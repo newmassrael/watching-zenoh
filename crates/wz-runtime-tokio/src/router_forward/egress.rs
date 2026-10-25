@@ -60,9 +60,8 @@
 //! payload for the destination cannot be undone and retried, and keeps the waiting send. A
 //! declaration, a query and a reply are rare and are not held here.
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -72,6 +71,8 @@ use wz_session_core::session_actions::Unsent;
 
 use super::{RouterFaceState, RouterForwarder};
 use crate::accept_loop::FaceId;
+use crate::counter::{Counter, Gauge};
+use crate::sync::PlainMutex;
 
 /// How many bytes the router lets a face's messages wait for, and where the faces that fed them
 /// are gated.
@@ -199,31 +200,42 @@ impl EgressQueue {
     }
 }
 
-/// The forwarder's flow-control state: which face is being routed from, which faces are gated
-/// on which destinations, and what is held.
+/// The forwarder's flow-control state: which faces are gated on which destinations, and what is
+/// held. (The face being routed from is not here: it is a property of the thread that routes it,
+/// see [`Credit::source`].)
+///
+/// It is shared between the threads that drive the router's faces (`docs/router-task-per-face.md`,
+/// phase 3), so each field is a lock or an atomic of its own. The locks are taken in ONE order, and
+/// no thread holds one while it waits for another that comes before it:
+///
+/// 1. a destination's queue (`RouterFaceState::held`), the outermost;
+/// 2. [`holding`](Self::holding), a leaf under a queue;
+/// 3. [`gated`](Self::gated), which no thread holds while it takes a queue: a pass that has to read
+///    the queues reads them first and takes `gated` after.
+///
+/// The counts are gauges and counters (`Relaxed`, see [`crate::counter`]): they are read for the
+/// capacity report and for a gate that every message that finds a budget reached asserts again, so a
+/// reading a moment old costs one message.
 pub(super) struct Credit {
-    /// The face whose inbound frame is being routed now, so that a destination that fills up
-    /// knows whom to gate. `None` outside a `forward`, and for a message with no face behind it.
-    source: Cell<Option<FaceId>>,
     /// For each gated face, what it is gated on: the destinations it fed that are at their
     /// budget, and the pool when the router is at its.
-    gated: RefCell<HashMap<FaceId, HashSet<GateOn>>>,
+    gated: PlainMutex<HashMap<FaceId, HashSet<GateOn>>>,
     /// The faces that hold at least one message, so that a pass over them does not visit the
     /// faces that hold none (a router holds thousands).
-    holding: RefCell<HashSet<FaceId>>,
+    holding: PlainMutex<HashSet<FaceId>>,
     /// Messages held now, over every destination.
-    held: Cell<usize>,
+    held: Gauge,
     /// What they cost together, in bytes: the pool the router's budget is spent from.
-    held_bytes: Cell<usize>,
+    held_bytes: Gauge,
     /// Where faces are gated.
     budget: EgressBudget,
     /// Messages that were held and then sent.
-    released: Cell<usize>,
+    released: Counter,
     /// Messages held at a destination that was closed for not taking them in time, or that went
     /// away.
-    abandoned: Cell<usize>,
+    abandoned: Counter,
     /// Destinations closed for not taking a held message within `wait_before_close`.
-    closed: Cell<usize>,
+    closed: Counter,
     /// Told when a destination took messages, so that a gated face asks again at once.
     wake: Arc<tokio::sync::Notify>,
     /// Told, with a stored permit, when a link the router holds messages for has room, so that
@@ -247,15 +259,14 @@ impl Default for Credit {
             })
         };
         Self {
-            source: Cell::default(),
-            gated: RefCell::default(),
-            holding: RefCell::default(),
-            held: Cell::default(),
-            held_bytes: Cell::default(),
+            gated: PlainMutex::default(),
+            holding: PlainMutex::default(),
+            held: Gauge::new(),
+            held_bytes: Gauge::new(),
             budget: EgressBudget::default(),
-            released: Cell::default(),
-            abandoned: Cell::default(),
-            closed: Cell::default(),
+            released: Counter::new(),
+            abandoned: Counter::new(),
+            closed: Counter::new(),
             wake,
             loop_wake,
             room_waker,
@@ -263,26 +274,59 @@ impl Default for Credit {
     }
 }
 
-/// Ends the routing of a source face's frame when it drops, on every way out of `forward`.
-pub(super) struct Routing<'a>(&'a Credit);
+thread_local! {
+    /// The face whose inbound frame this thread is routing, and the credit stage it is routing
+    /// for. A `forward` is a synchronous call that runs to its end on the thread that made it, so
+    /// the face it routes is a property of that call and of nothing else that runs at the same
+    /// time on another thread: a field of the shared [`Credit`] would be overwritten by the
+    /// frame another face's task is routing, and would gate the wrong face.
+    ///
+    /// Passed as an argument it would have to be threaded through every send of the router (some
+    /// thirty call sites, several of them inside closures that fan out), for a value that is
+    /// fixed for the whole call. The credit stage's address is kept with it so that a thread that
+    /// is routing for one router and, from inside it, sends through another, does not gate by the
+    /// first router's face in the second.
+    static ROUTING: Cell<Option<(usize, FaceId)>> = const { Cell::new(None) };
+}
 
-impl Drop for Routing<'_> {
+/// Ends the routing of a source face's frame when it drops, on every way out of `forward`, and
+/// puts back what was being routed before it.
+pub(super) struct Routing {
+    previous: Option<(usize, FaceId)>,
+}
+
+impl Drop for Routing {
     fn drop(&mut self) {
-        self.0.source.set(None);
+        ROUTING.with(|routing| routing.set(self.previous));
     }
 }
 
 impl Credit {
-    /// The frame of face `id` is being routed until the guard drops.
-    pub(super) fn routing_from(&self, id: FaceId) -> Routing<'_> {
-        self.source.set(Some(id));
-        Routing(self)
+    /// The frame of face `id` is being routed, on this thread, until the guard drops.
+    pub(super) fn routing_from(&self, id: FaceId) -> Routing {
+        let previous = ROUTING.with(|routing| routing.replace(Some((self.identity(), id))));
+        Routing { previous }
+    }
+
+    /// The face whose frame this thread is routing for this credit stage: `None` outside a
+    /// `forward`, and for a message with no face behind it.
+    pub(super) fn source(&self) -> Option<FaceId> {
+        match ROUTING.with(Cell::get) {
+            Some((credit, face)) if credit == self.identity() => Some(face),
+            _ => None,
+        }
+    }
+
+    /// What tells this credit stage from another: its address, which does not change while it is
+    /// held in an `Arc`.
+    fn identity(&self) -> usize {
+        std::ptr::from_ref(self) as usize
     }
 }
 
 /// A read-only handle on what the router holds back (see [`RouterForwarder::egress_view`]).
 #[derive(Clone)]
-pub struct EgressView(Rc<Credit>);
+pub struct EgressView(Arc<Credit>);
 
 impl EgressView {
     /// What the router holds back now, as the capacity report carries it.
@@ -296,7 +340,7 @@ impl EgressView {
             released: count(credit.released.get()),
             abandoned: count(credit.abandoned.get()),
             destinations_closed: count(credit.closed.get()),
-            gated_faces: credit.gated.borrow().len(),
+            gated_faces: credit.gated.guard().len(),
         }
     }
 }
@@ -316,7 +360,7 @@ impl RouterForwarder {
     /// may not drop it, sent on behalf of a face that can be gated, and not carrying shared
     /// memory.
     pub(super) fn is_credited(&self, msg: &NetworkMessage, reliable: bool) -> bool {
-        if !reliable || self.credit.source.get().is_none() {
+        if !reliable || self.credit.source().is_none() {
             return false;
         }
         let NetworkMessage::Push(push) = msg else {
@@ -344,7 +388,7 @@ impl RouterForwarder {
     ) -> Credited {
         // Behind what the destination already holds, whatever room it has now: a message that
         // went past its predecessors would put one source's messages out of order.
-        if !state.held.borrow().is_empty() {
+        if !state.held.guard().is_empty() {
             self.hold(dest, state, msg, reliable, express, priority);
             return Credited::Held;
         }
@@ -380,45 +424,51 @@ impl RouterForwarder {
         express: bool,
         priority: Priority,
     ) {
-        let mut queue = state.held.borrow_mut();
-        let first = queue.is_empty();
         let cost = message_cost(&msg);
-        queue.push_back(Held {
-            msg,
-            reliable,
-            express,
-            priority,
-            since: (self.clock)(),
-            cost,
-        });
-        self.credit.held.set(self.credit.held.get() + 1);
-        self.credit
-            .held_bytes
-            .set(self.credit.held_bytes.get() + cost);
-        if first {
-            // The link tells the router when it has room, for as long as it holds something.
-            // Room may have been made between the probe that found none and this call, which
-            // the link cannot have told it of, so the loop is woken once to look.
-            state
-                .actions
-                .watch_link_room(Some(Arc::clone(&self.credit.room_waker)));
-            self.credit.loop_wake.notify_one();
-        }
-        self.credit.holding.borrow_mut().insert(dest);
+        let (destination_bytes, pool_bytes) = {
+            let mut queue = state.held.guard();
+            let first = queue.is_empty();
+            // Counted before the message can be taken out by a pass that drains this queue, which
+            // cannot start until the queue is let go: a gauge is never subtracted from before the
+            // addition it undoes.
+            let pool_bytes = self.credit.held_bytes.add(cost);
+            self.credit.held.add(1);
+            queue.push_back(Held {
+                msg,
+                reliable,
+                express,
+                priority,
+                since: (self.clock)(),
+                cost,
+            });
+            if first {
+                // The link tells the router when it has room, for as long as it holds something.
+                // Room may have been made between the probe that found none and this call, which
+                // the link cannot have told it of, so the loop is woken once to look.
+                state
+                    .actions
+                    .watch_link_room(Some(Arc::clone(&self.credit.room_waker)));
+                self.credit.loop_wake.notify_one();
+            }
+            self.credit.holding.guard().insert(dest);
+            (queue.bytes(), pool_bytes)
+        };
         // The face whose message this is waits on what is full, so that what it had already read
         // is all the router holds past a budget for it. A face is not gated on itself.
-        let Some(source) = self.credit.source.get() else {
+        let Some(source) = self.credit.source() else {
             return;
         };
+        // After the queue is let go: `gated` is never held while a queue is taken (see
+        // [`Credit`]), and what the queue held a moment ago is what the gate is asserted from.
         let budget = self.credit.budget;
-        let mut gated = self.credit.gated.borrow_mut();
-        if source != dest && queue.bytes() >= budget.per_destination_bytes {
+        let mut gated = self.credit.gated.guard();
+        if source != dest && destination_bytes >= budget.per_destination_bytes {
             gated
                 .entry(source)
                 .or_default()
                 .insert(GateOn::Destination(dest));
         }
-        if self.credit.held_bytes.get() >= budget.pool_bytes {
+        if pool_bytes >= budget.pool_bytes {
             gated.entry(source).or_default().insert(GateOn::Pool);
         }
     }
@@ -429,15 +479,15 @@ impl RouterForwarder {
         if self.credit.held.get() == 0 {
             return;
         }
-        let holding: Vec<FaceId> = self.credit.holding.borrow().iter().copied().collect();
+        let holding: Vec<FaceId> = self.credit.holding.guard().iter().copied().collect();
         let faces = self.tables.faces.borrow();
         let mut took = false;
         for id in holding {
             let Some(state) = faces.get(&id) else {
-                self.credit.holding.borrow_mut().remove(&id);
+                self.credit.holding.guard().remove(&id);
                 continue;
             };
-            let mut queue = state.held.borrow_mut();
+            let mut queue = state.held.guard();
             while let Some(held) = queue.pop_front() {
                 let Held {
                     msg,
@@ -452,11 +502,9 @@ impl RouterForwarder {
                     .try_send_network_message_qos(msg, reliable, express, priority)
                 {
                     Ok(()) => {
-                        self.credit.held.set(self.credit.held.get() - 1);
-                        self.credit
-                            .held_bytes
-                            .set(self.credit.held_bytes.get() - cost);
-                        self.credit.released.set(self.credit.released.get() + 1);
+                        self.credit.held.sub(1);
+                        self.credit.held_bytes.sub(cost);
+                        self.credit.released.bump();
                         self.note_sent(true);
                         took = true;
                     }
@@ -476,10 +524,8 @@ impl RouterForwarder {
                     // waiting inside the send, keeps the order; what it costs the loop is what it
                     // cost before anything was held back.
                     Err(Unsent::Chain(msg)) => {
-                        self.credit.held.set(self.credit.held.get() - 1);
-                        self.credit
-                            .held_bytes
-                            .set(self.credit.held_bytes.get() - cost);
+                        self.credit.held.sub(1);
+                        self.credit.held_bytes.sub(cost);
                         if self.send_to_face_actions(
                             &state.actions,
                             msg,
@@ -487,24 +533,22 @@ impl RouterForwarder {
                             express,
                             priority,
                         ) {
-                            self.credit.released.set(self.credit.released.get() + 1);
+                            self.credit.released.bump();
                             self.note_sent(true);
                             took = true;
                         } else {
-                            self.credit.abandoned.set(self.credit.abandoned.get() + 1);
+                            self.credit.abandoned.bump();
                         }
                     }
                     Err(Unsent::Failed(_)) => {
-                        self.credit.held.set(self.credit.held.get() - 1);
-                        self.credit
-                            .held_bytes
-                            .set(self.credit.held_bytes.get() - cost);
-                        self.credit.abandoned.set(self.credit.abandoned.get() + 1);
+                        self.credit.held.sub(1);
+                        self.credit.held_bytes.sub(cost);
+                        self.credit.abandoned.bump();
                     }
                 }
             }
             if queue.is_empty() {
-                self.credit.holding.borrow_mut().remove(&id);
+                self.credit.holding.guard().remove(&id);
                 // Nothing held, so nothing to be told: the writer stops paying for the call.
                 state.actions.watch_link_room(None);
             }
@@ -523,14 +567,14 @@ impl RouterForwarder {
             return;
         }
         let now = (self.clock)();
-        let holding: Vec<FaceId> = self.credit.holding.borrow().iter().copied().collect();
+        let holding: Vec<FaceId> = self.credit.holding.guard().iter().copied().collect();
         let faces = self.tables.faces.borrow();
         let mut closed_any = false;
         for id in holding {
             let Some(state) = faces.get(&id) else {
                 continue;
             };
-            let mut queue = state.held.borrow_mut();
+            let mut queue = state.held.guard();
             let Some(oldest) = queue.oldest() else {
                 continue;
             };
@@ -538,15 +582,11 @@ impl RouterForwarder {
                 continue;
             }
             let (dropped, bytes) = queue.clear();
-            self.credit.held.set(self.credit.held.get() - dropped);
-            self.credit
-                .held_bytes
-                .set(self.credit.held_bytes.get() - bytes);
-            self.credit
-                .abandoned
-                .set(self.credit.abandoned.get() + dropped);
-            self.credit.closed.set(self.credit.closed.get() + 1);
-            self.credit.holding.borrow_mut().remove(&id);
+            self.credit.held.sub(dropped);
+            self.credit.held_bytes.sub(bytes);
+            self.credit.abandoned.add(dropped);
+            self.credit.closed.bump();
+            self.credit.holding.guard().remove(&id);
             state.actions.watch_link_room(None);
             let _ = state.actions.settle_blocking_expiry();
             closed_any = true;
@@ -564,11 +604,37 @@ impl RouterForwarder {
         let faces = self.tables.faces.borrow();
         let budget = self.credit.budget;
         let pool_full = self.credit.held_bytes.get() > budget.pool_bytes / 2;
-        self.credit.gated.borrow_mut().retain(|_, on| {
+        // What each gating destination holds, read BEFORE `gated` is taken: a queue is never
+        // taken under `gated` (see [`Credit`]). A destination gated after this read is not in the
+        // answer and keeps its gate; one that filled after it is gated again by the next message
+        // that finds its budget reached, so a gate released here on a reading that is a moment old
+        // costs the frame its face had already read.
+        let destinations: HashSet<FaceId> = self
+            .credit
+            .gated
+            .guard()
+            .values()
+            .flatten()
+            .filter_map(|on| match on {
+                GateOn::Destination(dest) => Some(*dest),
+                GateOn::Pool => None,
+            })
+            .collect();
+        let held: HashMap<FaceId, Option<usize>> = destinations
+            .into_iter()
+            .map(|dest| {
+                let bytes = faces.get(&dest).map(|state| state.held.guard().bytes());
+                (dest, bytes)
+            })
+            .collect();
+        self.credit.gated.guard().retain(|_, on| {
             on.retain(|on| match on {
-                GateOn::Destination(dest) => faces.get(dest).is_some_and(|state| {
-                    state.held.borrow().bytes() > budget.per_destination_bytes / 2
-                }),
+                GateOn::Destination(dest) => match held.get(dest) {
+                    Some(bytes) => {
+                        bytes.is_some_and(|bytes| bytes > budget.per_destination_bytes / 2)
+                    }
+                    None => true,
+                },
                 GateOn::Pool => pool_full,
             });
             !on.is_empty()
@@ -578,12 +644,12 @@ impl RouterForwarder {
     /// The answer to [`FaceForwarder::read_gate`](crate::accept_loop::FaceForwarder::read_gate):
     /// whether face `id` must wait, after the destinations it waits on were offered room.
     pub(super) fn gate_of(&self, id: FaceId) -> Option<Arc<tokio::sync::Notify>> {
-        if !self.credit.gated.borrow().contains_key(&id) {
+        if !self.credit.gated.guard().contains_key(&id) {
             return None;
         }
         self.drain_egress();
         self.sweep_egress();
-        if self.credit.gated.borrow().contains_key(&id) {
+        if self.credit.gated.guard().contains_key(&id) {
             Some(Arc::clone(&self.credit.wake))
         } else {
             None
@@ -597,19 +663,15 @@ impl RouterForwarder {
 
     /// A face left: what it held is gone with it, and no face waits on it or for it.
     pub(super) fn forget_egress_of(&self, id: FaceId, state: &RouterFaceState) {
-        let (dropped, bytes) = state.held.borrow_mut().clear();
+        let (dropped, bytes) = state.held.guard().clear();
         if dropped > 0 {
-            self.credit.held.set(self.credit.held.get() - dropped);
-            self.credit
-                .held_bytes
-                .set(self.credit.held_bytes.get() - bytes);
-            self.credit
-                .abandoned
-                .set(self.credit.abandoned.get() + dropped);
+            self.credit.held.sub(dropped);
+            self.credit.held_bytes.sub(bytes);
+            self.credit.abandoned.add(dropped);
         }
-        self.credit.holding.borrow_mut().remove(&id);
+        self.credit.holding.guard().remove(&id);
         {
-            let mut gated = self.credit.gated.borrow_mut();
+            let mut gated = self.credit.gated.guard();
             gated.remove(&id);
             gated.retain(|_, on| {
                 on.remove(&GateOn::Destination(id));
@@ -623,7 +685,7 @@ impl RouterForwarder {
     /// ([`EgressBudget`]). Set before the router serves, as its other builders are.
     pub fn with_egress_budget(mut self, budget: EgressBudget) -> Self {
         // Before the router serves and so before any view of the credit was handed out.
-        match Rc::get_mut(&mut self.credit) {
+        match Arc::get_mut(&mut self.credit) {
             Some(credit) => credit.budget = budget,
             None => log::warn!(
                 "wz-runtime-tokio: the egress budget was set after a view of it was taken; \
@@ -636,7 +698,7 @@ impl RouterForwarder {
     /// A handle that reads what the router holds back, for the capacity report: the handler of
     /// that report is stored inside this forwarder, so it cannot hold the forwarder itself.
     pub fn egress_view(&self) -> EgressView {
-        EgressView(Rc::clone(&self.credit))
+        EgressView(Arc::clone(&self.credit))
     }
 
     /// What the held messages cost together, in bytes: the pool [`EgressBudget::pool_bytes`]
@@ -668,6 +730,6 @@ impl RouterForwarder {
 
     /// The faces that are gated now: not read until a destination they fed has room.
     pub fn egress_gated_faces(&self) -> usize {
-        self.credit.gated.borrow().len()
+        self.credit.gated.guard().len()
     }
 }

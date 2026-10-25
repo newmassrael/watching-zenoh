@@ -870,3 +870,63 @@ fn the_pool_gates_faces_when_destinations_are_each_under_their_budget() {
     assert_eq!(rig.fwd.egress_held_bytes(), 0);
     assert_eq!(rig.fwd.egress_gated_faces(), 0);
 }
+
+/// The credit stage is what many faces' tasks reach at once (`docs/router-task-per-face.md`,
+/// phase 3), and the handle the capacity report reads it through is read from another thread: both
+/// are `Send + Sync`. The proof is the compile.
+#[test]
+fn the_credit_stage_and_its_view_can_be_shared_between_threads() {
+    fn shared<T: Send + Sync>() {}
+    shared::<super::egress::Credit>();
+    shared::<EgressView>();
+    shared::<crate::sync::PlainMutex<super::egress::EgressQueue>>();
+}
+
+/// The face whose frame is being routed belongs to the call that routes it and to the thread that
+/// runs it: another thread that routes another face at the same moment sees its own, a credit stage
+/// that is not the one being routed for sees none, and a routing that ends gives back what was being
+/// routed before it.
+#[test]
+fn the_face_being_routed_is_the_threads_own_for_this_credit_stage_and_is_put_back() {
+    let credit = Arc::new(super::egress::Credit::default());
+    let other_credit = super::egress::Credit::default();
+    assert_eq!(credit.source(), None);
+    let outer = credit.routing_from(FaceId(1));
+    assert_eq!(credit.source(), Some(FaceId(1)));
+    assert_eq!(
+        other_credit.source(),
+        None,
+        "a credit stage that is not the one routed for has no face being routed"
+    );
+    {
+        let _inner = credit.routing_from(FaceId(2));
+        assert_eq!(credit.source(), Some(FaceId(2)));
+    }
+    assert_eq!(
+        credit.source(),
+        Some(FaceId(1)),
+        "the routing that ended gave back the one it interrupted"
+    );
+
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let there = {
+        let (credit, barrier) = (Arc::clone(&credit), Arc::clone(&barrier));
+        std::thread::spawn(move || {
+            assert_eq!(credit.source(), None, "another thread routes nothing yet");
+            let _mine = credit.routing_from(FaceId(9));
+            barrier.wait();
+            assert_eq!(credit.source(), Some(FaceId(9)));
+            barrier.wait();
+        })
+    };
+    barrier.wait();
+    assert_eq!(
+        credit.source(),
+        Some(FaceId(1)),
+        "the face another thread is routing is not this thread's"
+    );
+    barrier.wait();
+    there.join().expect("the routing thread ends");
+    drop(outer);
+    assert_eq!(credit.source(), None);
+}

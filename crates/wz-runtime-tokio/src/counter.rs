@@ -52,10 +52,81 @@ impl Counter {
     }
 }
 
+/// A count that rises and falls: what is held now, as opposed to what has happened. Shared between
+/// threads without a lock, with the same `Relaxed` argument as [`Counter`].
+///
+/// What a gauge keeps is that every addition and every subtraction lands, so that a gauge that has
+/// been added to and subtracted from the same amounts reads where it started. It does not keep two
+/// gauges consistent with each other, and a reader that reads two sees them at two instants; the
+/// router's held messages and held bytes are read for a report and for a gate that is asserted again
+/// by every message that finds its budget reached, so a stale read costs one message.
+#[derive(Debug, Default)]
+pub(crate) struct Gauge(AtomicUsize);
+
+impl Gauge {
+    /// A gauge at zero.
+    #[cfg_attr(not(feature = "routing-router-hat"), allow(dead_code))]
+    pub(crate) const fn new() -> Self {
+        Self(AtomicUsize::new(0))
+    }
+
+    /// The value now.
+    #[cfg_attr(not(feature = "routing-router-hat"), allow(dead_code))]
+    pub(crate) fn get(&self) -> usize {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    /// `n` more; the value it has now.
+    #[cfg_attr(not(feature = "routing-router-hat"), allow(dead_code))]
+    pub(crate) fn add(&self, n: usize) -> usize {
+        self.0.fetch_add(n, Ordering::Relaxed).saturating_add(n)
+    }
+
+    /// `n` fewer; the value it has now. A gauge is never taken below what was put in, so going
+    /// under zero is a bug in the caller and is stopped at zero in a release build.
+    #[cfg_attr(not(feature = "routing-router-hat"), allow(dead_code))]
+    pub(crate) fn sub(&self, n: usize) -> usize {
+        let (Ok(was) | Err(was)) =
+            self.0
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                    debug_assert!(value >= n, "a gauge went below what was put in");
+                    Some(value.saturating_sub(n))
+                });
+        was.saturating_sub(n)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Counter;
+    use super::{Counter, Gauge};
     use std::sync::Arc;
+
+    /// A gauge that is added to and subtracted from by many threads in equal measure reads where it
+    /// started, and each call answers the value it left.
+    #[test]
+    fn a_gauge_added_and_subtracted_from_many_threads_returns_to_where_it_started() {
+        const THREADS: usize = 8;
+        const EACH: usize = 50_000;
+        let gauge = Arc::new(Gauge::new());
+        gauge.add(7);
+        let workers: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let gauge = Arc::clone(&gauge);
+                std::thread::spawn(move || {
+                    for _ in 0..EACH {
+                        gauge.add(3);
+                        gauge.sub(3);
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().expect("a gauge thread ends");
+        }
+        assert_eq!(gauge.get(), 7);
+        assert_eq!(gauge.add(2), 9);
+        assert_eq!(gauge.sub(4), 5);
+    }
 
     /// The three ways a counter rises, each from a known count.
     #[test]

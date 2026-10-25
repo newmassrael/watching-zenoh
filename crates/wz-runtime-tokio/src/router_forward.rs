@@ -448,6 +448,7 @@ mod shed;
 #[cfg(test)]
 mod shed_tests;
 use crate::counter::Counter;
+use crate::sync::PlainMutex;
 pub use egress::{EgressBudget, EgressView};
 pub use shed::{ShedBatch, ShedRegistry};
 
@@ -1418,7 +1419,7 @@ struct RouterFaceState {
     /// The messages this face, as a DESTINATION, has not taken yet: held in order until its link
     /// has room, so that a face that stopped reading costs the faces that do not feed it
     /// nothing (see [`egress`]).
-    held: RefCell<egress::EgressQueue>,
+    held: PlainMutex<egress::EgressQueue>,
 }
 
 /// One EGRESS-only multicast group face — the wz analog of a zenoh
@@ -2009,7 +2010,7 @@ pub struct RouterForwarder {
     ///
     /// Behind an `Rc` so that the capacity report, whose handler is stored inside this forwarder
     /// and so cannot capture it, can read what is held ([`Self::egress_view`]).
-    credit: Rc<egress::Credit>,
+    credit: Arc<egress::Credit>,
     /// The sessions this router holds, as far as closing the newest of them for capacity needs
     /// them (see [`shed`]). Behind a lock and not in [`faces`](Self#structfield.faces), so that
     /// the capacity control, a task of the control runtime, can shed while the loop is starved.
@@ -2489,7 +2490,7 @@ impl RouterForwarder {
                 WhatAmI::Router,
                 timestamping,
             ),
-            credit: Rc::new(egress::Credit::default()),
+            credit: Arc::new(egress::Credit::default()),
             shed_registry: Arc::default(),
             // R2639 — `disabled` seeds the empty matcher, so a router that never
             // enables autoconnect behaves byte-for-byte as before.
@@ -8259,7 +8260,7 @@ impl FaceForwarder for RouterForwarder {
                 peer_zid: peer_zid_routing(actions),
                 link: added.map(|(link, _, _)| link),
                 keyexpr_table: hashbrown::HashMap::new(),
-                held: RefCell::new(egress::EgressQueue::default()),
+                held: PlainMutex::new(egress::EgressQueue::default()),
             },
         );
         self.shed_registry.add(id, actions.clone());

@@ -73,6 +73,12 @@ impl<T> PlainMutex<T> {
         f(&mut *self.0.lock())
     }
 
+    /// The guard, waiting for the lock, for a caller that holds the value across several
+    /// statements and has no use for the error arm of [`Self::lock`].
+    pub fn guard(&self) -> PlainGuard<'_, T> {
+        self.0.lock()
+    }
+
     /// Run `f` over the value if the lock is free; `None` when it is held.
     pub fn try_with<U>(&self, f: impl FnOnce(&mut T) -> U) -> Option<U> {
         self.0.try_lock().map(|mut guard| f(&mut *guard))

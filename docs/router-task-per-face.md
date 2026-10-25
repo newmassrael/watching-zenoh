@@ -133,7 +133,58 @@ Each phase ends with the tree green and the numbers of Layer E7s (microseconds p
    host is that large (442 to 498), so this is not read as a cost and not as a gain.
 3. **Tables behind `RwLock`.** `Rc<RefCell<..>>` becomes `Arc<RwLock<..>>`; the forwarder is `Send + Sync`. Held
    queues and the credit move with it (`Cell` to atomic; the held queue to a `Mutex` per destination, so that
-   two faces feeding one destination do not meet on the tables lock).
+   two faces feeding one destination do not meet on the tables lock). It is the largest phase (the forwarder's
+   non-test code is about 273 methods and 6 000 lines of `impl`, with 58 `RefCell`, 84 `Cell`, 51 `Rc`, plus the
+   handlers of local subscribers and queryables, which are `Rc<RefCell<dyn FnMut>>` and must become `Send`), so
+   it lands in steps each of which compiles, passes and is measured, and none of which makes the forwarder
+   `Sync` before the last:
+   - **3a. The credit stage (done, round 3633).** `Credit` and its view are `Send + Sync`; see below.
+   - **3b. The rest of the state the data path writes** that is not tables: the pending-query table, the
+     interceptor chains and their per-keyexpr caches, the `Cell`s that are state (`autoconnect`,
+     `query_timeout`, `interceptor_version`, `mcast_governed`, the dirty flags of the hats), `clock`
+     (`Box<dyn Fn() -> Instant>`, not `Send`), `dial_tx` and the multicast state.
+   - **3c. The tables** under one `RwLock<Tables>`: the nine fields of phase 0 lose their cells, a method that
+     reads takes `&Tables`, one that writes `&mut Tables`, and the three views that share `faces` hold the
+     shared handle instead of an `Rc`. Locks taken in one order (tables, then the leaf locks), as the credit
+     stage's order below.
+   - **3d. The handlers** of local subscribers and queryables (`Send`), and the forwarder's `Send + Sync`
+     proof, with the test of many faces' threads into one router that the earlier steps could not write.
+
+   **3a, what it did.** `Credit`'s fields are each a lock or an atomic: `gated` and `holding` are
+   `PlainMutex`es, the held and held-bytes counts are a new `Gauge` (`counter.rs`: added to and subtracted from,
+   `Relaxed`), the released, abandoned and closed counts are `Counter`s, `credit` is an `Arc`, and a
+   destination's held queue (`RouterFaceState::held`) is a `PlainMutex<EgressQueue>`. The locks have one
+   order, written on the type: a destination's queue, then `holding` (a leaf under it), then `gated`, and no
+   thread holds `gated` while it takes a queue. That excluded a cycle the old code had no way to show: `hold`
+   took `gated` with its queue in hand, and `release_gates` read the queues with `gated` in hand. `hold` now
+   lets the queue go and asserts the gate from what it read there; `release_gates` reads the destinations'
+   bytes first and takes `gated` after, and a gate that a stale reading releases is asserted again by the next
+   message that finds the budget reached, so it costs one frame its face had already read. A gauge is added to
+   before the message is pushed, inside the queue's lock, so no pass that drains the queue can subtract what
+   has not been added. The face being routed (`Credit::source`, which the gate asks whom to gate) was a field
+   set by `forward` and cleared when it returned; with two faces' tasks it would name whichever frame was
+   routed last. It is now a thread-local scoped by the guard `forward` already held, keyed by the credit stage
+   it was set for, and the guard puts back what it interrupted. A thread-local is right here and not a shortcut:
+   `forward` is a synchronous call that runs to its end on the thread that made it, so the face it routes is
+   a property of that call; passing it as an argument would thread a value fixed for the whole call through some
+   thirty sends, several inside fan-out closures. What it did not change: `drain_egress` still holds the
+   destination's queue while a chain, which has to wait for room between its fragments, is sent (phase 6 makes
+   that wait a task), so a face that feeds that destination waits at its queue for as long as the chain does,
+   which is what the loop did for every face. Tests: the stage, its view and the queue are `Send + Sync`; the
+   face being routed is the thread's own for this stage and is put back; a gauge added to and subtracted from by
+   eight threads returns to where it started. The test that holds into one queue from many threads has to go
+   through the forwarder and waits for 3d. Measured: bytes and allocations per forward did not move (569, 708,
+   7454, 8718; 9, 11, 69, 86); time per forward, least of 25 repetitions of 20000, two runs (the phase 2 runs in
+   brackets, ns): one subscriber drop 519, 506 (494, 485), block 592, 591 (576, 575); sixteen drop 3983, 3872
+   (3860, 3846), block 4562, 4420 (4594, 4463). The blocking cases are the ones that take a destination's queue
+   lock for every message (an uncontended `parking_lot` lock, tens of nanoseconds), and the one-subscriber
+   blocking figure reads about 15 ns above phase 2 in both runs: probably that lock, and not distinguishable
+   from the host's spread (the same tree read 442 to 519 on the one-subscriber drop). Layer E7s on pc2 before
+   (the phase 2 head) and after, microseconds per message at 256, 1024, 2048 subscribers with no churn and at
+   256, 1024 with churn: 23.2, 19.1, 21.4, 21.7, 18.9 and 18.3, 20.4, 19.5, 21.3, 21.9, no direction beyond the
+   run-to-run spread of the table (the same router read 18.3 and 23.2 at 256); the starved-router tests pass
+   with no face down, 963 admitted sessions ended by the router at 32 hogs both times, the longest keepalive
+   timer 1863 ms before and 1940 ms after.
 4. **A task per face.** The accept loop already spawns a face's drive onto the runtime when its forwarder is
    `Send + Sync` (`SpawnedFaces`, `drive_face_shared`); the router takes that path. The closure watcher
    (`watch_room`) becomes the wake list of a destination, and a gated face awaits its destination's room.
