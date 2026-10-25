@@ -169,6 +169,12 @@ pub mod policy;
 /// which is upstream's behaviour. Unconditional, no_std and no_alloc.
 pub mod quota;
 
+/// A position in the sequence of declarations a node owes a peer: [`replay_cursor::ReplayCursor`],
+/// the part of paced declaration sync (`docs/declaration-sync-pacing.md`) that every host shares.
+/// It holds no list, clock or heap and does no I/O, so a host with no allocator uses it as it is.
+/// Unconditional, no_std and no_alloc.
+pub mod replay_cursor;
+
 /// Who sees a sample's timestamp: the `entity-timestamp-opt-in` policy's shared half, the default
 /// an entity gets ([`timestamp_visibility::default_exposed`]), the view that hides a timestamp
 /// ([`timestamp_visibility::HiddenTimestamp`]), and the conversion of a time in milliseconds to
