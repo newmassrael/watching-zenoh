@@ -176,6 +176,28 @@ the engine owns, put the operations behind `IRuntime`) is then written up and re
 way. The spike also measures what each form costs in lines of the top crate, since C13a asks for
 the form that is smaller and not the form that is nearer.
 
+### 5.1 The first pass: read, not run (2026-10-25)
+
+The first pass read the three paths against both engines' code and recorded what each needs. It
+did not run a peer; a path that was only read is marked so, and Z1 is where the first of them is
+run. What it found:
+
+| path | what the engines have | what the port or the engines must gain |
+|---|---|---|
+| (a) matching, by locality | Both engines compute a match as a peer's declaration, or with `count_local` one of the session's own (`wz-capi-core/src/faces.rs`, `plane_matches` in `wz-capi-coop/src/engine.rs`); the cooperative engine's criterion already carries a `Locality`. | `count_local: bool` becomes a `Locality` (`Any`, `Remote`, `SessionLocal`): a `count_remote` half beside the existing `count_local`, in one place per engine. A one-shot `matching_status(plane, key, locality)`: the engines read the same two halves for a listener, so it is a read of existing state. `wait_callbacks()` on undeclare has no barrier in either engine (the registry removes the entry and the face's watch, then returns while a delivery may be in flight): it needs a delivery epoch and is the one item here that is a new concept, tied to D4. |
+| (d) namespace | `wz-session-core` already carries the decorator (`namespace::apply_egress` and the stateful `NamespaceIngress`, feature `routing-namespace`), written as the mirror of upstream's; the tokio engine wires it. In upstream the decorator sits between the session and its face and rewrites wire expressions only, so a session's own publishes reach its own subscribers with the keys the user wrote: the namespace is visible on the wire and nowhere else. | No port operation: an open-time option, read at the face boundary where the decorator already sits. The cooperative engine does not wire `routing-namespace` (its manifest has no such feature), so on that engine the key is refused at open by the table of D6. That is the first case where the two engines differ in what they can open, and it is a reason the D6 table is per engine. |
+| (e) links and history | Both engines implement `face_snapshots`, `watch_faces` and `unwatch_faces`; a link carries `src`, `dst`, `kind`, `interfaces`, `mtu` and `group`; `is_streamed` is a method of the kind, and zenoh-c's reliability is derived from it. | `auth_identifier` and the QoS `priorities` are not in the link record: two optional fields added to `LinkSnapshot` (a type of `wz-session-core`, so the C ABIs ignore them). History needs one atomic call that returns the snapshot and the watch id under one lock, which the two separate calls cannot give; it is an addition to the port with a provided default. The three-state `interfaces` stays a D7 class. |
+
+Reading of the table. Every addition is an operation or a field that both engines can implement
+from state they already hold, with a provided default so that the pico ABI is unchanged, and none
+asks the port to carry a session table. The exceptions are the delivery barrier of (a), which is
+new and small, and the cooperative engine's lack of the namespace policy, which is a refusal and
+not a gap of the seam. On this reading D1 stands for these three paths and is NOT yet accepted:
+the evidence is a read, the paths of Z2 to Z4 are harder (the zero-copy payload, the held query,
+consolidation by the caller), and the third form of D1 stays the fallback. The decision is taken
+again at the end of Z3, from the list of port additions the slices produced and what each cost,
+and D1 is dropped if that list has grown to the size of `Primitives` and the session tables.
+
 ## 6. The slices, in order (after the spike)
 
 Each lands whole with its surface lines, tests and faults in one round.
