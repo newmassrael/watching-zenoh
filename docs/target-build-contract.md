@@ -504,8 +504,8 @@ node's code includes and `--env` printing the `WZ_LIMIT_*` budgets. The vocabula
 the slot target builds (a listening or multicast endpoint, a publisher, a subscriber, a token, a
 querier): a word the target does not build is REFUSED with its reason, never dropped, so a
 declaration that asks for a subscriber cannot produce a node that quietly has none. What the slot
-target builds today is what its node does: one dialled endpoint (`tcp`, `udp` or `tls`) and
-queryables that answer from documents. The registered node, `slot-answerer`, is the existing
+target builds today is what its node does: one dialled endpoint (`tcp`, `udp` or `tls`),
+queryables that answer from documents, and subscriptions that keep the latest sample (below). The registered node, `slot-answerer`, is the existing
 `deploy/host-slot-node` stated as data.
 
 **The structure (owner, 2026-10-25: cost ignored, the textbook one): ports and adapters.** The
@@ -545,11 +545,34 @@ is a finding. The artifact row lists the operating systems its port exists for (
 posix port is Linux only (`wz-runtime-posix` is empty on another OS): a QNX or Android platform
 row is refused by name, with the reason, before anything is built.
 
+**The structure of an entity (owner, 2026-10-25: cost ignored, the textbook one).** An entity is a
+kind, a key and a BEHAVIOUR, and the behaviours are a closed vocabulary stated as data: a
+declaration never carries code, so what a node does with what it receives is one of a few
+fixed-memory state machines, each added to the target with its generator rule, its `const`
+assertions, its link-gate proof and a witness against the reference router in the same change.
+The order is subscriber, publisher, querier, liveliness token, listen, multicast.
+
+**Subscriber (landed).** `kind = "subscriber"`, `key`, `sample_bytes`: the node declares the
+subscription on every session and keeps the LATEST sample under it in a cell
+(`wz_session_mcu::latest`: the key, the payload cut at `sample_bytes`, how long it was, put or
+delete, and a count), in storage the image declares, all zero bytes, so `.bss`. A queryable that
+states `from = "<subscriber key>"` instead of `document_bytes` answers from that cell (nothing
+while it is empty, and not from a delete), so a node that keeps what it receives and answers
+from it is two entities and no code. The node says each new sample on its console, once for each
+round that found a cell moved (`HOST-WZ-SAMPLE <key> put len= kept= seq= hex=`, or `<key> del
+seq=`), with a count that shows samples that arrived between two rounds. The budgets the entities
+decide (`MAX_QUERYABLES`, `MAX_SUBSCRIPTIONS`) follow from them when the declaration states
+none, and a declaration that states one below what its entities need is refused. A mirror whose
+subscription keeps more than a reply holds is refused. The witness is the reference router's REST
+plugin on both sides: a put it routes reaches the subscription, and a get it routes is answered
+from the latest sample (`wz_declared_node_zenohd_interop.rs`, which runs the file the entry
+packaged).
+
 Not written: the entities the slot profile does not build yet (a listening endpoint, multicast, a
-publisher, a subscriber, a token, a querier), each of which is a change to the profile before it is
-a word the declaration accepts; a port of the declared node for QNX or Android; and the budgets
-that are still tuning constants of the library (the task cells, the receive and send storage),
-which the declaration cannot state.
+publisher, a token, a querier), each of which is a change to the profile before it is a word the
+declaration accepts; a port of the declared node for QNX or Android; and the budgets that are
+still tuning constants of the library (the task cells, the receive and send storage), which the
+declaration cannot state.
 
 The text below is the proposal the decision answers.
 

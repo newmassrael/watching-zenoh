@@ -14,3 +14,11 @@ pub const TLS: bool = false;
 /// The queryables the node declares, and the documents they answer with: (key, bytes).
 pub const DOCS: usize = 2;
 pub const DOCUMENTS: [(&str, usize); 2] = [("lab/doc/small", 256), ("lab/doc/large", 4096)];
+/// The subscriptions the node declares, and the bytes of a payload each keeps: (key, bytes).
+pub const SUBSCRIBERS: usize = 0;
+pub const SUBSCRIPTIONS: [(&str, usize); 0] = [];
+/// The most bytes any subscription keeps: the size of every cell the node holds.
+pub const SAMPLE_MAX: usize = 1;
+/// The queryables that answer from a subscription: (key, index into `SUBSCRIPTIONS`).
+pub const MIRRORS: usize = 0;
+pub const MIRRORED: [(&str, usize); 0] = [];

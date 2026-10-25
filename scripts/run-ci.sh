@@ -11329,11 +11329,17 @@ layer_c1m_session_lwip() {
     _runci_guarded_test "C1m mcu adminspace read+write" 24 \
         cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
     # The fixed-memory client node's shared mechanism (`slot_node`, compiled only on the slot profile
-    # with the client core): no leg above selects both, so its tests ran in none until this one. 21 =
+    # with the client core): no leg above selects both, so its tests ran in none until this one. 25 =
     # the loop's observations, the identity and the handshake, the documents and their declarations,
-    # the body pool, the documents a front end chose, and the single endpoint.
-    _runci_guarded_test "C1m mcu slot node" 21 \
+    # the body pool, the documents a front end chose, the single endpoint, and the subscriptions and
+    # the queryables that answer from them (their order, a sample reaching its cell, the refusals).
+    _runci_guarded_test "C1m mcu slot node" 25 \
         cargo test -p wz-session-mcu --features client-slot --lib slot_node --quiet || return 1
+    # The latest sample of a subscription (`latest`, the same profile): the cell, its cut at the
+    # subscription's capacity, a delete, a key cut at a character, the storage's bounds, and the
+    # loop's watch that says each new sample once.
+    _runci_guarded_test "C1m mcu latest sample" 8 \
+        cargo test -p wz-session-mcu --features client-slot --lib latest::tests --quiet || return 1
     # R3167 moved EVERY wz-session-lwip leg below by FIVE, and the legs that turn
     # on `codec-push` by SIX: the driver's lend tests (the datagram equals the
     # copying send's, the size written, an abandoned lend, the table of places,
@@ -19875,6 +19881,24 @@ layer_z_zenohd_interop() {
         WZ_HOST_SLOT_NODE_TLS="$PWD/deploy/host-slot-node/target/release/host-slot-node" \
         cargo test -p wz-integration-tests --test wz_fixed_memory_tls_zenohd_interop \
         -- --ignored --quiet --test-threads=1 || return 1
+    # A node built from its declaration, against the reference router: the file the ENTRY packages
+    # (`wz_package.py --node slot-recorder`, whose manifest verifies) subscribes to a key, keeps
+    # the latest sample and answers a query from it. The router's REST plugin is the other end of
+    # both directions, so the node is judged by a peer it shares no code with. Two legs: a put is
+    # kept and the answer follows the latest; another key is not kept, a payload over the
+    # declared size is cut, and a delete empties the answer.
+    local decl_pkg decl_rc=0
+    decl_pkg="$(mktemp -d)" || return 1
+    python3 scripts/lib/wz_package.py --platform linux-x86_64-glibc --artifact declared-node \
+        --node slot-recorder --out "$decl_pkg/pkg" || decl_rc=1
+    [ "$decl_rc" -eq 0 ] && { [ -x "$decl_pkg/pkg/bin/declared-node" ] \
+        || { echo "  Zdecl FAIL: the packaged node is not executable"; decl_rc=1; }; }
+    [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Zdecl 2 env WZ_ZENOHD_BIN="$zenohd" \
+        WZ_DECLARED_NODE_RECORDER="$decl_pkg/pkg/bin/declared-node" \
+        cargo test -p wz-integration-tests --test wz_declared_node_zenohd_interop \
+        -- --ignored --quiet --test-threads=1 || decl_rc=1; }
+    rm -rf "$decl_pkg"
+    [ "$decl_rc" -eq 0 ] || return 1
     # R311y398 — wz UNIXSOCK ACCEPTOR cross-impl (transport-link-unixsock zenohd->wz):
     # the AF_UNIX-stream sibling of the ws/tls acceptor legs above. A real zenohd
     # DIALS the wz `--listen unixsock-stream/<path>` acceptor (the

@@ -562,6 +562,21 @@ IMAGES: dict[str, Image] = {
                 ),
                 label="linux-x86_64-slot-answerer",
             ),
+            # A node that subscribes and answers from what it received: its cells are `.bss`, and
+            # its budget (`MAX_SUBSCRIPTIONS`) is what `wz_node.py --env slot-recorder` prints.
+            Build(
+                HOST,
+                None,
+                ("declared",),
+                env=(
+                    (
+                        "WZ_DECLARED_RS",
+                        str(REPO_ROOT / "deploy" / "nodes" / "generated" / "slot-recorder.rs"),
+                    ),
+                    ("WZ_LIMIT_MAX_SUBSCRIPTIONS", "1"),
+                ),
+                label="linux-x86_64-slot-recorder",
+            ),
         ),
     ),
     # The wz half of the zenoh-pico comparison image: the CYT4BF MAC behind Zephyr's Ethernet

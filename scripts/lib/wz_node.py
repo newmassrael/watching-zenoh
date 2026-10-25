@@ -23,7 +23,9 @@ not build the node.
 
     [node]                     id (the file's name), help, target
     [[endpoint]]               role = "dial", locator = "<scheme>/<a.b.c.d>:<port>"
-    [[entity]]                 kind = "queryable", key, document_bytes
+    [[entity]]                 kind = "queryable", key, and document_bytes (a fixed document) or
+                               from = "<subscriber key>" (the latest sample of that subscription);
+                               kind = "subscriber", key, sample_bytes (the payload bytes it keeps)
     [limits]                   <LIMIT_ID> = <integer>, any limit `deploy/wz-config.toml` declares
 
 ## What it refuses, and why that is an exit and not a skip
@@ -69,7 +71,7 @@ ENDPOINT_ROLES = ("dial", "listen", "multicast")
 ENTITY_KINDS = ("publisher", "subscriber", "queryable", "querier", "liveliness-token")
 NODE_KEYS = {"id", "help", "target"}
 ENDPOINT_KEYS = {"role", "locator"}
-ENTITY_KEYS = {"kind", "key", "document_bytes"}
+ENTITY_KEYS = {"kind", "key", "document_bytes", "sample_bytes", "from"}
 TOP_KEYS = {"node", "endpoint", "entity", "limits"}
 
 # What each target builds. `slot` is the per-session fixed-memory profile of the cooperative runtime:
@@ -82,16 +84,17 @@ TARGETS = {
         "max_endpoints": 1,
         "endpoint_roles": {"dial"},
         "schemes": ("tcp", "udp", "tls"),
-        "entity_kinds": {"queryable"},
+        "entity_kinds": {"queryable", "subscriber"},
         # `DOC_MAX` of the same file: the static every document is a prefix of.
         "document_max": 4096,
+        # The bytes of a payload a subscription keeps (`LatestCells` of `wz_session_mcu::latest`).
+        "sample_max": 4096,
         "refused": {
             "listen": "the slot node holds one session that it dials; it has no accept loop",
             "multicast": "the multicast group session has a slot table but no node that joins "
             "one yet",
-            "publisher": "the slot node declares queryables only",
-            "subscriber": "the slot node declares queryables only",
-            "liveliness-token": "the slot node declares queryables only",
+            "publisher": "the slot node declares queryables and subscriptions only",
+            "liveliness-token": "the slot node declares queryables and subscriptions only",
             "querier": "the slot node's getter is a plan its arguments drive (a lab tool), not an "
             "entity a declaration can state",
         },
@@ -187,8 +190,10 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
             if any(int(match[o]) > 255 for o in "abcd") or not 1 <= int(match["port"]) <= 65535:
                 out.append(f"{who}: locator {ep['locator']!r} has an octet above 255 or a port outside 1..65535")
 
-    seen = set()
-    queryables = 0
+    seen: dict[str, set[str]] = {"queryable": set(), "subscriber": set()}
+    sample_sizes: dict[str, int] = {}
+    mirrors: list[tuple[str, object]] = []
+    queryables = subscribers = 0
     for n, ent in enumerate(data.get("entity", []), 1):
         who = f"entity {n}"
         for extra in sorted(set(ent) - ENTITY_KEYS):
@@ -200,21 +205,65 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
         if kind not in target["entity_kinds"]:
             out.append(f"{who}: a `{kind}` is not built on {node['target']}: {target['refused'][kind]}")
             continue
-        queryables += 1
+        queryables += kind == "queryable"
+        subscribers += kind == "subscriber"
         key = ent.get("key")
         why = key_problem(key, values["MAX_KEYEXPR_BYTES"]) if isinstance(key, str) else "is missing"
         if why:
             out.append(f"{who}: key {key!r} {why}")
-        elif key in seen:
+        elif key in seen[kind]:
             out.append(f"{who}: key {key!r} is declared twice")
         else:
-            seen.add(key)
+            seen[kind].add(key)
+        if kind == "subscriber":
+            for extra in ("document_bytes", "from"):
+                if extra in ent:
+                    out.append(f"{who}: a subscriber keeps what it receives and has no `{extra}`")
+            size = ent.get("sample_bytes")
+            if isinstance(size, bool) or not isinstance(size, int) or not 1 <= size <= target["sample_max"]:
+                out.append(f"{who}: sample_bytes is {size!r}, not an integer from 1 to {target['sample_max']}")
+            elif isinstance(key, str):
+                sample_sizes[key] = size
+            continue
+        if "sample_bytes" in ent:
+            out.append(f"{who}: a queryable has no `sample_bytes`; the subscription it answers from has")
+        if "from" in ent:
+            if "document_bytes" in ent:
+                out.append(f"{who}: a queryable answers from a subscription (`from`) or from a document "
+                           "(`document_bytes`), not both")
+            mirrors.append((who, ent["from"]))
+            continue
         size = ent.get("document_bytes")
         if isinstance(size, bool) or not isinstance(size, int) or not 0 <= size <= target["document_max"]:
             out.append(f"{who}: document_bytes is {size!r}, not an integer from 0 to {target['document_max']}")
-    if queryables > values["MAX_QUERYABLES"]:
-        out.append(f"{queryables} queryables; MAX_QUERYABLES is {values['MAX_QUERYABLES']} (state a larger one in [limits])")
+    for who, source in mirrors:
+        if not isinstance(source, str) or source not in seen["subscriber"]:
+            out.append(f"{who}: `from` is {source!r}, which is not the key of a subscription of this node")
+        elif sample_sizes.get(source, 0) > values["MAX_REPLY_PAYLOAD_BYTES"]:
+            out.append(f"{who}: the subscription {source!r} keeps {sample_sizes[source]} bytes, more than a "
+                       f"reply holds (MAX_REPLY_PAYLOAD_BYTES is {values['MAX_REPLY_PAYLOAD_BYTES']})")
+    stated = data.get("limits", {})
+    for name, need, what in (("MAX_QUERYABLES", queryables, "queryables"),
+                             ("MAX_SUBSCRIPTIONS", subscribers, "subscriptions")):
+        if name in stated and isinstance(stated[name], int) and stated[name] < need:
+            out.append(f"{need} {what}; the declaration states {name} = {stated[name]} (state at least "
+                       f"{need}, or nothing, and it follows from the entities)")
     return out
+
+
+def budgets(data: dict, decl: dict) -> dict[str, int]:
+    """The budgets a node's build is given: what the declaration states, and the two its entities
+    decide (`MAX_QUERYABLES`, `MAX_SUBSCRIPTIONS`) when the image's own is below what they need and
+    the declaration does not state one. Valid input only: `validate` ran first."""
+    target = TARGETS[data["node"]["target"]]
+    stated = dict(data.get("limits", {}))
+    values, _ = limit_values(decl, stated, image_limits(target))
+    entities = data.get("entity", [])
+    for name, kind in (("MAX_QUERYABLES", "queryable"), ("MAX_SUBSCRIPTIONS", "subscriber")):
+        need = sum(1 for e in entities if e["kind"] == kind)
+        if name not in stated and need > values[name]:
+            stated[name] = need
+    return dict(sorted(stated.items()))
 
 
 def rust_string(text: str) -> str:
@@ -230,8 +279,14 @@ def digest(name: str, directory: pathlib.Path = NODES) -> str:
 def emit(name: str, data: dict, declaration_sha256: str) -> str:
     """The `declared.rs` the node's code includes. Valid input only: `validate` ran first."""
     endpoint = data["endpoint"][0]["locator"]
-    entities = [(e["key"], e["document_bytes"]) for e in data.get("entity", []) if e["kind"] == "queryable"]
+    every = data.get("entity", [])
+    entities = [(e["key"], e["document_bytes"]) for e in every if e["kind"] == "queryable" and "from" not in e]
     docs = ", ".join(f"({rust_string(k)}, {b})" for k, b in entities)
+    subscribed = [(e["key"], e["sample_bytes"]) for e in every if e["kind"] == "subscriber"]
+    cells = ", ".join(f"({rust_string(k)}, {b})" for k, b in subscribed)
+    place = {k: at for at, (k, _) in enumerate(subscribed)}
+    mirrored = [(e["key"], place[e["from"]]) for e in every if e["kind"] == "queryable" and "from" in e]
+    mirrors = ", ".join(f"({rust_string(k)}, {at})" for k, at in mirrored)
     return "\n".join(
         [
             f"// {wz_config.SPDX}",
@@ -250,6 +305,14 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
             "/// The queryables the node declares, and the documents they answer with: (key, bytes).",
             f"pub const DOCS: usize = {len(entities)};",
             f"pub const DOCUMENTS: [(&str, usize); {len(entities)}] = [{docs}];",
+            "/// The subscriptions the node declares, and the bytes of a payload each keeps: (key, bytes).",
+            f"pub const SUBSCRIBERS: usize = {len(subscribed)};",
+            f"pub const SUBSCRIPTIONS: [(&str, usize); {len(subscribed)}] = [{cells}];",
+            "/// The most bytes any subscription keeps: the size of every cell the node holds.",
+            f"pub const SAMPLE_MAX: usize = {max((b for _, b in subscribed), default=1)};",
+            "/// The queryables that answer from a subscription: (key, index into `SUBSCRIPTIONS`).",
+            f"pub const MIRRORS: usize = {len(mirrored)};",
+            f"pub const MIRRORED: [(&str, usize); {len(mirrored)}] = [{mirrors}];",
             "",
         ]
     )
@@ -263,8 +326,8 @@ def load(name: str, decl: dict, directory: pathlib.Path = NODES) -> dict:
     return data
 
 
-def env_lines(data: dict) -> list[str]:
-    return [f"WZ_LIMIT_{k}={v}" for k, v in sorted(data.get("limits", {}).items())]
+def env_lines(data: dict, decl: dict) -> list[str]:
+    return [f"WZ_LIMIT_{k}={v}" for k, v in budgets(data, decl).items()]
 
 
 # What a dialled endpoint's scheme asks of the device, by name from the facilities of
@@ -300,7 +363,7 @@ def resolve(name: str, decl: dict, directory: pathlib.Path = NODES) -> dict:
         "declaration_sha256": sha,
         "generated": generated,
         "features": ["declared"] + (["tls"] if "tls" in schemes else []),
-        "limits": dict(line.split("=", 1) for line in env_lines(data)),
+        "limits": dict(line.split("=", 1) for line in env_lines(data, decl)),
         "facilities": facilities,
     }
 
@@ -399,7 +462,42 @@ def _selftest() -> int:
     expect("a tls endpoint sets the flag", "pub const TLS: bool = true;" in emit(
         "n", wz_config.read_decl_toml(SAMPLE.replace("tcp/", "tls/")), sha))
     expect("the file names its source and says it is generated", "GENERATED from deploy/nodes/n.toml" in rs)
-    expect("the budgets become the limit environment", env_lines(data) == ["WZ_LIMIT_MAX_QUERYABLES=2"])
+    expect("the budgets become the limit environment",
+           env_lines(data, decl) == ["WZ_LIMIT_MAX_QUERYABLES=2"])
+    expect("a node with no subscription declares none and holds cells of one byte nowhere",
+           "pub const SUBSCRIBERS: usize = 0;" in rs and "pub const MIRRORS: usize = 0;" in rs
+           and "pub const SAMPLE_MAX: usize = 1;" in rs)
+
+    # A subscription keeps what it receives; a queryable may answer from one.
+    sub = '\n[[entity]]\nkind = "subscriber"\nkey = "lab/in/a"\nsample_bytes = 64\n'
+    mirror = '\n[[entity]]\nkind = "queryable"\nkey = "lab/in/a"\nfrom = "lab/in/a"\n'
+    expect("a subscription is a valid entity", problems(SAMPLE + sub) == [])
+    expect("a queryable that answers from it is valid, under the key it subscribes to",
+           problems(SAMPLE + sub + mirror) == [])
+    both = emit("n", wz_config.read_decl_toml(SAMPLE + sub + mirror), sha)
+    expect("the subscription and its size are generated",
+           'pub const SUBSCRIPTIONS: [(&str, usize); 1] = [("lab/in/a", 64)];' in both
+           and "pub const SUBSCRIBERS: usize = 1;" in both and "pub const SAMPLE_MAX: usize = 64;" in both)
+    expect("the mirror names the subscription it answers from, by place",
+           'pub const MIRRORED: [(&str, usize); 1] = [("lab/in/a", 0)];' in both
+           and "pub const MIRRORS: usize = 1;" in both)
+    expect("the mirror is not a document",
+           'pub const DOCUMENTS: [(&str, usize); 1] = [("lab/doc/a", 512)];' in both)
+    expect("every cell is as large as the largest subscription",
+           "pub const SAMPLE_MAX: usize = 100;" in emit("n", wz_config.read_decl_toml(
+               SAMPLE + sub + '\n[[entity]]\nkind = "subscriber"\nkey = "lab/in/b"\nsample_bytes = 100\n'), sha))
+    two = wz_config.read_decl_toml(SAMPLE + sub + '\n[[entity]]\nkind = "subscriber"\nkey = "lab/in/b"\n'
+                                   'sample_bytes = 8\n' + '\n[[entity]]\nkind = "queryable"\nkey = "lab/in/b"\n'
+                                   'from = "lab/in/b"\n')
+    expect("a mirror points at the place of its own subscription, not the first",
+           'pub const MIRRORED: [(&str, usize); 1] = [("lab/in/b", 1)];' in emit("n", two, sha))
+    expect("the budgets a subscription decides follow from it when the declaration states none",
+           budgets(wz_config.read_decl_toml(SAMPLE + sub), decl)["MAX_SUBSCRIPTIONS"] >= 1)
+    many = SAMPLE.replace("MAX_QUERYABLES = 2", "") + "".join(
+        f'\n[[entity]]\nkind = "queryable"\nkey = "lab/q/{i}"\ndocument_bytes = 1\n' for i in range(4))
+    expect("the queryables of a node decide MAX_QUERYABLES where the image's is too small",
+           budgets(wz_config.read_decl_toml(many), decl)["MAX_QUERYABLES"] == 5)
+    expect("and the registry holds what they need", problems(many) == [])
 
     refuses("a file named otherwise than its id", SAMPLE, "the file is named", "other")
     refuses("an unknown target", SAMPLE.replace('"slot"', '"heap"'), "target is 'heap'")
@@ -407,8 +505,27 @@ def _selftest() -> int:
             SAMPLE.replace('role = "dial"', 'role = "listen"'), "no accept loop")
     refuses("a multicast endpoint", SAMPLE.replace('role = "dial"', 'role = "multicast"'), "not built on slot")
     refuses("a role outside the vocabulary", SAMPLE.replace('role = "dial"', 'role = "dail"'), "not one of dial")
-    refuses("a subscriber is refused, not dropped", SAMPLE.replace('kind = "queryable"', 'kind = "subscriber"'),
+    refuses("a publisher is refused, not dropped", SAMPLE.replace('kind = "queryable"', 'kind = "publisher"'),
             "not built on slot")
+    refuses("a subscription with no size", SAMPLE + '\n[[entity]]\nkind = "subscriber"\nkey = "lab/in/a"\n',
+            "sample_bytes is None")
+    refuses("a subscription of no bytes", SAMPLE + sub.replace("64", "0"), "sample_bytes is 0")
+    refuses("a subscription above the target's cell", SAMPLE + sub.replace("64", "4097"), "sample_bytes is 4097")
+    refuses("a subscription with a document", SAMPLE + sub + "document_bytes = 4\n", "has no `document_bytes`")
+    refuses("a subscription with a source", SAMPLE + sub + 'from = "lab/in/a"\n', "has no `from`")
+    refuses("a queryable with a sample size", SAMPLE.replace("512", "512\nsample_bytes = 4"), "has no `sample_bytes`")
+    refuses("a mirror of a subscription nobody declared", SAMPLE + sub + mirror.replace('from = "lab/in/a"',
+            'from = "lab/in/zzz"'), "not the key of a subscription")
+    refuses("a mirror that is also a document", SAMPLE + sub + mirror + "document_bytes = 4\n", "not both")
+    refuses("a mirror of a subscription that keeps more than a reply holds",
+            SAMPLE + sub.replace("64", "2048") + mirror, "more than a reply holds")
+    refuses("two subscriptions of one key", SAMPLE + sub + sub, "declared twice")
+    expect("a subscription and a queryable of one key are not a duplicate",
+           problems(SAMPLE + sub + mirror) == [])
+    refuses("a limit stated below what the entities need",
+            SAMPLE.replace("MAX_QUERYABLES = 2", "MAX_QUERYABLES = 2\nMAX_SUBSCRIPTIONS = 1") + sub
+            + '\n[[entity]]\nkind = "subscriber"\nkey = "lab/in/b"\nsample_bytes = 4\n',
+            "states MAX_SUBSCRIPTIONS = 1")
     refuses("a kind outside the vocabulary", SAMPLE.replace('kind = "queryable"', 'kind = "queryble"'),
             "not one of publisher")
     refuses("a locator with no scheme", SAMPLE.replace("tcp/10.0.0.1:7447", "10.0.0.1:7447"), "locator")
@@ -506,7 +623,7 @@ def main(argv: list[str]) -> int:
         except (ValueError, OSError) as err:
             print(f"wz-node: REFUSED -- {err}", file=sys.stderr)
             return 1
-        print(emit(argv[1], data, digest(argv[1])) if argv[0] == "--emit" else "\n".join(env_lines(data)))
+        print(emit(argv[1], data, digest(argv[1])) if argv[0] == "--emit" else "\n".join(env_lines(data, decl)))
         return 0
     print(__doc__, file=sys.stderr)
     return 2

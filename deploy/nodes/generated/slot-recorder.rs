@@ -1,0 +1,24 @@
+// SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+// GENERATED from deploy/nodes/slot-recorder.toml by scripts/lib/wz_node.py --emit slot-recorder.
+// Do not edit: a change is made in the declaration and generated again.
+
+pub const NODE_ID: &str = "slot-recorder";
+/// The digest of the declaration file this was generated from; the node's facts note carries it.
+pub const DECLARATION_SHA256: &str = "45e4cb1ebd02eb33fa65a290536518f8e4bde270e085cec4bcf45b734342fb70";
+/// The one endpoint the node dials, as a locator.
+pub const ROUTER: &str = "tcp/127.0.0.1:17471";
+/// Whether that endpoint is `tls/`, which the node's `tls` feature must be built for.
+pub const TLS: bool = false;
+/// The queryables the node declares, and the documents they answer with: (key, bytes).
+pub const DOCS: usize = 0;
+pub const DOCUMENTS: [(&str, usize); 0] = [];
+/// The subscriptions the node declares, and the bytes of a payload each keeps: (key, bytes).
+pub const SUBSCRIBERS: usize = 1;
+pub const SUBSCRIPTIONS: [(&str, usize); 1] = [("lab/in/temp", 64)];
+/// The most bytes any subscription keeps: the size of every cell the node holds.
+pub const SAMPLE_MAX: usize = 64;
+/// The queryables that answer from a subscription: (key, index into `SUBSCRIPTIONS`).
+pub const MIRRORS: usize = 1;
+pub const MIRRORED: [(&str, usize); 1] = [("lab/in/temp", 0)];

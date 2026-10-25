@@ -1,0 +1,30 @@
+# A node declaration (docs/target-build-contract.md section 5b), checked by scripts/lib/wz_node.py.
+#
+# A fixed-memory node that subscribes and answers from what it received: it dials one router, keeps
+# the latest sample of `lab/in/temp` (up to 64 bytes of its payload) and answers a query under the
+# same key with it, on the per-session slot profile (no allocator). Before the first sample the
+# query is answered with nothing.
+#
+# The endpoint is this machine's loopback on a port of its own, because this is the node the
+# interop test builds and runs against the reference router
+# (crates/wz-integration-tests/tests/wz_declared_node_zenohd_interop.rs): the locator is part of
+# what the node IS, so the router it is tested against listens there.
+
+[node]
+id = "slot-recorder"
+help = "A fixed-memory client that dials a router over TCP, keeps the latest sample of one key and answers queries from it."
+target = "slot"
+
+[[endpoint]]
+role = "dial"
+locator = "tcp/127.0.0.1:17471"
+
+[[entity]]
+kind = "subscriber"
+key = "lab/in/temp"
+sample_bytes = 64
+
+[[entity]]
+kind = "queryable"
+key = "lab/in/temp"
+from = "lab/in/temp"

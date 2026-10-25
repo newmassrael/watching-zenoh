@@ -20,6 +20,7 @@
 #![no_std]
 #![no_main]
 
+use core::ops::ControlFlow;
 #[cfg(not(feature = "tls"))]
 use host_slot_node_glue::fresh_zid;
 #[cfg(feature = "tls")]
@@ -29,18 +30,19 @@ use host_slot_node_glue::tuning::{
     TIMERS, TX,
 };
 use host_slot_node_glue::{fresh_signing_key, ConsoleName, HostPort};
-use wz_runtime_posix::glue::log;
-#[cfg(feature = "tls")]
-use wz_runtime_posix::glue::log_args;
+use wz_runtime_posix::glue::{log, log_args};
 #[cfg(not(feature = "tls"))]
 use wz_runtime_posix::slot::PosixStack;
 #[cfg(not(feature = "tls"))]
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
-use wz_session_core::caps::MAX_QUERYABLES;
+use wz_session_core::caps::{MAX_QUERYABLES, MAX_REPLY_PAYLOAD_BYTES, MAX_SUBSCRIPTIONS};
+use wz_session_core::sample_kind::SampleKind;
 use wz_session_mcu::connect_manager::StaticEndpoints;
+use wz_session_mcu::latest::{LatestCells, LatestRef, LatestWatch};
 use wz_session_mcu::slot_node::{
-    documents_of, Answering, BodyPool, ClientNode, Declared, NodeIdentity, NodePort, NodeStorage,
+    documents_of, Answering, BodyPool, ClientNode, Declared, Entities, Mirror, NodeApp, NodeHandle,
+    NodeIdentity, NodePort, NodeStorage, Subscription,
 };
 
 wz_runtime_posix::posix_image_no_heap!();
@@ -50,7 +52,14 @@ mod declared {
     include!(env!("WZ_DECLARED_RS"));
 }
 
-use declared::{DECLARATION_SHA256, DOCS, DOCUMENTS, NODE_ID, ROUTER, TLS};
+use declared::{
+    DECLARATION_SHA256, DOCS, DOCUMENTS, MIRRORED, MIRRORS, NODE_ID, ROUTER, SAMPLE_MAX,
+    SUBSCRIBERS, SUBSCRIPTIONS, TLS,
+};
+
+/// The declarations the node sends on a session: its documents, the queryables that answer from a
+/// subscription, and the subscriptions.
+const DECLS: usize = DOCS + MIRRORS + SUBSCRIBERS;
 
 /// The revision of how this executable is driven. It takes no argument and reads no document, so the
 /// surface is the console lines a lab waits for; it moves when one of them is removed or changes
@@ -74,9 +83,36 @@ wz_abi_stamp::facts!(
 );
 
 const _: () = assert!(
-    DOCS <= MAX_QUERYABLES,
+    DOCS + MIRRORS <= MAX_QUERYABLES,
     "the declaration has more queryables than the registry holds"
 );
+const _: () = assert!(
+    SUBSCRIBERS <= MAX_SUBSCRIPTIONS,
+    "the declaration has more subscriptions than the subscriber table holds"
+);
+const _: () = {
+    let mut at = 0;
+    while at < SUBSCRIBERS {
+        assert!(
+            SUBSCRIPTIONS[at].1 >= 1 && SUBSCRIPTIONS[at].1 <= SAMPLE_MAX,
+            "a subscription keeps no bytes, or more than the cells hold"
+        );
+        at += 1;
+    }
+    let mut at = 0;
+    while at < MIRRORS {
+        let from = MIRRORED[at].1;
+        assert!(
+            from < SUBSCRIBERS,
+            "a queryable answers from a subscription that is not there"
+        );
+        assert!(
+            SUBSCRIPTIONS[from].1 <= MAX_REPLY_PAYLOAD_BYTES,
+            "a queryable answers from a subscription that keeps more than a reply holds"
+        );
+        at += 1;
+    }
+};
 const _: () = assert!(
     TLS == cfg!(feature = "tls"),
     "the declaration's endpoint is `tls/` exactly when the node is built with the `tls` feature"
@@ -111,8 +147,11 @@ static BODY: BodyPool<DOC_MAX> = BodyPool::new();
 /// The endpoint the node dials: the declaration's, checked against a locator row when this is built.
 static ENDPOINTS: StaticEndpoints = StaticEndpoints::new(&[ROUTER]);
 
-/// The queryables the node declares on each session, in the order of their registrations.
-static DECLARED: Declared<DOCS> = Declared::new();
+/// The declarations the node sends on each session, in the order of their registrations.
+static DECLARED: Declared<DECLS> = Declared::new();
+
+/// The latest sample of each subscription, in the cells the declaration sized.
+static CELLS: LatestCells<SUBSCRIBERS, SAMPLE_MAX> = LatestCells::new();
 
 /// The name this front end's console lines carry.
 struct Console;
@@ -130,6 +169,64 @@ fn chosen() -> [Option<(&'static str, usize)>; DOCS] {
         at += 1;
     }
     out
+}
+
+/// The subscriptions the declaration chose, each with the cell that keeps its latest sample.
+fn subscriptions() -> [Subscription; SUBSCRIBERS] {
+    core::array::from_fn(|at| Subscription {
+        key: SUBSCRIPTIONS[at].0,
+        cell: LatestRef {
+            slots: &CELLS,
+            index: at,
+        },
+        capacity: SUBSCRIPTIONS[at].1,
+    })
+}
+
+/// The queryables that answer from a subscription, each with the cell it reads.
+fn mirrors() -> [Mirror; MIRRORS] {
+    core::array::from_fn(|at| Mirror {
+        key: MIRRORED[at].0,
+        cell: LatestRef {
+            slots: &CELLS,
+            index: MIRRORED[at].1,
+        },
+    })
+}
+
+/// What the node says when a subscription takes a sample: the console line a lab waits for, once for
+/// each round that found a cell moved. The payload is in hex, so the line is one line whatever the
+/// bytes are; `seq` is how many samples the cell has taken, so a run of samples that arrived between
+/// two rounds shows as a jump.
+struct Report {
+    watch: LatestWatch<SUBSCRIBERS>,
+}
+
+impl NodeApp for Report {
+    fn after_tick(&mut self, _now_ms: u64, _node: &dyn NodeHandle) -> ControlFlow<i32> {
+        self.watch.poll(&CELLS, SUBSCRIBERS, |_, sample| {
+            let mut hex = [0u8; 2 * SAMPLE_MAX];
+            for (at, byte) in sample.payload.iter().enumerate() {
+                hex[2 * at] = b"0123456789abcdef"[usize::from(byte >> 4)];
+                hex[2 * at + 1] = b"0123456789abcdef"[usize::from(byte & 15)];
+            }
+            match sample.kind {
+                SampleKind::Put => log_args(format_args!(
+                    "HOST-WZ-SAMPLE {} put len={} kept={} seq={} hex={}",
+                    sample.key,
+                    sample.received_len,
+                    sample.payload.len(),
+                    sample.sequence,
+                    core::str::from_utf8(&hex[..2 * sample.payload.len()]).unwrap_or("")
+                )),
+                SampleKind::Del => log_args(format_args!(
+                    "HOST-WZ-SAMPLE {} del seq={}",
+                    sample.key, sample.sequence
+                )),
+            }
+        });
+        ControlFlow::Continue(())
+    }
 }
 
 /// Assemble the node and run it. Returns only when it cannot start; the value is the process's exit
@@ -176,6 +273,7 @@ fn run() -> i32 {
         }
     };
 
+    let (subscribed, mirrored) = (subscriptions(), mirrors());
     let node = ClientNode {
         storage: &NODE,
         declared: &DECLARED,
@@ -190,15 +288,26 @@ fn run() -> i32 {
         entropy: || PosixEntropy,
         endpoints: &ENDPOINTS,
         documents: &documents[..taken],
+        entities: Entities {
+            subscriptions: &subscribed,
+            mirrors: &mirrored,
+        },
         layer: Answering,
         idle_sleep_us: IDLE_SLEEP_US,
         report_every_ms: 0,
     };
     // The line a lab (or a person at the console) waits for, once the node is built: the same one
     // `host-slot-node` says, so a lab that waits for it waits for either.
-    node.run(&mut HostPort::<Console>::new(), &mut (), |port, zid_hex| {
-        port.log(format_args!("HOST-WZ-CLIENT READY {zid_hex} {ROUTER}"));
-    })
+    let mut report = Report {
+        watch: LatestWatch::new(),
+    };
+    node.run(
+        &mut HostPort::<Console>::new(),
+        &mut report,
+        |port, zid_hex| {
+            port.log(format_args!("HOST-WZ-CLIENT READY {zid_hex} {ROUTER}"));
+        },
+    )
 }
 
 #[no_mangle]
