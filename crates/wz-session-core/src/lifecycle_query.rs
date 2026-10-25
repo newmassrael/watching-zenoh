@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! The session lifecycle as a QUERY: close a session and be told what happened,
-//! read what a node holds for a peer, and ask a node which lifecycle verbs it has.
+//! open one, read what a node holds for a peer, and ask a node which lifecycle
+//! verbs it has.
 //!
 //! The close verb has always been a Push on a switchboard row
 //! (`@/<zid>/<whatami>/session/close/<peer-zid>`, [`crate::drive::LifecycleKey`]):
@@ -11,7 +12,7 @@
 //! Push has no reply path, so a caller could not tell a close that ran from one
 //! that was refused or aimed at nobody. This is the same verb asked as a GET, which has one.
 //!
-//! # The four queries
+//! # The five queries
 //!
 //! * `GET @/<zid>/<whatami>/session/close/<peer-zid>` takes the peer out of the
 //!   node's intent, orders EVERY session this node holds with that peer closed
@@ -33,11 +34,20 @@
 //!   A machine is `{"state":"established"}`, with `"cause"` beside a `refused`
 //!   state and `"endpoint"` on a configured endpoint's machine. A refusal answers
 //!   `{"verdict":"refused","reason":"..."}`.
-//! * `GET @/<zid>/<whatami>/session/verbs` answers `{"verbs":["close","reset","status"]}`:
-//!   the verbs this node has bound. It says what the node KNOWS, not whether this
-//!   caller may use it; permission is judged by `refused` on each verb's query.
+//! * `GET @/<zid>/<whatami>/session/open/<peer-zid>` asks the node to hold the
+//!   peer: it joins the intent and its machine connects (decision D6). The reply
+//!   says the request was taken, `{"verdict":"opening"}`, not that a session is
+//!   up; the status query reads how the dial ends. A second open of a held peer
+//!   changes nothing and says the same, which is what makes a retransmission
+//!   safe. `{"verdict":"refused","reason":"..."}` names a peer the node has no
+//!   locator for, one it cannot dial, or a loop that is gone. A host with no
+//!   opener serves no open query.
+//! * `GET @/<zid>/<whatami>/session/verbs` answers `{"verbs":["close","reset","status"]}`,
+//!   with `"open"` last on a node that serves it: the verbs this node has bound.
+//!   It says what the node KNOWS, not whether this caller may use it; permission
+//!   is judged by `refused` on each verb's query.
 //!
-//! A node that binds neither answers nothing, which a querier reads as "no
+//! A node that binds none of them answers nothing, which a querier reads as "no
 //! surface". That is the honest answer for a node that has no lifecycle ingress.
 //!
 //! # What "closing" promises
@@ -56,7 +66,7 @@
 //! many this call ordered. A close that finds the peer's links all already ordered
 //! answers `already_closed`.
 //!
-//! # Why the close, reset and status queries are exact-key only
+//! # Why the close, reset, status and open queries are exact-key only
 //!
 //! A GET may carry a wildcard, and a wildcard close is "close everything that
 //! matches". The close query is answered only for a literal key that names this
@@ -211,6 +221,60 @@ impl PeerIntent for NoIntent {
     fn withdraw(&self, _peer_zid: &[u8]) {}
 }
 
+/// What a node's opener made of a request to hold a peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenOutcome {
+    /// The request reached the node's machines. Accepted, not completed: the dial
+    /// is asynchronous, and the status query is how its end is read.
+    Accepted,
+    /// The node knows no locator for the peer, so there is nothing to dial.
+    PeerUnknown,
+    /// The node knows the peer but none of the locators it has for it can be
+    /// dialled from here.
+    NoDialableLocator,
+    /// The loop that holds the node's machines is gone.
+    OpenerGone,
+}
+
+/// The node's opener, as the open query asks it (decision D6): told a peer's
+/// zid, it asks the node's machines to hold that peer.
+///
+/// A port for the reason [`SessionDirectory`] is one: the locators the node has
+/// for a peer, and the machines that dial them, live with the host. The in-band
+/// form of the verb asks the same host through [`crate::drive::SessionOpener`],
+/// so one request is one request however it arrives (decision D7).
+pub trait PeerOpener {
+    /// Whether the host has an opener at all. A host without one answers no open
+    /// query and lists no `open` verb, because the capability document says what
+    /// the node has bound.
+    const BOUND: bool = true;
+
+    /// Ask the node to hold the peer whose zid is `peer_zid` (wire bytes, any
+    /// trailing zero bytes). A peer already held is unchanged.
+    fn open(&self, peer_zid: &[u8]) -> OpenOutcome;
+}
+
+impl<O: PeerOpener + ?Sized> PeerOpener for &O {
+    const BOUND: bool = O::BOUND;
+
+    fn open(&self, peer_zid: &[u8]) -> OpenOutcome {
+        (**self).open(peer_zid)
+    }
+}
+
+/// The opener of a host that cannot create a session by a zid (a profile with no
+/// session manager to bind): the open query is not served.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoOpener;
+
+impl PeerOpener for NoOpener {
+    const BOUND: bool = false;
+
+    fn open(&self, _peer_zid: &[u8]) -> OpenOutcome {
+        OpenOutcome::OpenerGone
+    }
+}
+
 /// Why a close was refused, as one of a closed set of reasons.
 ///
 /// The words are the implementation's own and a querier shows them as written, so
@@ -227,16 +291,28 @@ pub enum RefusedReason {
     GenerationNotANumber,
     /// The node's authority does not admit reading the status this key names.
     StatusNotPermitted,
+    /// The node's authority does not admit opening the session this key names.
+    OpenNotPermitted,
+    /// The node knows no locator for the peer an open names.
+    PeerUnknown,
+    /// None of the locators the node knows for the peer can be dialled from it.
+    NoDialableLocator,
+    /// The loop that would hold the peer is gone, so the open reached nobody.
+    OpenerGone,
 }
 
 impl RefusedReason {
     /// Every reason this module can give, for the declared set to be held to.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 9] = [
         Self::NotPermitted,
         Self::PeerNotAZid,
         Self::ResetNotPermitted,
         Self::GenerationNotANumber,
         Self::StatusNotPermitted,
+        Self::OpenNotPermitted,
+        Self::PeerUnknown,
+        Self::NoDialableLocator,
+        Self::OpenerGone,
     ];
 
     /// The sentence a querier is shown. Plain ASCII with no quote or backslash, so
@@ -252,8 +328,60 @@ impl RefusedReason {
             Self::StatusNotPermitted => {
                 "this node does not permit reading the status of the session with that peer"
             }
+            Self::OpenNotPermitted => "this node does not permit opening a session with that peer",
+            Self::PeerUnknown => "this node knows no locator for that peer",
+            Self::NoDialableLocator => "this node cannot dial any locator it knows for that peer",
+            Self::OpenerGone => "the loop that would hold that peer is gone",
         }
     }
+}
+
+/// The answer to an open query (decision D6): the peer joins the node's intent and
+/// its machine connects. A second open of a held peer changes nothing, and says
+/// the same.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenVerdict {
+    /// The node's machines were asked to hold the peer. Accepted, not completed:
+    /// the status query reads how the dial ended.
+    Opening,
+    /// The open was not attempted, or reached nothing to dial.
+    Refused(RefusedReason),
+}
+
+impl OpenVerdict {
+    /// The verdict an opener's outcome amounts to.
+    pub fn of(outcome: OpenOutcome) -> Self {
+        match outcome {
+            OpenOutcome::Accepted => Self::Opening,
+            OpenOutcome::PeerUnknown => Self::Refused(RefusedReason::PeerUnknown),
+            OpenOutcome::NoDialableLocator => Self::Refused(RefusedReason::NoDialableLocator),
+            OpenOutcome::OpenerGone => Self::Refused(RefusedReason::OpenerGone),
+        }
+    }
+
+    /// Write the reply document: one JSON object. The words of `verdict` are the
+    /// closed set `opening` and `refused`; `reason` appears only on `refused`.
+    pub fn write_json<W: TextOut + ?Sized>(&self, out: &mut W) {
+        match self {
+            Self::Opening => out.push_str("{\"verdict\":\"opening\"}"),
+            Self::Refused(reason) => {
+                out.push_str("{\"verdict\":\"refused\",\"reason\":\"");
+                out.push_str(reason.words());
+                out.push_str("\"}");
+            }
+        }
+    }
+
+    /// The `verdict` word, for a declared set to be held to.
+    pub const fn word(&self) -> &'static str {
+        match self {
+            Self::Opening => "opening",
+            Self::Refused(_) => "refused",
+        }
+    }
+
+    /// Every `verdict` word, for a declared set to be held to.
+    pub const WORDS: [&'static str; 2] = ["opening", "refused"];
 }
 
 /// The answer to a close query.
@@ -428,17 +556,27 @@ impl StatusVerdict {
 /// The verb the status query carries in its key.
 const STATUS_VERB: &str = "status";
 
-/// The lifecycle verbs a node has bound, in the order the capability query lists
-/// them.
-pub const VERBS: [&str; 3] = [CLOSE_VERB, RESET_VERB, STATUS_VERB];
+/// The verb the open query carries in its key.
+const OPEN_VERB: &str = "open";
 
-/// Write the capability document `{"verbs":["close","reset","status"]}`.
-pub fn write_verbs_json<W: TextOut + ?Sized>(out: &mut W) {
+/// Every lifecycle verb a node can have bound, in the order the capability query
+/// lists them. `open` is last, and listed only by a node whose host has an opener
+/// ([`PeerOpener::BOUND`]).
+pub const VERBS: [&str; 4] = [CLOSE_VERB, RESET_VERB, STATUS_VERB, OPEN_VERB];
+
+/// Write the capability document `{"verbs":["close","reset","status"]}`, with
+/// `"open"` after them when `open_bound`.
+pub fn write_verbs_json<W: TextOut + ?Sized>(out: &mut W, open_bound: bool) {
     out.push_str("{\"verbs\":[");
-    for (i, verb) in VERBS.iter().enumerate() {
-        if i > 0 {
+    let mut first = true;
+    for verb in VERBS {
+        if verb == OPEN_VERB && !open_bound {
+            continue;
+        }
+        if !first {
             out.push_str(",");
         }
+        first = false;
         out.push_str("\"");
         out.push_str(verb);
         out.push_str("\"");
@@ -448,35 +586,40 @@ pub fn write_verbs_json<W: TextOut + ?Sized>(out: &mut W) {
 
 /// The queryables a node hosts to serve the lifecycle queries, as the key
 /// patterns to register them on: the close query for any peer, the reset query
-/// for any generation and peer, the status query for any peer, and the
-/// capability query.
-pub fn query_patterns(zid_hex: &str, whatami: &str) -> [String; 4] {
+/// for any generation and peer, the status query for any peer, the open query for
+/// any peer when `open_bound`, and the capability query.
+pub fn query_patterns(zid_hex: &str, whatami: &str, open_bound: bool) -> Vec<String> {
     let root = alloc::format!("@/{zid_hex}/{whatami}/session");
-    [
+    let mut patterns = Vec::from([
         alloc::format!("{root}/{CLOSE_VERB}/*"),
         alloc::format!("{root}/{RESET_VERB}/*/*"),
         alloc::format!("{root}/{STATUS_VERB}/*"),
-        alloc::format!("{root}/verbs"),
-    ]
+    ]);
+    if open_bound {
+        patterns.push(alloc::format!("{root}/{OPEN_VERB}/*"));
+    }
+    patterns.push(alloc::format!("{root}/verbs"));
+    patterns
 }
 
 /// Answers the lifecycle queries of one node.
 ///
 /// Holds nothing it does not borrow from the host but one record: the node's
 /// identity, the authority that says who may close, reset or read, the directory
-/// that holds the sessions, the intent a close withdraws the peer from and the
-/// machines the status query reads. The record
+/// that holds the sessions, the intent a close withdraws the peer from, the
+/// machines the status query reads and the opener an open asks. The record
 /// is the latest reset generation taken per peer, the duplicate suppression of
 /// at-most-once calls (decision D6; Birrell and Nelson, 1984), and it lives here
 /// because this is where a reset is taken. [`Self::answer`] is the body of the
 /// queryable handler the host registers on [`query_patterns`].
-pub struct LifecycleQueries<A, D, I = NoIntent, M = NoMachines> {
+pub struct LifecycleQueries<A, D, I = NoIntent, M = NoMachines, O = NoOpener> {
     zid_hex: String,
     whatami: String,
     authority: A,
     directory: D,
     intent: I,
     machines: M,
+    opener: O,
     /// The latest reset generation taken, by the peer's zid in its canonical
     /// form. Volatile, as every runtime edit of D6 is.
     resets: RefCell<BTreeMap<Vec<u8>, u64>>,
@@ -491,17 +634,20 @@ pub enum Answered {
     Reset(ResetVerdict),
     /// A reply was staged: the status query's verdict.
     Status(StatusVerdict),
+    /// A reply was staged: the open query's verdict.
+    Open(OpenVerdict),
     /// A reply was staged: the capability document.
     Verbs,
-    /// The query is no lifecycle query this node serves, or is a close, reset or
-    /// status query that is not an exact key; nothing was replied.
+    /// The query is no lifecycle query this node serves, or is a close, reset,
+    /// status or open query that is not an exact key; nothing was replied.
     Unserved,
 }
 
 impl<A: SessionLifecycleAuthority, D: SessionDirectory> LifecycleQueries<A, D> {
     /// The queries of the node `zid_hex` (zenoh's spelling) of role `whatami`,
-    /// for a host that holds no peer by intent or by a machine
-    /// ([`Self::with_intent`] and [`Self::with_machines`] say it does).
+    /// for a host that holds no peer by intent, by a machine or by an opener
+    /// ([`Self::with_intent`], [`Self::with_machines`] and [`Self::with_opener`]
+    /// say it does).
     pub fn new(zid_hex: &str, whatami: &str, authority: A, directory: D) -> Self {
         Self {
             zid_hex: String::from(zid_hex),
@@ -510,21 +656,23 @@ impl<A: SessionLifecycleAuthority, D: SessionDirectory> LifecycleQueries<A, D> {
             directory,
             intent: NoIntent,
             machines: NoMachines,
+            opener: NoOpener,
             resets: RefCell::new(BTreeMap::new()),
         }
     }
 }
 
-impl<A, D, I, M> LifecycleQueries<A, D, I, M>
+impl<A, D, I, M, O> LifecycleQueries<A, D, I, M, O>
 where
     A: SessionLifecycleAuthority,
     D: SessionDirectory,
     I: PeerIntent,
     M: PeerMachines,
+    O: PeerOpener,
 {
     /// These queries for a host that holds its peers by `intent`: a close also
     /// withdraws the peer from it, so no machine dials the peer again.
-    pub fn with_intent<J: PeerIntent>(self, intent: J) -> LifecycleQueries<A, D, J, M> {
+    pub fn with_intent<J: PeerIntent>(self, intent: J) -> LifecycleQueries<A, D, J, M, O> {
         LifecycleQueries {
             zid_hex: self.zid_hex,
             whatami: self.whatami,
@@ -532,13 +680,14 @@ where
             directory: self.directory,
             intent,
             machines: self.machines,
+            opener: self.opener,
             resets: self.resets,
         }
     }
 
     /// These queries for a host that holds its peers by `machines`: the status
     /// query reports each one that holds the peer it names.
-    pub fn with_machines<N: PeerMachines>(self, machines: N) -> LifecycleQueries<A, D, I, N> {
+    pub fn with_machines<N: PeerMachines>(self, machines: N) -> LifecycleQueries<A, D, I, N, O> {
         LifecycleQueries {
             zid_hex: self.zid_hex,
             whatami: self.whatami,
@@ -546,13 +695,29 @@ where
             directory: self.directory,
             intent: self.intent,
             machines,
+            opener: self.opener,
+            resets: self.resets,
+        }
+    }
+
+    /// These queries for a host that can open a session by a zid: the open query
+    /// is served, and the capability query lists `open`.
+    pub fn with_opener<P: PeerOpener>(self, opener: P) -> LifecycleQueries<A, D, I, M, P> {
+        LifecycleQueries {
+            zid_hex: self.zid_hex,
+            whatami: self.whatami,
+            authority: self.authority,
+            directory: self.directory,
+            intent: self.intent,
+            machines: self.machines,
+            opener,
             resets: self.resets,
         }
     }
 
     /// The patterns to register this on.
-    pub fn patterns(&self) -> [String; 4] {
-        query_patterns(&self.zid_hex, &self.whatami)
+    pub fn patterns(&self) -> Vec<String> {
+        query_patterns(&self.zid_hex, &self.whatami, O::BOUND)
     }
 
     fn verbs_key(&self) -> String {
@@ -569,7 +734,7 @@ where
         let verbs_chunks: alloc::vec::Vec<&str> = verbs_key.split('/').collect();
         if crate::keyexpr_match::keyexpr_intersects_target(key, &verbs_chunks) {
             let mut body: FixedText<64> = FixedText::new();
-            write_verbs_json(&mut body);
+            write_verbs_json(&mut body, O::BOUND);
             return match body.finish() {
                 Ok(text) if reply_json(out, &verbs_key, text).is_ok() => Answered::Verbs,
                 _ => Answered::Unserved,
@@ -611,6 +776,13 @@ where
                 verdict.write_json(&mut body);
                 Answered::Reset(verdict)
             }
+            // A host with no opener binds no open query, so the verb is no query
+            // of this node's and nothing is replied.
+            OPEN_VERB if O::BOUND => {
+                let verdict = self.open(&parsed);
+                verdict.write_json(&mut body);
+                Answered::Open(verdict)
+            }
             _ => return Answered::Unserved,
         };
         match body.finish() {
@@ -635,6 +807,18 @@ where
         };
         self.intent.withdraw(&peer);
         CloseVerdict::of(self.directory.order_close(&peer))
+    }
+
+    /// Open: the node's machines are asked to hold the peer, which joins the
+    /// intent. A peer already held is unchanged, so a retransmission is safe.
+    fn open(&self, key: &LifecycleKey<'_>) -> OpenVerdict {
+        if !self.authority.admits_open(key) {
+            return OpenVerdict::Refused(RefusedReason::OpenNotPermitted);
+        }
+        let Some(peer) = zenoh_hex_to_zid(key.peer_zid) else {
+            return OpenVerdict::Refused(RefusedReason::PeerNotAZid);
+        };
+        OpenVerdict::of(self.opener.open(&peer))
     }
 
     /// Reset: every session with the peer is ordered closed once for the key's
@@ -894,6 +1078,11 @@ mod tests {
             self.asked.set(self.asked.get() + 1);
             self.admits
         }
+
+        fn admits_open(&self, _key: &LifecycleKey<'_>) -> bool {
+            self.asked.set(self.asked.get() + 1);
+            self.admits
+        }
     }
 
     /// Sessions that remember being ordered closed.
@@ -945,8 +1134,8 @@ mod tests {
         )
     }
 
-    fn ask<I: PeerIntent, M: PeerMachines>(
-        node: &LifecycleQueries<Authority, Table, I, M>,
+    fn ask<I: PeerIntent, M: PeerMachines, O: PeerOpener>(
+        node: &LifecycleQueries<Authority, Table, I, M, O>,
         key: &str,
     ) -> (Answered, Vec<(String, String)>) {
         let mut out = Recorder::default();
@@ -1163,12 +1352,135 @@ mod tests {
 
     /// The patterns a host registers are the four keys the queries are asked on.
     #[test]
-    fn the_registered_patterns_cover_exactly_the_four_queries() {
-        let [close, reset, status, verbs] = query_patterns(ME, "peer");
-        assert_eq!(close, "@/a1b2/peer/session/close/*");
-        assert_eq!(reset, "@/a1b2/peer/session/reset/*/*");
-        assert_eq!(status, "@/a1b2/peer/session/status/*");
-        assert_eq!(verbs, "@/a1b2/peer/session/verbs");
+    fn the_registered_patterns_cover_exactly_the_queries_a_host_serves() {
+        assert_eq!(
+            query_patterns(ME, "peer", false),
+            [
+                "@/a1b2/peer/session/close/*",
+                "@/a1b2/peer/session/reset/*/*",
+                "@/a1b2/peer/session/status/*",
+                "@/a1b2/peer/session/verbs",
+            ]
+        );
+        assert_eq!(
+            query_patterns(ME, "peer", true),
+            [
+                "@/a1b2/peer/session/close/*",
+                "@/a1b2/peer/session/reset/*/*",
+                "@/a1b2/peer/session/status/*",
+                "@/a1b2/peer/session/open/*",
+                "@/a1b2/peer/session/verbs",
+            ]
+        );
+    }
+
+    /// An opener that records each peer it is asked to hold and answers as told.
+    struct Opener {
+        asked: RefCell<Vec<Vec<u8>>>,
+        outcome: OpenOutcome,
+    }
+
+    impl Opener {
+        fn answering(outcome: OpenOutcome) -> Self {
+            Self {
+                asked: RefCell::new(Vec::new()),
+                outcome,
+            }
+        }
+    }
+
+    impl PeerOpener for Opener {
+        fn open(&self, peer_zid: &[u8]) -> OpenOutcome {
+            self.asked.borrow_mut().push(peer_zid.to_vec());
+            self.outcome
+        }
+    }
+
+    /// Decision D6 — an open asks the node's machines to hold the peer and says the
+    /// request was taken; asked again it asks again and says the same, because the
+    /// machines treat a second open as no change. Each outcome of the opener is its
+    /// own refusal word.
+    #[test]
+    fn an_open_asks_the_opener_and_each_outcome_is_its_own_word() {
+        let key = alloc::format!("@/{ME}/peer/session/open/{PEER_A}");
+        let a = zenoh_hex_to_zid(PEER_A).expect("a zid");
+
+        let taking = node(true, Vec::new()).with_opener(Opener::answering(OpenOutcome::Accepted));
+        for _ in 0..2 {
+            let (answered, replies) = ask(&taking, &key);
+            assert_eq!(answered, Answered::Open(OpenVerdict::Opening));
+            assert_eq!(
+                replies,
+                vec![(key.clone(), String::from("{\"verdict\":\"opening\"}"))]
+            );
+        }
+        assert_eq!(*taking.opener.asked.borrow(), vec![a.clone(), a]);
+
+        for (outcome, reason) in [
+            (OpenOutcome::PeerUnknown, RefusedReason::PeerUnknown),
+            (
+                OpenOutcome::NoDialableLocator,
+                RefusedReason::NoDialableLocator,
+            ),
+            (OpenOutcome::OpenerGone, RefusedReason::OpenerGone),
+        ] {
+            let refusing = node(true, Vec::new()).with_opener(Opener::answering(outcome));
+            let (answered, replies) = ask(&refusing, &key);
+            assert_eq!(answered, Answered::Open(OpenVerdict::Refused(reason)));
+            assert_eq!(
+                replies[0].1,
+                alloc::format!(
+                    "{{\"verdict\":\"refused\",\"reason\":\"{}\"}}",
+                    reason.words()
+                )
+            );
+        }
+    }
+
+    /// An open the authority does not admit, or aimed at what is not a zid, asks
+    /// the opener nothing; a pattern is no target; and a host with no opener serves
+    /// no open query and lists no such verb.
+    #[test]
+    fn an_open_is_refused_unserved_or_not_a_query_of_a_host_with_no_opener() {
+        let key = alloc::format!("@/{ME}/peer/session/open/{PEER_A}");
+
+        let denied = node(false, Vec::new()).with_opener(Opener::answering(OpenOutcome::Accepted));
+        assert_eq!(
+            ask(&denied, &key).0,
+            Answered::Open(OpenVerdict::Refused(RefusedReason::OpenNotPermitted))
+        );
+        let (answered, _) = ask(&denied, &alloc::format!("@/{ME}/peer/session/open/0f1e"));
+        assert_eq!(
+            answered,
+            Answered::Open(OpenVerdict::Refused(RefusedReason::OpenNotPermitted)),
+            "the authority speaks before the key's last chunk is read"
+        );
+        assert!(denied.opener.asked.borrow().is_empty());
+
+        let permitted =
+            node(true, Vec::new()).with_opener(Opener::answering(OpenOutcome::Accepted));
+        let (answered, _) = ask(&permitted, &alloc::format!("@/{ME}/peer/session/open/0f1e"));
+        assert_eq!(
+            answered,
+            Answered::Open(OpenVerdict::Refused(RefusedReason::PeerNotAZid))
+        );
+        for pattern in [
+            alloc::format!("@/{ME}/peer/session/open/*"),
+            alloc::format!("@/{ME}/peer/session/open/**"),
+        ] {
+            assert_eq!(ask(&permitted, &pattern).0, Answered::Unserved, "{pattern}");
+        }
+        assert!(permitted.opener.asked.borrow().is_empty());
+
+        // No opener: not served, and the capability document does not list it.
+        let bare = node(true, Vec::new());
+        assert_eq!(ask(&bare, &key).0, Answered::Unserved);
+        let verbs = alloc::format!("@/{ME}/peer/session/verbs");
+        assert!(!ask(&bare, &verbs).1[0].1.contains("open"));
+        assert_eq!(
+            ask(&permitted, &verbs).1[0].1,
+            "{\"verbs\":[\"close\",\"reset\",\"status\",\"open\"]}"
+        );
     }
 
     /// The machines of a host, each with the zid of the peer it holds.
@@ -1516,5 +1828,11 @@ mod tests {
         ];
         let words: Vec<&str> = all.iter().map(StatusVerdict::word).collect();
         assert_eq!(words, StatusVerdict::WORDS);
+        let all = [
+            OpenVerdict::Opening,
+            OpenVerdict::Refused(RefusedReason::PeerUnknown),
+        ];
+        let words: Vec<&str> = all.iter().map(OpenVerdict::word).collect();
+        assert_eq!(words, OpenVerdict::WORDS);
     }
 }

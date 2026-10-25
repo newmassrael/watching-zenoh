@@ -4113,10 +4113,30 @@ impl wz::runtime_tokio::lifecycle_query::SessionLifecycleAuthority for ClosePerm
     fn admits_status(&self, _key: &wz::runtime_tokio::lifecycle_query::LifecycleKey<'_>) -> bool {
         self.0
     }
+
+    /// An open creates a session the node would not otherwise hold, which is a
+    /// stronger act than a close, and it is under the same permit: the demo has no
+    /// policy that tells the verbs apart, and a node that permits none of them
+    /// permits none.
+    fn admits_open(&self, _key: &wz::runtime_tokio::lifecycle_query::LifecycleKey<'_>) -> bool {
+        self.0
+    }
 }
 
-/// Host the session lifecycle queries -- the close, reset, status and capability
-/// queries (`wz_session_core::lifecycle_query`) -- on a forwarder.
+/// What a host's loop gives the lifecycle queries beyond its sessions (decision
+/// D6): the intent a close withdraws a peer from, the machines the status query
+/// reads, and the opener an open asks. A host whose loop holds no peer by a
+/// machine gives `NoIntent`, `NoMachines` and `NoOpener`, and serves the verbs on
+/// its sessions alone.
+#[cfg(feature = "session-close-ingress")]
+struct LoopLifecycle<I, M, P> {
+    intent: I,
+    machines: M,
+    opener: P,
+}
+
+/// Host the session lifecycle queries -- the close, reset, status, open and
+/// capability queries (`wz_session_core::lifecycle_query`) -- on a forwarder.
 ///
 /// `register` is the forwarder's `register_local_queryable`, passed in because the
 /// peer and the router are two types with one method of that shape. One answerer
@@ -4124,15 +4144,16 @@ impl wz::runtime_tokio::lifecycle_query::SessionLifecycleAuthority for ClosePerm
 /// what it permits. `intent` is what a close withdraws the peer from (decision D6):
 /// the face loop's reconcile channel on a host that has one, `NoIntent` on one
 /// that dials nobody again. `machines` is what the status query reads them from:
-/// the board the face loop publishes its machines to, or `NoMachines`.
+/// the board the face loop publishes its machines to, or `NoMachines`. `opener`
+/// is what an open asks to hold a peer: the link-state opener of a host whose loop
+/// holds its peers by machines, or `NoOpener`, which serves no open query.
 #[cfg(feature = "session-close-ingress")]
-fn host_session_lifecycle<D, I, M, E>(
+fn host_session_lifecycle<D, I, M, P, E>(
     zid_hex: &str,
     whatami: &str,
     permit: bool,
     directory: D,
-    intent: I,
-    machines: M,
+    loop_side: LoopLifecycle<I, M, P>,
     mut register: impl FnMut(
         &str,
         Box<
@@ -4146,14 +4167,16 @@ fn host_session_lifecycle<D, I, M, E>(
     D: wz::runtime_tokio::lifecycle_query::SessionDirectory + 'static,
     I: wz::runtime_tokio::lifecycle_query::PeerIntent + 'static,
     M: wz::runtime_tokio::lifecycle_query::PeerMachines + 'static,
+    P: wz::runtime_tokio::lifecycle_query::PeerOpener + 'static,
     E: std::fmt::Debug,
 {
     use wz::runtime_tokio::lifecycle_query::LifecycleQueries;
     use wz::runtime_tokio::query_sink::{QueryView, ReplyOut};
     let queries = std::rc::Rc::new(
         LifecycleQueries::new(zid_hex, whatami, ClosePermit(permit), directory)
-            .with_intent(intent)
-            .with_machines(machines),
+            .with_intent(loop_side.intent)
+            .with_machines(loop_side.machines)
+            .with_opener(loop_side.opener),
     );
     for pattern in queries.patterns() {
         let answerer = std::rc::Rc::clone(&queries);
@@ -4172,7 +4195,7 @@ fn host_session_lifecycle<D, I, M, E>(
         }
     }
     log::info!(
-        "wz-ap-demo {whatami}: session close, reset and status {}",
+        "wz-ap-demo {whatami}: session lifecycle verbs {}",
         if permit {
             "PERMITTED (--session-close-permit)"
         } else {
@@ -5096,9 +5119,13 @@ async fn run_peer_until(
             forwarder.lifecycle_directory(),
             // The peer's loop holds no intent it is told of at run time: it dials
             // its static connect list and the peers gossip names, by no machine,
-            // so the status query reads its sessions alone.
-            wz::runtime_tokio::lifecycle_query::NoIntent,
-            wz::runtime_tokio::lifecycle_query::NoMachines,
+            // so the status query reads its sessions alone; and it has no loop
+            // channel to ask a peer to be held through, so it serves no open query.
+            LoopLifecycle {
+                intent: wz::runtime_tokio::lifecycle_query::NoIntent,
+                machines: wz::runtime_tokio::lifecycle_query::NoMachines,
+                opener: wz::runtime_tokio::lifecycle_query::NoOpener,
+            },
             |pattern, handler| forwarder.register_local_queryable(pattern, true, handler),
         );
     }
@@ -7094,13 +7121,25 @@ async fn run_router_hat_until(
         let machines = peer_board.clone();
         #[cfg(not(feature = "router-connect-reconcile"))]
         let machines = wz::runtime_tokio::lifecycle_query::NoMachines;
+        // The opener asks the same loop, from the graphs this router learns its
+        // nodes' locators in; without the reconcile there is no loop to ask.
+        #[cfg(feature = "router-connect-reconcile")]
+        let opener = wz::runtime_tokio::session_lifecycle_open::LinkstateOpener::over(
+            forwarder.node_locators(),
+            reconcile_tx.clone(),
+        );
+        #[cfg(not(feature = "router-connect-reconcile"))]
+        let opener = wz::runtime_tokio::lifecycle_query::NoOpener;
         host_session_lifecycle(
             &wz::runtime_tokio::zid_hex::zid_to_zenoh_hex(&params.zid),
             params.whatami.to_str(),
             session_close_permit,
             forwarder.lifecycle_directory(),
-            intent,
-            machines,
+            LoopLifecycle {
+                intent,
+                machines,
+                opener,
+            },
             |pattern, handler| {
                 forwarder.register_local_queryable(pattern, true, handler);
                 Ok::<usize, std::convert::Infallible>(0)

@@ -2695,6 +2695,23 @@ impl RouterForwarder {
         }
     }
 
+    /// The graphs this router learns where nodes can be reached from, for the
+    /// lifecycle open: the routers region's and each peers region's. A node
+    /// advertised in any of them is a node an open can dial.
+    #[cfg(all(
+        feature = "session-close-ingress",
+        feature = "routing-accept",
+        feature = "router-connect-reconcile"
+    ))]
+    pub fn node_locators(&self) -> crate::session_lifecycle_open::NodeLocators {
+        crate::session_lifecycle_open::NodeLocators::new(
+            std::iter::once(self.routers_net())
+                .chain(self.peers_nets())
+                .map(Rc::clone)
+                .collect(),
+        )
+    }
+
     /// A read-only handle over the live face set — the admin host's `sessions[]`
     /// render seam, the transport-table twin of
     /// [`routers_net_view`](Self::routers_net_view). Held by the GET handler the

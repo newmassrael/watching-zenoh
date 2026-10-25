@@ -46,61 +46,101 @@ use std::rc::Rc;
 use wz_routing_graph::{LinkstateNetwork, Zid};
 use wz_session_core::credential_identity::zid_from_wire;
 use wz_session_core::drive::{LifecycleKey, SessionOpener};
+use wz_session_core::lifecycle_query::{OpenOutcome, PeerOpener};
 use wz_session_core::zid_hex::zenoh_hex_to_zid;
 
 use crate::accept_loop::{ConnectReconcile, ReconcileSender};
 use crate::session_open::plan_endpoint;
 
+/// The link-state graphs a node learns where its peers can be reached from: one
+/// for a peer, and one per region for a router. Read-only: all it answers is the
+/// locators a node advertised.
+///
+/// Holds each graph by `Rc<RefCell<..>>` because that is how the AP runtime
+/// already holds it, so this shares the graphs the floods populate rather than a
+/// copy that could disagree with them. A forwarder mints one for its own graphs
+/// (`node_locators`); the handle is never something a consumer mints over a graph
+/// it obtained some other way.
+#[derive(Clone)]
+pub struct NodeLocators {
+    nets: Vec<Rc<RefCell<LinkstateNetwork>>>,
+}
+
+impl NodeLocators {
+    /// The locators of `nets`, in order.
+    pub(crate) fn new(nets: Vec<Rc<RefCell<LinkstateNetwork>>>) -> Self {
+        Self { nets }
+    }
+
+    /// The locators any graph holds for `zid`, in the order the graphs and the
+    /// node's advertisement give them, or `None` when no graph holds the node.
+    /// Borrowed, copied out and dropped, so a caller may send on a channel with
+    /// no graph borrowed.
+    fn of(&self, zid: &Zid) -> Option<Vec<String>> {
+        let mut found: Option<Vec<String>> = None;
+        for net in &self.nets {
+            if let Some(locators) = net.borrow().node_locators(zid) {
+                let all = found.get_or_insert_with(Vec::new);
+                for locator in locators {
+                    if !all.contains(locator) {
+                        all.push(locator.clone());
+                    }
+                }
+            }
+        }
+        found
+    }
+}
+
 /// Opens sessions by resolving the key's target through the link-state
 /// directory and asking the face loop to dial what that node advertised.
-///
-/// Holds the graph by `Rc<RefCell<..>>` because that is how the AP runtime
-/// already holds it (`LinkstateForwarder::net`), so this shares the ONE graph
-/// the floods populate rather than a copy that could disagree with it.
 pub struct LinkstateOpener {
-    net: Rc<RefCell<LinkstateNetwork>>,
+    locators: NodeLocators,
     reconcile: ReconcileSender,
 }
 
 impl LinkstateOpener {
-    /// Bind the directory and the connect-set channel this opener works through.
+    /// Bind one graph and the connect-set channel this opener works through.
     pub fn new(net: Rc<RefCell<LinkstateNetwork>>, reconcile: ReconcileSender) -> Self {
-        Self { net, reconcile }
+        Self::over(NodeLocators::new(vec![net]), reconcile)
     }
-}
 
-impl SessionOpener for LinkstateOpener {
-    /// `true` when a dial request reached the face loop — accepted, not
-    /// completed, exactly as the port's contract says.
+    /// Bind a node's graphs and the connect-set channel this opener works through.
+    pub fn over(locators: NodeLocators, reconcile: ReconcileSender) -> Self {
+        Self {
+            locators,
+            reconcile,
+        }
+    }
+
+    /// Ask the face loop to hold the node whose zid is `peer_zid` (wire bytes): the
+    /// one request both forms of the verb, the Push and the query, make (decision
+    /// D7).
     ///
     /// Each refusal below is a DIFFERENT fact and each says which, because the
-    /// only thing an operator sees from outside is that nothing happened:
-    /// a target that is not a zid at all, a zid this node has never heard of, a
-    /// node that advertised nothing dialable, and a face loop that is gone.
-    fn request_open(&self, key: &LifecycleKey<'_>) -> bool {
-        let Some(bytes) = zenoh_hex_to_zid(key.peer_zid) else {
+    /// only thing an operator sees from outside is that nothing happened: a
+    /// target that is not a zid at all, a zid this node has never heard of, a node
+    /// that advertised nothing dialable, and a face loop that is gone. A peer the
+    /// node does not know is refused here and does not take an entry of the
+    /// bounded peer table, which a flood of opens for zids nobody advertises
+    /// would otherwise fill.
+    fn ask(&self, peer_zid: &[u8]) -> OpenOutcome {
+        let name = wz_session_core::zid_hex::zid_to_zenoh_hex(peer_zid);
+        let Some(expected) = zid_from_wire(peer_zid) else {
             log::warn!(
-                "LinkstateOpener: `{}` is not a zid in the rendering a key expression \
-                 carries; refusing to open.",
-                key.peer_zid
+                "LinkstateOpener: `{name}` does not read as a sixteen-byte zid; refusing to open."
             );
-            return false;
+            return OpenOutcome::PeerUnknown;
         };
-        let zid = Zid::from_slice(&bytes);
+        let zid = Zid::from_slice(peer_zid);
 
-        // Borrow, copy out, drop — the channel send below must not happen with
-        // the graph borrowed, and an owned Vec is what keeps the two apart.
-        let advertised: Vec<String> = match self.net.borrow().node_locators(&zid) {
-            Some(locators) => locators.to_vec(),
-            None => {
-                log::warn!(
-                    "LinkstateOpener: no link-state entry advertises dial locators for \
-                     `{}`; refusing to open a session to a node this one has never \
-                     heard announce itself.",
-                    key.peer_zid
-                );
-                return false;
-            }
+        let Some(advertised) = self.locators.of(&zid) else {
+            log::warn!(
+                "LinkstateOpener: no link-state entry advertises dial locators for \
+                 `{name}`; refusing to open a session to a node this one has never \
+                 heard announce itself."
+            );
+            return OpenOutcome::PeerUnknown;
         };
 
         // The locators as the node advertised them: the loop takes them into its
@@ -112,9 +152,8 @@ impl SessionOpener for LinkstateOpener {
                 Ok(_) => Some(locator),
                 Err(why) => {
                     log::warn!(
-                        "LinkstateOpener: `{}` advertises `{locator}`, which does not \
-                         parse as a locator ({why:?}); skipping that one.",
-                        key.peer_zid
+                        "LinkstateOpener: `{name}` advertises `{locator}`, which does not \
+                         parse as a locator ({why:?}); skipping that one."
                     );
                     None
                 }
@@ -122,11 +161,10 @@ impl SessionOpener for LinkstateOpener {
             .collect();
         if planned.is_empty() {
             log::warn!(
-                "LinkstateOpener: `{}` is known but advertises nothing dialable; \
-                 refusing to open.",
-                key.peer_zid
+                "LinkstateOpener: `{name}` is known but advertises nothing dialable; \
+                 refusing to open."
             );
-            return false;
+            return OpenOutcome::NoDialableLocator;
         }
 
         // ADD, never Replace: this verb asks for one more peer, and adopting its
@@ -135,26 +173,40 @@ impl SessionOpener for LinkstateOpener {
         // the NODE, not of its locators (decision D4): a locator is a hint for
         // reaching the zid, so each dial is made for the zid and a session that
         // another node answers closes at its InitAck.
-        let Some(expected) = zid_from_wire(&bytes) else {
-            log::warn!(
-                "LinkstateOpener: `{}` does not read as a sixteen-byte zid; refusing to open.",
-                key.peer_zid
-            );
-            return false;
-        };
         let request = ConnectReconcile::AddNode {
             zid: expected,
             locators: planned,
         };
         if self.reconcile.send(request).is_err() {
             log::warn!(
-                "LinkstateOpener: the face loop is gone, so the dial request for `{}` \
-                 reached nobody.",
+                "LinkstateOpener: the face loop is gone, so the dial request for `{name}` \
+                 reached nobody."
+            );
+            return OpenOutcome::OpenerGone;
+        }
+        OpenOutcome::Accepted
+    }
+}
+
+impl SessionOpener for LinkstateOpener {
+    /// `true` when a dial request reached the face loop — accepted, not
+    /// completed, exactly as the port's contract says.
+    fn request_open(&self, key: &LifecycleKey<'_>) -> bool {
+        let Some(bytes) = zenoh_hex_to_zid(key.peer_zid) else {
+            log::warn!(
+                "LinkstateOpener: `{}` is not a zid in the rendering a key expression \
+                 carries; refusing to open.",
                 key.peer_zid
             );
             return false;
-        }
-        true
+        };
+        self.ask(&bytes) == OpenOutcome::Accepted
+    }
+}
+
+impl PeerOpener for LinkstateOpener {
+    fn open(&self, peer_zid: &[u8]) -> OpenOutcome {
+        self.ask(peer_zid)
     }
 }
 
@@ -291,6 +343,158 @@ mod tests {
 
         assert!(!opener.request_open(&key));
         assert!(rx.try_recv().is_err());
+    }
+
+    /// Decision D6 / D7 — the query form of the verb makes the same request as the
+    /// Push form, and each way it can end is its own outcome: taken, a zid nobody
+    /// advertised, a node with nothing dialable, a face loop that is gone.
+    #[test]
+    fn the_query_form_asks_the_same_loop_and_names_each_outcome() {
+        use wz_session_core::lifecycle_query::{OpenOutcome, PeerOpener};
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let opener = LinkstateOpener::new(seeded(&[ADVERTISED]), tx);
+        assert_eq!(opener.open(PEER_ZID), OpenOutcome::Accepted);
+        match rx.try_recv().expect("a reconcile request was sent") {
+            ConnectReconcile::AddNode { zid, locators } => {
+                assert_eq!(Some(zid), zid_from_wire(PEER_ZID));
+                assert_eq!(locators, vec![String::from(ADVERTISED)]);
+            }
+            other => panic!("open must ADD the node to the connect set, got {other:?}"),
+        }
+        assert_eq!(
+            opener.open(&[0xff, 0xff]),
+            OpenOutcome::PeerUnknown,
+            "a zid nobody advertised"
+        );
+        assert!(rx.try_recv().is_err(), "and nothing was asked of the loop");
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let silent = LinkstateOpener::new(seeded(&[]), tx);
+        assert_eq!(
+            silent.open(PEER_ZID),
+            OpenOutcome::PeerUnknown,
+            "a node that advertises nothing is, to the graph, a node it holds no locator for"
+        );
+        assert!(rx.try_recv().is_err());
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let garbled = LinkstateOpener::new(seeded(&["no-such-scheme/1.2.3.4:5"]), tx);
+        assert_eq!(
+            garbled.open(PEER_ZID),
+            OpenOutcome::NoDialableLocator,
+            "locators the node advertised, none of which parses"
+        );
+        assert!(rx.try_recv().is_err());
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let orphaned = LinkstateOpener::new(seeded(&[ADVERTISED]), tx);
+        drop(rx);
+        assert_eq!(orphaned.open(PEER_ZID), OpenOutcome::OpenerGone);
+    }
+
+    /// The whole join in one arm, the query form: a GET on the open key, answered by
+    /// the lifecycle answerer over this opener, becomes the dial request the loop
+    /// takes, and the reply says the request was taken. The loop's own handling of
+    /// that request is `node_peer_open_e2e`'s.
+    #[test]
+    fn an_open_query_reaches_the_loop_as_a_dial_request() {
+        use wz_session_core::lifecycle_query::{Answered, LifecycleQueries, OpenVerdict};
+        use wz_session_core::lifecycle_query::{CloseOrder, SessionDirectory, SessionLinks};
+        use wz_session_core::query_sink::{BorrowedQuery, QueryView, ReplyError, ReplyOut};
+        use wz_session_core::sample::{EncodingHint, QosLevel};
+
+        struct NoSessions;
+        impl SessionDirectory for NoSessions {
+            fn order_close(&self, _peer_zid: &[u8]) -> CloseOrder {
+                CloseOrder::default()
+            }
+            fn links(&self, _peer_zid: &[u8]) -> SessionLinks {
+                SessionLinks::default()
+            }
+        }
+        struct Permit;
+        impl wz_session_core::lifecycle_query::SessionLifecycleAuthority for Permit {
+            fn admits_close(&self, _key: &LifecycleKey<'_>) -> bool {
+                false
+            }
+            fn admits_open(&self, _key: &LifecycleKey<'_>) -> bool {
+                true
+            }
+        }
+        #[derive(Default)]
+        struct Replies(Vec<String>);
+        impl ReplyOut for Replies {
+            fn reply(&mut self, _payload: &[u8]) {}
+            fn reply_del(&mut self) {}
+            fn reply_keyed_encoded(
+                &mut self,
+                _keyexpr: &str,
+                payload: &[u8],
+                _encoding: Option<&EncodingHint>,
+            ) -> Result<(), ReplyError> {
+                self.0
+                    .push(String::from_utf8(payload.to_vec()).expect("text"));
+                Ok(())
+            }
+            fn reply_err(&mut self, _id: Option<u32>, _schema: Option<&str>, _payload: &[u8]) {}
+            fn with_responder(&mut self, _zid: &[u8], _eid: u32) {}
+            fn clear_responder(&mut self) {}
+            fn responder(&self) -> Option<(&[u8], u32)> {
+                None
+            }
+        }
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let node = LifecycleQueries::new("0100", "router", Permit, NoSessions)
+            .with_opener(LinkstateOpener::new(seeded(&[ADVERTISED]), tx));
+        let key = format!("@/0100/router/session/open/{}", zid_to_zenoh_hex(PEER_ZID));
+        let view = BorrowedQuery {
+            keyexpr: &key,
+            parameters: None,
+            attachment: None,
+            source_info: None,
+            payload: None,
+            encoding: None,
+            rid: 1,
+            is_local: false,
+            qos: QosLevel::DEFAULT,
+        };
+        let mut out = Replies::default();
+        assert_eq!(
+            node.answer(&view as &dyn QueryView, &mut out),
+            Answered::Open(OpenVerdict::Opening)
+        );
+        assert_eq!(out.0, vec![String::from("{\"verdict\":\"opening\"}")]);
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Ok(ConnectReconcile::AddNode { zid, .. }) if Some(zid) == zid_from_wire(PEER_ZID)
+            ),
+            "the loop was asked to hold the node the key named"
+        );
+    }
+
+    /// A router holds one graph per region, and a node it learned of in either is a
+    /// node it can open: the locators of every graph that holds it are asked for,
+    /// each once.
+    #[test]
+    fn a_node_two_graphs_hold_is_asked_for_at_the_locators_of_both() {
+        use wz_session_core::lifecycle_query::PeerOpener;
+
+        let routers = seeded(&[ADVERTISED]);
+        let peers = seeded(&[ADVERTISED, "tcp/127.0.0.1:7448"]);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let opener = LinkstateOpener::over(NodeLocators::new(vec![routers, peers]), tx);
+        opener.open(PEER_ZID);
+        match rx.try_recv().expect("a reconcile request was sent") {
+            ConnectReconcile::AddNode { locators, .. } => assert_eq!(
+                locators,
+                vec![String::from(ADVERTISED), String::from("tcp/127.0.0.1:7448")],
+                "the locator both graphs hold is asked once"
+            ),
+            other => panic!("open must ADD the node to the connect set, got {other:?}"),
+        }
     }
 
     /// R2956 — `Zid`'s `Display` IS zenoh's form now, the string the key

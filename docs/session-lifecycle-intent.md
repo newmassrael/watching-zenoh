@@ -726,8 +726,40 @@ Each step lands with its own done-when; sizes are not estimated here.
      published (held, withdrawn to `idle`, refused with
      `identity_mismatch`, waiting to dial again), and Layer E6's status GET
      between two `wz-ap-demo` peers.
-   - Open as a query is 6c. Its open must reach the link-state graph from the
-     router host, as the in-band opener does from the switchboard.
+   - **6c, open as a query (Round 3597).**
+     `@/<zid>/<whatami>/session/open/<peer-zid>` is the fifth lifecycle query.
+     It asks the node to hold the peer, so the peer joins the intent and its
+     machine connects, and it answers that the request was taken
+     (`{"verdict":"opening"}`), not that a session is up: the status query
+     reads how the dial ends. A second open of a held peer changes nothing and
+     says the same, which is what makes a retransmission safe.
+     - The opener is a port, `PeerOpener`, apart from the sessions, the
+       intent and the machines. `LinkstateOpener` implements it and also the
+       in-band `SessionOpener`, over one `ask`, so the Push and the query make
+       one request (decision D7). The port answers with an outcome, not a bool,
+       so the reply says which refusal it was: the key is not a zid, the node
+       holds no locator for the peer (`peer_unknown`), it holds locators none of
+       which can be dialled (`no_dialable_locator`), or the loop is gone
+       (`opener_gone`).
+     - A router keeps one graph per region, so the opener reads the routers
+       region's graph and each peers region's (`NodeLocators`, minted by the
+       forwarder), and asks for a node at the locators of every graph that
+       holds it, each once. The peer host has no loop channel to ask through
+       and passes `NoOpener`: it serves no open query and lists no `open` verb,
+       since the capability document says what the node has bound.
+     - Decision: a peer the node has no locator for is refused at the opener
+       and does not enter the peer table, which is bounded and keeps a refused
+       peer until the next `open`; a run of opens for zids nobody advertised
+       would otherwise fill it. The cost is that a locator the loop's directory
+       learns later, from a `Hello`, is not found by an open the graphs could
+       not place. D5's `no_locator` refusal stays the machine's for a locator
+       that expires after the open. Whether an open should enter the table first
+       is open (section 5).
+     Witness: the open tests of `lifecycle_query` (each outcome its own word, a
+     refused or pattern key asking the opener nothing, no opener serving
+     nothing), `LinkstateOpener`'s query-form outcomes, its two-graph union and
+     the join from the query key to the loop's dial request, and the loop's own
+     handling of that request, `node_peer_open_e2e`.
 6. **The MCU opener** over `SessionHost`, `wz-session-lwip` forwarding the
    feature, and a witness on the fixed-memory image.
 7. **D7** transports 2 and 3 as values of the build configuration axis.
@@ -744,3 +776,9 @@ Each step lands with its own done-when; sizes are not estimated here.
 - The memory and handshake time of D9's channel on the fixed-memory profile,
   including how far the record size limit (RFC 8449) shrinks the 16 KiB
   record buffers. Not measured.
+- Whether an `open` for a peer the link-state graphs do not hold should enter
+  the peer table and let its machine refuse with `no_locator` (D5), rather than
+  be refused at the opener (step 6c). The first lets a `Hello` the loop's
+  directory learns later satisfy it and shows the refusal in the status read;
+  the second keeps a flood of opens from filling the bounded table. Neither is
+  measured, and a table that reclaims a refused entry would allow both.
