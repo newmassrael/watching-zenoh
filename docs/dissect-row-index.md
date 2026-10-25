@@ -334,6 +334,66 @@ checkpoint still refolds up to K rows per look. Facts on the row are what the
 reference design keeps, cost one look per row, and add nothing to a row that
 has none (most rows touch no chain and close no request).
 
+### D10. What a row still costs, and which of it is a fact and which a habit
+
+A consumer measured the handle at pin 0ec3e2ff7 (release build, heap peak,
+16 TCP flows, 60,000 and 240,000 rows, only what follows the row count) and
+found about 92 bytes a row in three places: 46 in the index entries, 38 in the
+TCP run map, 8 in the field walk's digests. They are three report keys, and the
+consumer's name for the first was one off: the entries are `lists.rows`
+(`ChunkLog<UnitRow>`, 48 B), not `lists.unit_log`, which is the datagram units'
+bytes and is zero for TCP; the run map is `streams.runs` (`ChunkLog<Run>`,
+40 B a payload segment); the digests are `fields.row_digests` (8 B a row).
+
+What each holds, and what of it a later reader could not recompute:
+
+- An entry holds eleven values, and most of them follow from the one before.
+  The anchors of one direction rise, the capture instants rise, the body of a
+  stream unit starts a prefix past its anchor, `wire_len` equals `unit_len`
+  unless the unit was an lz4 batch, and `unit_offset` and `batch_index` are zero
+  unless it was. What is not recomputable is the position of each row's unit
+  (a 64-bit offset or place, but only as a distance from where the rows near it
+  lie), its capture instant (exact, to the nanosecond), its length and its
+  context.
+- A run holds five words and a flag. `stream_offset` is the end of the run
+  before it (the stream is contiguous, a forced gap included), so it is a
+  prefix sum, and a run's length is the next run's offset. The packet index,
+  the instant and the place each rise from one run to the next.
+- A digest is the least that says WHICH row moved, which is what `revised`
+  promises (the column's own module says why a block digest is not enough). It
+  is not smaller than 64 bits without a row reported unchanged that moved, so
+  its cost is lowered by not holding it: a consumer that does not ask for
+  `revised` has no use for it.
+
+Decision. The first two are stored by frame of reference, the textbook
+column-store layout for a sorted integer log: a chunk of at most 1024 items
+carries a base for each of its columns and an item carries its columns as 32-bit
+distances from that base. An item that does not fit (a distance over 2^32, or a
+value below the base) begins a new chunk, so the encoding has no escape code,
+no exception table to search, and no value it cannot hold, and a chunk is
+shorter only where the data is unlike anything a capture does. The capture
+instant is the one column kept whole: it moves a billion a second, so as a
+distance it would end a chunk every fourth row of a flow that sends one segment
+a second (a keepalive does), and the first version of the run map, which rebased
+it, held 87 bytes a row on the matrix's fixture, whose packets are a second
+apart, where 70 were expected. The run map is 20 bytes a run (three distances
+and the instant), from 40. Chunks are found
+by bisecting their first positions, so a position is still found without
+reading the items before it, and a release from the front is still free. The
+sparse columns (`segment_offset`, `unit_offset`, `batch_index`, a `wire_len`
+unlike the unit's) are the existing sparse tables of the index, keyed by row.
+Every figure stays an allocation count: a chunk's capacity times its item size,
+so the report remains exact and the gate that holds it to the allocator holds
+the new structure with no new case. The digests get a choice and a door, step
+by step below.
+
+Order: (1) the log itself, in `wz-session-core`, with the run map on it, which
+is private to the TCP assembler and so a change of one module; (2) the index
+entry on it; (3) the digests' door, which changes the C ABI (a revision, and
+the consumer's pin). Each lowers the figure that its report key names, and each
+is judged at 60,000 and 240,000 rows, because a value that falls at one size
+only is a fixed cost that fell.
+
 ## 5. Expected cost, not yet measured
 
 Per row: the index entry (about 64 B), one segment-map entry per packet (about

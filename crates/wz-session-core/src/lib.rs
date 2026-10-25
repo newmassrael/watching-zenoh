@@ -1305,6 +1305,12 @@ pub mod passive_messages;
 #[cfg(feature = "alloc")]
 pub mod chunk_log;
 
+// Open-debt item 924, D10 — the log of rows of 64-bit columns, kept by frame of
+// reference, that the TCP run map and the message lists' entries are held in.
+// Undocumented on this line for the reason the module above gives.
+#[cfg(feature = "alloc")]
+pub mod column_log;
+
 // Open-debt item 924, step 5 — an ordered map in sorted chunks whose every byte is
 // counted. Undocumented on this line for the reason above.
 #[cfg(feature = "alloc")]

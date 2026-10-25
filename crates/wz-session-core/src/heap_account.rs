@@ -28,11 +28,17 @@
 //! difference stayed nil. A report is a lower bound on the heap, never an upper
 //! one.
 
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::mem::size_of;
 
 /// Bytes a vector has allocated: its capacity, not its length.
 pub fn vec_bytes<T>(v: &Vec<T>) -> usize {
+    v.capacity() * size_of::<T>()
+}
+
+/// Bytes a deque has allocated: its capacity, not its length.
+pub fn vec_deque_bytes<T>(v: &VecDeque<T>) -> usize {
     v.capacity() * size_of::<T>()
 }
 

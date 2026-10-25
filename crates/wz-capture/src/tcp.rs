@@ -27,19 +27,21 @@
 //! than at an abstraction. Runs are appended in stream order, so the lookup
 //! is a binary search.
 
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use wz_session_core::byte_log::ByteLog;
-use wz_session_core::chunk_log::ChunkLog;
+use wz_session_core::column_log::{ColumnLog, Row};
 
 use crate::link::Segment;
 
 /// A contiguous run of stream bytes contributed by one packet, as the run map
 /// keeps it.
 ///
-/// Open-debt item 924 (`docs/dissect-row-index.md`, step 3): one of these is
-/// kept for every payload-carrying segment of a capture, so it is held at 40
-/// bytes in a [`ChunkLog`] rather than as a struct of machine words in a buffer
-/// that doubles. The fields are read through [`StreamAssembler`]'s lookups.
+/// Open-debt item 924 (`docs/dissect-row-index.md`, step 3 and D10): one of these
+/// is kept for every payload-carrying segment of a capture, so what is held is
+/// not this value but its columns, in a [`RunMap`] (20 bytes a run). This is the
+/// run as a reader sees it. The fields are read through [`StreamAssembler`]'s
+/// lookups.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Run {
     /// Offset of the run's first byte within the direction's stream.
@@ -97,6 +99,127 @@ impl Run {
         } else {
             Place::Kept(self.place as usize)
         }
+    }
+}
+
+/// The run map: every run of a direction's stream, in stream order, kept as the
+/// columns a reader cannot recompute and nothing else (open-debt item 924, D10).
+///
+/// [`Run`] is the value a reader works with, 40 bytes of words; this is what is
+/// held, 20 bytes a run. Four of its fields are columns of a [`ColumnLog`]: the
+/// offset, the place and the packet rise from one run to the next, so each is a
+/// 32-bit distance from its chunk's first, and the instant, which moves a
+/// billion a second, is kept whole. The two fields it leaves out are not stored:
+///
+/// - `len` is the distance to the next run's offset, since the runs tile the
+///   stream (a forced gap included: the stream stays contiguous across it), and
+///   to [`Self::end`] for the last;
+/// - `segment_offset` is zero except for a run that began inside its packet's
+///   payload because the bytes before it were already delivered, which is a
+///   partial overlap, so those few are kept apart by stream offset.
+#[derive(Debug, Default)]
+struct RunMap {
+    /// `[stream_offset, place, packet_index]` rebased, and `[at_ns]` raw, of
+    /// every run.
+    log: ColumnLog<3, 1>,
+    /// One past the last run's last byte.
+    end: u64,
+    /// `(stream_offset, segment_offset)` of the runs whose `segment_offset` is not
+    /// zero, in stream order.
+    skipped: VecDeque<(u64, u32)>,
+}
+
+impl RunMap {
+    /// The run `row` is, given the offset the next run begins at.
+    fn run(&self, row: Row<3, 1>, next: u64) -> Run {
+        let [stream_offset, place, packet_index] = row.rebased;
+        let [at_ns] = row.raw;
+        Run {
+            stream_offset,
+            place,
+            packet_index,
+            at_ns,
+            len: u32::try_from(next - stream_offset).unwrap_or(u32::MAX),
+            segment_offset: self
+                .skipped
+                .binary_search_by_key(&stream_offset, |(offset, _)| *offset)
+                .map_or(0, |at| self.skipped[at].1),
+        }
+    }
+
+    /// Bytes the map holds on the heap.
+    fn allocated_bytes(&self) -> usize {
+        self.log.allocated_bytes() + wz_session_core::heap_account::vec_deque_bytes(&self.skipped)
+    }
+
+    /// Append the run that begins where the last one ended.
+    fn push_back(&mut self, run: Run) {
+        debug_assert!(
+            self.log.is_empty() || run.stream_offset == self.end,
+            "runs tile the stream"
+        );
+        self.log.push_back(Row {
+            rebased: [run.stream_offset, run.place, run.packet_index],
+            raw: [run.at_ns],
+        });
+        self.end = run.stream_offset + u64::from(run.len);
+        if run.segment_offset != 0 {
+            self.skipped
+                .push_back((run.stream_offset, run.segment_offset));
+        }
+    }
+
+    /// The run at `index`, oldest first.
+    fn get(&self, index: usize) -> Option<Run> {
+        let row = self.log.get(index)?;
+        let next = self
+            .log
+            .get(index + 1)
+            .map_or(self.end, |next| next.rebased[0]);
+        Some(self.run(row, next))
+    }
+
+    /// The oldest run.
+    fn front(&self) -> Option<Run> {
+        self.get(0)
+    }
+
+    /// Release the oldest run.
+    fn pop_front(&mut self) -> Option<Run> {
+        let run = self.get(0)?;
+        let _ = self.log.pop_front();
+        if self
+            .skipped
+            .front()
+            .is_some_and(|(offset, _)| *offset == run.stream_offset)
+        {
+            let _ = self.skipped.pop_front();
+        }
+        Some(run)
+    }
+
+    /// The position of the first run for which `pred` is `false`, the map being
+    /// partitioned by it.
+    fn partition_point(&self, mut pred: impl FnMut(&Run) -> bool) -> usize {
+        let (mut low, mut high) = (0usize, self.log.len());
+        while low < high {
+            let mid = low + (high - low) / 2;
+            match self.get(mid) {
+                Some(run) if pred(&run) => low = mid + 1,
+                _ => high = mid,
+            }
+        }
+        low
+    }
+
+    /// The runs from position `from`, oldest first.
+    fn iter_from(&self, from: usize) -> impl Iterator<Item = Run> + '_ {
+        let mut rows = self.log.iter_from(from).peekable();
+        core::iter::from_fn(move || {
+            let row = rows.next()?;
+            let next = rows.peek().map_or(self.end, |next| next.rebased[0]);
+            Some(self.run(row, next))
+        })
     }
 }
 
@@ -259,7 +382,7 @@ pub struct StreamAssembler {
     /// re-point every offset a consumer already holds.
     discarded: usize,
     /// The run map, in stream order.
-    runs: ChunkLog<Run>,
+    runs: RunMap,
     /// Segments ahead of `next_seq`, kept until the gap before them fills.
     ///
     /// Each carries [`Self::segments_pushed`] AT THE MOMENT IT WAS HELD — the
@@ -368,7 +491,7 @@ impl Default for StreamAssembler {
             kept: ByteLog::default(),
             end: 0,
             discarded: 0,
-            runs: ChunkLog::new(),
+            runs: RunMap::default(),
             pending: Vec::new(),
             fin_seen: false,
             rst_seen: false,
@@ -486,7 +609,7 @@ impl StreamAssembler {
             // Runs tile the stream: each begins where the one before it ends.
             let start = at.checked_sub(run.stream_offset as usize)?;
             let stop = run.end().min(to) - run.stream_offset as usize;
-            let piece = self.run_bytes(run, start, stop, container)?;
+            let piece = self.run_bytes(&run, start, stop, container)?;
             at = run.stream_offset as usize + stop;
             match gathered.as_mut() {
                 None if at == to => return Some(alloc::borrow::Cow::Borrowed(piece)),
@@ -642,7 +765,7 @@ impl StreamAssembler {
 
     /// The run holding the byte at `stream_offset`, when one does and the byte
     /// was not trimmed.
-    fn run_at(&self, stream_offset: usize) -> Option<&Run> {
+    fn run_at(&self, stream_offset: usize) -> Option<Run> {
         // An offset whose bytes were trimmed is UNANSWERABLE, not answerable
         // by the nearest surviving run: a live reader that reclaimed memory
         // must not thereby start misattributing old messages to new packets.
@@ -711,7 +834,7 @@ impl StreamAssembler {
     /// row names and the instant its record carries cannot come from two
     /// different runs.
     pub fn instant_of_offset(&self, stream_offset: usize) -> Option<u64> {
-        self.run_at(stream_offset).and_then(Run::at_ns)
+        self.run_at(stream_offset).and_then(|run| run.at_ns())
     }
 
     /// Feed one segment belonging to THIS direction, stating no instant for it.
@@ -1365,5 +1488,85 @@ mod tests {
         assert!(s.fin_seen());
         s.push(&seg(103, 0x04, b"", 3));
         assert!(s.rst_seen());
+    }
+
+    /// A run costs 20 bytes in the map, with the instant stated or not (open-debt
+    /// item 924, D10): three columns of 32-bit distances and the instant whole, and
+    /// neither the length nor the common zero of `segment_offset` held.
+    #[test]
+    fn a_run_costs_twenty_bytes_in_the_map() {
+        for stated in [false, true] {
+            let mut s = StreamAssembler::new();
+            s.push(&seg(100, 0x02, b"", 0));
+            let n = 8 * wz_session_core::chunk_log::CHUNK_ITEMS;
+            for k in 0..n {
+                let segment = seg(101 + 4 * k as u32, 0x18, b"abcd", 1 + k);
+                let at = stated.then_some(1_000_000_000 + 25_000 * k as u64);
+                s.push_at(&segment, at);
+            }
+            let per_run = s.memory().runs as f64 / n as f64;
+            assert!(
+                (20.0..20.2).contains(&per_run),
+                "stated {stated}: {per_run}"
+            );
+            assert_eq!(s.memory().pending, 0);
+        }
+    }
+
+    /// The map answers what the runs it replaced did, across chunk edges, a
+    /// partial overlap (the one run whose segment offset is not zero), a
+    /// retransmission, and a trim in the middle of a run.
+    #[test]
+    fn the_run_map_reads_back_what_was_pushed_after_a_trim() {
+        let mut s = StreamAssembler::new();
+        s.push(&seg(100, 0x02, b"", 0));
+        let mut expected = Vec::new();
+        let mut next = 101u32;
+        let n = 3 * wz_session_core::chunk_log::CHUNK_ITEMS + 11;
+        for k in 0..n {
+            let body = [b'a' + (k % 26) as u8; 5];
+            // Every 500th segment repeats its first two bytes: a partial overlap.
+            let (seq, bytes) = if k % 500 == 499 {
+                (
+                    next - 2,
+                    [&expected[expected.len() - 2..], &body[..]].concat(),
+                )
+            } else {
+                (next, body.to_vec())
+            };
+            s.push_at(&seg(seq, 0x18, &bytes, 10 + k), Some(7 + 3 * k as u64));
+            expected.extend_from_slice(&body);
+            next += 5;
+        }
+        assert_eq!(stream(&s), expected);
+        for probe in [0usize, 4, 5, 2_499, 2_500, 5_000, expected.len() - 1] {
+            let (packet, within) = s.origin_of_offset(probe).expect("held");
+            let run = probe / 5;
+            let overlapped = run % 500 == 499;
+            assert_eq!(packet, 10 + run, "offset {probe}");
+            assert_eq!(
+                within,
+                (probe % 5) + if overlapped { 2 } else { 0 },
+                "offset {probe}"
+            );
+            assert_eq!(s.instant_of_offset(probe), Some(7 + 3 * run as u64));
+        }
+        let before = s.memory().runs;
+        let cut = s.trim(expected.len() - 7_503);
+        assert_eq!(cut, 7_503);
+        assert!(s.memory().runs < before);
+        assert_eq!(s.origin_of_offset(cut - 1), None);
+        let (packet, _) = s.origin_of_offset(cut).expect("the straddled run answers");
+        assert_eq!(packet, 10 + cut / 5);
+        assert_eq!(
+            s.bytes(cut, expected.len(), None)
+                .expect("held")
+                .into_owned(),
+            expected[cut..].to_vec()
+        );
+        assert_eq!(
+            s.packets_in(cut, cut + 12).expect("held"),
+            alloc::vec![10 + cut / 5, 11 + cut / 5, 12 + cut / 5]
+        );
     }
 }
