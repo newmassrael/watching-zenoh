@@ -38,6 +38,9 @@ fn zenoh_shm::api::client_storage::ShmClientStorageBuilder::with_clients(Self, &
 fn zenoh_shm::api::common::types::PtrInSegment::new(*mut u8, alloc::sync::Arc<dyn core::any::Any + core::marker::Send + core::marker::Sync>) -> Self ; in impl zenoh_shm::api::common::types::PtrInSegment
 fn zenoh_shm::api::common::types::PtrInSegment::ptr(&Self) -> *const u8 ; in impl zenoh_shm::api::common::types::PtrInSegment
 fn zenoh_shm::api::common::types::PtrInSegment::ptr_mut(&mut Self) -> *mut u8 ; unsafe ; in impl zenoh_shm::api::common::types::PtrInSegment
+fn zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_binary_heap::PosixShmProviderBackendBinaryHeap::builder<Layout>(Layout) -> zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_binary_heap::PosixShmProviderBackendBinaryHeapBuilder<Layout> ; in impl zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_binary_heap::PosixShmProviderBackendBinaryHeap
+fn zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_buddy::PosixShmProviderBackendBuddy::builder<Layout>(Layout) -> zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_buddy::PosixShmProviderBackendBuddyBuilder<Layout> ; in impl zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_buddy::PosixShmProviderBackendBuddy
+fn zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_talc::PosixShmProviderBackendTalc::builder<Layout>(Layout) -> zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_talc::PosixShmProviderBackendTalcBuilder<Layout> ; in impl zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_talc::PosixShmProviderBackendTalc
 fn zenoh_shm::api::provider::chunk::AllocatedChunk::new(zenoh_shm::api::provider::chunk::ChunkDescriptor, zenoh_shm::api::common::types::PtrInSegment) -> Self ; in impl zenoh_shm::api::provider::chunk::AllocatedChunk
 fn zenoh_shm::api::provider::chunk::ChunkDescriptor::has_optimal_layout() -> bool ; const ; in impl zenoh_shm::api::provider::chunk::ChunkDescriptor where core::num::nonzero::NonZeroUsize: stabby_abi::istable::IStable, stabby_abi::Struct<stabby_abi::FieldPair<stabby_abi::FieldPair<zenoh_shm::api::common::types::SegmentID, zenoh_shm::api::common::types::ChunkID>, core::num::nonzero::NonZeroUsize>>: stabby_abi::istable::IStable, zenoh_shm::api::common::types::ChunkID: stabby_abi::istable::IStable, zenoh_shm::api::common::types::SegmentID: stabby_abi::istable::IStable
 fn zenoh_shm::api::provider::chunk::ChunkDescriptor::new(zenoh_shm::api::common::types::SegmentID, zenoh_shm::api::common::types::ChunkID, core::num::nonzero::NonZeroUsize) -> Self ; in impl zenoh_shm::api::provider::chunk::ChunkDescriptor
@@ -49,6 +52,27 @@ fn zenoh_shm::api::provider::memory_layout::MemoryLayout::new<T>(T, zenoh_shm::a
 fn zenoh_shm::api::provider::memory_layout::MemoryLayout::size(&Self) -> core::num::nonzero::NonZeroUsize ; in impl zenoh_shm::api::provider::memory_layout::MemoryLayout
 fn zenoh_shm::api::provider::memory_layout::TypedLayout::for_value(&T) -> Self ; in impl<T> zenoh_shm::api::provider::memory_layout::TypedLayout<T>
 fn zenoh_shm::api::provider::memory_layout::TypedLayout::new() -> Self ; in impl<T> zenoh_shm::api::provider::memory_layout::TypedLayout<T>
+fn zenoh_shm::api::provider::shm_provider::AllocBuilder::into_layout(Self) -> core::result::Result<zenoh_shm::api::provider::shm_provider::PrecomputedLayout<'0, Backend, Layout>, zenoh_shm::api::provider::types::ZLayoutError> ; in impl<'0, Backend: zenoh_shm::api::provider::shm_provider_backend::ShmProviderBackend, Layout: core::convert::TryInto<zenoh_shm::api::provider::memory_layout::MemoryLayout>> zenoh_shm::api::provider::shm_provider::AllocBuilder<'0, Backend, Layout> where <Layout as core::convert::TryInto>::Error: core::convert::Into<zenoh_shm::api::provider::types::ZLayoutError>
+fn zenoh_shm::api::provider::shm_provider::AllocBuilder::with_policy<OtherPolicy: zenoh_shm::api::provider::shm_provider::ConstPolicy + zenoh_shm::api::provider::shm_provider::SafePolicy>(Self) -> zenoh_shm::api::provider::shm_provider::AllocBuilder<'0, Backend, Layout, OtherPolicy> ; in impl<'0, Backend, Layout, Policy> zenoh_shm::api::provider::shm_provider::AllocBuilder<'0, Backend, Layout, Policy>
+fn zenoh_shm::api::provider::shm_provider::AllocBuilder::with_runtime_policy<OtherPolicy>(Self, OtherPolicy) -> zenoh_shm::api::provider::shm_provider::AllocBuilder<'0, Backend, Layout, OtherPolicy> ; unsafe ; in impl<'0, Backend, Layout, Policy> zenoh_shm::api::provider::shm_provider::AllocBuilder<'0, Backend, Layout, Policy>
+fn zenoh_shm::api::provider::shm_provider::AllocBuilder::with_unsafe_policy<OtherPolicy: zenoh_shm::api::provider::shm_provider::ConstPolicy>(Self) -> zenoh_shm::api::provider::shm_provider::AllocBuilder<'0, Backend, Layout, OtherPolicy> ; unsafe ; in impl<'0, Backend, Layout, Policy> zenoh_shm::api::provider::shm_provider::AllocBuilder<'0, Backend, Layout, Policy>
+fn zenoh_shm::api::provider::shm_provider::BlockOn::new(InnerPolicy) -> Self ; in impl<InnerPolicy> zenoh_shm::api::provider::shm_provider::BlockOn<InnerPolicy>
+fn zenoh_shm::api::provider::shm_provider::Deallocate::new(Limit, InnerPolicy, AltPolicy) -> Self ; in impl<Limit, InnerPolicy, AltPolicy> zenoh_shm::api::provider::shm_provider::Deallocate<Limit, InnerPolicy, AltPolicy>
+fn zenoh_shm::api::provider::shm_provider::Defragment::new(InnerPolicy, AltPolicy) -> Self ; in impl<InnerPolicy, AltPolicy> zenoh_shm::api::provider::shm_provider::Defragment<InnerPolicy, AltPolicy>
+fn zenoh_shm::api::provider::shm_provider::GarbageCollect::new(InnerPolicy, AltPolicy, Safe) -> Self ; in impl<InnerPolicy, AltPolicy, Safe> zenoh_shm::api::provider::shm_provider::GarbageCollect<InnerPolicy, AltPolicy, Safe>
+fn zenoh_shm::api::provider::shm_provider::PrecomputedAllocBuilder::with_policy<OtherPolicy: zenoh_shm::api::provider::shm_provider::ConstPolicy>(Self) -> zenoh_shm::api::provider::shm_provider::PrecomputedAllocBuilder<'0, '1, Backend, Layout, OtherPolicy> ; in impl<'0, '1: '0, Backend, Layout, Policy> zenoh_shm::api::provider::shm_provider::PrecomputedAllocBuilder<'0, '1, Backend, Layout, Policy>
+fn zenoh_shm::api::provider::shm_provider::PrecomputedAllocBuilder::with_runtime_policy<OtherPolicy>(Self, OtherPolicy) -> zenoh_shm::api::provider::shm_provider::PrecomputedAllocBuilder<'0, '1, Backend, Layout, OtherPolicy> ; unsafe ; in impl<'0, '1: '0, Backend, Layout, Policy> zenoh_shm::api::provider::shm_provider::PrecomputedAllocBuilder<'0, '1, Backend, Layout, Policy>
+fn zenoh_shm::api::provider::shm_provider::PrecomputedAllocBuilder::with_unsafe_policy<OtherPolicy: zenoh_shm::api::provider::shm_provider::ConstPolicy>(Self) -> zenoh_shm::api::provider::shm_provider::PrecomputedAllocBuilder<'0, '1, Backend, Layout, OtherPolicy> ; unsafe ; in impl<'0, '1: '0, Backend, Layout, Policy> zenoh_shm::api::provider::shm_provider::PrecomputedAllocBuilder<'0, '1, Backend, Layout, Policy>
+fn zenoh_shm::api::provider::shm_provider::PrecomputedLayout::alloc<'0>(&'0 Self) -> zenoh_shm::api::provider::shm_provider::PrecomputedAllocBuilder<'0, '1, Backend, Layout> ; in impl<'1, Backend, Layout> zenoh_shm::api::provider::shm_provider::PrecomputedLayout<'1, Backend, Layout> where Backend: zenoh_shm::api::provider::shm_provider_backend::ShmProviderBackend
+fn zenoh_shm::api::provider::shm_provider::ShmProvider::alloc<Layout>(&Self, Layout) -> zenoh_shm::api::provider::shm_provider::AllocBuilder<'_, Backend, Layout> ; in impl<Backend> zenoh_shm::api::provider::shm_provider::ShmProvider<Backend> where Backend: zenoh_shm::api::provider::shm_provider_backend::ShmProviderBackend
+fn zenoh_shm::api::provider::shm_provider::ShmProvider::alloc_layout<Layout: core::convert::TryInto<zenoh_shm::api::provider::memory_layout::MemoryLayout>>(&Self, Layout) -> core::result::Result<zenoh_shm::api::provider::shm_provider::PrecomputedLayout<'_, Backend, Layout>, zenoh_shm::api::provider::types::ZLayoutError> where <Layout as core::convert::TryInto>::Error: core::convert::Into<zenoh_shm::api::provider::types::ZLayoutError> ; in impl<Backend> zenoh_shm::api::provider::shm_provider::ShmProvider<Backend> where Backend: zenoh_shm::api::provider::shm_provider_backend::ShmProviderBackend
+fn zenoh_shm::api::provider::shm_provider::ShmProvider::available(&Self) -> usize ; in impl<Backend> zenoh_shm::api::provider::shm_provider::ShmProvider<Backend> where Backend: zenoh_shm::api::provider::shm_provider_backend::ShmProviderBackend
+fn zenoh_shm::api::provider::shm_provider::ShmProvider::defragment(&Self) -> usize ; in impl<Backend> zenoh_shm::api::provider::shm_provider::ShmProvider<Backend> where Backend: zenoh_shm::api::provider::shm_provider_backend::ShmProviderBackend
+fn zenoh_shm::api::provider::shm_provider::ShmProvider::garbage_collect(&Self) -> usize ; in impl<Backend> zenoh_shm::api::provider::shm_provider::ShmProvider<Backend> where Backend: zenoh_shm::api::provider::shm_provider_backend::ShmProviderBackend
+fn zenoh_shm::api::provider::shm_provider::ShmProvider::garbage_collect_unsafe(&Self) -> usize ; unsafe ; in impl<Backend> zenoh_shm::api::provider::shm_provider::ShmProvider<Backend> where Backend: zenoh_shm::api::provider::shm_provider_backend::ShmProviderBackend
+fn zenoh_shm::api::provider::shm_provider::ShmProvider::map(&Self, zenoh_shm::api::provider::chunk::AllocatedChunk, usize) -> core::result::Result<zenoh_shm::api::buffer::zshmmut::ZShmMut, zenoh_shm::api::provider::types::ZAllocError> ; in impl<Backend> zenoh_shm::api::provider::shm_provider::ShmProvider<Backend> where Backend: zenoh_shm::api::provider::shm_provider_backend::ShmProviderBackend
+fn zenoh_shm::api::provider::shm_provider::ShmProviderBuilder::backend<Backend: zenoh_shm::api::provider::shm_provider_backend::ShmProviderBackend>(Backend) -> zenoh_shm::api::provider::shm_provider::ShmProviderBuilderBackend<Backend> ; in impl zenoh_shm::api::provider::shm_provider::ShmProviderBuilder
+fn zenoh_shm::api::provider::shm_provider::ShmProviderBuilder::default_backend<Layout>(Layout) -> zenoh_shm::api::provider::shm_provider::ShmProviderBuilderWithDefaultBackend<Layout> ; in impl zenoh_shm::api::provider::shm_provider::ShmProviderBuilder
 fn zenoh_shm::api::provider::types::AllocAlignment::align_size(&Self, core::num::nonzero::NonZeroUsize) -> core::num::nonzero::NonZeroUsize ; in impl zenoh_shm::api::provider::types::AllocAlignment
 fn zenoh_shm::api::provider::types::AllocAlignment::for_type<T: core::marker::Sized>() -> Self ; const ; in impl zenoh_shm::api::provider::types::AllocAlignment
 fn zenoh_shm::api::provider::types::AllocAlignment::for_value<T: core::marker::Sized>(&T) -> Self ; const ; in impl zenoh_shm::api::provider::types::AllocAlignment
@@ -110,6 +134,11 @@ impl core::clone::Clone for zenoh_shm::api::common::types::PtrInSegment
 impl core::clone::Clone for zenoh_shm::api::provider::chunk::ChunkDescriptor
 impl core::clone::Clone for zenoh_shm::api::provider::memory_layout::MemoryLayout
 impl core::clone::Clone for zenoh_shm::api::provider::memory_layout::TypedLayout
+impl core::clone::Clone for zenoh_shm::api::provider::shm_provider::BlockOn
+impl core::clone::Clone for zenoh_shm::api::provider::shm_provider::Deallocate
+impl core::clone::Clone for zenoh_shm::api::provider::shm_provider::Defragment
+impl core::clone::Clone for zenoh_shm::api::provider::shm_provider::GarbageCollect
+impl core::clone::Clone for zenoh_shm::api::provider::shm_provider::JustAlloc
 impl core::clone::Clone for zenoh_shm::api::provider::types::AllocAlignment
 impl core::clone::Clone for zenoh_shm::metadata::descriptor::MetadataDescriptor
 impl core::clone::Clone for zenoh_shm::metadata::descriptor::OwnedMetadataDescriptor
@@ -191,6 +220,7 @@ impl core::convert::TryFrom for zenoh_shm::api::buffer::typed::Typed
 impl core::convert::TryFrom for zenoh_shm::api::buffer::zshmmut::ZShmMut
 impl core::convert::TryFrom for zenoh_shm::api::provider::memory_layout::MemoryLayout
 impl core::default::Default for zenoh_shm::api::provider::memory_layout::TypedLayout
+impl core::default::Default for zenoh_shm::api::provider::shm_provider::ShmProvider
 impl core::default::Default for zenoh_shm::api::provider::types::AllocAlignment
 impl core::error::Error for zenoh_shm::api::provider::types::ZAllocError
 impl core::error::Error for zenoh_shm::api::provider::types::ZLayoutAllocError
@@ -209,10 +239,30 @@ impl core::fmt::Debug for zenoh_shm::api::client_storage::ShmClientStorage
 impl core::fmt::Debug for zenoh_shm::api::client_storage::ShmClientStorageBuilder
 impl core::fmt::Debug for zenoh_shm::api::common::types::PtrInSegment
 impl core::fmt::Debug for zenoh_shm::api::protocol_implementations::posix::posix_shm_client::PosixShmClient
+impl core::fmt::Debug for zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_binary_heap::PosixShmProviderBackendBinaryHeap
+impl core::fmt::Debug for zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_binary_heap::PosixShmProviderBackendBinaryHeapBuilder
+impl core::fmt::Debug for zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_buddy::PosixShmProviderBackendBuddy
+impl core::fmt::Debug for zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_buddy::PosixShmProviderBackendBuddyBuilder
+impl core::fmt::Debug for zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_talc::PosixShmProviderBackendTalc
+impl core::fmt::Debug for zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_talc::PosixShmProviderBackendTalcBuilder
 impl core::fmt::Debug for zenoh_shm::api::provider::chunk::AllocatedChunk
 impl core::fmt::Debug for zenoh_shm::api::provider::chunk::ChunkDescriptor
 impl core::fmt::Debug for zenoh_shm::api::provider::memory_layout::MemoryLayout
 impl core::fmt::Debug for zenoh_shm::api::provider::memory_layout::TypedLayout
+impl core::fmt::Debug for zenoh_shm::api::provider::shm_provider::AllocBuilder
+impl core::fmt::Debug for zenoh_shm::api::provider::shm_provider::BlockOn
+impl core::fmt::Debug for zenoh_shm::api::provider::shm_provider::ConstBool
+impl core::fmt::Debug for zenoh_shm::api::provider::shm_provider::ConstUsize
+impl core::fmt::Debug for zenoh_shm::api::provider::shm_provider::Deallocate
+impl core::fmt::Debug for zenoh_shm::api::provider::shm_provider::Defragment
+impl core::fmt::Debug for zenoh_shm::api::provider::shm_provider::GarbageCollect
+impl core::fmt::Debug for zenoh_shm::api::provider::shm_provider::JustAlloc
+impl core::fmt::Debug for zenoh_shm::api::provider::shm_provider::PrecomputedAllocBuilder
+impl core::fmt::Debug for zenoh_shm::api::provider::shm_provider::PrecomputedLayout
+impl core::fmt::Debug for zenoh_shm::api::provider::shm_provider::ShmProvider
+impl core::fmt::Debug for zenoh_shm::api::provider::shm_provider::ShmProviderBuilder
+impl core::fmt::Debug for zenoh_shm::api::provider::shm_provider::ShmProviderBuilderBackend
+impl core::fmt::Debug for zenoh_shm::api::provider::shm_provider::ShmProviderBuilderWithDefaultBackend
 impl core::fmt::Debug for zenoh_shm::api::provider::types::AllocAlignment
 impl core::fmt::Debug for zenoh_shm::api::provider::types::ZAllocError
 impl core::fmt::Debug for zenoh_shm::api::provider::types::ZLayoutAllocError
@@ -240,10 +290,17 @@ impl core::fmt::Display for zenoh_shm::api::provider::types::AllocAlignment
 impl core::fmt::Display for zenoh_shm::api::provider::types::ZAllocError
 impl core::fmt::Display for zenoh_shm::api::provider::types::ZLayoutAllocError
 impl core::fmt::Display for zenoh_shm::api::provider::types::ZLayoutError
+impl core::future::into_future::IntoFuture for zenoh_shm::api::provider::shm_provider::AllocBuilder
+impl core::future::into_future::IntoFuture for zenoh_shm::api::provider::shm_provider::PrecomputedAllocBuilder
 impl core::hash::Hash for zenoh_shm::metadata::descriptor::MetadataDescriptor
 impl core::hash::Hash for zenoh_shm::metadata::descriptor::OwnedMetadataDescriptor
 impl core::marker::Copy for zenoh_shm::api::provider::memory_layout::MemoryLayout
 impl core::marker::Copy for zenoh_shm::api::provider::memory_layout::TypedLayout
+impl core::marker::Copy for zenoh_shm::api::provider::shm_provider::BlockOn
+impl core::marker::Copy for zenoh_shm::api::provider::shm_provider::Deallocate
+impl core::marker::Copy for zenoh_shm::api::provider::shm_provider::Defragment
+impl core::marker::Copy for zenoh_shm::api::provider::shm_provider::GarbageCollect
+impl core::marker::Copy for zenoh_shm::api::provider::shm_provider::JustAlloc
 impl core::marker::Copy for zenoh_shm::api::provider::types::AllocAlignment
 impl core::marker::Send for zenoh_shm::api::common::types::PtrInSegment
 impl core::marker::Send for zenoh_shm::posix_shm::array::ArrayInSHM
@@ -293,6 +350,20 @@ impl static_init::GeneratorTolerance for zenoh_shm::metadata::subscription::__St
 impl static_init::GeneratorTolerance for zenoh_shm::watchdog::confirmator::__StaticInitGeneratorFor_GLOBAL_CONFIRMATOR
 impl static_init::GeneratorTolerance for zenoh_shm::watchdog::validator::__StaticInitGeneratorFor_GLOBAL_VALIDATOR
 impl zenoh_buffers::zslice::ZSliceBuffer for zenoh_shm::ShmBufInner
+impl zenoh_core::Resolvable for zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_binary_heap::PosixShmProviderBackendBinaryHeapBuilder
+impl zenoh_core::Resolvable for zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_buddy::PosixShmProviderBackendBuddyBuilder
+impl zenoh_core::Resolvable for zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_talc::PosixShmProviderBackendTalcBuilder
+impl zenoh_core::Resolvable for zenoh_shm::api::provider::shm_provider::AllocBuilder
+impl zenoh_core::Resolvable for zenoh_shm::api::provider::shm_provider::PrecomputedAllocBuilder
+impl zenoh_core::Resolvable for zenoh_shm::api::provider::shm_provider::ShmProviderBuilderBackend
+impl zenoh_core::Resolvable for zenoh_shm::api::provider::shm_provider::ShmProviderBuilderWithDefaultBackend
+impl zenoh_core::Wait for zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_binary_heap::PosixShmProviderBackendBinaryHeapBuilder
+impl zenoh_core::Wait for zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_buddy::PosixShmProviderBackendBuddyBuilder
+impl zenoh_core::Wait for zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_talc::PosixShmProviderBackendTalcBuilder
+impl zenoh_core::Wait for zenoh_shm::api::provider::shm_provider::AllocBuilder
+impl zenoh_core::Wait for zenoh_shm::api::provider::shm_provider::PrecomputedAllocBuilder
+impl zenoh_core::Wait for zenoh_shm::api::provider::shm_provider::ShmProviderBuilderBackend
+impl zenoh_core::Wait for zenoh_shm::api::provider::shm_provider::ShmProviderBuilderWithDefaultBackend
 impl zenoh_shm::api::buffer::traits::OwnedShmBuf for zenoh_shm::api::buffer::zshm::ZShm
 impl zenoh_shm::api::buffer::traits::OwnedShmBuf for zenoh_shm::api::buffer::zshmmut::ZShmMut
 impl zenoh_shm::api::buffer::traits::ShmBuf for &zenoh_shm::api::buffer::zshm::zshm
@@ -313,6 +384,32 @@ impl zenoh_shm::api::buffer::traits::ShmBufUnsafeMut for zenoh_shm::api::buffer:
 impl zenoh_shm::api::buffer::traits::ShmBufUnsafeMut for zenoh_shm::api::buffer::zshmmut::ZShmMut
 impl zenoh_shm::api::client::shm_client::ShmClient for zenoh_shm::api::protocol_implementations::posix::posix_shm_client::PosixShmClient
 impl zenoh_shm::api::common::with_id::WithProtocolID for zenoh_shm::api::protocol_implementations::posix::posix_shm_client::PosixShmClient
+impl zenoh_shm::api::common::with_id::WithProtocolID for zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_binary_heap::PosixShmProviderBackendBinaryHeap
+impl zenoh_shm::api::common::with_id::WithProtocolID for zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_buddy::PosixShmProviderBackendBuddy
+impl zenoh_shm::api::common::with_id::WithProtocolID for zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_talc::PosixShmProviderBackendTalc
+impl zenoh_shm::api::provider::shm_provider::AllocLayout for zenoh_shm::api::provider::memory_layout::TypedLayout
+impl zenoh_shm::api::provider::shm_provider::AllocPolicy for zenoh_shm::api::provider::shm_provider::BlockOn
+impl zenoh_shm::api::provider::shm_provider::AllocPolicy for zenoh_shm::api::provider::shm_provider::Deallocate
+impl zenoh_shm::api::provider::shm_provider::AllocPolicy for zenoh_shm::api::provider::shm_provider::Defragment
+impl zenoh_shm::api::provider::shm_provider::AllocPolicy for zenoh_shm::api::provider::shm_provider::GarbageCollect
+impl zenoh_shm::api::provider::shm_provider::AllocPolicy for zenoh_shm::api::provider::shm_provider::JustAlloc
+impl zenoh_shm::api::provider::shm_provider::AsyncAllocPolicy for zenoh_shm::api::provider::shm_provider::BlockOn
+impl zenoh_shm::api::provider::shm_provider::ConstPolicy for zenoh_shm::api::provider::shm_provider::BlockOn
+impl zenoh_shm::api::provider::shm_provider::ConstPolicy for zenoh_shm::api::provider::shm_provider::ConstBool
+impl zenoh_shm::api::provider::shm_provider::ConstPolicy for zenoh_shm::api::provider::shm_provider::ConstUsize
+impl zenoh_shm::api::provider::shm_provider::ConstPolicy for zenoh_shm::api::provider::shm_provider::Deallocate
+impl zenoh_shm::api::provider::shm_provider::ConstPolicy for zenoh_shm::api::provider::shm_provider::Defragment
+impl zenoh_shm::api::provider::shm_provider::ConstPolicy for zenoh_shm::api::provider::shm_provider::GarbageCollect
+impl zenoh_shm::api::provider::shm_provider::ConstPolicy for zenoh_shm::api::provider::shm_provider::JustAlloc
+impl zenoh_shm::api::provider::shm_provider::PolicyValue for zenoh_shm::api::provider::shm_provider::ConstBool
+impl zenoh_shm::api::provider::shm_provider::PolicyValue for zenoh_shm::api::provider::shm_provider::ConstUsize
+impl zenoh_shm::api::provider::shm_provider::SafePolicy for zenoh_shm::api::provider::shm_provider::BlockOn
+impl zenoh_shm::api::provider::shm_provider::SafePolicy for zenoh_shm::api::provider::shm_provider::Defragment
+impl zenoh_shm::api::provider::shm_provider::SafePolicy for zenoh_shm::api::provider::shm_provider::GarbageCollect
+impl zenoh_shm::api::provider::shm_provider::SafePolicy for zenoh_shm::api::provider::shm_provider::JustAlloc
+impl zenoh_shm::api::provider::shm_provider_backend::ShmProviderBackend for zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_binary_heap::PosixShmProviderBackendBinaryHeap
+impl zenoh_shm::api::provider::shm_provider_backend::ShmProviderBackend for zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_buddy::PosixShmProviderBackendBuddy
+impl zenoh_shm::api::provider::shm_provider_backend::ShmProviderBackend for zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_talc::PosixShmProviderBackendTalc
 macro zenoh_shm::tested_crate_module
 macro zenoh_shm::tested_module
 mod zenoh_shm::api
@@ -332,10 +429,16 @@ mod zenoh_shm::api::common::with_id
 mod zenoh_shm::api::protocol_implementations
 mod zenoh_shm::api::protocol_implementations::posix
 mod zenoh_shm::api::protocol_implementations::posix::posix_shm_client
+mod zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend
+mod zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_binary_heap
+mod zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_buddy
+mod zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_talc
 mod zenoh_shm::api::protocol_implementations::posix::protocol_id
 mod zenoh_shm::api::provider
 mod zenoh_shm::api::provider::chunk
 mod zenoh_shm::api::provider::memory_layout
+mod zenoh_shm::api::provider::shm_provider
+mod zenoh_shm::api::provider::shm_provider_backend
 mod zenoh_shm::api::provider::types
 mod zenoh_shm::header
 mod zenoh_shm::init
@@ -375,10 +478,30 @@ struct zenoh_shm::api::client_storage::ShmClientStorageBuilder
 struct zenoh_shm::api::client_storage::__StaticInitGeneratorFor_GLOBAL_CLIENT_STORAGE
 struct zenoh_shm::api::common::types::PtrInSegment
 struct zenoh_shm::api::protocol_implementations::posix::posix_shm_client::PosixShmClient
+struct zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_binary_heap::PosixShmProviderBackendBinaryHeap
+struct zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_binary_heap::PosixShmProviderBackendBinaryHeapBuilder
+struct zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_buddy::PosixShmProviderBackendBuddy
+struct zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_buddy::PosixShmProviderBackendBuddyBuilder
+struct zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_talc::PosixShmProviderBackendTalc
+struct zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_talc::PosixShmProviderBackendTalcBuilder
 struct zenoh_shm::api::provider::chunk::AllocatedChunk
 struct zenoh_shm::api::provider::chunk::ChunkDescriptor
 struct zenoh_shm::api::provider::memory_layout::MemoryLayout
 struct zenoh_shm::api::provider::memory_layout::TypedLayout
+struct zenoh_shm::api::provider::shm_provider::AllocBuilder
+struct zenoh_shm::api::provider::shm_provider::BlockOn
+struct zenoh_shm::api::provider::shm_provider::ConstBool
+struct zenoh_shm::api::provider::shm_provider::ConstUsize
+struct zenoh_shm::api::provider::shm_provider::Deallocate
+struct zenoh_shm::api::provider::shm_provider::Defragment
+struct zenoh_shm::api::provider::shm_provider::GarbageCollect
+struct zenoh_shm::api::provider::shm_provider::JustAlloc
+struct zenoh_shm::api::provider::shm_provider::PrecomputedAllocBuilder
+struct zenoh_shm::api::provider::shm_provider::PrecomputedLayout
+struct zenoh_shm::api::provider::shm_provider::ShmProvider
+struct zenoh_shm::api::provider::shm_provider::ShmProviderBuilder
+struct zenoh_shm::api::provider::shm_provider::ShmProviderBuilderBackend
+struct zenoh_shm::api::provider::shm_provider::ShmProviderBuilderWithDefaultBackend
 struct zenoh_shm::api::provider::types::AllocAlignment
 struct zenoh_shm::metadata::descriptor::MetadataDescriptor
 struct zenoh_shm::metadata::descriptor::OwnedMetadataDescriptor
@@ -409,10 +532,19 @@ trait zenoh_shm::api::buffer::traits::ShmBufUnsafeMut
 trait zenoh_shm::api::client::shm_client::ShmClient
 trait zenoh_shm::api::client::shm_segment::ShmSegment
 trait zenoh_shm::api::common::with_id::WithProtocolID
+trait zenoh_shm::api::provider::shm_provider::AllocLayout
+trait zenoh_shm::api::provider::shm_provider::AllocPolicy
+trait zenoh_shm::api::provider::shm_provider::AsyncAllocPolicy
+trait zenoh_shm::api::provider::shm_provider::ConstPolicy
+trait zenoh_shm::api::provider::shm_provider::PolicyValue
+trait zenoh_shm::api::provider::shm_provider::SafePolicy
+trait zenoh_shm::api::provider::shm_provider_backend::ShmProviderBackend
 trait zenoh_shm::shm::SegmentID
 type zenoh_shm::api::common::types::ChunkID
 type zenoh_shm::api::common::types::ProtocolID
 type zenoh_shm::api::common::types::SegmentID
+type zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend::PosixShmProviderBackend
+type zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend::PosixShmProviderBackendBuilder
 type zenoh_shm::api::provider::types::ChunkAllocResult
 type zenoh_shm::metadata::descriptor::MetadataIndex
 type zenoh_shm::metadata::descriptor::MetadataSegmentID

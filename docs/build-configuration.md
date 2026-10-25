@@ -142,12 +142,15 @@ original reproduced by naming it. Three things follow from it:
   `shared-memory`; this crate's surface is small, so the bytes are held by differential tests of
   the wire format, and the codec of a pointer into shared memory waits for the `zenoh-shm` member,
   so that arm is held by the surface gate only until a test package builds both crates with it),
-  `zenoh-shm` (in progress: the platform segments, the segments of arrays and structures, the
-  chunk descriptors, the metadata and watchdog that keep a buffer alive across processes, and the
-  buffers with the reader that reads one another process described, 364 of 496 default lines;
-  two processes share a segment by its id and by what is in it, so the layouts and the names
-  `<id>.zenoh` are upstream's and the differential tests open each crate's segments, link each
-  crate's descriptors and read each crate's buffers with the other)
+  `zenoh-shm` (surface complete: the platform segments, the segments of arrays and structures,
+  the chunk descriptors, the metadata and watchdog that keep a buffer alive across processes, the
+  buffers with the reader that reads one another process described, and the provider with its
+  allocation policies and its three POSIX backends, 496 of 496 default lines and 548 of 548 with
+  `test`; two processes share a segment by its id and by what is in it, so the layouts and the
+  names `<id>.zenoh` are upstream's and the differential tests open each crate's segments, link
+  each crate's descriptors, read each crate's buffers and read what each crate's provider
+  allocated with the other; the codec of a pointer into shared memory is the next slice, of
+  `zenoh-codec`)
   and `zenoh` (`crates/wz-zenoh`, empty: 709 of 709
   default lines missing, named `wz-zenoh` until the slice that makes it patchable renames it).
   Behaviour is held beside the surface by Layer E18 (`conformance/`): a differential test of each
@@ -268,6 +271,28 @@ from the upstream crate's rustdoc JSON and by differential tests against it. (Re
 2026-10-24 from "changing one dependency line": the swap is by package name, which a
 `package = ` rename on the dependency line does not reach, so the unit of replacement is a
 `[patch]` block and not a line.)
+
+**C13a. The `zenoh` crate stands on wz's engine; it is not a second implementation of
+upstream (owner, 2026-10-25, delegated: "without regard to cost, the most correct over the
+longest term, textbook, ultimate").** The family has two layers and they are treated
+differently. The lower crates (`zenoh-result` to `zenoh-shm`) are the data and the contracts that
+two processes must read alike: types, the wire format, the layout of shared memory. They equal
+upstream's, because a program on one side of a wire or of a segment is upstream's, and a
+difference there is a defect and not a choice (where upstream cuts, loses or trusts what it was
+handed, the wz crate refuses or checks, and each such place is a class of the differential test).
+The top crate, `zenoh`, is behaviour: sessions, publishers, subscribers, queries, liveliness.
+It is built as an upstream-shaped surface over wz's own session engine (the cooperative engine,
+the session core, the slot policies, the capacity model) and never as a re-implementation of
+upstream's session beside it. Three rules follow. (1) A consumer that patches the family in gets
+wz's engine, with its memory and scheduling controls, behind upstream's API; a `zenoh` that only
+copied upstream's behaviour would hide the engine and give the consumer nothing that upstream
+does not, so it is refused. (2) The surface is upstream's, whole, and each path is backed by the
+engine or is a missing line of the surface gate: there is no stub that answers without doing the
+work. (3) Where upstream's behaviour and the engine's differ, the difference is stated and held by
+a differential test, and the default is upstream's (C2); wz's behaviour is a policy that enters
+by the rule of section 5. The `zenoh` slice begins with the seam that maps upstream's `Session`,
+`Publisher`, `Subscriber`, `Queryable` and `Query` onto the engine's, written and reviewed before
+any path is, and nothing of the top crate is written until then.
 
 **C14. Profiles are contracts.** A registered profile is a named, semver-versioned
 defconfig fragment that CI builds and tests; its name describes its axes (for

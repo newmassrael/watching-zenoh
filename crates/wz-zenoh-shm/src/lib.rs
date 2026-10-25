@@ -58,23 +58,15 @@ use zenoh_buffers::ZSliceBuffer;
 
 use crate::api::common::types::PtrInSegment;
 
-// The crate lands in slices, and what the later ones call is not yet called: the provider, which
-// uses the validator and the metadata storage, comes after. Until the provider lands (debt-910)
-// the modules that only it reaches are allowed to be unused, and the allowance is removed with
-// that slice.
-#[allow(dead_code)]
 pub mod api;
 mod cleanup;
-#[allow(dead_code)]
 pub mod header;
 pub mod init;
-#[allow(dead_code)]
 pub mod metadata;
 pub mod posix_shm;
 pub mod reader;
 pub mod shm;
 pub mod version;
-#[allow(dead_code)]
 pub mod watchdog;
 
 /// Information about a [`ShmBufInner`].

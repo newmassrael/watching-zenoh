@@ -1319,6 +1319,8 @@ name = "zenoh-shm"
 version = "1.10.1"
 dependencies = [
  "advisory-lock",
+ "async-trait",
+ "buddy_system_allocator",
  "crossbeam-channel",
  "crossbeam-queue",
  "nix",
@@ -1328,7 +1330,9 @@ dependencies = [
  "stabby",
  "static_assertions",
  "static_init",
+ "talc",
  "thread-priority",
+ "tokio",
  "tracing",
  "win-sys",
  "winapi",

@@ -1,0 +1,188 @@
+//
+// Copyright (c) 2025 ZettaScale Technology
+//
+// This program and the accompanying materials are made available under the
+// terms of the Eclipse Public License 2.0 which is available at
+// http://www.eclipse.org/legal/epl-2.0, or the Apache License, Version 2.0
+// which is available at https://www.apache.org/licenses/LICENSE-2.0.
+//
+// SPDX-License-Identifier: EPL-2.0 OR Apache-2.0
+//
+// Contributors:
+//   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
+//
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-shm 1.10.1, file
+// src/api/protocol_implementations/posix/posix_shm_provider_backend_talc.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
+
+use std::{
+    alloc::Layout,
+    ptr::NonNull,
+    slice,
+    sync::{Arc, Mutex},
+};
+
+use talc::{ErrOnOom, Talc};
+use zenoh_core::{zlock, Resolvable, Wait};
+use zenoh_result::ZResult;
+
+use super::posix_shm_segment::PosixShmSegment;
+use crate::api::{
+    common::{types::ProtocolID, with_id::WithProtocolID},
+    protocol_implementations::posix::protocol_id::POSIX_PROTOCOL_ID,
+    provider::{
+        chunk::ChunkDescriptor,
+        memory_layout::MemoryLayout,
+        shm_provider_backend::ShmProviderBackend,
+        types::{AllocAlignment, ChunkAllocResult, ZAllocError, ZLayoutError},
+    },
+};
+
+/// Builder to create posix SHM provider
+#[zenoh_macros::unstable_doc]
+pub struct PosixShmProviderBackendTalcBuilder<Layout> {
+    layout: Layout,
+}
+
+impl<Layout> std::fmt::Debug for PosixShmProviderBackendTalcBuilder<Layout> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PosixShmProviderBackendTalcBuilder")
+            .field("layout", &"..")
+            .finish()
+    }
+}
+
+#[zenoh_macros::unstable_doc]
+impl<Layout> Resolvable for PosixShmProviderBackendTalcBuilder<Layout> {
+    type To = ZResult<PosixShmProviderBackendTalc>;
+}
+
+#[zenoh_macros::unstable_doc]
+impl<Layout: TryInto<MemoryLayout>> Wait for PosixShmProviderBackendTalcBuilder<Layout>
+where
+    Layout::Error: Into<ZLayoutError>,
+{
+    fn wait(self) -> <Self as Resolvable>::To {
+        PosixShmProviderBackendTalc::new(&self.layout.try_into().map_err(Into::into)?)
+    }
+}
+
+/// A talc backend based on POSIX shared memory.
+///
+/// This is the default general-purpose backend shipped with Zenoh.
+/// Talc allocator provides great performnce (2nd after `buddy_system_allocator`) while maintaining
+/// excellent fragmentation resistance and memory utilization efficiency.
+#[zenoh_macros::unstable_doc]
+pub struct PosixShmProviderBackendTalc {
+    segment: Arc<PosixShmSegment>,
+    talc: Mutex<Talc<ErrOnOom>>,
+    alignment: AllocAlignment,
+}
+
+impl std::fmt::Debug for PosixShmProviderBackendTalc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PosixShmProviderBackendTalc")
+            .field("segment", &"..")
+            .field("talc", &"..")
+            .field("alignment", &self.alignment)
+            .finish()
+    }
+}
+
+impl PosixShmProviderBackendTalc {
+    /// Get the builder to construct a new instance
+    #[zenoh_macros::unstable_doc]
+    pub fn builder<Layout>(layout: Layout) -> PosixShmProviderBackendTalcBuilder<Layout> {
+        PosixShmProviderBackendTalcBuilder { layout }
+    }
+
+    fn new(layout: &MemoryLayout) -> ZResult<Self> {
+        let segment = Arc::new(PosixShmSegment::create(layout.size())?);
+
+        // because of platform specific, our shm segment is >= requested size, so in order to utilize
+        // additional memory we re-layout the size
+        let real_size = segment.segment.elem_count().get();
+        // SAFETY: the segment is guaranteed to be valid and the index 0 is always valid.
+        let ptr = unsafe { segment.segment.elem_mut(0) };
+
+        let mut talc = Talc::new(ErrOnOom);
+
+        // SAFETY: the pointer and size are guaranteed to be valid as they represent the whole segment.
+        unsafe {
+            talc.claim(slice::from_raw_parts_mut(ptr, real_size).into())
+                .map_err(|_| "Error initializing Talc backend!")?;
+        }
+
+        tracing::trace!(
+            "Created PosixShmProviderBackendTalc id {}, layout {:?}",
+            segment.segment.id(),
+            layout
+        );
+
+        Ok(Self {
+            segment,
+            talc: Mutex::new(talc),
+            alignment: layout.alignment(),
+        })
+    }
+}
+
+impl WithProtocolID for PosixShmProviderBackendTalc {
+    fn id(&self) -> ProtocolID {
+        POSIX_PROTOCOL_ID
+    }
+}
+
+impl ShmProviderBackend for PosixShmProviderBackendTalc {
+    fn alloc(&self, layout: &MemoryLayout) -> ChunkAllocResult {
+        tracing::trace!("PosixShmProviderBackendTalc::alloc({:?})", layout);
+
+        // A size that rounded up to its alignment is past `isize::MAX` is no layout: the original
+        // builds it unchecked, which is undefined behaviour (an abort with debug assertions).
+        let Ok(alloc_layout) = Layout::from_size_align(
+            layout.size().get(),
+            layout.alignment().get_alignment_value().get(),
+        ) else {
+            return Err(ZAllocError::OutOfMemory);
+        };
+
+        let alloc = {
+            let mut lock = zlock!(self.talc);
+            // SAFETY: layout is guaranteed to be valid.
+            unsafe { lock.malloc(alloc_layout) }
+        };
+
+        match alloc {
+            Ok(buf) => Ok(self.segment.clone().allocated_chunk(buf, layout)),
+            Err(_) => Err(ZAllocError::OutOfMemory),
+        }
+    }
+
+    fn free(&self, chunk: &ChunkDescriptor) {
+        // SAFETY: chunk descriptor is guaranteed to be valid and belong to the segment.
+        let alloc_layout = unsafe {
+            Layout::from_size_align_unchecked(
+                chunk.len.get(),
+                self.alignment.get_alignment_value().get(),
+            )
+        };
+
+        // SAFETY: chunk descriptor is guaranteed to be valid and belong to the segment.
+        let ptr = unsafe { self.segment.segment.elem_mut(chunk.chunk) };
+
+        // SAFETY: ptr and layout are guaranteed to be valid as they are passed from `ChunkDescriptor`.
+        unsafe { zlock!(self.talc).free(NonNull::new_unchecked(ptr), alloc_layout) };
+    }
+
+    fn defragment(&self) -> usize {
+        0
+    }
+
+    fn available(&self) -> usize {
+        0
+    }
+
+    fn layout_for(&self, layout: MemoryLayout) -> Result<MemoryLayout, ZLayoutError> {
+        layout.extend(self.alignment)
+    }
+}
