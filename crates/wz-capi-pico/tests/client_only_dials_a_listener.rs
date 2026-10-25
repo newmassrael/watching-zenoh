@@ -933,3 +933,147 @@ mod snapshot {
         }
     }
 }
+
+/// The unstable API in the build that cannot listen: an entity's global id names its session and
+/// is its own among the session's, and a get honours a cancellation token, refusing one already
+/// cancelled and answering as it does without one for one that is not.
+#[cfg(all(feature = "unstable-api", feature = "query"))]
+mod unstable {
+    use super::*;
+    use wz_capi_pico::cancellation::{
+        z_cancellation_token_cancel, z_cancellation_token_loan_mut, z_cancellation_token_move,
+        z_cancellation_token_new, z_owned_cancellation_token_t,
+    };
+    use wz_capi_pico::entity::{z_entity_global_id_eid, z_entity_global_id_zid};
+    use wz_capi_pico::result::Z_ERR_CANCELLED;
+    use wz_capi_pico::zid::z_info_zid;
+    use wz_capi_pico::{
+        z_closure_reply, z_closure_reply_move, z_declare_publisher, z_get, z_get_options_default,
+        z_get_options_t, z_loaned_reply_t, z_owned_closure_reply_t, z_owned_publisher_t,
+        z_publisher_id, z_publisher_loan, z_publisher_move, z_reply_is_ok, z_session_id,
+        z_undeclare_publisher,
+    };
+
+    /// What a get's closure saw: how many replies came, and whether it has been dropped.
+    #[derive(Default)]
+    struct Seen {
+        replies: usize,
+        done: bool,
+    }
+
+    unsafe extern "C" fn on_reply(reply: *mut z_loaned_reply_t, ctx: *mut c_void) {
+        let seen = &*(ctx as *const Mutex<Seen>);
+        if z_reply_is_ok(reply) {
+            seen.lock().unwrap().replies += 1;
+        }
+    }
+
+    unsafe extern "C" fn on_drop(ctx: *mut c_void) {
+        let seen = Arc::from_raw(ctx as *const Mutex<Seen>);
+        seen.lock().unwrap().done = true;
+    }
+
+    /// Issue a get on `key` carrying `token`, and step until its closure is dropped: the call's
+    /// answer, the replies it saw, and whether the closure was dropped.
+    unsafe fn get_with(
+        session: &z_owned_session_t,
+        key: &CStr,
+        token: &mut z_owned_cancellation_token_t,
+    ) -> (i8, usize, bool) {
+        let seen = Arc::new(Mutex::new(Seen::default()));
+        let mut closure: z_owned_closure_reply_t = std::mem::zeroed();
+        assert_eq!(
+            z_closure_reply(
+                &mut closure,
+                Some(on_reply),
+                Some(on_drop),
+                Arc::into_raw(seen.clone()) as *mut c_void
+            ),
+            Z_OK
+        );
+        let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut ke, key.as_ptr()), Z_OK);
+        let mut options: z_get_options_t = std::mem::zeroed();
+        z_get_options_default(&mut options);
+        options.cancellation_token = z_cancellation_token_move(token);
+        let answer = z_get(
+            z_session_loan(session),
+            z_view_keyexpr_loan(&ke),
+            std::ptr::null(),
+            z_closure_reply_move(&mut closure),
+            &mut options,
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !seen.lock().unwrap().done {
+            assert!(Instant::now() < deadline, "the get on {key:?} never ended");
+            step_for(session, Duration::from_millis(20));
+        }
+        let seen = seen.lock().unwrap();
+        (answer, seen.replies, seen.done)
+    }
+
+    #[test]
+    fn a_client_only_build_names_its_entities_and_honours_a_cancellation_token() {
+        let port = free_port();
+        let _listener = Listener::start(port);
+        // SAFETY: a fresh config and session, released before the function returns.
+        unsafe {
+            let mut session = open_to(port);
+            let zid = z_info_zid(z_session_loan(&session));
+
+            // A global id names the session, and an entity's eid is not the session's.
+            let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+            assert_eq!(
+                z_view_keyexpr_from_str(&mut ke, c"demo/ids/p".as_ptr()),
+                Z_OK
+            );
+            let mut publisher: z_owned_publisher_t = std::mem::zeroed();
+            assert_eq!(
+                z_declare_publisher(
+                    z_session_loan(&session),
+                    &mut publisher,
+                    z_view_keyexpr_loan(&ke),
+                    std::ptr::null_mut()
+                ),
+                Z_OK
+            );
+            let session_id = z_session_id(z_session_loan(&session));
+            let publisher_id = z_publisher_id(z_publisher_loan(&publisher));
+            assert_eq!(z_entity_global_id_zid(&session_id).id, zid.id);
+            assert_eq!(z_entity_global_id_zid(&publisher_id).id, zid.id);
+            assert_ne!(
+                z_entity_global_id_eid(&publisher_id),
+                z_entity_global_id_eid(&session_id),
+                "an entity's eid is not its session's"
+            );
+            assert_eq!(
+                z_undeclare_publisher(z_publisher_move(&mut publisher)),
+                Z_OK
+            );
+
+            // A token cancelled before the call refuses it, and its closure is still dropped.
+            let mut cancelled: z_owned_cancellation_token_t = std::mem::zeroed();
+            assert_eq!(z_cancellation_token_new(&mut cancelled), Z_OK);
+            assert_eq!(
+                z_cancellation_token_cancel(z_cancellation_token_loan_mut(&mut cancelled)),
+                Z_OK
+            );
+            let (answer, replies, done) = get_with(&session, c"demo/listener/a", &mut cancelled);
+            assert_eq!(answer, Z_ERR_CANCELLED);
+            assert!(
+                done && replies == 0,
+                "refused: nothing sent, closure dropped"
+            );
+
+            // A token nobody cancels is carried, and the get answers as it does without one.
+            let mut live: z_owned_cancellation_token_t = std::mem::zeroed();
+            assert_eq!(z_cancellation_token_new(&mut live), Z_OK);
+            let (answer, replies, _) = get_with(&session, c"demo/listener/a", &mut live);
+            assert_eq!(answer, Z_OK);
+            assert_eq!(replies, 1, "the listener's queryable answered");
+
+            z_close(z_session_loan_mut(&mut session), std::ptr::null());
+            z_session_drop(z_session_move(&mut session));
+        }
+    }
+}

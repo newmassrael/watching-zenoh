@@ -171,8 +171,9 @@ local-queryable = ["engine-tokio", "wz-capi-core/local-queryable"]
 # source info, `z_reliability_default`, `z_bytes_get_contiguous_view`, `z_reply_replier_id`, the
 # cancellation token, and the option fields that carry them (`reliability`, `source_info`,
 # `cancellation_token`). Off, those fields are not in the option structs a program allocates,
-# which are then the smaller structs pico's default header declares.
-unstable-api = ["engine-tokio", "wz-capi-core/unstable-api"]
+# which are then the smaller structs pico's default header declares. None of it is an engine's:
+# it selects neither (`wz-capi-core`'s is a marker its own code reads).
+unstable-api = ["wz-capi-core?/unstable-api"]
 # `connectivity` (`Z_FEATURE_CONNECTIVITY`): the transport and link snapshots and the event
 # listeners of pico's connectivity plane. Upstream declares it only with the unstable API.
 connectivity = ["engine-tokio", "unstable-api", "wz-capi-core/connectivity"]

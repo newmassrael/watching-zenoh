@@ -311,6 +311,18 @@ it behaves as pico behaves in both of pico's threading arms.
   DeclFinal alone, a deadline, a cancel with no step, a lost link), and
   `client_only_dials_a_listener` asking the listener which tokens are alive, on both engines
   (Layer C1co, now 6 and 5 a leg).
+- 2026-10-25: the unstable API on the cooperative engine (step U1). pico's `unstable-api` required
+  `engine-tokio` for no reason the code held: `wz-capi-core`'s feature of that name is an empty
+  marker its own code reads, and everything the ABI does behind it (entity global ids, the
+  sample's reliability and source info, `z_reply_replier_id`, the cancellation token and the
+  option fields that carry them) goes through the port. The feature now selects neither engine, and
+  the cooperative client builds with it unchanged, which the reference pico of the test lanes
+  (`-DZ_FEATURE_UNSTABLE_API`) needs of a build that stands in for it. A new size-gate case
+  measures it: pico-client-coop-unstable is 894,893 bytes of text (891,491 without it), 448
+  exports (441), 2.21 times the same pico. Tests: `client_only_dials_a_listener` on both engines,
+  with a global id that names its session and is not the session's own, a get that refuses a
+  token already cancelled (nothing sent, its closure dropped) and one that carries a token
+  nobody cancels (Layer C1co, now 7 and 6 a leg).
 - Next: the rest of section 6, one step each.
 - Earlier plan note: the engine port proper. A `SessionEngine` trait holds what the single-threaded client
   calls on a session; the tokio engine implements it first, `session_state` returns the selected

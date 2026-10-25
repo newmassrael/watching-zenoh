@@ -156,6 +156,16 @@ CASES: tuple[Case, ...] = (
               "sections are a lock of the process (`host-lock`), so no `critical-section` "
               "implementation is linked, whose two symbols a cdylib exported beside the C ABI "
               "(443 before)"),
+    # The cooperative client with the unstable API, which the reference pico of the test lanes is
+    # built with (`-DZ_FEATURE_UNSTABLE_API`): entity global ids, source info, cancellation
+    # tokens. Nothing of it is the engine's, so it costs the ABI's own code and no engine's.
+    Case("pico-client-coop-unstable", "wz-capi-pico", "libwz_capi_pico.so",
+         "engine-coop,link-udp,unstable-api", 913_000,
+         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
+                 MULTICAST, TOKIO_ENGINE),
+         require=(UDP, SINGLE_THREADED, COOP_ENGINE),
+         note="the pico-client-coop build with the unstable API: 894,893 measured against its "
+              "891,491, 2.21 times the same pico (404,880), and 448 exports against its 441"),
     Case("pico-peer", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",peer", 2_946_000,
          forbid=(GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY, MULTICAST),
          require=(ACCEPT, RESPONDER, SCOUTING, UDP, SINGLE_THREADED),
