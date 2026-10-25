@@ -287724,6 +287724,50 @@
         "Read the first completed hosted run holding this round: Qza and Qa step 6 green, and the Qzb rows for zephyr-fixed (wz_app_main as entry, a frame and a chain) and zephyr-client-fixed (7540 within the tolerance). The connect manager's tick frame is 1824 bytes on a 9216-byte stack; the chain is 1676 bytes under it, and moving the rows the reconcile copies off the stack is the next lever if a later change needs the room. Step 6.2b-2 (the opener port over the manager, the hint sources, the verbs on the fixed-memory profile, the image witness) is not started."
       ]
     },
+    "Round 3643": {
+      "decision_summary": "Phase 4 of declaration-sync pacing for the cooperative engine: its declarations take the replay cursor. Core::redeclare told six lists to a new link in one call and ignored every refused send. A per-link ReplayCursor (engine/replay.rs of wz-capi-coop) now walks the lists in a fixed order (key expressions, subscribers, Interests, queryables, tokens, liveliness subscribers), an entry's place being its kind's offset plus its index. A link that comes up begins the cursor and sends the first turn; poll_link sends later turns when due and the read's idle wait is shortened to the next one. Every live push into or removal from a list asks the cursor: a declaration it has not reached is sent in its turn, one behind it at once, a retraction is sent only if the peer was told of the entry. A lost or ended link discards the cursor. Off, a turn is the whole sequence, so the frames are the same; a refused send is retried from its entry. CoopEngine gains set_replay_pacing and declarations_synced.",
+      "changes_bullets": [
+        "wz-capi-coop: engine/replay.rs (new: Replay, Kind, OnRefusal and Core's announce, retract, begin_replay, replay_turn); engine.rs (Core::redeclare removed; poll_link begins and continues the replay; lose_link and end_link discard it; the push into and removal from each of the six lists asks the cursor; the idle wait counts the next turn; set_replay_pacing and declarations_synced); engine/liveliness.rs and the entries' send methods answer whether the link took the send.",
+        "tests/replay.rs (new, 5 tests over the router stand-in): a burst a turn and an interval between turns; a declaration made during the replay told once; a retraction sent only if the peer was told; a replay cut short by a lost link begun again on the next; the unpaced single turn. scout/tests.rs: two lower bounds allow the window's whole-millisecond clock one millisecond short.",
+        "docs/declaration-sync-pacing.md (the host table and phase 4) and docs/capi-pico-on-coop-engine.md."
+      ],
+      "verification_bullets": [
+        "On the build host, clippy -D warnings with all targets: wz-capi-coop with all its features and with defaults; wz-capi-pico with engine-coop,link-udp.",
+        "Tests: wz-capi-coop lib, all features: 44 passed, including the 5 new and the reconnect test; the new replay tests passed on the first run apart from one bound that was set too tight and was corrected.",
+        "Size: the eight cooperative cases of the capability gate are within budget (pico-client-coop 882,107 of 895,000; the others as before within two percent), so no budget moved.",
+        "The hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed.",
+        "Not witnessed: a paced replay under the policy built in (the tests state the pace through set_replay_pacing; the build's own default is policy off)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "The cooperative engine has no wait_declarations_stable and no synced query: the heap host's final-bookkeeping reads owned frames and this engine needs a reader of its own; to be shaped with the session that owns declaration sync before it is built.",
+        "Next in section 6: the advanced publisher and subscriber, then the listening role, then the engine flip.",
+        "Read the hosted runs of the earlier pushes at the start of the next round."
+      ],
+      "publishable_decision_summary": "Phase 4 of declaration-sync pacing for the cooperative engine: its declarations take the replay cursor. Core::redeclare told six lists to a new link in one call and ignored every refused send. A per-link ReplayCursor (engine/replay.rs of wz-capi-coop) now walks the lists in a fixed order (key expressions, subscribers, Interests, queryables, tokens, liveliness subscribers), an entry's place being its kind's offset plus its index. A link that comes up begins the cursor and sends the first turn; poll_link sends later turns when due and the read's idle wait is shortened to the next one. Every live push into or removal from a list asks the cursor: a declaration it has not reached is sent in its turn, one behind it at once, a retraction is sent only if the peer was told of the entry. A lost or ended link discards the cursor. Off, a turn is the whole sequence, so the frames are the same; a refused send is retried from its entry. CoopEngine gains set_replay_pacing and declarations_synced.",
+      "publishable_changes_bullets": [
+        "wz-capi-coop: engine/replay.rs (new: Replay, Kind, OnRefusal and Core's announce, retract, begin_replay, replay_turn); engine.rs (Core::redeclare removed; poll_link begins and continues the replay; lose_link and end_link discard it; the push into and removal from each of the six lists asks the cursor; the idle wait counts the next turn; set_replay_pacing and declarations_synced); engine/liveliness.rs and the entries' send methods answer whether the link took the send.",
+        "tests/replay.rs (new, 5 tests over the router stand-in): a burst a turn and an interval between turns; a declaration made during the replay told once; a retraction sent only if the peer was told; a replay cut short by a lost link begun again on the next; the unpaced single turn. scout/tests.rs: two lower bounds allow the window's whole-millisecond clock one millisecond short.",
+        "docs/declaration-sync-pacing.md (the host table and phase 4) and docs/capi-pico-on-coop-engine.md."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host, clippy -D warnings with all targets: wz-capi-coop with all its features and with defaults; wz-capi-pico with engine-coop,link-udp.",
+        "Tests: wz-capi-coop lib, all features: 44 passed, including the 5 new and the reconnect test; the new replay tests passed on the first run apart from one bound that was set too tight and was corrected.",
+        "Size: the eight cooperative cases of the capability gate are within budget (pico-client-coop 882,107 of 895,000; the others as before within two percent), so no budget moved.",
+        "The hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed.",
+        "Not witnessed: a paced replay under the policy built in (the tests state the pace through set_replay_pacing; the build's own default is policy off)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The cooperative engine has no wait_declarations_stable and no synced query: the heap host's final-bookkeeping reads owned frames and this engine needs a reader of its own; to be shaped with the session that owns declaration sync before it is built.",
+        "Next in section 6: the advanced publisher and subscriber, then the listening role, then the engine flip.",
+        "Read the hosted runs of the earlier pushes at the start of the next round."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
