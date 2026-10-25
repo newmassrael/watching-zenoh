@@ -11360,17 +11360,23 @@ layer_c1m_session_lwip() {
     # A dial naming its protocol (`Locator`, `udp/` or `tcp/`) moved the two legs
     # that compile the dialler (`adminspace-write`) by one more:
     # `a_stacks_refusal_is_permanent_only_for_a_protocol_it_lacks`.
+    # The connection manager rebuilt on the shared peer planner (decision D6 step
+    # 6.2a) moved the same two legs by THREE, in the manager's test module, which
+    # `adminspace-write` gates: 14 -> 17 and 24 -> 27, the numbers the command
+    # PRINTED. The three: a session seen up and then lost starts the schedule over,
+    # a dropped endpoint with a session up is hung up and a rewrite dials it
+    # afresh, an endpoint written twice is one endpoint.
     _runci_guarded_test "C1m mcu default" 4 \
         cargo test -p wz-session-mcu --quiet || return 1
     _runci_guarded_test "C1m mcu unicast app layer" 5 \
         cargo test -p wz-session-mcu \
         --features query-queryable,codec-response,codec-response-final,pubsub-put \
         --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace-write" 14 \
+    _runci_guarded_test "C1m mcu adminspace-write" 17 \
         cargo test -p wz-session-mcu --features adminspace-write --quiet || return 1
     _runci_guarded_test "C1m mcu adminspace-core" 8 \
         cargo test -p wz-session-mcu --features adminspace-core --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace read+write" 24 \
+    _runci_guarded_test "C1m mcu adminspace read+write" 27 \
         cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
     # The fixed-memory client node's shared mechanism (`slot_node`, compiled only on the slot profile
     # with the client core): no leg above selects both, so its tests ran in none until this one. 28 =

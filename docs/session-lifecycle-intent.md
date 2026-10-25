@@ -797,9 +797,45 @@ Each step lands with its own done-when; sizes are not estimated here.
      dial the planner cannot track), `LoopPeers`' own thirteen, which now run
      through it, and `node_peer_open_e2e` and `router_redial_backoff_e2e`
      unchanged.
-   - Next in step 6: the fixed-memory host (a planner over the directory, a
-     retry timer and `SessionHost::dial`), the verbs on it, and the witness on
-     the image.
+   - **6.2a, the fixed-memory host is the connect manager, on the planner
+     (Round 3613).** The fixed-memory profile already had a host for peers
+     it dials: `wz_session_mcu::connect_manager::ConnectManager`, one row per
+     configured endpoint, a retry schedule per row and a dialer port
+     (`SlotDialer` over `SessionHost::dial` on the slot profile). It predates
+     the machines, as AP's desired connect-set did, so it is rebuilt on the
+     planner the way D5c rebuilt AP's. The MCU opener is therefore not a
+     second host: it is this manager, with nodes held by zid beside the
+     endpoints (6.2b).
+     - Its surface and what it promises outside are unchanged. An endpoint the
+       list drops is hung up. One the build cannot dial is refused and not
+       retried until the list is written again. Failures before a session is
+       up are one outage and grow the wait; a session that was up and drops
+       starts the schedule again.
+     - An endpoint is a peer keyed by its text, so one written twice is one
+       endpoint, as on AP. What the build cannot dial is a peer with no
+       candidate (`NoLocator`); the reason the node reports at
+       `status/connect` (`unsupported`, `bad_address`, `multi_link_group`) is
+       read off the dialer when asked, not stored.
+     - The `Dialer` port gains three questions with defaults, so a dialer that
+       answers none behaves as before: what it cannot dial (`classify`, asked
+       before any dial), whether a session is up (`established`) and which node
+       it reached (`remote`). `UdpDialer` and `SlotDialer` answer all three. A
+       dialer that does not say when a session comes up is told of at its end,
+       as established and then lost, which gives the same schedule.
+     - The planner gains `stop` for one key, and its close action and `withdraw`
+       are no longer behind the lifecycle seam: a host that stops holding a
+       peer it dialled hangs the session up with no verb in the build.
+     - No call of the manager is its own callee: a dial that does not start is
+       reported in the next turn of a loop, because the stack gate reads the
+       worst chain of direct calls under a tick and a cycle is no bound.
+     Witness: the manager's eight tests (the five it had, and a session seen up
+     and then lost, a dropped endpoint with a session up hung up and dialled
+     afresh on a rewrite, an endpoint written twice), `wz-session-mcu`'s own
+     suite and clippy over all features, the slot-profile shape for the
+     bare-metal target, and the lwIP slot admin node test.
+   - Next in step 6: the nodes held by zid beside the endpoints, with the
+     locator directory (6.2b), then the verbs on the fixed-memory profile,
+     `wz-session-lwip` forwarding the feature, and the witness on the image.
 7. **D7** transports 2 and 3 as values of the build configuration axis.
 
 ## 5. Open
