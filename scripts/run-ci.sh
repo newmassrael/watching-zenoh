@@ -5366,7 +5366,9 @@ layer_c1u_cargo_test_tls() {
     # but no count guard, so the skew reaches origin by construction. The delta
     # being +1 HERE and +1 in C1v is the measurement that the new test is not
     # trapped behind either link feature: both sets compile and run it.
-    _runci_guarded_test C1u 7 cargo test -p wz-runtime-tokio --features transport-link-tls --test session_reconnect_e2e --quiet \
+    # f0676600a -- 7 -> 9: two cases of the declaration replay's pacing of a reconnect, in the file
+    # both transports' legs run (C1v counts the same file, and moves with this one). PRINTED.
+    _runci_guarded_test C1u 9 cargo test -p wz-runtime-tokio --features transport-link-tls --test session_reconnect_e2e --quiet \
         || return 1
     # R3463 — 6 -> 8. The two witnesses of decision D9 of
     # docs/session-lifecycle-intent.md: over mutual TLS a peer that claims the zid its
@@ -5427,7 +5429,8 @@ layer_c1v_cargo_test_ws() {
     _runci_guarded_test C1v 5 cargo test -p wz-runtime-tokio --features transport-link-ws --test ws_e2e --quiet \
         || return 1
     # R311y801 — 6 -> 7 with C1u, same commit, same reason (see C1u's note).
-    _runci_guarded_test C1v 7 cargo test -p wz-runtime-tokio --features transport-link-ws --test session_reconnect_e2e --quiet \
+    # f0676600a -- 7 -> 9, with C1u, same commit, same reason. PRINTED.
+    _runci_guarded_test C1v 9 cargo test -p wz-runtime-tokio --features transport-link-ws --test session_reconnect_e2e --quiet \
         || return 1
     # R2355 — the MULTI-PEER ws accept, which no lane ran until now. The
     # `transport-link-ws` registry entry carried "the multi-peer `--router ws/`
@@ -11320,7 +11323,11 @@ layer_c1q_multicast_glue() {
     # R3335 -- 10 -> 14: the unpinned multicast LINK's interface choice, two
     # pure cases and two that read `IP_MULTICAST_IF` back from the kernel
     # (Linux). PRINTED by the command, not a diff count.
-    _runci_guarded_test C1q 14 cargo test -p wz-runtime-tokio --features transport-multicast,transport-link-udp,locator-iface --lib udp_multicast_config --quiet \
+    # b2c5453f2 -- 14 -> 12: the host's interface facts and multicast sockets moved to
+    # `wz-host-net`, and the two cases of this filter that exercised them went with them. PRINTED
+    # by the command, not a diff count. (The moved cases run in `wz-host-net`'s row of the
+    # non-default test gate; this leg holds what stayed.)
+    _runci_guarded_test C1q 12 cargo test -p wz-runtime-tokio --features transport-multicast,transport-link-udp,locator-iface --lib udp_multicast_config --quiet \
         || return 1
     # Debt 873 side finding -- a scouting socket goes on past a refused IPv4 membership and
     # a multicast link does not. Its own leg because the one above builds no scouting
