@@ -4555,7 +4555,7 @@ fn push_parameters(
 ) {
     use wz_session_core::passive::Reading;
     out.push_str(",\"parameters\":{");
-    push_compression(compression.reading, compression.evidence, out);
+    push_compression(compression, out);
     let flag = |name: &str, reading: Reading<bool>, out: &mut String| {
         let _ = write!(out, ",\"{name}\":{{\"value\":{}", tri_state(reading.value));
         push_basis(reading.basis, out);
@@ -4588,30 +4588,26 @@ fn push_parameters(
 }
 
 /// The `compression` entry of [`push_parameters`], from the session's reading
-/// and its two directions' evidence (`a` then `b`).
-fn push_compression(
-    reading: wz_session_core::passive::Reading<bool>,
-    evidence: [wz_session_core::passive::BatchHeaderEvidence; 2],
-    out: &mut String,
-) {
-    use wz_session_core::json::u64_into;
+/// and its two directions' evidence (`a` then `b`). The four counts are
+/// counts of units this library read, which the integer rule leaves bare.
+fn push_compression(grounds: &CompressionGrounds, out: &mut String) {
+    use wz_session_core::passive::Basis;
     out.push_str("\"compression\":{\"value\":");
-    match reading.value {
+    match grounds.reading.value {
         Some(true) => out.push_str("\"lz4\""),
         Some(false) => out.push_str("\"off\""),
         None => out.push_str("null"),
     }
-    push_basis(reading.basis, out);
+    push_basis(grounds.reading.basis, out);
     out.push_str(",\"evidence\":");
-    use wz_session_core::passive::Basis;
-    if !matches!(reading.basis, Basis::Inferred | Basis::Conflicting) {
+    if !matches!(grounds.reading.basis, Basis::Inferred | Basis::Conflicting) {
         out.push_str("null}");
         return;
     }
     out.push_str("{\"halves\":[");
     for (i, (direction, e)) in [Direction::A, Direction::B]
         .iter()
-        .zip(evidence)
+        .zip(grounds.evidence)
         .enumerate()
     {
         if i > 0 {
@@ -4619,15 +4615,11 @@ fn push_compression(
         }
         out.push_str("{\"direction\":");
         escape_into(dir_name(*direction), out);
-        out.push_str(",\"headed_units\":");
-        u64_into(e.headed_units, out);
-        out.push_str(",\"plain_units\":");
-        u64_into(e.plain_units, out);
-        out.push_str(",\"headed_resyncs\":");
-        u64_into(e.headed_resyncs, out);
-        out.push_str(",\"plain_resyncs\":");
-        u64_into(e.plain_resyncs, out);
-        out.push('}');
+        let _ = write!(
+            out,
+            ",\"headed_units\":{},\"plain_units\":{},\"headed_resyncs\":{},\"plain_resyncs\":{}}}",
+            e.headed_units, e.plain_units, e.headed_resyncs, e.plain_resyncs
+        );
     }
     out.push_str("]}}");
 }
@@ -7764,7 +7756,13 @@ mod tests {
             ] {
                 words.insert(BasisWord::of(basis).name());
                 let mut out = String::from("{");
-                push_compression(Reading { value, basis }, [seen, seen], &mut out);
+                push_compression(
+                    &CompressionGrounds {
+                        reading: Reading { value, basis },
+                        evidence: [seen, seen],
+                    },
+                    &mut out,
+                );
                 out.push('}');
                 arms.push(out);
             }

@@ -2244,7 +2244,9 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
     // `lowlatency`, `qos`, `patch`, `sn_mask`, `batch_size` and `version`, and
     // each half's `lease_ms`. A capture that joined a compressed session
     // after its handshake now says `compression` `lz4` `inferred` where the
-    // flat `compression` beside it stays `null`.
+    // flat `compression` beside it stays `null`. Every integer `value` of a
+    // `parameters` entry takes the integer rule (`sn_mask` can pass 2^53 - 1);
+    // the four evidence counts are counts of units read and stay bare numbers.
     DocumentShape {
         document: FIELDS,
         revision: 45,

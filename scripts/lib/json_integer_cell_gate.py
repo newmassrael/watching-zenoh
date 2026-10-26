@@ -109,6 +109,12 @@ class Cell:
 
 _ID_HEADER = "the `id` and `solicited_by` values the census and the summary write"
 _HALVES_HEADER = "the `lease_ms` and `last_seen_ts_ns` of a flow's `halves`"
+#: Field document 45: every negotiated value beside its basis. The context's
+#: integer entries come out of one call and each half's lease out of one more.
+_PARAMETERS_HEADER = (
+    "the integer `value` of each entry of a flow's `context.parameters` and of its halves' `parameters`"
+)
+_PARAMETERS_ROW = "integer `value` of a `parameters` entry"
 _LATENCY_HEADER = "the `min_ns`, `max_ns`, `mean_ns` and `total_ns` of a census latency object"
 #: The protected-frame documents take the rule from their first revision. The
 #: field cells are written by ONE helper both documents share, so they are
@@ -148,6 +154,10 @@ CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
     ("crates/wz-capture/src/fields_json.rs", "push_halves"): (
         Cell("fields", "a half's lease_ms", _HALVES_HEADER, "`lease_ms` is a wire field's value", born=25),
         Cell("fields", "a half's last_seen_ts_ns", _HALVES_HEADER, "`last_seen_ts_ns` a nanosecond instant", born=25),
+        Cell("fields", "a half's parameters.lease_ms value", _PARAMETERS_HEADER, _PARAMETERS_ROW, born=45),
+    ),
+    ("crates/wz-capture/src/fields_json.rs", "push_parameters"): (
+        Cell("fields", "a context parameters entry's integer value", _PARAMETERS_HEADER, _PARAMETERS_ROW, born=45),
     ),
     ("crates/wz-capture/src/census_json.rs", "interests_json"): (
         Cell("census", "declarations[].id", _ID_HEADER, "`declarations[].id`"),

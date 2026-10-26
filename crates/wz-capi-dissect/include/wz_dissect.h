@@ -903,7 +903,10 @@
  * nine-byte VLE is 2^64 - 1); to the `first_seen_ts_ns` and `last_seen_ts_ns` of a
  * `session_table` row (that document takes the rule from its first revision:
  * they are clock instants, nanoseconds since 1970, which on a real clock are
- * past the line); and to
+ * past the line); to the integer `value` of each entry of a flow's
+ * `context.parameters` and of its halves' `parameters` (keys that exist from
+ * field document 45 and take the rule from their first appearance: `sn_mask`
+ * can pass the line, and a lease is a wire field's value); and to
  * `oldest_ts_ns` in the retention document. It does NOT apply to counts,
  * offsets, sizes and millisecond spans this library measures: those count
  * things the host holds, and stay bare numbers. Revisions: fields 23, census
