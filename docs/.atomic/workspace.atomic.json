@@ -289858,6 +289858,58 @@
         "Read the hosted run of this push per job, compared by head sha."
       ]
     },
+    "Round 3695": {
+      "decision_summary": "Phase 3b of the closed key set (docs/closed-key-set.md): a peer's message is delivered by the selection of its key. A subscriber row of a table with a closed gate holds the entity the image declares on its pattern, and register_sink refuses a pattern the image does not declare. A message on a key of the set reaches the rows whose entity is in that key's selection, in registration order, with no pattern matched; a row made before the table was given is matched by its pattern, so none loses messages. Measured against the open table's match memory (six release runs, shared host): over a rotation of keys the closed table is five to eleven times faster and allocates nothing, where the open one allocates one to three times a message; on one repeated key the memory is as fast or faster (closed 18 to 39 ns, open 13 to 29), so the table does not replace it there. Not done: the alias row stays text, declared keys are not checked for canonical form, no image supplies a table.",
+      "changes_bullets": [
+        "crates/wz-session-core src/pubsub.rs: a subscriber row holds Option<EntityId>; register_sink numbers it through the gate and refuses an undeclared pattern; set_key_gate numbers existing rows; fire_to_subscribers and fire_plain_to_subscribers deliver a numbered key by fire_by_selection.",
+        "src/key_gate.rs: admit_entity, entity_of, catalogue, and a one-key memory in admit_key; a unit test of it. src/registry_error.rs: RegisterError::KeyNotInSet.",
+        "tests/key_catalogue_model.rs: delivery by selection equals the scan for every key of the set, in order; refusal of an undeclared pattern or a role not declared; a row made before the gate is still delivered to.",
+        "tests/key_set_cost.rs (new): time and allocations a message, open against closed, rotating over every key and on one key, counting allocations per thread; asserts only that both fire the same subscribers the same number of times.",
+        "docs/closed-key-set.md: phase 3b as built, with the measured table and what it does not show."
+      ],
+      "verification_bullets": [
+        "On the shared build machine: the ten model tests and all unit tests of wz-session-core pass; clippy -D warnings passes for wz-session-core (all targets, and default features off), wz-session-mcu, wz-runtime-tokio and wz-capi-coop; cargo fmt --check passes.",
+        "The measurement ran six times in a release build on a host with one free core and two or three other jobs; times swung by up to a factor of two between runs, so the table gives ranges, and the allocations are exact and identical in every run. The first table showed the closed table losing on one repeated key; that is why the last-key memory exists, and the numbers before and after it are both recorded.",
+        "Not run: the hosted run; more than eight subscribers; a real link under the drive loop; ROM and RAM of a table; an image on a target; the selector side."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "The generator should refuse a declared key that is not in the canonical form the table stores a pattern in; until then a pattern the canonical form rewrites is registered rewritten and is not the declared text.",
+        "A node's generated declared.rs does not carry its table, so no image calls set_key_gate with one; the slot node and the cooperative engine (sessions ef and 11) adopt it.",
+        "The alias row is still text: a peer's declared resource is a prefix a selector may be built on, so it is not simply a key id; decide the form before changing the row.",
+        "A reply's key is not gated, and the selector side is as before.",
+        "On one repeated key the open table's memory is as fast as the closed table or faster; whether a closed image should still build the memory is a question for a profile with a tight ROM budget, which has not been measured.",
+        "Owner decisions still open: undeclared key under a declared wildcard (data keys), one declaration or two with access control, publisher wildcards, sender-fixed resource ids.",
+        "Read the hosted run of this push per job, compared by head sha."
+      ],
+      "publishable_decision_summary": "Phase 3b of the closed key set (docs/closed-key-set.md): a peer's message is delivered by the selection of its key. A subscriber row of a table with a closed gate holds the entity the image declares on its pattern, and register_sink refuses a pattern the image does not declare. A message on a key of the set reaches the rows whose entity is in that key's selection, in registration order, with no pattern matched; a row made before the table was given is matched by its pattern, so none loses messages. Measured against the open table's match memory (six release runs, shared host): over a rotation of keys the closed table is five to eleven times faster and allocates nothing, where the open one allocates one to three times a message; on one repeated key the memory is as fast or faster (closed 18 to 39 ns, open 13 to 29), so the table does not replace it there. Not done: the alias row stays text, declared keys are not checked for canonical form, no image supplies a table.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core src/pubsub.rs: a subscriber row holds Option<EntityId>; register_sink numbers it through the gate and refuses an undeclared pattern; set_key_gate numbers existing rows; fire_to_subscribers and fire_plain_to_subscribers deliver a numbered key by fire_by_selection.",
+        "src/key_gate.rs: admit_entity, entity_of, catalogue, and a one-key memory in admit_key; a unit test of it. src/registry_error.rs: RegisterError::KeyNotInSet.",
+        "tests/key_catalogue_model.rs: delivery by selection equals the scan for every key of the set, in order; refusal of an undeclared pattern or a role not declared; a row made before the gate is still delivered to.",
+        "tests/key_set_cost.rs (new): time and allocations a message, open against closed, rotating over every key and on one key, counting allocations per thread; asserts only that both fire the same subscribers the same number of times.",
+        "docs/closed-key-set.md: phase 3b as built, with the measured table and what it does not show."
+      ],
+      "publishable_verification_bullets": [
+        "On the shared build machine: the ten model tests and all unit tests of wz-session-core pass; clippy -D warnings passes for wz-session-core (all targets, and default features off), wz-session-mcu, wz-runtime-tokio and wz-capi-coop; cargo fmt --check passes.",
+        "The measurement ran six times in a release build on a host with one free core and two or three other jobs; times swung by up to a factor of two between runs, so the table gives ranges, and the allocations are exact and identical in every run. The first table showed the closed table losing on one repeated key; that is why the last-key memory exists, and the numbers before and after it are both recorded.",
+        "Not run: the hosted run; more than eight subscribers; a real link under the drive loop; ROM and RAM of a table; an image on a target; the selector side."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The generator should refuse a declared key that is not in the canonical form the table stores a pattern in; until then a pattern the canonical form rewrites is registered rewritten and is not the declared text.",
+        "A node's generated declared.rs does not carry its table, so no image calls set_key_gate with one; the slot node and the cooperative engine (sessions ef and 11) adopt it.",
+        "The alias row is still text: a peer's declared resource is a prefix a selector may be built on, so it is not simply a key id; decide the form before changing the row.",
+        "A reply's key is not gated, and the selector side is as before.",
+        "On one repeated key the open table's memory is as fast as the closed table or faster; whether a closed image should still build the memory is a question for a profile with a tight ROM budget, which has not been measured.",
+        "Owner decisions still open: undeclared key under a declared wildcard (data keys), one declaration or two with access control, publisher wildcards, sender-fixed resource ids.",
+        "Read the hosted run of this push per job, compared by head sha."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
