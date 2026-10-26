@@ -624,15 +624,42 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
   replaces and the rest is the peer tables' construction and drop, the reconcile, and code the
   compiler placed differently. The builds that answer queries grow about 9,000 to 11,000 more,
   which is not yet attributed.
-- **L2. A face table of one.** `Link` becomes a face: its id, its wire, its tables, its
-  `Replay`, its `generation`, its requesters; `Core` holds a table of them, the dial role's one
-  entry at a fixed id as `wz-capi-core` keeps `DIAL_FACE_ID`. A get is one leg for each face up,
-  which the port's `get_on_wire` already returns as a count; a publish goes to every face; a
-  write filter and a matching listener count the remote declarations of ALL faces
-  (`peer_matches` reads the table); an answer to a query goes to the face whose generation it
-  carries; a face event is reported for each face. Still one face, so the proof is again the
-  existing suite, plus the new unit tests of what the table decides with two faces on a
-  scripted link.
+- **L2. A face table. Done.** `Link` is a face: `Core` holds `Face { id, link, replay }` for
+  each, the dial role's first at `DIAL_FACE` (`1 << 62`, as `wz-capi-core` keeps it) and never
+  removed, and the registry holds the matching `FaceTables { peer, gets }`. The generation is the
+  link's (`Wire`). Each decision of the step:
+  - A declaration is told to every face that is up, each with a replay cursor of its own, and a
+    face that comes up is told all the session holds; a refused key alias is made over, and the
+    faces that took it take it back.
+  - A publish, a plain put, a batch and a keep-alive go to every face. A get is one leg for each
+    face up and one for the session's own queryables (`local-queryable`), which the port's
+    `get_on_wire` documents and the tokio engine already issues; the session's own leg is
+    registered under an id no link hands out and outlives every link. It used to share the
+    peer's entry (two Finals), so a test that asked the default destination of an engine with
+    `local-queryable` counted one leg and counts two now.
+  - A write filter reads every face's peer; a matching listener flips when the LAST face's peer
+    lets go. That needed the dispatch of one face to read the others: `slot_observer`'s
+    `OtherPeers`, which `dispatch_event_among` and `flush_declarations_on_link_loss_among` take
+    (monomorphic, so a slot image that has no other face pays nothing) and the registry
+    implements over the other faces' tables.
+  - A query is answered to the face it came in on. The query plane named a query's link by the
+    one dialled last, which is right for one link and wrong for two (a query on the older link
+    was answered to the newer, and its Final went out with no reply); a face now says its own
+    generation as its frame is dispatched.
+  - A face whose link is lost takes its peer's declarations with it and is dialled again if it
+    is the dial role's, and is removed if it is not. A face that is not the dial role's comes
+    from `CoopEngine::attach_face`, which dials one more endpoint (L3's accepted faces take the
+    same road).
+  - `read` waits on the readiness of the one link that has something to wait on, and looks at
+    several a millisecond apart (`IdleWait::Sleep`); L3 measures a multiplexed wait.
+
+  The proof: the whole suite as it was, bar the expectations of a default-destination get
+  (`tests::face_table::`, four new tests, run the session on two routers: a declaration and a
+  put reach both, a get is two legs that end with the last Final, a filter and a listener count
+  both peers and flip only when the last lets go, a query is answered to the router that asked
+  and a lost face leaves the other), the cooperative legs of Layer C1co, and the eight
+  cooperative cases of the size gate, which grew 17,220 to 24,520 bytes on pc2 (the budgets
+  state it, and the symbols of the scout build say where it went).
 - **L3. The acceptor.** The face table takes a face when the accept side yields a link, and
   loses it when its lease ends or its peer closes. The link layer's `SessionLinks` gains the
   accepting side: `Accept` over the host's `tcp/` listener first (it exists for the slot profile
@@ -657,8 +684,13 @@ and the accepted faces take ids beneath it, as `wz-capi-core`'s do; a sample tha
 two faces is delivered twice, as a peer that forwards would deliver it twice in zenoh-pico; the
 engine's one session lock stays, and a face's callbacks still run outside it (D8).
 
+Decided by L2: each face has a replay cursor of its own (so a new face is told the session's
+declarations at the pace the session states, whatever the other faces have been told); the dial
+role's tables are emptied when its link is lost and it keeps its face, an accepted face is removed
+with its link; a get is one leg for each face and one for the session's own queryables.
+
 Open, to be settled by the step that meets it and not before: how `read` waits on several links
-(L3); whether the bound of faces is a build constant or the config's; the order in which a new face is told the session's declarations when the session
-is already large (`Replay` is paced per link today); whether a face's `PeerTables` are kept or
-dropped when its link is lost and redialled (the dial role redials; an accepted face does not,
-its peer dials again and is a new face).
+(L3, which measures a multiplexed wait against the bounded look L2 makes); whether the bound of
+faces is a build constant or the config's; what a liveliness subscriber's history is when two
+faces hold the same token key (L2 hands it every face's tokens, and each face's loss deletes its
+own).
