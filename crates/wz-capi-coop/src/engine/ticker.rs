@@ -12,6 +12,9 @@
 
 use wz_capi_port::{Tick, TickerId};
 
+#[allow(unused_imports)]
+use crate::prelude::*;
+
 /// One periodic job.
 struct Entry {
     id: TickerId,

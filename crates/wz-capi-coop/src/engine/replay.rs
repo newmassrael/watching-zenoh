@@ -21,7 +21,7 @@
 //! idle wait is shortened to. A send the link refused is not lost in either case: the next turn
 //! starts at the entry it failed on.
 
-use std::rc::Rc;
+use alloc::rc::Rc;
 
 use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::ClockSource;

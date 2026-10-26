@@ -3849,6 +3849,7 @@ name = "wz-capi-coop"
 version = "0.1.0"
 dependencies = [
  "log",
+ "portable-atomic",
  "wz-capi-port",
  "wz-ext-pubsub",
  "wz-host-net",

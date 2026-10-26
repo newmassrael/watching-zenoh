@@ -30,6 +30,32 @@
 //! the neutral `wz-ext-pubsub`'s, hosted over the engine's port.
 //!
 //! What it does not do yet, a later step of the note: the listening role.
+//!
+//! ## Where it builds
+//!
+//! `no_std` with `alloc`, so the pico C ABI on an MCU runs on this engine and not on a copy of it
+//! (`docs/upstream-parity.md` section 5a). What the engine asks of an operating system (its mutex,
+//! its read task's thread, its sleep) is `wz-capi-port`'s `os`; the `std` feature, on by default,
+//! gives it the host's, and the runtime's critical sections the process's lock (`host-lock`).
+//! Without it the image supplies both: the kernel's answers to `os` and a `critical-section`
+//! implementation. Scouting asks the host's multicast sockets and comes with `std` only.
+
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+
+/// What `std`'s prelude gave every module and `alloc` does not: brought in by the modules that
+/// use it, so a build without `std` reads the same source. A build's features decide which of
+/// these it names, so one that names none of an item is not an error.
+#[allow(unused_imports)]
+mod prelude {
+    pub(crate) use alloc::borrow::ToOwned;
+    pub(crate) use alloc::boxed::Box;
+    pub(crate) use alloc::format;
+    pub(crate) use alloc::string::{String, ToString};
+    pub(crate) use alloc::vec;
+    pub(crate) use alloc::vec::Vec;
+}
 
 mod engine;
 #[cfg(feature = "scout")]

@@ -26,11 +26,15 @@
 //! the session's: a router that asked on a link since lost will never read the answer, and a new
 //! router never asked.
 
-use std::collections::VecDeque;
+use alloc::collections::VecDeque;
+use alloc::sync::{Arc, Weak};
 #[cfg(feature = "local-queryable")]
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Weak};
+use core::sync::atomic::AtomicBool;
+use core::sync::atomic::Ordering;
+use portable_atomic::AtomicU64;
+
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 use wz_capi_port::os::{self, Mutex, ThreadId};
 use wz_capi_port::sync::Lock;

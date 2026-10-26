@@ -15,8 +15,8 @@
 //! link), said by a guard the sink owns. The deliveries hand both out with no lock held, the end
 //! as the drop of the leg's callback, which is how a C program learns its get is over.
 
-use std::collections::VecDeque;
-use std::sync::Arc;
+use alloc::collections::VecDeque;
+use alloc::sync::Arc;
 
 use wz_capi_port::os::Mutex;
 

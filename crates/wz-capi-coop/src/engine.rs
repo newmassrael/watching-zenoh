@@ -28,12 +28,18 @@
 //! stepped like everything else: a step moves the handshake on and returns, so a program that
 //! steps its session, or its read task, is what brings the link back.
 
-use std::any::Any;
-use std::cell::RefCell;
-use std::collections::VecDeque;
-use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Weak};
+use alloc::collections::VecDeque;
+use alloc::rc::Rc;
+use alloc::sync::{Arc, Weak};
+use core::any::Any;
+use core::cell::RefCell;
+use core::sync::atomic::{AtomicBool, Ordering};
+// A 64-bit atomic where the target has one, and a critical section where it does not (a
+// Cortex-M7 has 32-bit atomics only).
+use portable_atomic::AtomicU64;
+
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 // The operating system the engine runs on: its mutex, its threads and its sleep are `std`'s on a
 // host and the kernel's on an MCU (`docs/upstream-parity.md` section 5a, E1).
@@ -700,7 +706,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     fn poll_link(&mut self, redial_ms: Option<u64>) -> Result<(), OpenError> {
         let now_us = self.clock.now_us();
         let now_ms = now_us / 1000;
-        let link = std::mem::replace(&mut self.link, Link::Waiting { at_us: now_us });
+        let link = core::mem::replace(&mut self.link, Link::Waiting { at_us: now_us });
         self.link = match link {
             // zenoh-pico's client reopens whatever ended its link: a lease that ran out, a read
             // that failed, a Close from the router (`vendor/zenoh-pico/src/transport/unicast/read.c` @
@@ -890,7 +896,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// End the link, whatever it is doing, telling an established peer so.
     fn end_link(&mut self) {
         self.replay.discard();
-        let link = std::mem::replace(&mut self.link, Link::Waiting { at_us: u64::MAX });
+        let link = core::mem::replace(&mut self.link, Link::Waiting { at_us: u64::MAX });
         if let Link::Up(wire) | Link::Dialing { wire, .. } = link {
             if wire.actions.is_established() {
                 wire.actions.send_close_with_reason(CloseReason::Generic);
@@ -2402,13 +2408,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         let live_subs: Vec<SubId> = Vec::new();
         drop(guard);
         #[cfg(feature = "liveliness")]
-        drop(std::mem::take(&mut *lock(&self.live_samples)));
+        drop(core::mem::take(&mut *lock(&self.live_samples)));
         #[cfg(feature = "query")]
-        drop(std::mem::take(&mut *lock(&self.gets.events)));
+        drop(core::mem::take(&mut *lock(&self.gets.events)));
         // The queries no callback will now answer, and the callbacks' C contexts, are dropped
         // with no lock held.
         #[cfg(feature = "queryable")]
-        drop(std::mem::take(&mut *lock(&self.plane.queries)));
+        drop(core::mem::take(&mut *lock(&self.plane.queries)));
         let taken: Vec<_> = subscribers
             .into_iter()
             .chain(matches)

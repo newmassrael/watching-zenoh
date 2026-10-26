@@ -17,8 +17,8 @@
 //! asked for its history, or gone with a lost link. The deliveries hand them out with no lock
 //! held.
 
-use std::collections::VecDeque;
-use std::sync::Arc;
+use alloc::collections::VecDeque;
+use alloc::sync::Arc;
 
 use wz_capi_port::os::Mutex;
 
@@ -31,6 +31,8 @@ use wz_session_core::declare_form::RetractionKey;
 use wz_session_mcu::dial::McuActions;
 
 use super::lock;
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 /// A liveliness subscriber's callback, as the ABI's sink minted it, locked while it runs as a
 /// subscriber's is.

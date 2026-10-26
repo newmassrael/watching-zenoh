@@ -33,7 +33,8 @@ path = "src/lib.rs"
 crate-type = ["rlib"]
 
 [dependencies]
-wz-capi-port = { path = "../wz-capi-port" }
+# The port, without its host half: `std` below asks for it (src/lib.rs, "Where it builds").
+wz-capi-port = { path = "../wz-capi-port", default-features = false }
 # What a zenoh-pico client does on a session: publish (Put and Delete, with every
 # metadata field), declare key expressions and subscribers and retract them, ask a
 # router who subscribes or answers (the write filter and the matching status),
@@ -74,13 +75,17 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
     "keyexpr-dollar-star",
     "keyexpr-includes",
 ] }
-# `host-lock`: this engine runs on a host, so the runtime's critical sections are a lock of the
-# process and no `critical-section` implementation is linked (wz-runtime-coop's src/cs.rs).
+# `host-lock` comes with `std` below: on a host the runtime's critical sections are a lock of the
+# process and no `critical-section` implementation is linked (wz-runtime-coop's src/cs.rs); an MCU
+# image links its own.
 wz-runtime-coop = { path = "../wz-runtime-coop", default-features = false, features = [
     "alloc",
     "transport-batching",
-    "host-lock",
 ] }
+# The engine's 64-bit counters (entity ids, link generations): native where the target has a
+# 64-bit atomic, a critical section where it has not (a Cortex-M7 has 32-bit atomics only). The
+# same features as wz-runtime-coop's, so the two resolve to one build of it.
+portable-atomic = { version = "1", default-features = false, features = ["fallback", "critical-section"] }
 # The dialler's endpoint reader and the application layer's dispatch.
 wz-session-mcu = { path = "../wz-session-mcu", default-features = false, features = [
     "alloc",
@@ -96,6 +101,11 @@ wz-host-net = { path = "../wz-host-net", optional = true }
 log = { version = "0.4", optional = true }
 
 [features]
+# The host: `std`'s mutex, threads and sleep behind the port's `os`, and the process's lock behind
+# the runtime's critical sections. Without it the engine is `no_std` with `alloc` and the image
+# supplies both (docs/upstream-parity.md section 5a).
+default = ["std"]
+std = ["wz-capi-port/std", "wz-runtime-coop/host-lock"]
 # Periodic jobs on the session (`SessionEngine::start_ticker`): a job run from the call that steps
 # the session once its time has come, which the advanced publisher's heartbeat is. A build that
 # starts none leaves it out, so the job table, the cut to a read's wait and the run after a step
@@ -108,6 +118,7 @@ ticker = []
 # ask socket to each interface that can carry multicast, which an unhonoured key would leave to
 # the kernel (one socket on the default route, which asks no other interface).
 scout = [
+    "std",
     "dep:wz-host-net",
     "dep:log",
     "wz-host-net/locator-iface",

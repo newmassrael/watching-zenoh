@@ -13,9 +13,13 @@
 //! announced to a watcher that came after it, which reads the faces that stand
 //! (`face_snapshots`) for its history, as zenoh-pico's listener does.
 
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use alloc::collections::VecDeque;
+use alloc::sync::Arc;
+use core::sync::atomic::Ordering;
+use portable_atomic::AtomicU64;
+
+#[allow(unused_imports)]
+use crate::prelude::*;
 
 use wz_capi_port::os::Mutex;
 
