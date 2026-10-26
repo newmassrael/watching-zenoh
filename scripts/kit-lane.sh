@@ -11,6 +11,7 @@
 #   scripts/kit-lane.sh build <image>        west build, pad to the region, the stack gate on the ELF
 #   scripts/kit-lane.sh run <image>          flash, boot, ask, and hold the run to its row
 #   scripts/kit-lane.sh all <image>...       preflight, then build and run each
+#   scripts/kit-lane.sh compare [--boots N] <image>...   answering images side by side, alternating boots
 #   scripts/kit-lane.sh build-responder      the host node that answers the asking image (needs cargo)
 #   scripts/kit-lane.sh list                 the images
 #   scripts/kit-lane.sh --selftest           the table of images against the gates and the overlays
@@ -21,7 +22,11 @@
 # over the secure channel, the lane configures the router to pin the certificate the image prints, holds
 # the run to the image's line that its peer is verified, and then measures a GET as for an answering
 # image. A MEASURE image (zephyr-tls-fit, the secure channel's fit) runs alone, with no router: it is
-# flashed, reset, and held to its own console verdict.
+# flashed, reset, and held to its own console verdict. COMPARE images (zephyr-client-heap, the client on
+# the heap profile, and zephyr-pico-queryable, zenoh-pico answering the same two GETs) are run by
+# `compare` beside answering images (docs/upstream-parity.md M1): each boot in alternating order, the
+# session's datagrams captured at the host's wire, and scripts/lib/kit_compare.py's verdict per cell.
+# The pico image builds from vendor/zenoh-pico, so a tree sent here carries that submodule too.
 #
 # WHERE IT RUNS: from a checkout of this repository on the host the kit is attached to (the lane builds
 # from the tree it lives in, so what was measured is what is in front of you). Send a tree there with
@@ -80,7 +85,21 @@ bad() {
 # `--selftest` holds it to the stack gate's population and to the files.
 image_spec() {
     APP=zephyr-admin-node
+    READY_TAG="ZEPHYR-WZ-CLIENT READY"
     case "$1" in
+        # COMPARE images (docs/upstream-parity.md M1): they answer the same two GETs with the same keys,
+        # bodies and encoding as zephyr-client-fixed, and are run by `compare` beside it. They have no
+        # stack gate row and no resource row: what a compare run reads of them is its own report.
+        zephyr-client-heap)
+            OVERLAYS="overlays/t2g_zeth.conf;overlays/t2g_client.conf"
+            KIND=answer
+            ;;
+        zephyr-pico-queryable)
+            APP=zephyr-pico-compare
+            OVERLAYS=""
+            KIND=answer
+            READY_TAG="ZEPHYR-PICO READY"
+            ;;
         # A MEASURE image runs alone on the kit, with no router and no network, and its console says
         # what it measured and whether it held (a line `<TAG> done ok=1`). The secure channel's fit
         # (decision D9 of docs/session-lifecycle-intent.md): Mbed TLS's mutual TLS 1.3 handshake
@@ -117,6 +136,9 @@ IMAGES=(zephyr-client-fixed zephyr-client-fixed-batching zephyr-client-fixed-get
 # The measure images: not the stack gate's (their stack is what they report) and not yet a resource
 # row's (the row is set from what they measure).
 MEASURE_IMAGES=(zephyr-tls-fit)
+# The compare images: run only by `compare`, beside the images above.
+COMPARE_IMAGES=(zephyr-client-heap zephyr-pico-queryable)
+is_compare_image() { [[ " ${COMPARE_IMAGES[*]} " == *" $1 "* ]]; }
 # The port a verify image's router listens on for `tls/` (the image's CONFIG_WZ_CLIENT_ENDPOINT).
 TLS_PORT=7448
 
@@ -303,6 +325,8 @@ PY
         ok "$key" "a measure image: its stack is one of the figures it reports, not the stack gate's"
     elif [[ "$KIND" == verify ]]; then
         ok "$key" "a verify image: no stack gate row yet, its first runs on the kit set it"
+    elif is_compare_image "$key"; then
+        ok "$key" "a compare image: no stack gate row, a compare run reports what it reads of it"
     elif python3 "$ROOT/scripts/lib/stack_frame_gate.py" --check "$key" --elf "$elf" >"$out/stack-gate.log" 2>&1; then
         ok "$key" "the stack gate holds the image ($(grep -a 'stack-chain: OK' "$out/stack-gate.log" | head -n 1 | cut -c1-120))"
     else
@@ -360,6 +384,8 @@ stop_all() {
 # The lines of the console that came AFTER the reset: the kit boots the image once on its own when the
 # flash ends, with no router yet, and that boot's lines are not this run's.
 count_lines() { grep -a -c "$1" "$OUT/console.raw" 2>/dev/null || true; }
+# The node's key id, the first word after the image's READY tag: the keys the host asks are under it.
+ready_node_id() { grep -a -o "$READY_TAG [0-9a-f]*" "$OUT/console.raw" | tail -n 1 | awk '{print $NF}'; }
 
 run() {
     local key="$1" before="$fails"
@@ -461,7 +487,7 @@ start_and_reset() {
     fi
 
     local ready_before
-    ready_before="$(count_lines 'ZEPHYR-WZ-CLIENT READY')"
+    ready_before="$(count_lines "$READY_TAG")"
     GETTER_BEFORE="$(count_lines 'ZEPHYR-WZ-GET done')"
     if timeout 60 "$KIT_PROGTOOLS/openocd/bin/openocd" -s "$KIT_PROGTOOLS/openocd/scripts" \
         -f interface/kitprog3.cfg -f target/infineon/cyt4bf.cfg -c "init" -c "reset run" -c "shutdown" \
@@ -475,13 +501,13 @@ start_and_reset() {
     local waited=0 limit=60
     [[ "$KIND" == ask ]] && limit=150
     while [[ "$waited" -lt "$limit" ]]; do
-        if [[ "$(count_lines 'ZEPHYR-WZ-CLIENT READY')" -gt "$ready_before" ]]; then
+        if [[ "$(count_lines "$READY_TAG")" -gt "$ready_before" ]]; then
             break
         fi
         sleep 1
         waited=$((waited + 1))
     done
-    if [[ "$(count_lines 'ZEPHYR-WZ-CLIENT READY')" -le "$ready_before" ]]; then
+    if [[ "$(count_lines "$READY_TAG")" -le "$ready_before" ]]; then
         bad "$key" "no READY line after the reset in ${limit} s: the image did not start (is the CM0+ launcher in place? preflight --deep)"
         return 1
     fi
@@ -494,7 +520,7 @@ start_and_reset() {
 hold_the_run() {
     local key="$1" limit="$2" waited=0
     local results=() node_id
-    node_id="$(grep -a -o 'ZEPHYR-WZ-CLIENT READY [0-9a-f]*' "$OUT/console.raw" | tail -n 1 | awk '{print $3}')"
+    node_id="$(ready_node_id)"
     if [[ "$KIND" == answer || "$KIND" == verify ]]; then
         if python3 -I "$ROOT/scripts/lib/kit_rest_probe.py" "$REST_PORT" "$node_id" "$OUT/rest.json" 2000 >"$OUT/probe.log" 2>&1; then
             ok "$key" "the host asked the kit's two documents 2,000 times each ($OUT/probe.log)"
@@ -663,6 +689,123 @@ EOF
     ok "$key" "the image and the router verify each other: $verdict"
 }
 
+# ── compare ─────────────────────────────────────────────────────────────────────────────────────
+# Answering images side by side (docs/upstream-parity.md M1, decision D1). Every image is built, then
+# each round boots every image once, in the images' order on odd rounds and the reverse on even ones,
+# so a drift of the bench over the run falls on both sides alike. A boot is: the flash written and read
+# back, the router and the console, the reset, the READY line, a capture of the session's datagrams
+# at the host's wire around the host's GETs, and the stack line the firmware prints when it moves.
+# The verdict is scripts/lib/kit_compare.py's, against the first image named.
+compare() {
+    local boots=6 keys=() key
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --boots)
+                [[ "${2:-}" =~ ^[1-9][0-9]*$ ]] || { bad compare "--boots takes a count"; return 1; }
+                boots="$2"
+                shift 2
+                ;;
+            *) keys+=("$1"); shift ;;
+        esac
+    done
+    if [[ "${#keys[@]}" -lt 2 ]]; then
+        bad compare "name two images or more: the first is the reference"
+        return 1
+    fi
+    for key in "${keys[@]}"; do
+        image_spec "$key" || { bad compare "$key is not an image of this lane (scripts/kit-lane.sh list)"; return 1; }
+        [[ "$KIND" == answer ]] || { bad compare "$key does not answer the host's GETs, which is what is compared"; return 1; }
+    done
+    preflight "" || return 1
+    for key in "${keys[@]}"; do
+        build "$key" || return 1
+    done
+    exec 9>"$LANE_HOME/kit.lock"
+    if ! flock -n 9; then
+        bad compare "another lane run holds $LANE_HOME/kit.lock: one run at a time touches the kit"
+        return 1
+    fi
+    local run_dir="$LANE_HOME/compare/$CLOCK_TAG" round order built i
+    mkdir -p "$run_dir"
+    {
+        echo "images: ${keys[*]}"
+        echo "boots:  $boots"
+        echo "router: $(router_version)"
+        echo "tree:   $(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo 'not a git checkout (a copy of a tree)')"
+        echo "date:   $(date '+%F %T %Z')"
+    } >"$run_dir/record.txt"
+    : >"$run_dir/manifest.tsv"
+    for ((round = 1; round <= boots; round++)); do
+        order=("${keys[@]}")
+        if ((round % 2 == 0)); then
+            order=()
+            for ((i = ${#keys[@]} - 1; i >= 0; i--)); do
+                order+=("${keys[i]}")
+            done
+        fi
+        for key in "${order[@]}"; do
+            image_spec "$key"
+            built="$(cat "$LANE_HOME/last-out-$key")"
+            OUT="$run_dir/$key-r$round"
+            mkdir -p "$OUT"
+            cp "$built/elf.path" "$built/m7.sha256" "$OUT/"
+            compare_boot "$key" "$built/m7.bin" "$round" || return 1
+            printf '%s\t%s\t%s\n' "$round" "$key" "$key-r$round" >>"$run_dir/manifest.tsv"
+        done
+    done
+    if python3 -I "$ROOT/scripts/lib/kit_compare.py" --run "$run_dir" --ref "${keys[0]}" >"$run_dir/verdict.txt" 2>&1; then
+        ok compare "the run was read ($run_dir/verdict.txt):"
+        sed 's/^/    /' "$run_dir/verdict.txt"
+    else
+        bad compare "the run could not be read: $(head -n 3 "$run_dir/verdict.txt" | tr '\n' ' ')"
+    fi
+}
+
+# The capture runs as root, so this user's `kill` in stop_all cannot end it; sudo hands the signal it is
+# sent to tcpdump, which then writes out what it holds. A capture left running would refuse the next
+# flash (flash_region), so every way out of a boot ends it.
+CAPTURE_PID=""
+stop_capture() {
+    if [[ -n "$CAPTURE_PID" ]]; then
+        sudo -n kill -INT "$CAPTURE_PID" 2>/dev/null
+        wait "$CAPTURE_PID" 2>/dev/null
+        CAPTURE_PID=""
+    fi
+}
+
+end_boot() {
+    stop_capture
+    stop_all
+    trap - EXIT
+}
+
+compare_boot() {
+    local key="$1" bin="$2" tag="$1 (round $3)"
+    flash_region "$bin" "$(cat "$OUT/m7.sha256")" "$tag" || return 1
+    PIDS=()
+    ADDR_ADDED=""
+    trap end_boot EXIT
+    start_and_reset "$key" || { end_boot; return 1; }
+    local node_id
+    node_id="$(ready_node_id)"
+    # shellcheck disable=SC2024  # the capture is written as this user, into the boot's own directory
+    sudo -n tcpdump -i "$KIT_IFACE" -n -tt -l -q "udp port 7447" >"$OUT/cap.txt" 2>"$OUT/cap.err" </dev/null &
+    CAPTURE_PID=$!
+    sleep 1
+    if python3 -I "$ROOT/scripts/lib/kit_rest_probe.py" "$REST_PORT" "$node_id" "$OUT/rest.json" 2000 >"$OUT/probe.log" 2>&1; then
+        ok "$tag" "the host asked the two documents 2,000 times each"
+    else
+        bad "$tag" "the image never answered through the router ($OUT/probe.log)"
+        end_boot
+        return 1
+    fi
+    sleep 1
+    stop_capture
+    # The firmware prints its stack high-water mark when it moves; let the last line come.
+    sleep 12
+    end_boot
+}
+
 build_responder() {
     # The host node with the getter, built here from this tree: the peer the asking image asks.
     mkdir -p "$LANE_HOME"
@@ -720,6 +863,26 @@ PY
             fi
         fi
     done
+    for key in "${COMPARE_IMAGES[@]}"; do
+        if ! image_spec "$key" || [[ "$KIND" != answer ]]; then
+            bad selftest "$key is listed as a compare image and does not answer"
+            continue
+        fi
+        IFS=';' read -ra files <<<"$OVERLAYS"
+        for overlay in "${files[@]}"; do
+            [[ -f "$ROOT/deploy/$APP/$overlay" ]] || bad selftest "$key names $overlay, which is not in deploy/$APP"
+        done
+        # The tag the lane waits for and takes the node's key id from must be one the image prints.
+        if grep -rqF "$READY_TAG {}" "$ROOT/deploy/$APP/rust/src" 2>/dev/null \
+            || grep -qF "$READY_TAG %s" "$ROOT/deploy/$APP/src/main.c" 2>/dev/null; then
+            ok selftest "$key is a compare image of deploy/$APP that prints '$READY_TAG <id>'"
+        else
+            bad selftest "$key waits for '$READY_TAG', which deploy/$APP never prints with an id"
+        fi
+        if is_compare_image "$key" && [[ " ${IMAGES[*]} " == *" $key "* ]]; then
+            bad selftest "$key is both a compare image and a gated one"
+        fi
+    done
     for key in "${MEASURE_IMAGES[@]}"; do
         if ! image_spec "$key" || [[ "$KIND" != measure || -z "${DONE_TAG:-}" ]]; then
             bad selftest "$key is listed as a measure image and the table does not say how it ends"
@@ -749,11 +912,12 @@ case "$cmd" in
             build "$key" && run "$key"
         done
         ;;
+    compare) compare "$@" ;;
     build-responder) build_responder ;;
-    list) printf '%s\n' "${IMAGES[@]}" "${MEASURE_IMAGES[@]}" ;;
+    list) printf '%s\n' "${IMAGES[@]}" "${MEASURE_IMAGES[@]}" "${COMPARE_IMAGES[@]}" ;;
     --selftest) selftest ;;
     *)
-        sed -n '9,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+        sed -n '9,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
         exit 64
         ;;
 esac
