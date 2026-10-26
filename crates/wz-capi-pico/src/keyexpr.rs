@@ -22,8 +22,8 @@ use crate::abi::{
 };
 use crate::ffi::{guard_val, guarded};
 use crate::result::{
-    ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_KEYEXPR_DECLARED_ON_ANOTHER_SESSION, Z_ERR_NULL,
-    Z_OK,
+    ZResult, Z_EINVAL, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_KEYEXPR_DECLARED_ON_ANOTHER_SESSION,
+    Z_ERR_NULL, Z_OK,
 };
 use crate::session::{engine_of, engine_ref, session_handle, z_loaned_session_t, Engine};
 use crate::write_filter::PicoSession;
@@ -341,9 +341,29 @@ fn non_wild_prefix_len(literal: &str) -> usize {
     bytes[..star].iter().rposition(|&b| b == b'/').unwrap_or(0)
 }
 
+/// Whether `text` is a key expression in canon form, as pico's
+/// `_z_keyexpr_is_canon` answers it: valid, and already what canonizing it
+/// would produce. The one judgement behind [`z_keyexpr_is_canon`], the two
+/// checked view constructors and the checked owned constructor.
+fn is_pico_canon(text: &str) -> bool {
+    matches!(
+        wz_session_core::keyexpr_canon::canonize_keyexpr(text),
+        Ok(canon) if canon.as_str() == text
+    )
+}
+
 /// Build a view keyexpr borrowing the caller's C string (pico
-/// `z_view_keyexpr_from_str`). The keyexpr must be valid UTF-8; the caller
-/// keeps `name` alive for the view's lifetime.
+/// `z_view_keyexpr_from_str`). The keyexpr must be valid UTF-8 and in canon
+/// form; the caller keeps `name` alive for the view's lifetime.
+///
+/// A text that is not canon is refused with `Z_EINVAL`, as pico's documented
+/// contract says ("This function will fail if the string is not in canon
+/// form", `vendor/zenoh-pico/include/zenoh-pico/api/primitives.h` @
+/// `z_result_t z_view_keyexpr_from_str(`) and its body does
+/// (`vendor/zenoh-pico/src/api/api.c` @
+/// `if (_z_keyexpr_is_canon(name, len) != Z_KEYEXPR_CANON_SUCCESS) {`). Before
+/// it, `a//b` and `a/b/` were viewed, declared and published under where pico
+/// refuses them at this call.
 #[no_mangle]
 pub unsafe extern "C" fn z_view_keyexpr_from_str(
     keyexpr: *mut z_view_keyexpr_t,
@@ -355,8 +375,11 @@ pub unsafe extern "C" fn z_view_keyexpr_from_str(
         }
         let cstr = CStr::from_ptr(name);
         // Validate UTF-8 up front; the borrowed bytes are read as `&str` later.
-        if cstr.to_str().is_err() {
+        let Ok(text) = cstr.to_str() else {
             return Z_ERR_INVALID;
+        };
+        if !is_pico_canon(text) {
+            return Z_EINVAL;
         }
         let bytes = cstr.to_bytes();
         *keyexpr = z_view_keyexpr_t {
@@ -414,9 +437,10 @@ pub unsafe extern "C" fn z_view_keyexpr_from_str_unchecked(
 /// `demo/example/**` and then re-views a prefix of it — and copying to
 /// NUL-terminate would defeat the whole point of a borrowing view.
 ///
-/// UTF-8 is validated over exactly those `len` bytes, matching the checked
-/// [`z_view_keyexpr_from_str`]: a view this crate stores must be readable as
-/// `&str` at every later publish.
+/// UTF-8 and canon form are validated over exactly those `len` bytes, matching
+/// the checked [`z_view_keyexpr_from_str`] (which pico implements as this
+/// function): a view this crate stores must be readable as `&str` at every
+/// later publish, and a text that is not canon is refused with `Z_EINVAL`.
 #[no_mangle]
 pub unsafe extern "C" fn z_view_keyexpr_from_substr(
     keyexpr: *mut z_view_keyexpr_t,
@@ -428,8 +452,11 @@ pub unsafe extern "C" fn z_view_keyexpr_from_substr(
             return Z_ERR_NULL;
         }
         let bytes = std::slice::from_raw_parts(name.cast::<u8>(), len);
-        if std::str::from_utf8(bytes).is_err() {
+        let Ok(text) = std::str::from_utf8(bytes) else {
             return Z_ERR_INVALID;
+        };
+        if !is_pico_canon(text) {
+            return Z_EINVAL;
         }
         *keyexpr = z_view_keyexpr_t {
             _start: bytes.as_ptr(),
@@ -786,13 +813,11 @@ pub unsafe extern "C" fn z_keyexpr_from_substr(
         };
         // The canon CHECK, not the canon transform: equality with the canonical
         // form is exactly `_z_keyexpr_is_canon` returning OK.
-        match wz_session_core::keyexpr_canon::canonize_keyexpr(&text) {
-            Ok(canon) if canon.as_str() == text => {
-                store_owned_keyexpr(keyexpr, DeclaredKeyexpr::literal_only(text));
-                Z_OK
-            }
-            _ => Z_ERR_INVALID,
+        if !is_pico_canon(&text) {
+            return Z_ERR_INVALID;
         }
+        store_owned_keyexpr(keyexpr, DeclaredKeyexpr::literal_only(text));
+        Z_OK
     })
 }
 
@@ -1140,9 +1165,10 @@ pub unsafe extern "C" fn z_keyexpr_is_canon(start: *const c_char, len: usize) ->
         else {
             return Z_ERR_INVALID;
         };
-        match wz_session_core::keyexpr_canon::canonize_keyexpr(text) {
-            Ok(canon) if canon.as_str() == text => Z_OK,
-            _ => Z_ERR_INVALID,
+        if is_pico_canon(text) {
+            Z_OK
+        } else {
+            Z_ERR_INVALID
         }
     })
 }
@@ -1305,6 +1331,43 @@ mod tests {
             .expect("test host entropy"),
         )
         .as_engine()
+    }
+
+    /// The checked view constructors refuse what pico refuses: a text that is
+    /// not in canon form (an empty chunk inside, at the end or at the start, a
+    /// spelling canonizing would change) is `Z_EINVAL` from both, and a canon
+    /// one, wildcards included, is viewed. The substring form judges exactly its
+    /// `len` bytes, so a canon prefix of a text that is not canon is viewed.
+    #[test]
+    fn the_checked_views_refuse_a_text_not_in_canon_form() {
+        let view = |text: &str| unsafe {
+            let c = std::ffi::CString::new(text).unwrap();
+            let mut out: z_view_keyexpr_t = std::mem::zeroed();
+            z_view_keyexpr_from_str(&mut out, c.as_ptr())
+        };
+        let view_substr = |text: &str, len: usize| unsafe {
+            let mut out: z_view_keyexpr_t = std::mem::zeroed();
+            z_view_keyexpr_from_substr(&mut out, text.as_ptr().cast(), len)
+        };
+        for refused in [
+            "zenoh//test",
+            "zenoh/test/",
+            "/zenoh/test",
+            "a/**/*",
+            "a/$*",
+        ] {
+            assert_eq!(view(refused), Z_EINVAL, "{refused} is not canon");
+            assert_eq!(
+                view_substr(refused, refused.len()),
+                Z_EINVAL,
+                "{refused} is not canon"
+            );
+        }
+        for viewed in ["zenoh/test", "zenoh/test/*", "a/*/**", "demo/$*x"] {
+            assert_eq!(view(viewed), Z_OK, "{viewed} is canon");
+            assert_eq!(view_substr(viewed, viewed.len()), Z_OK, "{viewed} is canon");
+        }
+        assert_eq!(view_substr("zenoh/test/", "zenoh/test".len()), Z_OK);
     }
 
     /// R2959 — pico's `_z_keyexpr_non_wild_prefix_len`, case by case: up to the
