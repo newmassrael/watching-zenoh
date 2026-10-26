@@ -1203,7 +1203,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":42,"key":"kind","values":[...],
+ *     {"name":"fields","revision":43,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -1233,10 +1233,13 @@
  * @carries census mode passenger
  * @carries census offset_space passenger
  * @carries census sender_end passenger
+ * @carries fields announced_version passenger
  * @carries fields body passenger
  * @carries fields carried_state discriminant
+ * @carries fields check passenger
  * @carries fields counter_reason passenger
  * @carries fields direction passenger
+ * @carries fields eps_basis passenger
  * @carries fields family passenger
  * @carries fields keyexpr_cause passenger
  * @carries fields kind discriminant
@@ -1246,10 +1249,12 @@
  * @carries fields outcome passenger
  * @carries fields phase passenger
  * @carries fields priority passenger
+ * @carries fields q_basis passenger
  * @carries fields reason passenger
  * @carries fields request_kind passenger
  * @carries fields selected passenger
  * @carries fields state discriminant
+ * @carries fields strength passenger
  * @carries fields under passenger
  * @carries fields unopened_reason discriminant
  * @carries fields verdict passenger
@@ -1885,19 +1890,18 @@ int wz_dissect_pcap_census_bounded(const unsigned char *bytes, size_t len,
  *   link         tcp udp raweth serial vsock                 == !=
  *   flow         an integer, the flow's list_id              == != < <= > >=
  *   packet       an integer, the row's packet                == != < <= > >=
- *   zenoh        the flow's word: proven unproven            == !=
- *                foreign_version mixed
+ *   zenoh        the flow's word: yes no undecided           == !=
  *
  * `zenoh` reads the word WHETHER A FLOW IS ZENOH (wz_dissect_pcap_session_table
  * describes it) gives the flow a row is in, as the flow's evidence stands when
- * the selector is judged: `zenoh == proven` is `yes` on every row of a flow with
- * an Init, Join, Scout or Hello of the protocol's version read from a unit read
- * whole, and `no` on every row of any other. It is the flow's word and not the
- * message's: a KeepAlive row of a proven flow is `yes`. A row whose flow has no
- * word (a plane handed no node census of its lists) is UNDECIDED, `!=` and `not`
- * with it, and never `no`. Because the word moves as Inits arrive, a row a
- * cursor has passed can read another word later, and wz_dissect_live_selection_since
- * names it in `revised`. The word is evidence of the flow, not a count of how
+ * the selector is judged: `zenoh == yes` is `yes` on every row of a flow whose
+ * sequential test crossed its threshold for zenoh, and `no` on every row of any
+ * other. It is the flow's word and not the message's: a KeepAlive row of a flow
+ * that is zenoh is `yes`. A row whose flow has no word (a plane handed no node
+ * census of its lists) is UNDECIDED, `!=` and `not` with it, and never `no`.
+ * Because the word moves as evidence arrives, a row a cursor has passed can read
+ * another word later, and wz_dissect_live_selection_since names it in
+ * `revised`. The word is evidence of the flow, not a count of how
  * its units read: that is `unit_readings`, on the field document's flow and the
  * session table's rows, and no selector field reads it.
  *
@@ -2128,19 +2132,34 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * answers the same question through wz_dissect_live_session_table, with the
  * same document; its limits are the handle's, chosen at open.
  *
- *     {"document":{"name":"session_table","revision":4},"ok":true,
+ *     {"document":{"name":"session_table","revision":5},"ok":true,
  *      "sessions":[{"initiator":"a1a1a1a1","acceptor":"b2b2b2b2","link":"tcp",
  *                   "phase":"established","encrypted":"clear",
  *                   "first_seen_ts_ns":"1700000000000000000",
  *                   "last_seen_ts_ns":"1700000000000015000",
- *                   "frames":10,"bytes":48,"zenoh":"proven",
+ *                   "frames":10,"bytes":48,"zenoh":"yes",
+ *                   "announced_version":"own",
+ *                   "zenoh_evidence":{"log2_lr_millibits":43029,
+ *                     "yes_at_millibits":20000,"no_at_millibits":-20000,
+ *                     "model":1,
+ *                     "checks":[{"check":"init_roles","strength":"handshake",
+ *                                "confirmed":1,"violated":0,"millibits":999,
+ *                                "q_basis":"derived","eps_basis":"assumed"},
+ *                               {"check":"version_header","strength":"header",
+ *                                "confirmed":2,"violated":0,"millibits":16000,
+ *                                "q_basis":"derived","eps_basis":"none"},
+ *                               {"check":"unit_reading","strength":"unit",
+ *                                "confirmed":10,"violated":0,
+ *                                "millibits":26030,"q_basis":"generated",
+ *                                "eps_basis":"assumed"}]},
  *                   "unit_readings":{"explained":{"units":10,"bytes":28},
  *                                    "residual":{"units":0,"bytes":0},
  *                                    "undecoded":{"units":0,"bytes":0}},
  *                   "unstated":[],
  *                   "flows":[{"flow":{"low":{...},"high":{...},"link":"tcp"},
  *                             "encrypted":"clear","bytes":48,
- *                             "zenoh":"proven",
+ *                             "zenoh":"yes","announced_version":"own",
+ *                             "zenoh_evidence":{...},
  *                             "unit_readings":{...}}]}],
  *      "excluded":[{"why":"multicast_group","count":0},
  *                  {"why":"scouting_only","count":0}],
@@ -2198,9 +2217,10 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *                every datagram, a duplicate counted again; for the serial line
  *                the bytes of the line as captured. Never the Ethernet, IP or
  *                transport headers. A count this library measures: a bare number.
- *   `zenoh`      whether the bytes are zenoh (session_table revision 3); see
- *                WHETHER A FLOW IS ZENOH below. A row's word is its flows'
- *                evidence taken together.
+ *   `zenoh`, `announced_version`, `zenoh_evidence`  whether the bytes are zenoh,
+ *                what their version-bearing messages announced, and the test
+ *                behind the word (session_table revision 5); see WHETHER A FLOW
+ *                IS ZENOH below. A row's evidence is its flows' together.
  *   `unit_readings`  how the framing units READ (session_table revision 4); see
  *                HOW A FLOW'S UNITS READ below. A row's tallies are its flows'
  *                together.
@@ -2208,43 +2228,79 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *                below.
  *   `flows`      the flows the row is made of, each with the flow object every
  *                other document carries (so a consumer can join), its `encrypted`
- *                finding, its own `bytes`, its own `zenoh` and its own
+ *                finding, its own `bytes`, its own three zenoh keys and its own
  *                `unit_readings`.
  *
  * WHETHER A FLOW IS ZENOH. Arbitrary bytes decode as zenoh transport messages:
  * a datagram on any port is read as one, and a few bytes make a KeepAlive or a
- * Frame. So a row, a flow and a node are evidence of nothing by existing. Four
- * messages begin with a byte the protocol fixes, the protocol version (0x09):
- * an Init, a Join, a Scout and a Hello. `zenoh` is what those said, on every
- * row and flow here and on every flow object of the field document (revision
- * 41):
+ * Frame. So a row, a flow and a node are evidence of nothing by existing, and
+ * one message is weak evidence: a DNS id of 0x6109 writes a Join header of
+ * version 0x09. `zenoh` is a SEQUENTIAL TEST over what the flow's messages keep
+ * that other protocols rarely keep by chance, on every row and flow here and on
+ * every flow object of the field document (revision 43). Each observation adds
+ * a weight in millibits, log2 of how much likelier it is from zenoh than from
+ * another protocol, and the sum is read against two thresholds:
  *
- *   `proven`           one of the four decoded with version 0x09 out of a unit
- *                      read WHOLE (a datagram, or a stream's length-prefixed
- *                      unit, every message of which decoded and every byte of
- *                      which a message accounts for), and none announced
- *                      another. The version byte alone is one chance in 256:
- *                      a random datagram that opens like a Join of 0x09 does
- *                      not also end where a batch ends;
- *   `unproven`         none of the four was read. Arbitrary bytes are this, and
- *                      so is a zenoh session the capture joined after its
- *                      handshake: the two are the same observation;
- *   `foreign_version`  every one of the four announced another version;
- *   `mixed`            both.
+ *   `yes`        the sum is at or above `yes_at_millibits` (20000: an error rate
+ *                of 2^-20 against the protocols the weights were taken from);
+ *   `no`         it is at or below `no_at_millibits` (-20000);
+ *   `undecided`  neither: too little evidence either way. A flow starts here,
+ *                and one Init, Join, Scout or Hello alone leaves it here.
+ *
+ * The word is read at every moment and moves as evidence arrives; the error
+ * rate holds for a reader that reads it after every packet. The port is not
+ * evidence. What the version-bearing messages said is its own answer:
+ *
+ *   `announced_version`  `own` (version 0x09 only), `foreign` (another version
+ *                        only), `mixed` (both) or `none` (no Init, Join, Scout
+ *                        or Hello read whole).
+ *
+ * `zenoh_evidence` is the test, so a consumer can show what the word rests on:
+ *
+ *   {"log2_lr_millibits":L,"yes_at_millibits":20000,"no_at_millibits":-20000,
+ *    "model":1,
+ *    "checks":[{"check":"init_roles","strength":"handshake","confirmed":1,
+ *               "violated":0,"millibits":999,"q_basis":"derived",
+ *               "eps_basis":"assumed"},...]}
+ *
+ * `checks` holds one entry per check that observed anything, `L` is the sum of
+ * their `millibits`, and `model` names the weights. The checks:
+ *
+ *   `cookie_echo`     an OpenSyn carried the cookie the other direction's InitAck
+ *                     issued (strength `handshake`; 8 bits a byte up to 64), or
+ *                     another cookie (a violation);
+ *   `init_roles`      the two directions' Inits are an InitSyn and an InitAck
+ *                     (`handshake`), or two of one kind (a violation);
+ *   `sn_follows`      a Frame or a Fragment took the SN after the previous one on
+ *                     its conduit (`state`), judged without the ring when no
+ *                     InitAck gave one, or did not (a violation);
+ *   `version_header`  an Init, Join, Scout or Hello of version 0x09 out of a unit
+ *                     read whole (`header`);
+ *   `unit_reading`    a unit read `explained` (`unit`), or `residual` or
+ *                     `undecoded` (a violation): see HOW A FLOW'S UNITS READ.
+ *
+ * `q_basis` and `eps_basis` say where the two probabilities a weight is computed
+ * from come from: `derived` from the widths of the fields compared, `generated`
+ * from the largest share any protocol of a generated corpus shows, `assumed`
+ * until a measurement replaces it, `none` for a check that only confirms. A
+ * weight is a statement against the protocols its basis covers and no others.
  *
  * @values fields zenoh
+ * @values fields announced_version
+ * @values fields check
+ * @values fields strength
+ * @values fields q_basis
+ * @values fields eps_basis
  *
  * A message of the four announcing another version is not read past that byte
  * (since field-document revision 41 and session_table revision 3): its row is a
  * decode error naming the version, it names no node and no initiator or
  * acceptor, and it folds nothing into the flow's `context`. And an Init, a Join,
  * a Scout or a Hello names a node, an initiator or an acceptor only out of a
- * unit read whole, on the rule `proven` uses: that and the version byte are
- * what keep arbitrary bytes from becoming a node with a zid and a role.
+ * unit read whole: that and the version byte are what keep arbitrary bytes from
+ * becoming a node with a zid and a role.
  *
- * HOW A FLOW'S UNITS READ. `zenoh` reads a session the capture joined after its
- * handshake as `unproven`, the word arbitrary bytes get, because to a VERDICT
- * the two are one observation. To the READING they are not: such a session
+ * HOW A FLOW'S UNITS READ. A session the capture joined after its handshake
  * reads, unit after unit, as messages that account for every byte, and
  * arbitrary bytes mostly do not. `unit_readings` keeps that count, on every row
  * and flow here and on every flow object of the field document (revision 42):
@@ -2258,8 +2314,8 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * unit in exactly one:
  *
  *   `explained`   every message of the unit decoded and every byte of it is
- *                 accounted for by a message (the rule `proven` reads a version
- *                 under);
+ *                 accounted for by a message (the rule `version_header` reads a
+ *                 version under);
  *   `residual`    the unit opens with a message this reader decoded and knows,
  *                 and the walk stopped before the unit's end: bytes remain that
  *                 no message accounts for;
@@ -2275,9 +2331,9 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *
  * THIS IS EVIDENCE AND NOT A VERDICT. A one-byte datagram is a KeepAlive and
  * reads `explained`; a compressed zenoh session whose batches this reader
- * cannot decompress reads `undecoded`. A consumer that draws it beside `zenoh`
- * must not hide a row by it and must not say `proven` for it: the numbers say
- * how the bytes read, never that they are zenoh.
+ * cannot decompress reads `undecoded`. The units weigh in `zenoh_evidence` as
+ * the `unit_reading` check, beside the others; a consumer must not draw its own
+ * verdict from the tallies.
  *
  * EVERY CELL IS PRESENT ON EVERY ROW. A value this reader cannot state is `null`
  * and the row's `unstated` names it with a REASON, so a cell is null exactly when
@@ -2350,13 +2406,23 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * @values session_table refusal
  * @values session_table why
  * @values session_table zenoh
+ * @values session_table announced_version
+ * @values session_table check
+ * @values session_table strength
+ * @values session_table q_basis
+ * @values session_table eps_basis
+ * @carries session_table announced_version passenger
  * @carries session_table cell passenger
+ * @carries session_table check passenger
  * @carries session_table encrypted passenger
+ * @carries session_table eps_basis passenger
  * @carries session_table family passenger
  * @carries session_table link passenger
  * @carries session_table phase passenger
+ * @carries session_table q_basis passenger
  * @carries session_table reason passenger
  * @carries session_table refusal passenger
+ * @carries session_table strength passenger
  * @carries session_table why passenger
  * @carries session_table zenoh passenger
  *
@@ -2526,7 +2592,7 @@ int wz_dissect_selector_bind(const char *selector, const char *names_json,
  * this BUILD's, not a capture's), returns WZ_DISSECT_OK and a string you free
  * with wz_dissect_string_free:
  *
- *     {"document":{"name":"selector_fields","revision":3},
+ *     {"document":{"name":"selector_fields","revision":4},
  *      "matches":true,
  *      "fields":[{"name":"key","operators":["==","!=","in","contains","matches"]},
  *                {"name":"dir","operators":["==","!=","in"],"words":["a","b"]},
@@ -4713,7 +4779,7 @@ int wz_dissect_transport_layout(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":42,"key":"state",
+ *     "value_families":[{"name":"fields","revision":43,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

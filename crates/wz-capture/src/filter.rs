@@ -68,7 +68,7 @@
 //! | `link` | `tcp` `udp` `raweth` `serial` `vsock` | `==` `!=` | as above |
 //! | `flow` | an integer, the number the document gives the row's flow (`list_id`) | `==` `!=` `<` `<=` `>` `>=` | as above |
 //! | `packet` | an integer, the packet the document numbers the row by | `==` `!=` `<` `<=` `>` `>=` | as above, or the reader cannot place the message |
-//! | `zenoh` | the flow's word for whether its bytes are zenoh: `proven` `unproven` `foreign_version` `mixed` | `==` `!=` | as above, or the plane holds no evidence of the row's flow (a tap handed no node census) |
+//! | `zenoh` | the flow's word for whether its bytes are zenoh: `yes` `no` `undecided` | `==` `!=` | as above, or the plane holds no evidence of the row's flow (a tap handed no node census) |
 //!
 //! The table is the language's field list as it is WRITTEN. The list the
 //! parser reads and the one the field list document prints are one

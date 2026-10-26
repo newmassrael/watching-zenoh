@@ -1281,7 +1281,7 @@ pub struct SessionGrouping {
     /// Per list index, the flow's word for whether its bytes are zenoh, as the
     /// census held it ([`NodeCensus::words`]). Indexed by list and not keyed by
     /// the attributed lists alone: a flow whose handshake nobody saw has a word
-    /// (`unproven`) and no session.
+    /// and no session.
     words: alloc::vec::Vec<Option<crate::session_table::ZenohVerdict>>,
     /// How many distinct sessions the links named.
     sessions: usize,

@@ -8740,10 +8740,11 @@ mod tests {
         // added two fields and the escapes of a quoted value, nor revision 5's
         // (paths, the list operators, the braces of a list), nor revision 6's
         // (the row's facts as fields). Revision 7 adds each token's `role`, what
-        // the parser read it as. Revision 8 is `zenoh` joining the fields.
+        // the parser read it as. Revision 8 is `zenoh` joining the fields, and
+        // revision 9 its words becoming the sequential test's three.
         assert_eq!(
             verdict,
-            "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":8},\"ok\":true,\
+            "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":9},\"ok\":true,\
              \"tokens\":[{\"start\":0,\"end\":3,\"kind\":\"word\",\"role\":\"field\"},\
              {\"start\":4,\"end\":6,\"kind\":\"operator\",\"role\":\"operator\"},\
              {\"start\":7,\"end\":14,\"kind\":\"word\",\"role\":\"value\"}]}"
@@ -8763,7 +8764,7 @@ mod tests {
         unsafe { wz_dissect_string_free(out) };
         assert!(
             verdict.starts_with(
-                "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":8},\"ok\":false,\"at\":"
+                "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":9},\"ok\":false,\"at\":"
             ),
             "the verdict must carry a position: {verdict}"
         );

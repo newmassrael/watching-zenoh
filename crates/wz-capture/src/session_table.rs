@@ -61,11 +61,12 @@ use alloc::vec::Vec;
 use wz_session_core::inbound::InboundFrame;
 use wz_session_core::parse_error::InboundParseError;
 use wz_session_core::passive::{
-    Direction, PassiveFrame, ReadingEvidence, SessionPhase, UnitReading, VersionEvidence,
+    Direction, PassiveFrame, ReadingEvidence, SessionPhase, SnSteps, UnitReading, VersionEvidence,
 };
 use wz_session_core::scouting_message::ScoutingFrame;
 
 use crate::link::{FlowKey, LinkKind};
+use crate::zenoh_evidence::{model, Check, ZenohEvidence};
 use crate::{Dissection, Framing};
 
 /// What the ingest path keeps about one flow that no retention bound may take
@@ -95,67 +96,136 @@ pub struct LinkIngest {
     /// What the flow's version-bearing messages said, counted here for the
     /// reason the module gives: an Init is the oldest message of a flow and the
     /// first a retention ceiling discards. See [`VersionEvidence`].
-    zenoh: VersionEvidence,
+    versions: VersionEvidence,
     /// How the flow's framing units read, counted at ingest for the same reason
-    /// [`Self::zenoh`] is. See [`ReadingEvidence`].
+    /// [`Self::versions`] is. See [`ReadingEvidence`].
     readings: ReadingEvidence,
+    /// The observations of the zenoh test this ingest path makes: the cookie
+    /// echoes, the version headers and the unit readings. The Init roles are
+    /// read off [`Self::named`] and the SN steps off the flow's sessions, both
+    /// when the evidence is asked for ([`Self::evidence`]).
+    observed: ZenohEvidence,
+    /// Per direction, the cookie of the latest InitAck that direction sent, for
+    /// the OpenSyn of the other direction to be compared with. Only a flow that
+    /// carried an InitAck holds one.
+    init_ack_cookie: [Option<Vec<u8>>; 2],
 }
 
-/// Whether a flow is zenoh, as [`VersionEvidence`] decides it. The closed set:
+/// Whether a flow is zenoh, as the sequential test of [`crate::zenoh_evidence`]
+/// reads its evidence. The closed set:
 ///
-/// * `proven` -- an Init, Join, Scout or Hello of the protocol version this
-///   reader reads decoded from the flow, in a framing unit read whole, and none
-///   of another version;
-/// * `unproven` -- none of the four was read: arbitrary bytes, or a zenoh flow
-///   the capture joined after its handshake;
-/// * `foreign_version` -- every one of the four announced another version;
-/// * `mixed` -- both were read.
+/// * `yes` -- the log likelihood ratio is at or above [`model::YES_AT`];
+/// * `no` -- it is at or below [`model::NO_AT`];
+/// * `undecided` -- between the two: too little evidence either way, which is
+///   the word a lone header earns and the word a flow starts with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ZenohVerdict {
-    /// Version-bearing messages of this reader's version, and no other.
-    Proven,
-    /// No version-bearing message.
-    Unproven,
-    /// Version-bearing messages of another version only.
-    ForeignVersion,
-    /// Both.
-    Mixed,
+    /// The evidence crossed the threshold for zenoh.
+    Yes,
+    /// It crossed the threshold against.
+    No,
+    /// It crossed neither.
+    Undecided,
 }
 
 impl ZenohVerdict {
     /// The word `evidence` comes to.
-    pub fn of(evidence: VersionEvidence) -> ZenohVerdict {
-        match (evidence.own_version > 0, evidence.foreign_version > 0) {
-            (true, false) => ZenohVerdict::Proven,
-            (false, false) => ZenohVerdict::Unproven,
-            (false, true) => ZenohVerdict::ForeignVersion,
-            (true, true) => ZenohVerdict::Mixed,
+    pub fn of(evidence: &ZenohEvidence) -> ZenohVerdict {
+        let lr = evidence.log2_lr_millibits();
+        if lr >= model::YES_AT {
+            ZenohVerdict::Yes
+        } else if lr <= model::NO_AT {
+            ZenohVerdict::No
+        } else {
+            ZenohVerdict::Undecided
         }
     }
 
     /// The word this verdict is written as.
     pub const fn name(self) -> &'static str {
         match self {
-            ZenohVerdict::Proven => "proven",
-            ZenohVerdict::Unproven => "unproven",
-            ZenohVerdict::ForeignVersion => "foreign_version",
-            ZenohVerdict::Mixed => "mixed",
+            ZenohVerdict::Yes => "yes",
+            ZenohVerdict::No => "no",
+            ZenohVerdict::Undecided => "undecided",
         }
     }
 
     /// Every verdict, from an exhaustive match.
-    pub fn all() -> [ZenohVerdict; 4] {
+    pub fn all() -> [ZenohVerdict; 3] {
         let one = |v: ZenohVerdict| match v {
-            ZenohVerdict::Proven => ZenohVerdict::Proven,
-            ZenohVerdict::Unproven => ZenohVerdict::Unproven,
-            ZenohVerdict::ForeignVersion => ZenohVerdict::ForeignVersion,
-            ZenohVerdict::Mixed => ZenohVerdict::Mixed,
+            ZenohVerdict::Yes => ZenohVerdict::Yes,
+            ZenohVerdict::No => ZenohVerdict::No,
+            ZenohVerdict::Undecided => ZenohVerdict::Undecided,
         };
         [
-            one(ZenohVerdict::Proven),
-            one(ZenohVerdict::Unproven),
-            one(ZenohVerdict::ForeignVersion),
-            one(ZenohVerdict::Mixed),
+            one(ZenohVerdict::Yes),
+            one(ZenohVerdict::No),
+            one(ZenohVerdict::Undecided),
+        ]
+    }
+
+    /// Every word, sorted.
+    pub fn names() -> Vec<&'static str> {
+        let mut words: Vec<&'static str> = Self::all().iter().map(|v| v.name()).collect();
+        words.sort_unstable();
+        words
+    }
+}
+
+/// What a flow's version-bearing messages (Init, Join, Scout, Hello) announced:
+/// a different question from [`ZenohVerdict`], which asks whether the bytes are
+/// zenoh as this reader reads it. The closed set:
+///
+/// * `none` -- no version-bearing message was read;
+/// * `own` -- every one announced the version this reader reads;
+/// * `foreign` -- every one announced another version;
+/// * `mixed` -- both were read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnnouncedVersion {
+    /// No version-bearing message.
+    None,
+    /// This reader's version only.
+    Own,
+    /// Another version only.
+    Foreign,
+    /// Both.
+    Mixed,
+}
+
+impl AnnouncedVersion {
+    /// The word `evidence` comes to.
+    pub fn of(evidence: VersionEvidence) -> AnnouncedVersion {
+        match (evidence.own_version > 0, evidence.foreign_version > 0) {
+            (false, false) => AnnouncedVersion::None,
+            (true, false) => AnnouncedVersion::Own,
+            (false, true) => AnnouncedVersion::Foreign,
+            (true, true) => AnnouncedVersion::Mixed,
+        }
+    }
+
+    /// The word this answer is written as.
+    pub const fn name(self) -> &'static str {
+        match self {
+            AnnouncedVersion::None => "none",
+            AnnouncedVersion::Own => "own",
+            AnnouncedVersion::Foreign => "foreign",
+            AnnouncedVersion::Mixed => "mixed",
+        }
+    }
+
+    /// Every answer, from an exhaustive match.
+    pub fn all() -> [AnnouncedVersion; 4] {
+        let one = |v: AnnouncedVersion| match v {
+            AnnouncedVersion::None => AnnouncedVersion::None,
+            AnnouncedVersion::Own => AnnouncedVersion::Own,
+            AnnouncedVersion::Foreign => AnnouncedVersion::Foreign,
+            AnnouncedVersion::Mixed => AnnouncedVersion::Mixed,
+        };
+        [
+            one(AnnouncedVersion::None),
+            one(AnnouncedVersion::Own),
+            one(AnnouncedVersion::Foreign),
+            one(AnnouncedVersion::Mixed),
         ]
     }
 
@@ -225,23 +295,68 @@ impl LinkIngest {
         }
         // Before the admissibility test: an Init on a link that cannot carry one
         // names nobody, and is still a message of a version.
-        self.zenoh.observe(
-            frame.frame.as_ref().map(InboundFrame::announced_version),
-            frame.unit_read_whole,
-        );
+        let announced = frame.frame.as_ref().map(InboundFrame::announced_version);
+        self.versions.observe(announced, frame.unit_read_whole);
         // An Init in a unit not read whole names nobody either: see
-        // `PassiveFrame::unit_read_whole`.
+        // `PassiveFrame::unit_read_whole`. Neither is evidence of the test: a
+        // zenoh peer never sends an Init on a link without a handshake.
         if frame.inadmissible_on_link || !frame.unit_read_whole {
             return;
         }
-        let Ok(InboundFrame::Init { is_ack, body, .. }) = &frame.frame else {
-            return;
-        };
-        if body.zid.is_empty() {
-            return;
+        if matches!(announced, Ok(Some(v)) if v == wz_codecs::wire_const::PROTOCOL_VERSION) {
+            self.observed
+                .confirm(Check::VersionHeader, model::VERSION_HEADER);
         }
         let seat = usize::from(frame.direction == Direction::B);
-        self.named[seat] = Some((body.zid.to_vec(), *is_ack));
+        match &frame.frame {
+            Ok(InboundFrame::Init { is_ack, body, .. }) => {
+                if *is_ack {
+                    self.init_ack_cookie[seat] = body.cookie.as_ref().map(|c| c.to_vec());
+                }
+                if !body.zid.is_empty() {
+                    self.named[seat] = Some((body.zid.to_vec(), *is_ack));
+                }
+            }
+            Ok(InboundFrame::Open {
+                is_ack: false,
+                body,
+                ..
+            }) => self.observe_cookie_echo(seat, body.cookie.as_ref().map(|c| &c[..])),
+            _ => {}
+        }
+    }
+
+    /// An OpenSyn from `seat`'s direction carried `cookie`: compared with the
+    /// cookie the other direction's latest InitAck issued, where the capture
+    /// holds one. An empty cookie on both sides matches nothing worth weighing
+    /// and is not an observation.
+    fn observe_cookie_echo(&mut self, seat: usize, cookie: Option<&[u8]>) {
+        let Some(issued) = self.init_ack_cookie[1 - seat].as_deref() else {
+            return;
+        };
+        let echoed = cookie.unwrap_or(&[]);
+        if issued.is_empty() && echoed.is_empty() {
+            return;
+        }
+        if issued == echoed {
+            self.observed.confirm(
+                Check::CookieEcho,
+                crate::zenoh_evidence::cookie_echo_weight(issued.len()),
+            );
+        } else {
+            self.observed
+                .violate(Check::CookieEcho, model::COOKIE_ECHO_VIOLATED);
+        }
+    }
+
+    /// One framing unit's reading, as evidence of the test.
+    fn observe_reading(&mut self, reading: UnitReading) {
+        let weight = crate::zenoh_evidence::unit_reading_weight(reading);
+        if reading == UnitReading::Explained {
+            self.observed.confirm(Check::UnitReading, weight);
+        } else {
+            self.observed.violate(Check::UnitReading, weight);
+        }
     }
 
     /// One framing unit the session produced: every message of it, and the unit
@@ -256,6 +371,19 @@ impl LinkIngest {
             self.observe_frame(frame);
         }
         self.readings.observe_frames(frames);
+        // An lz4 batch a build without lz4 cannot open reads `undecoded`
+        // whatever its bytes are: counted as a reading, and not weighed as
+        // evidence, because it says what the build can do.
+        let unopenable = !wz_session_core::passive::OPENS_LZ4_BATCHES
+            && frames.iter().any(|f| {
+                matches!(
+                    f.carried,
+                    wz_session_core::passive::Carried::Undecompressible
+                )
+            });
+        if let Some(reading) = UnitReading::of_frames(frames).filter(|_| !unopenable) {
+            self.observe_reading(reading);
+        }
     }
 
     /// One scouting datagram's decode, for the evidence alone: a Scout or a
@@ -268,15 +396,44 @@ impl LinkIngest {
         whole: bool,
         datagram_len: usize,
     ) {
-        self.zenoh
-            .observe(frame.as_ref().map(ScoutingFrame::announced_version), whole);
-        self.readings
-            .observe(UnitReading::of_scouting(frame, whole), datagram_len);
+        let announced = frame.as_ref().map(ScoutingFrame::announced_version);
+        self.versions.observe(announced, whole);
+        if whole && matches!(announced, Ok(Some(v)) if v == wz_codecs::wire_const::PROTOCOL_VERSION)
+        {
+            self.observed
+                .confirm(Check::VersionHeader, model::VERSION_HEADER);
+        }
+        let reading = UnitReading::of_scouting(frame, whole);
+        self.readings.observe(reading, datagram_len);
+        self.observe_reading(reading);
     }
 
     /// What the flow's version-bearing messages said.
-    pub fn zenoh(&self) -> VersionEvidence {
-        self.zenoh
+    pub fn versions(&self) -> VersionEvidence {
+        self.versions
+    }
+
+    /// The flow's evidence for the zenoh test: what ingest observed, the Init
+    /// roles, and `steps`, the SN steps of the flow's sessions
+    /// ([`wz_session_core::passive::PassiveSession::sn_steps`], both directions
+    /// and every session of the flow together).
+    pub fn evidence(&self, steps: SnSteps) -> ZenohEvidence {
+        let mut evidence = self.observed;
+        match self.roles() {
+            Roles::Settled {
+                initiator: Some(_),
+                acceptor: Some(_),
+            } => evidence.confirm(Check::InitRoles, model::INIT_ROLES_CONFIRMED),
+            Roles::Contradicted => evidence.violate(Check::InitRoles, model::INIT_ROLES_VIOLATED),
+            Roles::Settled { .. } => {}
+        }
+        evidence.add(
+            Check::SnFollows,
+            steps.follows,
+            steps.breaks,
+            crate::zenoh_evidence::sn_steps_weight(steps),
+        );
+        evidence
     }
 
     /// How the flow's framing units read.
@@ -664,7 +821,9 @@ pub struct Link {
     /// session this flow belongs to. `None` leaves the flow a row of its own.
     pub pair: Option<(Vec<u8>, Vec<u8>)>,
     /// What the flow's version-bearing messages said.
-    pub zenoh: VersionEvidence,
+    pub versions: VersionEvidence,
+    /// The flow's evidence for the zenoh test.
+    pub evidence: ZenohEvidence,
     /// How the flow's framing units read.
     pub readings: ReadingEvidence,
 }
@@ -690,9 +849,11 @@ pub struct SessionRow {
     pub frames: Stated<u64>,
     /// Bytes carried, summed over the flows.
     pub bytes: u64,
-    /// The flows' evidence together: a session is zenoh by what any of its
-    /// flows proved, and a row grouped by a zid pair has an Init behind it.
-    pub zenoh: VersionEvidence,
+    /// What the flows' version-bearing messages said, together.
+    pub versions: VersionEvidence,
+    /// The flows' evidence for the zenoh test, together: the observations of
+    /// one session's links add, as the observations of one link do.
+    pub evidence: ZenohEvidence,
     /// How the flows' framing units read, together.
     pub readings: ReadingEvidence,
     /// The flows, in the order the dissection holds them.
@@ -785,9 +946,12 @@ impl SessionRow {
         let bytes = links
             .iter()
             .fold(0u64, |sum, l| sum.saturating_add(l.bytes));
-        let zenoh = links
+        let versions = links
             .iter()
-            .fold(VersionEvidence::default(), |sum, l| sum.and(l.zenoh));
+            .fold(VersionEvidence::default(), |sum, l| sum.and(l.versions));
+        let evidence = links
+            .iter()
+            .fold(ZenohEvidence::default(), |sum, l| sum.and(l.evidence));
         let readings = links
             .iter()
             .fold(ReadingEvidence::default(), |sum, l| sum.and(l.readings));
@@ -801,7 +965,8 @@ impl SessionRow {
             last_seen_ns: last.ok_or(Unstated::NoClock),
             frames,
             bytes,
-            zenoh,
+            versions,
+            evidence,
             readings,
             links,
         }
@@ -842,6 +1007,7 @@ fn links_of(d: &Dissection) -> (Vec<Link>, Excluded) {
             frames,
             f.residue().recovered,
             &f.ingest,
+            f.sn_steps(),
         ));
     }
 
@@ -883,6 +1049,7 @@ fn links_of(d: &Dissection) -> (Vec<Link>, Excluded) {
             frames,
             f.residue().recovered,
             &f.ingest,
+            f.sn_steps(),
         ));
     }
 
@@ -900,9 +1067,17 @@ fn links_of(d: &Dissection) -> (Vec<Link>, Excluded) {
             frames,
             census.bytes as u64,
             &d.serial_ingest,
+            session_sn_steps(&d.serial_session),
         ));
     }
     (links, excluded)
+}
+
+/// Both directions' SN steps of one session together.
+pub(crate) fn session_sn_steps(session: &wz_session_core::passive::PassiveSession) -> SnSteps {
+    session
+        .sn_steps(Direction::A)
+        .and(session.sn_steps(Direction::B))
 }
 
 /// One flow's link, the cells that depend on whether it could be read decided
@@ -914,6 +1089,7 @@ fn link_of(
     frames: u64,
     bytes: u64,
     ingest: &LinkIngest,
+    steps: SnSteps,
 ) -> Link {
     let unreadable = encryption == Encryption::EncryptedUnreadable;
     // The role cells. A zid the Inits do not give is absent for the reason that
@@ -965,7 +1141,8 @@ fn link_of(
         initiator,
         acceptor,
         pair,
-        zenoh: ingest.zenoh(),
+        versions: ingest.versions(),
+        evidence: ingest.evidence(steps),
         readings: ingest.readings(),
     }
 }

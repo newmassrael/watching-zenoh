@@ -2644,11 +2644,17 @@ static int check_transport_layout_door(void) {
  * parameter of the fixture. */
 static int check_session_table_doors(void) {
     static const char opening[] =
-        "{\"document\":{\"name\":\"session_table\",\"revision\":4},\"ok\":true,"
+        "{\"document\":{\"name\":\"session_table\",\"revision\":5},\"ok\":true,"
         "\"sessions\":[{\"initiator\":null,\"acceptor\":null,\"link\":\"udp\","
         "\"phase\":\"unseen\",\"encrypted\":\"clear\","
         "\"first_seen_ts_ns\":1000000,\"last_seen_ts_ns\":3000000,"
-        "\"frames\":3,\"bytes\":3,\"zenoh\":\"unproven\","
+        "\"frames\":3,\"bytes\":3,\"zenoh\":\"undecided\","
+        "\"announced_version\":\"none\","
+        "\"zenoh_evidence\":{\"log2_lr_millibits\":7809,"
+        "\"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":1,"
+        "\"checks\":[{\"check\":\"unit_reading\",\"strength\":\"unit\","
+        "\"confirmed\":3,\"violated\":0,\"millibits\":7809,"
+        "\"q_basis\":\"generated\",\"eps_basis\":\"assumed\"}]},"
         "\"unit_readings\":{\"explained\":{\"units\":3,\"bytes\":3},"
         "\"residual\":{\"units\":0,\"bytes\":0},"
         "\"undecoded\":{\"units\":0,\"bytes\":0}},"
@@ -3439,10 +3445,12 @@ int main(void) {
      * it is on this branch. Nor is revision 6's, the row's facts as fields.
      * Revision 7 adds each token's `role`, what the parser read it as.
      * Revision 8 is `zenoh` joining the fields, and nothing on this branch.
+     * Revision 9 is its words becoming the sequential test's three, and
+     * nothing on this branch either.
      * (Not quoted here: its double star followed by a slash would open a
      * nested comment, which -Werror=comment refuses.) */
     CHECK(strcmp(verdict,
-                 "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":8},"
+                 "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":9},"
                  "\"ok\":true,\"tokens\":["
                  "{\"start\":0,\"end\":3,\"kind\":\"word\",\"role\":\"field\"},"
                  "{\"start\":4,\"end\":6,\"kind\":\"operator\",\"role\":\"operator\"},"
@@ -3970,8 +3978,11 @@ int main(void) {
      * retires.
      * 42: every flow object carries `unit_readings`, how its framing units read
      * (`explained`, `residual`, `undecoded`, each `units` and `bytes`). Keys
-     * arrive; nothing retires. */
-    revisioned[2].revision = 42;
+     * arrive; nothing retires.
+     * 43: `zenoh` is a sequential test's verdict (yes, no, undecided), and
+     * every flow object carries `announced_version` and `zenoh_evidence`.
+     * Values move, keys arrive and families are declared; nothing retires. */
+    revisioned[2].revision = 43;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
@@ -4114,9 +4125,12 @@ int main(void) {
      * 3: every row and every flow of a row carries `zenoh`. A key arrives and a
      * family is declared; nothing retires.
      * 4: every row and every flow of a row carries `unit_readings`. Keys
-     * arrive; nothing retires. */
+     * arrive; nothing retires.
+     * 5: `zenoh` is a sequential test's verdict, and every row and every flow
+     * of a row carries `announced_version` and `zenoh_evidence`. Values move
+     * and keys arrive; nothing retires. */
     revisioned[12].name = "session_table";
-    revisioned[12].revision = 4;
+    revisioned[12].revision = 5;
     revisioned[12].doc = NULL;
     rc = wz_dissect_pcap_session_table((const unsigned char *)"not a capture", 13,
                                        WZ_DISSECT_LIMITS_NONE,
@@ -4192,10 +4206,11 @@ int main(void) {
         CHECK(rc == WZ_DISSECT_OK, "selection_since document rc=%d", rc);
         wz_dissect_live_close(quiet);
     }
-    /* (ABI 44) -- the field list, at 3: it takes no input at all. 2: the row's
-     * facts join the fixed fields. 3: `zenoh`, the flow's word, joins them. */
+    /* (ABI 44) -- the field list, at 4: it takes no input at all. 2: the row's
+     * facts join the fixed fields. 3: `zenoh`, the flow's word, joins them.
+     * 4: its words become the sequential test's three. */
     revisioned[19].name = "selector_fields";
-    revisioned[19].revision = 3;
+    revisioned[19].revision = 4;
     revisioned[19].doc = NULL;
     rc = wz_dissect_selector_fields(&revisioned[19].doc);
     CHECK(rc == WZ_DISSECT_OK, "selector_fields document rc=%d", rc);

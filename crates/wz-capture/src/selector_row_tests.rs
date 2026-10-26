@@ -171,7 +171,7 @@ fn a_plane_given_no_row_facts_decides_no_row_term() {
         "link == udp",
         "flow == 0",
         "packet == 0",
-        "zenoh == proven",
+        "zenoh == yes",
     ] {
         let filter = Filter::parse(selector).expect("compiles");
         assert_eq!(
@@ -219,32 +219,30 @@ fn a_zenoh_term_is_undecided_where_the_flow_has_no_word_and_decided_where_it_has
             .matches(&view(Some(facts), Record::None))
     };
     for selector in [
-        "zenoh == proven",
-        "zenoh != proven",
-        "not zenoh == proven",
-        "zenoh in {proven, mixed}",
+        "zenoh == yes",
+        "zenoh != yes",
+        "not zenoh == yes",
+        "zenoh in {yes, undecided}",
     ] {
         assert_eq!(judged(selector, None), Truth::Unknown, "{selector}");
     }
+    assert_eq!(judged("zenoh == yes", Some(ZenohVerdict::Yes)), Truth::Yes);
+    assert_eq!(judged("zenoh != yes", Some(ZenohVerdict::Yes)), Truth::No);
     assert_eq!(
-        judged("zenoh == proven", Some(ZenohVerdict::Proven)),
-        Truth::Yes
-    );
-    assert_eq!(
-        judged("zenoh != proven", Some(ZenohVerdict::Proven)),
+        judged("zenoh == yes", Some(ZenohVerdict::Undecided)),
         Truth::No
     );
     assert_eq!(
-        judged("zenoh == proven", Some(ZenohVerdict::Mixed)),
+        judged("zenoh != yes", Some(ZenohVerdict::Undecided)),
+        Truth::Yes
+    );
+    assert_eq!(
+        judged("zenoh in {yes, undecided}", Some(ZenohVerdict::Undecided)),
+        Truth::Yes
+    );
+    assert_eq!(
+        judged("zenoh in {yes, undecided}", Some(ZenohVerdict::No)),
         Truth::No
-    );
-    assert_eq!(
-        judged("zenoh != proven", Some(ZenohVerdict::Mixed)),
-        Truth::Yes
-    );
-    assert_eq!(
-        judged("zenoh in {proven, mixed}", Some(ZenohVerdict::Mixed)),
-        Truth::Yes
     );
     // Every word the verdict has is a word the field takes, and the field
     // takes no other.

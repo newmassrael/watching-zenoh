@@ -2192,6 +2192,33 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R41_CARRIES,
     },
+    // Revision 43: `zenoh` IS A SEQUENTIAL TEST'S VERDICT, and two keys arrive
+    // beside it on every flow object. Nothing retires.
+    //
+    // * The words of `zenoh` move: `yes`, `no` or `undecided`, from a log
+    //   likelihood ratio over the flow's evidence read against two thresholds
+    //   (`docs/flow-zenoh-verdict.md`). `proven`, `unproven`, `foreign_version`
+    //   and `mixed` are no longer written. A flow the capture joined after its
+    //   handshake can now be `yes` on its units and SN steps; one Init, Join,
+    //   Scout or Hello alone is `undecided`.
+    // * `announced_version` is what revision 41's word said: `none`, `own`,
+    //   `foreign` or `mixed`, from the same version-bearing messages.
+    // * `zenoh_evidence` is the test: `log2_lr_millibits`, `yes_at_millibits`,
+    //   `no_at_millibits`, `model`, and `checks`, one entry per check that
+    //   observed anything, each with `check`, `strength`, `confirmed`,
+    //   `violated`, `millibits`, `q_basis` and `eps_basis`.
+    //
+    // A cached document from revision 42 holds the old words and should be read
+    // again by a consumer of this revision.
+    DocumentShape {
+        document: FIELDS,
+        revision: 43,
+        keys: FIELDS_R43_KEYS,
+        retiring: &[],
+        families: FIELDS_R43_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R43_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -2948,6 +2975,19 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: SESSION_TABLE_R3_CARRIES,
     },
+    // Revision 5 is the field document's revision 43 on a row and on every flow
+    // of a row: `zenoh` takes `yes`, `no` or `undecided`, and `announced_version`
+    // and `zenoh_evidence` arrive beside it. A row's evidence is its flows'
+    // together. Nothing retires.
+    DocumentShape {
+        document: SESSION_TABLE,
+        revision: 5,
+        keys: SESSION_TABLE_R5_KEYS,
+        retiring: &[],
+        families: SESSION_TABLE_R5_FAMILIES,
+        planes: &[],
+        carries: SESSION_TABLE_R5_CARRIES,
+    },
     // The selector's verdict over the field document's rows, with none
     // of what the field document renders beside it.
     //
@@ -3312,6 +3352,20 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: SELECTOR_FIELDS_R1_CARRIES,
     },
+    // THE FLOW'S WORD MOVES, and no key does: the `zenoh` field's `words` are
+    // the sequential test's three (`no`, `undecided`, `yes`), the closed set the
+    // field document declares from its revision 43 and the session table from
+    // its revision 5. A selector written with a word of revision 3 is refused
+    // as an unknown value.
+    DocumentShape {
+        document: SELECTOR_FIELDS,
+        revision: 4,
+        keys: SELECTOR_FIELDS_R1_KEYS,
+        retiring: &[],
+        families: SELECTOR_FIELDS_R1_FAMILIES,
+        planes: &[],
+        carries: SELECTOR_FIELDS_R1_CARRIES,
+    },
     // Revision 7 ADDS `role` to a token object and retires nothing: what the
     // parser read the token as, `field`, `path`, `operator`, `value`,
     // `function`, `logic` or `group` (`crate::filter::TokenRole`). It is
@@ -3335,6 +3389,19 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
     DocumentShape {
         document: SELECTOR_DIAGNOSE,
         revision: 8,
+        keys: SELECTOR_DIAGNOSE_R7_KEYS,
+        retiring: &[],
+        families: SELECTOR_DIAGNOSE_R7_FAMILIES,
+        planes: &[],
+        carries: SELECTOR_DIAGNOSE_R7_CARRIES,
+    },
+    // Revision 9: `zenoh` TAKES THE SEQUENTIAL TEST'S WORDS, and no key moves.
+    // A selector naming `yes`, `no` or `undecided` reads `ok:true`; one naming
+    // `proven`, `unproven`, `foreign_version` or `mixed` is refused as a value
+    // the field does not admit, at the value's own byte.
+    DocumentShape {
+        document: SELECTOR_DIAGNOSE,
+        revision: 9,
         keys: SELECTOR_DIAGNOSE_R7_KEYS,
         retiring: &[],
         families: SELECTOR_DIAGNOSE_R7_FAMILIES,
@@ -15163,6 +15230,649 @@ pub const FIELDS_R42_KEYS: &[&str] = &[
     "zid",
 ];
 
+/// Whether a flow's bytes are zenoh, as the sequential test reads its evidence:
+/// the closed set [`crate::session_table::ZenohVerdict`] writes from the field
+/// document's revision 43 and the session table's revision 5.
+pub const ZENOH_VERDICT_R43: &[&str] = &["no", "undecided", "yes"];
+
+/// What a flow's version-bearing messages announced
+/// ([`crate::session_table::AnnouncedVersion`]), the question the verdict of
+/// revision 41 answered, kept as an answer of its own.
+pub const ANNOUNCED_VERSION_R43: &[&str] = &["foreign", "mixed", "none", "own"];
+
+/// The checks the test weighs ([`crate::zenoh_evidence::Check`]).
+pub const ZENOH_CHECK_R43: &[&str] = &[
+    "cookie_echo",
+    "init_roles",
+    "sn_follows",
+    "unit_reading",
+    "version_header",
+];
+
+/// How hard a check is to satisfy by chance
+/// ([`crate::zenoh_evidence::Strength`]).
+pub const ZENOH_STRENGTH_R43: &[&str] = &["handshake", "header", "state", "unit"];
+
+/// Where a probability of the model comes from
+/// ([`crate::zenoh_evidence::Basis`]), the vocabulary of both `q_basis` and
+/// `eps_basis`.
+pub const ZENOH_BASIS_R43: &[&str] = &["assumed", "derived", "generated", "none"];
+
+/// The keys the field document carries at revision 43: revision 42's PLUS
+/// `announced_version` and `zenoh_evidence` on every flow object, and the keys
+/// inside the evidence: its sum and thresholds (`log2_lr_millibits`,
+/// `yes_at_millibits`, `no_at_millibits`), `model`, and `checks`, whose entries
+/// carry `check`, `strength`, `confirmed`, `violated`, `millibits`, `q_basis`
+/// and `eps_basis`.
+pub const FIELDS_R43_KEYS: &[&str] = &[
+    "abandoned_at_end",
+    "abandoned_on_eviction",
+    "above_transport",
+    "addr",
+    "after_seq",
+    "anchor",
+    "announced_version",
+    "batch_index",
+    "batch_size",
+    "body",
+    "body_schema",
+    "bytes",
+    "caps",
+    "capture_reread",
+    "carried",
+    "carried_state",
+    "chain",
+    "chain_id",
+    "check",
+    "checks",
+    "close_seen",
+    "closes",
+    "compression",
+    "conduit",
+    "confirmed",
+    "context",
+    "counter",
+    "counter_error",
+    "counter_reason",
+    "counter_step",
+    "crc_computed",
+    "crc_error",
+    "datagram_flows",
+    "declaration_checked",
+    "declared",
+    "depth",
+    "descriptor_bytes",
+    "despite_encoding",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "dst",
+    "e2e",
+    "encoding",
+    "end",
+    "eps_basis",
+    "example",
+    "expired_chains",
+    "explained",
+    "family",
+    "fields",
+    "fin_seen",
+    "first",
+    "first_byte",
+    "flow",
+    "flows",
+    "format",
+    "frame_offset",
+    "frames",
+    "frames_per_flow",
+    "frames_total",
+    "halves",
+    "header",
+    "high",
+    "identity",
+    "index",
+    "keyexpr",
+    "keyexpr_cause",
+    "keyexpr_id",
+    "kind",
+    "l2",
+    "last_seen_ts_ns",
+    "lease_ms",
+    "length",
+    "length_expected",
+    "length_field",
+    "length_matches_frame",
+    "link",
+    "list_id",
+    "log2_lr_millibits",
+    "low",
+    "lowlatency",
+    "matched_rule",
+    "max_flows_per_table",
+    "max_gap",
+    "max_scout_askers",
+    "message",
+    "message_at",
+    "messages",
+    "millibits",
+    "missing",
+    "model",
+    "name",
+    "negotiated",
+    "no_at_millibits",
+    "note",
+    "offset",
+    "offset_space",
+    "omitted",
+    "opened",
+    "outcome",
+    "packet",
+    "parent",
+    "parts",
+    "patch",
+    "path",
+    "pattern",
+    "payload",
+    "payload_bytes",
+    "payload_decode",
+    "payload_mapping",
+    "payload_mapping_counts_exact",
+    "payload_offset",
+    "payload_refusals",
+    "phase",
+    "port",
+    "previous_counter",
+    "priority",
+    "profile",
+    "q_basis",
+    "qos",
+    "raw",
+    "reason",
+    "reassembly",
+    "reliable",
+    "request_kind",
+    "request_record",
+    "request_seq",
+    "residual",
+    "revised",
+    "revision",
+    "rst_seen",
+    "samples",
+    "scout_askers",
+    "scouting",
+    "selected",
+    "seq",
+    "shm_descriptor",
+    "shown",
+    "silence_ms",
+    "skipped",
+    "skipped_packets",
+    "slot",
+    "sn",
+    "sn_mask",
+    "src",
+    "start",
+    "state",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+    "strength",
+    "through_seq",
+    "timeout_error",
+    "timeout_ms",
+    "undecoded",
+    "under",
+    "unit_readings",
+    "units",
+    "unopened_reason",
+    "value",
+    "verdict",
+    "version",
+    "violated",
+    "why",
+    "window",
+    "wrong",
+    "yes_at_millibits",
+    "zenoh",
+    "zenoh_evidence",
+    "zid",
+];
+
+/// The value families the field document declares at revision 43: revision
+/// 41's with `zenoh` drawn from [`ZENOH_VERDICT_R43`], PLUS `announced_version`,
+/// `check`, `strength`, `q_basis` and `eps_basis`.
+pub const FIELDS_R43_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "announced_version",
+        values: ANNOUNCED_VERSION_R43,
+    },
+    ValueFamily {
+        key: "body",
+        values: BODY_R33,
+    },
+    ValueFamily {
+        key: "carried_state",
+        values: CARRIED_STATE_R12,
+    },
+    ValueFamily {
+        key: "check",
+        values: ZENOH_CHECK_R43,
+    },
+    ValueFamily {
+        key: "counter_reason",
+        values: COUNTER_REASON_R34,
+    },
+    ValueFamily {
+        key: "direction",
+        values: DIRECTION_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "eps_basis",
+        values: ZENOH_BASIS_R43,
+    },
+    ValueFamily {
+        key: "family",
+        values: ADDR_FAMILY_R15,
+    },
+    ValueFamily {
+        key: "keyexpr_cause",
+        values: UNRESOLVED_CAUSE_R11,
+    },
+    ValueFamily {
+        key: "kind",
+        values: FIELD_VALUE_KIND_R17,
+    },
+    ValueFamily {
+        key: "link",
+        values: LINK_KIND_R7,
+    },
+    ValueFamily {
+        key: "message",
+        values: MESSAGE_R10,
+    },
+    ValueFamily {
+        key: "offset_space",
+        values: ANCHOR_SPACE_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "outcome",
+        values: CHAIN_OUTCOME_R14,
+    },
+    ValueFamily {
+        key: "phase",
+        values: SESSION_PHASE_R14,
+    },
+    ValueFamily {
+        key: "priority",
+        values: PRIORITY_R14,
+    },
+    ValueFamily {
+        key: "q_basis",
+        values: ZENOH_BASIS_R43,
+    },
+    ValueFamily {
+        key: "reason",
+        values: CHAIN_REASON_R32,
+    },
+    ValueFamily {
+        key: "request_kind",
+        values: REQUEST_KIND_R37,
+    },
+    ValueFamily {
+        key: "selected",
+        values: SELECTED_R13,
+    },
+    ValueFamily {
+        key: "state",
+        values: PAYLOAD_STATE_R2,
+    },
+    ValueFamily {
+        key: "strength",
+        values: ZENOH_STRENGTH_R43,
+    },
+    ValueFamily {
+        key: "under",
+        values: REFUSED_UNDER_R2,
+    },
+    ValueFamily {
+        key: "unopened_reason",
+        values: UNOPENED_REASON_R35,
+    },
+    ValueFamily {
+        key: "verdict",
+        values: SN_VERDICT_R14,
+    },
+    ValueFamily {
+        key: "wrong",
+        values: MISBOUND_R2,
+    },
+    ValueFamily {
+        key: "zenoh",
+        values: ZENOH_VERDICT_R43,
+    },
+];
+
+/// What each field-document family's WORD decides at revision 43: revision
+/// 41's PLUS the five new families, every one a passenger. A flow object
+/// carries the same keys whichever verdict and version it says, and a check
+/// entry carries the same keys whichever check, strength or basis it names.
+pub const FIELDS_R43_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "announced_version",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "body",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "carried_state",
+        shape: CarriesShape::Discriminant(CARRIED_STATE_CARRIES_R12),
+    },
+    KeyCarries {
+        key: "check",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "counter_reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "direction",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "eps_basis",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "family",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "keyexpr_cause",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "kind",
+        shape: CarriesShape::Discriminant(FIELD_VALUE_KIND_CARRIES_R17),
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "message",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "offset_space",
+        shape: CarriesShape::Discriminant(FIELD_OFFSET_SPACE_CARRIES_R19),
+    },
+    KeyCarries {
+        key: "outcome",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "phase",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "priority",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "q_basis",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "request_kind",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "selected",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "state",
+        shape: CarriesShape::Discriminant(PAYLOAD_STATE_CARRIES_R28),
+    },
+    KeyCarries {
+        key: "strength",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "under",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "unopened_reason",
+        shape: CarriesShape::Discriminant(UNOPENED_REASON_CARRIES_R35),
+    },
+    KeyCarries {
+        key: "verdict",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "wrong",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "zenoh",
+        shape: CarriesShape::Passenger,
+    },
+];
+
+/// The keys the `session_table` document carries at revision 5: revision 4's
+/// PLUS the field document's revision 43 keys, on every row and on every flow
+/// of a row.
+pub const SESSION_TABLE_R5_KEYS: &[&str] = &[
+    "acceptor",
+    "addr",
+    "announced_version",
+    "bytes",
+    "caps",
+    "cell",
+    "check",
+    "checks",
+    "confirmed",
+    "count",
+    "document",
+    "dropped_by_limits",
+    "encrypted",
+    "eps_basis",
+    "excluded",
+    "explained",
+    "family",
+    "first_seen_ts_ns",
+    "flow",
+    "flows",
+    "frames",
+    "frames_per_flow",
+    "frames_total",
+    "high",
+    "initiator",
+    "last_seen_ts_ns",
+    "link",
+    "log2_lr_millibits",
+    "low",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "message",
+    "millibits",
+    "model",
+    "name",
+    "no_at_millibits",
+    "ok",
+    "phase",
+    "port",
+    "q_basis",
+    "reason",
+    "refusal",
+    "residual",
+    "revision",
+    "scout_askers",
+    "scouting",
+    "sessions",
+    "skipped",
+    "skipped_packets",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "strength",
+    "undecoded",
+    "unit_readings",
+    "units",
+    "unstated",
+    "violated",
+    "why",
+    "yes_at_millibits",
+    "zenoh",
+    "zenoh_evidence",
+];
+
+/// The `session_table` document's value families at revision 5: revision 3's
+/// with `zenoh` drawn from [`ZENOH_VERDICT_R43`], PLUS the field document's
+/// five new families.
+pub const SESSION_TABLE_R5_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "announced_version",
+        values: ANNOUNCED_VERSION_R43,
+    },
+    ValueFamily {
+        key: "cell",
+        values: &[
+            "acceptor",
+            "first_seen_ts_ns",
+            "frames",
+            "initiator",
+            "last_seen_ts_ns",
+            "link",
+            "phase",
+        ],
+    },
+    ValueFamily {
+        key: "check",
+        values: ZENOH_CHECK_R43,
+    },
+    ValueFamily {
+        key: "encrypted",
+        values: &[
+            "clear",
+            "decrypted_quic",
+            "decrypted_tls",
+            "encrypted_unreadable",
+            "mixed",
+            "unknown",
+        ],
+    },
+    ValueFamily {
+        key: "eps_basis",
+        values: ZENOH_BASIS_R43,
+    },
+    ValueFamily {
+        key: "family",
+        values: ADDR_FAMILY_R15,
+    },
+    ValueFamily {
+        key: "link",
+        values: LINK_KIND_R7,
+    },
+    ValueFamily {
+        key: "phase",
+        values: SESSION_PHASE_R14,
+    },
+    ValueFamily {
+        key: "q_basis",
+        values: ZENOH_BASIS_R43,
+    },
+    ValueFamily {
+        key: "reason",
+        values: &["encrypted", "mixed", "no_clock", "not_in_capture"],
+    },
+    ValueFamily {
+        key: "refusal",
+        values: &["damaged", "not_a_capture", "truncated"],
+    },
+    ValueFamily {
+        key: "strength",
+        values: ZENOH_STRENGTH_R43,
+    },
+    ValueFamily {
+        key: "why",
+        values: &["multicast_group", "scouting_only"],
+    },
+    ValueFamily {
+        key: "zenoh",
+        values: ZENOH_VERDICT_R43,
+    },
+];
+
+/// All fourteen families are PASSENGERS, revision 3's argument extended to the
+/// five that arrive: a row, a flow of a row and a check entry carry the same
+/// keys whichever word they say.
+pub const SESSION_TABLE_R5_CARRIES: &[KeyCarries] = &[
+    KeyCarries {
+        key: "announced_version",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "cell",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "check",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "encrypted",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "eps_basis",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "family",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "link",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "phase",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "q_basis",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "reason",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "refusal",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "strength",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "why",
+        shape: CarriesShape::Passenger,
+    },
+    KeyCarries {
+        key: "zenoh",
+        shape: CarriesShape::Passenger,
+    },
+];
+
 /// What each field-document family's WORD decides at revision 28 — revision 20's,
 /// with `state` changed: see [`PAYLOAD_STATE_CARRIES_R28`]. Written out in full,
 /// because a slice cannot be spliced in a `const` and an alias would make the
@@ -18450,7 +19160,9 @@ mod tests {
             // another protocol version stopped being read past its version.
             // To 42 when every flow carried `unit_readings`: how its framing
             // units read. Keys arrive; nothing retires and no word moves.
-            (FIELDS, 42),
+            // To 43 when `zenoh` became the sequential test's verdict and every
+            // flow carried `announced_version` and `zenoh_evidence`.
+            (FIELDS, 43),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.
@@ -18489,13 +19201,15 @@ mod tests {
             // link, the flow, the packet) joined the fields.
             // To 7 when a token gained `role`, what the parser read it as.
             // To 8 when `zenoh`, the flow's word, joined the fields.
-            (SELECTOR_DIAGNOSE, 8),
+            // To 9 when its words became the sequential test's three.
+            (SELECTOR_DIAGNOSE, 9),
             // The node names of a selector resolved to the zids a caller's
             // table gives them.
             (SELECTOR_BIND, 1),
             // Every field a selector can name. To 2 when the row's facts joined.
             // To 3 when `zenoh`, the flow's word, joined.
-            (SELECTOR_FIELDS, 3),
+            // To 4 when its words became the sequential test's three.
+            (SELECTOR_FIELDS, 4),
             // To 2 when the success branch named the kind each line was read
             // as and a refused key named its chunk, byte and reason.
             (DECLARATIONS_DIAGNOSE, 2),
@@ -18539,7 +19253,9 @@ mod tests {
             // To 3 when every row and flow carried `zenoh`.
             // To 4 when every row and flow carried `unit_readings`: keys
             // arrive; nothing retires and no word moves.
-            (SESSION_TABLE, 4),
+            // To 5 when `zenoh` became the sequential test's verdict and every
+            // row and flow carried `announced_version` and `zenoh_evidence`.
+            (SESSION_TABLE, 5),
             // The selector's verdict over the field document's rows.
             // To 2 on the same move as fields 27: the word on a `Request`, a
             // `ResponseFinal` and a del row stopped being `unjudged`.

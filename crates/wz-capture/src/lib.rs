@@ -251,6 +251,10 @@ pub mod session_table;
 pub mod session_table_json;
 #[cfg(all(test, feature = "dissect"))]
 mod session_table_tests;
+/// Whether a flow's bytes are zenoh, as a sequential test over the invariants a
+/// zenoh flow keeps: the checks, their weights and the tallies `session_table`
+/// keeps at ingest. Ungated for the reason the table is.
+pub mod zenoh_evidence;
 use exit::ExitingFlow as _;
 /// R311y616 (§1.1f) — the FILTER LANGUAGE: a selector a reader types, compiled
 /// into a three-valued predicate over records.
@@ -1828,6 +1832,23 @@ impl DatagramDissection {
     pub fn residue(&self) -> ByteResidue {
         self.residue
     }
+
+    /// The SN steps of every session of this flow, its own and one per QUIC
+    /// stream, both directions together. See
+    /// [`wz_session_core::passive::SnSteps`].
+    pub fn sn_steps(&self) -> wz_session_core::passive::SnSteps {
+        self.quic_streams
+            .iter()
+            .fold(session_table::session_sn_steps(&self.session), |sum, s| {
+                sum.and(session_table::session_sn_steps(&s.session))
+            })
+    }
+
+    /// This flow's evidence for the zenoh test
+    /// ([`zenoh_evidence::ZenohEvidence`]).
+    pub fn zenoh_evidence(&self) -> zenoh_evidence::ZenohEvidence {
+        self.ingest.evidence(self.sn_steps())
+    }
 }
 
 /// R311y607 — one datagram observed on the pre-session multicast link.
@@ -2948,6 +2969,18 @@ impl FlowDissection {
     /// bad link and nine good ones reads as uniformly lossy without this.
     pub fn chain_loss(&self) -> ChainLoss {
         self.chain_loss
+    }
+
+    /// The SN steps of this flow's session, both directions together. See
+    /// [`wz_session_core::passive::SnSteps`].
+    pub fn sn_steps(&self) -> wz_session_core::passive::SnSteps {
+        session_table::session_sn_steps(&self.session)
+    }
+
+    /// This flow's evidence for the zenoh test
+    /// ([`zenoh_evidence::ZenohEvidence`]).
+    pub fn zenoh_evidence(&self) -> zenoh_evidence::ZenohEvidence {
+        self.ingest.evidence(self.sn_steps())
     }
 
     fn new(flow: FlowKey, window_ms: Option<u64>, gap_patience: Option<usize>, keep: Keep) -> Self {
@@ -6727,21 +6760,28 @@ impl Dissection {
     pub(crate) fn list_zenoh_words(&self) -> Vec<Option<session_table::ZenohVerdict>> {
         let mut streams = self.flows.iter();
         let mut datagrams = self.datagram_flows.iter();
-        let mut datagram: Option<&session_table::LinkIngest> = None;
+        let mut datagram: Option<zenoh_evidence::ZenohEvidence> = None;
         self.message_lists_with_origin()
             .map(|(_, origin, _)| {
-                let ingest = match origin {
-                    MessageListOrigin::Stream => streams.next().map(|f| &f.ingest),
+                let evidence = match origin {
+                    MessageListOrigin::Stream => streams.next().map(FlowDissection::zenoh_evidence),
                     MessageListOrigin::Datagram => {
-                        datagram = datagrams.next().map(|f| &f.ingest);
+                        datagram = datagrams.next().map(DatagramDissection::zenoh_evidence);
                         datagram
                     }
                     MessageListOrigin::QuicStream(_) | MessageListOrigin::QuicDatagram => datagram,
-                    MessageListOrigin::Serial => Some(&self.serial_ingest),
+                    MessageListOrigin::Serial => Some(self.serial_zenoh_evidence()),
                 };
-                ingest.map(|i| session_table::ZenohVerdict::of(i.zenoh()))
+                evidence.map(|e| session_table::ZenohVerdict::of(&e))
             })
             .collect()
+    }
+
+    /// The serial line's evidence for the zenoh test
+    /// ([`zenoh_evidence::ZenohEvidence`]).
+    pub fn serial_zenoh_evidence(&self) -> zenoh_evidence::ZenohEvidence {
+        self.serial_ingest
+            .evidence(session_table::session_sn_steps(&self.serial_session))
     }
 
     /// R2508 (open-debt item 713) — every message of every list, in the order

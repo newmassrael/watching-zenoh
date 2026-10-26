@@ -20,18 +20,17 @@
 //!   and the last packet of the session, so a consumer derives an uptime from a
 //!   clock the document states;
 //! * `frames`, `bytes` -- the totals, which no retention bound moves;
-//! * `zenoh` -- whether the bytes are zenoh, as
-//!   [`crate::session_table::ZenohVerdict`] decides it from the version an
-//!   Init, Join, Scout or Hello announced: `proven`, `unproven`,
-//!   `foreign_version` or `mixed`. A row of arbitrary bytes on a zenoh port is
-//!   `unproven`, and so is a session the capture joined after its handshake;
-//! * `unit_readings` -- how the framing units READ, the evidence that tells those
-//!   two `unproven` rows apart: `explained`, `residual` and `undecoded`, each
-//!   `{"units":N,"bytes":B}`, partitioning the row's units. Evidence and not a
-//!   verdict: see `ReadingEvidence` in `wz_session_core::passive`;
+//! * `zenoh`, `announced_version`, `zenoh_evidence` -- whether the bytes are
+//!   zenoh, as the sequential test of [`crate::zenoh_evidence`] reads the row's
+//!   evidence (`yes`, `no` or `undecided`), what the version-bearing messages
+//!   announced, and the test's sum, thresholds and checks: the field document's
+//!   three keys, from the same writer. A row's evidence is its flows' together;
+//! * `unit_readings` -- how the framing units READ: `explained`, `residual` and
+//!   `undecoded`, each `{"units":N,"bytes":B}`, partitioning the row's units.
+//!   The same counts weigh in `zenoh_evidence` as the `unit_reading` check;
 //! * `flows` -- the flows the row is made of, each with the flow object every
-//!   other document carries and its own `encrypted`, `bytes` and `zenoh`, for a
-//!   consumer that joins.
+//!   other document carries and its own `encrypted`, `bytes`, the three zenoh
+//!   keys and `unit_readings`, for a consumer that joins.
 //!
 //! # EVERY KEY IS PRESENT, ALWAYS
 //!
@@ -51,7 +50,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
-use crate::session_table::{session_table, Cell, SessionRow, Stated, Unstated, Why, ZenohVerdict};
+use crate::session_table::{session_table, Cell, SessionRow, Stated, Unstated, Why};
 use crate::{CaptureError, Dissection};
 
 /// Why a container was refused, the closed set.
@@ -216,12 +215,8 @@ fn push_row(row: &SessionRow, out: &mut String) {
     push_cell(out, &mut unstated, Cell::Frames, &row.frames, |n, o| {
         let _ = write!(o, "{n}");
     });
-    let _ = write!(
-        out,
-        ",\"bytes\":{},\"zenoh\":\"{}\"",
-        row.bytes,
-        ZenohVerdict::of(row.zenoh).name()
-    );
+    let _ = write!(out, ",\"bytes\":{}", row.bytes);
+    crate::fields_json::push_zenoh(row.versions, &row.evidence, out);
     crate::fields_json::push_unit_readings(row.readings, out);
     out.push_str(",\"unstated\":[");
     for (i, (cell, reason)) in unstated.iter().enumerate() {
@@ -244,11 +239,11 @@ fn push_row(row: &SessionRow, out: &mut String) {
         crate::census_json::push_flow(&link.flow, out);
         let _ = write!(
             out,
-            ",\"encrypted\":\"{}\",\"bytes\":{},\"zenoh\":\"{}\"",
+            ",\"encrypted\":\"{}\",\"bytes\":{}",
             link.encryption.name(),
             link.bytes,
-            ZenohVerdict::of(link.zenoh).name()
         );
+        crate::fields_json::push_zenoh(link.versions, &link.evidence, out);
         crate::fields_json::push_unit_readings(link.readings, out);
         out.push('}');
     }

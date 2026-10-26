@@ -2138,7 +2138,7 @@ fn push_stream_flow(
     out.push_str("{\"flow\":");
     push_flow(&flow.flow, out);
     push_flow_number(tags.flow_id, out);
-    push_zenoh(flow.ingest.zenoh(), out);
+    push_zenoh(flow.ingest.versions(), &flow.zenoh_evidence(), out);
     push_unit_readings(flow.ingest.readings(), out);
     push_context(&flow.session.context(), out);
     push_halves(&flow.half(Direction::A), &flow.half(Direction::B), out);
@@ -2489,7 +2489,7 @@ fn push_datagram_flow(
     out.push_str("{\"flow\":");
     push_flow(&flow.flow, out);
     push_flow_number(tags.flow_id, out);
-    push_zenoh(flow.ingest.zenoh(), out);
+    push_zenoh(flow.ingest.versions(), &flow.zenoh_evidence(), out);
     push_unit_readings(flow.ingest.readings(), out);
     push_context(&flow.session.context(), out);
     push_halves(&flow.half(Direction::A), &flow.half(Direction::B), out);
@@ -4308,20 +4308,66 @@ fn tri_state(v: Option<bool>) -> &'static str {
     }
 }
 
-/// Revision 41 — whether the flow's bytes are zenoh, one word from the closed
-/// set [`crate::session_table::ZenohVerdict`]: `proven`, `unproven`,
-/// `foreign_version`, `mixed`.
+/// Revision 43 — whether the flow's bytes are zenoh, and what that rests on:
+/// three keys, shared with the session table, which writes them on a row and on
+/// each flow of it.
+///
+/// * `zenoh` -- `yes`, `no` or `undecided`, the sequential test's verdict
+///   ([`crate::session_table::ZenohVerdict`]);
+/// * `announced_version` -- `none`, `own`, `foreign` or `mixed`, what the Inits,
+///   Joins, Scouts and Hellos announced
+///   ([`crate::session_table::AnnouncedVersion`]);
+/// * `zenoh_evidence` -- the test itself: the log likelihood ratio and the two
+///   thresholds in millibits, the model the weights are, and one entry per check
+///   that observed anything, in [`crate::zenoh_evidence::Check::ALL`] order,
+///   with its strength, its counts, its millibits and the basis of each side.
 ///
 /// Beside the context and not inside it: the context is what the handshake
-/// negotiated, and this is what every Init, Join, Scout and Hello of the flow
-/// said, the scouting ones included, which no session folds. Counted at ingest,
-/// so a retention ceiling that has discarded the Init does not move it.
-fn push_zenoh(evidence: wz_session_core::passive::VersionEvidence, out: &mut String) {
+/// negotiated, and this is what every message of the flow was evidence of, the
+/// scouting ones included, which no session folds. Counted at ingest, so a
+/// retention ceiling that has discarded the Init does not move it.
+pub(crate) fn push_zenoh(
+    versions: wz_session_core::passive::VersionEvidence,
+    evidence: &crate::zenoh_evidence::ZenohEvidence,
+    out: &mut String,
+) {
+    use crate::zenoh_evidence::{model, Check};
     let _ = write!(
         out,
-        ",\"zenoh\":\"{}\"",
-        crate::session_table::ZenohVerdict::of(evidence).name()
+        ",\"zenoh\":\"{}\",\"announced_version\":\"{}\",\"zenoh_evidence\":{{\
+         \"log2_lr_millibits\":{},\"yes_at_millibits\":{},\"no_at_millibits\":{},\
+         \"model\":{},\"checks\":[",
+        crate::session_table::ZenohVerdict::of(evidence).name(),
+        crate::session_table::AnnouncedVersion::of(versions).name(),
+        evidence.log2_lr_millibits(),
+        model::YES_AT,
+        model::NO_AT,
+        model::MODEL,
     );
+    let mut first = true;
+    for check in Check::ALL {
+        let tally = evidence.tally(check);
+        if !tally.observed() {
+            continue;
+        }
+        if !first {
+            out.push(',');
+        }
+        first = false;
+        let _ = write!(
+            out,
+            "{{\"check\":\"{}\",\"strength\":\"{}\",\"confirmed\":{},\"violated\":{},\
+             \"millibits\":{},\"q_basis\":\"{}\",\"eps_basis\":\"{}\"}}",
+            check.name(),
+            check.strength().name(),
+            tally.confirmed,
+            tally.violated,
+            tally.millibits,
+            check.q_basis().name(),
+            check.eps_basis().name(),
+        );
+    }
+    out.push_str("]}");
 }
 
 /// Revision 42 — how the flow's framing units READ, beside the verdict
@@ -4331,10 +4377,9 @@ fn push_zenoh(evidence: wz_session_core::passive::VersionEvidence, out: &mut Str
 /// The three PARTITION the flow's units (see
 /// [`wz_session_core::passive::UnitReading`]), so a consumer that wants the
 /// unit total sums them and one that wants the share of bytes a decoded message
-/// accounts for divides. It is evidence and not a verdict, and it is the count
-/// that tells a zenoh session the capture joined after its handshake from
-/// arbitrary bytes, which `zenoh` reads as the same observation (`unproven`).
-/// Counted at ingest, so a retention ceiling does not move it. It is shared with
+/// accounts for divides. It is evidence and not a verdict: the same units weigh
+/// in `zenoh_evidence` as the `unit_reading` check, and the verdict is the
+/// test's. Counted at ingest, so a retention ceiling does not move it. It is shared with
 /// the session table, which writes the same object on a row and on each flow of
 /// it.
 pub(crate) fn push_unit_readings(
@@ -7418,22 +7463,48 @@ mod tests {
             push_context(&context, &mut out);
             arms.push(out);
         }
-        // Every `zenoh` word, from the evidence that decides it.
-        let mut zenoh_words = alloc::collections::BTreeSet::new();
-        for (own_version, foreign_version) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-            let evidence = wz_session_core::passive::VersionEvidence {
-                own_version,
-                foreign_version,
-            };
-            zenoh_words.insert(crate::session_table::ZenohVerdict::of(evidence).name());
-            let mut out = String::new();
-            push_zenoh(evidence, &mut out);
-            arms.push(out);
+        // Every `zenoh` and `announced_version` word, from the evidence that
+        // decides it, and every check with both sides observed, so the check,
+        // strength and basis words are all written.
+        {
+            use crate::session_table::{AnnouncedVersion, ZenohVerdict};
+            use crate::zenoh_evidence::{model, Check, ZenohEvidence};
+            let mut every_check = ZenohEvidence::default();
+            for check in Check::ALL {
+                every_check.confirm(check, 0);
+                every_check.violate(check, 0);
+            }
+            let mut yes = ZenohEvidence::default();
+            yes.confirm(Check::CookieEcho, model::YES_AT);
+            let mut no = ZenohEvidence::default();
+            no.violate(Check::UnitReading, model::NO_AT);
+            let mut zenoh_words = alloc::collections::BTreeSet::new();
+            let mut version_words = alloc::collections::BTreeSet::new();
+            let versions = [(0, 0), (1, 0), (0, 1), (1, 1)];
+            for (i, evidence) in [yes, no, every_check, ZenohEvidence::default()]
+                .iter()
+                .enumerate()
+            {
+                let (own_version, foreign_version) = versions[i];
+                let versions = wz_session_core::passive::VersionEvidence {
+                    own_version,
+                    foreign_version,
+                };
+                zenoh_words.insert(ZenohVerdict::of(evidence).name());
+                version_words.insert(AnnouncedVersion::of(versions).name());
+                let mut out = String::new();
+                push_zenoh(versions, evidence, &mut out);
+                arms.push(out);
+            }
+            assert_eq!(
+                zenoh_words.into_iter().collect::<Vec<_>>(),
+                ZenohVerdict::names()
+            );
+            assert_eq!(
+                version_words.into_iter().collect::<Vec<_>>(),
+                AnnouncedVersion::names()
+            );
         }
-        assert_eq!(
-            zenoh_words.into_iter().collect::<Vec<_>>(),
-            crate::session_table::ZenohVerdict::names()
-        );
         let mut out = String::new();
         push_first_byte(
             Some(FirstByte {
@@ -9068,7 +9139,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 68] = [
+        let live: [(&str, &str, Vec<&'static str>); 78] = [
             // The session's per-frame verdicts, each held to the
             // walk its emitter's exhaustive match is bound to.
             (rev::FIELDS, "verdict", SnVerdictWord::names()),
@@ -9411,8 +9482,10 @@ mod tests {
                 "why",
                 crate::session_table::Why::names(),
             ),
-            // Whether a flow is zenoh, declared by both documents that carry it
-            // and held to the one enum that writes it.
+            // Whether a flow is zenoh, what its versions announced, and the words
+            // of the test's evidence, declared by both documents that carry them
+            // and each held to the one enum that writes it. `q_basis` and
+            // `eps_basis` are two keys of one vocabulary.
             (
                 rev::SESSION_TABLE,
                 "zenoh",
@@ -9422,6 +9495,52 @@ mod tests {
                 rev::FIELDS,
                 "zenoh",
                 crate::session_table::ZenohVerdict::names(),
+            ),
+            (
+                rev::SESSION_TABLE,
+                "announced_version",
+                crate::session_table::AnnouncedVersion::names(),
+            ),
+            (
+                rev::FIELDS,
+                "announced_version",
+                crate::session_table::AnnouncedVersion::names(),
+            ),
+            (
+                rev::SESSION_TABLE,
+                "check",
+                crate::zenoh_evidence::Check::names(),
+            ),
+            (rev::FIELDS, "check", crate::zenoh_evidence::Check::names()),
+            (
+                rev::SESSION_TABLE,
+                "strength",
+                crate::zenoh_evidence::Strength::names(),
+            ),
+            (
+                rev::FIELDS,
+                "strength",
+                crate::zenoh_evidence::Strength::names(),
+            ),
+            (
+                rev::SESSION_TABLE,
+                "q_basis",
+                crate::zenoh_evidence::Basis::names(),
+            ),
+            (
+                rev::FIELDS,
+                "q_basis",
+                crate::zenoh_evidence::Basis::names(),
+            ),
+            (
+                rev::SESSION_TABLE,
+                "eps_basis",
+                crate::zenoh_evidence::Basis::names(),
+            ),
+            (
+                rev::FIELDS,
+                "eps_basis",
+                crate::zenoh_evidence::Basis::names(),
             ),
             // The verdict document's two families, each held to the
             // SAME walk the field document's is. Two declarations of one
