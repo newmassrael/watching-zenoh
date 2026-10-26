@@ -291456,6 +291456,64 @@
         "Still red on the last hosted runs and not of this family: the repository-captures test of wz-capture, Layer C1cs for the size of the C ABI builds, and wz-ext-pubsub in the audit of Layer C1bf. Hosted runs of this family's pushes were cancelled by the next push each time, so their per-job result is still to be read."
       ]
     },
+    "Round 3732": {
+      "decision_summary": "The parity program's second batch (docs/upstream-parity.md). The MCU matrix measures memory instead of restating a configuration: a compare build carries a report of the kernel heap's peak and every thread's stack, said the same way by both programs. zenoh-pico is held with the wz client's planes only (queryable over UDP), in both of its arms, and its single-threaded arm is stronger in every cell, so it is the reference. The first committed matrix (deploy/upstream_parity.json, the verdict module's rows): the fixed client wins the heap peak and static RAM and loses text 1.23x, stack used 1.62x and turnaround 1.035x; the heap client loses every cell. The pico C ABI on the MCU runs on the one cooperative engine and not a copy of it: the engine's mutex, threads, sleep and thread-local sets go behind the port's os seam (the host's std, or a kernel through wz_os_*, Zephyr's in wz_os_zephyr.c), and the engine builds without std.",
+      "changes_bullets": [
+        "deploy/zephyr-common: wz_memory_report.c and memory_report.conf (CONFIG_WZ_MEMORY_REPORT: a lowest-priority thread prints `mem: heap peak` and `mem: stack <thread>` when a figure moves); wz_os_zephyr.c (CONFIG_WZ_OS: k_mutex, k_current_get, dynamic threads, k_msleep behind the port's wz_os_* functions); Kconfig.wz and wz_zephyr_board.cmake for both.",
+        "deploy/zephyr-pico-compare: prj.conf with the queryable and UDP unicast only; overlays/multi_thread.conf; main.c steps the session with zp_spin_once in the single-threaded arm.",
+        "scripts/kit-lane.sh: compare builds into compare-<image> directories with the memory report on, so a gated image's own build is never replaced; image zephyr-pico-queryable-st. scripts/lib/kit_compare.py: heap, stack used and stack reserved cells; Cell and rows (--format rows).",
+        "deploy/upstream_parity.json (new): run 20261026T214250, 21 rows.",
+        "crates/wz-capi-port/src/os.rs (new): Mutex, ThreadId, spawn, join, is_finished, sleep_ms. crates/wz-capi-coop: the engine on it; no_std with a default std feature (port std, runtime host-lock); portable-atomic for its 64-bit counters; scout needs std.",
+        "scripts/lib/capability_cost_gate.py: pico-client-coop-admin-space budget 1,115,000 to 1,118,000."
+      ],
+      "verification_bullets": [
+        "The kit, six alternating boots of four images (pico both arms, the heap and the fixed client), 2,000 GETs per document per boot, every boot answered, judged against the single-threaded pico: fixed client text 179,536 vs 146,316 LOSS, heap peak 0 vs 9,280 WIN, stack used 9,720 vs 5,984 LOSS, turnaround 1.0346 [1.0245, 1.0448] LOSS; heap client text 1.648, heap 1.547, stack 2.762, turnaround 1.0738 [1.0636, 1.0862], all LOSS. The committed rows equal the module's output for the run.",
+        "kit_compare.py selftest 23 of 23; kit-lane.sh --selftest passes; shellcheck clean.",
+        "wz-capi-port 10 tests; wz-capi-coop 51 tests with all its features and 13 with none; clippy -D warnings of both on the host and for thumbv7em-none-eabi without std; wz-capi-pico on the cooperative engine, its unit tests and client_only_dials_a_listener 5 of 5 against a freshly built hold_a_listener (a stale one in a shared build slot failed 4).",
+        "capability_cost_gate coop cases on one bench host, both orders, at a7f11d66e and at this batch: pico-client-coop 899,663 to 899,111, admin-space 1,114,729 to 1,115,141, scout 981,698 to 981,182."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "carry_forward_bullets": [
+        "pico-client-coop-scout reads 981,698 at a7f11d66e against its 981,000 budget on the bench host, before this batch (which takes 516 off it): the pico size item is the cooperative engine's author's, told with the figures.",
+        "L, the loop on the LOSS cells, largest first: the wz client's main stack (13,288 B heap, 6,480 fixed, against pico's 2,944 + 2,520), the heap client's heap peak (14,356 vs 9,280), text (the fixed client grew 157,088 on 2026-10-22 to 179,536 now, unattributed), and a turnaround 3.5 percent behind.",
+        "The ram cell needs the smallest kernel heap pool each image runs in.",
+        "The delivery set now takes the port's lock twice per step on the host: a cost to weigh in the host throughput cells.",
+        "C12 next: the pico ABI without std behind src/os/zephyr.rs, the MCU link over Zephyr sockets, the MCU staticlib; the port's start of a read task has no answer for \"no thread\" yet (it panics, as std's spawn did).",
+        "K1: the SCE element gate is SCE's ADR 0057, proposed; the wz feature model is generated from deploy/wz-config.toml once it is approved."
+      ],
+      "publishable_decision_summary": "The parity program's second batch (docs/upstream-parity.md). The MCU matrix measures memory instead of restating a configuration: a compare build carries a report of the kernel heap's peak and every thread's stack, said the same way by both programs. zenoh-pico is held with the wz client's planes only (queryable over UDP), in both of its arms, and its single-threaded arm is stronger in every cell, so it is the reference. The first committed matrix (deploy/upstream_parity.json, the verdict module's rows): the fixed client wins the heap peak and static RAM and loses text 1.23x, stack used 1.62x and turnaround 1.035x; the heap client loses every cell. The pico C ABI on the MCU runs on the one cooperative engine and not a copy of it: the engine's mutex, threads, sleep and thread-local sets go behind the port's os seam (the host's std, or a kernel through wz_os_*, Zephyr's in wz_os_zephyr.c), and the engine builds without std.",
+      "publishable_changes_bullets": [
+        "deploy/zephyr-common: wz_memory_report.c and memory_report.conf (CONFIG_WZ_MEMORY_REPORT: a lowest-priority thread prints `mem: heap peak` and `mem: stack <thread>` when a figure moves); wz_os_zephyr.c (CONFIG_WZ_OS: k_mutex, k_current_get, dynamic threads, k_msleep behind the port's wz_os_* functions); Kconfig.wz and wz_zephyr_board.cmake for both.",
+        "deploy/zephyr-pico-compare: prj.conf with the queryable and UDP unicast only; overlays/multi_thread.conf; main.c steps the session with zp_spin_once in the single-threaded arm.",
+        "scripts/kit-lane.sh: compare builds into compare-<image> directories with the memory report on, so a gated image's own build is never replaced; image zephyr-pico-queryable-st. scripts/lib/kit_compare.py: heap, stack used and stack reserved cells; Cell and rows (--format rows).",
+        "deploy/upstream_parity.json (new): run 20261026T214250, 21 rows.",
+        "crates/wz-capi-port/src/os.rs (new): Mutex, ThreadId, spawn, join, is_finished, sleep_ms. crates/wz-capi-coop: the engine on it; no_std with a default std feature (port std, runtime host-lock); portable-atomic for its 64-bit counters; scout needs std.",
+        "scripts/lib/capability_cost_gate.py: pico-client-coop-admin-space budget 1,115,000 to 1,118,000."
+      ],
+      "publishable_verification_bullets": [
+        "The kit, six alternating boots of four images (pico both arms, the heap and the fixed client), 2,000 GETs per document per boot, every boot answered, judged against the single-threaded pico: fixed client text 179,536 vs 146,316 LOSS, heap peak 0 vs 9,280 WIN, stack used 9,720 vs 5,984 LOSS, turnaround 1.0346 [1.0245, 1.0448] LOSS; heap client text 1.648, heap 1.547, stack 2.762, turnaround 1.0738 [1.0636, 1.0862], all LOSS. The committed rows equal the module's output for the run.",
+        "kit_compare.py selftest 23 of 23; kit-lane.sh --selftest passes; shellcheck clean.",
+        "wz-capi-port 10 tests; wz-capi-coop 51 tests with all its features and 13 with none; clippy -D warnings of both on the host and for thumbv7em-none-eabi without std; wz-capi-pico on the cooperative engine, its unit tests and client_only_dials_a_listener 5 of 5 against a freshly built hold_a_listener (a stale one in a shared build slot failed 4).",
+        "capability_cost_gate coop cases on one bench host, both orders, at a7f11d66e and at this batch: pico-client-coop 899,663 to 899,111, admin-space 1,114,729 to 1,115,141, scout 981,698 to 981,182."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "publishable_carry_forward_bullets": [
+        "pico-client-coop-scout reads 981,698 at a7f11d66e against its 981,000 budget on the bench host, before this batch (which takes 516 off it): the pico size item is the cooperative engine's author's, told with the figures.",
+        "L, the loop on the LOSS cells, largest first: the wz client's main stack (13,288 B heap, 6,480 fixed, against pico's 2,944 + 2,520), the heap client's heap peak (14,356 vs 9,280), text (the fixed client grew 157,088 on 2026-10-22 to 179,536 now, unattributed), and a turnaround 3.5 percent behind.",
+        "The ram cell needs the smallest kernel heap pool each image runs in.",
+        "The delivery set now takes the port's lock twice per step on the host: a cost to weigh in the host throughput cells.",
+        "C12 next: the pico ABI without std behind src/os/zephyr.rs, the MCU link over Zephyr sockets, the MCU staticlib; the port's start of a read task has no answer for \"no thread\" yet (it panics, as std's spawn did).",
+        "K1: the SCE element gate is SCE's ADR 0057, proposed; the wz feature model is generated from deploy/wz-config.toml once it is approved."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
