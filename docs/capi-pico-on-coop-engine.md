@@ -96,6 +96,13 @@ it behaves as pico behaves in both of pico's threading arms.
   runs with the lock released (deliveries are queued under it and handed out after), so a
   callback may call back into its session, as zenoh-pico's may. That is the one `unsafe`
   claim the engine makes, stated where its lock is.
+- **D9. The listening role is several faces over one set of registrations (section 7).** A
+  session that accepts holds one face for each peer it is linked to, each with the tables its
+  peer writes and the queries it asked of that peer, and one registration table of what the
+  application declared, which every face is dispatched against. The engine does not keep one
+  observer for each peer and replay the application's registrations onto each, as the tokio
+  engine's registry does, because the fixed-memory profile already separates the two kinds of
+  table and the separation is what the engine needs.
 - **D6. The compile profile is orthogonal.** A `panic = "abort"` profile for the
   C ABI (`capi-small`) composes with either engine and is measured on its own.
 
@@ -535,13 +542,108 @@ it behaves as pico behaves in both of pico's threading arms.
 
 ## 6. Open
 
-- The listening role. pico's `z_open(listen)` holds several peers in one
-  session. The slot profile's accept (`Accept`, `IpAcceptor`) is not the heap engine's: the heap
-  stack has the UDP `open_acceptor` only, and the stream accept would reuse the ungated
-  `StreamListen`. The engine's `Core` holds one observer and one link, and an observer follows
-  ONE peer (the remote registries are the peer's), so several peers are several observers: a face
-  registry in which each face has its observer and the session's declarations are replayed onto
-  each as a redial replays them, with the port's factories (`SubscriberSink` and the like)
-  minting one callback per face, as that vocabulary already says. A get then has one leg per
-  face, which the port's `get_on_wire` already returns.
+- The listening role, designed in section 7 and not yet built.
 - How the selection is spelled on the build-configuration axis (D5).
+
+## 7. The listening role (decision D9)
+
+pico's `z_open` with a `listen` endpoint accepts peers, and in `mode=peer` a session is both
+dialled and dialling. The cooperative engine has one link (`Core::link`, up, being dialled or
+waiting to be) and one observer, so it is a client. What follows is read from the code as it
+stands (`crates/wz-capi-coop/src/engine.rs`, `crates/wz-session-core/src/{observer,slot_observer,
+peer_tables}.rs`, `crates/wz-runtime-coop/src/{session_drive,ip_stack}.rs`) and is a design, with
+what each step proves; nothing here is built.
+
+### What the engine holds today, and what a second peer breaks
+
+- One `ApplicationLayerObserver` holds what the application registered (subscribers, queryables,
+  local tokens) AND what the peer wrote (its key aliases, the subscribers, queryables and tokens
+  it declared, its interests, the replies and Finals its queries are owed), and the requester
+  side of the session's own gets. A wire id is scoped by its transport session, so two peers'
+  tables cannot be one table: both number their aliases, declarations and requests from 1.
+- One `Replay` says how much of the session's declarations the link's peer has been told, one
+  `generation` names the link a query came in on (`QueryPlane`), one `FacePlane` snapshot lists
+  the transport.
+- The link layer opens a UDP acceptor that takes the first `InitSyn` and no other (`SessionLinks::
+  open_acceptor`). A peer-accepting stack exists beside it, for the slot profile: `Accept<D>` and
+  `IpAcceptor` (`wz-runtime-coop`), which yield one driver for each peer that connects.
+
+### The shape: registrations once, tables per face
+
+The tokio engine's registry (`wz-capi-core::faces`) gives each face a session and an observer of
+its own and replays every application registration onto each, so one subscriber is N callbacks
+and one queryable N handlers, which the port's factories (`SubscriberSink`, `QueryableSink`)
+were written to allow. The fixed-memory profile took the other cut: `SlotObserverOf` holds what
+the application registers, once; `PeerTables` holds what one peer writes, one set for each
+session; `Requesters` holds the pending queries of one session; and `dispatch` takes the
+session's tables as arguments, so one observer serves every session and holds none of their
+state. That is the cut a listening engine needs, and it is not a second way of doing the same
+thing: it is the same registry with the per-peer part made explicit, which the heap observer
+bundles. D9 chooses it, for these reasons.
+
+- A registration is made once and read once. A sample from two faces reaches one callback, where
+  N copies of a callback would be N things to keep consistent with each other and with the C
+  program's own state.
+- A flood on one face fills that face's tables and no other face's.
+- The two profiles stop having two implementations of the dispatch order, which the module
+  documentation of `slot_observer` states "step for step" as a promise two files keep.
+
+### What is not as is
+
+`slot_observer` is compiled only with `bounded-heapless` (the fixed backing, which flips the
+build's whole storage policy to static), and its `dispatch` takes `PeerTables` and `Requesters`
+of the build's policy. A heap build cannot name it. `PeerTables<P: Storage>` is already generic
+over the policy, and `Requesters<R, G>` over the reply sinks, so the work is in the observer: its
+dispatch and drain made generic over the policy, ungated from `bounded-heapless`, and held equal
+to `ApplicationLayerObserver::dispatch` by a differential (the same events into both give the
+same sends and the same deliveries). The AP observer stays as the tokio engine's until it is
+rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables<Heap>` and one `Requesters`, which is
+the end state and is not this work.
+
+### The steps, each of which stands alone and proves what it says
+
+- **L0. The observer, generic.** `SlotObserverOf`'s dispatch over `PeerTables<P>`, in a heap
+  build, with the differential against `ApplicationLayerObserver`. Nothing in the engine moves.
+  Proof: the differential, and `session-core`'s existing tests on both profiles.
+- **L1. The engine on it, with one link.** `Core` holds a `SlotObserver`, the link's
+  `PeerTables<Heap>` and its `Requesters`, and dispatches against them. No behaviour change: the
+  engine's whole test suite and the size gate's cooperative cases (whose budgets leave almost no
+  margin) are the proof, and the cases are measured before and after on one machine.
+- **L2. A face table of one.** `Link` becomes a face: its id, its wire, its tables, its
+  `Replay`, its `generation`, its requesters; `Core` holds a table of them, the dial role's one
+  entry at a fixed id as `wz-capi-core` keeps `DIAL_FACE_ID`. A get is one leg for each face up,
+  which the port's `get_on_wire` already returns as a count; a publish goes to every face; a
+  write filter and a matching listener count the remote declarations of ALL faces
+  (`peer_matches` reads the table); an answer to a query goes to the face whose generation it
+  carries; a face event is reported for each face. Still one face, so the proof is again the
+  existing suite, plus the new unit tests of what the table decides with two faces on a
+  scripted link.
+- **L3. The acceptor.** The face table takes a face when the accept side yields a link, and
+  loses it when its lease ends or its peer closes. The link layer's `SessionLinks` gains the
+  accepting side: `Accept` over the host's `tcp/` listener first (it exists for the slot profile
+  and is ungated from `session-slot` here), and UDP, by source-address demultiplexing, as its own
+  sub-step once the stream case stands; `read` waits on
+  the readiness of every link and not one (today `IdleWait::Input` is one `LinkReadiness`; two
+  links need either a multiplexed wait or a bounded one, and the choice is measured). Proof: a
+  listener session and two clients of the same engine in one process over loopback, each client
+  declaring and putting, the listener's subscriber hearing both and a get reaching both.
+- **L4. The ABI.** pico's `z_open(listen)` and `mode=peer` on the cooperative engine: the feature
+  `peer` stops selecting the tokio engine. Proof: Layer C1co's legs with the full build's
+  `hold_a_listener` as a client of the cooperative listener, the pico interop against the real
+  zenoh-pico for both roles, and a size-gate case for a cooperative peer.
+- **L5. Both roles at once.** A peer that listens and dials: the dial role's face and the
+  accepted ones in one table, one face for each remote zid as the tokio registry keeps (a node
+  the session is already linked to is not given a second face).
+
+### What is decided and what is open
+
+Decided: one registration table and per-face tables (D9); the dial role keeps a fixed face id
+and the accepted faces take ids beneath it, as `wz-capi-core`'s do; a sample that arrives from
+two faces is delivered twice, as a peer that forwards would deliver it twice in zenoh-pico; the
+engine's one session lock stays, and a face's callbacks still run outside it (D8).
+
+Open, to be settled by the step that meets it and not before: how `read` waits on several links
+(L3); whether the bound of faces is a build constant or the config's; the order in which a new face is told the session's declarations when the session
+is already large (`Replay` is paced per link today); whether a face's `PeerTables` are kept or
+dropped when its link is lost and redialled (the dial role redials; an accepted face does not,
+its peer dials again and is a new face).
