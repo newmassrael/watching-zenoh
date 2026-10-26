@@ -188,6 +188,16 @@ IMAGES = (
     # them. The tolerance of 128 is smaller than that spread, so the row follows what the hosted
     # run reads and not what a change should have caused; the cause of the fall from 15 frames to
     # 10 was not separated.
+    #
+    # 6,940 bytes in the bench host's build of 2026-10-27 over 15 frames, which is what the hosted
+    # image reads for the same tree: the host read 7,152 where the hosted job read 7,296 before the
+    # console line's buffer left `wz_app_main` (-144), the two were equal at that tree. The
+    # not-a-Frame dispatch of `wz-session-core` is three steps now (`decode_unit_in`,
+    # `decide_unit_in`, then the engine's event in `dispatch_unit_in`), so the 720-byte decoded
+    # message is the only copy held across them, and the worst chain is no longer the engine's
+    # answer to a handshake under that dispatch (2,432 bytes of frame) but the connect manager's
+    # dial path: `wz_app_main` 1,784, `ConnectManager::reconcile` 1,280 and two frames of its own
+    # (416, 112), `SlotDialer::dial_expecting` 1,216, the pump's `PumpSlots` 64.
     Image(
         key="zephyr-client-fixed",
         elf=None,
@@ -195,7 +205,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=7280,
+        peak=6940,
     ),
     # The same client with the session coalescing a send window into one datagram
     # (`overlays/t2g_client_batching.conf`). The batch writer and its flush path are two more
@@ -203,11 +213,14 @@ IMAGES = (
     # 2026-10-23 on the shared node, against 6,904 for the client without them (and 7,140 with
     # the node written in `fixed_client.rs`). Its stack is the overlay's own.
     #
-    # `peak` is 7,460 bytes in the image of 2026-10-27 (the kit lane's build, 3 runs of the same
-    # kit reading, 6,328 bytes). Since 2026-10-23: the slot node keeps the latest sample of a
-    # subscription (+136) and holds sessions a peer opened beside the dialled ones (+64), the
-    # connect manager is held by the shared planner and by nodes' zids (+88), a few smaller steps,
-    # and the log lines are not inlined into the main frame (-144).
+    # `peak` is 6,940 bytes in the image of 2026-10-27 after the not-a-Frame dispatch was split
+    # into three steps (the kit lane's build, 2 runs of the same kit reading, 6,060 bytes), against
+    # 7,460 before the split, the same chain as the client without batching: the worst chain is
+    # the connect manager's dial path (see the fixed client's row). The 7,460 had been read since
+    # 2026-10-23: the slot node keeps the latest sample of a subscription (+136) and holds
+    # sessions a peer opened beside the dialled ones (+64), the connect manager is held by the
+    # shared planner and by nodes' zids (+88), a few smaller steps, and the log lines are not
+    # inlined into the main frame (-144).
     Image(
         key="zephyr-client-fixed-batching",
         elf=None,
@@ -215,23 +228,24 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=7460,
+        peak=6940,
     ),
     # The fixed client that ASKS (`overlays/t2g_client_get.conf`): the getter of
     # `wz_session_mcu::slot_getter` is the application layer the observer's drain runs inside, and
     # its query path (`get`, the request written into the slot the link lends) is under that drain
     # too. Its stack is the overlay's own.
     #
-    # `peak` is 7,784 bytes in the image of 2026-10-27 (one query in flight; it was 7,672 on
+    # `peak` is 7,092 bytes in the image of 2026-10-27 after the not-a-Frame dispatch was split
+    # into three steps (one query in flight; it was 7,784 before the split and 7,672 on
     # 2026-10-23, and 8,588 with four then, whose worst path is another and which was not
-    # re-measured). ⚠ It is BELOW what the kit's own reading of the same image reaches over 2,050
-    # answered queries, 8,328 bytes (8,144 on 2026-10-23): the reader does not follow a call
-    # through a register (12 on this path), and the reply sink the getter hands the session is
-    # called through one (`ReplySink::on_reply`/`on_final`, which write the plan). So for this image
-    # the chain is a figure a change moves and not a bound on the stack: the stack is sized from
-    # the kit's reading (12,288 bytes leaves a third free at 8,328: 32 percent), and the resource
-    # budget's row for it says so (`chain_misses`) and holds the reading to a quarter of the stack
-    # free.
+    # re-measured). It is now ABOVE what the kit's own reading of the same image reaches over
+    # 2,050 answered queries, 6,648 bytes (it was 8,328 before the split and 8,144 on 2026-10-23,
+    # when the reading was over the chain): the reply sink the getter hands the session is still
+    # called through a register (`ReplySink::on_reply`/`on_final`, which write the plan) and the
+    # reader does not follow it, but the path under that dispatch is the engine's answer to a
+    # handshake no longer, and the worst chain is the connect manager's dial path (see the fixed
+    # client's row). The resource budget's row for this image no longer carries `chain_misses`:
+    # the chain is a bound again, for as long as the reading stays under it.
     Image(
         key="zephyr-client-fixed-get",
         elf=None,
@@ -239,7 +253,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=7784,
+        peak=7092,
     ),
     # The fixed client over the secure channel (`overlays/t2g_client_tls.conf`, decision D9):
     # the dial completes a TLS 1.3 handshake in Mbed TLS before the session sees a byte, and every
@@ -250,6 +264,15 @@ IMAGES = (
     # calls through a register not followed (the channel's transport callbacks among them). The
     # kit's own reading of that image over a dial, a handshake and a session is 6,864 bytes, under
     # the chain.
+    #
+    # 7,432 bytes in the bench host's build of 2026-10-27 over 23 frames, 416 over the figure
+    # above, and the same with and without the split of the not-a-Frame dispatch of
+    # `wz-session-core` into three steps: the worst chain is the connect manager's dial path
+    # (`wz_app_main` 1,920, `ConnectManager::reconcile` 1,280 and two frames of its own, 416 and
+    # 112, `SlotDialer::dial_expecting` 1,440, `wz_tls_session_handshake` under it), which the
+    # connect manager's changes since 2026-10-24 deepened and which was not bisected. The kit's
+    # reading of the image, 6,752 bytes, fell 112 with the split. The hosted Qzb lane runs this
+    # gate for the fixed client's overlay only, so this figure is the bench host's.
     Image(
         key="zephyr-client-fixed-tls",
         elf=None,
@@ -257,7 +280,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=7016,
+        peak=7432,
     ),
 )
 
