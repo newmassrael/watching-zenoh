@@ -409,6 +409,23 @@ Each lands whole with its surface lines, tests and faults in one round.
     names the same set); a "listening" check that a port answers proves nothing, since the kernel
     completes a handshake no one accepts. 8 differential tests, 6 injected faults of this slice and
     the 12 of the last, one fault that did not compile run again.
+  - **Z1c (landed; Z1 is complete).** `Session::info` and `SessionInfo` with `zid`, `routers_zid`
+    and `peers_zid` and their three builders, over the registry's list of established peers and the
+    role each announced (a link whose handshake has not completed is not listed, and a closed
+    session has none, as upstream's has no transport left); the locators, transports, links and the
+    listeners of their events are the `unstable` arm and slice Z6a. 21 of the default lines and the
+    same of the other two arms, 5 injected faults none missed, and the roles of the differential
+    now read the other direction as well: each node of this crate reports what its own `info` sees
+    of the upstream node it is connected to, equal to what an upstream node of the same role
+    reports, with the control (upstream's nodes as the subject) asserting the shape. **The rule of
+    D4 is fixed and its test is not in this slice**, because no entity that takes a callback exists
+    until Z2: a callback of a session of this crate runs on the thread of the face it arrived on
+    (`FaceDrive::PerFace`, the choice `open` makes), so a blocking resolve inside it holds up that
+    link and no other, and does not hold up the face that carries the answer unless it is the same
+    one; the test that does exactly this, a `get().wait()` in a subscriber's callback with the
+    answer arriving on another face and on the same one, is written with the first callback in Z2
+    and Z3. One behaviour differs from upstream's and is kept: `info` resolves without blocking
+    (upstream's blocks in place on a runtime and panics on a current-thread one).
 - **Z2. Publish and subscribe.** `put`, `delete`, `declare_publisher`, `declare_subscriber` with
   the handlers the surface has (callback, callback with a drop, the default handler, fifo, ring),
   QoS, attachments, encodings, localities, express, congestion control, `new_timestamp`, the
