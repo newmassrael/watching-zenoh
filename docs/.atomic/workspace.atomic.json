@@ -291962,6 +291962,36 @@
         "The owned keyexpr constructor of the pico ABI refuses a text that is not canon where zenoh-pico 1.10.1's copies it unchecked; whether the drop-in should follow pico there is open."
       ]
     },
+    "Round 3745": {
+      "decision_summary": "The rustdoc findings of wz-session-core are brought from 494 to zero on the doc lane's own command, and the crate no longer holds a line in the doc budget, which reads as zero. 283 of the findings were the doc blocks of lib.rs: a module's outer doc comment and its own inner one are a single text that rustdoc resolves from the crate root, so the links of 70 modules to their own items did not resolve. Those outer blocks are plain comments now and each module is documented from inside. The remaining findings were links to private items, to items of other crates or to items absent in a feature state, now code spans, explicit link targets made redundant by a name already in scope, now dropped, and a few paths that named the wrong module. Only comments changed. The count was read from cargo's JSON messages, which carry a place for every finding.",
+      "changes_bullets": [
+        "crates/wz-session-core/src: doc comments of lib.rs and 55 module files (comments only).",
+        "scripts/run-ci.sh: the wz-session-core line removed from the doc budget of Layer C1bz, with the history comment."
+      ],
+      "verification_bullets": [
+        "cargo doc -p wz-session-core --no-deps --all-features exits 0 with no error, before and after the rebase onto the newest main; the JSON count is 0 findings in 0 files. The crate compiles with default features and cargo fmt is clean. Runs were local."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "Bring the other crates of the doc budget to zero, smallest first and wz-runtime-tokio (427) last; read the hosted C1bz of this push per crate."
+      ],
+      "publishable_decision_summary": "The rustdoc findings of wz-session-core are brought from 494 to zero on the doc lane's own command, and the crate no longer holds a line in the doc budget, which reads as zero. 283 of the findings were the doc blocks of lib.rs: a module's outer doc comment and its own inner one are a single text that rustdoc resolves from the crate root, so the links of 70 modules to their own items did not resolve. Those outer blocks are plain comments now and each module is documented from inside. The remaining findings were links to private items, to items of other crates or to items absent in a feature state, now code spans, explicit link targets made redundant by a name already in scope, now dropped, and a few paths that named the wrong module. Only comments changed. The count was read from cargo's JSON messages, which carry a place for every finding.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src: doc comments of lib.rs and 55 module files (comments only).",
+        "scripts/run-ci.sh: the wz-session-core line removed from the doc budget of Layer C1bz, with the history comment."
+      ],
+      "publishable_verification_bullets": [
+        "cargo doc -p wz-session-core --no-deps --all-features exits 0 with no error, before and after the rebase onto the newest main; the JSON count is 0 findings in 0 files. The crate compiles with default features and cargo fmt is clean. Runs were local."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Bring the other crates of the doc budget to zero, smallest first and wz-runtime-tokio (427) last; read the hosted C1bz of this push per crate."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
