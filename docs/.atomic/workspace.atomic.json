@@ -290920,6 +290920,44 @@
         "Still open: wait_declarations_stable and a synced query on the cooperative engine; the listening role."
       ]
     },
+    "Round 3719": {
+      "decision_summary": "The workload (docs/target-build-contract.md 5c; owner, 2026-10-26: cost ignored, the textbook one) is a model apart from the node declaration: arrivals x payload x stop, and the pacing and mutation of a recorded sequence, written once in a new no_std+alloc crate wz-workload. The pacing and mutation were wz-replay's plan half, which a downstream product calls through wz-capi-replay; they moved unchanged and wz-replay re-exports them at its paths, so the C ABI is untouched and the traffic driver plays the same words without the analyzer. The rate is a decimal read from its digits; the periodic schedule keeps absolute deadlines and counts the ones it passes instead of bursting; payloads are fixed or made (zero, counter, seeded). The wz-ap-demo driver's publish takes rate_per_s, made payloads and duration_ms, a new replay role takes samples with mutations and refuses a plan over a ceiling whole, and --driver-vocabulary prints the role table.",
+      "changes_bullets": [
+        "crates/wz-workload (new): arrivals (Decimal, gap_nanos, Periodic), payload (Fill, Payload, parse_hex), pacing (Schedule, Timing, TimingSource, ScheduleError, Pacing; the rounding without std), mutation (Mutation, MutationOutcome, splitmix64); tests with byte and delay vectors. crates/wz-replay: the moved items removed and re-exported, the rendering note a local function.",
+        "crates/wz-ap-demo: sessions_driver key kinds Decimal, Hex, Integer, IntegerOrNull and Structured (a judge that refuses by the path inside a structure), stream.rs (a stream's keys and rules), publish on the absolute schedule, roles/replay.rs, vocabulary() and --driver-vocabulary; two binary tests and the registry and refusal tests updated.",
+        "scripts/run-ci.sh: C1by runs, clippys and lists wz-workload's tests; C1AY sessions_driver_binary guard 4 to 6. .github/workflows/platform.yml: the crate's path. docs/target-build-contract.md: 5c. Measured manifests of linux-aarch64-glibc and both QNX stacks recorded in deploy/fixtures."
+      ],
+      "verification_bullets": [
+        "On pc2 through bx: wz-workload 10 tests, wz-replay 25+13+4, wz-capi-replay 32; clippy of wz-workload and wz-replay; wz-workload built for thumbv7em-none-eabihf; Layer C1by pass and C1bz pass for both crates (no broken doc link); wz-ap-demo unit 95, sessions_driver_binary 6 (the rate stream and the replay counted on the listener, the vocabulary) and sessions_driver_query_binary 3, and clippy of wz-ap-demo.",
+        "The vectors hold the definitions against independent references: the published SplitMix64 sequence from state 0, f64::round over halves and 10000 random values, and the downstream product's own pacing vectors.",
+        "The aarch64 and QNX measured manifests were built from a fresh clone of 79b90017 on each SDK host, verified here before they were recorded, and both hosts were cleaned."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "The fixed-memory interpreter of the workload (a slot publisher at a rate with a made payload, a replay of a bounded trace compiled into the image) and the other arrival processes (Poisson, burst, closed loop) are not written.",
+        "advanced_publish still takes only period_ms and a text payload; it reads the stream keys when it is moved onto stream.rs."
+      ],
+      "publishable_decision_summary": "The workload (docs/target-build-contract.md 5c; owner, 2026-10-26: cost ignored, the textbook one) is a model apart from the node declaration: arrivals x payload x stop, and the pacing and mutation of a recorded sequence, written once in a new no_std+alloc crate wz-workload. The pacing and mutation were wz-replay's plan half, which a downstream product calls through wz-capi-replay; they moved unchanged and wz-replay re-exports them at its paths, so the C ABI is untouched and the traffic driver plays the same words without the analyzer. The rate is a decimal read from its digits; the periodic schedule keeps absolute deadlines and counts the ones it passes instead of bursting; payloads are fixed or made (zero, counter, seeded). The wz-ap-demo driver's publish takes rate_per_s, made payloads and duration_ms, a new replay role takes samples with mutations and refuses a plan over a ceiling whole, and --driver-vocabulary prints the role table.",
+      "publishable_changes_bullets": [
+        "crates/wz-workload (new): arrivals (Decimal, gap_nanos, Periodic), payload (Fill, Payload, parse_hex), pacing (Schedule, Timing, TimingSource, ScheduleError, Pacing; the rounding without std), mutation (Mutation, MutationOutcome, splitmix64); tests with byte and delay vectors. crates/wz-replay: the moved items removed and re-exported, the rendering note a local function.",
+        "crates/wz-ap-demo: sessions_driver key kinds Decimal, Hex, Integer, IntegerOrNull and Structured (a judge that refuses by the path inside a structure), stream.rs (a stream's keys and rules), publish on the absolute schedule, roles/replay.rs, vocabulary() and --driver-vocabulary; two binary tests and the registry and refusal tests updated.",
+        "scripts/run-ci.sh: C1by runs, clippys and lists wz-workload's tests; C1AY sessions_driver_binary guard 4 to 6. .github/workflows/platform.yml: the crate's path. docs/target-build-contract.md: 5c. Measured manifests of linux-aarch64-glibc and both QNX stacks recorded in deploy/fixtures."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2 through bx: wz-workload 10 tests, wz-replay 25+13+4, wz-capi-replay 32; clippy of wz-workload and wz-replay; wz-workload built for thumbv7em-none-eabihf; Layer C1by pass and C1bz pass for both crates (no broken doc link); wz-ap-demo unit 95, sessions_driver_binary 6 (the rate stream and the replay counted on the listener, the vocabulary) and sessions_driver_query_binary 3, and clippy of wz-ap-demo.",
+        "The vectors hold the definitions against independent references: the published SplitMix64 sequence from state 0, f64::round over halves and 10000 random values, and the downstream product's own pacing vectors.",
+        "The aarch64 and QNX measured manifests were built from a fresh clone of 79b90017 on each SDK host, verified here before they were recorded, and both hosts were cleaned."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The fixed-memory interpreter of the workload (a slot publisher at a rate with a made payload, a replay of a bounded trace compiled into the image) and the other arrival processes (Poisson, burst, closed loop) are not written.",
+        "advanced_publish still takes only period_ms and a text payload; it reads the stream keys when it is moved onto stream.rs."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
