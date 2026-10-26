@@ -291168,6 +291168,38 @@
         "The fixed-memory interpreter: the slot publisher's schedule (slot_schedule, which sends once after a stall and counts again from then) is to be replaced by the workload's Arrivals with made payloads, and a replay entity of a bounded trace compiled into the image, with its generator rule, const assertions, link-gate proof and witness."
       ]
     },
+    "Round 3725": {
+      "decision_summary": "The closed key set is now a build feature, so an open build carries neither its code nor its bytes. The cargo feature key-set-closed of wz-session-core compiles in the key table, the per-peer allowance and the closed gate. Without it the same module path holds an open gate of no size, and the types that number keys, entities and peers have no value, so the number on every subscriber row and the class on every peer cost nothing and the delivery by selection is not generated. A build whose key-set policy is closed without the feature fails a const assertion, so a build cannot ask for a mode it lacks. A node declaration carries its key table only when it states a closed set. Measured here: the admin node session slots return to 36800 and 36792 bytes, and pico-client text fell by 2,944 bytes locally. Tests of the closed mode run in a leg of their own.",
+      "changes_bullets": [
+        "crates/wz-session-core: feature key-set-closed (Cargo.toml), key_gate_open.rs, lib.rs, pubsub.rs, reply.rs, tests gated.",
+        "scripts/lib/wz_node.py, wz_key_set.py and deploy/nodes/generated: no key set module for an open node.",
+        "deploy/session_slot_bytes.json, scripts/lib/nondefault-tests-gate.sh (new leg), deploy/wz-config.toml (policy note), docs/closed-key-set.md."
+      ],
+      "verification_bullets": [
+        "Tests pass with the feature on (all features, 2726) and off (lib, 1187, including the zero-size test), and the new census leg passes with 1078 lib tests plus the two proof files. The census reads wz-session-core as 2079 of 2079 run by a leg. Clippy passes on and off and for the dependent crates. A closed policy without the feature fails the assertion and with it compiles. The doc error count of the crate is 516 before and after. The slot record equals the measurement after the rebase. Runs were local."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted pico sizes after this push and tighten the four budgets moved in the last round. Nodes that adopt the closed set enable the feature. The zenoh crate's five tests are claimed by no leg (not this change)."
+      ],
+      "publishable_decision_summary": "The closed key set is now a build feature, so an open build carries neither its code nor its bytes. The cargo feature key-set-closed of wz-session-core compiles in the key table, the per-peer allowance and the closed gate. Without it the same module path holds an open gate of no size, and the types that number keys, entities and peers have no value, so the number on every subscriber row and the class on every peer cost nothing and the delivery by selection is not generated. A build whose key-set policy is closed without the feature fails a const assertion, so a build cannot ask for a mode it lacks. A node declaration carries its key table only when it states a closed set. Measured here: the admin node session slots return to 36800 and 36792 bytes, and pico-client text fell by 2,944 bytes locally. Tests of the closed mode run in a leg of their own.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core: feature key-set-closed (Cargo.toml), key_gate_open.rs, lib.rs, pubsub.rs, reply.rs, tests gated.",
+        "scripts/lib/wz_node.py, wz_key_set.py and deploy/nodes/generated: no key set module for an open node.",
+        "deploy/session_slot_bytes.json, scripts/lib/nondefault-tests-gate.sh (new leg), deploy/wz-config.toml (policy note), docs/closed-key-set.md."
+      ],
+      "publishable_verification_bullets": [
+        "Tests pass with the feature on (all features, 2726) and off (lib, 1187, including the zero-size test), and the new census leg passes with 1078 lib tests plus the two proof files. The census reads wz-session-core as 2079 of 2079 run by a leg. Clippy passes on and off and for the dependent crates. A closed policy without the feature fails the assertion and with it compiles. The doc error count of the crate is 516 before and after. The slot record equals the measurement after the rebase. Runs were local."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted pico sizes after this push and tighten the four budgets moved in the last round. Nodes that adopt the closed set enable the feature. The zenoh crate's five tests are claimed by no leg (not this change)."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
