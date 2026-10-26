@@ -610,10 +610,20 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
   session it sends (byte for byte) and delivers what `ApplicationLayerObserver` does. The module's
   own unit tests, which compare the two observers, run in the heap build too. Layer C1g runs the
   file.
-- **L1. The engine on it, with one link.** `Core` holds a `SlotObserver`, the link's
-  `PeerTables<Heap>` and its `Requesters`, and dispatches against them. No behaviour change: the
-  engine's whole test suite and the size gate's cooperative cases (whose budgets leave almost no
-  margin) are the proof, and the cases are measured before and after on one machine.
+- **L1. The engine on it, with one link. Done.** `Core` holds one `Registry`
+  (`engine/registry.rs`): the `SlotObserver`, the link's `PeerTables` and the session's `Requesters`,
+  and dispatches against them. The engine's whole suite (56 tests with every plane on) and the
+  cooperative legs of Layer C1co pass unchanged. Two things were not as the application observer
+  had them. A subscription registered after a peer's interest is owed that peer a push, which the
+  application observer staged as it was told and the slot observer leaves to the peer's side to
+  read off the table's epoch (`SubscriberPeer::reconcile`), which nothing in the tree called: the
+  registry calls it before each drain, and `SlotObserver::flush_pending_replies` drains the replies
+  alone so the `Final`s stay held behind the callbacks that may still answer. And the size: the
+  eight cooperative cases grew 13,704 bytes (the client) to 24,848 (the admin space) on pc2, which
+  the budgets now state; of the client's, the observer's dispatch is the same size as the one it
+  replaces and the rest is the peer tables' construction and drop, the reconcile, and code the
+  compiler placed differently. The builds that answer queries grow about 9,000 to 11,000 more,
+  which is not yet attributed.
 - **L2. A face table of one.** `Link` becomes a face: its id, its wire, its tables, its
   `Replay`, its `generation`, its requesters; `Core` holds a table of them, the dial role's one
   entry at a fixed id as `wz-capi-core` keeps `DIAL_FACE_ID`. A get is one leg for each face up,
