@@ -291652,6 +291652,36 @@
         "The reduced-feature rustdoc of wz-session-mcu (client-slot alone) still reports unresolved links in slot_plane, slot_node and slot_active that predate this round; C1bz measures all features and does not count them."
       ]
     },
+    "Round 3737": {
+      "decision_summary": "The 21 broken doc links of the closed key set modules are paid, and the doc budget of wz-session-core holds at 494 again. The links resolved from the parent: a module's outer docs in lib.rs and its inner docs were one text, so links from the inner text to the module's own items did not resolve. The three modules, key_catalogue, key_allowance and key_gate, are now documented from their own inner text only, and lib.rs keeps a plain comment about them; 18 links resolve that way. Three explicit link targets became redundant once the names were in scope and are shortened. The count on the lane's own command is 494. An earlier round saw the count differ from the budget and read it as old; it was not, and the budget is exact, so a count that differs is always read.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/lib.rs: the outer docs of key_catalogue, key_allowance and key_gate become a plain comment.",
+        "crates/wz-session-core/src/key_allowance.rs and key_gate.rs: three redundant explicit link targets removed."
+      ],
+      "verification_bullets": [
+        "The lane's command, cargo doc -p wz-session-core --no-deps --all-features, printed 498 error lines after the first change and 495 after the second, which is 494 without the could not document line and equals the budget. No remaining error names the three modules. The default build compiles and the duplicate-module lint passes."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted C1bz of this push per crate; tighten the pico budgets of the earlier round once the feature's size is read."
+      ],
+      "publishable_decision_summary": "The 21 broken doc links of the closed key set modules are paid, and the doc budget of wz-session-core holds at 494 again. The links resolved from the parent: a module's outer docs in lib.rs and its inner docs were one text, so links from the inner text to the module's own items did not resolve. The three modules, key_catalogue, key_allowance and key_gate, are now documented from their own inner text only, and lib.rs keeps a plain comment about them; 18 links resolve that way. Three explicit link targets became redundant once the names were in scope and are shortened. The count on the lane's own command is 494. An earlier round saw the count differ from the budget and read it as old; it was not, and the budget is exact, so a count that differs is always read.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/lib.rs: the outer docs of key_catalogue, key_allowance and key_gate become a plain comment.",
+        "crates/wz-session-core/src/key_allowance.rs and key_gate.rs: three redundant explicit link targets removed."
+      ],
+      "publishable_verification_bullets": [
+        "The lane's command, cargo doc -p wz-session-core --no-deps --all-features, printed 498 error lines after the first change and 495 after the second, which is 494 without the could not document line and equals the budget. No remaining error names the three modules. The default build compiles and the duplicate-module lint passes."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted C1bz of this push per crate; tighten the pico budgets of the earlier round once the feature's size is read."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
