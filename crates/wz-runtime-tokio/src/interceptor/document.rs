@@ -134,6 +134,14 @@ pub enum InterceptorCompileError {
 }
 
 impl core::fmt::Display for InterceptorCompileError {
+    #[cfg_attr(
+        not(any(
+            feature = "access-acl",
+            feature = "access-quota",
+            feature = "access-downsampling"
+        )),
+        allow(unused_variables)
+    )]
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             #[cfg(feature = "access-acl")]
@@ -142,6 +150,14 @@ impl core::fmt::Display for InterceptorCompileError {
             Self::LowPassFilter => f.write_str("low_pass_filter holds a literal wz does not know"),
             #[cfg(feature = "access-downsampling")]
             Self::Downsampling => f.write_str("downsampling holds a literal wz does not know"),
+            // Every variant is behind a feature: with none on the type has no value, and a
+            // reference to it is still taken to hold one, so the match needs its empty form.
+            #[cfg(not(any(
+                feature = "access-acl",
+                feature = "access-quota",
+                feature = "access-downsampling"
+            )))]
+            _ => match *self {},
         }
     }
 }
@@ -153,6 +169,14 @@ impl InterceptorConfig {
     /// not be compiled. An empty config (no key stated, or `access_control` disabled) is the
     /// answer for a node that wants none: [`InterceptorConfig::is_inert`] says so.
     pub fn from_node_config(node: &ZenohNodeConfig) -> Result<Self, InterceptorCompileError> {
+        #[cfg_attr(
+            not(any(
+                feature = "access-acl",
+                feature = "access-quota",
+                feature = "access-downsampling"
+            )),
+            allow(unused_mut)
+        )]
         let mut config = Self::default();
         let _ = &node;
         #[cfg(feature = "access-acl")]

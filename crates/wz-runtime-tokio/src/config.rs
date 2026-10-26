@@ -4313,6 +4313,7 @@ mod tests {
                     installs: RefCell::new(Vec::new()),
                 }
             }
+            #[cfg(feature = "config-mutate-runtime")]
             fn last_rule_count(&self) -> Option<usize> {
                 self.installs
                     .borrow()
