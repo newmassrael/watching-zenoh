@@ -202,6 +202,12 @@ IMAGES = (
     # frames under the observer's drain, which the overlay says: 7,204 bytes in the image of
     # 2026-10-23 on the shared node, against 6,904 for the client without them (and 7,140 with
     # the node written in `fixed_client.rs`). Its stack is the overlay's own.
+    #
+    # `peak` is 7,460 bytes in the image of 2026-10-27 (the kit lane's build, 3 runs of the same
+    # kit reading, 6,328 bytes). Since 2026-10-23: the slot node keeps the latest sample of a
+    # subscription (+136) and holds sessions a peer opened beside the dialled ones (+64), the
+    # connect manager is held by the shared planner and by nodes' zids (+88), a few smaller steps,
+    # and the log lines are not inlined into the main frame (-144).
     Image(
         key="zephyr-client-fixed-batching",
         elf=None,
@@ -209,21 +215,23 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=7204,
+        peak=7460,
     ),
     # The fixed client that ASKS (`overlays/t2g_client_get.conf`): the getter of
     # `wz_session_mcu::slot_getter` is the application layer the observer's drain runs inside, and
     # its query path (`get`, the request written into the slot the link lends) is under that drain
     # too. Its stack is the overlay's own.
     #
-    # `peak` is 7,672 bytes in the image of 2026-10-23 (one query in flight; 8,588 with four, whose
-    # worst path is another). ⚠ It is BELOW what the kit's own reading of the same image reaches
-    # over 2,050 answered queries, 8,144 bytes: the reader does not follow a call through a register
-    # (12 on this path), and the reply sink the getter hands the session is called through one
-    # (`ReplySink::on_reply`/`on_final`, which write the plan). So for this image the chain is a
-    # figure a change moves and not a bound on the stack: the stack is sized from the kit's reading
-    # (12,288 bytes leaves a third free at 8,144), and the resource budget's row for it says so
-    # (`chain_misses`) and holds the reading to a quarter of the stack free.
+    # `peak` is 7,784 bytes in the image of 2026-10-27 (one query in flight; it was 7,672 on
+    # 2026-10-23, and 8,588 with four then, whose worst path is another and which was not
+    # re-measured). ⚠ It is BELOW what the kit's own reading of the same image reaches over 2,050
+    # answered queries, 8,328 bytes (8,144 on 2026-10-23): the reader does not follow a call
+    # through a register (12 on this path), and the reply sink the getter hands the session is
+    # called through one (`ReplySink::on_reply`/`on_final`, which write the plan). So for this image
+    # the chain is a figure a change moves and not a bound on the stack: the stack is sized from
+    # the kit's reading (12,288 bytes leaves a third free at 8,328: 32 percent), and the resource
+    # budget's row for it says so (`chain_misses`) and holds the reading to a quarter of the stack
+    # free.
     Image(
         key="zephyr-client-fixed-get",
         elf=None,
@@ -231,7 +239,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=7672,
+        peak=7784,
     ),
     # The fixed client over the secure channel (`overlays/t2g_client_tls.conf`, decision D9):
     # the dial completes a TLS 1.3 handshake in Mbed TLS before the session sees a byte, and every

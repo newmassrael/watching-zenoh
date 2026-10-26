@@ -631,6 +631,12 @@ same directory, with the node in `fixed_client.rs` (before) and on the module (a
   images and refuses the old base image's runs (a stack peak of 5,936 B against 6,000 +/- 16).
   `no_allocator_link_gate.py --image zephyr-client-fixed` is clean on both of its builds, and
   so is `zephyr-admin-node-fixed`, which shares two constants of the image crate.
+- **Re-measured on 2026-10-27 (the kit lane, `65d07530d`).** The batching image's worst chain
+  is 7,460 B and its stack peak 6,328 B (3 of 3 runs), from 7,204 B and 6,016 B above. The 256 B
+  of chain came from the slot node keeping the latest sample of a subscription (+136) and holding
+  sessions a peer opened beside the dialled ones (+64), the connect manager held by the shared
+  planner and by nodes' zids (+88), a few smaller steps, and the log lines no longer inlined into
+  the main frame (-144). The kit lane is not a hosted job, so nothing had read the row since.
 - **What was measured is the build before two `cfg` edits.** The kit runs above are of the
   images built before `BUSY_PASSES_MAX` and `LISTEN_PORT` were limited to the nodes that use
   them (they warned as unused in the client). The rebuilt images have the same text, `.data`,
@@ -679,7 +685,9 @@ warm-up:
   `chain_misses` with its reason: the key is true only while the reading is over the chain, and
   what holds the stack is then the reading, which must leave a quarter of the stack free
   (8,144 of 12,288 leaves a third; four in flight reads 8,816 and leaves 28 percent). Eight
-  mutants of the new rules are each caught by the gate's selftest.
+  mutants of the new rules are each caught by the gate's selftest. On 2026-10-27 one query in
+  flight read 8,328 B (3 of 3 runs) over a chain of 7,784 B, 544 B over it; four in flight was not
+  re-measured, and the same 184 B would put it near 9,000 B, which leaves 27 percent.
 - **The latency is the image's own round trip as the asker**, at the resolution of the kernel tick
   (100 us), so a median is a multiple of it. With one query in flight the median was 300 us in
   8 of 8 clean runs of the afternoon (16:08 to 16:13; p99 1,300 to 1,400 us, max 4,000 to 5,100
