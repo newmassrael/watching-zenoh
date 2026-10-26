@@ -96,6 +96,47 @@ impl Default for SubscriberOverload {
     }
 }
 
+/// `key-set`: Which keys the receive path takes a message on (docs/closed-key-set.md).
+/// `open` takes any key a peer sends. `closed` takes only the keys the image declares as
+/// its key set, which the build generates into a read-only table: a message on any other
+/// key is dropped before a subscriber is looked up, and counted by reason. A closed build
+/// that is given no table takes no key at all. The selectors a peer asks with, a query or
+/// an interest, are patterns and not data keys, and are answered as in an open build.
+/// Upstream: Takes a message on any key a peer sends, and finds the subscribers it reaches
+/// by matching that key against each subscription's pattern as text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeySet {
+    /// `open`.
+    Open,
+    /// `closed`.
+    Closed,
+}
+
+impl KeySet {
+    /// The value as the declaration, the Kconfig and the environment spell it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Closed => "closed",
+        }
+    }
+
+    const CHOICES: [&str; 2] = ["open", "closed"];
+    const ALL: [Self; 2] = [Self::Open, Self::Closed];
+
+    const fn stated() -> Self {
+        let stated = option_env!("WZ_POLICY_KEY_SET");
+        let index = policy_choice(stated, &Self::CHOICES, 0);
+        Self::ALL[index]
+    }
+}
+
+impl Default for KeySet {
+    fn default() -> Self {
+        Self::stated()
+    }
+}
+
 /// What this build decided beyond upstream's behaviour.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -121,6 +162,10 @@ pub struct SessionPolicy {
     /// sender when the handler is full, so a slow consumer applies backpressure into the
     /// session and no sample is lost.
     pub subscriber_overload: SubscriberOverload,
+    /// `key-set`. Upstream: Takes a message on any key a peer sends, and finds the
+    /// subscribers it reaches by matching that key against each subscription's pattern as
+    /// text.
+    pub key_set: KeySet,
 }
 
 impl SessionPolicy {
@@ -132,6 +177,7 @@ impl SessionPolicy {
         let declaration_sync_pacing = policy_bool(option_env!("WZ_POLICY_DECLARATION_SYNC_PACING"));
         let entity_timestamp_opt_in = policy_bool(option_env!("WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN"));
         let subscriber_overload = SubscriberOverload::stated();
+        let key_set = KeySet::stated();
         Self {
             multicast_loopback,
             tx_no_progress_deadline,
@@ -139,6 +185,7 @@ impl SessionPolicy {
             declaration_sync_pacing,
             entity_timestamp_opt_in,
             subscriber_overload,
+            key_set,
         }
     }
 }

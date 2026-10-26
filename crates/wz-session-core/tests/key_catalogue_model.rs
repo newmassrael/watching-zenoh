@@ -128,6 +128,84 @@ fn a_selection_is_the_subscriber_tables_own_answer() {
     }
 }
 
+/// A subscriber table with the fixture's subscribers registered, each a counting sink.
+#[cfg(feature = "alloc")]
+fn table_of_the_fixtures_subscribers() -> (
+    wz_session_core::pubsub::SubscriberTable<Counted>,
+    std::rc::Rc<std::cell::RefCell<Vec<usize>>>,
+) {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use wz_session_core::locality::Locality;
+    use wz_session_core::pubsub::SubscriberTable;
+
+    let fired = Rc::new(RefCell::new(Vec::new()));
+    let mut table: SubscriberTable<Counted> = SubscriberTable::with_sink_backing();
+    for (number, (kind, pattern)) in DECLARED.iter().enumerate() {
+        if *kind != EntityKind::Subscriber {
+            continue;
+        }
+        let sink = Counted {
+            tag: number,
+            fired: Rc::clone(&fired),
+        };
+        table
+            .register_sink(pattern, Locality::Any, sink)
+            .expect("the subscriber table holds the fixture's subscribers");
+    }
+    (table, fired)
+}
+
+#[cfg(feature = "alloc")]
+struct Counted {
+    tag: usize,
+    fired: std::rc::Rc<std::cell::RefCell<Vec<usize>>>,
+}
+
+#[cfg(feature = "alloc")]
+impl wz_session_core::sink::SampleSink for Counted {
+    fn deliver(&mut self, _sample: &dyn wz_session_core::sink::SampleView) {
+        self.fired.borrow_mut().push(self.tag);
+    }
+}
+
+#[cfg(feature = "alloc")]
+#[test]
+fn a_closed_table_drops_a_peers_key_outside_the_set_and_an_open_one_does_not() {
+    use wz_session_core::key_gate::KeyGate;
+    use wz_session_core::sample::Sample;
+
+    // `lab/**` and `**` cover `lab/sensor/pressure`, which the image does not declare.
+    let undeclared = Sample::new_put("lab/sensor/pressure", Vec::new());
+    let declared = Sample::new_put("lab/sensor/temp", Vec::new());
+
+    let (mut open, fired) = table_of_the_fixtures_subscribers();
+    assert!(
+        !KeyGate::of_build().is_closed(),
+        "this test runs on an open build"
+    );
+    assert!(open.dispatch_borrowed(&undeclared, true) > 0);
+    assert!(!fired.borrow().is_empty());
+    assert_eq!(open.key_gate_refused().total, 0);
+
+    let (mut closed, fired) = table_of_the_fixtures_subscribers();
+    closed.set_key_gate(KeyGate::closed(&CATALOGUE));
+    // A peer's message on a key outside the set reaches no subscriber, and is counted.
+    assert_eq!(closed.dispatch_borrowed(&undeclared, true), 0);
+    assert!(fired.borrow().is_empty());
+    assert_eq!(closed.key_gate_refused().outside_set, 1);
+    // A peer's message on a declared key reaches exactly the subscribers its selection names.
+    let key = CATALOGUE.find_exact("lab/sensor/temp").expect("declared");
+    let selection = CATALOGUE.selection(key, EntityKind::Subscriber).len();
+    assert_eq!(closed.dispatch_borrowed(&declared, true), selection);
+    assert_eq!(fired.borrow().len(), selection);
+    assert_eq!(closed.key_gate_refused().total, 1);
+    // The application's own publish is not a peer's message and is not gated.
+    fired.borrow_mut().clear();
+    assert!(closed.dispatch_borrowed(&undeclared, false) > 0);
+    assert_eq!(closed.key_gate_refused().total, 1);
+}
+
 #[test]
 fn the_table_is_the_declaration() {
     assert_eq!(CATALOGUE.entity_count(), DECLARED.len());

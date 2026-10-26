@@ -27,9 +27,11 @@
 //!
 //! # Where it is read
 //!
-//! Nowhere yet: no host calls it, and the `key-set` policy that would choose between the two gates
-//! is not declared, because a switch that no host acts on would tell a deployer a build is closed
-//! when nothing is. The policy lands with the first host that refuses on it.
+//! The subscriber table holds one and applies it to the key of every message that arrives from a
+//! peer, before a subscriber is looked up ([`crate::pubsub::SubscriberTable::set_key_gate`]). It
+//! starts as [`KeyGate::of_build`], which the `key-set` policy decides. Selectors a peer asks with
+//! (a query's, an interest's) are patterns and not data keys: they are not looked up here, and
+//! nothing refuses them.
 
 use crate::key_catalogue::{EntityKind, KeyCatalogue, KeyId};
 
@@ -62,6 +64,11 @@ pub struct Refused {
     pub role_not_declared: usize,
 }
 
+/// The catalogue of a closed build that was given none: no key, so the gate over it refuses every
+/// key. A closed image that forgot its table takes nothing, which is the safe way for it to be
+/// wrong.
+const NO_KEYS: KeyCatalogue<'static> = KeyCatalogue::new("", &[], &[0], &[], &[]);
+
 /// The gate a host puts in front of its keys. See the module note.
 #[derive(Debug, Clone, Copy)]
 pub struct KeyGate<'a> {
@@ -93,6 +100,16 @@ impl<'a> KeyGate<'a> {
     /// Whether the gate refuses anything.
     pub const fn is_closed(&self) -> bool {
         self.catalogue.is_some()
+    }
+
+    /// The gate the build's `key-set` policy states: open, or closed over no keys until a host
+    /// gives it its table with [`Self::closed`]. Every host starts from this and a host that knows
+    /// better (a test, an image that has a table) sets its own.
+    pub const fn of_build() -> KeyGate<'static> {
+        match crate::policy::SessionPolicy::from_build().key_set {
+            crate::policy::KeySet::Open => KeyGate::open(),
+            crate::policy::KeySet::Closed => KeyGate::closed(&NO_KEYS),
+        }
     }
 
     /// Admit a key that is one of the set: the key of a message, or of a resource a peer declares.
@@ -219,6 +236,19 @@ mod tests {
                 role_not_declared: 2
             }
         );
+    }
+
+    #[test]
+    fn the_gate_of_a_build_is_the_policy_it_states() {
+        let gate = KeyGate::of_build();
+        let closed =
+            crate::policy::SessionPolicy::from_build().key_set == crate::policy::KeySet::Closed;
+        assert_eq!(gate.is_closed(), closed);
+        // A closed build that was given no table refuses every key.
+        let mut over_nothing = KeyGate::closed(&NO_KEYS);
+        assert_eq!(over_nothing.admit_key("a"), Err(Refusal::OutsideSet));
+        assert_eq!(over_nothing.admit_key(""), Err(Refusal::OutsideSet));
+        assert_eq!(over_nothing.refused().total, 2);
     }
 
     #[test]

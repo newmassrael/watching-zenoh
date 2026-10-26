@@ -71,8 +71,8 @@ test that makes the table safe to trust and it comes before any host uses the ta
 selector is expanded over the declared concrete keys at build time. A message whose key is not declared
 is refused even if it would match the selector. Reason: admitting "a key that matches an allowed
 selector" would need a text row at run time, which is the open mode returning through a side door, and
-the bound on memory and on time per message would no longer be a build-time fact. Open question for the
-owner below.
+the bound on memory and on time per message would no longer be a build-time fact. This is about a data
+key; a selector is another thing (see "Data keys and selectors"). Open question for the owner below.
 
 **D5. Resolution happens once, at the edge.** A peer's resource declaration binds its wire id to a key id
 (an exact key, or a declared prefix plus a suffix looked up in the catalogue). After that a received
@@ -89,6 +89,26 @@ declaration is a decision for the owner below.
 **D7. In the closed mode the table replaces the memo.** The selection is the exact answer a memo
 approximates, so `MATCH_MEMO_SLOTS` does nothing in a closed image and the memo is not built.
 
+## Data keys and selectors
+
+D4 says a key outside the set is refused. That is right for a **data key** and wrong for a
+**selector**, and the receive path has both:
+
+- A data key is a concrete key a message is on: the key of a Put or a Delete, of a Reply. It is looked
+  up in the table, and outside the set it is refused.
+- A selector is a pattern a peer asks with: a query's, an interest's, a liveliness get's, and the
+  pattern of a subscription or a queryable the peer declares. It is not a key of the set and cannot be
+  looked up: any pattern may arrive, and refusing one breaks what every zenoh node answers (a `get` on
+  `lab/doc/*` of a node that declares `lab/doc/small`, or the interest a zenoh-pico publisher waits
+  on before it puts at all). What a closed image answers to a selector is what it selects among the
+  entities it declares, and a selector that intersects none is answered with nothing, not refused.
+  That is the matcher over the image's own entities, a bounded number known at build time; it is not
+  the open mode's matcher over whatever a peer declared.
+
+So the refusal of D4 applies to data keys only, and a selector is the one place a closed image still
+runs the matcher, over a set fixed at build time. Where a peer's declared pattern matters (which of our
+publishes it receives) is the per-peer allowance, phase 4.
+
 ## Phases
 
 1. **Pure catalogue, generator and oracle.** `KeyCatalogue`, the declaration and its validation (a
@@ -98,11 +118,14 @@ approximates, so `MATCH_MEMO_SLOTS` does nothing in a closed image and the memo 
    role asked, and counts each refusal by reason. Pure, tested over the fixture, called by no host.
    This replaces "the policy and the refusal at declare time" of the first cut of this note: see
    "Phase 2, as built" for why.
-3. **The policy, and receive through the id.** `key-set` (`open` is the default) lands with the first
-   host that acts on it. The peer's alias row holds a key id; the received message reaches its
-   selection by index; a peer's resource or message on a key outside the set is refused and counted.
-   Open keeps today's path unchanged, tested. Measured against open with the memo on one machine and
-   condition: allocations and time per sample, alias row bytes, ROM and RAM of the table.
+3. **The policy and the receive path**, in two steps.
+   - **3a. The policy and the refusal of a peer's data key.** `key-set` (`open` is the default) lands
+     with the subscriber table acting on it: a message from a peer on a key outside the set is dropped
+     before a subscriber is looked up and counted. Open keeps today's path unchanged, tested.
+   - **3b. Receive through the id.** The key a message arrives on is looked up once and the message
+     reaches its subscribers by the selection of that key, by number; the subscriber rows hold the
+     entity they were declared as. Measured against open with the memo on one machine and condition:
+     allocations and time per sample, alias row bytes, ROM and RAM of the table.
 4. **Per-peer allowance** (D6).
 5. **The cooperative engine, the slot node and the C ABIs** (sessions 11 and ef own the first two; a C
    ABI door is the third), once phase 3 shows the receive path.
@@ -163,6 +186,27 @@ approximates, so `MATCH_MEMO_SLOTS` does nothing in a closed image and the memo 
   saturate) and by `tests/key_catalogue_model.rs` over the fixture: every declared role is admitted,
   every other (key, kind) pair is refused by role and counted, a key a declared pattern covers is
   outside the set.
+
+## Phase 3a, as built
+
+- **The policy.** `key-set` is `open` (default, upstream's behaviour) or `closed`, declared in
+  `deploy/wz-config.toml` with its generated Kconfig and typed `SessionPolicy::key_set`. A build that
+  states `closed` has a gate that refuses every key until a host gives it its table
+  (`KeyGate::of_build`), so a closed image that forgot its table takes nothing and not everything.
+- **The place.** `SubscriberTable` holds a `KeyGate` and applies it in the two functions every
+  delivery goes through (`fire_to_subscribers` and `fire_plain_to_subscribers`), to a message that
+  came from a peer. A local publish is the application's own and is not gated. A refused message
+  reaches no subscriber, as a message that matched none, and is counted by reason
+  (`SubscriberTable::key_gate_refused`). `set_key_gate` replaces the gate, which is how an image gives
+  its table and how a test names the mode.
+- **Tested.** Over the fixture, an open table delivers a peer's message on a key a pattern covers and
+  counts nothing; a closed one drops it, counts it, delivers a declared key to exactly the subscribers
+  its selection names, and does not gate a local publish. All 739 unit tests of the crate pass on an
+  open build, and the gate and policy tests pass on a build whose environment states `closed`.
+- **Not done.** Nothing calls `set_key_gate` with a real table yet: the generated `declared.rs` of a
+  node does not carry one. The selector side is as it was. A reply's key is not gated. No time or
+  allocation is measured: the added work on an open build is one flag test and one `Option` test per
+  message from a peer.
 
 ## What is not decided
 

@@ -104,6 +104,7 @@ use crate::caps;
 use crate::id_map::key_text_as;
 #[cfg(feature = "storage-profile")]
 use crate::id_map::{IdMap, PeerAliases};
+use crate::key_gate::{KeyGate, Refused};
 use crate::keyexpr_match::{keyexpr_intersects_target, MAX_KEYEXPR_CHUNKS};
 use crate::registry_error::RegisterError;
 
@@ -299,6 +300,10 @@ pub struct SubscriberTable<C: SampleSink, P: Storage = Profile> {
     /// and an entry from an earlier one is not read. See `MatchMemo`.
     #[cfg(feature = "alloc")]
     memo: MatchMemo,
+    /// Which keys a message from a peer may be on: open takes every key, closed takes the keys of
+    /// the image's key set and drops the rest, counted by reason. Starts as the build's
+    /// `key-set` policy ([`KeyGate::of_build`]); see [`Self::set_key_gate`].
+    key_gate: KeyGate<'static>,
     /// transport-shm — the receive side of shared memory for a push: the negotiated
     /// capability, the AP-injected resolver, the means of acknowledging the peer's
     /// slices, the drop counters, and the un-swap itself. R3042 moved all of it into
@@ -722,6 +727,7 @@ impl<C: SampleSink, P: Storage> Default for SubscriberTable<C, P> {
             local_live: alloc::sync::Arc::new(core::sync::atomic::AtomicUsize::new(0)),
             #[cfg(feature = "alloc")]
             memo: MatchMemo::new(),
+            key_gate: KeyGate::of_build(),
             #[cfg(feature = "transport-shm")]
             shm: crate::extshm::ShmReceiveState::default(),
             #[cfg(all(
@@ -734,6 +740,25 @@ impl<C: SampleSink, P: Storage> Default for SubscriberTable<C, P> {
 }
 
 impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
+    /// Replace the gate that decides which keys a message from a peer may be on, which starts as
+    /// what the build's `key-set` policy states. A closed image hands it the gate over its
+    /// generated table. The counts of the gate it replaces are not carried over.
+    pub fn set_key_gate(&mut self, gate: KeyGate<'static>) {
+        self.key_gate = gate;
+    }
+
+    /// How many messages from a peer the key gate dropped, by reason: all zero for an open gate.
+    pub const fn key_gate_refused(&self) -> Refused {
+        self.key_gate.refused()
+    }
+
+    /// Whether a message may be delivered, by the key it arrived on. A message that is not from a
+    /// peer (a local publish) is the application's own and is not gated.
+    #[inline]
+    fn admits(&mut self, keyexpr: &str, is_remote: bool) -> bool {
+        !is_remote || self.key_gate.admit_key(keyexpr).is_ok()
+    }
+
     /// What the in-place receive path's Puts cost in owned fallbacks since this
     /// registry was built; see [`InPlaceFallbacks`].
     #[cfg(all(
@@ -1995,6 +2020,9 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     }
 
     fn fire_to_subscribers(&mut self, view: &dyn SampleView, is_remote: bool) -> usize {
+        if !self.admits(view.keyexpr(), is_remote) {
+            return 0;
+        }
         #[cfg(feature = "alloc")]
         {
             fire_into_memoized(
@@ -2024,6 +2052,9 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         sample: &crate::sink::PlainSample<'_>,
         is_remote: bool,
     ) -> usize {
+        if !self.admits(sample.keyexpr(), is_remote) {
+            return 0;
+        }
         fire_into_memoized(
             &mut self.subscribers,
             &mut self.memo,
