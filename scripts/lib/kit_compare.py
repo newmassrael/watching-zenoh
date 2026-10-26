@@ -43,13 +43,18 @@ Then each image against the reference (`--ref`, the first image by default), by 
 It judges a run and grades nothing: the committed matrix (`deploy/upstream_parity.json`) is where a
 verdict becomes a row. Exit 0 when the run was read, 2 when it could not be.
 
+With `--format rows` it prints the cells as JSON rows, the shape `deploy/upstream_parity.json`
+holds them in (decision D6), so a committed row is this module's output and never a figure copied
+by hand.
+
 Usage:
-    kit_compare.py --run <run dir> [--ref <image>] [--node <ip>]
+    kit_compare.py --run <run dir> [--ref <image>] [--node <ip>] [--format report|rows]
     kit_compare.py --selftest
 """
 
 from __future__ import annotations
 
+import json
 import pathlib
 import random
 import re
@@ -234,6 +239,41 @@ def report(images: dict[str, Image], ref_key: str) -> list[str]:
                        f"{statistics.median(m):.3f} ms, boots {min(m):.3f} to {max(m):.3f}")
         else:
             out.append(f"kit-compare: {image.key}: no query/reply pair in any capture")
+    for c in cells(images, ref_key):
+        if c.metric == "turnaround":
+            if c.verdict is None:
+                out.append(f"kit-compare: cell turnaround: {c.image} vs {c.reference}: fewer than "
+                           f"two boots with pairs on a side, no verdict")
+            else:
+                out.append(f"kit-compare: cell turnaround: {c.image} vs {c.reference}: ratio "
+                           f"{c.ratio:.3f} [{c.low:.3f}, {c.high:.3f}] over {c.boots[0]} and "
+                           f"{c.boots[1]} boots -> {c.verdict}")
+        else:
+            ratio = f"{c.ratio:.3f}" if c.ratio is not None else "n/a"
+            out.append(f"kit-compare: cell {c.metric}: {c.image} {c.mine} vs {c.reference} "
+                       f"{c.theirs} ({ratio}) -> {c.verdict}")
+    return out
+
+
+@dataclass(frozen=True)
+class Cell:
+    """One cell of the matrix: an image held to the reference on one metric (decision D1)."""
+
+    image: str
+    reference: str
+    metric: str
+    mine: float | None
+    theirs: float | None
+    ratio: float | None
+    low: float | None  # the interval, for a metric measured over boots
+    high: float | None
+    boots: tuple[int, int] | None
+    verdict: str | None  # WIN, TIE, LOSS, or None when there is nothing to judge
+
+
+def cells(images: dict[str, Image], ref_key: str) -> list[Cell]:
+    """Every cell of every image against the reference, in the order the report prints them."""
+    out: list[Cell] = []
     ref = images[ref_key]
     for image in images.values():
         if image.key == ref_key:
@@ -241,24 +281,39 @@ def report(images: dict[str, Image], ref_key: str) -> list[str]:
         if image.size is not None and ref.size is not None:
             for metric in ("text", "flash", "ram"):
                 mine, theirs = getattr(image.size, metric), getattr(ref.size, metric)
-                out.append(f"kit-compare: cell {metric}: {image.key} {mine} vs {ref_key} {theirs} "
-                           f"({mine / theirs:.3f}) -> {verdict_size(mine, theirs)}")
+                out.append(Cell(image.key, ref_key, metric, mine, theirs, mine / theirs, None, None,
+                                None, verdict_size(mine, theirs)))
         mine_mem, ref_mem = image.worst_memory(), ref.worst_memory()
         if mine_mem is not None and ref_mem is not None:
             for metric in ("heap_peak", "stack_used", "stack_reserved"):
                 mine, theirs = getattr(mine_mem, metric), getattr(ref_mem, metric)
-                ratio = f"{mine / theirs:.3f}" if theirs else "n/a"
-                out.append(f"kit-compare: cell {metric}: {image.key} {mine} vs {ref_key} {theirs} "
-                           f"({ratio}) -> {verdict_size(mine, theirs)}")
-        if len(image.boot_medians) >= 2 and len(ref.boot_medians) >= 2:
+                out.append(Cell(image.key, ref_key, metric, mine, theirs,
+                                mine / theirs if theirs else None, None, None,
+                                (len(image.memory), len(ref.memory)), verdict_size(mine, theirs)))
+        boots = (len(image.boot_medians), len(ref.boot_medians))
+        if min(boots) >= 2:
             point, lo, hi = bootstrap_ratio(image.boot_medians, ref.boot_medians)
-            out.append(f"kit-compare: cell turnaround: {image.key} vs {ref_key}: ratio {point:.3f} "
-                       f"[{lo:.3f}, {hi:.3f}] over {len(image.boot_medians)} and "
-                       f"{len(ref.boot_medians)} boots -> {verdict_interval(lo, hi)}")
+            out.append(Cell(image.key, ref_key, "turnaround",
+                            statistics.median(image.boot_medians),
+                            statistics.median(ref.boot_medians), point, lo, hi, boots,
+                            verdict_interval(lo, hi)))
         else:
-            out.append(f"kit-compare: cell turnaround: {image.key} vs {ref_key}: fewer than two boots "
-                       f"with pairs on a side, no verdict")
+            out.append(Cell(image.key, ref_key, "turnaround", None, None, None, None, None, boots,
+                            None))
     return out
+
+
+def rows(images: dict[str, Image], ref_key: str, run: str) -> list[dict]:
+    """The cells as the committed matrix holds them (`deploy/upstream_parity.json`, decision D6):
+    every figure the verdict rests on, and the run it was read from."""
+    return [{
+        "image": c.image, "reference": c.reference, "metric": c.metric,
+        "image_value": c.mine, "reference_value": c.theirs,
+        "ratio": None if c.ratio is None else round(c.ratio, 4),
+        "interval": None if c.low is None else [round(c.low, 4), round(c.high, 4)],
+        "boots": None if c.boots is None else list(c.boots),
+        "verdict": c.verdict, "run": run,
+    } for c in cells(images, ref_key)]
 
 
 def selftest() -> int:
@@ -339,6 +394,15 @@ def selftest() -> int:
     expect("stack is summed over the threads: pico's two against wz's one",
            any("cell stack_used: wz 5928 vs pico 5680" in line and line.endswith("LOSS")
                for line in lines))
+    table = rows(images, "pico", "run-x")
+    expect("the rows are the report's cells, one for one",
+           len(table) == sum(" cell " in line for line in lines))
+    expect("a row carries its figures, its verdict and its run",
+           any(r["metric"] == "heap_peak" and r["image_value"] == 0 and r["verdict"] == "WIN"
+               and r["run"] == "run-x" for r in table))
+    expect("a turnaround row carries its interval and its boots",
+           any(r["metric"] == "turnaround" and len(r["interval"]) == 2 and r["boots"] == [6, 6]
+               for r in table))
     expect("a firmware that prints no stack line is said to, not read as zero",
            any("pico: stack not reported" in line for line in lines))
     print(f"  kit-compare selftest: {'PASS' if not fails else f'{fails} FAIL'}")
@@ -366,8 +430,15 @@ def main(argv: list[str]) -> int:
         print(f"kit-compare: the reference {ref} is not an image of the run ({', '.join(images)})",
               file=sys.stderr)
         return 2
-    for line in report(images, ref):
-        print(line)
+    output = args.get("--format", "report")
+    if output == "rows":
+        print(json.dumps(rows(images, ref, run.name), indent=1))
+    elif output == "report":
+        for line in report(images, ref):
+            print(line)
+    else:
+        print(f"kit-compare: --format is report or rows, not {output}", file=sys.stderr)
+        return 64
     return 0
 
 
