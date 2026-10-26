@@ -1747,6 +1747,11 @@ struct DirectionStream {
     /// R311y609 — cumulative, for a reader that wants the flow's health
     /// rather than one frame's story.
     accounting: ResyncAccounting,
+    /// How the direction's framing was first judged
+    /// ([`PassiveSession::first_framing`]): `Some(true)` when a unit was framed
+    /// before any desynchronisation this reader inferred, `Some(false)` when
+    /// one was inferred first, `None` while neither has happened.
+    first_framing: Option<bool>,
 }
 
 /// R311y609 — the live state of one direction's resynchronisation scan.
@@ -2556,6 +2561,9 @@ impl PassiveSession {
         stream.buf.drain(..width + payload_len);
         stream.give_back_capacity();
         stream.consumed += width + payload_len;
+        if stream.first_framing.is_none() {
+            stream.first_framing = Some(true);
+        }
         let resync = stream.pending_resync.take();
         // A message's instant is that of ITS first byte, which the walk names as
         // an offset from the unit's first byte (the length prefix, at
@@ -2740,6 +2748,17 @@ impl PassiveSession {
     /// Always zero on a datagram link, which has no framing to lose.
     pub fn resync_accounting(&self, direction: Direction) -> ResyncAccounting {
         self.stream(direction).accounting
+    }
+
+    /// How `direction`'s stream framing was FIRST judged: `Some(true)` when
+    /// the reader framed a unit before it inferred any desynchronisation,
+    /// `Some(false)` when it inferred one first, `None` while neither has
+    /// happened, and always on a datagram link, which has no framing to lose.
+    /// A hole the source reported ([`DesyncReason::CaptureGap`]) judges
+    /// nothing. Once judged it stays: a stream joined mid-unit that finds its
+    /// framing again is still one that lost it first.
+    pub fn first_framing(&self, direction: Direction) -> Option<bool> {
+        self.stream(direction).first_framing
     }
 
     /// R3054 — what is known of one direction's half of the session. See
@@ -4118,6 +4137,11 @@ impl DirectionStream {
     /// backwards.
     fn desynchronise(&mut self, reason: DesyncReason) -> PassiveStall {
         let at_offset = self.consumed;
+        // A hole the source reported is known, not inferred, and says nothing
+        // about whether these bytes frame.
+        if self.first_framing.is_none() && !matches!(reason, DesyncReason::CaptureGap { .. }) {
+            self.first_framing = Some(false);
+        }
         if self.desync.is_none() {
             self.accounting.desyncs += 1;
             self.desync = Some(DesyncState {
@@ -7183,6 +7207,42 @@ mod tests {
                 plain_resyncs: 0,
             }
         );
+    }
+
+    /// HOW A STREAM DIRECTION'S FRAMING WAS FIRST JUDGED. A direction that
+    /// frames a unit first held its framing, and keeps that answer through a
+    /// later loss; one that loses it first lost it, and keeps that answer
+    /// through the recovery (the headed stream above); a hole the source
+    /// reported judges nothing, and the unit framed after it decides.
+    #[test]
+    fn a_stream_directions_framing_is_judged_by_what_happened_first() {
+        let mut s = PassiveSession::new();
+        assert_eq!(s.first_framing(Direction::A), None);
+        s.push(Direction::A, &framed(&frame_wire(1, &oam_record(1)), 2));
+        s.next_frame(Direction::A).expect("a unit");
+        assert_eq!(s.first_framing(Direction::A), Some(true));
+        s.note_gap(Direction::A, 7);
+        assert_eq!(s.first_framing(Direction::A), Some(true), "a later loss");
+
+        let mut joined = PassiveSession::new();
+        for sn in 10..10 + 2 * DEFAULT_RESYNC_DEPTH as u64 {
+            joined.push(Direction::B, &framed(&headed_frame(sn), 2));
+        }
+        while !matches!(
+            joined.next_frame(Direction::B),
+            Err(PassiveStall::NeedMoreBytes)
+        ) {}
+        assert_eq!(joined.resync_accounting(Direction::B).recoveries, 1);
+        assert_eq!(
+            joined.first_framing(Direction::B),
+            Some(false),
+            "lost, then found"
+        );
+
+        let mut gapped = PassiveSession::new();
+        gapped.note_gap(Direction::A, 0);
+        assert_eq!(gapped.first_framing(Direction::A), None, "a reported hole");
+        assert_eq!(gapped.first_framing(Direction::B), None);
     }
 
     /// THE COMPRESSION READING AND ITS GROUNDS, where no Init was seen. A

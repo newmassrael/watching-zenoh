@@ -588,10 +588,12 @@ fn the_walk_from_nothing_is_the_whole_walk_and_from_a_mark_is_its_tail() {
 ///
 /// The flow carries records and no handshake, and every Frame of it repeats
 /// SN 0, which a zenoh sender never does: each Frame after the first weighs
-/// against the flow more than its unit weighs for it, and with thirteen of them
-/// the word is still `undecided`. An Init of another protocol version then
-/// arrives: its unit does not decode, the evidence crosses the threshold, and
-/// the word becomes `no`. That Init names no node, so nothing else a fold is
+/// against the flow a little more than its unit weighs for it (model 2's `no`
+/// sum: a broken step, -3994 millibits, beside a unit read whole, +3641), and
+/// with fifty-one of them the sum is about -14 bits and the word still
+/// `undecided`. An Init of another protocol version then arrives: its unit
+/// does not decode (-6225), the `no` sum crosses its threshold, and the word
+/// becomes `no`. That Init names no node, so nothing else a fold is
 /// judged by moves, which is what isolates the word. A selector that reads
 /// `zenoh` judged the flow's earlier messages by the old word and must begin
 /// again (and writes the same document a fresh fold does); one that does not
@@ -601,7 +603,7 @@ fn a_flow_word_that_moves_begins_a_fold_that_reads_it_and_no_other() {
     for (selector, begins) in [("zenoh == undecided", true), ("kind == put", false)] {
         let mut g = Growing::new(Dissection::new(), selector);
         g.udp(true, 40000, 7447, &declare_kexpr(7, "demo/temp"));
-        for _ in 0..11 {
+        for _ in 0..49 {
             g.udp(true, 40000, 7447, &push(sender_space(7, None), &[1u8; 12]));
         }
         g.ask("settled");

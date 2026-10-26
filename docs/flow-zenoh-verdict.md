@@ -52,11 +52,21 @@ inequality bounds the chance that it EVER reaches `1/alpha` by `alpha`
 the verdict after every packet. Wald's `(1 - beta) / alpha` is not used: it
 assumes one decision at a stopping time.
 
-**Several null protocols, one statistic.** H0 is a family (DNS, mDNS, SSDP,
-RTPS, ...). For an outcome whose H0 probability differs across the family,
-the weight uses the LARGEST probability any member shows. The statistic is
-then at most the true ratio against every member, so the bound holds against
-each member of the corpus at once. It does not hold against a protocol the
+**Several null protocols, two statistics (model 2).** H0 is a family (DNS,
+mDNS, SSDP, RTPS, ...). For an outcome whose H0 probability differs across the
+family, the `yes` statistic uses the LARGEST probability any member shows. It
+is then at most the true ratio against every member, so the false `yes` is
+bounded against each member of the corpus at once. Those largest
+probabilities sum to more than one over an observation's outcomes, so the
+same statistic read for `no` bounds nothing: under H1, `2^-L` is a martingale
+only when the denominator is a proper distribution. The `no` statistic uses
+one, the average of the members' (any proper distribution bounds the false
+`no`). Each observation therefore weighs twice, `yes` is read on the first sum
+and `no` on the second, and a flow whose two sums both cross is `undecided`.
+Model 1 kept one sum and claimed both bounds; only the false `yes` held. An
+observation must also be weighed on every outcome it can have: one weighed
+only when it confirms (model 1's `version_header`) raises the `yes`
+statistic's expectation under H0. Neither bound holds against a protocol the
 corpus does not contain; that is the limit the claim states and the reason
 for section 6.
 
@@ -66,6 +76,10 @@ amount nobody has measured. A posterior beside the verdict needs base rates
 per port, which only a corpus of real captures gives (section 6).
 
 ## 3. The observations (model 1)
+
+This section is model 1, kept as it was written; model 2 (section 6.2)
+measures the unit weights, adds `stream_framing`, weighs another version
+against the flow and keeps two sums.
 
 Each check has a strength, a probability under H0 (`q`, the chance a
 non-zenoh flow satisfies it) and a probability under H1 (`eps`, the chance a
@@ -200,5 +214,67 @@ infers the same value.
 
 Still to come for step 2: LLMNR, WS-Discovery, NTP
 and DHCP on a busier network, and several zenoh versions and zenoh-pico on the
-zenoh side. Step 3 waits for a corpus large enough to measure
-the weights it would replace.
+zenoh side.
+
+### 6.2 Model 2: measured weights, two sums (step 3, 2026-10-26)
+
+The field document's revision 46 and the session table's revision 6 carry
+model 2 (`crates/wz-capture/src/zenoh_evidence.rs`). Three things move.
+
+**Two sums** (section 2): `log2_lr_millibits` is read for `yes`,
+`log2_lr_no_millibits` for `no`, and each check carries `millibits` and
+`no_millibits`. A check whose null chance is derived from field widths weighs
+the same in both.
+
+**Measured weights.** `unit_reading`, and the new `stream_framing`, take their
+probabilities from the counts of `captures/corpus/` (written out in
+`model::measured`, re-measured by
+`the_corpus_measures_the_counts_model_two_is_computed_from`, and turned into
+the weights by `model_weights_are_their_stated_probabilities`):
+
+- zenoh's chance of each failure is the one-sided 95% Clopper-Pearson upper
+  bound on its count (0 residual and 0 undecoded in 346 units; 4 framings lost
+  in 16 directions), and the confirming outcome takes the rest;
+- the `yes` sum's null chance of an outcome is the largest such upper bound
+  over the null protocols (a unit read whole: mDNS, 13 of 36 units, bound
+  0.51; a framing held: MQTT, 0 of 84 directions, bound 0.035);
+- the `no` sum's is the average over the null protocols of each one's
+  Jeffreys estimate, `(k + 1/2) / (n + K/2)`, a proper distribution.
+
+| outcome | `yes` sum | `no` sum | model 1 |
+|---|---|---|---|
+| unit read whole | +942 | +3641 | +2603 |
+| unit residual | -6858 | -5004 | -6745 |
+| unit undecoded | -6858 | -6225 | -7000 |
+| stream framing held | +3879 | +6454 | (none) |
+| stream framing lost | -1046 | -1037 | (none) |
+| version of this reader | +7999 | +7999 | +8000 |
+| another version | -9994 | -9994 | (none) |
+
+The unit weight fell because the corpus's real mDNS reads a unit whole 36% of
+the time where the generated mDNS model 1 was priced on did 16%: model 1's
+weight claimed more than the bytes give, against a protocol the corpus holds.
+The SN steps keep their assumed zenoh break rate: the zenoh captures are taken
+on loopback, which loses nothing, and a rate measured there would understate a
+real link's. The cookie and the Init roles keep theirs for want of handshakes
+to count.
+
+**`stream_framing`.** A stream direction is judged once, by what happened
+first: a unit framed (held) or a desynchronisation this reader inferred
+(lost); a hole the capture reported judges nothing
+(`PassiveSession::first_framing`). A zenoh stream joined inside a unit loses
+its framing first, which is why the zenoh side of `lost` is a quarter and not
+zero. The forty short MQTT connections lose it in both directions and read
+`undecided` still: twenty-odd bytes a direction are too few to say `no` at
+2^-20, and that is the honest word.
+
+What moved on the corpus: one longer MQTT connection from `no` to
+`undecided`; every zenoh flow stays `yes` and no other flow reads `yes`. Of
+the repository's own captures, the seven-unit raweth capture moved from `yes`
+to `undecided`: a version header, seven units read whole and one SN break come
+to about ten and a half bits, and model 1's crossing rested on the unit weight
+the real mDNS beats.
+
+Still open after model 2: the zenoh side measured only on 1.10.1 over
+loopback, the null side only on the protocols the corpus holds, and the
+handshake checks' `eps` assumed.

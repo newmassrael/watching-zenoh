@@ -4325,10 +4325,17 @@ fn tri_state(v: Option<bool>) -> &'static str {
 /// * `announced_version` -- `none`, `own`, `foreign` or `mixed`, what the Inits,
 ///   Joins, Scouts and Hellos announced
 ///   ([`crate::session_table::AnnouncedVersion`]);
-/// * `zenoh_evidence` -- the test itself: the log likelihood ratio and the two
-///   thresholds in millibits, the model the weights are, and one entry per check
-///   that observed anything, in [`crate::zenoh_evidence::Check::ALL`] order,
-///   with its strength, its counts, its millibits and the basis of each side.
+/// * `zenoh_evidence` -- the test itself: its two sums and the two thresholds
+///   in millibits, the model the weights are, and one entry per check that
+///   observed anything, in [`crate::zenoh_evidence::Check::ALL`] order, with
+///   its strength, its counts, its millibits in each sum and the basis of each
+///   side.
+///
+/// Revision 46 (model 2): `log2_lr_millibits` is the sum read against
+/// `yes_at_millibits`, and `log2_lr_no_millibits`, new, the sum read against
+/// `no_at_millibits`; each check's `millibits` is its part of the first and
+/// `no_millibits`, new, its part of the second. Why there are two:
+/// [`crate::zenoh_evidence`].
 ///
 /// Beside the context and not inside it: the context is what the handshake
 /// negotiated, and this is what every message of the flow was evidence of, the
@@ -4343,11 +4350,12 @@ pub(crate) fn push_zenoh(
     let _ = write!(
         out,
         ",\"zenoh\":\"{}\",\"announced_version\":\"{}\",\"zenoh_evidence\":{{\
-         \"log2_lr_millibits\":{},\"yes_at_millibits\":{},\"no_at_millibits\":{},\
-         \"model\":{},\"checks\":[",
+         \"log2_lr_millibits\":{},\"log2_lr_no_millibits\":{},\"yes_at_millibits\":{},\
+         \"no_at_millibits\":{},\"model\":{},\"checks\":[",
         crate::session_table::ZenohVerdict::of(evidence).name(),
         crate::session_table::AnnouncedVersion::of(versions).name(),
         evidence.log2_lr_millibits(),
+        evidence.log2_lr_no_millibits(),
         model::YES_AT,
         model::NO_AT,
         model::MODEL,
@@ -4365,12 +4373,13 @@ pub(crate) fn push_zenoh(
         let _ = write!(
             out,
             "{{\"check\":\"{}\",\"strength\":\"{}\",\"confirmed\":{},\"violated\":{},\
-             \"millibits\":{},\"q_basis\":\"{}\",\"eps_basis\":\"{}\"}}",
+             \"millibits\":{},\"no_millibits\":{},\"q_basis\":\"{}\",\"eps_basis\":\"{}\"}}",
             check.name(),
             check.strength().name(),
             tally.confirmed,
             tally.violated,
             tally.millibits,
+            tally.no_millibits,
             check.q_basis().name(),
             check.eps_basis().name(),
         );
@@ -7773,16 +7782,16 @@ mod tests {
         // strength and basis words are all written.
         {
             use crate::session_table::{AnnouncedVersion, ZenohVerdict};
-            use crate::zenoh_evidence::{model, Check, ZenohEvidence};
+            use crate::zenoh_evidence::{model, Check, Weight, ZenohEvidence};
             let mut every_check = ZenohEvidence::default();
             for check in Check::ALL {
-                every_check.confirm(check, 0);
-                every_check.violate(check, 0);
+                every_check.confirm(check, Weight::both(0));
+                every_check.violate(check, Weight::both(0));
             }
             let mut yes = ZenohEvidence::default();
-            yes.confirm(Check::CookieEcho, model::YES_AT);
+            yes.confirm(Check::CookieEcho, Weight::both(model::YES_AT));
             let mut no = ZenohEvidence::default();
-            no.violate(Check::UnitReading, model::NO_AT);
+            no.violate(Check::UnitReading, Weight::both(model::NO_AT));
             let mut zenoh_words = alloc::collections::BTreeSet::new();
             let mut version_words = alloc::collections::BTreeSet::new();
             let versions = [(0, 0), (1, 0), (0, 1), (1, 1)];

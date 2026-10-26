@@ -112,12 +112,15 @@ pub struct LinkIngest {
 }
 
 /// Whether a flow is zenoh, as the sequential test of [`crate::zenoh_evidence`]
-/// reads its evidence. The closed set:
+/// reads its evidence's two sums. The closed set:
 ///
-/// * `yes` -- the log likelihood ratio is at or above [`model::YES_AT`];
-/// * `no` -- it is at or below [`model::NO_AT`];
-/// * `undecided` -- between the two: too little evidence either way, which is
-///   the word a lone header earns and the word a flow starts with.
+/// * `yes` -- the `yes` sum is at or above [`model::YES_AT`] and the `no` sum
+///   is above [`model::NO_AT`];
+/// * `no` -- the `no` sum is at or below [`model::NO_AT`] and the `yes` sum is
+///   below [`model::YES_AT`];
+/// * `undecided` -- otherwise: too little evidence either way, which is the
+///   word a lone header earns and the word a flow starts with, or both sums
+///   past their thresholds at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ZenohVerdict {
     /// The evidence crossed the threshold for zenoh.
@@ -131,13 +134,12 @@ pub enum ZenohVerdict {
 impl ZenohVerdict {
     /// The word `evidence` comes to.
     pub fn of(evidence: &ZenohEvidence) -> ZenohVerdict {
-        let lr = evidence.log2_lr_millibits();
-        if lr >= model::YES_AT {
-            ZenohVerdict::Yes
-        } else if lr <= model::NO_AT {
-            ZenohVerdict::No
-        } else {
-            ZenohVerdict::Undecided
+        let yes = evidence.log2_lr_millibits() >= model::YES_AT;
+        let no = evidence.log2_lr_no_millibits() <= model::NO_AT;
+        match (yes, no) {
+            (true, false) => ZenohVerdict::Yes,
+            (false, true) => ZenohVerdict::No,
+            _ => ZenohVerdict::Undecided,
         }
     }
 
@@ -303,9 +305,8 @@ impl LinkIngest {
         if frame.inadmissible_on_link || !frame.unit_read_whole {
             return;
         }
-        if matches!(announced, Ok(Some(v)) if v == wz_codecs::wire_const::PROTOCOL_VERSION) {
-            self.observed
-                .confirm(Check::VersionHeader, model::VERSION_HEADER);
+        if let Ok(Some(version)) = announced {
+            self.observe_version(version);
         }
         let seat = usize::from(frame.direction == Direction::B);
         match &frame.frame {
@@ -346,6 +347,20 @@ impl LinkIngest {
         } else {
             self.observed
                 .violate(Check::CookieEcho, model::COOKIE_ECHO_VIOLATED);
+        }
+    }
+
+    /// The version an admissible version-bearing message announced, out of a
+    /// unit read whole: this reader's confirms the check and any other
+    /// violates it. Both are weighed, because an observation that could only
+    /// confirm would raise the `yes` sum's expectation under the null.
+    fn observe_version(&mut self, version: u8) {
+        if version == wz_codecs::wire_const::PROTOCOL_VERSION {
+            self.observed
+                .confirm(Check::VersionHeader, model::VERSION_HEADER);
+        } else {
+            self.observed
+                .violate(Check::VersionHeader, model::VERSION_FOREIGN);
         }
     }
 
@@ -398,10 +413,8 @@ impl LinkIngest {
     ) {
         let announced = frame.as_ref().map(ScoutingFrame::announced_version);
         self.versions.observe(announced, whole);
-        if whole && matches!(announced, Ok(Some(v)) if v == wz_codecs::wire_const::PROTOCOL_VERSION)
-        {
-            self.observed
-                .confirm(Check::VersionHeader, model::VERSION_HEADER);
+        if let (true, Ok(Some(version))) = (whole, announced) {
+            self.observe_version(version);
         }
         let reading = UnitReading::of_scouting(frame, whole);
         self.readings.observe(reading, datagram_len);
@@ -414,10 +427,9 @@ impl LinkIngest {
     }
 
     /// The flow's evidence for the zenoh test: what ingest observed, the Init
-    /// roles, and `steps`, the SN steps of the flow's sessions
-    /// ([`wz_session_core::passive::PassiveSession::sn_steps`], both directions
-    /// and every session of the flow together).
-    pub fn evidence(&self, steps: SnSteps) -> ZenohEvidence {
+    /// roles, and what the flow's sessions observed ([`SessionObservations`]:
+    /// the SN steps and how each stream direction's framing was first judged).
+    pub fn evidence(&self, sessions: SessionObservations) -> ZenohEvidence {
         let mut evidence = self.observed;
         match self.roles() {
             Roles::Settled {
@@ -427,11 +439,20 @@ impl LinkIngest {
             Roles::Contradicted => evidence.violate(Check::InitRoles, model::INIT_ROLES_VIOLATED),
             Roles::Settled { .. } => {}
         }
+        let steps = sessions.steps;
         evidence.add(
             Check::SnFollows,
             steps.follows,
             steps.breaks,
             crate::zenoh_evidence::sn_steps_weight(steps),
+        );
+        evidence.add(
+            Check::StreamFraming,
+            sessions.framing_held,
+            sessions.framing_lost,
+            model::FRAMING_HELD
+                .times(sessions.framing_held)
+                .plus(model::FRAMING_LOST.times(sessions.framing_lost)),
         );
         evidence
     }
@@ -1007,7 +1028,7 @@ fn links_of(d: &Dissection) -> (Vec<Link>, Excluded) {
             frames,
             f.residue().recovered,
             &f.ingest,
-            f.sn_steps(),
+            f.session_observations(),
         ));
     }
 
@@ -1049,7 +1070,7 @@ fn links_of(d: &Dissection) -> (Vec<Link>, Excluded) {
             frames,
             f.residue().recovered,
             &f.ingest,
-            f.sn_steps(),
+            f.session_observations(),
         ));
     }
 
@@ -1067,7 +1088,7 @@ fn links_of(d: &Dissection) -> (Vec<Link>, Excluded) {
             frames,
             census.bytes as u64,
             &d.serial_ingest,
-            session_sn_steps(&d.serial_session),
+            SessionObservations::of(&d.serial_session),
         ));
     }
     (links, excluded)
@@ -1080,6 +1101,49 @@ pub(crate) fn session_sn_steps(session: &wz_session_core::passive::PassiveSessio
         .and(session.sn_steps(Direction::B))
 }
 
+/// What a flow's sessions observed that the zenoh test weighs, both
+/// directions and every session of the flow together: the SN steps
+/// ([`wz_session_core::passive::PassiveSession::sn_steps`]) and the stream
+/// directions whose framing was first judged held or lost
+/// ([`wz_session_core::passive::PassiveSession::first_framing`]; a datagram
+/// direction has no framing to judge).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SessionObservations {
+    /// The SN steps.
+    pub steps: SnSteps,
+    /// Stream directions that framed a unit before they lost their framing.
+    pub framing_held: u64,
+    /// Stream directions that lost their framing first.
+    pub framing_lost: u64,
+}
+
+impl SessionObservations {
+    /// One session's.
+    pub fn of(session: &wz_session_core::passive::PassiveSession) -> Self {
+        let mut out = Self {
+            steps: session_sn_steps(session),
+            ..Self::default()
+        };
+        for direction in [Direction::A, Direction::B] {
+            match session.first_framing(direction) {
+                Some(true) => out.framing_held += 1,
+                Some(false) => out.framing_lost += 1,
+                None => {}
+            }
+        }
+        out
+    }
+
+    /// Two sessions' together.
+    pub fn and(self, other: Self) -> Self {
+        Self {
+            steps: self.steps.and(other.steps),
+            framing_held: self.framing_held.saturating_add(other.framing_held),
+            framing_lost: self.framing_lost.saturating_add(other.framing_lost),
+        }
+    }
+}
+
 /// One flow's link, the cells that depend on whether it could be read decided
 /// in ONE place.
 fn link_of(
@@ -1089,7 +1153,7 @@ fn link_of(
     frames: u64,
     bytes: u64,
     ingest: &LinkIngest,
-    steps: SnSteps,
+    sessions: SessionObservations,
 ) -> Link {
     let unreadable = encryption == Encryption::EncryptedUnreadable;
     // The role cells. A zid the Inits do not give is absent for the reason that
@@ -1142,7 +1206,7 @@ fn link_of(
         acceptor,
         pair,
         versions: ingest.versions(),
-        evidence: ingest.evidence(steps),
+        evidence: ingest.evidence(sessions),
         readings: ingest.readings(),
     }
 }

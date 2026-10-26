@@ -192,11 +192,13 @@ const EXPECTED: &[(&str, Tally, Tally)] = &[
     ("lan-mdns.pcap", (0, 1, 18), (0, 1, 18)),
     ("lan-ssdp.pcap", (0, 1, 1), (0, 1, 1)),
     // The real implementations of three protocols that run beside zenoh, in
-    // containers (2026-10-26). A TCP flow whose bytes never frame a unit
-    // carries no evidence the model weighs, so the forty MQTT connections that
-    // publish once and leave read `undecided`; a framing that never takes is
-    // not yet a check.
-    ("stack-mqtt.pcap", (0, 4, 40), (0, 4, 40)),
+    // containers (2026-10-26). The forty MQTT connections that publish once and
+    // leave lose their framing in both directions and frame no unit: model 2
+    // weighs that (`stream_framing`, about a bit a direction), and twenty-odd
+    // bytes a direction are rightly too few to say `no` at 2^-20. One longer
+    // connection moved from `no` to `undecided` with model 2, whose unit weights
+    // are measured against the real nulls and weaker than model 1's.
+    ("stack-mqtt.pcap", (0, 3, 41), (0, 3, 41)),
     ("stack-rtps.pcap", (0, 9, 3), (0, 9, 3)),
     ("stack-coap.pcap", (0, 5, 20), (0, 5, 20)),
     // Upstream vsomeip between two containers: service discovery, a method
@@ -283,4 +285,97 @@ fn the_corpus_holds_both_error_rates_and_every_files_tally() {
         failures.join("\n"),
         rows.join("\n")
     );
+}
+
+/// One file's counts the measured weights rest on: framing units read whole,
+/// residual and undecoded, and stream directions whose framing held or was
+/// lost first.
+fn counts(d: &Dissection) -> ([u64; 3], [u64; 2]) {
+    let mut units = [0u64; 3];
+    let mut add = |r: wz_session_core::passive::ReadingEvidence| {
+        units[0] += r.explained.units;
+        units[1] += r.residual.units;
+        units[2] += r.undecoded.units;
+    };
+    let mut framing = [0u64; 2];
+    for f in d.flows() {
+        add(f.ingest.readings());
+        let o = f.session_observations();
+        framing[0] += o.framing_held;
+        framing[1] += o.framing_lost;
+    }
+    for f in d.datagram_flows() {
+        add(f.ingest.readings());
+        let o = f.session_observations();
+        framing[0] += o.framing_held;
+        framing[1] += o.framing_lost;
+    }
+    (units, framing)
+}
+
+/// THE MEASURED WEIGHTS REST ON THIS CORPUS. Model 2's counts
+/// ([`crate::zenoh_evidence::model::measured`]) are measured again here, file
+/// by file for the null protocols and summed over the zenoh files, so a file
+/// added to the corpus, or a reader that reads one differently, fails here
+/// until the counts and the weights computed from them move together.
+///
+/// The counts are a build's that opens lz4. A build that cannot reads the one
+/// lz4 batch of `zenoh-tcp-lz4.pcap` that no plain unit stands beside as
+/// `undecoded`, which it does not weigh ([`wz_session_core::passive::OPENS_LZ4_BATCHES`]).
+#[test]
+fn the_corpus_measures_the_counts_model_two_is_computed_from() {
+    use crate::zenoh_evidence::model::measured;
+    let mut zenoh_units = [0u64; 3];
+    let mut zenoh_framing = [0u64; 2];
+    let mut failures = Vec::new();
+    for entry in manifest() {
+        let bytes = std::fs::read(corpus_dir().join(&entry.file))
+            .unwrap_or_else(|e| panic!("{}: {e}", entry.file));
+        let d = Dissection::from_capture(&bytes)
+            .unwrap_or_else(|e| panic!("{}: the capture reads: {e:?}", entry.file));
+        let (units, framing) = counts(&d);
+        if entry.hypothesis == "zenoh" {
+            for (sum, n) in zenoh_units.iter_mut().zip(units) {
+                *sum += n;
+            }
+            for (sum, n) in zenoh_framing.iter_mut().zip(framing) {
+                *sum += n;
+            }
+            continue;
+        }
+        match measured::NULL.iter().find(|m| m.file == entry.file) {
+            Some(m) if m.units == units && m.framing == framing => {}
+            Some(m) => failures.push(alloc::format!(
+                "{}: units {units:?} framing {framing:?}, stated {:?} {:?}",
+                entry.file,
+                m.units,
+                m.framing
+            )),
+            None => failures.push(alloc::format!(
+                "{}: units {units:?} framing {framing:?}, and no member states it",
+                entry.file
+            )),
+        }
+    }
+    let want_units = if wz_session_core::passive::OPENS_LZ4_BATCHES {
+        measured::ZENOH_UNITS
+    } else {
+        [measured::ZENOH_UNITS[0] - 1, 0, 1]
+    };
+    if zenoh_units != want_units || zenoh_framing != measured::ZENOH_FRAMING {
+        failures.push(alloc::format!(
+            "zenoh: units {zenoh_units:?} framing {zenoh_framing:?}, stated {want_units:?} {:?}",
+            measured::ZENOH_FRAMING
+        ));
+    }
+    let listed: Vec<String> = manifest().into_iter().map(|e| e.file).collect();
+    for m in &measured::NULL {
+        if !listed.iter().any(|f| f == m.file) {
+            failures.push(alloc::format!(
+                "{}: stated, and not in the manifest",
+                m.file
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

@@ -1868,22 +1868,27 @@ fn the_headers_example_is_the_document_of_a_real_session() {
         "the example's numbers"
     );
     let doc = session_table_json(&packets.dissect());
-    // Two version headers, the Init roles and ten units read whole; the
-    // keep-alives carry no SN and the fixture's cookie is empty.
+    // Two version headers, the Init roles, ten units read whole and two stream
+    // directions whose framing held; the keep-alives carry no SN and the
+    // fixture's cookie is empty.
     let zenoh = "\"zenoh\":\"yes\",\"announced_version\":\"own\",\
-                 \"zenoh_evidence\":{\"log2_lr_millibits\":43029,\
-                 \"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":1,\
+                 \"zenoh_evidence\":{\"log2_lr_millibits\":34175,\
+                 \"log2_lr_no_millibits\":66315,\
+                 \"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":2,\
                  \"checks\":[{\"check\":\"init_roles\",\"strength\":\"handshake\",\
-                 \"confirmed\":1,\"violated\":0,\"millibits\":999,\
+                 \"confirmed\":1,\"violated\":0,\"millibits\":999,\"no_millibits\":999,\
                  \"q_basis\":\"derived\",\"eps_basis\":\"assumed\"},\
                  {\"check\":\"version_header\",\"strength\":\"header\",\
-                 \"confirmed\":2,\"violated\":0,\"millibits\":16000,\
-                 \"q_basis\":\"derived\",\"eps_basis\":\"none\"},\
+                 \"confirmed\":2,\"violated\":0,\"millibits\":15998,\"no_millibits\":15998,\
+                 \"q_basis\":\"derived\",\"eps_basis\":\"assumed\"},\
                  {\"check\":\"unit_reading\",\"strength\":\"unit\",\
-                 \"confirmed\":10,\"violated\":0,\"millibits\":26030,\
-                 \"q_basis\":\"generated\",\"eps_basis\":\"assumed\"}]}";
+                 \"confirmed\":10,\"violated\":0,\"millibits\":9420,\"no_millibits\":36410,\
+                 \"q_basis\":\"measured\",\"eps_basis\":\"measured\"},\
+                 {\"check\":\"stream_framing\",\"strength\":\"unit\",\
+                 \"confirmed\":2,\"violated\":0,\"millibits\":7758,\"no_millibits\":12908,\
+                 \"q_basis\":\"measured\",\"eps_basis\":\"measured\"}]}";
     let want = alloc::format!(
-        "{{\"document\":{{\"name\":\"session_table\",\"revision\":5}},\"ok\":true,\
+        "{{\"document\":{{\"name\":\"session_table\",\"revision\":6}},\"ok\":true,\
          \"sessions\":[{{\"initiator\":\"a1a1a1a1\",\"acceptor\":\"b2b2b2b2\",\
          \"link\":\"tcp\",\"phase\":\"established\",\"encrypted\":\"clear\",\
          \"first_seen_ts_ns\":\"1700000000000000000\",\
@@ -2102,19 +2107,21 @@ fn a_session_with_its_handshake_is_zenoh() {
     assert_eq!(row.evidence.tally(Check::VersionHeader).confirmed, 2);
     assert_eq!(row.evidence.tally(Check::InitRoles).confirmed, 1);
     assert_eq!(row.evidence.tally(Check::UnitReading).confirmed, 6);
-    assert_eq!(
-        row.evidence.log2_lr_millibits(),
-        2 * model::VERSION_HEADER + model::INIT_ROLES_CONFIRMED + 6 * model::UNIT_EXPLAINED
-    );
+    let sum = model::VERSION_HEADER
+        .times(2)
+        .plus(model::INIT_ROLES_CONFIRMED)
+        .plus(model::UNIT_EXPLAINED.times(6));
+    assert_eq!(row.evidence.log2_lr_millibits(), sum.yes);
+    assert_eq!(row.evidence.log2_lr_no_millibits(), sum.no);
     let doc = session_table_json(&d);
-    assert!(
-        doc.contains(
-            "\"zenoh\":\"yes\",\"announced_version\":\"own\",\"zenoh_evidence\":\
-             {\"log2_lr_millibits\":32617,\"yes_at_millibits\":20000,\
-             \"no_at_millibits\":-20000,\"model\":1,\"checks\":[{\"check\":\"init_roles\""
-        ),
-        "{doc}"
+    let head = alloc::format!(
+        "\"zenoh\":\"yes\",\"announced_version\":\"own\",\"zenoh_evidence\":\
+         {{\"log2_lr_millibits\":{},\"log2_lr_no_millibits\":{},\"yes_at_millibits\":20000,\
+         \"no_at_millibits\":-20000,\"model\":2,\"checks\":[{{\"check\":\"init_roles\"",
+        sum.yes,
+        sum.no
     );
+    assert!(doc.contains(&head), "{head}\n{doc}");
 }
 
 /// THE COOKIE BINDS THE TWO DIRECTIONS. An OpenSyn that carries the cookie the
@@ -2151,6 +2158,7 @@ fn an_echoed_cookie_decides_and_a_different_one_is_a_violation() {
             confirmed: 1,
             violated: 0,
             millibits: 8 * model::COOKIE_ECHO_PER_BYTE + model::COOKIE_ECHO_FIDELITY,
+            no_millibits: 8 * model::COOKIE_ECHO_PER_BYTE + model::COOKIE_ECHO_FIDELITY,
         }
     );
     assert_eq!(word(echoed), ZenohVerdict::Yes);
@@ -2200,7 +2208,8 @@ fn a_flow_joined_mid_session_is_zenoh_on_its_sn_steps() {
         crate::zenoh_evidence::CheckTally {
             confirmed: 4,
             violated: 0,
-            millibits: 4 * crate::zenoh_evidence::model::SN_FOLLOWS,
+            millibits: 4 * crate::zenoh_evidence::model::SN_FOLLOWS.yes,
+            no_millibits: 4 * crate::zenoh_evidence::model::SN_FOLLOWS.no,
         },
         "{row:?}"
     );
@@ -2326,7 +2335,7 @@ fn the_declared_zenoh_words_are_the_enums() {
         AnnouncedVersion::names()
     );
     assert_eq!(
-        crate::doc_revision::ZENOH_CHECK_R43.to_vec(),
+        crate::doc_revision::ZENOH_CHECK_R46.to_vec(),
         Check::names()
     );
     assert_eq!(
@@ -2334,7 +2343,7 @@ fn the_declared_zenoh_words_are_the_enums() {
         Strength::names()
     );
     assert_eq!(
-        crate::doc_revision::ZENOH_BASIS_R43.to_vec(),
+        crate::doc_revision::ZENOH_BASIS_R46.to_vec(),
         Basis::names()
     );
 }
@@ -2347,20 +2356,30 @@ fn tally(units: u64, bytes: u64) -> wz_session_core::passive::UnitTally {
 
 /// A flow joined after its handshake carries no Init. Every unit of it reads as
 /// a message that accounts for every byte: the fixture knows it put seven
-/// one-byte units in the stream. Seven keep-alives weigh just under the
-/// threshold, so the word is still `undecided`; the eighth would cross it.
+/// one-byte units in the stream. Seven keep-alives and two directions whose
+/// framing held are not enough for `yes`. The unit at which they would be is
+/// the model's: the framing's weight and one unit's, against the threshold.
 #[test]
 fn a_flow_joined_after_its_handshake_reads_as_explained_units() {
+    use crate::zenoh_evidence::model;
     let (packets, _) = midstream_tcp(7);
     let d = packets.dissect();
     let table = session_table(&d);
     let row = only(&table);
     assert_eq!(word(row.evidence), ZenohVerdict::Undecided);
-    let (packets, _) = midstream_tcp(8);
-    assert_eq!(
-        word(only(&session_table(&packets.dissect())).evidence),
-        ZenohVerdict::Yes
-    );
+    let held = 2 * model::FRAMING_HELD.yes;
+    let crossing = ((model::YES_AT - held) as u64).div_ceil(model::UNIT_EXPLAINED.yes as u64);
+    for (units, want) in [
+        (crossing - 1, ZenohVerdict::Undecided),
+        (crossing, ZenohVerdict::Yes),
+    ] {
+        let (packets, _) = midstream_tcp(units);
+        assert_eq!(
+            word(only(&session_table(&packets.dissect())).evidence),
+            want,
+            "{units} units"
+        );
+    }
     assert_eq!(row.readings.explained, tally(7, 7));
     assert_eq!(row.readings.residual, tally(0, 0));
     assert_eq!(row.readings.undecoded, tally(0, 0));
@@ -3374,18 +3393,25 @@ fn the_repositorys_captures_read_as_what_they_are() {
     assert_eq!(joined.1.explained, tally(2, 144));
     assert_eq!(joined.1.units(), 2);
 
-    for (name, bytes) in [
+    // The raweth capture is seven units with one version header and one SN
+    // break: about ten and a half bits for `yes`, which model 2 does not call
+    // (model 1 did, on a unit weight the real mDNS of the corpus beats). A
+    // unit read whole is weak evidence against a protocol that reads whole a
+    // third of the time.
+    for (name, bytes, want) in [
         (
             "publisher",
             &include_bytes!("../../../captures/publisher-priority-encoding-timestamp.pcap")[..],
+            ZenohVerdict::Yes,
         ),
         (
             "raweth",
             &include_bytes!("../../../captures/raweth-transport-messages.pcap")[..],
+            ZenohVerdict::Undecided,
         ),
     ] {
         for (verdict, readings) in read(bytes) {
-            assert_eq!(verdict, ZenohVerdict::Yes, "{name}");
+            assert_eq!(verdict, want, "{name}");
             assert!(readings.units() > 0, "{name}");
             assert_eq!(readings.explained.units, readings.units(), "{name}");
         }

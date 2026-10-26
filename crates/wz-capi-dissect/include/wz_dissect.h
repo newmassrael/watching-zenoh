@@ -1261,7 +1261,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":45,"key":"kind","values":[...],
+ *     {"name":"fields","revision":46,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -2192,26 +2192,34 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * answers the same question through wz_dissect_live_session_table, with the
  * same document; its limits are the handle's, chosen at open.
  *
- *     {"document":{"name":"session_table","revision":5},"ok":true,
+ *     {"document":{"name":"session_table","revision":6},"ok":true,
  *      "sessions":[{"initiator":"a1a1a1a1","acceptor":"b2b2b2b2","link":"tcp",
  *                   "phase":"established","encrypted":"clear",
  *                   "first_seen_ts_ns":"1700000000000000000",
  *                   "last_seen_ts_ns":"1700000000000015000",
  *                   "frames":10,"bytes":48,"zenoh":"yes",
  *                   "announced_version":"own",
- *                   "zenoh_evidence":{"log2_lr_millibits":43029,
+ *                   "zenoh_evidence":{"log2_lr_millibits":34175,
+ *                     "log2_lr_no_millibits":66315,
  *                     "yes_at_millibits":20000,"no_at_millibits":-20000,
- *                     "model":1,
+ *                     "model":2,
  *                     "checks":[{"check":"init_roles","strength":"handshake",
  *                                "confirmed":1,"violated":0,"millibits":999,
+ *                                "no_millibits":999,
  *                                "q_basis":"derived","eps_basis":"assumed"},
  *                               {"check":"version_header","strength":"header",
- *                                "confirmed":2,"violated":0,"millibits":16000,
- *                                "q_basis":"derived","eps_basis":"none"},
+ *                                "confirmed":2,"violated":0,"millibits":15998,
+ *                                "no_millibits":15998,
+ *                                "q_basis":"derived","eps_basis":"assumed"},
  *                               {"check":"unit_reading","strength":"unit",
  *                                "confirmed":10,"violated":0,
- *                                "millibits":26030,"q_basis":"generated",
- *                                "eps_basis":"assumed"}]},
+ *                                "millibits":9420,"no_millibits":36410,
+ *                                "q_basis":"measured","eps_basis":"measured"},
+ *                               {"check":"stream_framing","strength":"unit",
+ *                                "confirmed":2,"violated":0,
+ *                                "millibits":7758,"no_millibits":12908,
+ *                                "q_basis":"measured",
+ *                                "eps_basis":"measured"}]},
  *                   "unit_readings":{"explained":{"units":10,"bytes":28},
  *                                    "residual":{"units":0,"bytes":0},
  *                                    "undecoded":{"units":0,"bytes":0}},
@@ -2279,7 +2287,8 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *                transport headers. A count this library measures: a bare number.
  *   `zenoh`, `announced_version`, `zenoh_evidence`  whether the bytes are zenoh,
  *                what their version-bearing messages announced, and the test
- *                behind the word (session_table revision 5); see WHETHER A FLOW
+ *                behind the word (session_table revision 5, model 2 from
+ *                revision 6); see WHETHER A FLOW
  *                IS ZENOH below. A row's evidence is its flows' together.
  *   `unit_readings`  how the framing units READ (session_table revision 4); see
  *                HOW A FLOW'S UNITS READ below. A row's tallies are its flows'
@@ -2299,13 +2308,22 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * that other protocols rarely keep by chance, on every row and flow here and on
  * every flow object of the field document (revision 43). Each observation adds
  * a weight in millibits, log2 of how much likelier it is from zenoh than from
- * another protocol, and the sum is read against two thresholds:
+ * another protocol, to TWO sums (model 2, field-document revision 46 and
+ * session_table revision 6). "Another protocol" is a family, and the false
+ * `yes` is bounded only when each outcome is priced at the largest chance any
+ * member gives it, while the false `no` is bounded only when it is priced by a
+ * proper distribution; one sum cannot do both. So:
  *
- *   `yes`        the sum is at or above `yes_at_millibits` (20000: an error rate
- *                of 2^-20 against the protocols the weights were taken from);
- *   `no`         it is at or below `no_at_millibits` (-20000);
- *   `undecided`  neither: too little evidence either way. A flow starts here,
- *                and one Init, Join, Scout or Hello alone leaves it here.
+ *   `yes`        the `yes` sum (`log2_lr_millibits`) is at or above
+ *                `yes_at_millibits` (20000: an error rate of 2^-20 against the
+ *                protocols the weights were taken from) and the `no` sum is not
+ *                at or below its threshold;
+ *   `no`         the `no` sum (`log2_lr_no_millibits`) is at or below
+ *                `no_at_millibits` (-20000) and the `yes` sum is not at or above
+ *                its threshold;
+ *   `undecided`  otherwise: too little evidence either way, or both sums past
+ *                their thresholds at once. A flow starts here, and one Init,
+ *                Join, Scout or Hello alone leaves it here.
  *
  * The word is read at every moment and moves as evidence arrives; the error
  * rate holds for a reader that reads it after every packet. The port is not
@@ -2317,14 +2335,16 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *
  * `zenoh_evidence` is the test, so a consumer can show what the word rests on:
  *
- *   {"log2_lr_millibits":L,"yes_at_millibits":20000,"no_at_millibits":-20000,
- *    "model":1,
+ *   {"log2_lr_millibits":L,"log2_lr_no_millibits":M,"yes_at_millibits":20000,
+ *    "no_at_millibits":-20000,"model":2,
  *    "checks":[{"check":"init_roles","strength":"handshake","confirmed":1,
- *               "violated":0,"millibits":999,"q_basis":"derived",
- *               "eps_basis":"assumed"},...]}
+ *               "violated":0,"millibits":999,"no_millibits":999,
+ *               "q_basis":"derived","eps_basis":"assumed"},...]}
  *
  * `checks` holds one entry per check that observed anything, `L` is the sum of
- * their `millibits`, and `model` names the weights. The checks:
+ * their `millibits` and `M` of their `no_millibits`, and `model` names the
+ * weights. A check whose null chance is derived from field widths weighs the
+ * same in both sums. The checks:
  *
  *   `cookie_echo`     an OpenSyn carried the cookie the other direction's InitAck
  *                     issued (strength `handshake`; 8 bits a byte up to 64), or
@@ -2335,15 +2355,23 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *                     its conduit (`state`), judged without the ring when no
  *                     InitAck gave one, or did not (a violation);
  *   `version_header`  an Init, Join, Scout or Hello of version 0x09 out of a unit
- *                     read whole (`header`);
+ *                     read whole (`header`), or of another version (a violation,
+ *                     from model 2);
  *   `unit_reading`    a unit read `explained` (`unit`), or `residual` or
- *                     `undecoded` (a violation): see HOW A FLOW'S UNITS READ.
+ *                     `undecoded` (a violation): see HOW A FLOW'S UNITS READ;
+ *   `stream_framing`  a stream direction framed a unit before this reader lost
+ *                     its framing (`unit`), or lost it first (a violation: a
+ *                     stream joined inside a unit, or bytes that are not zenoh's
+ *                     framing), from model 2. A hole the capture reported judges
+ *                     nothing, and a datagram link has no framing to lose.
  *
  * `q_basis` and `eps_basis` say where the two probabilities a weight is computed
- * from come from: `derived` from the widths of the fields compared, `generated`
- * from the largest share any protocol of a generated corpus shows, `assumed`
- * until a measurement replaces it, `none` for a check that only confirms. A
- * weight is a statement against the protocols its basis covers and no others.
+ * from come from: `derived` from the widths of the fields compared, `measured`
+ * on the real captures of the repository's calibration corpus
+ * (`captures/corpus/`: a bound on each protocol's share), `assumed` until a
+ * measurement replaces it. A weight is a statement against the protocols its
+ * basis covers and no others. Model 1 (field-document revisions 43 to 45)
+ * wrote `generated` and `none` here.
  *
  * @values fields zenoh
  * @values fields announced_version
@@ -4839,7 +4867,7 @@ int wz_dissect_transport_layout(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":45,"key":"state",
+ *     "value_families":[{"name":"fields","revision":46,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

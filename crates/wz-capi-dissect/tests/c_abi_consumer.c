@@ -2644,17 +2644,18 @@ static int check_transport_layout_door(void) {
  * parameter of the fixture. */
 static int check_session_table_doors(void) {
     static const char opening[] =
-        "{\"document\":{\"name\":\"session_table\",\"revision\":5},\"ok\":true,"
+        "{\"document\":{\"name\":\"session_table\",\"revision\":6},\"ok\":true,"
         "\"sessions\":[{\"initiator\":null,\"acceptor\":null,\"link\":\"udp\","
         "\"phase\":\"unseen\",\"encrypted\":\"clear\","
         "\"first_seen_ts_ns\":1000000,\"last_seen_ts_ns\":3000000,"
         "\"frames\":3,\"bytes\":3,\"zenoh\":\"undecided\","
         "\"announced_version\":\"none\","
-        "\"zenoh_evidence\":{\"log2_lr_millibits\":7809,"
-        "\"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":1,"
+        "\"zenoh_evidence\":{\"log2_lr_millibits\":2826,"
+        "\"log2_lr_no_millibits\":10923,"
+        "\"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":2,"
         "\"checks\":[{\"check\":\"unit_reading\",\"strength\":\"unit\","
-        "\"confirmed\":3,\"violated\":0,\"millibits\":7809,"
-        "\"q_basis\":\"generated\",\"eps_basis\":\"assumed\"}]},"
+        "\"confirmed\":3,\"violated\":0,\"millibits\":2826,\"no_millibits\":10923,"
+        "\"q_basis\":\"measured\",\"eps_basis\":\"measured\"}]},"
         "\"unit_readings\":{\"explained\":{\"units\":3,\"bytes\":3},"
         "\"residual\":{\"units\":0,\"bytes\":0},"
         "\"undecoded\":{\"units\":0,\"bytes\":0}},"
@@ -3988,8 +3989,11 @@ int main(void) {
      * 45: every context and every half carries `parameters`, each value
      * beside its basis (stated, inferred, conflicting, absent), and the
      * compression entry its evidence. Keys arrive and a family is declared;
-     * nothing retires. */
-    revisioned[2].revision = 45;
+     * nothing retires.
+     * 46: model 2 of the zenoh test: two sums (`log2_lr_no_millibits`, each
+     * check's `no_millibits`), the `stream_framing` check and the `measured`
+     * basis. Keys arrive and words move; nothing retires. */
+    revisioned[2].revision = 46;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

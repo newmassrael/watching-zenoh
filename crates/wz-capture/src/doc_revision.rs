@@ -2256,6 +2256,23 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R45_CARRIES,
     },
+    // Revision 46 IS MODEL 2 OF THE ZENOH TEST (`docs/flow-zenoh-verdict.md`
+    // §6.2), and retires no key. The evidence keeps two sums: `log2_lr_millibits`
+    // is read against `yes_at_millibits` and `log2_lr_no_millibits`, new, against
+    // `no_at_millibits`, and each check's `millibits` and `no_millibits`, new, are
+    // its parts of the two. `check` gains `stream_framing`; the bases are
+    // `derived`, `measured` (new) and `assumed`, and `generated` and `none` are
+    // no longer written. The weights move, so `zenoh` moves on some flows and
+    // keeps its three words; a document of revision 45 should be read again.
+    DocumentShape {
+        document: FIELDS,
+        revision: 46,
+        keys: FIELDS_R46_KEYS,
+        retiring: &[],
+        families: FIELDS_R46_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R45_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -3022,6 +3039,19 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         keys: SESSION_TABLE_R5_KEYS,
         retiring: &[],
         families: SESSION_TABLE_R5_FAMILIES,
+        planes: &[],
+        carries: SESSION_TABLE_R5_CARRIES,
+    },
+    // Revision 6 is the field document's revision 46 on a row and on every flow
+    // of a row: model 2's two sums (`log2_lr_no_millibits`, each check's
+    // `no_millibits`), the `stream_framing` check and the `measured` basis.
+    // `zenoh` keeps its words and its values move. Nothing retires.
+    DocumentShape {
+        document: SESSION_TABLE,
+        revision: 6,
+        keys: SESSION_TABLE_R6_KEYS,
+        retiring: &[],
+        families: SESSION_TABLE_R6_FAMILIES,
         planes: &[],
         carries: SESSION_TABLE_R5_CARRIES,
     },
@@ -16555,6 +16585,476 @@ pub const FIELDS_R45_CARRIES: &[KeyCarries] = &[
     },
 ];
 
+/// The checks the test weighs ([`crate::zenoh_evidence::Check`]) from the
+/// field document's revision 46 and the session table's revision 6:
+/// revision 43's PLUS `stream_framing`.
+pub const ZENOH_CHECK_R46: &[&str] = &[
+    "cookie_echo",
+    "init_roles",
+    "sn_follows",
+    "stream_framing",
+    "unit_reading",
+    "version_header",
+];
+
+/// Where a probability of model 2 comes from
+/// ([`crate::zenoh_evidence::Basis`]), for both `q_basis` and `eps_basis`:
+/// `measured` arrives, and `generated` and `none` leave with model 1, whose
+/// generated null and confirm-only check model 2 replaces.
+pub const ZENOH_BASIS_R46: &[&str] = &["assumed", "derived", "measured"];
+
+/// The keys the field document carries at revision 46: revision 45's PLUS
+/// `log2_lr_no_millibits` on the evidence and `no_millibits` on each check.
+pub const FIELDS_R46_KEYS: &[&str] = &[
+    "abandoned_at_end",
+    "abandoned_on_eviction",
+    "above_transport",
+    "addr",
+    "after_seq",
+    "anchor",
+    "announced_version",
+    "basis",
+    "batch_header",
+    "batch_index",
+    "batch_size",
+    "body",
+    "body_schema",
+    "bytes",
+    "caps",
+    "capture_reread",
+    "carried",
+    "carried_state",
+    "chain",
+    "chain_id",
+    "check",
+    "checks",
+    "close_seen",
+    "closes",
+    "compression",
+    "conduit",
+    "confirmed",
+    "context",
+    "counter",
+    "counter_error",
+    "counter_reason",
+    "counter_step",
+    "crc_computed",
+    "crc_error",
+    "datagram_flows",
+    "declaration_checked",
+    "declared",
+    "depth",
+    "descriptor_bytes",
+    "despite_encoding",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "dst",
+    "e2e",
+    "encoding",
+    "end",
+    "eps_basis",
+    "evidence",
+    "example",
+    "expired_chains",
+    "explained",
+    "family",
+    "fields",
+    "fin_seen",
+    "first",
+    "first_byte",
+    "flow",
+    "flows",
+    "format",
+    "frame_offset",
+    "frames",
+    "frames_per_flow",
+    "frames_total",
+    "halves",
+    "headed_resyncs",
+    "headed_units",
+    "header",
+    "high",
+    "identity",
+    "index",
+    "keyexpr",
+    "keyexpr_cause",
+    "keyexpr_id",
+    "kind",
+    "l2",
+    "last_seen_ts_ns",
+    "lease_ms",
+    "length",
+    "length_expected",
+    "length_field",
+    "length_matches_frame",
+    "link",
+    "list_id",
+    "log2_lr_millibits",
+    "log2_lr_no_millibits",
+    "low",
+    "lowlatency",
+    "matched_rule",
+    "max_flows_per_table",
+    "max_gap",
+    "max_scout_askers",
+    "message",
+    "message_at",
+    "messages",
+    "millibits",
+    "missing",
+    "model",
+    "name",
+    "negotiated",
+    "no_at_millibits",
+    "no_millibits",
+    "note",
+    "offset",
+    "offset_space",
+    "omitted",
+    "opened",
+    "outcome",
+    "packet",
+    "parameters",
+    "parent",
+    "parts",
+    "patch",
+    "path",
+    "pattern",
+    "payload",
+    "payload_bytes",
+    "payload_decode",
+    "payload_mapping",
+    "payload_mapping_counts_exact",
+    "payload_offset",
+    "payload_refusals",
+    "phase",
+    "plain_resyncs",
+    "plain_units",
+    "port",
+    "previous_counter",
+    "priority",
+    "profile",
+    "q_basis",
+    "qos",
+    "raw",
+    "reason",
+    "reassembly",
+    "reliable",
+    "request_kind",
+    "request_record",
+    "request_seq",
+    "residual",
+    "revised",
+    "revision",
+    "rst_seen",
+    "samples",
+    "scout_askers",
+    "scouting",
+    "selected",
+    "seq",
+    "shm_descriptor",
+    "shown",
+    "silence_ms",
+    "skipped",
+    "skipped_packets",
+    "slot",
+    "sn",
+    "sn_mask",
+    "src",
+    "start",
+    "state",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+    "strength",
+    "through_seq",
+    "timeout_error",
+    "timeout_ms",
+    "undecoded",
+    "under",
+    "unit_readings",
+    "units",
+    "unopened_reason",
+    "value",
+    "verdict",
+    "version",
+    "violated",
+    "why",
+    "window",
+    "wrong",
+    "yes_at_millibits",
+    "zenoh",
+    "zenoh_evidence",
+    "zid",
+];
+
+/// The value families the field document declares at revision 46: revision
+/// 45's, with model 2's checks and bases.
+pub const FIELDS_R46_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "announced_version",
+        values: ANNOUNCED_VERSION_R43,
+    },
+    ValueFamily {
+        key: "basis",
+        values: BASIS_R45,
+    },
+    ValueFamily {
+        key: "batch_header",
+        values: BATCH_HEADER_R44,
+    },
+    ValueFamily {
+        key: "body",
+        values: BODY_R33,
+    },
+    ValueFamily {
+        key: "carried_state",
+        values: CARRIED_STATE_R12,
+    },
+    ValueFamily {
+        key: "check",
+        values: ZENOH_CHECK_R46,
+    },
+    ValueFamily {
+        key: "counter_reason",
+        values: COUNTER_REASON_R34,
+    },
+    ValueFamily {
+        key: "direction",
+        values: DIRECTION_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "eps_basis",
+        values: ZENOH_BASIS_R46,
+    },
+    ValueFamily {
+        key: "family",
+        values: ADDR_FAMILY_R15,
+    },
+    ValueFamily {
+        key: "keyexpr_cause",
+        values: UNRESOLVED_CAUSE_R11,
+    },
+    ValueFamily {
+        key: "kind",
+        values: FIELD_VALUE_KIND_R17,
+    },
+    ValueFamily {
+        key: "link",
+        values: LINK_KIND_R7,
+    },
+    ValueFamily {
+        key: "message",
+        values: MESSAGE_R10,
+    },
+    ValueFamily {
+        key: "offset_space",
+        values: ANCHOR_SPACE_FIELDS_R2,
+    },
+    ValueFamily {
+        key: "outcome",
+        values: CHAIN_OUTCOME_R14,
+    },
+    ValueFamily {
+        key: "phase",
+        values: SESSION_PHASE_R14,
+    },
+    ValueFamily {
+        key: "priority",
+        values: PRIORITY_R14,
+    },
+    ValueFamily {
+        key: "q_basis",
+        values: ZENOH_BASIS_R46,
+    },
+    ValueFamily {
+        key: "reason",
+        values: CHAIN_REASON_R32,
+    },
+    ValueFamily {
+        key: "request_kind",
+        values: REQUEST_KIND_R37,
+    },
+    ValueFamily {
+        key: "selected",
+        values: SELECTED_R13,
+    },
+    ValueFamily {
+        key: "state",
+        values: PAYLOAD_STATE_R2,
+    },
+    ValueFamily {
+        key: "strength",
+        values: ZENOH_STRENGTH_R43,
+    },
+    ValueFamily {
+        key: "under",
+        values: REFUSED_UNDER_R2,
+    },
+    ValueFamily {
+        key: "unopened_reason",
+        values: UNOPENED_REASON_R35,
+    },
+    ValueFamily {
+        key: "verdict",
+        values: SN_VERDICT_R14,
+    },
+    ValueFamily {
+        key: "wrong",
+        values: MISBOUND_R2,
+    },
+    ValueFamily {
+        key: "zenoh",
+        values: ZENOH_VERDICT_R43,
+    },
+];
+
+/// The keys the `session_table` document carries at revision 6: revision 5's
+/// PLUS the field document's revision 46 keys, on every row and on every flow
+/// of a row.
+pub const SESSION_TABLE_R6_KEYS: &[&str] = &[
+    "acceptor",
+    "addr",
+    "announced_version",
+    "bytes",
+    "caps",
+    "cell",
+    "check",
+    "checks",
+    "confirmed",
+    "count",
+    "document",
+    "dropped_by_limits",
+    "encrypted",
+    "eps_basis",
+    "excluded",
+    "explained",
+    "family",
+    "first_seen_ts_ns",
+    "flow",
+    "flows",
+    "frames",
+    "frames_per_flow",
+    "frames_total",
+    "high",
+    "initiator",
+    "last_seen_ts_ns",
+    "link",
+    "log2_lr_millibits",
+    "log2_lr_no_millibits",
+    "low",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "message",
+    "millibits",
+    "model",
+    "name",
+    "no_at_millibits",
+    "no_millibits",
+    "ok",
+    "phase",
+    "port",
+    "q_basis",
+    "reason",
+    "refusal",
+    "residual",
+    "revision",
+    "scout_askers",
+    "scouting",
+    "sessions",
+    "skipped",
+    "skipped_packets",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "strength",
+    "undecoded",
+    "unit_readings",
+    "units",
+    "unstated",
+    "violated",
+    "why",
+    "yes_at_millibits",
+    "zenoh",
+    "zenoh_evidence",
+];
+
+/// The value families the `session_table` document declares at revision 6:
+/// revision 5's, with model 2's checks and bases.
+pub const SESSION_TABLE_R6_FAMILIES: &[ValueFamily] = &[
+    ValueFamily {
+        key: "announced_version",
+        values: ANNOUNCED_VERSION_R43,
+    },
+    ValueFamily {
+        key: "cell",
+        values: &[
+            "acceptor",
+            "first_seen_ts_ns",
+            "frames",
+            "initiator",
+            "last_seen_ts_ns",
+            "link",
+            "phase",
+        ],
+    },
+    ValueFamily {
+        key: "check",
+        values: ZENOH_CHECK_R46,
+    },
+    ValueFamily {
+        key: "encrypted",
+        values: &[
+            "clear",
+            "decrypted_quic",
+            "decrypted_tls",
+            "encrypted_unreadable",
+            "mixed",
+            "unknown",
+        ],
+    },
+    ValueFamily {
+        key: "eps_basis",
+        values: ZENOH_BASIS_R46,
+    },
+    ValueFamily {
+        key: "family",
+        values: ADDR_FAMILY_R15,
+    },
+    ValueFamily {
+        key: "link",
+        values: LINK_KIND_R7,
+    },
+    ValueFamily {
+        key: "phase",
+        values: SESSION_PHASE_R14,
+    },
+    ValueFamily {
+        key: "q_basis",
+        values: ZENOH_BASIS_R46,
+    },
+    ValueFamily {
+        key: "reason",
+        values: &["encrypted", "mixed", "no_clock", "not_in_capture"],
+    },
+    ValueFamily {
+        key: "refusal",
+        values: &["damaged", "not_a_capture", "truncated"],
+    },
+    ValueFamily {
+        key: "strength",
+        values: ZENOH_STRENGTH_R43,
+    },
+    ValueFamily {
+        key: "why",
+        values: &["multicast_group", "scouting_only"],
+    },
+    ValueFamily {
+        key: "zenoh",
+        values: ZENOH_VERDICT_R43,
+    },
+];
+
 /// The keys the `session_table` document carries at revision 5: revision 4's
 /// PLUS the field document's revision 43 keys, on every row and on every flow
 /// of a row.
@@ -20054,7 +20554,9 @@ mod tests {
             // no Init read a compressed session's batches headed.
             // To 45 when every context and every half carried `parameters`,
             // each value beside its basis. Keys arrive; nothing retires.
-            (FIELDS, 45),
+            // To 46 with model 2 of the zenoh test: two sums, `stream_framing`,
+            // and measured weights. Keys arrive and words move.
+            (FIELDS, 46),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.
@@ -20147,7 +20649,8 @@ mod tests {
             // arrive; nothing retires and no word moves.
             // To 5 when `zenoh` became the sequential test's verdict and every
             // row and flow carried `announced_version` and `zenoh_evidence`.
-            (SESSION_TABLE, 5),
+            // To 6 with model 2 of the zenoh test, as the field document's 46.
+            (SESSION_TABLE, 6),
             // The selector's verdict over the field document's rows.
             // To 2 on the same move as fields 27: the word on a `Request`, a
             // `ResponseFinal` and a del row stopped being `unjudged`.

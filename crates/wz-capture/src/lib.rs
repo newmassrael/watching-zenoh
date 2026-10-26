@@ -1847,10 +1847,20 @@ impl DatagramDissection {
             })
     }
 
+    /// What every session of this flow observed that the zenoh test weighs,
+    /// its own and one per QUIC stream
+    /// ([`session_table::SessionObservations`]).
+    pub fn session_observations(&self) -> session_table::SessionObservations {
+        self.quic_streams.iter().fold(
+            session_table::SessionObservations::of(&self.session),
+            |sum, s| sum.and(session_table::SessionObservations::of(&s.session)),
+        )
+    }
+
     /// This flow's evidence for the zenoh test
     /// ([`zenoh_evidence::ZenohEvidence`]).
     pub fn zenoh_evidence(&self) -> zenoh_evidence::ZenohEvidence {
-        self.ingest.evidence(self.sn_steps())
+        self.ingest.evidence(self.session_observations())
     }
 }
 
@@ -2980,10 +2990,16 @@ impl FlowDissection {
         session_table::session_sn_steps(&self.session)
     }
 
+    /// What this flow's session observed that the zenoh test weighs
+    /// ([`session_table::SessionObservations`]).
+    pub fn session_observations(&self) -> session_table::SessionObservations {
+        session_table::SessionObservations::of(&self.session)
+    }
+
     /// This flow's evidence for the zenoh test
     /// ([`zenoh_evidence::ZenohEvidence`]).
     pub fn zenoh_evidence(&self) -> zenoh_evidence::ZenohEvidence {
-        self.ingest.evidence(self.sn_steps())
+        self.ingest.evidence(self.session_observations())
     }
 
     fn new(flow: FlowKey, window_ms: Option<u64>, gap_patience: Option<usize>, keep: Keep) -> Self {
@@ -6789,7 +6805,7 @@ impl Dissection {
     /// ([`zenoh_evidence::ZenohEvidence`]).
     pub fn serial_zenoh_evidence(&self) -> zenoh_evidence::ZenohEvidence {
         self.serial_ingest
-            .evidence(session_table::session_sn_steps(&self.serial_session))
+            .evidence(session_table::SessionObservations::of(&self.serial_session))
     }
 
     /// R2508 (open-debt item 713) — every message of every list, in the order
