@@ -291682,6 +291682,52 @@
         "Read the hosted C1bz of this push per crate; tighten the pico budgets of the earlier round once the feature's size is read."
       ]
     },
+    "Round 3738": {
+      "decision_summary": "SCE's element gate (its ADR 0057, approved 2026-10-26) reads the features a state machine may gate on from a feature-model document the machine imports. The Rust it emits gates an item under cfg(feature), which the crate compiling the generated module reads, so the names are that crate's cargo features and the implications the crate's own. wz generates each consuming crate's model from its own Cargo.toml [features] (scripts/lib/sce_feature_model.py) and holds the committed model to it in Layer C0 and the pre-push static set: a drifted model would let a machine gate on a feature the crate lacks, or miss an implication SCE turns into a compile_error guard. wz-session-core compiles all six of wz's machines, so its model is first (115 features; default and no_std left out and named). deploy/wz-config.toml stays the source above: a capability turns crate features on. The machines are annotated once the SCE pin reaches the gate's second phase.",
+      "changes_bullets": [
+        "scripts/lib/sce_feature_model.py (new): --emit, --write, --check and --selftest; MODELS names the crates whose machines are gated (wz-session-core); a cycle among the carried implications is refused.",
+        "sources/features/wz-session-core.scxml (new, generated): sce:kind=\"feature-model\", 115 sce:feature elements with their requires.",
+        "scripts/run-ci.sh Layer C0 and .githooks/pre-push round_fed_gates: sce_feature_model.py --selftest and --check.",
+        "sources/README.md: the features/ row. docs/upstream-parity.md D7: the model is the compiling crate's."
+      ],
+      "verification_bullets": [
+        "sce_feature_model.py --selftest 9 of 9 (default out, an unspellable name out and named, an in-crate implication is a requires edge, an edge to a dependency or another crate is not, a cycle is found); --check passes on the written model.",
+        "The model's shape checked with SCE's session: a hyphen in the model's name is allowed (the name rule binds feature names, which reach generated code), one model per consuming crate is ADR 0057's, and leaving default and no_std out is right.",
+        "relicense_spdx.py --check, hook_script_reference_gate.py --check and gate_provenance_lint.py pass with the new script and the wiring."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/8-sce-feature-gate-mechanism",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart"
+      ],
+      "carry_forward_bullets": [
+        "K2: annotate the unicast session machine's accept path once the SCE pin reaches the gate's second phase; the Rust cfg emit and the pin bump come with its third.",
+        "A session that adds a wz-session-core feature regenerates the model in the same commit (sce_feature_model.py --write), as a manifest change regenerates the lockfile.",
+        "L, the fixed client's main stack (6,480 B against pico's whole main of about 2,900): the worst chain's large frames are dispatch_copied 2,432 (a handshake's body and extension chain decoded into arrays), SessionLinkActions::dispatch_network_message_at for a reply 2,096 (a local of the dispatch, not the reply, which ResponseWriter already writes from its parts), the lend_* decoders 2,064 to 1,280 and wz_app_main 1,928; the locals are to be measured (type sizes and the frame's stack accesses) before anything is moved, and moving one to a static would only move the cell.",
+        "Hosted CI on main has not completed a run this evening: every run is cancelled by the next push."
+      ],
+      "publishable_decision_summary": "SCE's element gate (its ADR 0057, approved 2026-10-26) reads the features a state machine may gate on from a feature-model document the machine imports. The Rust it emits gates an item under cfg(feature), which the crate compiling the generated module reads, so the names are that crate's cargo features and the implications the crate's own. wz generates each consuming crate's model from its own Cargo.toml [features] (scripts/lib/sce_feature_model.py) and holds the committed model to it in Layer C0 and the pre-push static set: a drifted model would let a machine gate on a feature the crate lacks, or miss an implication SCE turns into a compile_error guard. wz-session-core compiles all six of wz's machines, so its model is first (115 features; default and no_std left out and named). deploy/wz-config.toml stays the source above: a capability turns crate features on. The machines are annotated once the SCE pin reaches the gate's second phase.",
+      "publishable_changes_bullets": [
+        "scripts/lib/sce_feature_model.py (new): --emit, --write, --check and --selftest; MODELS names the crates whose machines are gated (wz-session-core); a cycle among the carried implications is refused.",
+        "sources/features/wz-session-core.scxml (new, generated): sce:kind=\"feature-model\", 115 sce:feature elements with their requires.",
+        "scripts/run-ci.sh Layer C0 and .githooks/pre-push round_fed_gates: sce_feature_model.py --selftest and --check.",
+        "sources/README.md: the features/ row. docs/upstream-parity.md D7: the model is the compiling crate's."
+      ],
+      "publishable_verification_bullets": [
+        "sce_feature_model.py --selftest 9 of 9 (default out, an unspellable name out and named, an in-crate implication is a requires edge, an edge to a dependency or another crate is not, a cycle is found); --check passes on the written model.",
+        "The model's shape checked with SCE's session: a hyphen in the model's name is allowed (the name rule binds feature names, which reach generated code), one model per consuming crate is ADR 0057's, and leaving default and no_std out is right.",
+        "relicense_spdx.py --check, hook_script_reference_gate.py --check and gate_provenance_lint.py pass with the new script and the wiring."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/8-sce-feature-gate-mechanism",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart"
+      ],
+      "publishable_carry_forward_bullets": [
+        "K2: annotate the unicast session machine's accept path once the SCE pin reaches the gate's second phase; the Rust cfg emit and the pin bump come with its third.",
+        "A session that adds a wz-session-core feature regenerates the model in the same commit (sce_feature_model.py --write), as a manifest change regenerates the lockfile.",
+        "L, the fixed client's main stack (6,480 B against pico's whole main of about 2,900): the worst chain's large frames are dispatch_copied 2,432 (a handshake's body and extension chain decoded into arrays), SessionLinkActions::dispatch_network_message_at for a reply 2,096 (a local of the dispatch, not the reply, which ResponseWriter already writes from its parts), the lend_* decoders 2,064 to 1,280 and wz_app_main 1,928; the locals are to be measured (type sizes and the frame's stack accesses) before anything is moved, and moving one to a static would only move the cell.",
+        "Hosted CI on main has not completed a run this evening: every run is cancelled by the next push."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
