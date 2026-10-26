@@ -4455,6 +4455,7 @@ dependencies = [
  "wz-runtime-coop",
  "wz-runtime-core",
  "wz-session-core",
+ "wz-workload",
 ]
 
 [[package]]

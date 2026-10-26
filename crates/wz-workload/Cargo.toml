@@ -30,6 +30,13 @@ name = "wz_workload"
 path = "src/lib.rs"
 crate-type = ["rlib"]
 
+[features]
+default = ["alloc"]
+# The allocating forms: a payload of its own (`payload::Payload`, `payload::parse_hex`) and a mutated
+# copy (`mutation::Mutation::apply`). A fixed-memory interpreter turns it off and writes into
+# storage it owns; the definitions are the same functions either way.
+alloc = []
+
 [dependencies]
 # The natural logarithm of a Poisson process's exponential gaps, which `core` does not have: the
 # Rust project's own port of the C library's mathematics, `no_std`, already in this workspace's lock.

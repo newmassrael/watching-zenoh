@@ -717,22 +717,38 @@ plugin on both sides: a put it routes reaches the subscription, and a get it rou
 from the latest sample (`wz_declared_node_zenohd_interop.rs`, which runs the file the entry
 packaged).
 
-**Publisher (landed).** `kind = "publisher"`, `key` (a literal key, not a pattern), `period_ms` and
-`document_bytes`: while a session is established the node puts a document of that length on that
-key, the first put when the session is established and then every period. The session's own
-application layer does it, inside its event (`wz_session_mcu::slot_publisher`): after it has
-dispatched what the iteration brought it asks a pure schedule what is due, sends each due put,
-and tells the drive loop the moment it needs to be awake next, which the loop budgets its wait
-by with the transport's own. Nothing runs on the program's main loop and nothing waits in a
-mailbox, so the cadence is the session's. A loop that was late sends one put and counts again
-from there, a put the session cannot take (between transports) is tried again after 10 ms and is
-not counted, and a session that is lost starts over with the next one. The node says what it
-published (`HOST-WZ-PUBLISHED <key> sent=<n> refused=<n>`, once for each round that found the
-counts moved). A node holds at most four publishers, the size of their schedule in the
-session's task cell, and the task cell of a declared node is the larger one. The witness is the
-reference router's REST SSE stream: the declared document, eight bytes of `x`, arrives about
-every 200 ms, and it arrives again from the next session after the router is stopped and
-started (`wz_declared_publisher_zenohd_interop.rs`).
+**Publisher (landed).** `kind = "publisher"` and `key` (a literal key, not a pattern) with the
+stream of section 5c in the driver's own words: WHEN is `period_ms` or `rate_per_s` (a decimal
+written as a string, so its digits are the rate) under `arrivals` (`periodic`, the default;
+`poisson` with `arrival_seed`; `burst` with `burst`), and WHAT is `document_bytes` (the same
+document every put, a prefix of the body pool) or `payload_bytes` with a `fill` (`counter`, the
+default, `zero`, or `seeded` with a `seed`), made for each put from its sequence number. A key read
+only under another's value is refused where that value is not stated, and each pair is exactly one.
+While a session is established the node puts on that key from the moment the session is
+established. The session's own application layer does it, inside its event
+(`wz_session_mcu::slot_publisher`): after it has dispatched what the iteration brought it asks the
+publications' state which puts are due, sends each, and tells the drive loop the moment it needs to
+be awake next, which the loop budgets its wait by with the transport's own. Nothing runs on the
+program's main loop and nothing waits in a mailbox, so the cadence is the session's. The times are
+the workload's (`wz_workload::arrivals`, the same definitions the driver plays, without `alloc`),
+from the moment the session started them, each due on the clock's millisecond at or after it, so a
+rate the millisecond does not divide does not drift; the clock is the millisecond, so a gap is at
+least 1 ms (a rate of at most 1,000 a second). A put that could not be made on time is made at
+once and the ones behind it follow, at most eight of one publication in one round and the rest in
+rounds the loop wakes for at once, so the load offered is the plan's; how late the latest put was
+is counted, never hidden by dropping puts. A put the session cannot take (between transports) is
+tried again after 10 ms without moving on, one the wire cannot carry moves on and is counted
+refused, and a session that is lost starts over with the next one. A made body is written into the
+node's one buffer (`MadeBuffer`, as long as its longest made body, `.bss`), which the sessions
+share since a body is made and sent within one round, so a session's task cell does not grow by it.
+The node says what it published (`HOST-WZ-PUBLISHED <key> sent=<n> refused=<n> late_max_ms=<n>`,
+once for each round that found the counts moved). A node holds at most four publishers, the size
+of their state in the session's task cell, and the task cell of a declared node is the larger one.
+The witness is the reference router's REST SSE stream: the declared document, eight bytes of `x`,
+arrives about every 200 ms, the counted stream declared at 20 a second shows eight bytes that are
+each put's sequence number, each one more than the last, at the rate, and the document arrives
+again from the next session after the router is stopped and started
+(`wz_declared_publisher_zenohd_interop.rs`).
 
 **Querier (landed).** `kind = "querier"`, `key` (a pattern is allowed: it asks for everything
 under it), `period_ms`, `timeout_ms` (how long a query may stay pending) and `reply_bytes`: while
@@ -799,7 +815,9 @@ routers the node dials still meet a client. A node built to listen carries the a
 handshake, which a client does not (`wz-session-mcu/listen`, forwarded by the image's `listen`
 feature): an acceptor given to a node without it would read each InitSyn and answer none, so the
 constructor of a `Listening` exists only in a build with the feature, and the declaration decides
-the feature. The generator emits `DIALED`, `LISTEN`, `LISTEN_ADDR`, `LISTEN_PORT`, `ACCEPTS` and
+the feature. The generator emits `DIALED`, `LISTEN`, `ACCEPTS`, `LISTEN_ADDR` and `LISTEN_PORT` (the
+last two only for a node that listens: the node reads them only under `listen`, and a constant no
+build reads is not generated) and
 `SESSIONS = DIALS + ACCEPTS`, which is the size of the node's session and task tables; the node's
 `const` assertions hold the declaration's `listen` endpoint to the feature and to `accepts`. A
 UDP listener (it answers the sender of an InitSyn, and the accept loop of the slot node is a
@@ -834,14 +852,19 @@ node's publishers put on the group by the same `Schedule` that puts on a session
 same counts, the members counted from the arrivals and departures the pump reports, and a rejoin a
 second after the group is lost or could not be joined. The parameters a group's members must agree
 on (the sequence-number resolution `0x02` and the 2,048-byte batch) are the stock peers' own, since
-a JOIN that advertises others is refused and nothing negotiates. The generator emits `GROUPS`,
-`GROUP`, `GROUP_ADDR`, `GROUP_PORT`, `GROUP_TTL` and `MEMBERS`; the `multicast` feature is built
+a JOIN that advertises others is refused and nothing negotiates. The generator emits `GROUPS`, and
+`GROUP`, `GROUP_ADDR`, `GROUP_PORT`, `GROUP_TTL` and `MEMBERS` for a node that has a group (and
+`QUERIED` only for a node that has a querier, the same rule); the `multicast` feature is built
 exactly when the declaration has the endpoint, and the node's `const` assertion holds the two to each
 other; `TASKS` is the sessions and one for the group. What a group carries with no allocator is the
 literal Put: the replies of a queryable, the Request of a querier and the answer a token gives to
 an interest are heap-only forms in the shared emit, so a node that is a member of a group may
 declare publishers and subscriptions and the validator refuses the other kinds for it, by name,
-rather than serve them on its sessions and drop them on the group. The node says `HOST-WZ-GROUP
+rather than serve them on its sessions and drop them on the group. Its publishers put on the group
+by the same publication state as on a session (the same arrivals, catch-up and lateness), and put
+documents: an offer on the group borrows its bytes for as long as the pump holds it, which a body
+made in the node's one buffer cannot give, so `payload_bytes` is refused on a node with a group (and
+the node's `const` assertion holds the same). The node says `HOST-WZ-GROUP
 <locator> joins=<n> refused=<n> turned_away=<n> members=<n>` each time any of the four moves;
 `turned_away` counts the JOINs its member table had no free row for in the current join (a peer
 turned away announces itself again each join interval, so it counts beacons and not peers), which is
@@ -941,9 +964,18 @@ sessions over a real link: a rate stream, a Poisson and a burst stream, and a re
 on the listener at the lengths sent, and the closed loop's questions are each asked after the
 last one's final.
 
-Not yet: the fixed-memory interpreter (a `publish` behaviour with a rate and a made payload, a
-replay of a bounded trace compiled into the image), and mutation at the wire rather than the
-payload, which is a codec's fault injection and not a workload.
+**The fixed-memory interpreter (landed for publishers).** A declared node's publisher (section 5b)
+is the same stream in the same words, played by `wz_session_mcu::slot_publisher` from
+`wz_workload` built without `alloc` (`Arrivals`, `fill_into`; the allocating forms, `Payload` and
+`Mutation::apply`, are the `alloc` feature's, and `Mutation::apply_into` writes into storage the
+caller owns). The generator turns a rate into its gap by the same integer rule
+(`wz_node.py`'s `rate_gap_ns`, held to the crate's vectors by its selftest), and the image holds
+each publisher's gap to the millisecond its clock counts. What the fixed-memory node does not
+take: a stop condition (`count`, `duration_ms`: it publishes while a session is up), a payload
+written as text or hex beyond a document, and the replay.
+
+Not yet: the replay of a bounded trace compiled into a fixed-memory image, and mutation at the wire
+rather than the payload, which is a codec's fault injection and not a workload.
 
 ## 6. Open
 

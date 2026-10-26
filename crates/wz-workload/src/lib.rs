@@ -21,6 +21,10 @@
 
 #![no_std]
 
+// The allocating forms (a payload of its own, a mutated copy, hex text into bytes) are the heap
+// interpreters'; a fixed-memory interpreter builds without `alloc` and uses the forms that write
+// into storage it owns (`payload::fill_into`, `mutation::Mutation::apply_into`).
+#[cfg(feature = "alloc")]
 extern crate alloc;
 
 #[cfg(test)]

@@ -16,37 +16,29 @@ pub const PEERS: usize = 0;
 pub const PEER_NODES: [([u8; 16], &str); 0] = [];
 /// Whether a dialled endpoint or a peer is `tls/`, which the node's `tls` feature must be built for.
 pub const TLS: bool = false;
-/// Whether the node listens, the locator it listens on (empty when it does not), the address
-/// and port that locator names, and how many sessions a peer opened it holds at once.
+/// Whether the node listens, the locator it listens on (empty when it does not) and how many
+/// sessions a peer opened it holds at once.
 pub const LISTENS: bool = false;
 pub const LISTEN: &str = "";
-pub const LISTEN_ADDR: [u8; 4] = [0, 0, 0, 0];
-pub const LISTEN_PORT: u16 = 0;
 pub const ACCEPTS: usize = 0;
 /// The sessions the node holds at most: the ones it dials, the peers it holds by their zid and
 /// the ones a peer opened.
 pub const SESSIONS: usize = DIALS + PEERS + ACCEPTS;
-/// Whether the node is a member of a multicast group, the locator of the group (empty when it
-/// is not), the address and port that locator names, the hop limit of what it sends and how
-/// many members of the group it tracks at once.
+/// Whether the node is a member of a multicast group.
 pub const GROUPS: usize = 0;
-pub const GROUP: &str = "";
-pub const GROUP_ADDR: [u8; 4] = [0, 0, 0, 0];
-pub const GROUP_PORT: u16 = 0;
-pub const GROUP_TTL: u8 = 1;
-pub const MEMBERS: usize = 0;
 /// The queryables the node declares, and the documents they answer with: (key, bytes).
 pub const DOCS: usize = 0;
 pub const DOCUMENTS: [(&str, usize); 0] = [];
 /// The subscriptions the node declares, and the bytes of a payload each keeps: (key, bytes).
 pub const SUBSCRIBERS: usize = 0;
 pub const SUBSCRIPTIONS: [(&str, usize); 0] = [];
-/// The queriers the node runs: (key, the period and the timeout in milliseconds, the bytes of a
-/// reply each keeps).
 /// The liveliness tokens the node declares on every session, by key.
 pub const TOKENS: usize = 0;
 pub const TOKEN_KEYS: [&str; 0] = [];
+/// The queriers the node runs.
 pub const QUERIERS: usize = 1;
+/// The queriers: (key, the period and the timeout in milliseconds, the bytes of a reply each
+/// keeps).
 pub const QUERIED: [(&str, u32, u32, usize); 1] = [("lab/ask/val", 500, 1000, 32)];
 /// The cells that keep a latest value: the subscriptions' and then the queriers'.
 pub const CELLS: usize = 1;
@@ -55,6 +47,7 @@ pub const SAMPLE_MAX: usize = 32;
 /// The queryables that answer from a cell: (key, index into the cells).
 pub const MIRRORS: usize = 1;
 pub const MIRRORED: [(&str, usize); 1] = [("lab/ask/val", 0)];
-/// The publishers: (key, the period in milliseconds, the bytes of the document it puts).
+/// The publishers: (key, when its puts are due, the bytes of each put and the fill they are
+/// made with, or `None` for a document of that many bytes).
 pub const PUBLISHERS: usize = 0;
-pub const PUBLISHED: [(&str, u32, usize); 0] = [];
+pub const PUBLISHED: [(&str, wz_session_mcu::slot_publisher::Process, usize, Option<wz_session_mcu::slot_publisher::Fill>); 0] = [];

@@ -97,8 +97,8 @@ pub mod slot_client;
 // subscribes keeps, and what a queryable that answers from it reads.
 #[cfg(all(feature = "session-slot", feature = "client-core"))]
 pub mod latest;
-// The client node as a publisher: a fixed document put on a key every period, from the session's own
-// application layer.
+// The client node as a publisher: a stream of puts on a key, at the times of an arrival process, from
+// the session's own application layer or the group's pump.
 #[cfg(all(feature = "session-slot", feature = "client-core"))]
 pub mod slot_publisher;
 // What the client node knows of a plane it holds beside its sessions (a group, today): two traits and
@@ -114,8 +114,7 @@ pub mod slot_plane;
     feature = "codec-push"
 ))]
 pub mod slot_group;
-// When a node's periodic behaviours are due: the one schedule a publisher's puts and a querier's gets
-// are both kept on.
+// When a querier's gets are due, and the outcome of a send that a publisher's puts share.
 #[cfg(all(feature = "session-slot", feature = "client-core"))]
 pub mod slot_schedule;
 // A querier of the client node: a query asked every period, whose latest reply the node keeps.

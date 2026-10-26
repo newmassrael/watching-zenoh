@@ -11,7 +11,8 @@
 //! node does with what the group carries is what it does with what a session carries: the
 //! datagrams of the group become the same [`IterationEvent`]s, fanned to the same observer (the
 //! subscriptions the image registered), and the node's publishers put on the group by the same
-//! [`Schedule`] that puts on a session.
+//! [`Publishing`] that puts on a session: the same arrival processes, the same catch-up, the same
+//! count of how late a put was.
 //!
 //! ## What the group carries
 //!
@@ -46,7 +47,7 @@ use wz_runtime_core::TimeSource;
 use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
 use wz_session_core::multicast_params::{zid_vec, MulticastOutcome, MulticastParams};
-use wz_session_core::multicast_tx::multicast_tx_offer_put_literal;
+use wz_session_core::multicast_tx::{multicast_tx_offer_put_literal, MulticastTxOffer};
 use wz_session_core::peer_tables::PeerTables;
 use wz_session_core::session_init_params::{LinkRxConf, TxQueueConf};
 use wz_session_core::slot_observer::{ObserverCell, Requesters};
@@ -57,8 +58,8 @@ use crate::group_drive::{spawn_multicast_pump, MulticastSession, MulticastSlots}
 use crate::slot_client::DocumentSinks;
 use crate::slot_node::ZID_MAX;
 use crate::slot_plane::{Plane, PlaneContext, PlaneRunning};
-use crate::slot_publisher::{Publication, PublishCounts};
-use crate::slot_schedule::{Outcome, Schedule};
+use crate::slot_publisher::{Body, Publication, PublishCounts, Publishing};
+use crate::slot_schedule::Outcome;
 
 /// How long after a group was lost, or could not be joined, the node tries to join it again.
 pub const REJOIN_MS: u64 = 1_000;
@@ -168,40 +169,63 @@ impl GroupTiming {
     };
 }
 
-/// The publishers of a group, due at their periods.
+/// The publishers of a group, played by the same [`Publishing`] a session's are, one round per
+/// drain of the pump's outbound seam: the seam is drained until it says `None`, which is the end of
+/// the round, and the next call starts the next one.
 struct GroupPublisher<const P: usize> {
-    schedule: Schedule<P>,
-    /// The publications found due and not yet offered, one bit each.
-    queued: u32,
+    publishing: Publishing<P>,
+    in_round: bool,
 }
 
 impl<const P: usize> GroupPublisher<P> {
-    const FITS: () = assert!(P <= 32, "a group's publishers are queued in one word");
-
     const fn new() -> Self {
-        let () = Self::FITS;
         Self {
-            schedule: Schedule::new(),
-            queued: 0,
+            publishing: Publishing::new(),
+            in_round: false,
         }
     }
 
-    /// The next publication to offer at `now_ms`, if any is due: the schedule is asked only when
-    /// nothing is queued, so each due put is offered once, in the order of the declaration.
+    /// The next publication to offer at `now_ms` in this round, or `None` at its end.
     fn next(&mut self, now_ms: u64, items: &[Publication]) -> Option<usize> {
-        if self.queued == 0 {
-            let queued = &mut self.queued;
-            self.schedule.poll(now_ms, items, |at, _| {
-                *queued |= 1u32 << at;
-                Outcome::Sent
-            });
+        if !self.in_round {
+            self.publishing.begin_round(now_ms, items);
+            self.in_round = true;
         }
-        if self.queued == 0 {
-            return None;
+        let next = self.publishing.next(now_ms, items);
+        self.in_round = next.is_some();
+        next
+    }
+
+    /// The put of publication `at` went as `outcome` at `now_ms`.
+    fn settle(&mut self, at: usize, now_ms: u64, outcome: Outcome, counts: &PublishCounts<P>) {
+        self.publishing.settle(at, now_ms, outcome, counts);
+    }
+
+    /// The offer of the next put at `now_ms`, counted in `counts`, or `None` at the end of the
+    /// round. A put the wire cannot carry is refused and the round goes on, and so is a body made
+    /// for each put: the group's offer borrows its bytes for as long as the pump holds it, which a
+    /// body made in the node's one buffer cannot give, so the node declaration refuses one on a node
+    /// with a group and the image asserts the same of the constants it was generated.
+    fn offer(
+        &mut self,
+        now_ms: u64,
+        items: &[Publication],
+        counts: &PublishCounts<P>,
+    ) -> Option<MulticastTxOffer<'static>> {
+        loop {
+            let at = self.next(now_ms, items)?;
+            let offer = match items[at].body {
+                Body::Text(text) => multicast_tx_offer_put_literal(items[at].key, text.as_bytes()),
+                Body::Made { .. } => None,
+            };
+            match offer {
+                Some(offer) => {
+                    self.settle(at, now_ms, Outcome::Sent, counts);
+                    return Some(offer);
+                }
+                None => self.settle(at, now_ms, Outcome::Refused, counts),
+            }
         }
-        let at = self.queued.trailing_zeros() as usize;
-        self.queued &= self.queued - 1;
-        Some(at)
     }
 }
 
@@ -328,14 +352,7 @@ where
         let publications = self.plane.publications;
         let counts = self.plane.counts;
         let mut publisher = GroupPublisher::<P>::new();
-        let next_tx = move || {
-            let at = publisher.next(clock.now_monotonic_ms(), &publications)?;
-            let publication = publications.get(at)?;
-            let (key, body) = (publication.key, publication.body);
-            let offer = multicast_tx_offer_put_literal(key, body.as_bytes())?;
-            counts.record_sent(at);
-            Some(offer)
-        };
+        let next_tx = move || publisher.offer(clock.now_monotonic_ms(), &publications, counts);
         let local = CoopLocalSet::new(&self.runtime);
         match spawn_multicast_pump(&local, pump, on_event, next_tx, || false) {
             Ok(task) => {
@@ -388,29 +405,32 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::slot_publisher::{Fill, Process, CATCH_UP};
     use alloc::vec::Vec;
 
-    const ITEMS: [Publication; 2] = [
+    const fn every(key: &'static str, ms: u64) -> Publication {
         Publication {
-            key: "lab/a",
-            period_ms: 100,
-            body: "",
-        },
-        Publication {
-            key: "lab/b",
-            period_ms: 250,
-            body: "",
-        },
-    ];
+            key,
+            arrivals: Process::Periodic {
+                gap_nanos: ms * 1_000_000,
+            },
+            body: Body::Text(""),
+        }
+    }
 
-    /// Everything the publisher offers at `now_ms`, in the order it offers it.
+    const ITEMS: [Publication; 2] = [every("lab/a", 100), every("lab/b", 250)];
+
+    /// Everything the publisher offers at `now_ms` in one round, in the order it offers it, each
+    /// taken as sent.
     fn offered(publisher: &mut GroupPublisher<2>, now_ms: u64) -> Vec<usize> {
+        let counts = PublishCounts::<2>::new();
         let mut out = Vec::new();
         while let Some(at) = publisher.next(now_ms, &ITEMS) {
+            publisher.settle(at, now_ms, Outcome::Sent, &counts);
             out.push(at);
             assert!(
-                out.len() <= 2,
-                "a put offered over and over is a loop that never yields"
+                out.len() <= 2 * CATCH_UP as usize,
+                "a round that never ends is a loop that never yields"
             );
         }
         out
@@ -437,12 +457,38 @@ mod tests {
     }
 
     #[test]
-    fn a_publisher_that_polls_late_offers_once_and_counts_again_from_there() {
+    fn a_group_publisher_that_polls_late_makes_up_its_puts_a_round_at_a_time() {
         let mut publisher = GroupPublisher::<2>::new();
         assert_eq!(offered(&mut publisher, 0), [0, 1]);
-        // A loop that was away for a long time owes one put of each, not the periods it missed.
-        assert_eq!(offered(&mut publisher, 10_000), [0, 1]);
-        assert!(offered(&mut publisher, 10_050).is_empty());
+        // At 300 the first owes the puts of 100, 200 and 300 and the second that of 250, in turn.
+        assert_eq!(offered(&mut publisher, 300), [0, 1, 0, 0]);
+        // A loop away for a long time makes up at most CATCH_UP of each per round.
+        let round = offered(&mut publisher, 10_000);
+        assert_eq!(round.len(), 2 * CATCH_UP as usize);
+        assert_eq!(&round[..4], [0, 1, 0, 1]);
+    }
+
+    #[test]
+    fn a_made_body_is_refused_on_a_group_and_the_round_goes_on() {
+        let made = Publication {
+            body: Body::Made {
+                size: 8,
+                fill: Fill::Counter,
+            },
+            ..every("lab/m", 10)
+        };
+        let items = [made, ITEMS[0]];
+        let (mut publisher, counts) = (GroupPublisher::<2>::new(), PublishCounts::<2>::new());
+        assert!(
+            publisher.offer(0, &items, &counts).is_some(),
+            "the text is offered"
+        );
+        assert!(
+            publisher.offer(0, &items, &counts).is_none(),
+            "and the round ends"
+        );
+        assert_eq!((counts.refused(0), counts.sent(0)), (1, 0));
+        assert_eq!((counts.refused(1), counts.sent(1)), (0, 1));
     }
 
     #[test]

@@ -17,6 +17,9 @@
 //!   puts is the period and not a flood or a stall (the bounds are loose, a REST stream adds its
 //!   own jitter, and tight enough that a node that sent on every event of the session or on a
 //!   period of seconds fails);
+//! - the second publisher's stream, declared at a rate with a body made for each put by the
+//!   `counter` fill (`wz_workload`, played without an allocator), shows eight bytes that are the
+//!   put's sequence number, each one more than the last (none lost, none repeated), at the rate;
 //! - the router is stopped and started again: the node says its session was lost, dials the new
 //!   router, and the puts start again at once with the next session.
 //!
@@ -40,7 +43,8 @@ use wz_runtime_tokio_test_support::free_port;
 
 // The node is a deploy crate, which the barrier gate does not read as a producer: the lines it
 // prints are declared here, each for the needle the tests wait for.
-// barrier-producer: deploy/host-slot-node/src/bin/declared_node.rs @ "HOST-WZ-PUBLISHED {} sent={} refused={}" for "HOST-WZ-PUBLISHED lab/out/beat sent="
+// barrier-producer: deploy/host-slot-node/src/bin/declared_node.rs @ "HOST-WZ-PUBLISHED {} sent={} refused={} late_max_ms={}" for "HOST-WZ-PUBLISHED lab/out/beat sent="
+// barrier-producer: deploy/host-slot-node/src/bin/declared_node.rs @ "HOST-WZ-PUBLISHED {} sent={} refused={} late_max_ms={}" for "HOST-WZ-PUBLISHED lab/out/count sent="
 
 /// The router the node dials, as its declaration states it.
 const ROUTER_PORT: u16 = 17472;
@@ -52,6 +56,8 @@ const LOST: &str = "slot-reporter: session lost";
 const VALUE: &str = "eHh4eHh4eHg=";
 /// The declared period.
 const PERIOD: Duration = Duration::from_millis(200);
+/// The gap of the counted stream: twenty puts a second.
+const COUNT_GAP: Duration = Duration::from_millis(50);
 /// How long the node may take to establish, and the router to learn it.
 const ESTABLISH_BUDGET: Duration = Duration::from_secs(30);
 /// How long a run of puts may take to come.
@@ -266,6 +272,69 @@ fn zenohd_sees_the_declared_document_on_the_declared_period() {
         ),
         "the node did not say what it published\n{}",
         fx.report()
+    );
+    fx.finish();
+}
+
+/// The sequence number a put of the counted stream carries: the `value` the REST plugin renders,
+/// base64 of eight bytes, read little-endian. `None` for anything else.
+fn sequence_of(data: &str) -> Option<u64> {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let start = data.find("\"value\":\"")? + "\"value\":\"".len();
+    let text = &data[start..start + data[start..].find('"')?];
+    let mut bits = Vec::new();
+    for c in text.trim_end_matches('=').bytes() {
+        let six = ALPHABET.iter().position(|&a| a == c)?;
+        bits.extend((0..6).rev().map(|at| (six >> at) & 1));
+    }
+    let bytes: Vec<u8> = bits
+        .chunks_exact(8)
+        .map(|byte| byte.iter().fold(0u8, |acc, &bit| acc << 1 | bit as u8))
+        .collect();
+    Some(u64::from_le_bytes(bytes.try_into().ok()?))
+}
+
+// wz-proves: none -- the same node, for the same reason: the publisher of the fixed-memory profile has no catalog atom
+#[test]
+#[ignore = "binary-dep e2e (the packaged slot-reporter, which Layer Z makes, + zenohd and its REST plugin); runs via --ignored"]
+fn zenohd_sees_the_made_stream_in_order_at_its_rate() {
+    let fx = Fixture::start();
+    let mut sse = Sse::open(fx.rest, "lab/out/count");
+    let puts = sse.puts(20, PUTS_BUDGET);
+    let report = fx.report();
+    assert!(
+        puts.len() >= 20,
+        "the stream showed {} put(s) in {PUTS_BUDGET:?}, not 20\n{report}",
+        puts.len()
+    );
+    let sequence: Vec<u64> = puts
+        .iter()
+        .map(|(_, data)| {
+            sequence_of(data)
+                .unwrap_or_else(|| panic!("a put is not eight counted bytes: {data}\n{report}"))
+        })
+        .collect();
+    for pair in sequence.windows(2) {
+        assert_eq!(
+            pair[1],
+            pair[0] + 1,
+            "the counted stream skipped or repeated a put: {sequence:?}\n{report}"
+        );
+    }
+    // Nineteen gaps of 50 ms: a node that flooded, or that put one a period of the clock's
+    // rounding, is far outside a factor of two either way.
+    let span = puts[puts.len() - 1].0.duration_since(puts[0].0);
+    assert!(
+        span >= COUNT_GAP * 19 / 2 && span <= COUNT_GAP * 19 * 2,
+        "twenty puts took {span:?}, the rate gives {:?}\n{report}",
+        COUNT_GAP * 19
+    );
+    assert!(
+        fx.node_says(
+            "HOST-WZ-PUBLISHED lab/out/count sent=",
+            Duration::from_secs(5)
+        ),
+        "the node did not say what it published\n{report}"
     );
     fx.finish();
 }

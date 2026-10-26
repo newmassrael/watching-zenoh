@@ -55,7 +55,9 @@ use wz_session_mcu::slot_node::{
     documents_of, BodyPool, ClientNode, Declared, Entities, Mirror, NodeApp, NodeHandle,
     NodeIdentity, NodePort, NodeStorage, Subscription,
 };
-use wz_session_mcu::slot_publisher::{Publication, PublishCounts, PublishWatch};
+use wz_session_mcu::slot_publisher::{
+    Body, MadeBuffer, Process, Publication, PublishCounts, PublishWatch,
+};
 #[cfg(feature = "get")]
 use wz_session_mcu::slot_querier::{Query, QueryState, QueryWatch};
 
@@ -182,19 +184,50 @@ const fn queried_bytes(at: usize) -> usize {
 const fn queried_bytes(_at: usize) -> usize {
     0
 }
+
+/// The gap of a publisher's arrival process, in nanoseconds: its period, its Poisson mean or the
+/// gap between its bursts.
+const fn gap_nanos(process: Process) -> u64 {
+    match process {
+        Process::Periodic { gap_nanos } | Process::Burst { gap_nanos, .. } => gap_nanos,
+        Process::Poisson { mean_gap_nanos, .. } => mean_gap_nanos,
+    }
+}
 const _: () = {
     let mut at = 0;
     while at < PUBLISHERS {
         assert!(
-            PUBLISHED[at].1 >= 1,
-            "a publisher has a period of no milliseconds"
+            gap_nanos(PUBLISHED[at].1) >= 1_000_000,
+            "a publisher's gap is shorter than the millisecond the node's clock counts"
         );
-        assert!(
-            PUBLISHED[at].2 <= DOC_MAX,
-            "a publisher puts a document longer than the body pool"
-        );
+        match PUBLISHED[at].3 {
+            None => assert!(
+                PUBLISHED[at].2 <= DOC_MAX,
+                "a publisher puts a document longer than the body pool"
+            ),
+            Some(_) => {
+                assert!(PUBLISHED[at].2 >= 1, "a publisher makes a body of no bytes");
+                assert!(
+                    GROUPS == 0,
+                    "a publisher of a node with a group makes a body for each put, which the group cannot carry"
+                );
+            }
+        }
         at += 1;
     }
+};
+
+/// The longest body the node makes for a put: the size of its one buffer, and none for a node whose
+/// publishers put documents.
+const MADE_MAX: usize = {
+    let (mut at, mut most) = (0, 0);
+    while at < PUBLISHERS {
+        if PUBLISHED[at].3.is_some() && PUBLISHED[at].2 > most {
+            most = PUBLISHED[at].2;
+        }
+        at += 1;
+    }
+    most
 };
 const _: () = assert!(
     TLS == cfg!(feature = "tls"),
@@ -277,8 +310,11 @@ static GROUP_STATE: GroupState = GroupState::new();
 /// the queriers' replies.
 static LATEST: LatestCells<CELLS, SAMPLE_MAX> = LatestCells::new();
 
-/// How many puts each publisher sent and had refused.
+/// How many puts each publisher sent and had refused, and how late the latest was.
 static COUNTS: PublishCounts<PUBLISHERS> = PublishCounts::new();
+
+/// The bytes a body made for each put is written into, one for the node's sessions.
+static MADE: MadeBuffer<MADE_MAX> = MadeBuffer::new();
 
 /// Where the replies of the queriers are kept, and how many queries each asked and had answered.
 #[cfg(feature = "get")]
@@ -338,13 +374,20 @@ fn queries() -> [Query; QUERIERS] {
     })
 }
 
-/// The publications the declaration chose: each key, its period and a document of the declared
-/// length, a prefix of the body pool.
+/// The publications the declaration chose: each key, its arrival process, and a document of the
+/// declared length (a prefix of the body pool) or a body made for each put by its fill.
 fn publications() -> [Publication; PUBLISHERS] {
-    core::array::from_fn(|at| Publication {
-        key: PUBLISHED[at].0,
-        period_ms: PUBLISHED[at].1,
-        body: BODY.text(PUBLISHED[at].2).unwrap_or(""),
+    core::array::from_fn(|at| {
+        let (key, arrivals, bytes, fill) = PUBLISHED[at];
+        let body = match fill {
+            None => Body::Text(BODY.text(bytes).unwrap_or("")),
+            Some(fill) => Body::Made { size: bytes, fill },
+        };
+        Publication {
+            key,
+            arrivals,
+            body,
+        }
     })
 }
 
@@ -352,7 +395,9 @@ fn publications() -> [Publication; PUBLISHERS] {
 /// each round that found a cell moved. The payload is in hex, so the line is one line whatever the
 /// bytes are; `seq` is how many samples the cell has taken, so a run of samples that arrived between
 /// two rounds shows as a jump. A publisher is said the same way, as `HOST-WZ-PUBLISHED <key>
-/// sent=<n> refused=<n>`, once for each round that found its counts moved.
+/// sent=<n> refused=<n> late_max_ms=<n>`, once for each round that found its counts moved: the last
+/// is how late its latest put was against its intended time, which a node that could not keep its
+/// arrival process says rather than thin its puts.
 struct Report {
     watch: LatestWatch<CELLS>,
     published: PublishWatch<PUBLISHERS>,
@@ -387,12 +432,13 @@ impl NodeApp for Report {
                 ));
             }
         }
-        self.published.poll(&COUNTS, |at, sent, refused| {
-            log_args(format_args!(
-                "HOST-WZ-PUBLISHED {} sent={} refused={}",
-                PUBLISHED[at].0, sent, refused
-            ));
-        });
+        self.published
+            .poll(&COUNTS, |at, sent, refused, late_max_ms| {
+                log_args(format_args!(
+                    "HOST-WZ-PUBLISHED {} sent={} refused={} late_max_ms={}",
+                    PUBLISHED[at].0, sent, refused, late_max_ms
+                ));
+            });
         #[cfg(feature = "get")]
         self.queried.poll(&QUERY_STATE, |at, tally| {
             log_args(format_args!(
@@ -542,9 +588,10 @@ fn run() -> i32 {
             mirrors: &mirrored,
             tokens: &TOKEN_KEYS,
         },
-        layer: Active::<PUBLISHERS, QUERIERS> {
+        layer: Active::<PUBLISHERS, QUERIERS, MADE_MAX> {
             publications: publications(),
             counts: &COUNTS,
+            made: &MADE,
             #[cfg(feature = "get")]
             queries: queries(),
             #[cfg(feature = "get")]

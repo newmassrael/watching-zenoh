@@ -1,8 +1,11 @@
 # A node declaration (docs/target-build-contract.md section 5b), checked by scripts/lib/wz_node.py.
 #
 # A fixed-memory node that publishes: it dials one router and, while the session is up, puts an
-# eight-byte document on `lab/out/beat` every 200 ms, on the per-session slot profile (no
-# allocator). The first put goes out when the session is established.
+# eight-byte document on `lab/out/beat` every 200 ms and, at twenty a second, eight bytes made for
+# each put on `lab/out/count` (the `counter` fill: the put's sequence number, little-endian, which
+# is what a receiver measures loss and order with), on the per-session slot profile (no
+# allocator). The first puts go out when the session is established, and a new session starts both
+# streams over.
 #
 # The endpoint is this machine's loopback on a port of its own, because this is the node the
 # interop test builds and runs against the reference router
@@ -13,7 +16,7 @@ schema = 1
 
 [node]
 id = "slot-reporter"
-help = "A fixed-memory client that dials a router over TCP and puts a document on one key every period."
+help = "A fixed-memory client that dials a router over TCP and puts a document on one key every period and a counted stream on another."
 target = "slot"
 
 [[endpoint]]
@@ -25,3 +28,10 @@ kind = "publisher"
 key = "lab/out/beat"
 period_ms = 200
 document_bytes = 8
+
+[[entity]]
+kind = "publisher"
+key = "lab/out/count"
+rate_per_s = "20"
+payload_bytes = 8
+fill = "counter"

@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! When a node's periodic behaviours are due: the one schedule a publisher's puts and a querier's
-//! gets are both kept on.
+//! When a node's periodic behaviours are due: the schedule a querier's gets are kept on, and the
+//! outcome of a send that a publisher's puts share ([`Outcome`], [`RETRY_MS`]).
+//!
+//! A query is a question asked again a period after the last, and a loop that was late asks once:
+//! a querier's load is what its answers allow, not a plan to keep. A publisher's puts are a plan,
+//! the arrival process of `wz_workload`, and are kept by `crate::slot_publisher::Publishing`, which
+//! makes up what a late loop missed and counts how late it was.
 //!
 //! A pure value. The session's application layer gives it the time and the periods, sends what it
 //! says is due, and tells it how that went; what comes back is the earliest moment the drive loop is

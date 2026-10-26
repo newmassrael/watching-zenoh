@@ -15,6 +15,7 @@
 //! * `seeded`: the little-endian bytes of successive SplitMix64 words from the state
 //!   `seed ^ sequence`, so every send differs and the same plan repeats the same bytes.
 
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
 use crate::mutation::splitmix64;
@@ -30,7 +31,9 @@ pub enum Fill {
     Seeded { seed: u64 },
 }
 
-/// The bytes a stream sends.
+/// The bytes a stream sends, for an interpreter with an allocator; one without states its fixed
+/// bytes as storage it owns and makes the rest with [`fill_into`].
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Payload {
     /// The same bytes every send.
@@ -39,6 +42,7 @@ pub enum Payload {
     Generated { size: usize, fill: Fill },
 }
 
+#[cfg(feature = "alloc")]
 impl Payload {
     /// How long every send is.
     pub fn len(&self) -> usize {
@@ -111,6 +115,7 @@ impl core::fmt::Display for HexError {
 }
 
 /// The bytes hex text writes, two digits a byte, either case, nothing else.
+#[cfg(feature = "alloc")]
 pub fn parse_hex(text: &str) -> Result<Vec<u8>, HexError> {
     let digits = text.as_bytes();
     if digits.len() % 2 != 0 {
@@ -132,6 +137,22 @@ pub fn parse_hex(text: &str) -> Result<Vec<u8>, HexError> {
 mod tests {
     use super::*;
 
+    /// The fills with no allocator: what a fixed-memory interpreter writes into its own storage.
+    #[test]
+    fn the_fills_without_an_allocator() {
+        let mut out = [0xffu8; 10];
+        fill_into(Fill::Counter, 0x0102, &mut out);
+        assert_eq!(out, [0x02, 0x01, 0, 0, 0, 0, 0, 0, 0, 0]);
+        fill_into(Fill::Seeded { seed: 0 }, 0, &mut out);
+        assert_eq!(
+            out,
+            [0xaf, 0xcd, 0x1d, 0x7b, 0x39, 0xa8, 0x20, 0xe2, 0xf4, 0x65]
+        );
+        fill_into(Fill::Zero, 3, &mut out);
+        assert_eq!(out, [0; 10]);
+    }
+
+    #[cfg(feature = "alloc")]
     #[test]
     fn the_fills_are_these_bytes() {
         let counter = Payload::Generated {
@@ -167,6 +188,7 @@ mod tests {
         assert_eq!((fixed.bytes(7), fixed.len()), (alloc::vec![0, 1, 0], 3));
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn hex_is_two_digits_a_byte() {
         assert_eq!(parse_hex("00ff10"), Ok(alloc::vec![0x00, 0xff, 0x10]));

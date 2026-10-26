@@ -163,7 +163,7 @@ pub enum Process {
 
 /// The intended send times of an arrival [`Process`], in nanoseconds after the start (see this
 /// module's doc): a pure sequence, which no send's lateness moves.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Arrivals {
     process: Process,
     /// When the next send is due, in nanoseconds after the start.
@@ -174,24 +174,33 @@ pub struct Arrivals {
     state: u64,
 }
 
+/// `value`, or one when it is zero: a gap or a burst of none is one (`max` is not `const`).
+const fn at_least_one(value: u64) -> u64 {
+    if value == 0 {
+        1
+    } else {
+        value
+    }
+}
+
 impl Arrivals {
     /// The schedule of `process`, the first send due at the start. A gap or a burst of zero is
-    /// taken as one.
-    pub fn new(process: Process) -> Self {
+    /// taken as one. `const`, so a fixed-memory image can hold a table of them as its initial value.
+    pub const fn new(process: Process) -> Self {
         let process = match process {
             Process::Periodic { gap_nanos } => Process::Periodic {
-                gap_nanos: gap_nanos.max(1),
+                gap_nanos: at_least_one(gap_nanos),
             },
             Process::Poisson {
                 mean_gap_nanos,
                 seed,
             } => Process::Poisson {
-                mean_gap_nanos: mean_gap_nanos.max(1),
+                mean_gap_nanos: at_least_one(mean_gap_nanos),
                 seed,
             },
             Process::Burst { size, gap_nanos } => Process::Burst {
-                size: size.max(1),
-                gap_nanos: gap_nanos.max(1),
+                size: at_least_one(size),
+                gap_nanos: at_least_one(gap_nanos),
             },
         };
         let state = match process {

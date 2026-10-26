@@ -44,8 +44,14 @@ not build the node.
     [[entity]]               kind = "queryable", key, and document_bytes (a fixed document) or
                                from = "<subscriber key>" (the latest sample of that subscription);
                                kind = "subscriber", key, sample_bytes (the payload bytes it keeps);
-                               kind = "publisher", key, period_ms, document_bytes (the document it
-                               puts on that key every period);
+                               kind = "publisher", key, WHEN and WHAT (a stream of puts on that key,
+                               the workload of docs/target-build-contract.md 5c in the driver's own
+                               words): WHEN is period_ms or rate_per_s (a decimal written as a
+                               string) under arrivals = "periodic" (the default), "poisson" (with
+                               an arrival_seed) or "burst" (with burst, the puts of each); WHAT is
+                               document_bytes (the same document every put) or payload_bytes with
+                               a fill ("counter", the default, "zero" or "seeded" with a seed),
+                               made for each put from its sequence number;
                                kind = "querier", key, period_ms, timeout_ms, reply_bytes (it asks
                                that key every period and keeps the latest reply; a queryable's
                                from may name its key);
@@ -125,7 +131,13 @@ DECLARATION_SCHEMA = 1
 # consumer is told a target builds and what the target accepts are one statement.
 #   value: `locator` (<scheme>/<a.b.c.d>:<port>), `zid` (lowercase hex), `key-expression` (a key or a
 #   pattern, held to MAX_KEYEXPR_BYTES), `key` (a literal key: no `*`, no `$`), `cell-key` (the key
-#   of a subscriber or a querier of the same node), `integer` (from `min` to `max`).
+#   of a subscriber or a querier of the same node), `integer` (from `min` to `max`), `word` (one of
+#   `choices`), `rate` (a positive decimal of puts a second written as a string, whose gap is from
+#   `min_gap_ns` to `max_gap_ns`).
+#   with: a key read only when another key of the word is stated (`{"key": K}`) or has a value
+#   (`{"key": K, "value": V}`, a word's default counting as stated); `required` is then "required
+#   exactly when that holds", and the key stated when it does not hold is refused.
+#   one_of: groups of keys of which a word states exactly one each.
 def _key(value: str, required: bool = True) -> dict:
     return {"value": value, "required": required}
 
@@ -135,6 +147,24 @@ def _int(low: int, high: int | str, required: bool = True, default: int | None =
     if default is not None:
         spec["default"] = default
     return spec
+
+
+def _word(choices: tuple[str, ...], default: str) -> dict:
+    return {"value": "word", "required": False, "choices": list(choices), "default": default}
+
+
+def _rate(min_gap: int | str, max_gap: int | str) -> dict:
+    return {"value": "rate", "required": False, "min_gap_ns": min_gap, "max_gap_ns": max_gap}
+
+
+def _when(spec: dict, key: str, value: str | None = None) -> dict:
+    return {**spec, "with": {"key": key, **({"value": value} if value is not None else {})}}
+
+
+# The words of a stream, as the traffic driver of `wz-ap-demo` names them (`sessions_driver/stream.rs`,
+# `PROCESSES` and `FILLS`), so a declared publisher and a driven one are written alike.
+PROCESSES = ("periodic", "poisson", "burst")
+FILLS = ("zero", "counter", "seeded")
 
 
 ENDPOINT_SHAPES = {
@@ -147,16 +177,24 @@ ENDPOINT_SHAPES = {
 # `count` is how many of a kind one node holds: a target's field, or the budget (`limit`) a declaration
 # may raise.
 ENTITY_SHAPES = {
-    "publisher": {"is": "puts a document of its own", "count": {"max": "max_publishers"},
-                  "keys": {"key": _key("key"), "period_ms": _int(1, "period_max"),
-                           "document_bytes": _int(0, "publish_max")}},
+    "publisher": {"is": "puts a stream of its own", "count": {"max": "max_publishers"},
+                  "keys": {"key": _key("key"), "period_ms": _int(1, "period_max", required=False),
+                           "rate_per_s": _rate("gap_min_ns", "gap_max_ns"),
+                           "arrivals": _word(PROCESSES, "periodic"),
+                           "arrival_seed": _when(_int(0, "seed_max"), "arrivals", "poisson"),
+                           "burst": _when(_int(1, "burst_max"), "arrivals", "burst"),
+                           "document_bytes": _int(0, "publish_max", required=False),
+                           "payload_bytes": _int(1, "publish_max", required=False),
+                           "fill": _when(_word(FILLS, "counter"), "payload_bytes"),
+                           "seed": _when(_int(0, "seed_max"), "fill", "seeded")},
+                  "one_of": [["period_ms", "rate_per_s"], ["document_bytes", "payload_bytes"]]},
     "subscriber": {"is": "keeps what it receives", "count": {"limit": "MAX_SUBSCRIPTIONS"},
                    "keys": {"key": _key("key-expression"), "sample_bytes": _int(1, "sample_max")}},
     "queryable": {"is": "answers from a document or from what a subscriber or querier keeps",
                   "count": {"limit": "MAX_QUERYABLES"},
                   "keys": {"key": _key("key-expression"), "document_bytes": _int(0, "document_max", required=False),
                            "from": _key("cell-key", required=False)},
-                  "one_of": ["document_bytes", "from"]},
+                  "one_of": [["document_bytes", "from"]]},
     "querier": {"is": "asks and keeps what comes back", "count": {"max": "max_queriers"},
                 "keys": {"key": _key("key-expression"), "period_ms": _int(1, "period_max"),
                          "timeout_ms": _int(1, "timeout_max"), "reply_bytes": _int(1, "sample_max")}},
@@ -183,16 +221,64 @@ def owners(shapes: dict, key: str) -> list[str]:
     return [word for word, shape in shapes.items() if key in shape["keys"]]
 
 
-def integer_problems(who: str, item: dict, keys: dict, target: dict) -> list[str]:
-    """Each integer key of a word's shape that is missing (when required) or outside its bounds."""
+DECIMAL_RE = re.compile(r"([0-9]+)(?:\.([0-9]+))?")
+
+
+def rate_gap_ns(text: object) -> tuple[int | None, str | None]:
+    """The gap between two puts of a rate written as `text`, in nanoseconds rounded down, or why
+    `text` is not a rate: `wz_workload::arrivals::Decimal::parse` and `gap_nanos` (at most 18
+    significant digits, greater than zero, exactly 10^9 x 10^scale / mantissa), so a declared rate
+    and a driven one give one gap to the nanosecond."""
+    match = DECIMAL_RE.fullmatch(text) if isinstance(text, str) else None
+    if match is None:
+        return None, "not a positive decimal written as a string: digits, and a point and digits if any"
+    whole, fraction = match[1], (match[2] or "").rstrip("0")
+    if len(whole.lstrip("0")) + len(fraction) > 18:
+        return None, "has more than 18 significant digits"
+    mantissa = int(whole + fraction)
+    if mantissa == 0:
+        return None, "must be greater than zero"
+    return 10**9 * 10 ** len(fraction) // mantissa, None
+
+
+def holds(item: dict, keys: dict, condition: dict) -> bool:
+    """Whether the `with` condition of a key holds for `item`: the key it names is stated, or has
+    the value it names (a word's default counting as stated)."""
+    if "value" not in condition:
+        return condition["key"] in item
+    return item.get(condition["key"], keys[condition["key"]].get("default")) == condition["value"]
+
+
+def value_problems(who: str, item: dict, keys: dict, target: dict) -> list[str]:
+    """Each integer, word or rate key of a word's shape that is missing (when required) or outside
+    its bounds, and each key stated where its `with` condition does not hold."""
     out = []
     for key, spec in keys.items():
-        if spec["value"] != "integer" or (key not in item and not spec["required"]):
+        condition = spec.get("with")
+        if condition is not None and not holds(item, keys, condition):
+            if key in item:
+                when = (f"`{condition['key']}` is {condition['value']!r}" if "value" in condition
+                        else f"`{condition['key']}` is stated")
+                out.append(f"{who}: `{key}` is read only when {when}")
+            continue
+        if spec["value"] not in ("integer", "word", "rate") or (key not in item and not spec["required"]):
             continue
         value = item.get(key)
-        low, high = bound(target, spec["min"]), bound(target, spec["max"])
-        if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
-            out.append(f"{who}: {key} is {value!r}, not an integer from {low} to {high}")
+        if spec["value"] == "integer":
+            low, high = bound(target, spec["min"]), bound(target, spec["max"])
+            if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+                out.append(f"{who}: {key} is {value!r}, not an integer from {low} to {high}")
+        elif spec["value"] == "word":
+            if value not in spec["choices"]:
+                out.append(f"{who}: {key} is {value!r}, not one of {', '.join(spec['choices'])}")
+        else:
+            gap, why = rate_gap_ns(value)
+            low, high = bound(target, spec["min_gap_ns"]), bound(target, spec["max_gap_ns"])
+            if why is not None:
+                out.append(f"{who}: {key} is {value!r}, {why}")
+            elif not low <= gap <= high:
+                out.append(f"{who}: {key} is {value!r}, a gap of {gap} ns between two puts, not from "
+                           f"{low} to {high} ns")
     return out
 
 # What each target builds. `slot` is the per-session fixed-memory profile of the cooperative runtime:
@@ -225,6 +311,14 @@ TARGETS = {
             "liveliness-token": "the answer a token gives to an interest (DeclareReply) has no form "
             "without an allocator in the group's emit yet",
         },
+        # A key of a kind the group carries that the group cannot carry, by kind and key.
+        "group_refused_keys": {
+            "publisher": {
+                "payload_bytes": "a put on the group borrows its bytes for as long as the group's "
+                "pump holds it, which a body made for each put in the node's one buffer cannot "
+                "give; a group's publisher puts a document",
+            },
+        },
         # A listener is a stream's: a `tcp/` connection is a link the moment it is accepted, with no
         # handshake of the transport's own to read first.
         "listen_schemes": ("tcp",),
@@ -239,10 +333,22 @@ TARGETS = {
         "document_max": 4096,
         # The bytes of a payload a subscription keeps (`LatestCells` of `wz_session_mcu::latest`).
         "sample_max": 4096,
-        # What a publisher puts: one document, at most what a frame carries with room to spare, and
+        # What a publisher puts: one document or a body made for each put (in the node's one
+        # `MadeBuffer`, sized by the longest), at most what a frame carries with room to spare, and
         # the schedules of at most `max_publishers` in the session's task cell.
         "publish_max": 1024,
         "max_publishers": 4,
+        # The gaps of a publisher's arrivals: its clock is the millisecond, so a gap shorter than one
+        # would be puts the node makes in the same tick (a rate of at most 1000 a second), and the
+        # longest is `period_max`'s. A Poisson process draws gaps shorter than its mean; those are made
+        # at once and how late they were is counted, never thinned (`wz_session_mcu::slot_publisher`).
+        "gap_min_ns": 1_000_000,
+        "gap_max_ns": 3_600_000 * 1_000_000,
+        # A burst is made at most `CATCH_UP` puts a round (`slot_publisher`), the rest in rounds the
+        # node wakes for at once; the bound is a batch a frame-sized put of each fits a link with.
+        "burst_max": 1024,
+        # A seed is a TOML integer, which is signed 64-bit; the generators take its bits.
+        "seed_max": 2**63 - 1,
         # A querier keeps its latest reply in a cell, so it is held to the cell's size (`sample_max`),
         # and its schedule is in the same task cell.
         "max_queriers": 4,
@@ -364,7 +470,7 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
             for extra in sorted((set(ep) & ENDPOINT_KEYS) - set(keys) - {"role"}):
                 out.append(f"{who}: only a {' or a '.join(f'`{r}`' for r in owners(ENDPOINT_SHAPES, extra))} "
                            f"endpoint has `{extra}`")
-            out += integer_problems(who, ep, keys, target)
+            out += value_problems(who, ep, keys, target)
         zid = ep.get("zid")
         if role == "peer":
             if not isinstance(zid, str) or ZID_RE.fullmatch(zid) is None:
@@ -430,12 +536,17 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
         for extra in sorted((set(ent) & ENTITY_KEYS) - set(shape["keys"]) - {"kind"}):
             out.append(f"{who}: a {kind} {shape['is']} and has no `{extra}` (only "
                        f"{' or '.join(f'a {k}' for k in owners(ENTITY_SHAPES, extra))} has `{extra}`)")
-        one_of = shape.get("one_of", [])
-        stated = [k for k in one_of if k in ent]
-        if one_of and len(stated) != 1:
-            out.append(f"{who}: a {kind} {shape['is']}: state exactly one of "
-                       f"{', '.join(f'`{k}`' for k in one_of)}" + (", not both" if stated else ""))
-        out += integer_problems(who, ent, shape["keys"], target)
+        for group in shape.get("one_of", []):
+            stated = [k for k in group if k in ent]
+            if len(stated) != 1:
+                out.append(f"{who}: a {kind} {shape['is']}: state exactly one of "
+                           f"{', '.join(f'`{k}`' for k in group)}" + (", not both" if stated else ""))
+        out += value_problems(who, ent, shape["keys"], target)
+        if has_group:
+            for refused, why_not in target["group_refused_keys"].get(kind, {}).items():
+                if refused in ent:
+                    out.append(f"{who}: a {kind}'s `{refused}` is not carried by the group this node is "
+                               f"a member of: {why_not}")
         key = ent.get("key")
         why = key_problem(key, values["MAX_KEYEXPR_BYTES"]) if isinstance(key, str) else "is missing"
         # A subscription and a querier each keep their latest in a cell named by the key.
@@ -572,6 +683,41 @@ def key_set_lines(data: dict) -> list[str]:
     return wz_key_set.table_lines(wz_key_set.build(entities), closed=True, allowance=allowance)
 
 
+# The module the generated publisher constants are written in: `wz_session_mcu::slot_publisher`
+# re-exports the workload's `Process` and `Fill`, so a node's image names one crate for them.
+PUBLISHER = "wz_session_mcu::slot_publisher"
+
+
+def gap_of(publisher: dict) -> int:
+    """The gap of a valid publisher's arrivals, in nanoseconds: its period, or its rate's gap."""
+    if "period_ms" in publisher:
+        return publisher["period_ms"] * 1_000_000
+    gap, _ = rate_gap_ns(publisher["rate_per_s"])
+    return gap
+
+
+def process_literal(publisher: dict) -> str:
+    """The `Process` of a valid publisher, as Rust: the gap is the periodic gap, the Poisson mean
+    or the gap between bursts, as the driver's `stream::schedule` reads the same keys."""
+    gap = gap_of(publisher)
+    arrivals = publisher.get("arrivals", "periodic")
+    if arrivals == "poisson":
+        return f"{PUBLISHER}::Process::Poisson {{ mean_gap_nanos: {gap}, seed: {publisher['arrival_seed']} }}"
+    if arrivals == "burst":
+        return f"{PUBLISHER}::Process::Burst {{ size: {publisher['burst']}, gap_nanos: {gap} }}"
+    return f"{PUBLISHER}::Process::Periodic {{ gap_nanos: {gap} }}"
+
+
+def body_literal(publisher: dict) -> str:
+    """The bytes of each put of a valid publisher and the fill they are made with, as Rust: `None`
+    for a document, whose bytes the image takes from its body pool."""
+    if "document_bytes" in publisher:
+        return f"{publisher['document_bytes']}, None"
+    fill = publisher.get("fill", "counter")
+    made = {"zero": "Zero", "counter": "Counter"}.get(fill) or f"Seeded {{ seed: {publisher['seed']} }}"
+    return f"{publisher['payload_bytes']}, Some({PUBLISHER}::Fill::{made})"
+
+
 def emit(name: str, data: dict, declaration_sha256: str) -> str:
     """The `declared.rs` the node's code includes. Valid input only: `validate` ran first."""
     dialed = [ep["locator"] for ep in data["endpoint"] if ep["role"] == "dial"]
@@ -607,10 +753,32 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
     place = {k: at for at, k in enumerate([k for k, _ in subscribed] + [k for k, _, _, _ in queried])}
     mirrored = [(e["key"], place[e["from"]]) for e in every if e["kind"] == "queryable" and "from" in e]
     mirrors = ", ".join(f"({rust_string(k)}, {at})" for k, at in mirrored)
-    published = [(e["key"], e["period_ms"], e["document_bytes"]) for e in every if e["kind"] == "publisher"]
-    pubs = ", ".join(f"({rust_string(k)}, {p}, {b})" for k, p, b in published)
+    published = [e for e in every if e["kind"] == "publisher"]
+    pubs = ", ".join(f"({rust_string(e['key'])}, {process_literal(e)}, {body_literal(e)})" for e in published)
     alive = [e["key"] for e in every if e["kind"] == "liveliness-token"]
     token_keys = ", ".join(rust_string(k) for k in alive)
+    # The constants of a plane the node does not have are not generated: the node's code reads them
+    # only under the feature that plane is built with, which is on exactly when the declaration has
+    # it, so a constant generated without it would be one the build never reads.
+    listener = [
+        "/// The address and port the listening locator names.",
+        f"pub const LISTEN_ADDR: [u8; 4] = [{listen_addr}];",
+        f"pub const LISTEN_PORT: u16 = {listen_port};",
+    ] if listens else []
+    group = [
+        "/// The locator of the group, the address and port it names, the hop limit of what the node",
+        "/// sends and how many members of the group it tracks at once.",
+        f"pub const GROUP: &str = {rust_string(group_at)};",
+        f"pub const GROUP_ADDR: [u8; 4] = [{group_addr}];",
+        f"pub const GROUP_PORT: u16 = {group_port};",
+        f"pub const GROUP_TTL: u8 = {group_ttl};",
+        f"pub const MEMBERS: usize = {members};",
+    ] if groups else []
+    querier = [
+        "/// The queriers: (key, the period and the timeout in milliseconds, the bytes of a reply each",
+        "/// keeps).",
+        f"pub const QUERIED: [(&str, u32, u32, usize); {len(queried)}] = [{asks}];",
+    ] if queried else []
     return "\n".join(
         [
             f"// {wz_config.SPDX}",
@@ -631,38 +799,30 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
             f"pub const PEER_NODES: [([u8; 16], &str); {len(peers)}] = [{peer_nodes}];",
             "/// Whether a dialled endpoint or a peer is `tls/`, which the node's `tls` feature must be built for.",
             f"pub const TLS: bool = {'true' if secure else 'false'};",
-            "/// Whether the node listens, the locator it listens on (empty when it does not), the address",
-            "/// and port that locator names, and how many sessions a peer opened it holds at once.",
+            "/// Whether the node listens, the locator it listens on (empty when it does not) and how many",
+            "/// sessions a peer opened it holds at once.",
             f"pub const LISTENS: bool = {'true' if listens else 'false'};",
             f"pub const LISTEN: &str = {rust_string(listen_at)};",
-            f"pub const LISTEN_ADDR: [u8; 4] = [{listen_addr}];",
-            f"pub const LISTEN_PORT: u16 = {listen_port};",
             f"pub const ACCEPTS: usize = {accepts};",
+            *listener,
             "/// The sessions the node holds at most: the ones it dials, the peers it holds by their zid and",
             "/// the ones a peer opened.",
             "pub const SESSIONS: usize = DIALS + PEERS + ACCEPTS;",
-            "/// Whether the node is a member of a multicast group, the locator of the group (empty when it",
-            "/// is not), the address and port that locator names, the hop limit of what it sends and how",
-            "/// many members of the group it tracks at once.",
+            "/// Whether the node is a member of a multicast group.",
             f"pub const GROUPS: usize = {len(groups)};",
-            f"pub const GROUP: &str = {rust_string(group_at)};",
-            f"pub const GROUP_ADDR: [u8; 4] = [{group_addr}];",
-            f"pub const GROUP_PORT: u16 = {group_port};",
-            f"pub const GROUP_TTL: u8 = {group_ttl};",
-            f"pub const MEMBERS: usize = {members};",
+            *group,
             "/// The queryables the node declares, and the documents they answer with: (key, bytes).",
             f"pub const DOCS: usize = {len(entities)};",
             f"pub const DOCUMENTS: [(&str, usize); {len(entities)}] = [{docs}];",
             "/// The subscriptions the node declares, and the bytes of a payload each keeps: (key, bytes).",
             f"pub const SUBSCRIBERS: usize = {len(subscribed)};",
             f"pub const SUBSCRIPTIONS: [(&str, usize); {len(subscribed)}] = [{cells}];",
-            "/// The queriers the node runs: (key, the period and the timeout in milliseconds, the bytes of a",
-            "/// reply each keeps).",
             "/// The liveliness tokens the node declares on every session, by key.",
             f"pub const TOKENS: usize = {len(alive)};",
             f"pub const TOKEN_KEYS: [&str; {len(alive)}] = [{token_keys}];",
+            "/// The queriers the node runs.",
             f"pub const QUERIERS: usize = {len(queried)};",
-            f"pub const QUERIED: [(&str, u32, u32, usize); {len(queried)}] = [{asks}];",
+            *querier,
             "/// The cells that keep a latest value: the subscriptions' and then the queriers'.",
             f"pub const CELLS: usize = {len(subscribed) + len(queried)};",
             "/// The most bytes any cell keeps: the size of every cell the node holds.",
@@ -670,9 +830,11 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
             "/// The queryables that answer from a cell: (key, index into the cells).",
             f"pub const MIRRORS: usize = {len(mirrored)};",
             f"pub const MIRRORED: [(&str, usize); {len(mirrored)}] = [{mirrors}];",
-            "/// The publishers: (key, the period in milliseconds, the bytes of the document it puts).",
+            "/// The publishers: (key, when its puts are due, the bytes of each put and the fill they are",
+            "/// made with, or `None` for a document of that many bytes).",
             f"pub const PUBLISHERS: usize = {len(published)};",
-            f"pub const PUBLISHED: [(&str, u32, usize); {len(published)}] = [{pubs}];",
+            f"pub const PUBLISHED: [(&str, {PUBLISHER}::Process, usize, Option<{PUBLISHER}::Fill>); "
+            f"{len(published)}] = [{pubs}];",
             "",
             *([*key_set_lines(data), ""] if states_closed_key_set(data) else []),
         ]
@@ -799,15 +961,16 @@ def view_of(name: str, data: dict, sha: str, generated: pathlib.Path, decl: dict
 def vocabulary(target_id: str, decl: dict) -> dict:
     """What a target builds, as data a consumer reads before it writes a declaration: the schema
     number, each endpoint role and entity kind with its keys and their bounds resolved to this
-    target's numbers (a word the target does not build carries the reason instead), what a group
-    carries, and the budgets and policies a declaration may state with the values a node gets when it
+    target's numbers (a word the target does not build carries the reason instead), the groups of
+    keys a word states exactly one of each (`one_of`, a list of lists), what a group carries (and
+    the keys of a kind it carries that it does not), and the budgets and policies a declaration may state with the values a node gets when it
     states none. Made from the tables `validate` reads, so it cannot say a target builds what the
     target refuses."""
     target = TARGETS[target_id]
+    bounds = {"integer": ("min", "max"), "rate": ("min_gap_ns", "max_gap_ns")}
 
     def resolved(keys: dict) -> dict:
-        return {key: {**spec, **({"min": bound(target, spec["min"]), "max": bound(target, spec["max"])}
-                                 if spec["value"] == "integer" else {})}
+        return {key: {**spec, **{name: bound(target, spec[name]) for name in bounds.get(spec["value"], ())}}
                 for key, spec in keys.items()}
 
     schemes = {"dial": target["schemes"], "listen": target["listen_schemes"],
@@ -833,7 +996,9 @@ def vocabulary(target_id: str, decl: dict) -> dict:
                  else {"limit": shape["count"]["limit"], "default": limits[shape["count"]["limit"]]})
         entry = {"built": True, "is": shape["is"], "count": count, "keys": resolved(shape["keys"])}
         if "one_of" in shape:
-            entry["one_of"] = list(shape["one_of"])
+            entry["one_of"] = [list(group) for group in shape["one_of"]]
+        if kind in target["group_refused_keys"]:
+            entry["group_refused_keys"] = dict(target["group_refused_keys"][kind])
         entities[kind] = entry
     policies = {pol["id"]: ["on", "off"] if pol["kind"] == "bool" else list(pol["choices"])
                 for pol in decl["policies"]}
@@ -998,7 +1163,7 @@ def _selftest() -> int:
            'pub const DIALED: [&str; 1] = ["tcp/10.0.0.1:7447"];' in lrs and "pub const SESSIONS: usize = DIALS + PEERS + ACCEPTS;" in lrs)
     expect("a node that listens on nothing accepts nothing",
            "pub const LISTENS: bool = false;" in rs and "pub const ACCEPTS: usize = 0;" in rs
-           and 'pub const LISTEN: &str = "";' in rs)
+           and 'pub const LISTEN: &str = "";' in rs and "LISTEN_ADDR" not in rs and "LISTEN_PORT" not in rs)
     expect("a listener is a feature of the build, and the others are unchanged",
            features_of(wz_config.read_decl_toml(listening)) == ["declared", "listen"]
            and features_of(data) == ["declared"])
@@ -1052,11 +1217,17 @@ document_bytes = 8
            and "pub const GROUP_ADDR: [u8; 4] = [224, 0, 0, 224];" in grs and "pub const GROUP_PORT: u16 = 7447;" in grs
            and "pub const GROUP_TTL: u8 = 1;" in grs and "pub const MEMBERS: usize = 4;" in grs
            and "pub const DIALS: usize = 0;" in grs and "pub const SESSIONS: usize = DIALS + PEERS + ACCEPTS;" in grs)
-    expect("a node with no group is a member of none",
-           "pub const GROUPS: usize = 0;" in rs and "pub const MEMBERS: usize = 0;" in rs
-           and "pub const GROUP_TTL: u8 = 1;" in rs)
+    expect("a node with no group is a member of none, and none of a group's constants is generated",
+           "pub const GROUPS: usize = 0;" in rs and "MEMBERS" not in rs and "GROUP_TTL" not in rs
+           and "GROUP_ADDR" not in rs)
     expect("a group is a feature of the build",
            features_of(wz_config.read_decl_toml(group_node)) == ["declared", "multicast"])
+    expect("a group's publisher puts at a rate and under any arrival process",
+           problems(group_node.replace("period_ms = 200", 'rate_per_s = "20"\narrivals = "poisson"\n'
+                                       "arrival_seed = 1")) == [])
+    refuses("a body made for each put on a node with a group",
+            group_node.replace("document_bytes = 8", "payload_bytes = 8"),
+            "`payload_bytes` is not carried by the group")
     expect("a ttl the declaration states is the one generated",
            "pub const GROUP_TTL: u8 = 8;" in emit(
                "n", wz_config.read_decl_toml(group_node.replace("members = 4", "members = 4\nttl = 8")), sha))
@@ -1185,22 +1356,79 @@ document_bytes = 8
             SAMPLE.replace("MAX_QUERYABLES = 2", "MAX_QUERYABLES = 2\nMAX_PENDING_QUERIES = 2") + ask,
             "states MAX_PENDING_QUERIES = 2")
 
-    # A publisher puts a document of its own on one key, every period.
+    # A publisher puts a stream of its own on one key: a document every period, at its least.
     pub = '\n[[entity]]\nkind = "publisher"\nkey = "lab/out/beat"\nperiod_ms = 200\ndocument_bytes = 8\n'
     expect("a publisher is a valid entity", problems(SAMPLE + pub) == [])
     puts = emit("n", wz_config.read_decl_toml(SAMPLE + pub), sha)
+    published = f"pub const PUBLISHED: [(&str, {PUBLISHER}::Process, usize, Option<{PUBLISHER}::Fill>); "
     expect("the publisher, its period and its document are generated",
-           'pub const PUBLISHED: [(&str, u32, usize); 1] = [("lab/out/beat", 200, 8)];' in puts
-           and "pub const PUBLISHERS: usize = 1;" in puts)
+           published + '1] = [("lab/out/beat", ' + f"{PUBLISHER}::Process::Periodic {{ gap_nanos: 200000000 }}, "
+           "8, None)];" in puts and "pub const PUBLISHERS: usize = 1;" in puts)
     expect("a node with no publisher declares none",
-           "pub const PUBLISHERS: usize = 0;" in rs and "pub const PUBLISHED: [(&str, u32, usize); 0] = [];" in rs)
+           "pub const PUBLISHERS: usize = 0;" in rs and published + "0] = [];" in rs)
     expect("a publisher decides no budget", budgets(wz_config.read_decl_toml(SAMPLE + pub), decl)
            == budgets(data, decl))
-    refuses("a publisher with no period", SAMPLE + pub.replace("period_ms = 200\n", ""), "period_ms is None")
+    refuses("a publisher with no period", SAMPLE + pub.replace("period_ms = 200\n", ""),
+            "state exactly one of `period_ms`, `rate_per_s`")
     refuses("a period of zero", SAMPLE + pub.replace("200", "0"), "period_ms is 0")
     refuses("a period above the target's", SAMPLE + pub.replace("200", "3600001"), "period_ms is 3600001")
-    refuses("a publisher with no document", SAMPLE + pub.replace("document_bytes = 8\n", ""), "document_bytes is None")
+    refuses("a publisher with no document", SAMPLE + pub.replace("document_bytes = 8\n", ""),
+            "state exactly one of `document_bytes`, `payload_bytes`")
     refuses("a document above what a put carries", SAMPLE + pub.replace("= 8\n", "= 1025\n"), "document_bytes is 1025")
+
+    # The stream's words are the traffic driver's, and a rate is its digits: the gaps below are the
+    # ones `wz_workload::arrivals` holds in `a_rate_gives_its_gap_exactly`.
+    for text, gap in (("100", 10_000_000), ("0.5", 2_000_000_000), ("3", 333_333_333), ("0.1", 10_000_000_000),
+                      ("1000000", 1_000), ("007.250", 137_931_034)):
+        expect(f"the rate {text} gives the workload's gap", rate_gap_ns(text) == (gap, None))
+    for bad in ("", ".5", "5.", "-1", "+1", "1e3", "1.2.3", " 1", "0x10", "١", 2.5, 3):
+        expect(f"{bad!r} is not a rate", rate_gap_ns(bad)[0] is None)
+    expect("a rate of nothing is refused as zero", rate_gap_ns("0.000")[1] == "must be greater than zero")
+    expect("a rate of more digits than a mantissa holds is refused",
+           rate_gap_ns("1234567890.123456789")[1] == "has more than 18 significant digits")
+    rated = pub.replace("period_ms = 200", 'rate_per_s = "3"')
+    expect("a publisher at a rate is valid", problems(SAMPLE + rated) == [])
+    expect("and its gap is the rate's",
+           f"{PUBLISHER}::Process::Periodic {{ gap_nanos: 333333333 }}"
+           in emit("n", wz_config.read_decl_toml(SAMPLE + rated), sha))
+    refuses("a period and a rate", SAMPLE + pub + 'rate_per_s = "3"\n', "not both")
+    refuses("a rate above the millisecond's", SAMPLE + rated.replace('"3"', '"1001"'), "a gap of 999000 ns")
+    expect("a rate of a thousand a second is the slot clock's floor",
+           problems(SAMPLE + rated.replace('"3"', '"1000"')) == [])
+    try:
+        wz_config.read_decl_toml(SAMPLE + rated.replace('"3"', "2.5"))
+    except ValueError as err:
+        expect(f"a rate written as a float is not read at all ({err})", "not a string, integer" in str(err))
+    else:
+        expect("a rate written as a float is not read at all", False)
+    refuses("a rate written as an integer", SAMPLE + rated.replace('"3"', "3"), "not a positive decimal")
+    poisson = rated + 'arrivals = "poisson"\narrival_seed = 7\n'
+    expect("a Poisson publisher is valid, its mean the rate's gap and its seed the declaration's",
+           f"{PUBLISHER}::Process::Poisson {{ mean_gap_nanos: 333333333, seed: 7 }}"
+           in emit("n", wz_config.read_decl_toml(SAMPLE + poisson), sha) and problems(SAMPLE + poisson) == [])
+    refuses("a Poisson publisher with no seed", SAMPLE + rated + 'arrivals = "poisson"\n', "arrival_seed is None")
+    refuses("a seed of periodic arrivals", SAMPLE + rated + "arrival_seed = 7\n",
+            "`arrival_seed` is read only when `arrivals` is 'poisson'")
+    burst = pub + 'arrivals = "burst"\nburst = 4\n'
+    expect("a burst publisher is valid, its size and gap the declaration's",
+           f"{PUBLISHER}::Process::Burst {{ size: 4, gap_nanos: 200000000 }}"
+           in emit("n", wz_config.read_decl_toml(SAMPLE + burst), sha) and problems(SAMPLE + burst) == [])
+    refuses("a burst of periodic arrivals", SAMPLE + pub + "burst = 4\n", "`burst` is read only when")
+    refuses("an arrival process the driver does not have", SAMPLE + pub + 'arrivals = "steady"\n',
+            "not one of periodic, poisson, burst")
+    made = pub.replace("document_bytes = 8", "payload_bytes = 16")
+    expect("a publisher of a made body is valid, the counter its fill when it names none",
+           f"16, Some({PUBLISHER}::Fill::Counter))" in emit("n", wz_config.read_decl_toml(SAMPLE + made), sha)
+           and problems(SAMPLE + made) == [])
+    seeded = made + 'fill = "seeded"\nseed = 9\n'
+    expect("a seeded fill carries its seed",
+           f"16, Some({PUBLISHER}::Fill::Seeded {{ seed: 9 }}))"
+           in emit("n", wz_config.read_decl_toml(SAMPLE + seeded), sha))
+    refuses("a seeded fill with no seed", SAMPLE + made + 'fill = "seeded"\n', "seed is None")
+    refuses("a seed of a counter", SAMPLE + made + "seed = 9\n", "`seed` is read only when `fill` is 'seeded'")
+    refuses("a fill of a document", SAMPLE + pub + 'fill = "zero"\n', "`fill` is read only when `payload_bytes` is stated")
+    refuses("a document and a made body", SAMPLE + made + "document_bytes = 8\n", "not both")
+    refuses("a made body above what a put carries", SAMPLE + made.replace("= 16", "= 1025"), "payload_bytes is 1025")
     refuses("a publisher of a pattern", SAMPLE + pub.replace("lab/out/beat", "lab/out/*"), "is a pattern")
     refuses("a publisher of a pattern with $", SAMPLE + pub.replace("lab/out/beat", "lab/out/$*"), "is a pattern")
     refuses("a publisher with a source", SAMPLE + pub + 'from = "lab/in/a"\n', "has no `from`")
@@ -1400,21 +1628,50 @@ document_bytes = 8
             f"{k} = {v!r}\n".replace("'", '"') if isinstance(v, str) else f"{k} = {v}\n" for k, v in values.items())
 
     def at_least(spec: dict, kind: str) -> object:
-        return {"integer": spec.get("min"), "key": f"lab/v/{kind}", "key-expression": f"lab/v/{kind}"}[spec["value"]]
+        return {"integer": spec.get("min"), "key": f"lab/v/{kind}", "key-expression": f"lab/v/{kind}",
+                "word": spec.get("default"), "rate": "1"}[spec["value"]]
+
+    def stating(entry: dict, item: dict, key: str, value: object) -> dict:
+        """`item` with `key` stated as `value`: the other keys of its `one_of` group left out, and
+        what its `with` condition names stated so that it holds."""
+        groups = [g for g in entry.get("one_of", []) if key in g]
+        out = {k: v for k, v in item.items() if not any(k in g and k != key for g in groups)}
+        condition = entry["keys"][key].get("with")
+        if condition is not None and not holds(out, entry["keys"], condition):
+            need = condition["key"]
+            out = stating(entry, out, need, condition.get("value", at_least(entry["keys"][need], kind)))
+        return {**out, key: value}
 
     for kind, entry in vocab["entities"].items():
         expect(f"the slot target builds a {kind}", entry["built"])
-        base = {"kind": kind, **{k: at_least(s, kind) for k, s in entry["keys"].items() if s["required"]}}
-        if "one_of" in entry:
-            first = entry["one_of"][0]
-            base[first] = at_least(entry["keys"][first], kind)
+        base = {"kind": kind, **{k: at_least(s, kind) for k, s in entry["keys"].items()
+                                 if s["required"] and "with" not in s}}
+        for group in entry.get("one_of", []):
+            base = stating(entry, base, group[0], at_least(entry["keys"][group[0]], kind))
         expect(f"a {kind} with the keys the vocabulary requires, at their least, is valid",
                problems(head + dial + toml_item("entity", base)) == [])
         for key, spec in entry["keys"].items():
+            if "with" in spec:
+                stray = problems(head + dial + toml_item("entity", {**base, key: at_least(spec, kind)}))
+                expect(f"a {kind}'s {key} where its condition does not hold is refused ({stray})",
+                       any(f"`{key}` is read only when" in p for p in stray))
+            if spec["value"] == "word":
+                odd = problems(head + dial + toml_item("entity", stating(entry, base, key, "odd")))
+                expect(f"a {kind}'s {key} outside the vocabulary's words is refused by name ({odd})",
+                       any(f"{key} is 'odd', not one of {', '.join(spec['choices'])}" in p for p in odd))
+            if spec["value"] == "rate":
+                fastest = 10**9 // spec["min_gap_ns"]
+                expect(f"the vocabulary's shortest gap of a {kind}'s {key} is a whole rate",
+                       rate_gap_ns(str(fastest)) == (spec["min_gap_ns"], None))
+                at_max = problems(head + dial + toml_item("entity", stating(entry, base, key, str(fastest))))
+                past = problems(head + dial + toml_item("entity", stating(entry, base, key, str(fastest + 1))))
+                expect(f"a {kind}'s {key} at the vocabulary's shortest gap is valid ({at_max})", at_max == [])
+                expect(f"a {kind}'s {key} past it is refused by name ({past})",
+                       any(f"{key} is '{fastest + 1}'" in p for p in past))
             if spec["value"] != "integer":
                 continue
-            at_max = problems(head + dial + toml_item("entity", {**base, key: spec["max"]}))
-            past = problems(head + dial + toml_item("entity", {**base, key: spec["max"] + 1}))
+            at_max = problems(head + dial + toml_item("entity", stating(entry, base, key, spec["max"])))
+            past = problems(head + dial + toml_item("entity", stating(entry, base, key, spec["max"] + 1)))
             expect(f"a {kind}'s {key} at the vocabulary's bound {spec['max']} is valid ({at_max})",
                    not any(f"{key} is" in p for p in at_max))
             expect(f"a {kind}'s {key} one past the vocabulary's bound is refused by name ({past})",

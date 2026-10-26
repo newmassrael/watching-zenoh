@@ -197,6 +197,9 @@ wz-runtime-core = { path = "../wz-runtime-core", default-features = false }
 # The slot profile's reply queue: a fixed-capacity deque in a `static`, the same
 # crate and version `wz-session-core`'s bounded backing is made of.
 heapless = { version = "0.8", default-features = false }
+# What a publisher of the slot client plays (docs/target-build-contract.md 5c): its arrival process
+# and the fill of a made body, the same definitions the heap interpreters play, without `alloc`.
+wz-workload = { path = "../wz-workload", default-features = false }
 
 [dev-dependencies]
 # critical-section's std impl backs CoopRuntime's critical_section::Mutex and the

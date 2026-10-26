@@ -5,9 +5,10 @@
 //! answers does ([`SlotDispatch`]), and then the puts and the queries that are due.
 //!
 //! The layer is one, and the behaviours are data: a node's publishers
-//! ([`Publication`]) and queriers ([`Query`]) are arrays the image states, and this layer gives each its
-//! own [`Schedule`] and sends what is due. After it has dispatched what the iteration brought it asks
-//! each schedule, sends each due put (`send_push_literal`) and asks each due query, and tells the
+//! ([`Publication`]) and queriers ([`Query`]) are arrays the image states. The publishers are played
+//! by [`Publishing`] (their arrival processes, their made bodies, how late each put was) and the
+//! queriers by a [`Schedule`](crate::slot_schedule::Schedule). After it has dispatched what the iteration brought it sends each due
+//! put (`send_push_literal`) and asks each due query, and tells the
 //! drive loop the earliest moment it needs to be awake next
 //! ([`set_app_wake_deadline_ms`](wz_session_core::session_actions::SessionLinkActions::set_app_wake_deadline_ms)),
 //! which the loop budgets its wait by with the transport's own: the earliest of the next put, the
@@ -19,7 +20,9 @@
 //! none; a node built without it holds no querier (`Q` is 0).
 //!
 //! The schedules are per session and live in the session's task cell, which the image sizes for them
-//! and for the pending table; a session that is lost starts over with the next one.
+//! and for the pending table; a session that is lost starts over with the next one. A made body is
+//! written into the node's one [`MadeBuffer`] (`B` bytes, the longest made body the image declares;
+//! 0 for a node whose bodies are texts), which the sessions share, so the cell does not grow by it.
 //!
 //! This module does not link `alloc`.
 
@@ -32,8 +35,11 @@ use wz_session_core::slot_observer::{ObserverCell, Requesters};
 use crate::app_layer::{NoReplies, SessionEvents, SlotDispatch};
 use crate::slot_client::DocumentSinks;
 use crate::slot_node::SessionLayer;
-use crate::slot_publisher::{Publication, PublishCounts};
-use crate::slot_schedule::{Outcome, Schedule};
+use crate::slot_publisher::{MadeBuffer, Publication, PublishCounts, Publishing};
+use crate::slot_schedule::{Outcome, RETRY_MS};
+
+#[cfg(feature = "query-get")]
+use crate::slot_schedule::Schedule;
 
 #[cfg(feature = "query-get")]
 use crate::app_layer::{GetError, GetRequest};
@@ -49,13 +55,15 @@ type Replies = ReplyLatest;
 #[cfg(not(feature = "query-get"))]
 type Replies = NoReplies;
 
-/// The application layer of one session of a node with `P` publishers and `Q` queriers.
-pub struct ActiveEvents<C: ClockSource + 'static, const P: usize, const Q: usize> {
+/// The application layer of one session of a node with `P` publishers, `Q` queriers and a made body
+/// of at most `B` bytes.
+pub struct ActiveEvents<C: ClockSource + 'static, const P: usize, const Q: usize, const B: usize> {
     inner: SlotDispatch<C, Replies, NoReplies, DocumentSinks>,
     handle: SessionHandle<C>,
     publications: [Publication; P],
     counts: &'static PublishCounts<P>,
-    puts: Schedule<P>,
+    puts: Publishing<P>,
+    made: &'static MadeBuffer<B>,
     #[cfg(feature = "query-get")]
     queries: [Query; Q],
     #[cfg(feature = "query-get")]
@@ -64,8 +72,8 @@ pub struct ActiveEvents<C: ClockSource + 'static, const P: usize, const Q: usize
     asks: Schedule<Q>,
 }
 
-impl<C: ClockSource + 'static, const P: usize, const Q: usize> SessionEvents
-    for ActiveEvents<C, P, Q>
+impl<C: ClockSource + 'static, const P: usize, const Q: usize, const B: usize> SessionEvents
+    for ActiveEvents<C, P, Q, B>
 {
     fn on_event(&mut self, event: IterationEvent<'_>) {
         self.inner.on_event(event);
@@ -81,21 +89,20 @@ impl<C: ClockSource + 'static, const P: usize, const Q: usize> SessionEvents
         }
         let now_ms = wz_runtime_core::TimeSource::now_monotonic_ms(&self.handle.clock);
         let (handle, counts) = (&self.handle, self.counts);
-        let next_put = self
-            .puts
-            .poll(now_ms, &self.publications, |at, publication| {
-                match handle.send_push_literal(publication.key, publication.body.as_bytes(), true) {
-                    Ok(()) => {
-                        counts.record_sent(at);
-                        Outcome::Sent
-                    }
+        let next_put = match self.made.take() {
+            Some(mut made) => self.puts.poll(
+                now_ms,
+                &self.publications,
+                &mut made[..],
+                counts,
+                |_, key, body| match handle.send_push_literal(key, body, true) {
+                    Ok(()) => Outcome::Sent,
                     Err(SendWireError::TransportUnavailable) => Outcome::Retry,
-                    Err(_) => {
-                        counts.record_refused(at);
-                        Outcome::Refused
-                    }
-                }
-            });
+                    Err(_) => Outcome::Refused,
+                },
+            ),
+            None => Some(now_ms + RETRY_MS),
+        };
         #[cfg(feature = "query-get")]
         let (next_ask, pending) = {
             let (inner, state) = (&mut self.inner, self.state);
@@ -132,11 +139,14 @@ impl<C: ClockSource + 'static, const P: usize, const Q: usize> SessionEvents
 }
 
 /// The layer of a node that publishes `publications` and asks `queries`.
-pub struct Active<const P: usize, const Q: usize> {
-    /// What it puts, and how often.
+pub struct Active<const P: usize, const Q: usize, const B: usize> {
+    /// What it puts, and when.
     pub publications: [Publication; P],
     /// Where the puts are counted.
     pub counts: &'static PublishCounts<P>,
+    /// Where a made body is written: `B` is the longest made body of `publications`, which the
+    /// image takes from its declaration. A body longer than it is refused unsent, and counted so.
+    pub made: &'static MadeBuffer<B>,
     /// What it asks, and how often.
     #[cfg(feature = "query-get")]
     pub queries: [Query; Q],
@@ -145,8 +155,10 @@ pub struct Active<const P: usize, const Q: usize> {
     pub state: &'static QueryState<Q>,
 }
 
-impl<C: ClockSource + 'static, const P: usize, const Q: usize> SessionLayer<C> for Active<P, Q> {
-    type Events = ActiveEvents<C, P, Q>;
+impl<C: ClockSource + 'static, const P: usize, const Q: usize, const B: usize> SessionLayer<C>
+    for Active<P, Q, B>
+{
+    type Events = ActiveEvents<C, P, Q, B>;
 
     fn events(
         &mut self,
@@ -162,7 +174,8 @@ impl<C: ClockSource + 'static, const P: usize, const Q: usize> SessionLayer<C> f
             handle: handle.clone(),
             publications: self.publications,
             counts: self.counts,
-            puts: Schedule::new(),
+            puts: Publishing::new(),
+            made: self.made,
             #[cfg(feature = "query-get")]
             queries: self.queries,
             #[cfg(feature = "query-get")]

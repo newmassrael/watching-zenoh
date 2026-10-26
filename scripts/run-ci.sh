@@ -11523,13 +11523,19 @@ layer_c1m_session_lwip() {
     # loop's watch that says each new sample once.
     _runci_guarded_test "C1m mcu latest sample" 9 \
         cargo test -p wz-session-mcu --features client-slot --lib latest::tests --quiet || return 1
-    # The schedule a publisher's puts and a querier's gets are kept on (`slot_schedule`, the same
-    # profile): the first poll at once, the cadence kept on the grid, a late loop sending once, a
-    # retry soon, a lost session starting over, a period of zero not a spin.
+    # The schedule a querier's gets are kept on (`slot_schedule`, the same profile): the first poll
+    # at once, the cadence kept on the grid, a late loop sending once, a retry soon, a lost session
+    # starting over, a period of zero not a spin.
     _runci_guarded_test "C1m mcu schedule" 8 \
         cargo test -p wz-session-mcu --features client-slot --lib slot_schedule::tests --quiet || return 1
-    # The publisher (`slot_publisher`): the counts and the watch that says them.
-    _runci_guarded_test "C1m mcu publisher" 3 \
+    # The publisher (`slot_publisher`), which plays the workload's arrival processes and fills: the
+    # first round at once and the next a gap on, a rate the millisecond does not divide not
+    # drifting, a late round making up its puts within its budget and saying how late, the
+    # publications taken in turn, a made body the fill of its sequence number (and refused when
+    # longer than the buffer), a retry that does not move on, a refusal that does, a lost session
+    # starting over, no publication no wake, the one made buffer lent to one round, the counts and
+    # the watch that says them: 12 = what that command PRINTED.
+    _runci_guarded_test "C1m mcu publisher" 12 \
         cargo test -p wz-session-mcu --features client-slot --lib slot_publisher::tests --quiet || return 1
     # The querier (`slot_querier`, which is `query-get`'s): a reply into the cell of its query after
     # the subscriptions', cut at the size it keeps, an error counted and kept nowhere, a delete, the
@@ -11969,9 +11975,10 @@ layer_c1m_session_lwip() {
         --features control --test control_channel --quiet || return 1
     # The group plane of the client node (`slot_group`, the slot profile with `group`): what a
     # publisher offers is each due put once in the order of the declaration, and again a period on; a
-    # loop that was late owes one put and not the periods it missed; and the members follow the
-    # arrivals and departures and never go below none: 3 = what that command PRINTED.
-    _runci_guarded_test "C1m mcu slot group" 3 \
+    # loop that was late makes up its puts a round at a time, as a session's publisher does; a body
+    # made for each put is refused on the group and the round goes on; and the members follow the
+    # arrivals and departures and never go below none: 4 = what that command PRINTED.
+    _runci_guarded_test "C1m mcu slot group" 4 \
         cargo test -p wz-session-mcu --features group --lib slot_group:: --quiet || return 1
     # The replay of a node's declarations on a session (`slot_client`, the slot profile with
     # `client-slot`): each entry is offered once in order, a refused send resumes at the entry it failed
@@ -12909,12 +12916,20 @@ layer_c1by_replay_engine() {
     (cd crates && cargo clippy -p wz-workload --all-targets --quiet -- -D warnings) || return 1
     (cd crates && cargo test -p wz-workload --quiet) || {
         echo "  C1by FAIL: wz-workload does not pass in isolation"; return 1; }
+    # Without `alloc` too: the forms a fixed-memory interpreter plays (`fill_into`, `apply_into`,
+    # the arrivals) are the same definitions, and the slot publisher builds the crate this way.
+    (cd crates && cargo clippy -p wz-workload --no-default-features --all-targets --quiet -- -D warnings) \
+        || return 1
+    (cd crates && cargo test -p wz-workload --no-default-features --quiet) || {
+        echo "  C1by FAIL: wz-workload without alloc does not pass in isolation"; return 1; }
     listing="$(cd crates && cargo test -p wz-workload --lib -- --list 2>/dev/null)" \
         || { echo "  C1by FAIL: the workload tests did not list"; return 1; }
     missing=0
     for name in \
         mutation::tests::the_generator_is_splitmix64 \
         mutation::tests::the_mutations_are_these_bytes \
+        mutation::tests::a_buffer_too_short_is_refused_and_its_need_stated \
+        mutation::tests::the_allocating_form_gives_the_same_bytes \
         pacing::tests::the_rounding_is_the_standard_one \
         pacing::tests::the_downstream_vectors_hold \
         pacing::tests::a_speed_that_cannot_be_played_is_refused \
@@ -12924,6 +12939,7 @@ layer_c1by_replay_engine() {
         arrivals::tests::a_burst_is_sent_back_to_back \
         arrivals::tests::a_poisson_process_draws_its_gaps_from_the_seed \
         payload::tests::the_fills_are_these_bytes \
+        payload::tests::the_fills_without_an_allocator \
         payload::tests::hex_is_two_digits_a_byte
     do
         grep -qF "$name: test" <<<"$listing" || {
@@ -20303,8 +20319,10 @@ layer_z_zenohd_interop() {
         cargo test -p wz-integration-tests --test wz_declared_node_zenohd_interop \
         -- --ignored --quiet --test-threads=1 || decl_rc=1; }
     # The publisher, the same way: the router's REST stream shows the declared document on the
-    # declared period, and the node puts again with the session that follows a router restart.
-    [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Zpub 2 env WZ_ZENOHD_BIN="$zenohd" \
+    # declared period, the counted stream declared at a rate with a body made for each put shows
+    # every sequence number in order at the rate, and the node puts again with the session that
+    # follows a router restart.
+    [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Zpub 3 env WZ_ZENOHD_BIN="$zenohd" \
         WZ_DECLARED_NODE_REPORTER="$decl_pkg/slot-reporter/bin/declared-node" \
         cargo test -p wz-integration-tests --test wz_declared_publisher_zenohd_interop \
         -- --ignored --quiet --test-threads=1 || decl_rc=1; }
