@@ -105,6 +105,7 @@ use alloc::vec::Vec;
 // pending table.
 use crate::bounded::{BoundedVec, Profile, Storage};
 use crate::caps;
+use crate::key_gate::KeyGate;
 use crate::registry_error::RegisterError;
 use crate::reply_acceptance::{ReplyAcceptance, ReplyAcceptanceStored};
 
@@ -904,6 +905,9 @@ struct Pending<C: ReplySink, P: Storage = Profile> {
 /// hard-capped table and the growable one.
 pub struct ReplyRegistry<C: ReplySink, P: Storage = Profile> {
     pending: BoundedVec<Pending<C, P>, { caps::MAX_PENDING_QUERIES }, P>,
+    /// Which keys a reply from a peer may be on: open takes every key, closed takes the keys of the
+    /// image's key set. Starts as the build's `key-set` policy; see [`Self::set_key_gate`].
+    key_gate: KeyGate<'static>,
     /// transport-shm -- the receive side of shared memory for a reply: the same
     /// state a push has (the negotiated capability, the resolver, the means of
     /// acknowledging the peer's slices, the drop counters, the un-swap). Upstream
@@ -921,6 +925,7 @@ impl<C: ReplySink, P: Storage> Default for ReplyRegistry<C, P> {
     fn default() -> Self {
         Self {
             pending: BoundedVec::default(),
+            key_gate: KeyGate::of_build(),
             #[cfg(feature = "transport-shm")]
             shm: crate::extshm::ShmReceiveState::default(),
         }
@@ -950,6 +955,18 @@ impl<C: ReplySink> ReplyRegistry<C, Profile> {
 }
 
 impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
+    /// Replace the gate that decides which keys a reply from a peer may be on; it starts as what the
+    /// build's `key-set` policy states. A closed image gives the gate over its own table, the one its
+    /// subscriber table holds. The counts of the gate it replaces are not carried over.
+    pub fn set_key_gate(&mut self, gate: KeyGate<'static>) {
+        self.key_gate = gate;
+    }
+
+    /// How many replies from a peer the key gate dropped, by reason.
+    pub const fn key_gate_refused(&self) -> crate::key_gate::Refused {
+        self.key_gate.refused()
+    }
+
     /// transport-shm -- install the resolver a reply's shared-memory slices are read
     /// through. Shared with the subscriber registry by the session, so a reply is
     /// read by the same resolver a push is. Without one a reply whose slice names a
@@ -1200,7 +1217,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
             keyexpr_literal: resolved,
             body,
         };
-        self.fire_replies_for(&inbound);
+        self.fire_replies_for(&inbound, true);
     }
 
     /// The bytes a Reply's Put delivers. A Put in the inline layout is read as it
@@ -1276,7 +1293,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// Final) is identical across origins.
     #[cfg(feature = "alloc")]
     pub fn deliver_local_reply(&mut self, inbound: &InboundReply) {
-        self.fire_replies_for(inbound);
+        self.fire_replies_for(inbound, false);
     }
 
     /// R311gb (Track 2) — no-heap fire entry for the reply plane: deliver
@@ -1291,7 +1308,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// [`deliver_local_final`](Self::deliver_local_final) (a `Copy` rid
     /// scalar). Returns the count of sinks fired.
     pub fn dispatch_borrowed(&mut self, reply: &dyn ReplyView) -> usize {
-        self.fire_replies_for(reply)
+        self.fire_replies_for(reply, true)
     }
 
     /// R239 — loopback delivery of an in-process `ResponseFinal`-
@@ -1451,7 +1468,17 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// AHEAD of consolidation, which is why it is here rather than in a sink
     /// decorator. A refused reply is not counted as fired: the return value is
     /// the number of callers that actually saw it.
-    fn fire_replies_for(&mut self, reply: &dyn ReplyView) -> usize {
+    ///
+    /// A closed key set also drops a reply a PEER sent on a key outside the set
+    /// (`docs/closed-key-set.md`), at the same seam, so no path skips it: an error reply names no
+    /// key and a reply of the application's own (loopback) is not a peer's, so neither is gated.
+    fn fire_replies_for(&mut self, reply: &dyn ReplyView, from_peer: bool) -> usize {
+        if from_peer
+            && reply.kind() != crate::reply_sink::ReplyKind::Err
+            && self.key_gate.admit_key(reply.keyexpr()).is_err()
+        {
+            return 0;
+        }
         let rid = reply.rid();
         let mut fired: usize = 0;
         for pending in self.pending.iter_mut() {
@@ -4346,6 +4373,64 @@ mod tests {
             put_encoding: None,
         });
         assert_eq!(none, 0, "non-matching rid does not fire");
+    }
+
+    /// A closed key set drops a reply a peer sent on a key outside the set, on every path that
+    /// reaches the shared seam, and leaves an error reply and the application's own loopback reply
+    /// alone. The pending query stays, since only its final removes it.
+    #[test]
+    fn a_closed_key_set_drops_a_peers_reply_outside_it() {
+        use crate::key_catalogue::tests::TABLE;
+        use crate::key_gate::KeyGate;
+        use crate::reply_sink::BorrowedReply;
+        let mut reg = ReplyRegistry::new();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = hits.clone();
+        reg.register(
+            5,
+            1,
+            None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
+            move |_: &dyn ReplyView| {
+                h.fetch_add(1, Ordering::SeqCst);
+            },
+            |_rid| {},
+        );
+        reg.set_key_gate(KeyGate::closed(&TABLE));
+        let reply = |keyexpr, kind| BorrowedReply {
+            rid: 5,
+            keyexpr,
+            kind,
+            payload: b"v",
+            err_encoding: None,
+            attachment: None,
+            put_encoding: None,
+        };
+        // `a/b` is a key of the set; `a/c` is not.
+        assert_eq!(reg.dispatch_borrowed(&reply("a/b", ReplyKind::Put)), 1);
+        assert_eq!(reg.dispatch_borrowed(&reply("a/c", ReplyKind::Put)), 0);
+        assert_eq!(reg.dispatch_borrowed(&reply("a/c", ReplyKind::Del)), 0);
+        assert_eq!(reg.key_gate_refused().outside_set, 2);
+        // An error reply names no key the set could hold.
+        assert_eq!(reg.dispatch_borrowed(&reply("", ReplyKind::Err)), 1);
+        // The application's own loopback reply is not a peer's.
+        let own = InboundReply {
+            rid: 5,
+            keyexpr_literal: "a/c".to_string(),
+            body: InboundReplyBody::Put {
+                payload: b"v".to_vec().into(),
+                attachment: None,
+                encoding: None,
+                source_info: None,
+                timestamp: None,
+            },
+        };
+        reg.deliver_local_reply(&own);
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
+        assert_eq!(reg.len(), 1, "a dropped reply does not retire the query");
+        // An open registry takes every key.
+        reg.set_key_gate(KeyGate::open());
+        assert_eq!(reg.dispatch_borrowed(&reply("a/c", ReplyKind::Put)), 1);
     }
 }
 

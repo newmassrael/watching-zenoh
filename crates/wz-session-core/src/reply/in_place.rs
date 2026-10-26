@@ -328,7 +328,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
             #[cfg(feature = "alloc")]
             timestamp_hint: OnceCell::new(),
         };
-        self.fire_replies_for(&reply);
+        self.fire_replies_for(&reply, true);
         Ok(())
     }
 

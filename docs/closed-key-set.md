@@ -338,6 +338,25 @@ publishes it receives) is the per-peer allowance, phase 4.
   query, its declarations, what this node sends it), and a node's code that reads `ALLOWED_PEERS` and
   `set_class`, which is the slot node's and the cooperative engine's.
 
+## A reply's key, as built
+
+- **The seam.** Every delivery of a reply, from the wire (owned, lent in place and borrowed) and from the
+  loopback, reaches `ReplyRegistry::fire_replies_for`, where the reply-keyexpr acceptance already ran.
+  Searched this time in the child module too (`reply/in_place.rs` calls it at one place). The gate sits
+  there: `ReplyRegistry` holds a `KeyGate`, starting as the build's `key-set` policy and replaced with
+  `set_key_gate`, and a reply a peer sent on a key outside the set is dropped before any pending
+  query is asked, counted as `outside_set`.
+- **What is not gated.** An error reply, which names no key, and the application's own loopback reply
+  (`deliver_local_reply`), which is not a peer's, as a local publish is not on the subscriber side.
+  The allowance is not asked for a reply: it decides what a peer may publish, and a reply is an
+  answer to a query this node asked.
+- **Tested** by a unit test of the registry (a key of the set, a key outside it as a Put and as a Del,
+  an error reply, a loopback reply, an open registry; the pending query stays), which fails with the
+  gate disabled. It needs the features `codec-response` and `codec-response-final`, which the default
+  build does not have, so it was run with them on.
+- **Not done.** No image calls `set_key_gate` on its reply registry yet; a node adopting its table
+  gives the same gate to both registries.
+
 ## What is not decided
 
 - **D4 for the owner.** Does a closed image admit a message whose key is undeclared but matches a
