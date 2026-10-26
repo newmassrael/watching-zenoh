@@ -146,21 +146,58 @@ def inventory() -> list[dict]:
     return json.loads(run.stdout)
 
 
-def suffix_index(paths: list[str]) -> dict[str, set[str]]:
+def suffix_index(
+    paths: list[str], whole_only: frozenset[str] | set[str] = frozenset()
+) -> dict[str, set[str]]:
     """Every `/`-boundary suffix of every path, to the paths carrying it.
 
     Citations are written as SUFFIXES (`interceptor/access_control.rs`), never
     repo-relative, so resolving one means asking which tracked files end that
     way -- and how MANY, which is the whole of rule 3.
+
+    A path in `whole_only` is indexed under its FULL path alone: see `family_derived`.
     """
     idx: dict[str, set[str]] = collections.defaultdict(set)
     for path in paths:
         if not path:
             continue
+        if path in whole_only:
+            idx[path].add(path)
+            continue
         parts = path.split("/")
         for i in range(len(parts)):
             idx["/".join(parts[i:])].add(path)
     return idx
+
+
+#: The notice a file of the zenoh compatibility family carries when it is upstream's file with a
+#: header changed (`docs/build-configuration.md` C13; the family notice gate requires it).
+DERIVED_FROM_UPSTREAM = re.compile(r"Derived from zenoh[\w-]* \d")
+
+
+def family_derived(paths: list[str]) -> set[str]:
+    """The tracked files that are upstream's own files, carried under the family's names.
+
+    R3694. A citation that names the end of a path of the family is, in every reason of this store, upstream's
+    file of that name: reasons cite upstream by the end of its path. The family keeps a file of the
+    same name under `crates/wz-zenoh*/src/`, and before it was indexed under every suffix, so the
+    day a family file took a name upstream also has, every citation of upstream's file turned into
+    a citation of wz's (a line past the end of a 23-line file, or worse, a line inside one). Such a
+    file is indexed under its full path only: `crates/wz-zenoh/src/api/session.rs:5` still names
+    it, and the same name without the crate's directories names upstream's, as it always did.
+    """
+    out: set[str] = set()
+    for path in paths:
+        if not (path.startswith("crates/wz-zenoh") and path.endswith(".rs")):
+            continue
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                head = "".join(line for _, line in zip(range(40), fh))
+        except OSError:
+            continue
+        if DERIVED_FROM_UPSTREAM.search(head):
+            out.add(path)
+    return out
 
 
 def git_paths(args: list[str]) -> list[str]:
@@ -181,7 +218,9 @@ def wz_paths(paths: list[str]) -> list[str]:
 
 def audit() -> tuple[list[str], dict[str, int]]:
     rows = inventory()
-    now = suffix_index(wz_paths(git_paths(["ls-files"])))
+    tracked = wz_paths(git_paths(["ls-files"]))
+    derived = family_derived(tracked)
+    now = suffix_index(tracked, derived)
     # Every path the history of the tree being graded has ever ADDED, DELETED or
     # RENAMED. A citation whose path is here but not in `now` is one wz used to
     # carry and dropped; a path in neither is upstream's, cited correctly.
@@ -194,7 +233,8 @@ def audit() -> tuple[list[str], dict[str, int]]:
     ever = suffix_index(
         wz_paths(
             git_paths(["log", "HEAD", "--pretty=format:", "--name-only", "--diff-filter=ADR"])
-        )
+        ),
+        derived,
     )
 
     findings: list[str] = []
@@ -348,6 +388,23 @@ SELFTEST: tuple[tuple[str, list[dict], int, str | None], ...] = (
         [{"id": "dead", "reason": "see wz-ap-demo/src/link_driver.rs:40"}],
         1,
         "no longer has",
+    ),
+    # R3694: the family keeps files under names upstream also has. A citation by the END of upstream's
+    # path is upstream's, whatever the family file of that name holds; one by the family file's
+    # own path is still about it.
+    (
+        "a citation of upstream's file whose name a family file also ends is FOREIGN",
+        # Written in two literals so that this line is not itself a root-less citation of upstream's
+        # file, which the anchor gate would count against its budget.
+        [{"id": "fam-up", "reason": "see api/" "session.rs:1374"}],
+        0,
+        None,
+    ),
+    (
+        "a citation by the full path of a family file still resolves, and fails past its end",
+        [{"id": "fam-own", "reason": "see crates/wz-zenoh/src/api/session.rs:999999"}],
+        1,
+        "points past the end of",
     ),
     (
         "no citation anywhere is a FAILURE, not a pass",
