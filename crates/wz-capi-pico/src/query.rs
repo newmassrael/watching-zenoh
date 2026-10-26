@@ -13,41 +13,25 @@
 //! independence (each face's wz session allocates its own request ids) makes
 //! cross-face rid collision unrepresentable rather than merely untested.
 //!
-//! ## What is deliberately NOT exported, and why that is loud
+//! ## The owned query
 //!
-//! The **owned-query family** (`z_query_clone` / `z_query_take_from_loaned` /
-//! the `z_owned_query_t` ownership set) is withheld. pico's channel handlers
+//! The owned-query family (`z_query_clone` / `z_query_take_from_loaned` / the
+//! `z_owned_query_t` ownership set) is exported, with the query's accessors
+//! (`z_query_encoding`, `z_query_source_info`, `z_query_accepts_replies`) and
+//! `z_queryable_id`. pico's channel handlers
 //! (`include/zenoh-pico/api/handlers.h`, e.g. `z_fifo_channel_query_new`) are
-//! `static inline` — they compile into the USER's object file and their bodies
-//! call `z_query_take_from_loaned` / `z_query_move` / `z_query_drop`. Exporting
-//! that family WITHOUT first building the retained-responder seam wz lacks (see
-//! below) would make every channel-based queryable compile, link, and then
-//! **silently** fail to answer. Withholding it instead yields an undefined
-//! symbol at link time — loud, and the same round boundary R1 drew (R1 shipped
-//! pub/sub; a get program failed to link rather than silently no-op).
+//! `static inline`: they compile into the USER's object file and their bodies
+//! call `z_query_take_from_loaned` / `z_query_move` / `z_query_drop`, so a
+//! program that keeps a query and answers it later links against these.
 //!
-//! The seam that family needs is a NEW wz core concept, not a binding detail:
-//! [`wz_session_core::query_sink::ReplyOut`] is a borrowed `&mut` reply
-//! ACCUMULATOR whose `with_responder` / `clear_responder` only stamp a responder
-//! IDENTITY (zid + eid) — not a detachment. Nothing in the tree owns a responder
-//! past the callback, and wz sends the `ResponseFinal` once the callback
-//! returns. A retained-responder + deferred-final concept must land in
-//! wz-session-core before an owned query can outlive its callback.
-//!
-//! Two accessors are withheld on the same principle, each because it returns a
-//! type family this round does not build — a missing symbol is a link error,
-//! while a stub returning null would be a silent lie:
-//! - `z_query_encoding` → `z_loaned_encoding_t` (the encoding family).
-//! - `z_query_source_info` → `z_source_info_t` (the source-info family).
-//!
-//! That is the COMPLETE withheld set for a DEFAULT pico build, which is the
-//! configuration this crate's ABI targets. `z_queryable_id` looks like a third
-//! but is not: it is `#if defined(Z_FEATURE_UNSTABLE_API)`
-//! (`primitives.h:2884-2886`) and that flag defaults to 0
-//! (`~/zenoh-pico/CMakeLists.txt:316`), so a default build has no such symbol to
-//! match. Everything else in pico's default queryable surface is exported —
-//! including `z_query_accepts_replies`, which is the `_anyke` accessor
-//! [`z_query_reply`]'s coverage gate turns on.
+//! What lets a kept query answer after its callback is the engine's
+//! [`HeldQuery`] (R2953, open-debt item 836): it answers on the query's own
+//! route and holds the `ResponseFinal` until the copy is let go, as pico's
+//! `_z_query_clear` does. The family was withheld until that seam existed,
+//! because exporting it without one would have made every channel-based
+//! queryable link and then silently fail to answer; the owned query is now
+//! deferred through the held query and does not depend on the callback's
+//! `ReplyOut`, which only accumulates replies for the callback's own return.
 //!
 //! ## Reply accumulation
 //!

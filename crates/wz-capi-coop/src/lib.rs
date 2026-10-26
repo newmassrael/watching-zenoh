@@ -25,8 +25,11 @@
 //! With `scout` it also scouts: a window a program runs on its own thread, which needs no
 //! session (`scout`).
 //!
-//! What it does not do yet, each a later step of the note: the listening role and the advanced
-//! plane.
+//! With `ticker` it runs a program's periodic jobs from the call that steps the session, which
+//! the advanced plane's heartbeat, periodic re-ask and retention sweep are; the plane itself is
+//! the neutral `wz-ext-pubsub`'s, hosted over the engine's port.
+//!
+//! What it does not do yet, a later step of the note: the listening role.
 
 mod engine;
 #[cfg(feature = "scout")]
