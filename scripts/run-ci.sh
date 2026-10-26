@@ -13489,6 +13489,11 @@ layer_c1bz_docs_resolve() {
     # findings its docs held (links to the session-bound handle, the plane and the cache) went
     # with them; the module doc that stays names its items in plain code and the new file holds
     # the budget of 0.
+    # wz-runtime-tokio 433 -> 427, by removal, COUNTED on this lane's command: the advanced
+    # subscriber's options, plans and ordering machine moved to wz-ext-pubsub
+    # (`advanced_subscriber/`), and the six findings their docs held (links to the host's
+    # subscriber, its session and its recovery helpers) went with them; the new module's docs name
+    # those in plain code and it holds the budget of 0.
     # wz-capi-pico 41 -> 40, by removal: the scouting plane's module doc linked
     # `ScoutedHello`, which that file does not import, and names the scouted hello in plain words
     # now that the window is the session's and not the tokio engine's (the cooperative scouting
@@ -13503,7 +13508,7 @@ layer_c1bz_docs_resolve() {
         wz-mcu-session-acceptor:1
         wz-routing-graph:5
         wz-runtime-coop:7
-        wz-runtime-tokio:433
+        wz-runtime-tokio:427
         wz-session-core:494
         wz-switchboard-codegen:8
         zenoh-pico-sys:3
