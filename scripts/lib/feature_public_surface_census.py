@@ -359,14 +359,19 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
     # R3673 -- the top crate, `zenoh`, the eighth family member with a feature of its own.
     # R3681 -- `unstable` and `internal` join with the cancellation module, the first public
     # items of the crate that those two features gate.
+    # R3688 -- `plugins` joins with the config module: it gates the subscription of the
+    # configuration's notifier, and is enabled on the crate by `conformance/differential`, which
+    # exercises what a subscriber receives.
     "zenoh": (
         "the top crate of the zenoh compatibility family: `shared-memory` and `unstable` are "
         "arms of upstream's own public surface that `scripts/lib/rust_api_surface.py` emits "
         "the wz crate with and holds it to (`shared-memory` adds the buffer of a payload in "
-        "shared memory and the `shm` module, `unstable` the cancellation token), and `internal` "
+        "shared memory and the `shm` module, `unstable` the cancellation token), `internal` "
         "is enabled on the crate by `conformance/differential`, which exercises the group under "
-        "the token with it. Held to `FAMILY_GRADED` below rather than to this sentence",
-        frozenset({"internal", "shared-memory", "unstable"}),
+        "the token with it, and `plugins` is enabled there too, which exercises the "
+        "subscription of the configuration's notifier. Held to `FAMILY_GRADED` below rather "
+        "than to this sentence",
+        frozenset({"internal", "plugins", "shared-memory", "unstable"}),
     ),
     "wz-capi-core": (
         "the ABI-neutral session model: a workspace-internal rlib whose only "
@@ -1200,7 +1205,7 @@ FAMILY_GRADED: dict[str, frozenset[str]] = {
     "zenoh-codec": frozenset({"shared-memory"}),
     "zenoh-shm": frozenset({"test"}),
     "zenoh-util": frozenset({"test"}),
-    "zenoh": frozenset({"internal", "shared-memory", "unstable"}),
+    "zenoh": frozenset({"internal", "plugins", "shared-memory", "unstable"}),
 }
 
 #: The manifest of the differential workspace, whose dependency line names the features the wz

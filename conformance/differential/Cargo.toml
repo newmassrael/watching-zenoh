@@ -70,12 +70,12 @@ up_util = { package = "zenoh-util", version = "=1.10.1", features = ["test"] }
 wz_util = { package = "zenoh-util", path = "../../crates/wz-zenoh-util", features = ["test"] }
 humantime = "2"
 # `zenoh`: the pair again, each over its own family crates, each built with `unstable` and
-# `internal` (the identifier and the schema of an `Encoding`). Without the default features: the
-# transports are not what the `bytes` module of the first slice is about, and upstream's would be
-# built for nothing. The `shared-memory` arm is in `../differential-shm`, because it changes the
-# types of the protocol.
-up_zenoh = { package = "zenoh", version = "=1.10.1", default-features = false, features = ["unstable", "internal"] }
-wz_zenoh = { package = "zenoh", path = "../../crates/wz-zenoh", features = ["unstable", "internal"] }
+# `internal` (the identifier and the schema of an `Encoding`) and `plugins` (the subscription of the
+# configuration's notifier). Without the default features: the transports are not what the `bytes`
+# and `config` modules are about, and upstream's would be built for nothing. The `shared-memory` arm
+# is in `../differential-shm`, because it changes the types of the protocol.
+up_zenoh = { package = "zenoh", version = "=1.10.1", default-features = false, features = ["unstable", "internal", "plugins"] }
+wz_zenoh = { package = "zenoh", path = "../../crates/wz-zenoh", features = ["unstable", "internal", "plugins"] }
 bytes = "1.11.0"
 # `zenoh-config`: the pair again, each over its own family crates, each built with `unstable` (the
 # TOML reader and the unstable keys) and `internal`. `serde_yaml` and `json5` are what its files are

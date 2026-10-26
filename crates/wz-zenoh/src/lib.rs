@@ -21,14 +21,27 @@
 // resolve until then (docs/zenoh-api-on-the-engine.md, section 6).
 #![allow(rustdoc::broken_intra_doc_links)]
 
-// `bail!` of `zenoh-result`, which the cancellation token of the `unstable` arm uses; upstream
-// takes the macros of `zenoh-result` and `zenoh-core` for the whole crate, and each joins here with
-// the first slice that calls it, so that a build that calls none does not carry an unused import.
-#[cfg(feature = "unstable")]
+// The macros of `zenoh-result` (`bail!`, `zerror!`), which the configuration and the cancellation
+// token of the `unstable` arm use; upstream takes them, and those of `zenoh-core`, for the whole
+// crate, and each joins here with the first slice that calls it, so that a build that calls none
+// does not carry an unused import.
 #[macro_use]
 extern crate zenoh_result;
 
 mod api;
+
+pub use zenoh_core::{Resolvable, Resolve, Wait};
+/// A Zenoh error.
+pub use zenoh_result::Error;
+/// A Zenoh result.
+pub use zenoh_result::ZResult as Result;
+#[doc(inline)]
+pub use zenoh_util::{init_log_from_env_or, try_init_log_from_env};
+
+// Upstream's root also re-exports `scout`, `open` and `Session`, which arrive with the slices that
+// give them a body.
+#[doc(inline)]
+pub use crate::config::Config;
 
 /// # Payload primitives and encoding
 ///
@@ -132,4 +145,36 @@ pub mod cancellation {
     pub use crate::api::cancellation::CancellationToken;
     #[cfg(feature = "internal")]
     pub use crate::api::cancellation::{SyncGroup, SyncGroupNotifier};
+}
+
+/// # Configuration to pass to [`open`] and [`scout`] functions and associated constants.
+///
+/// The [`Config`] object contains all parameters necessary to configure
+/// a Zenoh session or the scouting process. Usually a configuration file is stored in the json or
+/// yaml format and loaded using the [`Config::from_file`](crate::config::Config::from_file) method.
+/// It's also possible to read or
+/// modify individual elements of the `Config` with the
+/// [`Config::insert_json5`](crate::config::Config::insert_json5)
+/// and [`Config::get_json`](crate::config::Config::get_json) methods.
+///
+/// An example configuration file is available in the [`Config`] documentation section
+/// and in the Zenoh repository as
+/// [DEFAULT_CONFIG.json5](https://github.com/eclipse-zenoh/zenoh/blob/release/1.0.0/DEFAULT_CONFIG.json5)
+///
+/// # Example
+/// ```no_run
+/// # #[tokio::main]
+/// # async fn main() {
+/// use zenoh::config::Config;
+/// use serde_json::json;
+/// let mut config = Config::from_file("path/to/config.json5").unwrap();
+/// config.insert_json5("scouting/multicast/enabled", &json!(false).to_string()).unwrap();
+/// let session = zenoh::open(config).await.unwrap();
+/// # }
+pub mod config {
+    pub use zenoh_config::{EndPoint, EndPoints, Locator, WhatAmI, WhatAmIMatcher, ZenohId};
+
+    pub use crate::api::config::Config;
+    #[zenoh_macros::unstable]
+    pub use crate::api::config::Notifier;
 }

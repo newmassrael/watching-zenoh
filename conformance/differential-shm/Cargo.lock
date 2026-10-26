@@ -2628,16 +2628,21 @@ name = "zenoh"
 version = "1.10.1"
 dependencies = [
  "bytes",
+ "flume",
  "futures",
+ "json5",
  "phf",
+ "serde",
  "tokio",
  "zenoh-buffers 1.10.1",
+ "zenoh-config 1.10.1",
  "zenoh-core 1.10.1",
  "zenoh-macros 1.10.1",
  "zenoh-protocol 1.10.1",
  "zenoh-result 1.10.1",
  "zenoh-runtime 1.10.1",
  "zenoh-shm 1.10.1",
+ "zenoh-util 1.10.1",
 ]
 
 [[package]]
@@ -2675,7 +2680,7 @@ dependencies = [
  "zenoh-buffers 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-codec 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-collections 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "zenoh-config",
+ "zenoh-config 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-core 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-keyexpr 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-link",
@@ -2689,7 +2694,7 @@ dependencies = [
  "zenoh-sync",
  "zenoh-task",
  "zenoh-transport",
- "zenoh-util",
+ "zenoh-util 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -2755,6 +2760,30 @@ dependencies = [
 [[package]]
 name = "zenoh-config"
 version = "1.10.1"
+dependencies = [
+ "json5",
+ "nonempty-collections",
+ "num_cpus",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "serde_yaml",
+ "toml",
+ "tracing",
+ "uhlc",
+ "validated_struct",
+ "zenoh-core 1.10.1",
+ "zenoh-keyexpr 1.10.1",
+ "zenoh-macros 1.10.1",
+ "zenoh-protocol 1.10.1",
+ "zenoh-result 1.10.1",
+ "zenoh-util 1.10.1",
+]
+
+[[package]]
+name = "zenoh-config"
+version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "59799d556b4fac79886cb0a9c90f3bc48d0894816b99c8a90a3509b1809a02dd"
 dependencies = [
@@ -2775,7 +2804,7 @@ dependencies = [
  "zenoh-macros 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-protocol 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-result 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "zenoh-util",
+ "zenoh-util 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -2849,7 +2878,7 @@ version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c55c4fbc923328f0b62b1b492723ff53b757a36421f70218e652f0aa899cde6c"
 dependencies = [
- "zenoh-config",
+ "zenoh-config 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-link-commons",
  "zenoh-protocol 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-result 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -2876,7 +2905,7 @@ dependencies = [
  "zenoh-protocol 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-result 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-runtime 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "zenoh-util",
+ "zenoh-util 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -2912,11 +2941,11 @@ dependencies = [
  "serde",
  "stabby",
  "tracing",
- "zenoh-config",
+ "zenoh-config 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-keyexpr 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-macros 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-result 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "zenoh-util",
+ "zenoh-util 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -3117,7 +3146,7 @@ dependencies = [
  "tracing",
  "zenoh-buffers 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-codec 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "zenoh-config",
+ "zenoh-config 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-core 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-crypto",
  "zenoh-link",
@@ -3129,7 +3158,31 @@ dependencies = [
  "zenoh-stats",
  "zenoh-sync",
  "zenoh-task",
- "zenoh-util",
+ "zenoh-util 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "zenoh-util"
+version = "1.10.1"
+dependencies = [
+ "async-trait",
+ "const_format",
+ "flume",
+ "home",
+ "humantime",
+ "lazy_static",
+ "libloading",
+ "pnet_datalink",
+ "schemars 1.2.3",
+ "serde",
+ "serde_json",
+ "shellexpand",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "winapi",
+ "zenoh-core 1.10.1",
+ "zenoh-result 1.10.1",
 ]
 
 [[package]]

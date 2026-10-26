@@ -17,9 +17,18 @@ fn zenoh::bytes::ZBytesReader::is_empty(&Self) -> bool ; in impl zenoh::bytes::Z
 fn zenoh::bytes::ZBytesReader::remaining(&Self) -> usize ; in impl zenoh::bytes::ZBytesReader<'_>
 fn zenoh::bytes::ZBytesWriter::append(&mut Self, zenoh::bytes::ZBytes) ; in impl zenoh::bytes::ZBytesWriter
 fn zenoh::bytes::ZBytesWriter::finish(Self) -> zenoh::bytes::ZBytes ; in impl zenoh::bytes::ZBytesWriter
+fn zenoh::config::Config::from_env() -> zenoh::Result<Self> ; in impl zenoh::config::Config
+fn zenoh::config::Config::from_file<P: core::convert::AsRef<std::path::Path>>(P) -> zenoh::Result<Self> ; in impl zenoh::config::Config
+fn zenoh::config::Config::from_json5(&str) -> zenoh::Result<zenoh::config::Config> ; in impl zenoh::config::Config
+fn zenoh::config::Config::get_json(&Self, &str) -> zenoh::Result<alloc::string::String> ; in impl zenoh::config::Config
+fn zenoh::config::Config::insert_json5(&mut Self, &str, &str) -> zenoh::Result<()> ; in impl zenoh::config::Config
+fn zenoh::config::Config::remove<K: core::convert::AsRef<str>>(&mut Self, K) -> zenoh::Result<()> ; in impl zenoh::config::Config
+fn zenoh::config::Config::try_insert_json5_array_item(&mut Self, &str, &str) -> zenoh::Result<bool> ; in impl zenoh::config::Config
+fn zenoh::config::Config::try_remove_json5_array_item<K: core::convert::AsRef<str>>(&mut Self, K) -> zenoh::Result<bool> ; in impl zenoh::config::Config
 impl core::clone::Clone for zenoh::bytes::Encoding
 impl core::clone::Clone for zenoh::bytes::OptionZBytes
 impl core::clone::Clone for zenoh::bytes::ZBytes
+impl core::clone::Clone for zenoh::config::Config
 impl core::cmp::Eq for zenoh::bytes::Encoding
 impl core::cmp::Eq for zenoh::bytes::OptionZBytes
 impl core::cmp::Eq for zenoh::bytes::ZBytes
@@ -38,26 +47,47 @@ impl core::convert::From for zenoh_protocol::zenoh::ext::AttachmentType
 impl core::default::Default for zenoh::bytes::Encoding
 impl core::default::Default for zenoh::bytes::OptionZBytes
 impl core::default::Default for zenoh::bytes::ZBytes
+impl core::default::Default for zenoh::config::Config
 impl core::fmt::Debug for zenoh::bytes::Encoding
 impl core::fmt::Debug for zenoh::bytes::OptionZBytes
 impl core::fmt::Debug for zenoh::bytes::ZBytes
 impl core::fmt::Debug for zenoh::bytes::ZBytesReader
 impl core::fmt::Debug for zenoh::bytes::ZBytesSliceIterator
 impl core::fmt::Debug for zenoh::bytes::ZBytesWriter
+impl core::fmt::Debug for zenoh::config::Config
 impl core::fmt::Display for zenoh::bytes::Encoding
+impl core::fmt::Display for zenoh::config::Config
 impl core::hash::Hash for zenoh::bytes::Encoding
 impl core::iter::traits::iterator::Iterator for zenoh::bytes::ZBytesSliceIterator
 impl core::marker::StructuralPartialEq for zenoh::bytes::Encoding
 impl core::marker::StructuralPartialEq for zenoh::bytes::OptionZBytes
 impl core::marker::StructuralPartialEq for zenoh::bytes::ZBytes
 impl core::str::traits::FromStr for zenoh::bytes::Encoding
+impl serde_core::de::Deserialize for zenoh::config::Config
+impl serde_core::ser::Serialize for zenoh::config::Config
 impl std::io::Read for zenoh::bytes::ZBytesReader
 impl std::io::Seek for zenoh::bytes::ZBytesReader
 impl std::io::Write for zenoh::bytes::ZBytesWriter
 mod zenoh::bytes
+mod zenoh::config
+reexport enum zenoh::config::EndPoints = zenoh_protocol::core::endpoint::EndPoints
+reexport enum zenoh::config::WhatAmI = zenoh_protocol::core::whatami::WhatAmI
+reexport fn zenoh::init_log_from_env_or = zenoh_util::log::init_log_from_env_or
+reexport fn zenoh::try_init_log_from_env = zenoh_util::log::try_init_log_from_env
+reexport struct zenoh::config::EndPoint = zenoh_protocol::core::endpoint::EndPoint
+reexport struct zenoh::config::Locator = zenoh_protocol::core::locator::Locator
+reexport struct zenoh::config::WhatAmIMatcher = zenoh_protocol::core::whatami::WhatAmIMatcher
+reexport struct zenoh::config::ZenohId = zenoh_config::wrappers::ZenohId
+reexport trait zenoh::Resolvable = zenoh_core::Resolvable
+reexport trait zenoh::Resolve = zenoh_core::Resolve
+reexport trait zenoh::Wait = zenoh_core::Wait
+reexport type zenoh::Error = zenoh_result::Error
+reexport type zenoh::Result = zenoh_result::ZResult
+struct zenoh::Config
 struct zenoh::bytes::Encoding
 struct zenoh::bytes::OptionZBytes
 struct zenoh::bytes::ZBytes
 struct zenoh::bytes::ZBytesReader
 struct zenoh::bytes::ZBytesSliceIterator
 struct zenoh::bytes::ZBytesWriter
+struct zenoh::config::Config

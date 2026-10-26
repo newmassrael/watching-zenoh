@@ -21,6 +21,22 @@ fn zenoh::bytes::ZBytesWriter::append(&mut Self, zenoh::bytes::ZBytes) ; in impl
 fn zenoh::bytes::ZBytesWriter::finish(Self) -> zenoh::bytes::ZBytes ; in impl zenoh::bytes::ZBytesWriter
 fn zenoh::cancellation::CancellationToken::cancel(&Self) -> zenoh::api::cancellation::CancelResult ; in impl zenoh::cancellation::CancellationToken
 fn zenoh::cancellation::CancellationToken::is_cancelled(&Self) -> bool ; in impl zenoh::cancellation::CancellationToken
+fn zenoh::config::Config::from_deserializer<'0, D: serde_core::de::Deserializer<'0>>(D) -> core::result::Result<Self, core::result::Result<Self, <D as serde_core::de::Deserializer>::Error>> where Self: serde_core::de::Deserialize<'0> ; in impl zenoh::config::Config
+fn zenoh::config::Config::from_env() -> zenoh::Result<Self> ; in impl zenoh::config::Config
+fn zenoh::config::Config::from_file<P: core::convert::AsRef<std::path::Path>>(P) -> zenoh::Result<Self> ; in impl zenoh::config::Config
+fn zenoh::config::Config::from_json5(&str) -> zenoh::Result<zenoh::config::Config> ; in impl zenoh::config::Config
+fn zenoh::config::Config::get_json(&Self, &str) -> zenoh::Result<alloc::string::String> ; in impl zenoh::config::Config
+fn zenoh::config::Config::insert_json5(&mut Self, &str, &str) -> zenoh::Result<()> ; in impl zenoh::config::Config
+fn zenoh::config::Config::remove<K: core::convert::AsRef<str>>(&mut Self, K) -> zenoh::Result<()> ; in impl zenoh::config::Config
+fn zenoh::config::Config::try_insert_json5_array_item(&mut Self, &str, &str) -> zenoh::Result<bool> ; in impl zenoh::config::Config
+fn zenoh::config::Config::try_remove_json5_array_item<K: core::convert::AsRef<str>>(&mut Self, K) -> zenoh::Result<bool> ; in impl zenoh::config::Config
+fn zenoh::config::Notifier::insert_json5(&Self, &str, &str) -> zenoh::Result<()> ; in impl zenoh::config::Notifier<zenoh_config::ExpandedConfig>
+fn zenoh::config::Notifier::lock(&Self) -> std::sync::poison::mutex::MutexGuard<'_, zenoh_config::ExpandedConfig> ; in impl zenoh::config::Notifier<zenoh_config::ExpandedConfig>
+fn zenoh::config::Notifier::new(zenoh_config::ExpandedConfig) -> Self ; in impl zenoh::config::Notifier<zenoh_config::ExpandedConfig>
+fn zenoh::config::Notifier::notify<K: core::convert::AsRef<str>>(&Self, K) ; in impl zenoh::config::Notifier<zenoh_config::ExpandedConfig>
+fn zenoh::config::Notifier::remove<K: core::convert::AsRef<str>>(&Self, K) -> zenoh::Result<()> ; in impl zenoh::config::Notifier<zenoh_config::ExpandedConfig>
+fn zenoh::config::Notifier::try_insert_json5_array_item(&Self, &str, &str) -> zenoh::Result<bool> ; in impl zenoh::config::Notifier<zenoh_config::ExpandedConfig>
+fn zenoh::config::Notifier::try_remove_json5_array_item<K: core::convert::AsRef<str>>(&Self, K) -> zenoh::Result<bool> ; in impl zenoh::config::Notifier<zenoh_config::ExpandedConfig>
 glob zenoh::shm::* = zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend
 glob zenoh::shm::* = zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_binary_heap
 glob zenoh::shm::* = zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend_buddy
@@ -29,6 +45,8 @@ impl core::clone::Clone for zenoh::bytes::Encoding
 impl core::clone::Clone for zenoh::bytes::OptionZBytes
 impl core::clone::Clone for zenoh::bytes::ZBytes
 impl core::clone::Clone for zenoh::cancellation::CancellationToken
+impl core::clone::Clone for zenoh::config::Config
+impl core::clone::Clone for zenoh::config::Notifier
 impl core::cmp::Eq for zenoh::bytes::Encoding
 impl core::cmp::Eq for zenoh::bytes::OptionZBytes
 impl core::cmp::Eq for zenoh::bytes::ZBytes
@@ -48,6 +66,7 @@ impl core::default::Default for zenoh::bytes::Encoding
 impl core::default::Default for zenoh::bytes::OptionZBytes
 impl core::default::Default for zenoh::bytes::ZBytes
 impl core::default::Default for zenoh::cancellation::CancellationToken
+impl core::default::Default for zenoh::config::Config
 impl core::fmt::Debug for zenoh::bytes::Encoding
 impl core::fmt::Debug for zenoh::bytes::OptionZBytes
 impl core::fmt::Debug for zenoh::bytes::ZBytes
@@ -55,25 +74,41 @@ impl core::fmt::Debug for zenoh::bytes::ZBytesReader
 impl core::fmt::Debug for zenoh::bytes::ZBytesSliceIterator
 impl core::fmt::Debug for zenoh::bytes::ZBytesWriter
 impl core::fmt::Debug for zenoh::cancellation::CancellationToken
+impl core::fmt::Debug for zenoh::config::Config
+impl core::fmt::Debug for zenoh::config::Notifier
 impl core::fmt::Display for zenoh::bytes::Encoding
+impl core::fmt::Display for zenoh::config::Config
 impl core::hash::Hash for zenoh::bytes::Encoding
 impl core::iter::traits::iterator::Iterator for zenoh::bytes::ZBytesSliceIterator
 impl core::marker::StructuralPartialEq for zenoh::bytes::Encoding
 impl core::marker::StructuralPartialEq for zenoh::bytes::OptionZBytes
 impl core::marker::StructuralPartialEq for zenoh::bytes::ZBytes
+impl core::ops::deref::Deref for zenoh::config::Config
+impl core::ops::deref::DerefMut for zenoh::config::Config
 impl core::str::traits::FromStr for zenoh::bytes::Encoding
+impl serde_core::de::Deserialize for zenoh::config::Config
+impl serde_core::ser::Serialize for zenoh::config::Config
 impl std::io::Read for zenoh::bytes::ZBytesReader
 impl std::io::Seek for zenoh::bytes::ZBytesReader
 impl std::io::Write for zenoh::bytes::ZBytesWriter
 mod zenoh::bytes
 mod zenoh::cancellation
+mod zenoh::config
 mod zenoh::shm
+reexport enum zenoh::config::EndPoints = zenoh_protocol::core::endpoint::EndPoints
+reexport enum zenoh::config::WhatAmI = zenoh_protocol::core::whatami::WhatAmI
 reexport enum zenoh::shm::BufferRelayoutError = zenoh_shm::api::buffer::traits::BufferRelayoutError
 reexport enum zenoh::shm::ZAllocError = zenoh_shm::api::provider::types::ZAllocError
 reexport enum zenoh::shm::ZLayoutAllocError = zenoh_shm::api::provider::types::ZLayoutAllocError
 reexport enum zenoh::shm::ZLayoutError = zenoh_shm::api::provider::types::ZLayoutError
+reexport fn zenoh::init_log_from_env_or = zenoh_util::log::init_log_from_env_or
 reexport fn zenoh::shm::cleanup_orphaned_shm_segments = zenoh_shm::api::cleanup::cleanup_orphaned_shm_segments
+reexport fn zenoh::try_init_log_from_env = zenoh_util::log::try_init_log_from_env
 reexport static zenoh::shm::GLOBAL_CLIENT_STORAGE = zenoh_shm::api::client_storage::GLOBAL_CLIENT_STORAGE
+reexport struct zenoh::config::EndPoint = zenoh_protocol::core::endpoint::EndPoint
+reexport struct zenoh::config::Locator = zenoh_protocol::core::locator::Locator
+reexport struct zenoh::config::WhatAmIMatcher = zenoh_protocol::core::whatami::WhatAmIMatcher
+reexport struct zenoh::config::ZenohId = zenoh_config::wrappers::ZenohId
 reexport struct zenoh::shm::AllocAlignment = zenoh_shm::api::provider::types::AllocAlignment
 reexport struct zenoh::shm::AllocBuilder = zenoh_shm::api::provider::shm_provider::AllocBuilder
 reexport struct zenoh::shm::AllocatedChunk = zenoh_shm::api::provider::chunk::AllocatedChunk
@@ -98,6 +133,9 @@ reexport struct zenoh::shm::ZShm = zenoh_shm::api::buffer::zshm::ZShm
 reexport struct zenoh::shm::ZShmMut = zenoh_shm::api::buffer::zshmmut::ZShmMut
 reexport struct zenoh::shm::zshm = zenoh_shm::api::buffer::zshm::zshm
 reexport struct zenoh::shm::zshmmut = zenoh_shm::api::buffer::zshmmut::zshmmut
+reexport trait zenoh::Resolvable = zenoh_core::Resolvable
+reexport trait zenoh::Resolve = zenoh_core::Resolve
+reexport trait zenoh::Wait = zenoh_core::Wait
 reexport trait zenoh::shm::AllocPolicy = zenoh_shm::api::provider::shm_provider::AllocPolicy
 reexport trait zenoh::shm::AsyncAllocPolicy = zenoh_shm::api::provider::shm_provider::AsyncAllocPolicy
 reexport trait zenoh::shm::ConstPolicy = zenoh_shm::api::provider::shm_provider::ConstPolicy
@@ -113,10 +151,13 @@ reexport trait zenoh::shm::ShmClient = zenoh_shm::api::client::shm_client::ShmCl
 reexport trait zenoh::shm::ShmProviderBackend = zenoh_shm::api::provider::shm_provider_backend::ShmProviderBackend
 reexport trait zenoh::shm::ShmSegment = zenoh_shm::api::client::shm_segment::ShmSegment
 reexport trait zenoh::shm::WithProtocolID = zenoh_shm::api::common::with_id::WithProtocolID
+reexport type zenoh::Error = zenoh_result::Error
+reexport type zenoh::Result = zenoh_result::ZResult
 reexport type zenoh::shm::ChunkAllocResult = zenoh_shm::api::provider::types::ChunkAllocResult
 reexport type zenoh::shm::ChunkID = zenoh_shm::api::common::types::ChunkID
 reexport type zenoh::shm::ProtocolID = zenoh_shm::api::common::types::ProtocolID
 reexport type zenoh::shm::SegmentID = zenoh_shm::api::common::types::SegmentID
+struct zenoh::Config
 struct zenoh::bytes::Encoding
 struct zenoh::bytes::OptionZBytes
 struct zenoh::bytes::ZBytes
@@ -124,3 +165,5 @@ struct zenoh::bytes::ZBytesReader
 struct zenoh::bytes::ZBytesSliceIterator
 struct zenoh::bytes::ZBytesWriter
 struct zenoh::cancellation::CancellationToken
+struct zenoh::config::Config
+struct zenoh::config::Notifier

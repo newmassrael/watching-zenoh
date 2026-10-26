@@ -4567,16 +4567,22 @@ name = "zenoh"
 version = "1.10.1"
 dependencies = [
  "bytes",
+ "flume",
  "futures",
+ "json5",
  "phf",
+ "serde",
+ "serde_json",
  "tokio",
  "zenoh-buffers",
+ "zenoh-config",
  "zenoh-core",
  "zenoh-macros",
  "zenoh-protocol",
  "zenoh-result",
  "zenoh-runtime",
  "zenoh-shm",
+ "zenoh-util",
 ]
 
 [[package]]

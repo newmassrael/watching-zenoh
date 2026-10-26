@@ -63,6 +63,7 @@ normal state once nothing remains.
 | api-compat-rust | conformance/differential/tests/zenoh_bytes.rs | edab4da86f55c2b225b99e534178b19298849189 | R3673 |
 | api-compat-rust | conformance/differential-shm/tests/zenoh_bytes_shm.rs | 5ccacbf32ff18ece8e87f890ca83c74db907284e | R3673 |
 | api-compat-rust | conformance/differential/tests/zenoh_cancellation.rs | 61b4bee338810435b477af488466b70bbf8c030e | R3681 |
+| api-compat-rust | conformance/differential/tests/zenoh_api_config.rs | 3d57a26789e32537ef2c932cbee1cad601459cc0 | R3688 |
 | api-compat-rust | conformance/differential/tests/zenoh_protocol_network.rs | ff1b88360290937b8d76ca3785657a8c96299782 | R3545 |
 | api-compat-rust | conformance/differential/tests/zenoh_protocol_common.rs | 05f5b189986cf72e17d40c9e85a618c10c01f35c | R3540 |
 | api-compat-rust | conformance/differential/tests/zenoh_protocol_core.rs | cd3b503814501026e5a9f33b12173fa938a2ad90 | R3538 |

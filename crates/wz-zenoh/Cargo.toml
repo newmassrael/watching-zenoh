@@ -44,30 +44,40 @@ doctest = false
 # feature; they join the manifest with the slice that gives them meaning, and the three that the
 # surface gate's arms and the `zenoh_macros` attributes read are here from the first.
 [features]
-internal = ["zenoh-protocol/internal"]
+internal = ["zenoh-config/internal", "zenoh-protocol/internal"]
+# Upstream's marker for the plugin interface: with it the configuration's notifier can be
+# subscribed to (`Notifier::subscribe`).
+plugins = []
 shared-memory = [
     "dep:zenoh-shm",
     "zenoh-buffers/shared-memory",
     "zenoh-protocol/shared-memory",
 ]
-unstable = ["zenoh-protocol/unstable"]
+unstable = ["zenoh-config/unstable", "zenoh-protocol/unstable"]
 
 [dependencies]
 bytes = "1.11.0"
+flume = "0.11.1"
 futures = "0.3.31"
+json5 = "0.4.1"
 phf = { version = "0.13.1", features = ["macros"] }
+serde = { version = "1.0.225", features = ["default"] }
 tokio = { version = "1.47.1", default-features = false, features = ["macros", "rt", "sync", "time"] }
 zenoh-buffers = { path = "../wz-zenoh-buffers", features = ["std"] }
+zenoh-config = { path = "../wz-zenoh-config" }
 zenoh-core = { path = "../wz-zenoh-core" }
 zenoh-macros = { path = "../wz-zenoh-macros" }
 zenoh-protocol = { path = "../wz-zenoh-protocol", features = ["std"] }
 zenoh-result = { path = "../wz-zenoh-result", default-features = false }
 zenoh-runtime = { path = "../wz-zenoh-runtime" }
 zenoh-shm = { path = "../wz-zenoh-shm", optional = true }
+zenoh-util = { path = "../wz-zenoh-util" }
 
-# The tests of the cancellation token run on a runtime of several threads.
+# The tests of the cancellation token run on a runtime of several threads, and those of the
+# configuration read its items back as JSON.
 [dev-dependencies]
-tokio = { version = "1.47.1", default-features = false, features = ["macros", "rt-multi-thread", "sync", "time"] }
+serde_json = "1.0.145"
+tokio ={ version = "1.47.1", default-features = false, features = ["macros", "rt-multi-thread", "sync", "time"] }
 
 [lints]
 workspace = true

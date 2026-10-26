@@ -21,4 +21,8 @@ pub(crate) mod bytes;
 // docs/zenoh-api-on-the-engine.md; until they land the helpers upstream calls from there are unused.
 #[allow(dead_code)]
 pub(crate) mod cancellation;
+// R3688: the notifier's user, `Session::config`, is slice Z1 of docs/zenoh-api-on-the-engine.md;
+// until it lands a build without `unstable`, which exports the notifier, holds it unused.
+#[allow(dead_code)]
+pub(crate) mod config;
 pub(crate) mod encoding;

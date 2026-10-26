@@ -156,7 +156,18 @@ sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 #: too: crates.io packages copied whole with one arm changed (`THIRD_PARTY.md`), whose comments
 #: name paths of THEIR own trees, so grading them would count another project's prose against
 #: this tree's budgets and move them whenever a copy is added or upgraded.
-SKIP_PREFIXES = ("vendor/", "out/", "docs/.atomic/", "third-party/")
+#: R3688 -- the same holds of one FILE, the example configuration of the `zenoh` crate
+#: (`crates/wz-zenoh/DEFAULT_CONFIG.json5`): upstream's own file, included by the documentation of
+#: `Config` and held byte for byte to the pinned crate's by a differential test, so its one bare
+#: path (upstream's own pointer, in its first lines, to a file that has since moved) cannot be
+#: anchored without the copy ceasing to be upstream's.
+SKIP_PREFIXES = (
+    "vendor/",
+    "out/",
+    "docs/.atomic/",
+    "third-party/",
+    "crates/wz-zenoh/DEFAULT_CONFIG.json5",
+)
 
 #: An upstream zenoh source path. Root-anchored: without the lookbehind this
 #: matches from the MIDDLE of a longer path -- a link-commons unicast path

@@ -178,9 +178,10 @@ original reproduced by naming it. Three things follow from it:
   left out comes back as written where upstream writes the bound as 0)
   and `zenoh` (`crates/wz-zenoh`, now the package `zenoh` under the directory of the family; its
   first slices are the `bytes` module, `ZBytes` with its reader, writer and slice iterator and
-  `Encoding`, the `shm` module without its provider state, and the `cancellation` module of the
-  `unstable` arm: 59 of 709 default lines present, 66 of 965 with `unstable` and 122 of 1,025 with
-  `unstable` and `shared-memory`; the seam over the engine is `docs/zenoh-api-on-the-engine.md`).
+  `Encoding`, the `shm` module without its provider state, the `cancellation` module of the
+  `unstable` arm and the `config` module with its notifier: 89 of 709 default lines present, 109
+  of 965 with `unstable` and 165 of 1,025 with `unstable` and `shared-memory`; the seam over the
+  engine is `docs/zenoh-api-on-the-engine.md`).
   Behaviour is held beside the surface by Layer E18 (`conformance/`): a differential test of each
   crate against upstream's, a graph in which an upstream crate and the wz crate meet one type once
   patched, and the same graph unpatched as its control. The packages are not published (the

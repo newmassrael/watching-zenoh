@@ -224,9 +224,20 @@ Each lands whole with its surface lines, tests and faults in one round.
     (one test gap found and closed: a failed cancel must not wait for a notifier that is held). The
     helpers upstream calls from the builders of `get` are unused until Z3, so the module carries
     `allow(dead_code)` with the reason beside it.
-  - **Z0c onward.** `config`, `handlers` (with the channels), then `key_expr` and
-    `selector` (the wire declaration of a key becomes an erased anchor, D2), then `sample` and the
-    quality-of-service types. Each is a part of Z0 that lands when its closure exists.
+  - **Z0c, `config` (landed).** `Config` (read from a file, the environment or a JSON5 string;
+    keys read, inserted and removed; the items of an array by their `id=`; with `unstable` the
+    deserializer and the `Deref` to the crate under it) and its notifier (`unstable`, with
+    `plugins` its subscription), over `zenoh-config`; the root re-exports `Config`, `Resolvable`,
+    `Resolve`, `Wait`, `Error`, `Result` and the two log initialisers, because a signature's
+    return type names `zenoh::Result` only where that re-export exists (the surface gate showed it
+    by reading `zenoh_result::ZResult` where upstream has `zenoh::Result`). 30 of the default
+    lines and 43 of the `unstable` and shared-memory arms' lines, 11 differential tests and 11
+    injected faults (one test gap found and closed: a key with no `field=value` is not an array
+    operation and must tell nobody). The example in the documentation of `Config` is a 967-line
+    file of upstream's, copied, and a test holds the copy byte for byte to the pinned crate's.
+  - **Z0c onward.** `handlers` (with the channels), then `key_expr` and `selector` (the wire
+    declaration of a key becomes an erased anchor, D2), then `sample` and the quality-of-service
+    types. Each is a part of Z0 that lands when its closure exists.
 - **Z1. Open, close, identity, config table, the choice of D5 and the rule of D4.** `zenoh::open`,
   `Session::zid`, `close`, `is_closed`, `id`, `config`, `info` (routers and peers only). The
   first slice that names an engine. Router mode is decided HERE and not later: 15 of upstream's 31
