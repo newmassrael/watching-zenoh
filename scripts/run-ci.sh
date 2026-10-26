@@ -8269,7 +8269,10 @@ layer_c1aq_cargo_test_ext_pubsub_advanced() {
     # grammar, `the_cache_filter_resolves_every_form_the_grammar_accepts`, and the
     # guard was not moved with them. Derived by `--list` under this feature set:
     # 23, twelve in `advanced_cache` and eleven in `advanced_publisher`.
-    _runci_guarded_test "C1aq advanced_" 23 \
+    # 23 -> 9, MEASURED on this command: the publisher composite's tests that drive it through a
+    # recording plane moved to `wz-ext-pubsub` with the composite (the non-default test leg of
+    # that crate counts them), and the guard was not moved with them.
+    _runci_guarded_test "C1aq advanced_" 9 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-publisher,query-get,pubsub-allow-loop \
         --lib advanced_ --quiet || return 1
     (cd crates \
@@ -8443,7 +8446,9 @@ layer_c1at_cargo_test_ext_pubsub_advanced_recovery() {
     # Item 850 — 29 -> 30: a_recovered_sample_holds_the_storage_its_reply_holds,
     # gated on recovery, which this command compiles. Measured: this command
     # printed 30.
-    _runci_guarded_test "C1at advanced_subscriber" 30 \
+    # 30 -> 21, MEASURED on this command: the machine's tests moved to `wz-ext-pubsub` with the
+    # machine and run in that crate's non-default test leg.
+    _runci_guarded_test "C1at advanced_subscriber" 21 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-recovery,ext-pubsub-advanced-publisher,pubsub-allow-loop \
         --lib advanced_subscriber --quiet || return 1
     # R311y836 — the SAME 22 cases again, with `query-consolidation` composed on
@@ -8471,7 +8476,8 @@ layer_c1at_cargo_test_ext_pubsub_advanced_recovery() {
     # R2817 — 26 -> 27, the background witness, as above.
     # R2819 — 27 -> 29, the two ungated witnesses, as above.
     # Item 850 — 29 -> 30, the recovery-gated witness, as above.
-    _runci_guarded_test "C1at advanced_subscriber (query-consolidation)" 30 \
+    # 30 -> 21, as above.
+    _runci_guarded_test "C1at advanced_subscriber (query-consolidation)" 21 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-recovery,ext-pubsub-advanced-publisher,pubsub-allow-loop,query-consolidation \
         --lib advanced_subscriber --quiet || return 1
     (cd crates \
@@ -8521,7 +8527,8 @@ layer_c1au_cargo_test_ext_pubsub_sample_miss_detection() {
     # both ungated (see C1aq), and the beacon publisher's own, which needs this
     # lane's feature and so is counted here alone. The cache's retention witness
     # is in `advanced_cache` and this filter does not reach it.
-    _runci_guarded_test "C1au advanced_publisher" 20 \
+    # 20 -> 14, MEASURED on this command: the composite's tests moved to `wz-ext-pubsub`.
+    _runci_guarded_test "C1au advanced_publisher" 14 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-sample-miss-detection,ext-pubsub-advanced-recovery,pubsub-allow-loop \
         --lib advanced_publisher --quiet || return 1
     (cd crates \
@@ -8628,7 +8635,9 @@ layer_c1av_cargo_test_ext_pubsub_advanced_history() {
     # command printed 58.
     # Item 850 — 58 -> 59, the recovery-gated witness (history implies recovery).
     # Measured: this command printed 59.
-    _runci_guarded_test "C1av advanced_subscriber" 59 \
+    # 59 -> 39, MEASURED on this command: the machine's and the plans' tests moved to
+    # `wz-ext-pubsub`.
+    _runci_guarded_test "C1av advanced_subscriber" 39 \
         cargo test -p wz-runtime-tokio --features ext-pubsub-advanced-history,ext-pubsub-advanced-publisher,pubsub-allow-loop \
         --lib advanced_subscriber --quiet || return 1
     (cd crates \

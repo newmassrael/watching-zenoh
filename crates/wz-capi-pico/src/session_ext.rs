@@ -22,7 +22,6 @@
 #[cfg(feature = "connectivity")]
 use std::sync::Arc;
 
-#[cfg(feature = "advanced")]
 #[cfg(feature = "connectivity")]
 use wz_capi_port::SessionEngine;
 #[cfg(feature = "advanced")]
