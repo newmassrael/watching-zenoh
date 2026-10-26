@@ -21,10 +21,13 @@
 // resolve until then (docs/zenoh-api-on-the-engine.md, section 6).
 #![allow(rustdoc::broken_intra_doc_links)]
 
-// The macros of `zenoh-result` (`bail!`, `zerror!`), which the configuration and the cancellation
-// token of the `unstable` arm use; upstream takes them, and those of `zenoh-core`, for the whole
-// crate, and each joins here with the first slice that calls it, so that a build that calls none
-// does not carry an unused import.
+// The macros of `zenoh-core` (`zlock!`, `zconfigurable!`), which the handlers and the size of the
+// channel they read use, and those of `zenoh-result` (`bail!`, `zerror!`), which the configuration,
+// the handlers and the cancellation token of the `unstable` arm use; upstream takes them for the
+// whole crate, and each joins here with the first slice that calls it, so that a build that calls
+// none does not carry an unused import.
+#[macro_use]
+extern crate zenoh_core;
 #[macro_use]
 extern crate zenoh_result;
 
@@ -145,6 +148,114 @@ pub mod cancellation {
     pub use crate::api::cancellation::CancellationToken;
     #[cfg(feature = "internal")]
     pub use crate::api::cancellation::{SyncGroup, SyncGroupNotifier};
+}
+
+/// # Callback handler trait.
+///
+/// Zenoh allows two ways to get sequential data from Zenoh primitives, like
+/// [`Subscriber`](crate::pubsub::Subscriber) or [`Query`](crate::query::Query)
+///
+/// 1. **Callback functions**: the user provides a callback function that is called with each
+///    incoming sample.
+///
+/// 2. **Channels**: the user provides a channel that buffers incoming samples, and the user
+///    retrieves samples from the channel when needed.
+///
+/// # ⚠️ Important Note
+///
+/// > **Warning**: The callback function is called in the context of the Zenoh runtime.
+/// > Calling zenoh network operations from the callback (e.g., making queries)
+/// > may lead to deadlocks and other unexpected behaviors.
+/// >
+/// > The Rust type system is not used to prevent calling zenoh network operations
+/// > from the callback for two reasons:
+/// > - this would be too restrictive for multithreaded scenarios
+/// > - this may change in future releases in any direction: immediate crash or allowing
+/// >  this behavior.
+///
+/// Below are the details of how channels work in Zenoh.
+///
+/// Under the hood, the sequential data from a primitive is always passed to a callback function.
+/// However, to simplify using channels, Zenoh provides the
+/// [`IntoHandler`](crate::handlers::IntoHandler) trait,
+/// which returns a pair: a callback which pushes data to the channel and a "handler"
+/// which allows retrieving data from the channel.
+///
+/// The method [`with`](crate::pubsub::SubscriberBuilder::with) accepts any type that
+/// implements the `IntoHandler` trait and extracts the callback and handler from it.
+/// The Zenoh object calls the callback with each incoming sample.
+///
+/// The handler is also stored in the Zenoh object. It's completely opaque to the Zenoh object;
+/// it's just made available to the user via the [`handler`](crate::pubsub::Subscriber::handler) method
+/// or by dereferencing, allowing the user to call the handler's methods directly on the
+/// `Subscriber` or `Query` object.
+/// This is syntactic sugar that allows the user not to care about the separate channel object.
+///
+/// The example of using channels is shown below.
+///
+/// ```no_run
+/// # #[tokio::main]
+/// # async fn main() {
+/// # let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// let subscriber = session.declare_subscriber("key/expression")
+///    .with(zenoh::handlers::RingChannel::new(10))
+///   .await.unwrap();
+/// while let Ok(sample) = subscriber.recv_async().await {
+///    println!("Received: {:?}", sample);
+/// }
+/// # }
+/// ```
+///
+/// Note that this code is equivalent to the following one, where the channel
+/// and the callback are created explicitly.
+///
+/// ```no_run
+/// # #[tokio::main]
+/// # async fn main() {
+/// # let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// use zenoh::handlers::IntoHandler;
+/// let (callback, mut ring_channel_handler)
+///    = zenoh::handlers::RingChannel::new(10).into_handler();
+/// let subscriber = session.declare_subscriber("key/expression")
+///    .with((callback, ())) // or simply .callback(callback)
+///   .await.unwrap();
+/// while let Ok(sample) = ring_channel_handler.recv_async().await {
+///    println!("Received: {:?}", sample);
+/// }
+/// # }
+/// ```
+///
+/// Obviously, the callback can also be defined manually, without using a channel, and passed
+/// to the [`callback`](crate::pubsub::SubscriberBuilder::callback) method.
+/// In this case, the handler type is `()`, and no additional methods, like `recv_async`, are available on the
+/// subscriber object.
+///
+/// ```no_run
+/// # #[tokio::main]
+/// # async fn main() {
+/// # let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// let subscriber = session.declare_subscriber("key/expression")
+///    .callback(|sample| {
+///        println!("Received: {:?}", sample);
+///    }).await.unwrap();
+/// # }
+/// ```
+///
+pub mod handlers {
+    #[zenoh_macros::internal]
+    pub use crate::api::handlers::locked;
+    #[zenoh_macros::internal]
+    pub use crate::api::handlers::CallbackParameter;
+    pub use crate::api::handlers::{
+        Callback, CallbackDrop, DefaultHandler, FifoChannel, FifoChannelHandler, IntoHandler,
+        RingChannel, RingChannelHandler,
+    };
+    /// The module contains helper types and traits necessary to work with FIFO channels
+    pub mod fifo {
+        pub use crate::api::handlers::{
+            Drain, FifoChannel, FifoChannelHandler, IntoIter, Iter, RecvFut, RecvStream, TryIter,
+        };
+    }
 }
 
 /// # Configuration to pass to [`open`] and [`scout`] functions and associated constants.

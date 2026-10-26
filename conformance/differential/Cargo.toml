@@ -77,6 +77,10 @@ humantime = "2"
 up_zenoh = { package = "zenoh", version = "=1.10.1", default-features = false, features = ["unstable", "internal", "plugins"] }
 wz_zenoh = { package = "zenoh", path = "../../crates/wz-zenoh", features = ["unstable", "internal", "plugins"] }
 bytes = "1.11.0"
+# The channels of the `handlers` module are `flume`'s, whose pair one of the handlers takes as it is,
+# and their futures and streams are `futures`'s: one package for both crates, so the tests name them.
+flume = "0.11.1"
+futures = "0.3.31"
 # `zenoh-config`: the pair again, each over its own family crates, each built with `unstable` (the
 # TOML reader and the unstable keys) and `internal`. `serde_yaml` and `json5` are what its files are
 # read with, one package for both crates, so the tests name them.

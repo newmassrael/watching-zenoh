@@ -23870,6 +23870,9 @@ layer_e18_zenoh_family_conformance() {
     _runci_guarded_test "Layer E18 (differential, zenoh config api)" 11 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_api_config || return 1
+    _runci_guarded_test "Layer E18 (differential, zenoh handlers)" 7 \
+        cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
+        --test zenoh_api_handlers || return 1
     _runci_guarded_test "Layer E18 (differential, zenoh-config files)" 4 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_config_file || return 1

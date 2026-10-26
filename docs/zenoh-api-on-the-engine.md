@@ -235,9 +235,16 @@ Each lands whole with its surface lines, tests and faults in one round.
     injected faults (one test gap found and closed: a key with no `field=value` is not an array
     operation and must tell nobody). The example in the documentation of `Config` is a 967-line
     file of upstream's, copied, and a test holds the copy byte for byte to the pinned crate's.
-  - **Z0c onward.** `handlers` (with the channels), then `key_expr` and `selector` (the wire
-    declaration of a key becomes an erased anchor, D2), then `sample` and the quality-of-service
-    types. Each is a part of Z0 that lands when its closure exists.
+  - **Z0c, `handlers` (landed).** `Callback`, `CallbackDrop`, `IntoHandler`, `DefaultHandler`, the
+    FIFO channel with its iterators, future and stream, and the ring channel, which names nothing
+    of the session but the size of its default channel: of `session.rs` only that one constant is
+    here (the file is a partial derivative, and says so in its header), and the other three sizes
+    come with the slices that read them. 89 lines of each arm, 12 injected faults, none missed.
+    The callback helpers upstream calls from the builders (`set_on_drop`, `call_with_message`) are
+    unused until Z2 and Z3, so the module carries `allow(dead_code)` with the reason beside it.
+  - **Z0c onward.** `key_expr` and `selector` (the wire declaration of a key becomes an erased
+    anchor, D2), then `sample` and the quality-of-service types. Each is a part of Z0 that lands
+    when its closure exists.
 - **Z1. Open, close, identity, config table, the choice of D5 and the rule of D4.** `zenoh::open`,
   `Session::zid`, `close`, `is_closed`, `id`, `config`, `info` (routers and peers only). The
   first slice that names an engine. Router mode is decided HERE and not later: 15 of upstream's 31

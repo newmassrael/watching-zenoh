@@ -63,7 +63,9 @@ json5 = "0.4.1"
 phf = { version = "0.13.1", features = ["macros"] }
 serde = { version = "1.0.225", features = ["default"] }
 tokio = { version = "1.47.1", default-features = false, features = ["macros", "rt", "sync", "time"] }
+tracing = "0.1.41"
 zenoh-buffers = { path = "../wz-zenoh-buffers", features = ["std"] }
+zenoh-collections = { path = "../wz-zenoh-collections", features = ["std"] }
 zenoh-config = { path = "../wz-zenoh-config" }
 zenoh-core = { path = "../wz-zenoh-core" }
 zenoh-macros = { path = "../wz-zenoh-macros" }
