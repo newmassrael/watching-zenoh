@@ -10,7 +10,7 @@
 //! two shims is identical: bind the multicast group, drive the scouting FSM
 //! for the caller's budget, and report each peer as it answers. That middle is
 //! what lives here, expressed over
-//! [`ScoutedHello`](wz_runtime_tokio::scouting_glue::ScoutedHello), which is
+//! [`ScoutedHello`], which is
 //! already an ABI-neutral type.
 //!
 //! Nothing here has a `z_` in its name, per this crate's contract; the ABI

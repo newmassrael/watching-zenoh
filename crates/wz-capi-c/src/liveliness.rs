@@ -19,7 +19,7 @@
 //!
 //! ## Dropping a token RETRACTS it
 //!
-//! The retraction lives in [`TokenState`]'s `Drop`, so the explicit
+//! The retraction lives in `TokenState`'s `Drop`, so the explicit
 //! `z_liveliness_undeclare_token` and the implicit `z_drop(z_move(token))` take
 //! the identical path and cannot drift. That is upstream's contract and
 //! `z_liveliness.c` depends on it — its explicit undeclare sits after an infinite
@@ -465,7 +465,7 @@ pub unsafe extern "C" fn z_liveliness_get_options_default(this_: *mut z_liveline
 /// a `Declare(DeclToken)` and the snapshot ends with one `DeclFinal`. wz models
 /// that with [`wz_runtime_tokio::session::Session::liveliness_get`], whose
 /// application surface is already reply-shaped — which is why this maps onto the
-/// same `z_owned_closure_reply_t` and the same [`crate::get::fire_reply`] marshal
+/// same `z_owned_closure_reply_t` and the same `crate::get::fire_reply` marshal
 /// `z_get` uses, rather than a parallel one.
 ///
 /// Fanned across every connected face for the reason every declaration in this

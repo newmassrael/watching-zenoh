@@ -49,7 +49,7 @@
 //! live in the session's local tables and are pushed to each peer as it joins
 //! (`src/transport/unicast/accept.c:148-149`). Here that falls out of the
 //! registry for free — [`SharedSession::declare_subscriber`] records a
-//! [`SubEntry`] in the SSOT and declares it on whatever faces exist (possibly
+//! `SubEntry` in the SSOT and declares it on whatever faces exist (possibly
 //! none); [`SharedSession::face_up`] replays the whole SSOT onto each new
 //! face.
 //!
@@ -2435,7 +2435,7 @@ impl SharedSession {
     /// already sent in the loop above).
     ///
     /// R311y557 — the local leg no longer belongs to a FACE. It runs on the
-    /// session-scope [local plane](Self::local), so it runs identically at zero
+    /// session-scope local plane (`Self::local`), so it runs identically at zero
     /// faces and at N, and the "first face takes it" convention (with the
     /// zenoh-c divergence it carried at zero faces) is gone.
     pub fn publish_all(
@@ -2907,7 +2907,7 @@ impl SharedSession {
     /// replays it, and emit the wire undeclare on every live face.
     ///
     /// No cross-lock drop dance is needed here, unlike the subscriber and
-    /// queryable twins: a [`KexprEntry`] owns a `String` and no `Arc<CClosure>`,
+    /// queryable twins: a `KexprEntry` owns a `String` and no `Arc<CClosure>`,
     /// so releasing it cannot run C code.
     pub fn undeclare_keyexpr(&self, mapping_id: u64) {
         let mut guard = self.lock();
@@ -3452,7 +3452,7 @@ impl SharedSession {
 
     /// The fan-out every get shares, the query half of the publish fan-out: the wire leg
     /// to each face, then to each group the session joined, then the local leg ONCE on
-    /// the [local plane](Self::local), each only where `destination` admits it.
+    /// the local plane (`Self::local`), each only where `destination` admits it.
     ///
     /// A C session's queryable is declared on every face AND on the plane, so an `Any`
     /// get handed to each face would run its one handler once per face, and at zero
@@ -3527,7 +3527,7 @@ impl SharedSession {
             .collect()
     }
 
-    /// Face `id`'s drive-loop re-arm signal (see [`FaceEntry::revised`]).
+    /// Face `id`'s drive-loop re-arm signal (see `FaceEntry::revised`).
     pub fn deadline_revised(&self, id: u64) -> Option<Arc<Notify>> {
         self.lock().faces.get(&id).map(|face| face.revised.clone())
     }
@@ -3836,7 +3836,7 @@ impl SharedSession {
     /// querier form.
     ///
     /// Everything else — the cross-face OR, the three-phase install, the
-    /// [`deliver_matching_flip`] serialisation — is shared with the publisher
+    /// `deliver_matching_flip` serialisation — is shared with the publisher
     /// path by construction: the only difference is which declaration the
     /// per-face watch is installed on.
     ///

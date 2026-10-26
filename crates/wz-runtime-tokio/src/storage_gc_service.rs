@@ -19,7 +19,7 @@
 //! lifetime — the caller MUST hold the returned handle for the storage's
 //! lifetime (a dropped handle stops collecting). This mirrors the
 //! [`DigestPublisher`](crate::storage_replication_service::DigestPublisher)
-//! caller-driven periodic-driver pattern; the [`StorageService`] itself does
+//! caller-driven periodic-driver pattern; the `StorageService` itself does
 //! not own the timer.
 //!
 //! ## zenoh anchor
@@ -34,7 +34,7 @@
 //! - the PERIOD uses the session's monotonic-ms [`TimeSource::sleep`] — an
 //!   interval must not wobble on an NTP step (same as `DigestPublisher`);
 //! - the CUTOFF `now` uses the wall-clock NTP64 SSOT
-//!   ([`wall_clock_ntp64`](crate::timestamp_source::wall_clock_ntp64)) — a
+//!   ([`wall_clock_ntp64`]) — a
 //!   registry entry's age is measured against its wall-clock stamp, not a
 //!   monotonic instant (whose epoch is unspecified). zenoh splits them the same
 //!   way (`config.period` timer vs `SystemTime::now()` cutoff).
@@ -80,7 +80,7 @@ impl Drop for GarbageCollector {
 
 impl GarbageCollector {
     /// Spawn the periodic garbage collector. `state` is shared with the
-    /// [`StorageService`](crate::storage_service::StorageService) (pass
+    /// `StorageService`(crate::storage_service::StorageService) (pass
     /// [`StorageService::shared_state`](crate::storage_service::StorageService::shared_state)),
     /// so the sweep acts on the live registries. The loop sleeps
     /// `gc.period` then sweeps entries older than `gc.lifespan`. The kernel

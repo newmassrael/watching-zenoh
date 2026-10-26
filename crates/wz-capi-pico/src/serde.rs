@@ -15,7 +15,7 @@
 //! **0**, so `&s->_writer` is bit-identical to `s`.
 //!
 //! That is what makes the design here sound rather than convenient: one
-//! [`WriterState`] behind one handle representation, shared by
+//! `WriterState` behind one handle representation, shared by
 //! `z_owned_bytes_writer_t` and `ze_owned_serializer_t` alike. If the two had
 //! different handle shapes, every inline helper in pico's header would hand the
 //! writer functions a serializer-shaped pointer and corrupt memory silently. The
@@ -733,7 +733,7 @@ impl_arithmetic!(ze_serialize_double, ze_deserialize_double, f64);
 /// `z_bytes_writer_take_from_loaned`).
 ///
 /// R311y559 — a symbol the census found missing. Hand-written rather than
-/// emitted by [`impl_value_ownership`](crate::abi::impl_value_ownership)
+/// emitted by `impl_value_ownership`
 /// because that macro clears a THREE-slot pad and the writer carries four; an
 /// under-wide clear would leave a stale pointer word in the source the caller
 /// is entitled to reuse. Same reason, same shape as

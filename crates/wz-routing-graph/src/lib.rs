@@ -19,7 +19,7 @@
 //! [`LinkstateNetwork::ingest_linkstate_list`] node update under the
 //! sn-staleness gate, c2c the mutual-link edge rebuild (`update_edge`), d
 //! the spanning-tree computation (`compute_trees`), and (c3c-3 D3) the
-//! [`remove_detached_nodes`](LinkstateNetwork::remove_detached_nodes) GC
+//! `remove_detached_nodes` GC
 //! that prunes nodes no longer reachable from self once a link drops or an
 //! advertisement is withdrawn (zenoh `network.rs:786,948,990`).
 //!
@@ -43,7 +43,7 @@
 //!   a zenohd interop witness, so what is missing is not the mechanism but a
 //!   deploy that turns it on: none of the four `deploy/*.yaml` names it. The
 //!   onward re-flood `propagate_link_states` (zenoh `network.rs:804`) is DONE:
-//!   the graph supplies the [`build_linkstate_split`] payload builder — `new`
+//!   the graph supplies the `build_linkstate_split` payload builder — `new`
 //!   nodes full, `updated` nodes links-only, the D4 `Details` split — and the
 //!   per-face re-flood lives in the driver `linkstate_forward::propagate`,
 //!   R311ra+sl.
@@ -467,7 +467,7 @@ impl LinkEdgeWeight {
         LinkEdgeWeight(NonZeroU16::new(value))
     }
 
-    /// The effective weight — the explicit value, or [`DEFAULT`] if unset.
+    /// The effective weight — the explicit value, or `DEFAULT` if unset.
     pub fn value(&self) -> u16 {
         self.0.map(NonZeroU16::get).unwrap_or(Self::DEFAULT)
     }
@@ -983,7 +983,7 @@ impl LinkstateNetwork {
     /// Enable or disable zenoh `gossip_multihop` (`scouting.gossip.multihop`).
     /// On: a node's locators ride every flood regardless of hop distance; off
     /// (the default): only self's and direct neighbours' do
-    /// ([`propagate_locators`](Self::propagate_locators)). The config seam the
+    /// (`propagate_locators`). The config seam the
     /// driver threads its deploy setting through; an all-default deploy never
     /// calls it, so the non-multihop one-hop behaviour is unchanged.
     pub fn set_gossip_multihop(&mut self, enabled: bool) {
@@ -2393,7 +2393,7 @@ impl LinkstateNetwork {
 
     /// This peer's children in the spanning tree rooted at `source` — the
     /// neighbours to forward a message flooded along `source`'s tree to.
-    /// Empty if `source` is unknown or [`compute_trees`] has not run for
+    /// Empty if `source` is unknown or `compute_trees` has not run for
     /// the current topology.
     pub fn tree_children_of(&self, source: &Zid) -> Vec<Zid> {
         let root = match self.get_idx(source) {

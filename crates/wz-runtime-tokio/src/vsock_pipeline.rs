@@ -10,7 +10,7 @@
 //! transport-neutral byte-stream machinery in [`crate::stream_link`] UNCHANGED:
 //! the [`StreamReadDriver`] StreamEnvelope framing `LinkDriver` impl, the
 //! [`StreamWriteDriver`] channel, and the
-//! [`writer_task`](crate::stream_link::writer_task).
+//! [`writer_task`].
 //!
 //! Unlike TCP / unixsock (whose `into_split` yields owned halves), a
 //! [`tokio_vsock::VsockStream`] has no owned-half split, so this module splits
@@ -160,7 +160,7 @@ pub async fn accept_vsock_on(listener: &mut VsockListener) -> io::Result<VsockSt
 /// Split a connected [`VsockStream`] into the cooperating drivers the session
 /// FSM consumes: an inbound [`VsockReadDriver`] (`&mut LinkDriver` for the poll
 /// loop), an outbound `Arc<`[`StreamWriteDriver`]`>` (`BoxedLinkDriver` for
-/// `send_blocking`), and the [`writer_task`](crate::stream_link::writer_task)
+/// `send_blocking`), and the [`writer_task`]
 /// join handle. Mirrors [`crate::tls_pipeline::wire_tls_stream`] — a vsock
 /// stream is split with [`tokio::io::split`] (no owned-half split) but
 /// otherwise the StreamEnvelope framing + write driver are the SAME shared

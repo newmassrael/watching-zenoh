@@ -22,7 +22,7 @@
 //! single-core IRQ-safe primitive for this environment:
 //!
 //! **Send + Sync**: `critical_section::Mutex<T>: Send + Sync where T:
-//! Send`. The trait-level [`Runtime::Mutex`] bound (`Send + Sync +
+//! Send`. The trait-level `Runtime::Mutex` bound (`Send + Sync +
 //! 'static where T: Send + 'static`) is satisfied via the `RefCell<T>`
 //! interior — `RefCell<T>: Send where T: Send`, and the outer
 //! `critical_section::Mutex` adds the `Sync` half by interrupt-

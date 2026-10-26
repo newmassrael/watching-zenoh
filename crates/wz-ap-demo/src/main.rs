@@ -3015,7 +3015,7 @@ fn mesh_exit_code(outcome: std::io::Result<()>) -> ExitCode {
 /// R311y277 (§5.23 adminspace-config-hotreload ACTIVATION) — storage-host mode
 /// entry (`--storage-host <listen>`): init logging, build the runtime, and run the
 /// multi-accept storage-hosting loop
-/// ([`runner::run_storage_host`](crate::runner::run_storage_host)). Mirrors
+/// ([`runner::run_storage_host`]). Mirrors
 /// [`run_router_hat_mode`] — a bare loop with no per-connection application I/O,
 /// just the admin GET queryable + config-write subscriber + the storage lifecycle
 /// apply (live-spawn / -despawn a `RuntimeStorageManager` storage).
@@ -3040,7 +3040,7 @@ fn run_storage_host_mode(listen: String, opts: crate::runner::StorageHostOpts) -
 
 /// P4 §5.21 ACTIVATION — router-hat mode entry (`--router-hat <listen>`): present
 /// a true wire WhatAmI::Router and drive the dual-mesh RouterForwarder over real
-/// transport ([`runner::run_router_hat`](crate::runner::run_router_hat)). Mirrors
+/// transport ([`runner::run_router_hat`]). Mirrors
 /// [`run_peer_mode`] — bind + dial the `--connect` router set + hold faces — but
 /// the node announces Router and hosts no application I/O (a pure router).
 #[cfg(feature = "router-hat-router")]

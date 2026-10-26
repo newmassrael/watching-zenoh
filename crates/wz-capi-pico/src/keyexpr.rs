@@ -7,7 +7,7 @@
 //! (no allocation, no drop). Round 1 reproduces that borrow: the view stores
 //! `{ start, len }` into the caller's NUL-terminated string, which the caller
 //! must keep alive while the keyexpr is used (the pico contract). `z_put` /
-//! `z_declare_*` read the borrowed UTF-8 back via [`keyexpr_str`].
+//! `z_declare_*` read the borrowed UTF-8 back via `keyexpr_str`.
 
 use std::ffi::{c_char, c_void, CStr};
 use std::sync::{Arc, Weak};

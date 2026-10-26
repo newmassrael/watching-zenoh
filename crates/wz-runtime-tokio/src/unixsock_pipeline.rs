@@ -10,7 +10,7 @@
 //! reuses the transport-neutral byte-stream machinery in
 //! [`crate::stream_link`] UNCHANGED: the [`StreamReadDriver`] StreamEnvelope
 //! framing `LinkDriver` impl, the [`StreamWriteDriver`] channel, and the
-//! [`writer_task`](crate::stream_link::writer_task). A `UnixStream` splits with
+//! [`writer_task`]. A `UnixStream` splits with
 //! [`tokio::net::UnixStream::into_split`] (OWNED halves, like `TcpStream`, NOT
 //! the `tokio::io::split` that TLS needs for its un-owned `TlsStream`), so this
 //! module is the TCP pipeline with `UnixStream`/`UnixListener` swapped for
@@ -30,7 +30,7 @@
 //! A live listener holds the lock, so a second bind FAILS instead of pulling
 //! the socket out from under it; a crashed one held it only until its fd
 //! closed, so its leftovers are correctly reclaimed.
-//! [`UnixsockListener`](crate::unixsock_pipeline::UnixsockListener) is
+//! [`UnixsockListener`] is
 //! that discipline, over the same `libc::flock` wz already uses for the
 //! unixpipe rendezvous (`crate::unixpipe_pipeline`) and the SHM auth segment.
 //!
@@ -305,7 +305,7 @@ pub async fn accept_unixsock_on(listener: &UnixsockListener) -> io::Result<UnixS
 /// Split a connected [`UnixStream`] into the cooperating drivers the session
 /// FSM consumes: an inbound [`UnixsockReadDriver`] (`&mut LinkDriver` for the
 /// poll loop), an outbound `Arc<`[`StreamWriteDriver`]`>` (`BoxedLinkDriver`
-/// for `send_blocking`), and the [`writer_task`](crate::stream_link::writer_task)
+/// for `send_blocking`), and the [`writer_task`]
 /// join handle. Byte-for-byte the same shape as
 /// [`crate::link_pipeline::wire_tcp_stream`] — a unix stream owns its split
 /// halves (`into_split`) exactly like a `TcpStream`, and the StreamEnvelope

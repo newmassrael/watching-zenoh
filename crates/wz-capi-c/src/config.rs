@@ -10,7 +10,7 @@
 //! — by far the largest of them, and its size is a pure function of upstream's
 //! `Config`, so it moves whenever that type does (1.5.0 -> 1.10.0 moved it).
 //! The number lives once, in [`crate::abi`]. wz stores a handle to a
-//! [`ConfigState`] in its leading
+//! `ConfigState` in its leading
 //! pointer slot and zero-pads the rest — the C side never reads inside, it only
 //! hands the struct back through `z_loan_mut` / `z_move`.
 //!
@@ -20,7 +20,7 @@
 //! passes exactly three shapes: a quoted string (`"client"`), a list of quoted
 //! strings (`["tcp/127.0.0.1:7447"]`), and the bare literal `false`. This slice
 //! parses those three and REFUSES anything else with
-//! [`Z_EPARSE`](crate::result::Z_EPARSE) rather than storing it unparsed.
+//! [`Z_EPARSE`] rather than storing it unparsed.
 //!
 //! Refusing is the load-bearing half. A config engine that silently accepted a
 //! nested object would let a program believe it had configured something wz never

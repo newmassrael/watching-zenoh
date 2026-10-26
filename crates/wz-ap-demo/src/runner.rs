@@ -232,7 +232,7 @@ struct SpawnedTasks {
 /// seam (Acceptor -> [`accept_endpoint`], Initiator -> [`dial_endpoint`]).
 /// Both paths return a [`DialedLink`] the role-agnostic open helpers
 /// consume, after which the FSM-driving code is role-agnostic except
-/// for the initial role-start event dispatch (see [`activate_role`]).
+/// for the initial role-start event dispatch (see `activate_role`).
 ///
 /// R121f — this binary does NOT implement connect retry / timeout
 /// tuning beyond the kernel default; production callers that need
@@ -921,7 +921,7 @@ const SCOUT_TICK_MS: u64 = 50;
 /// pre-session locator resolution, and everything downstream of the returned
 /// string is the ordinary Initiator path.
 ///
-/// WHY THIS REPEATS THE CYCLE. [`drive_scouting_until_resolved`] is ONE cycle by
+/// WHY THIS REPEATS THE CYCLE. `drive_scouting_until_resolved` is ONE cycle by
 /// construction (one Scout, one `timeout_ms` window, exit on the first Hello) —
 /// the shape of zenoh-pico's `__z_scout_loop`
 /// (`vendor/zenoh-pico/src/session/scout.c:57`, which sends the wbuf once and
@@ -934,7 +934,7 @@ const SCOUT_TICK_MS: u64 = 50;
 /// harness workaround. What is deliberately NOT mirrored is the exponential
 /// backoff: zenoh's loop is an unbounded background task where widening the
 /// gap saves chatter over hours, whereas this one is a bounded startup budget
-/// (default [`DEFAULT_SCOUT_BUDGET_MS`]) where a constant cycle just spends the
+/// (default `DEFAULT_SCOUT_BUDGET_MS`) where a constant cycle just spends the
 /// budget evenly.
 ///
 /// The engine is built ONCE and re-driven: `drive_scouting_until_resolved`
@@ -4353,7 +4353,7 @@ pub(crate) struct PeerOpts {
     /// counts as a broken link rather than as a reference.
     pub max_sessions: usize,
     /// R311y218 (transport-qos) — offer the QoS transport on this peer's aggregated
-    /// links (`--qos`). Routed through [`WzConfig::with_qos`] into `FaceSources.qos`.
+    /// links (`--qos`). Routed through `WzConfig::with_qos` into `FaceSources.qos`.
     #[cfg(feature = "transport-qos")]
     pub qos: bool,
     /// R2095 (open-debt item 513) — the capability SET every face this peer
@@ -6062,7 +6062,7 @@ async fn run_peer_until(
 }
 
 /// P4 §5.21 ACTIVATION — router-hat MODE (`--router-hat <listen>`): the first wz
-/// run-mode to present a TRUE wire [`WhatAmI::Router`] and drive the dual-mesh
+/// run-mode to present a TRUE wire `WhatAmI::Router` and drive the dual-mesh
 /// [`RouterForwarder`](wz::runtime_tokio::router_forward::RouterForwarder) (the
 /// zenoh `hat/router` port) over real transport. The dial+accept
 /// [`peer_loop`](wz::runtime_tokio::accept_loop::peer_loop) host, and since
@@ -8204,7 +8204,7 @@ fn admin_metadata_json_of(
 ///
 /// ## The Send+'static handler bound forces Arc-shared state
 ///
-/// [`Session::declare_queryable`] / [`Session::declare_subscriber`] callbacks are
+/// `Session::declare_queryable` / `Session::declare_subscriber` callbacks are
 /// `Send + 'static` (session/mod.rs), but the manager is NOT `Send` (the storage
 /// `Volume` trait carries no `Send` bound). So the manager CANNOT be captured by a
 /// handler — it stays task-local in the drive-loop dispatch closure (which has no
@@ -8258,7 +8258,7 @@ fn admin_metadata_json_of(
 /// The live-config invariant is the same as those two hosts; only the SHARING
 /// SHAPE differs. They hold an `Rc<RefCell<WzConfig>>` because their handler goes
 /// through the non-`Send` `register_local_queryable`; this host's
-/// [`Session::declare_queryable`] callback is `Send + 'static` (see above), so the
+/// `Session::declare_queryable` callback is `Send + 'static` (see above), so the
 /// same one-instance-read-per-request invariant needs an `Arc<Mutex<_>>`.
 /// R2374 (§5.23 `adminspace-read` / `adminspace-write`) — the `--storage-host`
 /// knobs, bundled.

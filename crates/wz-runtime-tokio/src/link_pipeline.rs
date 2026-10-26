@@ -5,7 +5,7 @@
 //!
 //! The TCP instantiation of the transport-neutral byte-stream link machinery
 //! in [`crate::stream_link`] (the read/write drivers + the StreamEnvelope
-//! [`writer_task`](crate::stream_link::writer_task)). This module carries only
+//! [`writer_task`]). This module carries only
 //! the TCP-specific dial + split; the framing drivers are shared with TLS
 //! ([`crate::tls_pipeline`]) so the StreamEnvelope wire shape has a single
 //! source of truth. See the module-level doc on [`crate::link_pipeline`]
@@ -384,7 +384,7 @@ async fn dial_tcp_candidates(
 /// learns its port. Quiet, like the dial primitives: logging is the caller's
 /// concern (the Acceptor's "listening on" line; the Initiator's "connected
 /// to"). Numeric only by construction, mirroring [`dial_tcp`]; [`bind_tcp_host`]
-/// is the DNS-capable sibling. Built through the [`bind_listener`] SSOT
+/// is the DNS-capable sibling. Built through the `bind_listener` SSOT
 /// (`TcpSocket` + backlog 1024, zenoh parity).
 pub async fn bind_tcp(addr: SocketAddr, link_socket: &LinkSocket<'_>) -> io::Result<TcpListener> {
     bind_listener(addr, link_socket)
@@ -395,7 +395,7 @@ pub async fn bind_tcp(addr: SocketAddr, link_socket: &LinkSocket<'_>) -> io::Res
 /// resolver ([`lookup_host`]) and each resolved address is tried in order until
 /// one binds (the listen-side mirror of how `TcpStream::connect` walks a
 /// `ToSocketAddrs` set); a numeric string resolves to itself. Each candidate
-/// goes through the same [`bind_listener`] SSOT, so the backlog / `SO_REUSEADDR`
+/// goes through the same `bind_listener` SSOT, so the backlog / `SO_REUSEADDR`
 /// posture holds whichever address binds. (Listen-side hostnames are unusual,
 /// but `TcpSocket::bind` takes a single `SocketAddr`, so the resolve loop the
 /// numeric path skips is hand-rolled here.)
@@ -653,7 +653,7 @@ fn bind_listener(addr: SocketAddr, link_socket: &LinkSocket<'_>) -> io::Result<T
 }
 
 /// Accept ONE inbound connection from a *borrowed* [`TcpListener`], applying the
-/// per-link TCP tuning ([`configure_tcp_stream`]) and returning the accepted
+/// per-link TCP tuning (`configure_tcp_stream`) and returning the accepted
 /// [`TcpStream`] + its peer address. Quiet (no log): the caller owns the
 /// "listening on" / "accepted peer" lines (the demo tags `wz accept:`, the e2e
 /// harness tags its binary name) — the accept-side reason the dial primitives
@@ -699,7 +699,7 @@ use crate::iface_bind::configure_tcp_stream;
 /// Split a connected [`TcpStream`] into the cooperating drivers the session
 /// FSM consumes: an inbound [`TcpReadDriver`] (`&mut LinkDriver` for the poll
 /// loop), an outbound `Arc<`[`StreamWriteDriver`]`>` (`BoxedLinkDriver` for
-/// `send_blocking`), and the [`writer_task`](crate::stream_link::writer_task)
+/// `send_blocking`), and the [`writer_task`]
 /// join handle.
 ///
 /// The `Arc` lets the FSM's `SessionLinkActions` keep the outbound side alive

@@ -1069,7 +1069,7 @@ pub struct z_bytes_slice_iterator_t {
 /// `z_bytes_get_slice_iterator`).
 ///
 /// The slices are the SEGMENTS a `z_bytes_writer_append` left behind (see
-/// [`ByteBuf`]), so upstream's own `z_bytes.c` walks the same three slices on
+/// `ByteBuf`), so upstream's own `z_bytes.c` walks the same three slices on
 /// wz that it walks on the real zenoh-pico.
 ///
 /// An earlier cut of this function yielded ONE slice covering the whole payload
@@ -1323,7 +1323,7 @@ pub unsafe extern "C" fn z_bytes_from_string(
 ///
 /// The deleter is owed on EVERY path once the call is made, a failed one
 /// included: pico's ownership transfer is unconditional, so it is held in a
-/// [`Release`] before anything can return early.
+/// `Release` before anything can return early.
 ///
 /// # Safety
 /// `bytes` must be valid and writable; `value` must be null or a live
@@ -1413,7 +1413,7 @@ pub unsafe extern "C" fn z_slice_copy_from_buf(
 ///
 /// The slice DESCRIBES the caller's buffer — `z_slice_data` answers `data`
 /// itself — and the deleter runs when the last holder of it is dropped, which is
-/// after the payload the slice was moved into, if any. Held in a [`Release`]
+/// after the payload the slice was moved into, if any. Held in a `Release`
 /// before anything can return early, so a failed call still runs it, as pico's
 /// unconditional ownership transfer requires.
 ///

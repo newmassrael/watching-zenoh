@@ -328,7 +328,7 @@ impl Channel {
 /// multi-threaded arm, a mutex and two condvars after them
 /// (`vendor/zenoh-pico/include/zenoh-pico/collections/fifo_mt.h`). 184 B measured
 /// in the multi-threaded arm, 48 B in the single-threaded one (the 40-byte ring
-/// and the flag). Slot 0 is this crate's [`Channel`] handle; the remainder is
+/// and the flag). Slot 0 is this crate's `Channel` handle; the remainder is
 /// inert padding that keeps the C-side `sizeof` and the `memcpy` relocation exact.
 ///
 /// The size is the header arm's because pico's channel macros allocate the struct

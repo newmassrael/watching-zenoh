@@ -3,7 +3,7 @@
 
 //! §5.24 — the DYNAMIC storage-volume host: `dlopen` loading, the ABI gate, and
 //! the adapter that makes a loaded `.so` an ordinary
-//! [`Volume`](wz_session_core::storage_volume::Volume).
+//! [`Volume`].
 //!
 //! ## The atom R311y256 deprecated on a condition that has now fired
 //!
@@ -18,7 +18,7 @@
 //! ## Why the adapter is an ordinary `Volume` and not a new seam
 //!
 //! [`DynamicVolume`] implements the same runtime-agnostic
-//! [`Volume`](wz_session_core::storage_volume::Volume) trait
+//! [`Volume`] trait
 //! [`MemoryVolume`](wz_session_core::storage_volume::MemoryVolume) and
 //! [`FilesystemVolume`](crate::filesystem_storage::FilesystemVolume) do, so
 //! `RuntimeStorageManager::register_volume` takes it with no change and every
@@ -30,12 +30,12 @@
 //!
 //! [`DynamicStore`] keeps an in-memory mirror for reads and writes THROUGH to the
 //! volume. It was written when
-//! [`StorageBackend::get`](wz_session_core::storage_backend::StorageBackend::get)
+//! [`StorageBackend::get`]
 //! returned a BORROWED [`StoredData`], which only a value the backend owned could
 //! satisfy, and the filesystem backend kept a mirror for the same reason. R2800
 //! made the seam hand out values, and R2801 took the filesystem backend's mirror
 //! away; this one stays because the volume ABI still gives it nothing else to
-//! read from -- [`VolumeVTable`](wz_volume_abi::VolumeVTable) reports stored
+//! read from -- [`VolumeVTable`] reports stored
 //! values only as a whole-store listing, and has no read by key.
 //!
 //! The honest consequence, stated because it bounds every claim made about this
@@ -56,7 +56,7 @@
 //! different in one specific way: every pointer into its library that the host
 //! keeps is reachable from a [`DynamicStore`] or the [`DynamicVolume`] itself, and
 //! both are ordinary owned values. So this module shares one
-//! [`Arc`](std::sync::Arc)`<Library>` between the volume and every store it
+//! [`Arc`]`<Library>` between the volume and every store it
 //! creates, which makes the mapping outlive its last user by construction instead
 //! of by argument. Dropping the last store after the volume is a correct order,
 //! and so is the reverse.
@@ -178,7 +178,7 @@ unsafe fn copy_cstr(
 }
 
 /// One `dlopen`ed storage volume, usable anywhere a
-/// [`Volume`](wz_session_core::storage_volume::Volume) is.
+/// [`Volume`] is.
 pub struct DynamicVolume {
     id: String,
     name: String,

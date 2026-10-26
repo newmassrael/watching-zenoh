@@ -3,7 +3,7 @@
 
 //! The AP POSIX shared-memory provider for the same-host SHM transport
 //! (`transport-shm`) — the `std` half of the split (the no_std descriptor +
-//! marker codec + the [`ShmResolver`](wz_session_core::extshm::ShmResolver) trait
+//! marker codec + the [`ShmResolver`] trait
 //! live in `wz-session-core::extshm`).
 //!
 //! # R2862 — the payload is addressed the way upstream addresses it
@@ -79,7 +79,7 @@
 //! marking a chunk whose bit no one set in the whole window as invalidated.
 //! Here the owner's handle confirms for as long as it lives, the store validates
 //! what it provides on the watchdog thread's clock, and a receiver's
-//! [`ChunkHold`](crate::shm_provider::ChunkHold) confirms for as long as it holds
+//! [`ChunkHold`] confirms for as long as it holds
 //! and releases its reference when it drops, which is upstream's received buffer
 //! as a lifecycle, with the bytes still to come. Metadata segments a receiver
 //! opens are kept, by id, and let go of once their name names another object.
@@ -90,8 +90,8 @@
 //! it. That gives a publisher that sends one buffer exactly what it needs and gives a program
 //! that allocates a chunk out of a fixed-size pool once a second nothing at all, which is the
 //! program upstream's own examples are. The lifecycle above is now the PROVIDER's
-//! ([`ShmProvider`](crate::shm_provider::ShmProvider)), not the payload's, and the memory under it is a
-//! [`ShmProviderBackend`](crate::shm_backend::ShmProviderBackend):
+//! ([`ShmProvider`]), not the payload's, and the memory under it is a
+//! [`ShmProviderBackend`]:
 //!
 //! * a backend allocates and frees chunks of its segments
 //!   ([`crate::shm_posix_backend`] is the built-in pool);
@@ -99,7 +99,7 @@
 //!   keeps the chunk on its busy list, and gives its memory back to the backend only when the
 //!   reference count reads zero (`commons/zenoh-shm/src/api/provider/shm_provider.rs` @
 //!   `fn garbage_collect_impl<const SAFE: bool>(&self) -> usize {`);
-//! * a policy ([`AllocPolicy`](crate::shm_provider::AllocPolicy)) says what an allocation does when the backend cannot serve
+//! * a policy ([`AllocPolicy`]) says what an allocation does when the backend cannot serve
 //!   it: collect, defragment, take back the newest chunk held or not, or wait.
 //!
 //! [`ShmBackedPayload::alloc`](crate::shm_provider::ShmBackedPayload::alloc) is a provider whose pool is one payload, so everything above

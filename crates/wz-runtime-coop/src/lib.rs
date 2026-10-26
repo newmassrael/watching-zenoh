@@ -34,7 +34,7 @@
 //! Every item exported under the `alloc` feature is a real
 //! implementation:
 //!
-//! - [`CoopRuntime::spawn`] heap-allocates a `Pin<Box<dyn Future +
+//! - `CoopRuntime::spawn` heap-allocates a `Pin<Box<dyn Future +
 //!   Send>>` wrapper that captures the user future + a JoinState
 //!   handle, pushes it into the executor's task vector, and returns
 //!   a real `CoopJoinHandle<T>` whose `poll` checks the shared
@@ -47,7 +47,7 @@
 //!   `cx.waker().wake_by_ref()`) become ready for the *next*
 //!   `run_until_idle` call; this round does not busy-spin inside
 //!   one call.
-//! - [`CoopTime::now_monotonic_ms`] reads the user-supplied
+//! - `CoopTime::now_monotonic_ms` reads the user-supplied
 //!   `ClockSource::now_us(&self)` and divides by 1000 against the
 //!   per-instance epoch — no fake constant, no `unimplemented!()`.
 //!
@@ -351,7 +351,7 @@ pub use wz_session_core::switchboard::EventInjector;
 /// this crate has no build script); compiled only under the `reassembly`
 /// feature via the `#[cfg]` on the wrapping module below.
 ///
-/// R311in carry[3] — the MCU sibling of `wz-runtime-tokio`'s
+/// R311in carry\[3\] — the MCU sibling of `wz-runtime-tokio`'s
 /// `reassembly_pool_ap`. Exposes the spec-anchored pool constants the
 /// MCU [`reassembly_rx`] seam consumes: `SLOT_COUNT` / `SLOT_SIZE` (the
 /// dispatcher const generics) and `PER_PEER_QUOTA` /

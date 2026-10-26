@@ -23,7 +23,7 @@
 //! an owned [`z_owned_matching_listener_t`], its undeclare, and the two polls
 //! ([`z_publisher_get_matching_status`] / [`z_querier_get_matching_status`]).
 //!
-//! Retiring the listener when its publisher drops is [`MatchingHold`]'s `Drop`,
+//! Retiring the listener when its publisher drops is `MatchingHold`'s `Drop`,
 //! which the publisher state owns — so the two cannot drift, the same discipline
 //! the liveliness token uses for its retraction.
 

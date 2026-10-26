@@ -52,4 +52,9 @@ pub mod cmake_cache;
 /// target, shared with `build.rs` for the same reason `cmake_cache` is.
 pub mod platform_map;
 
+/// A C header comment made safe to read as rustdoc: the rewrite `build.rs` gives bindgen's
+/// `process_comment`, so the generated bindings carry no link or code block rustdoc rejects.
+/// Shared with `build.rs` for the same reason `cmake_cache` is.
+pub mod rustdoc_comment;
+
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));

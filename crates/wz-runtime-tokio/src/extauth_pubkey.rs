@@ -474,7 +474,7 @@ impl AuthMethod for PubKeyMethod {
     /// key in its canonical encoded ZPublicKey form. The RESPONDER captures the
     /// initiator's key on InitSyn (`peer_pubkey`), the INITIATOR captures the
     /// responder's key on InitAck (`resp_pubkey`); either side surfaces whichever
-    /// it holds. Re-encodes through the SAME [`encode_pubkey`] the InitSyn body
+    /// it holds. Re-encodes through the SAME `encode_pubkey` the InitSyn body
     /// uses, so the bytes are identical to the on-wire form the peer sent — a
     /// byte-equality on the encoded key across two links proves they present the
     /// SAME ephemeral identity (the multilink join's config-equality gate).

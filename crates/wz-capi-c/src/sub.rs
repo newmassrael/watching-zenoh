@@ -7,7 +7,7 @@
 //! ## One C subscription is N wz subscribers
 //!
 //! A zenoh-c session is "one session, many peers"; a wz unicast `Session` is
-//! exactly one peer. [`wz_capi_core`](wz_capi_core) resolves that with a face
+//! exactly one peer. [`wz_capi_core`] resolves that with a face
 //! registry and a declaration SSOT replayed onto each face as it comes up, so a
 //! `z_declare_subscriber` before any peer is connected still records the
 //! subscription and every FUTURE face gets it. That is upstream's
@@ -345,7 +345,7 @@ pub unsafe extern "C" fn z_declare_subscriber(
 /// Discarding the local is a genuine leak and that is the intent, not an
 /// oversight to be papered over with `mem::forget`. `z_owned_subscriber_t` is a
 /// plain `#[repr(C)]` struct with NO `Drop` — the retraction lives in the boxed
-/// [`SubscriberState`] behind its handle, and only [`z_undeclare_subscriber`]
+/// `SubscriberState` behind its handle, and only [`z_undeclare_subscriber`]
 /// reclaims that. With no handle in the C side's hands, nobody can call it, so
 /// the subscription lives until the session's registry is torn down. `mem::forget`
 /// here would be a no-op that merely LOOKED load-bearing.
@@ -408,7 +408,7 @@ pub unsafe extern "C" fn z_subscriber_id(
 /// boxed and the view is aimed at its own field.
 ///
 /// Serves the LIVELINESS subscriber too, because both kinds share one
-/// [`SubscriberState`] (see [`subscriber_state_handle`] for why), so
+/// `SubscriberState` (see `subscriber_state_handle` for why), so
 /// `z_liveliness_declare_subscriber`'s handle answers here as well.
 ///
 /// # Safety

@@ -11,7 +11,7 @@
 //! [`wz_capi_core::encoding_ids::ENCODING_ID_TO_STR`], pinned entry-for-entry
 //! against the real `libzenohpico.so` by `wz-capi-pico`'s oracle.
 //!
-//! So [`encoding_constants!`] takes a function name and a table INDEX, and the
+//! So `encoding_constants!` takes a function name and a table INDEX, and the
 //! label is read out of the shared table. A constant whose label were written
 //! here would be a second transcription of a wire value — the exact shape this
 //! workspace has watched drift — and the index is the wire id, so getting it
@@ -30,9 +30,9 @@
 //!
 //! [`z_encoding_from_str`] builds a label the caller supplied, so the "every
 //! label is `'static`, drop frees nothing" invariant this module used to rest
-//! on is gone. [`EncodingState::heap`] carries the distinction and the three
+//! on is gone. `EncodingState::heap` carries the distinction and the three
 //! places that care — [`z_encoding_clone`], [`z_encoding_drop`] and
-//! [`take_moved_encoding`] — all read it, so a constant is still never freed
+//! `take_moved_encoding` — all read it, so a constant is still never freed
 //! and a caller's string is still never leaked.
 
 use std::borrow::Cow;

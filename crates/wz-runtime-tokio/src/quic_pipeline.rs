@@ -280,7 +280,7 @@ where
 /// choice upstream makes where it hands quinn its crypto
 /// (`io/zenoh-link-commons/src/quic/unicast.rs` @ `Arc::new(PlainTextClientConfig::new(quic_config.into()))`,
 /// the `else` of `if is_secure`). The plaintext arm is
-/// `crate::quic_plaintext`, and both reach [`connect_quic_client`] through the
+/// `crate::quic_plaintext`, and both reach `connect_quic_client` through the
 /// same parameter, which is why that function takes quinn's trait object rather
 /// than a rustls config: a rustls config can only ever be the encrypted arm.
 pub(crate) fn tls_client_crypto(
@@ -367,7 +367,7 @@ pub(crate) async fn connect_quic_client(
 /// convenience `Endpoint::server` owns the UDP socket it binds and exposes no
 /// bind-device hook, so a device-bound listener needs the socket built FIRST:
 /// bind, `SO_BINDTODEVICE`, then hand it to `Endpoint::new`. This is the exact
-/// mirror of the dial-side [`connect_quic_client`] arm, and of zenoh's own
+/// mirror of the dial-side `connect_quic_client` arm, and of zenoh's own
 /// listener, which binds a UDP socket, calls `set_bind_to_device_udp_socket`, and
 /// passes it to `Endpoint::new_with_abstract_socket`
 /// (`io/zenoh-link-commons/src/quic/unicast.rs` @
@@ -441,7 +441,7 @@ pub(crate) async fn accept_quic_connection(endpoint: &Endpoint) -> io::Result<Co
 /// stream. Returns a [`QuicLink`] ready for [`wire_quic_stream`]. The primitive
 /// [`crate::session_open::dial_locator`] calls for a `quic/...` locator carrying
 /// [`crate::session_open::DialConfig`]`.quic`. Mirrors zenoh's `new_link`: the
-/// shared [`connect_quic_client`] handshake, then `open_bi`.
+/// shared `connect_quic_client` handshake, then `open_bi`.
 pub async fn dial_quic(
     addr: SocketAddr,
     client_config: Arc<RustlsClientConfig>,
@@ -458,7 +458,7 @@ pub async fn dial_quic(
 }
 
 /// R2798 — the crypto-agnostic body of [`dial_quic`]: the shared
-/// [`connect_quic_client`] handshake, then `open_bi`. Split out so the
+/// `connect_quic_client` handshake, then `open_bi`. Split out so the
 /// reliable UDP variant, which is this same stream link under a plaintext
 /// session, dials through it instead of repeating it.
 pub(crate) async fn open_quic_stream(
@@ -483,7 +483,7 @@ pub(crate) async fn open_quic_stream(
 /// Bind a QUIC server [`Endpoint`] at `addr` presenting `server_config` — the
 /// accept-side "listen half" symmetric to [`dial_quic`]. Restricts the connection
 /// to ONE bidirectional stream and ZERO unidirectional (the shared
-/// [`quic_server_endpoint`] with `max_bidi = 1`), mirroring zenoh's
+/// `quic_server_endpoint` with `max_bidi = 1`), mirroring zenoh's
 /// `new_listener`, so the QUIC link is exactly one StreamEnvelope byte stream.
 /// The caller owns the returned `Endpoint` and loops [`accept_quic_on`] over it.
 ///
@@ -509,7 +509,7 @@ pub async fn bind_quic(
 /// cheap TCP `accept` that precedes the DEFERRED tls SERVER handshake — a stalled
 /// peer handshake never blocks accepting the next peer, which is what makes the
 /// quic acceptor mesh-capable (R311y404). `None` (endpoint closed) maps to an
-/// `io` error, matching [`accept_quic_connection`].
+/// `io` error, matching `accept_quic_connection`.
 pub async fn accept_quic_incoming(endpoint: &Endpoint) -> io::Result<Incoming> {
     endpoint
         .accept()
@@ -543,7 +543,7 @@ pub async fn complete_quic_accept(incoming: Incoming, endpoint: Endpoint) -> io:
 /// QUIC mirror of [`crate::link_pipeline::accept_tcp_on`], INLINE (crypto + stream
 /// back to back). Composes the [`accept_quic_incoming`] arrival with the deferred
 /// [`complete_quic_accept`], so the split-half primitives stay the one SSOT. Since
-/// R311y404 BOTH the one-shot [`crate::session_open::accept_bound`] AND the
+/// R311y404 BOTH the one-shot `crate::session_open::accept_bound` AND the
 /// multi-peer accept loop go through the two halves directly (accept_raw's arrival +
 /// handshake's completion, so the crypto defers off the accept path); the only
 /// remaining caller of this inline entry is the wz<->wz `quic_e2e` test, which wants
@@ -557,7 +557,7 @@ pub async fn accept_quic_on(endpoint: &Endpoint) -> io::Result<QuicLink> {
 /// Wire a [`QuicLink`] into the cooperating drivers the session FSM consumes: an
 /// inbound [`QuicReadDriver`] (`&mut LinkDriver` for the poll loop), an outbound
 /// `Arc<`[`StreamWriteDriver`]`>` (`BoxedLinkDriver` for `send_blocking`), and
-/// the [`writer_task`](crate::stream_link::writer_task) join handle. The
+/// the [`writer_task`] join handle. The
 /// `SendStream`/`RecvStream` are already a split pair (no `into_split` /
 /// `tokio::io::split`); the endpoint + connection ride into the read driver as
 /// the link keep-alive (module doc). StreamEnvelope framing + write driver are

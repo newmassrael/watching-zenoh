@@ -46,7 +46,7 @@ use wz_session_core::qos::Priority;
 
 /// Inbound read half of a split byte-stream link — owns the read half `R`
 /// (any `AsyncRead`) and impls [`LinkDriver`] with `poll_event` reading one
-/// [`StreamEnvelope`] frame via the shared [`crate::poll_framed`] state
+/// [`StreamEnvelope`] frame via the shared `crate::poll_framed` state
 /// machine. The send/open/close methods are no-ops: the inbound side never
 /// emits — the FSM's outbound path is the sibling [`StreamWriteDriver`].
 ///

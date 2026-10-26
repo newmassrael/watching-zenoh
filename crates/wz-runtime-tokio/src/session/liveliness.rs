@@ -630,7 +630,7 @@ impl std::error::Error for LivelinessAliasError {
 /// the observer.liveliness_subscribers field + declare::liveliness_subscriber
 /// module become unconditional") is now closed: the
 /// [`LivelinessSubscriber`] handle, the
-/// [`Session::declare_liveliness_subscriber{_aliased}`] surface
+/// `Session::declare_liveliness_subscriber{_aliased}` surface
 /// (Result form with `FeatureDisabled` variant), the
 /// `observer.liveliness_subscribers` field, and the
 /// `declare::liveliness_subscriber` module are all type-ungated. The
@@ -717,13 +717,13 @@ impl LivelinessSubscriberOptions {
 /// by an earlier callback panic; the Drop impl `map`s over the
 /// `Result` so a poisoned mutex still produces an idempotent
 /// no-op rather than a double panic (same shape as
-/// [`crate::pubsub::Subscriber::drop`] guard).
+/// `crate::pubsub::Subscriber::drop` guard).
 ///
 /// `#[non_exhaustive]`. Construct only through
 /// [`Session::declare_liveliness_subscriber`].
 ///
 /// R311q — type-ungated. The struct, impl, and Drop are always defined
-/// so the [`Session::declare_liveliness_subscriber{_aliased}`]
+/// so the `Session::declare_liveliness_subscriber{_aliased}`
 /// Result-form signature compiles regardless of feature state; a
 /// feature-OFF call returns `Err(LivelinessSubscriberAliasError::FeatureDisabled)`
 /// without ever constructing this handle (so the Drop-path wire emit
@@ -1057,7 +1057,7 @@ impl<R: SessionRuntime, T: TimeSource> Drop for LivelinessSubscriber<R, T> {
 ///
 /// R311q — type-ungated + [`Self::FeatureDisabled`] variant added.
 /// The enum is always defined so the
-/// [`Session::declare_liveliness_subscriber{_aliased}`] Result-form
+/// `Session::declare_liveliness_subscriber{_aliased}` Result-form
 /// signature compiles regardless of feature state; a feature-OFF call
 /// returns `Err(FeatureDisabled)` so caller code can branch on it
 /// uniformly. Mirrors the `FeatureDisabled` variant pattern already
@@ -1075,7 +1075,7 @@ pub enum LivelinessSubscriberAliasError {
     /// is mid-handshake (InitSyn / InitAck / OpenSyn / OpenAck) and
     /// the peer would discard it (no `remote-interests` table entry
     /// yet). Caller should wait for
-    /// [`crate::Session::is_established`] (or the equivalent
+    /// `crate::Session::is_established` (or the equivalent
     /// session-level signal in higher-tier wrappers) to flip to
     /// `true` before retrying the declare. Mirrors zenoh-pico's
     /// implicit "declare AFTER z_open returns Z_OK" sequencing

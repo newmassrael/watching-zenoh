@@ -150,7 +150,7 @@ pub enum CodegenError {
     /// input (no `external_ingress_events` descriptor matches it per W3C
     /// SCXML 3.12.1).
     UnknownEvent {
-        /// The offending [`Binding::event`].
+        /// The offending [`Binding::event`](wz_switchboard_schema::Binding::event).
         event: String,
         /// The machine whose contract rejected it.
         machine: String,
@@ -162,7 +162,7 @@ pub enum CodegenError {
     /// runtime registry merely warns: a bad pattern in a sidecar is a
     /// defect to fix, not to tolerate.
     Keyexpr {
-        /// The offending [`Binding::keyexpr`].
+        /// The offending [`Binding::keyexpr`](wz_switchboard_schema::Binding::keyexpr).
         keyexpr: String,
         /// The canonicalizer's diagnostic.
         reason: String,
@@ -173,7 +173,7 @@ pub enum CodegenError {
     /// `typed_inject_events`). Such a binding can only be a signal binding —
     /// drop its `codec` or give the machine a native typed guard.
     EventNotTypedInject {
-        /// The offending [`Binding::event`].
+        /// The offending [`Binding::event`](wz_switchboard_schema::Binding::event).
         event: String,
         /// The machine whose contract rejected it.
         machine: String,
@@ -185,13 +185,13 @@ pub enum CodegenError {
     /// decoded value cannot be field-mapped. (The consumer build must emit
     /// the EventSchema document's forge-ast and pass it in.)
     MissingEventSchema {
-        /// The [`Binding::event`] whose schema was not supplied.
+        /// The [`Binding::event`](wz_switchboard_schema::Binding::event) whose schema was not supplied.
         event: String,
     },
     /// A value binding names a `codec` with no matching [`CodecFacts`] among
     /// the facts supplied to [`generate`] — the wire decoder is unknown.
     CodecNotFound {
-        /// The [`Binding::codec`] name that was not supplied.
+        /// The [`Binding::codec`](wz_switchboard_schema::Binding::codec) name that was not supplied.
         codec: String,
         /// The value binding's event, for the fix hint.
         event: String,
@@ -413,7 +413,7 @@ pub struct FieldFact {
 /// the consumer build emits alongside the statechart.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventSchemaFacts {
-    /// The SCXML event this schema constrains (matches [`Binding::event`]).
+    /// The SCXML event this schema constrains (matches [`Binding::event`](wz_switchboard_schema::Binding::event)).
     pub event_name: String,
     /// The typed fields exposed via `_event.data.<field>`, in declaration
     /// order (the order the generated payload struct literal emits).
@@ -426,7 +426,7 @@ pub struct EventSchemaFacts {
 /// forge-ast document (`kind = "codec"`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodecFacts {
-    /// The codec kind name (matches [`Binding::codec`]).
+    /// The codec kind name (matches [`Binding::codec`](wz_switchboard_schema::Binding::codec)).
     pub name: String,
     /// Rust path to the module the consumer's build generated this codec
     /// into (e.g. `"temp_payload"` for a sibling `mod temp_payload`). The
@@ -619,7 +619,7 @@ pub struct GenInput<'a> {
 /// Generate the closed `dispatch_switchboard` function source for the spec in
 /// `input`, validated against the machine + schema + codec facts.
 ///
-/// The switchboard has two row kinds, chosen per [`Binding::codec`]:
+/// The switchboard has two row kinds, chosen per [`Binding::codec`](wz_switchboard_schema::Binding::codec):
 ///  - **signal** (no codec) — injects the event with an empty `_event.data`.
 ///  - **value** (codec present) — decodes the wire payload and injects a typed
 ///    `_event.data` via the machine's generated `<Machine>Inject` seam.

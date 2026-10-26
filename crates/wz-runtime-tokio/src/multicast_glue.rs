@@ -4,7 +4,7 @@
 //! Round C — multicast transport <-> multicast-link drive loop.
 //!
 //! The AP host loop that drives the engine-free
-//! [`MulticastDispatcher`](wz_session_core::multicast_dispatch::MulticastDispatcher)
+//! [`MulticastDispatcher`]
 //! (the session-fsm §3.1 session-level FSM + the §3.2 per-peer table,
 //! landed in wz-session-core) against a real UDP-multicast link. This is
 //! the multicast sibling of [`crate::scouting_glue`]; the same engine-free
@@ -49,12 +49,12 @@
 //! ## A1b — the multicast DATA plane (§3.1 `Frame -> per-peer RxDispatch`)
 //!
 //! An inbound `T_MID_FRAME` from a live peer is decoded
-//! ([`parse_inbound`]), admitted against that peer's per-channel SN gate
+//! (`parse_inbound`), admitted against that peer's per-channel SN gate
 //! ([`ingest_frame_by_src`](MulticastDispatcher::ingest_frame_by_src) — the
 //! §2.3 half-window rule, zenoh-pico `_z_multicast_handle_frame`), and its
-//! NetworkMessage batch ([`parse_frame_payload`]) is fanned to the caller's
+//! NetworkMessage batch (`parse_frame_payload`) is fanned to the caller's
 //! `on_event` observer callback as an
-//! [`IterationEvent::Poll`]`(`[`DriverLoopOutcome::FramePayload`]`)` — the
+//! [`IterationEvent::Poll`]`(``DriverLoopOutcome::FramePayload``)` — the
 //! SAME event shape the unicast
 //! [`drive_session_until_terminal`](crate::session_glue::drive_session_until_terminal)
 //! loop fans, so one
@@ -79,28 +79,28 @@
 //! ## The link is the session machine's to open and release
 //!
 //! The loop does not take a bound socket. It takes a
-//! [`MulticastLink`](crate::multicast_glue::MulticastLink), which holds the
+//! [`MulticastLink`], which holds the
 //! BIND, and the session machine decides when it runs: entering LinkOpening
 //! (`open_multicast_link`) binds and opens the link, and the loop answers the
 //! machine with `link.ready` or `link.lost`; entering Stopped
 //! (`release_multicast_link`, on a stop or a lost link) closes it. A link that
 //! cannot be bound therefore ends the session as
-//! [`MulticastOutcome::LinkLost`](crate::multicast_glue::MulticastOutcome::LinkLost)
+//! [`MulticastOutcome::LinkLost`]
 //! before anything is sent. A host that needs the bound link before the loop
 //! runs (a group face labels its counters and its member view by it) brings
 //! the session up with
-//! [`open_multicast_session`](crate::multicast_glue::open_multicast_session)
+//! [`open_multicast_session`]
 //! first.
 //!
 //! ## Stop
 //!
 //! Three ways out: the link is lost (`LinkEvent::Lost` ->
-//! [`MulticastOutcome::LinkLost`](crate::multicast_glue::MulticastOutcome::LinkLost)),
+//! [`MulticastOutcome::LinkLost`]),
 //! the test iteration budget is reached
-//! ([`MulticastOutcome::IterationLimit`](crate::multicast_glue::MulticastOutcome::IterationLimit)),
+//! ([`MulticastOutcome::IterationLimit`]),
 //! or the caller asks for a graceful `multicast.stop` — the §3.1 Running ->
 //! Stopped event —
-//! ([`MulticastOutcome::Stopped`](crate::multicast_glue::MulticastOutcome::Stopped)).
+//! ([`MulticastOutcome::Stopped`]).
 //!
 //! R311y772 built that third door. The FSM half already existed
 //! (`MulticastDispatcher::stop`, which clears the peer table); what was
@@ -192,7 +192,7 @@ use crate::LinkDriver;
 // mint/encode/fragment orchestration the outbound arm carried inline now lives
 // in `multicast_tx_emit`.
 
-/// R311md — the AP loop's [`MulticastReplyEnqueue`] backing for the shared
+/// R311md — the AP loop's `MulticastReplyEnqueue` backing for the shared
 /// observer-drain reply sink. The shared
 /// [`MulticastReplySink<Q>`](wz_session_core::multicast_reply_sink::MulticastReplySink)
 /// constructs each [`MulticastTxItem`] and calls this backing's `enqueue`, which
@@ -658,7 +658,7 @@ where
 ///
 /// `on_event` is the per-iteration observer callback (the multicast mirror
 /// of `drive_session_until_terminal`'s): each SN-admitted data Frame fans
-/// one [`IterationEvent::Poll`]`(`[`DriverLoopOutcome::FramePayload`]`)`
+/// one [`IterationEvent::Poll`]`(``DriverLoopOutcome::FramePayload``)`
 /// carrying the decoded NetworkMessage batch. Wire it to
 /// `ApplicationLayerObserver::dispatch` (exactly as the unicast loop does)
 /// to route multicast pub/sub data into the registered subscriber /

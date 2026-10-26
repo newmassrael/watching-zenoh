@@ -60,7 +60,7 @@ use wz_capi_port::{FilterPlane, FilteredPut, SubId, WireKey};
 /// of pico's concrete `_z_sample_t`.
 ///
 /// The exception is upstream's `z_pong.c`, which reads `sample->payload` as a
-/// struct field. [`SampleMarshal`] therefore reproduces the layout PREFIX up to
+/// struct field. `SampleMarshal` therefore reproduces the layout PREFIX up to
 /// and including that member; see its docs.
 #[repr(C)]
 pub struct z_loaned_sample_t {
@@ -2536,7 +2536,7 @@ unsafe fn sample_qos(
 /// Deep-copy a sample into an owned one (pico `z_sample_clone`).
 ///
 /// The same deep copy `z_sample_take_from_loaned` performs — routed through the
-/// identical [`clone_sample_marshal`] so the two cannot diverge — with the
+/// identical `clone_sample_marshal` so the two cannot diverge — with the
 /// source left INTACT, which is the only difference between the two exports.
 ///
 /// # Safety

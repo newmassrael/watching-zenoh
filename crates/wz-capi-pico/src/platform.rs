@@ -414,7 +414,7 @@ unsafe fn random_value<const N: usize>() -> [u8; N] {
 ///
 /// The deleter is owed on EVERY path, success or not: pico's ownership transfer
 /// is unconditional once the call is made, so it is held in a
-/// [`crate::bytes::Release`] before anything can return early. A NULL deleter
+/// `crate::bytes::Release` before anything can return early. A NULL deleter
 /// means the buffer is static and must not be released, which pico documents at
 /// the parameter.
 #[no_mangle]

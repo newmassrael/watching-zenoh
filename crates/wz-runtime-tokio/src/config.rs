@@ -15,7 +15,7 @@
 //!
 //! * **read-at-open** — `whatami` / `batch_size` / `lease_ms` are
 //!   negotiated and FIXED by the 4-way handshake
-//!   ([`SessionInitParams`](wz_session_core::session_init_params::SessionInitParams));
+//!   ([`SessionInitParams`]);
 //!   the config mirrors them for introspection (the admin surface reads
 //!   them) but a post-open change cannot take effect without
 //!   re-handshaking, so the config never re-applies them. These are
@@ -26,7 +26,7 @@
 //!   interceptor factories on a config diff). wz drives it the same way:
 //!   [`WzConfig::reconfigure_interceptors`] mutates the typed config and,
 //!   under `config-mutate-runtime`, re-installs the chain on the live
-//!   forwarder via the [`InterceptorSink`](crate::interceptor::InterceptorSink)
+//!   forwarder via the [`InterceptorSink`]
 //!   seam (the production impl is
 //!   [`LinkstateForwarder`](crate::linkstate_forward::LinkstateForwarder)) so
 //!   the change takes effect at runtime.

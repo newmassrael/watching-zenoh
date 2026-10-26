@@ -638,7 +638,7 @@ impl QuicAcceptConfig {
 /// stream session, a UDP datagram session, and a serial tty session through
 /// one code path.
 pub enum DialedLink {
-    /// A connected stream, split downstream via [`wire_tcp_stream`].
+    /// A connected stream, split downstream via `wire_tcp_stream`.
     Tcp(TcpStream),
     /// A bound datagram socket + its unicast peer, shared downstream via
     /// [`wire_udp_socket`] — the DIAL side (this link owns its socket).
@@ -815,11 +815,11 @@ impl DialedLink {
 
 /// A bound listening socket, keyed by transport scheme — the ACCEPT-side mirror
 /// of [`DialedLink`]. [`bind_locator`] produces one per `--listen` scheme; the
-/// consuming [`accept_bound`] dispatches on the variant to accept ONE peer and
+/// consuming `accept_bound` dispatches on the variant to accept ONE peer and
 /// run that scheme's post-accept handshake, yielding the SAME [`DialedLink`] the
 /// dial side produces — so the downstream `wire_*` split is shared, dialed or
 /// accepted. Adding a transport is one arm HERE + one in [`bind_locator`] + one
-/// in [`accept_bound`], the symmetric counterpart of adding a `dial_locator` arm
+/// in `accept_bound`, the symmetric counterpart of adding a `dial_locator` arm
 /// plus a [`DialedLink`] variant (R311y375 — the accept side made symmetric to
 /// the dial side, retiring the per-scheme `bind_locator`-returns-`TcpListener`
 /// special-casing).
@@ -855,7 +855,7 @@ impl TlsAcceptPolicy {
 }
 
 pub enum BoundListener {
-    /// A bound TCP listener; [`accept_bound`] accepts a raw [`DialedLink::Tcp`].
+    /// A bound TCP listener; `accept_bound` accepts a raw [`DialedLink::Tcp`].
     Tcp(TcpListener),
     /// A bound TCP listener whose accepted stream gets the RFC6455 SERVER upgrade
     /// ([`accept_ws`]) — ws LISTENS on plain TCP, so the listener type is the same
@@ -875,7 +875,7 @@ pub enum BoundListener {
     /// CLIENT's, which exists only under mTLS; without it the fold finds no
     /// chain and nothing arms, exactly as upstream leaves it.
     Tls(TcpListener, Arc<ServerConfig>, TlsAcceptPolicy),
-    /// A bound unix-domain [`UnixsockListener`]; [`accept_bound`] accepts a raw
+    /// A bound unix-domain [`UnixsockListener`]; `accept_bound` accepts a raw
     /// [`DialedLink::Unixsock`] with NO post-accept handshake (a `UnixStream` is
     /// wrapped directly, like `tcp`). The FIRST non-`TcpListener` variant
     /// (R311y378, accept-symmetry Stage 4) — the accept-side mirror of
@@ -890,7 +890,7 @@ pub enum BoundListener {
     /// socket file, which is why no caller has to.
     #[cfg(all(feature = "transport-link-unixsock", unix))]
     Unixsock(UnixsockListener),
-    /// A bound AF_VSOCK [`VsockListener`]; [`accept_bound`] accepts a raw
+    /// A bound AF_VSOCK [`VsockListener`]; `accept_bound` accepts a raw
     /// [`DialedLink::Vsock`] with NO post-accept handshake (direct wrap, like
     /// `tcp` / `unixsock`). Non-IP like `unixsock` (the accepted peer is
     /// anonymous -> [`AcceptedPeer::NonIp`]); Linux-only (AF_VSOCK), gated with
@@ -902,7 +902,7 @@ pub enum BoundListener {
     /// A bound MULTI-CLIENT unix named-pipe rendezvous (R311y392) — a
     /// [`UnixpipeAcceptor`] owning the shared request channel + a spawned acceptor
     /// task that runs each client's zenoh-compatible invitation handshake and
-    /// feeds the completed links over a channel. [`accept_bound`] / the mesh loop
+    /// feeds the completed links over a channel. `accept_bound` / the mesh loop
     /// accept a raw [`DialedLink::Unixpipe`] with NO post-accept handshake (the
     /// invitation handshake already ran in the task; direct wrap, like `tcp` /
     /// `unixsock` / `vsock`). Non-IP like the other same-host families (a FIFO open
@@ -970,7 +970,7 @@ pub enum BoundListener {
     /// the mesh loop needs a quic cert, and every shipped listen caller now threads one
     /// (`--quic-cert`/`--quic-key` -> `AcceptConfig.quic`): the `--router` (R311y405),
     /// `--peer`, and `--router-hat` (R311y406) CLI paths, the one-shot `--listen quic/`
-    /// (via [`accept_bound`]), and pico's `z_open(listen=quic/)`. So a quic listen binds
+    /// (via `accept_bound`), and pico's `z_open(listen=quic/)`. So a quic listen binds
     /// whenever a cert is supplied; only a cert-LESS bind (a direct-API caller passing
     /// [`AcceptConfig::default`]) hits `bind_locator`'s cert-absence `Unsupported`.
     /// R2600 — the `bool` is `close_link_on_expiration`, read off the LOCATOR at
@@ -1097,7 +1097,7 @@ impl SerialListener {
 }
 
 /// The peer of a link accepted by [`BoundListener::accept_raw`] — an IP
-/// [`SocketAddr`](std::net::SocketAddr) for the stream family (tcp/ws/tls, all
+/// [`SocketAddr`] for the stream family (tcp/ws/tls, all
 /// `TcpListener`-backed), or a non-IP marker for a unix/vsock family listener
 /// whose accepted peer wz does NOT thread: a unix `accept` yields a genuinely
 /// unnamed peer (zenoh assigns a fresh UUID, `unixsock_pipeline`), while a vsock
@@ -1107,7 +1107,7 @@ impl SerialListener {
 /// doc anticipated for the first non-IP variant (R311y378).
 ///
 /// [`Display`](std::fmt::Display) renders the "accepted peer {..}" log line the
-/// one-shot [`accept_bound`] writes. The multi-peer
+/// one-shot `accept_bound` writes. The multi-peer
 /// [`accept_loop`](crate::accept_loop) holds a mesh face per accepted peer keyed
 /// by its handshake zid, NOT by the transport address: an [`Self::Ip`] peer AND a
 /// mesh-capable [`Self::NonIp`] peer (unixsock / vsock / unixpipe — each a genuine
@@ -1343,7 +1343,7 @@ impl BoundListener {
     /// The bound local address rendered as a `String` — the per-variant address
     /// the runner's `--router` / `--peer` / `--router-hat` bind paths log (the
     /// cross-impl e2e greps `peer: listening on 127.0.0.1:`) and the address half
-    /// of [`Self::log_listening`]. Returns a `String`, NOT a `SocketAddr`: each
+    /// of `Self::log_listening`. Returns a `String`, NOT a `SocketAddr`: each
     /// transport formats its OWN address type (the IP `SocketAddr` for the stream
     /// family tcp/ws/tls; a unix path / vsock CID for a future non-IP variant),
     /// rather than a uniform IP-typed accessor the non-IP transports could not
@@ -1484,7 +1484,7 @@ impl BoundListener {
     /// invariant the loop doc states). The stream family (tcp/ws/tls) all accept
     /// from the same [`TcpListener`] — only the deferred handshake differs — so the
     /// returned [`AcceptedLink`] carries WHICH handshake to run. The borrowed,
-    /// multi-accept counterpart of the consuming one-shot [`accept_bound`] (which
+    /// multi-accept counterpart of the consuming one-shot `accept_bound` (which
     /// handshakes inline for the one-shot session-open contract).
     ///
     /// The peer is an [`AcceptedPeer`] (R311y378), not a bare
@@ -1740,7 +1740,7 @@ impl BoundListener {
 /// [`Self::handshake`] (the ws/tls SERVER handshake, deferred to the spawned
 /// per-face open future so a slow/stalled handshake never blocks the accept
 /// loop). [`Self::handshake`] completes it into the SAME [`DialedLink`] the
-/// consuming one-shot [`accept_bound`] yields inline — the split exists ONLY so
+/// consuming one-shot `accept_bound` yields inline — the split exists ONLY so
 /// the loop can move the (potentially slow, peer-controlled) handshake off its
 /// accept path. The accept-side counterpart of [`DialedLink`] mid-flight; the
 /// stream family only (tcp/ws/tls all accept from a [`TcpListener`]).
@@ -1859,7 +1859,7 @@ impl AcceptedLink {
     /// [`DialedLink`] the dial side produces (so the downstream `wire_*` split is
     /// shared, dialed or accepted) — the acceptor twin of [`dial_locator`]'s
     /// per-scheme client handshake, and the mechanism SSOT the consuming one-shot
-    /// [`accept_bound`] also drives. Runs in the spawned per-face open future (not
+    /// `accept_bound` also drives. Runs in the spawned per-face open future (not
     /// the accept loop's `select!` arm), so a slow ws/tls/quic handshake never stalls
     /// accepting the next peer.
     pub async fn handshake(self) -> io::Result<DialedLink> {
@@ -1989,7 +1989,7 @@ impl AcceptedLink {
     // declaration is the whole truth and two was the duplication that let three
     // comments about this predicate go stale together.
 
-    /// The one-shot [`accept_bound`]'s "accepted peer {peer}{note}" log suffix —
+    /// The one-shot `accept_bound`'s "accepted peer {peer}{note}" log suffix —
     /// `""` for tcp, `"; ws server upgrade"` / `"; tls server handshake"` for the
     /// handshaking schemes (the completion-witness wording R311y375 obs#1 pinned,
     /// logged AFTER [`Self::handshake`] succeeds). A variant->note SSOT so the
@@ -2100,7 +2100,7 @@ pub const NOT_COMPILED_IN_MARKER: &str = "requires the transport-link-";
 /// seam, dispatching on the locator's scheme.
 ///
 /// `Ip(Proto::Tcp)` returns a connected [`TcpStream`] (split downstream by
-/// [`wire_dialed_link`] via [`wire_tcp_stream`], per the R311et raw-dial
+/// [`wire_dialed_link`] via `wire_tcp_stream`, per the R311et raw-dial
 /// decision: the stream is dialed once and the split shape is chosen by the
 /// consumer, not buried inside a unified driver).
 ///
@@ -2669,7 +2669,7 @@ pub(crate) fn plan_endpoint(connect: &str) -> Result<AnyLocator, AnyLocatorError
 
 /// Dial a `--connect`-style endpoint string to a raw [`DialedLink`] — the
 /// std-layer dial seam, the single home of "turn a `--connect` string into a
-/// dialed transport". [`plan_endpoint`] classifies the string into an
+/// dialed transport". `plan_endpoint` classifies the string into an
 /// [`AnyLocator`] (applying only the scheme-less = `tcp` convenience), then
 /// [`dial_locator`] — the SINGLE dial path, shared with the scouting /
 /// static-deploy open path — performs the dial: a numeric endpoint via its
@@ -2680,7 +2680,7 @@ pub(crate) fn plan_endpoint(connect: &str) -> Result<AnyLocator, AnyLocatorError
 /// [`open_session_at`] (the scouting / static-deploy entry) gained the same
 /// scheme'd-hostname capability for free — DNS-capability is now a property of
 /// the resolver layer, not of which caller invoked it. The scheme-LESS
-/// convenience stays demo-only in [`plan_endpoint`] (configured zenoh locators
+/// convenience stays demo-only in `plan_endpoint` (configured zenoh locators
 /// always carry a scheme).
 ///
 /// `cfg` is forwarded to [`dial_locator`] for transports needing out-of-band
@@ -3184,7 +3184,7 @@ async fn tls_accept_server_config(
 /// concrete type whatever the role.
 ///
 /// R311qa — delegates to [`bind_locator`] (the bind half, the SSOT the
-/// multi-peer [`accept_loop`](crate::accept_loop) shares) then [`accept_bound`]
+/// multi-peer [`accept_loop`](crate::accept_loop) shares) then `accept_bound`
 /// (accept ONE), rather than inlining the bind. The `Unsupported` still
 /// surfaced here originates in `bind_locator`'s scheme match.
 ///
@@ -3691,7 +3691,7 @@ pub async fn accept_bound_on(listener: &mut BoundListener) -> io::Result<DialedL
 }
 
 /// Accept a `--listen`-style endpoint string to a raw [`DialedLink`] — the
-/// std-layer accept seam, symmetric to [`dial_endpoint`]. [`plan_endpoint`] is the
+/// std-layer accept seam, symmetric to [`dial_endpoint`]. `plan_endpoint` is the
 /// SHARED classifier (a listen string parses to an [`AnyLocator`] by the same
 /// rules a connect string does — a scheme'd locator, or the scheme-less =
 /// `tcp` convenience), then [`accept_locator`] performs the bind + accept.
@@ -3704,7 +3704,7 @@ pub async fn accept_bound_on(listener: &mut BoundListener) -> io::Result<DialedL
 /// to the demo's `establish_link` Acceptor role, dissolving its inline
 /// `TcpListener::bind` into the same library seam the Initiator role already
 /// dials through.
-/// R311qa — composes [`bind_endpoint`] + [`accept_bound`] (the one-shot mirror
+/// R311qa — composes [`bind_endpoint`] + `accept_bound` (the one-shot mirror
 /// of `bind_endpoint` + the multi-peer [`accept_loop`](crate::accept_loop)),
 /// so the `plan_endpoint` classify + error-map lives once in `bind_endpoint`,
 /// not duplicated here — the endpoint-layer analogue of
@@ -3730,7 +3730,7 @@ pub async fn accept_endpoint(listen: &str, cfg: &AcceptConfig) -> io::Result<Dia
 /// Bind a `--listen`-style endpoint string to a scheme-keyed [`BoundListener`] —
 /// the bind-only seam symmetric to [`accept_endpoint`], consumed by the multi-peer
 /// [`accept_loop`](crate::accept_loop) (a router/peer binds once, then holds the
-/// listener and loops accepts). [`plan_endpoint`] classifies the string exactly
+/// listener and loops accepts). `plan_endpoint` classifies the string exactly
 /// as [`accept_endpoint`] does; [`bind_locator`] performs the bind.
 ///
 /// R311y376 (Stage 3) — the multi-peer accept loop now accepts every
@@ -3754,7 +3754,7 @@ pub async fn bind_endpoint(listen: &str) -> io::Result<BoundListener> {
 /// [`bind_endpoint`] with a caller-supplied [`AcceptConfig`] — the cert-threading
 /// bind seam for a mesh `--router`/`--peer` that binds a `tls/...` or `quic/...`
 /// listen, its `AcceptConfig.{tls,quic}` carrying the server cert the acceptor
-/// presents (R311y405). [`plan_endpoint`] classifies the string exactly as
+/// presents (R311y405). `plan_endpoint` classifies the string exactly as
 /// [`bind_endpoint`] does; [`bind_locator`] performs the bind, consuming `cfg`'s
 /// server cert where the scheme needs it. The bind-only twin of [`accept_endpoint`]
 /// (which already takes a `cfg`), so the accept and bind seams thread a cert the
@@ -3922,7 +3922,7 @@ impl LinkDriver for InboundLink {
 /// consumes — the per-transport branch that converges on one shape: an
 /// inbound [`InboundLink`] (`&mut LinkDriver` for the poll loop), an outbound
 /// `Arc<dyn BoxedLinkDriver>` (`send_blocking` for the Lua actions), and the
-/// writer-task join handle. TCP splits the stream ([`wire_tcp_stream`]); UDP
+/// writer-task join handle. TCP splits the stream (`wire_tcp_stream`); UDP
 /// shares the socket ([`wire_udp_socket`]).
 pub fn wire_dialed_link(
     dialed: DialedLink,
@@ -4123,7 +4123,7 @@ impl OpenedSession {
     /// `Arc<SessionLinkActions>` holders of the outbound sender — the `engine`'s
     /// `SessionActionsBinding` clone and the caller-held `actions` — so the
     /// `writer_task`'s channel closes, then await that task BOUNDED by
-    /// [`WRITER_DRAIN_MS`]. Consuming `self` makes the engine-before-actions-
+    /// `WRITER_DRAIN_MS`. Consuming `self` makes the engine-before-actions-
     /// before-await order correct-by-construction instead of a doc-only invariant
     /// (the regression the R292 `teardown` typestate was built to forbid); the
     /// bounded await is the same wedged-writer defense as `teardown::drain_writer`
@@ -4267,7 +4267,7 @@ pub enum OpenError {
     /// in the multi-peer [`accept_loop`](crate::accept_loop) surfaces its failed
     /// SERVER handshake here (a `FaceFailed`, isolated — one peer's bad handshake
     /// never sinks the loop). Only the loop's deferred-handshake path
-    /// ([`AcceptedLink::handshake`]) produces it; the one-shot [`accept_bound`]
+    /// ([`AcceptedLink::handshake`]) produces it; the one-shot `accept_bound`
     /// returns the raw `io::Error` instead.
     AcceptHandshake(io::Error),
     /// The link was lost mid-handshake (peer closed before OpenAck).
@@ -4369,7 +4369,7 @@ pub enum OpenError {
     /// transport half this build can bring up — today only "both at once",
     /// which needs the `_z_new_peer` multi-peer path wz has no analog of.
     /// Raised BEFORE any socket is touched, by
-    /// [`resolve_static_config`](wz_session_core::scout_static::resolve_static_config);
+    /// [`resolve_static_config`];
     /// pico's own answer to the same pair under `Z_FEATURE_UNICAST_PEER == 0`
     /// is `_Z_ERR_GENERIC` (`vendor/zenoh-pico/src/net/session.c:107-108`).
     /// Distinct from [`Self::NoReachableLocator`], which means the config was
@@ -4385,9 +4385,9 @@ pub enum OpenError {
     /// carried through rather than flattened to a string so the caller can
     /// distinguish it from a malformed-locator [`Self::BadLocator`].
     NotReconnectable(wz_session_core::reconnect::NotReconnectable),
-    /// R311y435 — the [`SessionOffer`](wz_session_core::transport_mode::SessionOffer)
+    /// R311y435 — the [`SessionOffer`]
     /// asked for a capability whose cargo feature this build does not carry
-    /// (e.g. [`TransportMode::LowLatency`](wz_session_core::transport_mode::TransportMode::LowLatency)
+    /// (e.g. [`TransportMode::LowLatency`]
     /// without `transport-lowlatency`). Surfaced BEFORE the handshake drives, so
     /// no wire byte is emitted for a session that could not honour its own
     /// offer. Deliberately not a silent downgrade to the universal transport: a
@@ -4930,7 +4930,7 @@ pub async fn connect_and_open_session_with_namespace(
 /// connected, then `link.opened` -> SentInitSyn fires `send_init_syn`, the
 /// first wire byte) and drives the inbound handshake (peer InitAck -> OpenSyn
 /// -> peer OpenAck) to Established. Wall-clock bounded by the FSM's handshake
-/// timers exactly as [`connect_and_open_session`] (see [`drive_open_loop`]).
+/// timers exactly as [`connect_and_open_session`] (see `drive_open_loop`).
 pub async fn initiate_and_open_session(
     connected: DialedLink,
     params: SessionInitParams,
@@ -5177,12 +5177,12 @@ pub async fn initiate_and_open_session_with_lowlatency(
 ///
 /// The exclusive qos/lowlatency pair cannot be mis-staged here because
 /// [`SessionOffer`] carries ONE
-/// [`TransportMode`](wz_session_core::transport_mode::TransportMode); see that
+/// [`TransportMode`]; see that
 /// type for why wz encodes upstream's `manager.rs:264` runtime bail as a
 /// compile-time impossibility instead.
 ///
 /// The link is wired with the 4-byte u32 lowlatency prefix ONLY for
-/// [`TransportMode::LowLatency`](wz_session_core::transport_mode::TransportMode::LowLatency),
+/// [`TransportMode::LowLatency`],
 /// and even then the flag flips at Established, so the handshake goes out u16 in
 /// every mode — zenoh likewise reconfigures the link only after `recv_open_ack`
 /// (`io/zenoh-transport/src/unicast/establishment/open.rs:706`).
@@ -5451,7 +5451,7 @@ pub async fn initiate_and_open_session_with_namespace(
 /// fresh engine over `actions`, dispatch the role-start activation
 /// (`OutboundStart` -> LinkOpening, where `link_driver_open` is a no-op on
 /// an already-connected transport; `LinkOpened` -> SentInitSyn, which fires
-/// `send_init_syn` — the first wire byte), and drive [`drive_open_loop`] to
+/// `send_init_syn` — the first wire byte), and drive `drive_open_loop` to
 /// Established.
 ///
 /// Extracted from the A4b session review (F1): the activation order is
@@ -5492,7 +5492,7 @@ pub(crate) async fn initiator_open(
 /// The caller owns the listener and hands the accepted connection in as a
 /// [`DialedLink`] (`DialedLink::Tcp(stream)` from a `TcpListener::accept`
 /// result; the datagram acceptor is test-only). This wires it through the same
-/// [`wire_dialed_link`] -> [`wire_session_engine`] path the dial side uses,
+/// [`wire_dialed_link`] -> `wire_session_engine` path the dial side uses,
 /// activates the FSM in the Accepting role (`inbound.start` ->
 /// `Accepting.AwaitingInitSyn`), and drives the 4-way handshake (peer InitSyn
 /// -> our InitAck -> peer OpenSyn -> our OpenAck) to Established.
@@ -5506,7 +5506,7 @@ pub(crate) async fn initiator_open(
 /// §2.7 anti-amplification) and therefore surfaces as [`OpenError::Terminal`],
 /// not a distinct timeout variant: a timed-out accept is intentionally
 /// indistinguishable from a peer close (no reply is spent on a possibly-spoofed
-/// peer). See [`drive_open_loop`] for the shared terminal mapping.
+/// peer). See `drive_open_loop` for the shared terminal mapping.
 ///
 /// `max_iters` / `tick_interval_ms` carry the same meaning as on
 /// [`connect_and_open_session`] (test-determinism poll bound + SCE-scheduler
@@ -5944,7 +5944,7 @@ pub async fn open_session_at(
 /// list — the static scouting mode (docs/scouting-fsm.md §2.4.3, scouting
 /// expressed as *absent*: no FSM, the locators come from config verbatim).
 ///
-/// [`synth_static_locators`] normalises the configured locators in deploy
+/// `synth_static_locators` normalises the configured locators in deploy
 /// order; each is tried via [`open_session_at`] and the first that reaches
 /// Established wins. Per-locator failures are logged (no silent skip) so the
 /// diagnostic trail survives; the call returns [`OpenError::NoReachableLocator`]

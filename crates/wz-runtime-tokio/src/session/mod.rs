@@ -39,7 +39,7 @@
 //!
 //! ## Locking discipline
 //!
-//! The observer is wrapped in the per-runtime synchronous [`Mutex`]
+//! The observer is wrapped in the per-runtime synchronous `Mutex`
 //! alias exposed by [`crate::sync`] (R311y option (a) per-runtime
 //! type alias; R311ar trait shape mechanical land). On the AP profile
 //! this resolves to [`std::sync::Mutex`]; the future MCU profiles
@@ -1666,7 +1666,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     ///   elides the leg entirely (loopback still runs) rather than `?`-aborting
     ///   on a `FeatureDisabled` reject.
     /// * **Local loopback leg** (`pubsub-allow-loop`-gated): builds the Sample
-    ///   via [`build_loopback_sample`] (threading every `opts` metadata field —
+    ///   via `build_loopback_sample` (threading every `opts` metadata field —
     ///   timestamp / encoding / source_info / attachment / qos, R232), delivers
     ///   it in-process through
     ///   [`wz_session_core::pubsub::SubscriberTable::local_publish`], then drains the
@@ -3360,7 +3360,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
 impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// Construct a new session bundle from existing handles.
     /// `actions` typically comes from
-    /// [`SessionLinkActions::new`](crate::session_glue::SessionLinkActions::new);
+    /// `SessionLinkActions::new`;
     /// `observer` is a freshly-wrapped
     /// [`ApplicationLayerObserver::new`](crate::observer::ApplicationLayerObserver::new)
     /// inside the per-runtime mutex alias (`R::Mutex<...>`);
@@ -3394,7 +3394,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// dedup zid after construction still has the explicit
     /// `set_own_zid` / `clear_own_zid` surface available.
     ///
-    /// R311da — constructor lifts from the AP-bound impl<T>
+    /// R311da — constructor lifts from the AP-bound `impl<T>`
     /// Session<TokioRuntime, T> block to the R-generic impl<R, T>
     /// Session<R, T> block. The observer parameter type lifts from
     /// the per-runtime alias `Arc<Mutex<...>>` (resolved to
@@ -7160,7 +7160,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// [`SessionLinkActions::alloc_next_token_id`] (independent
     /// counter from subscriber / queryable / request id spaces, see
     /// the field comment on
-    /// [`SessionLinkActions::next_outbound_token_id`]) and embedded
+    /// `SessionLinkActions::next_outbound_token_id`) and embedded
     /// in both the `Declare(DeclToken)` emitted here and the
     /// `Declare(UndeclToken)` emitted by the returned handle's
     /// `Drop` (or explicit [`LivelinessToken::undeclare`]). The
@@ -7464,7 +7464,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     }
 
     /// R280 — declare a liveliness subscriber on a literal `keyexpr`
-    /// pattern, registering a [`LivelinessSampleSink`] that fires
+    /// pattern, registering a `LivelinessSampleSink` that fires
     /// for every peer `Decl*Token` whose resolved keyexpr matches the
     /// pattern. Returns a [`LivelinessSubscriber`] RAII handle whose
     /// `Drop` emits `Interest(Final)` on the outbound link and
@@ -7964,7 +7964,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// dependency on the query plane.
     ///
     /// R311y326 — `options.timeout_ms == 0` selects the platform default
-    /// ([`LivelinessGetOptions::effective_timeout_ms`] resolves it to
+    /// (`LivelinessGetOptions::effective_timeout_ms` resolves it to
     /// `DEFAULT_QUERY_TIMEOUT_MS`), so EVERY snapshot get arms a deadline the
     /// host sweeps via `LivelinessGetRegistry::sweep_timed_out` (the wz-ap-demo
     /// sweep ticker drives it alongside the reply registry; F3), terminating the

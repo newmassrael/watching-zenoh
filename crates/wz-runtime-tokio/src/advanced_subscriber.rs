@@ -48,7 +48,7 @@
 //!   reported, never recovered.
 //! - **Recovering** ([`AdvancedSubscriber::declare_with_options`], gated
 //!   `ext-pubsub-advanced-recovery`): the gap is BUFFERED into a per-source
-//!   sn-ordered reorder buffer ([`SourceState::pending_samples`]) instead of
+//!   sn-ordered reorder buffer (`SourceState::pending_samples`) instead of
 //!   delivered, and a sample-driven `_sn=last+1..` recovery GET is issued to
 //!   the publisher's `@adv` cache. The recovered (retransmitted) replies —
 //!   each carrying the original `(zid, eid, sn)` on its inner-body source_info

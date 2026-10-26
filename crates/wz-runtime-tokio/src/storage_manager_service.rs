@@ -7,7 +7,7 @@
 //!
 //! The kernel [`wz_session_core::storage_manager::StorageManager`] (R311y57) is
 //! the SYNC, runtime-agnostic registry: it resolves a config's `volume_id` to a
-//! [`Volume`](wz_session_core::storage_volume::Volume), creates a backend, and
+//! [`Volume`], creates a backend, and
 //! holds the bare [`StorageBackend`] by name. It has no Session — it cannot
 //! capture Put/Delete samples or answer queries. [`RuntimeStorageManager`] here
 //! is its LIVE counterpart: per [`StorageConfig`] it resolves+creates the
@@ -74,7 +74,7 @@
 //! ## Why a shared volume registry
 //!
 //! [`RuntimeStorageManager`] holds a [`VolumeRegistry`] directly — the SAME
-//! registry the kernel [`StorageManager`] composes — for volume registration,
+//! registry the kernel `StorageManager` composes — for volume registration,
 //! `volume_id` resolution, and the resolve+create step
 //! ([`register_volume`](RuntimeStorageManager::register_volume) +
 //! [`VolumeRegistry::create_backend`](wz_session_core::storage_manager::VolumeRegistry::create_backend)),
@@ -83,7 +83,7 @@
 //! /
 //! [`VolumeCreate`](wz_session_core::storage_manager::VolumeRegistryError::VolumeCreate)
 //! errors are a single source of truth shared by both managers (no duplicated
-//! registry). There is no embedded kernel [`StorageManager`] and so no dead
+//! registry). There is no embedded kernel `StorageManager` and so no dead
 //! `storages` map: the kernel manager's hold-the-backend
 //! [`add_storage`](wz_session_core::storage_manager::StorageManager::add_storage)
 //! is the no_std / MCU sync hosting path; here the LIVE services hold their
@@ -301,7 +301,7 @@ pub enum RuntimeStorageManagerError {
     DuplicateStorage(String),
     /// The shared [`VolumeRegistry`] could not resolve the volume or create the
     /// backend (the propagated
-    /// [`VolumeRegistryError`](wz_session_core::storage_manager::VolumeRegistryError):
+    /// [`VolumeRegistryError`]:
     /// `VolumeNotFound` / `VolumeCreate`). Nothing is hosted.
     Volume(VolumeRegistryError),
     /// The live [`StorageService`] declaration was rejected (a bad keyexpr, a
@@ -451,7 +451,7 @@ fn build_declared_volume(volume: &VolumeDecl) -> Result<Box<dyn Volume>, PluginA
 }
 
 /// Hosts N live [`StorageService`]s over a volume registry — the AP runtime
-/// counterpart of the sync kernel [`StorageManager`]. Empty by default;
+/// counterpart of the sync kernel `StorageManager`. Empty by default;
 /// register volumes, then add storages from their [`StorageConfig`]s.
 pub struct RuntimeStorageManager<R: SessionRuntime, T: TimeSource> {
     /// The shared volume registry — registration + the resolve/create step. No

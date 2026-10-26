@@ -12,16 +12,16 @@
 //! The no_std kernel ([`wz_session_core::storage_aligner`] +
 //! [`StorageState::answer_alignment_query`](wz_session_core::storage_state::StorageState::answer_alignment_query))
 //! decodes nothing and emits nothing — it takes a typed
-//! [`AlignmentQuery`](wz_session_core::storage_aligner::AlignmentQuery) and
+//! [`AlignmentQuery`] and
 //! returns the full `Vec<AlignmentResponse>` to send back. This module is its
 //! tokio binding: an [`AlignerService`] declares a [`Queryable`] on this
 //! replica's aligner keyexpr (`@zid/<zid-hex>/<config-fp>/aligner`), and each
 //! inbound query is decoded from its attachment
-//! ([`decode_alignment_query`](wz_session_core::storage_aligner::wire::decode_alignment_query)),
+//! ([`decode_alignment_query`]),
 //! answered by the kernel, and every response emitted on the reply seam
-//! ([`ReplyOut::reply_keyed_attached`](wz_session_core::query_sink::ReplyOut::reply_keyed_attached)):
+//! ([`ReplyOut::reply_keyed_attached`]):
 //! the serialized
-//! [`AlignmentReply`](wz_session_core::storage_aligner::AlignmentReply) rides
+//! [`AlignmentReply`] rides
 //! the reply attachment, the retrieved value (if any) rides the payload. It
 //! shares the live [`crate::storage_service::StorageService`] state (via
 //! [`StorageService::shared_state`](crate::storage_service::StorageService::shared_state)),
@@ -67,12 +67,12 @@
 //! diverging entries. It serializes an [`AlignmentQuery`] onto a query
 //! attachment, GETs the peer's aligner keyexpr
 //! ([`Session::query`](crate::session::Session::query)) with the right
-//! consolidation ([`consolidation_for`]), decodes each reply
-//! ([`decode_reply`]) into an [`AlignmentReply`] (+ a Put `Retrieval`'s
+//! consolidation (`consolidation_for`), decodes each reply
+//! (`decode_reply`) into an [`AlignmentReply`] (+ a Put `Retrieval`'s
 //! value), and feeds it to the kernel
 //! [`process_alignment_reply`](wz_session_core::storage_state::StorageState::process_alignment_reply),
 //! which returns an [`AlignmentFollowup`] the driver follows
-//! ([`next_query`]) — issuing the next, finer query until convergence. zenoh
+//! (`next_query`) — issuing the next, finer query until convergence. zenoh
 //! `spawn_query_replica_aligner` + `process_alignment_reply`
 //! (core.rs:484-577, core/aligner_reply.rs:99-303): zenoh spawns a fresh task
 //! per followup; wz drains a work queue (the same request tree, one task).
@@ -83,8 +83,8 @@
 //! `on_diff` → [`spawn_digest_aligner`] auto-wiring + facade + run-ci) are all
 //! here. The pure decode / consolidation / followup helpers are unit tested and
 //! the answer→pull convergence is proven deterministically off the wire
-//! ([`tests`]). The async transport itself — [`issue_and_collect`] /
-//! [`run_alignment`] / the `on_diff`→pull spawn — is exercised only by the live
+//! (`tests`). The async transport itself — `issue_and_collect` /
+//! `run_alignment` / the `on_diff`→pull spawn — is exercised only by the live
 //! **two-replica** A11 e2e, because the answer queryable + digest subscriber are
 //! both [`Locality::Remote`] and so cannot be driven by a single-session
 //! loopback; that is the one remaining live leg.
@@ -138,7 +138,7 @@ use crate::timestamp_source::wall_clock_ntp64;
 ///
 /// The sweep ([`ReplyRegistry::sweep_timed_out`](crate::reply::ReplyRegistry))
 /// is a SEPARATE task — R268 relocated it out of `drive_session_until_terminal`
-/// — so the pull loop must NOT assume it is running. [`issue_and_collect`]
+/// — so the pull loop must NOT assume it is running. `issue_and_collect`
 /// therefore also wraps the `on_final` await in a [`tokio::time::timeout`]
 /// backstop ([`ALIGNER_QUERY_TIMEOUT_MS`] + [`ALIGNER_BACKSTOP_SLACK_MS`]): a
 /// sweep-equipped session resolves on the real Err+Final first; a session
@@ -147,13 +147,13 @@ use crate::timestamp_source::wall_clock_ntp64;
 /// session is driven.
 const ALIGNER_QUERY_TIMEOUT_MS: u32 = 10_000;
 
-/// Extra wait the [`issue_and_collect`] backstop allows beyond the wire
+/// Extra wait the `issue_and_collect` backstop allows beyond the wire
 /// `with_timeout_ms` before giving up on `on_final`, so a sweep-equipped
 /// session's real Err+Final wins the race and the backstop only trips when no
 /// sweep is reclaiming the query.
 const ALIGNER_BACKSTOP_SLACK_MS: u64 = 1_000;
 
-/// Defensive cap on the number of queries one [`run_alignment`] issues. A
+/// Defensive cap on the number of queries one `run_alignment` issues. A
 /// conformant peer's refinement tree is shallow (Cold → Intervals →
 /// SubIntervals → Events → Retrieval) and finite, so a real alignment stays far
 /// below this. A hostile/buggy peer, however, can answer ANY query with fresh
@@ -179,7 +179,7 @@ type DecodedReply = (AlignmentReply, Option<RetrievedValue>);
 ///
 /// Both components render through zenoh's `keformat` `set<S: Display>`: the zid
 /// via zenoh's `ZenohId` Display (the
-/// [`zid_to_zenoh_hex`](wz_session_core::storage_replication::zid_to_zenoh_hex)
+/// [`zid_to_zenoh_hex`]
 /// SSOT — LE id read as a `u128`, big-endian hex, one leading zero stripped,
 /// NOT a naive per-byte hex) and the fingerprint via the `u64`'s decimal
 /// `Display` (`Fingerprint` `Deref`s to `u64`). Using the shared SSOT keeps
@@ -273,7 +273,7 @@ fn answer_alignment_into<B: StorageBackend>(
 
 /// A live aligner answer service bound to a [`Session`]: a [`Queryable`] on
 /// this replica's aligner keyexpr (`@zid/<zid-hex>/<config-fp>/aligner`) that
-/// answers a peer's [`AlignmentQuery`](wz_session_core::storage_aligner::AlignmentQuery)
+/// answers a peer's [`AlignmentQuery`]
 /// with the entries it needs to converge. Dropping it undeclares the queryable
 /// (RAII teardown), so the service's lifetime is the handle's lifetime.
 ///
@@ -431,7 +431,7 @@ pub fn discovery_keyexpr(config: &ReplicationConfig) -> String {
 /// collect every decoded reply, returning once the terminal `ResponseFinal`
 /// fires. The query is fire-and-forget at the [`Session::query`] seam; the
 /// session drive loop delivers replies through `on_reply` (decoded by
-/// [`decode_reply`]) and the terminal `on_final`, which this awaits via a
+/// `decode_reply`) and the terminal `on_final`, which this awaits via a
 /// oneshot. A rejected query (e.g. `query-get` disabled) yields no replies.
 async fn issue_and_collect<R, T>(
     session: &Session<R, T, Unicast>,
@@ -560,7 +560,7 @@ async fn run_alignment<R, T, B>(
 }
 
 /// Spawn an alignment pull against a peer replica's aligner queryable: a
-/// detached task that drives [`run_alignment`] to convergence and resolves its
+/// detached task that drives `run_alignment` to convergence and resolves its
 /// [`JoinHandle`](tokio::task::JoinHandle). `state` is shared with the
 /// [`StorageService`](crate::storage_service::StorageService) (pass its
 /// `shared_state()`), so pulled entries land in the live store. `peer_aligner_ke`

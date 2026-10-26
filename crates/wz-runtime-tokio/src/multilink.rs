@@ -10,7 +10,7 @@
 //! The 0x4 multilink handshake is the SAME mutual RSA challenge-response as the
 //! pubkey auth method, and `rsa` requires std — so, exactly like
 //! [`extauth_pubkey`](crate::extauth_pubkey), the concrete
-//! [`PubKeyMethod`](crate::extauth_pubkey::PubKeyMethod) lives in this AP crate,
+//! [`PubKeyMethod`] lives in this AP crate,
 //! not the no_std session kernel. The kernel holds only the rsa-free
 //! [`MultiLinkDispatch`] (the 0x4 envelope + the single-method driver); this
 //! module INJECTS the concrete method into it, the wz analogue of zenoh's

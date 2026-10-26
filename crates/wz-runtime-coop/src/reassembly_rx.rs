@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! R311in carry[3] — the MCU-profile live reassembly seam.
+//! R311in carry\[3\] — the MCU-profile live reassembly seam.
 //!
 //! This is the MCU sibling of the AP host's reassembly drive (the
 //! `wz-runtime-tokio::session_glue::TokioReassembly` +
 //! `report_outcome_reassembling` path). It binds the engine-free
 //! [`ReassemblyDispatcher`] to the MCU machine's pool policy — sourced
 //! from the SCE-codegen'd buffer-pool constants whose SSOT is
-//! `sources/network/reassembly_pool_mcu.scxml` (carry [0] established the
+//! `sources/network/reassembly_pool_mcu.scxml` (carry \[0\] established the
 //! same pattern for the AP profile).
 //!
 //! ## What "drives" the dispatcher

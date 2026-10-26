@@ -242,7 +242,7 @@ impl DownsamplingRule {
 ///   threshold` shift that makes the first message due — so even the first
 ///   message fails `now - latest >= MAX`. wz encodes that state in the interval
 ///   itself rather than in a seeded instant, which keeps
-///   [`admit_at`](DownsamplingInterceptor::admit_at) a pure function of the clock
+///   `admit_at` a pure function of the clock
 ///   it is handed (zenoh's form would need an `Instant::now()` at construction)
 ///   and avoids the `Instant - Duration::MAX` underflow that shift would be.
 /// - a NEGATIVE or non-finite frequency saturates the `as u64` cast to `0`, i.e.

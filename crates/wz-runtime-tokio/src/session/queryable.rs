@@ -122,7 +122,7 @@ impl NodeStamp {
 /// R311r closure — the prior carry ("deferred to a future round when
 /// the observer.queryables field + `crate::query` module become
 /// unconditional") is now closed: the [`Queryable`] handle, the
-/// [`Session::declare_queryable{_aliased}`] surface (Result form with
+/// `Session::declare_queryable{_aliased}` surface (Result form with
 /// `FeatureDisabled` variant), the `observer.queryables` field, and
 /// the `crate::query` module are all type-ungated. The only remaining
 /// feature gates are the BODY of the two declare entry points, the
@@ -224,7 +224,7 @@ impl QueryableOptions {
 /// [`Session::declare_queryable`] / [`Session::declare_queryable_aliased`].
 ///
 /// R311r — type-ungated. The struct, impl, and Drop are always defined
-/// so the [`Session::declare_queryable{_aliased}`] Result-form signature
+/// so the `Session::declare_queryable{_aliased}` Result-form signature
 /// compiles regardless of feature state; a feature-OFF call returns
 /// `Err(QueryableAliasError::FeatureDisabled)` without ever
 /// constructing this handle. Drop calls `observer.queryables.unregister`

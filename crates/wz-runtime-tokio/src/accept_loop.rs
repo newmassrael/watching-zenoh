@@ -7,7 +7,7 @@
 //! [`accept_loop`] is the accept-only entry (the `routing-router` foundation);
 //! [`peer_loop`] (R311qg, `routing-peer`) generalises it to a node that also
 //! DIALS a configured peer set, holding the dialed and accepted faces in one
-//! set. Both delegate to the shared [`face_drive_loop`] core, differing only in
+//! set. Both delegate to the shared `face_drive_loop` core, differing only in
 //! their [`FaceSources`] (accept-only vs accept + dial).
 //!
 //! The single-peer session-open path ([`crate::session_open::accept_endpoint`]
@@ -384,7 +384,7 @@ pub type DialIntentSender = tokio::sync::mpsc::UnboundedSender<DialIntent>;
 pub type DialIntentReceiver = tokio::sync::mpsc::UnboundedReceiver<DialIntent>;
 
 /// A runtime connect-list reconcile request (`router-connect-reconcile`): the NEW
-/// full desired outbound connect-set, delivered to [`face_drive_loop`] when the
+/// full desired outbound connect-set, delivered to `face_drive_loop` when the
 /// operator changes the connect endpoints at runtime.
 ///
 /// ⚠ R2665 — THIS PARAGRAPH NAMED AN UPSTREAM MECHANISM THAT DOES NOT EXIST AT
@@ -411,7 +411,7 @@ pub type DialIntentReceiver = tokio::sync::mpsc::UnboundedReceiver<DialIntent>;
 /// runtime add of a `quic/...` endpoint was unrepresentable while this channel
 /// carried addresses); the loop dials each address it is not already dialing
 /// (address dedup — a config endpoint has no zid pre-handshake, so the gossip zid
-/// dedup [`holds_zid`] cannot apply).
+/// dedup `holds_zid` cannot apply).
 /// ADD-ONLY, faithful to the router branch (`orchestrator.rs:449-467`): a removed
 /// endpoint is NOT torn down (the Client close-removed branch `427-448` is
 /// deliberately router-inapplicable — closing a live federation face on a
@@ -689,7 +689,7 @@ pub enum AcceptEvent {
         held: usize,
     },
     /// `accept()` itself returned a (typically transient) error; the loop logs
-    /// it (via this event), throttles ([`ACCEPT_ERROR_THROTTLE_MS`]), then keeps
+    /// it (via this event), throttles (`ACCEPT_ERROR_THROTTLE_MS`), then keeps
     /// accepting — zenoh's `accept_task` parity (log + `TCP_ACCEPT_THROTTLE_TIME`
     /// sleep). Surfaced so the caller can log it rather than the loop swallowing
     /// it.
@@ -1073,7 +1073,7 @@ pub struct AcceptLoopSummary {
     /// limit it was.
     pub refused_over_capacity: usize,
     /// R311y423 — of [`dialed`](Self::dialed), the subset dialed because the
-    /// GOSSIP-autoconnect policy admitted a discovered peer (the [`Step::Dial`]
+    /// GOSSIP-autoconnect policy admitted a discovered peer (the `Step::Dial`
     /// arm), as opposed to a configured `--connect` target or a reconcile add.
     ///
     /// A SEPARATE counter rather than a reading of `dialed`, because `dialed`
@@ -2000,7 +2000,7 @@ async fn forwarder_tick(timer: &mut Option<tokio::time::Interval>) {
 }
 
 /// Await the forwarder's wake signal ([`FaceForwarder::wake_signal`]), or park forever when it
-/// has none: the arm of [`face_drive_loop`]'s `select!` that lets a forwarder holding messages
+/// has none: the arm of `face_drive_loop`'s `select!` that lets a forwarder holding messages
 /// for a full link send them as soon as the link has room.
 async fn forwarder_woken(signal: &Option<Arc<tokio::sync::Notify>>) {
     match signal {
@@ -2010,7 +2010,7 @@ async fn forwarder_woken(signal: &Option<Arc<tokio::sync::Notify>>) {
 }
 
 /// Await the next inbound connection on ANY of the node's bound listeners — the
-/// accept arm of [`face_drive_loop`]'s `select!`, and the seam that makes
+/// accept arm of `face_drive_loop`'s `select!`, and the seam that makes
 /// `listen/endpoints` a LIST rather than a first-element (R2099, open-debt item
 /// 512).
 ///
@@ -2189,7 +2189,7 @@ pub(crate) fn first_dialable_locator(locators: &[String]) -> Option<MeshDialTarg
 }
 
 /// The outcome of weighing a [`DialIntent`] against the held faces — the pure
-/// dial decision the [`Step::Dial`] arm acts on (extracted so it is unit-testable
+/// dial decision the `Step::Dial` arm acts on (extracted so it is unit-testable
 /// without standing up a TCP loop).
 enum DialDecision {
     /// Dial the discovered peer at this target.
@@ -2253,7 +2253,7 @@ fn dial_decision(
 }
 
 /// Take a discovery into `directory` and weigh it: [`learn_locators`] then
-/// [`dial_decision`], the two steps the [`Step::Dial`] arm takes.
+/// [`dial_decision`], the two steps the `Step::Dial` arm takes.
 fn learn_and_decide(
     faces: &BTreeMap<FaceId, Option<Vec<u8>>>,
     intent: &DialIntent,
@@ -2654,7 +2654,7 @@ pub struct FaceSources {
     pub stats: Option<crate::node_stats::NodeStats>,
 }
 
-/// How [`face_drive_loop`] holds the drive of its faces: through which forwarder, and whether each
+/// How `face_drive_loop` holds the drive of its faces: through which forwarder, and whether each
 /// drive is spawned on the runtime or held inside the loop's own task.
 struct FaceDriving<'a> {
     forwarder: &'a dyn FaceForwarder,
@@ -3935,7 +3935,7 @@ where
 /// accepted link is opened to Established (concurrently, so one peer's handshake
 /// never blocks accepting the next — the ws/tls transport handshake is part of
 /// that per-face open, off the accept path) and then driven as a held *face*
-/// until the peer closes. A thin entry over [`face_drive_loop`] with NO outbound
+/// until the peer closes. A thin entry over `face_drive_loop` with NO outbound
 /// dials — every face comes from accepting. `on_event` observes each
 /// [`AcceptEvent`]; the loop runs until `shutdown` resolves, then returns its
 /// [`AcceptLoopSummary`].
@@ -4190,7 +4190,7 @@ fn accept_only_sources(listener: BoundListener, offer: SessionOffer) -> FaceSour
 /// loop's [`FaceSources::dial_config`] trust material) AND accepts inbound peers
 /// on [`FaceSources::listeners`], holding every resulting face in one set. The
 /// only difference from `accept_loop` is the seeded outbound dials;
-/// both delegate to the shared [`face_drive_loop`] core, so accept-side
+/// both delegate to the shared `face_drive_loop` core, so accept-side
 /// robustness (one peer's handshake never blocks another, a failed open is
 /// isolated as `FaceFailed`) covers a dialed face too — an unreachable dial
 /// target surfaces as `FaceFailed` and the mesh keeps forming.

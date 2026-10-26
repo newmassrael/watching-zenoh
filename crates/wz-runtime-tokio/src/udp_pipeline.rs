@@ -33,11 +33,11 @@
 //!   datagram, from either the link's own `Arc<UdpSocket>` (dial/scout) or the
 //!   accept demux's per-src channel (see below). No framing prefix — UDP
 //!   preserves message boundaries, so one datagram is exactly one wire
-//!   message (contrast the TCP [`crate::poll_framed`] / `StreamEnvelope`
+//!   message (contrast the TCP `crate::poll_framed` / `StreamEnvelope`
 //!   length-prefix reassembly).
 //! - [`UdpWriteDriver`] — holds the channel sender; impls
 //!   [`BoxedLinkDriver`] with a non-blocking enqueue, mirroring
-//!   [`crate::link_pipeline::TcpWriteDriver`] so the sync-action /
+//!   `crate::link_pipeline::TcpWriteDriver` so the sync-action /
 //!   async-runtime boundary is decoupled the same way.
 //! - [`udp_writer_task`] — holds the shared socket + peer; drains the
 //!   channel and writes each payload as one datagram (no envelope encode).
@@ -46,7 +46,7 @@
 //!
 //! A `udp/..` ACCEPTOR has ONE bound socket but may serve N peers. UDP has no
 //! `accept()` yielding a per-peer socket, so [`bind_udp_demux`] spawns a single
-//! pump task ([`udp_demux_task`]) that is the SOLE `recv_from` owner of the
+//! pump task (`udp_demux_task`) that is the SOLE `recv_from` owner of the
 //! listener socket and routes each datagram to its SOURCE's face channel:
 //!
 //! - a datagram from a KNOWN src is forwarded to that src's bounded channel;
@@ -67,7 +67,7 @@
 //!
 //! The pump must OUTLIVE the `BoundListener` on the one-shot `accept_bound`
 //! path (which drops the listener before the accepted session is driven), so it
-//! is kept alive by an `Arc<`[`UdpDemuxPump`]`>` shared between the listener and
+//! is kept alive by an `Arc<``UdpDemuxPump``>` shared between the listener and
 //! every accepted face's read driver; it aborts only when the last holder
 //! drops. A plain [`TokioJoinHandle`] does NOT abort on drop
 //! (`runtime_impl.rs:209`), so the abort is explicit — the same RAII idiom as
@@ -120,7 +120,7 @@ pub(crate) const MAX_UDP_PAYLOAD: usize = 65507;
 /// computes at `transport/unicast/transport.c:47`), so a >1450 message
 /// fragments into emittable datagrams. It binds BELOW the unbounded stream
 /// `DEFAULT_LINK_MTU` (65535) the default would otherwise inherit — the same
-/// way serial's `SERIAL_MTU` (1500) does — and below [`MAX_UDP_PAYLOAD`], so
+/// way serial's `SERIAL_MTU` (1500) does — and below `MAX_UDP_PAYLOAD`, so
 /// frames reaching [`UdpWriteDriver::send_blocking`] are pre-fragmented well
 /// under the drop guard, leaving that guard a pure defensive backstop.
 ///
@@ -328,7 +328,7 @@ pub async fn dial_udp(peer: SocketAddr, link_socket: &LinkSocket<'_>) -> io::Res
 /// Bind a UDP socket on `listen` for the ACCEPTOR side — the datagram twin of
 /// [`dial_udp`]'s ephemeral bind, but on a KNOWN address:port an Initiator can
 /// target. Returns the bound socket unwrapped; [`bind_udp_demux`] wraps it in the
-/// multi-peer [`UdpDemux`] (spawning the [`udp_demux_task`] pump that learns each
+/// multi-peer [`UdpDemux`] (spawning the `udp_demux_task` pump that learns each
 /// peer from its first datagram's source). `#iface=` is honoured the same as
 /// [`dial_udp`] (SO_BINDTODEVICE, Linux/Android; a warn-no-op off-platform).
 pub async fn bind_udp(listen: SocketAddr, link_socket: &LinkSocket<'_>) -> io::Result<UdpSocket> {
@@ -538,7 +538,7 @@ pub struct NewUdpFace {
 
 /// The multi-peer datagram listener a `udp/..` acceptor binds to — replaces the
 /// R311y381 single-shot `Option<UdpSocket>`. One bound socket is shared: the
-/// pump task ([`udp_demux_task`], the sole `recv_from` owner) routes each
+/// pump task (`udp_demux_task`, the sole `recv_from` owner) routes each
 /// datagram to its src's face channel, and [`Self::recv_new_face`] awaits a NEW
 /// src. Retires reviewer-C's F1 (cross-talk — each face reads only its own src)
 /// and F2 (perpetual-throttle — a second src is a real second face, not an Err).
@@ -552,7 +552,7 @@ pub struct UdpDemux {
     /// the single-shot model whose `local_addr` broke after the socket was taken.
     local_addr: SocketAddr,
     /// The shared pump keep-alive; cloned into every accepted face so the pump
-    /// outlives the listener on the one-shot path (see [`UdpDemuxPump`]).
+    /// outlives the listener on the one-shot path (see `UdpDemuxPump`).
     pump: Arc<UdpDemuxPump>,
 }
 
@@ -588,7 +588,7 @@ impl UdpDemux {
 /// bundle — its fields are private (only [`UdpDemux::wire_inputs`] builds it and
 /// only [`wire_udp_demuxed`] consumes it), so the accept path threads one value
 /// through the `pub` `AcceptedLink`/`DialedLink` variants without exposing the
-/// crate-private [`UdpDemuxPump`] guard type.
+/// crate-private `UdpDemuxPump` guard type.
 pub struct UdpAcceptedInputs {
     /// This src's demultiplexed inbound datagrams (from [`NewUdpFace`]).
     inbound_rx: UdpFaceReceiver,
@@ -625,7 +625,7 @@ fn register_on_acceptor(socket: UdpSocket) -> io::Result<UdpSocket> {
     UdpSocket::from_std(socket)
 }
 
-/// Bind a UDP demux LISTENER on `listen` and spawn its [`udp_demux_task`] pump —
+/// Bind a UDP demux LISTENER on `listen` and spawn its `udp_demux_task` pump —
 /// the multi-peer datagram acceptor the scheme-keyed accept seam
 /// ([`crate::session_open::bind_locator`]) wraps in `BoundListener::Udp`.
 /// `#iface=` is honoured via [`bind_udp`]. The pump starts pumping at bind (like
@@ -661,7 +661,7 @@ pub async fn bind_udp_demux(
 /// entry); a NEW src opens a bounded channel (first datagram queued) and emits a
 /// [`NewUdpFace`], keeping the src only if a listener is still there to accept it.
 ///
-/// NEITHER error path returns: the pump's ONLY termination is the [`UdpDemuxPump`]
+/// NEITHER error path returns: the pump's ONLY termination is the `UdpDemuxPump`
 /// RAII abort (fired when the last listener/face holder drops). A `return` here
 /// would drop the stack `faces` map and CLOSE every live face's channel — and on
 /// the one-shot `accept_bound` path the listener is dropped while an accepted face
@@ -840,8 +840,8 @@ enum UdpRxSource {
 
 /// Inbound read side of a UDP link — impls [`LinkDriver`] with `poll_event`
 /// receiving one datagram as one [`RxFrame`]. The RX comes from either the
-/// link's own socket (dial/scout, [`Self::from_socket`]) or the accept demux's
-/// per-src channel ([`Self::from_demux`]) — see [`UdpRxSource`]. The
+/// link's own socket (dial/scout, `Self::from_socket`) or the accept demux's
+/// per-src channel (`Self::from_demux`) — see `UdpRxSource`. The
 /// send/open/close methods mirror [`crate::link_pipeline::TcpReadDriver`]: open
 /// is a no-op (already bound/wired), close is a no-op (UDP has no teardown
 /// handshake), and send fails loud (the FSM's outbound path is the sibling
@@ -968,7 +968,7 @@ impl LinkDriver for UdpReadDriver {
 /// Outbound write side — holds an `OutboundTx` (R2919: priority lanes) whose
 /// receiver is owned by the [`udp_writer_task`]. Impls [`BoxedLinkDriver`]
 /// with a NON-blocking enqueue, the same sync-from-async decoupling
-/// [`crate::link_pipeline::TcpWriteDriver`] uses: the sync Lua
+/// `crate::link_pipeline::TcpWriteDriver` uses: the sync Lua
 /// script-action handlers fire from inside a future the same runtime drives,
 /// where a nested `block_on` would trip the reentrancy check. The channel
 /// crosses that boundary cleanly.
@@ -1170,7 +1170,7 @@ impl BoxedLinkDriver for UdpWriteDriver {
 /// Async writer task. Holds the shared `Arc<UdpSocket>` + the unicast `peer`
 /// and drains the outbound channel one frame at a time, writing each payload
 /// as one datagram via `send_to`. No envelope encode — UDP datagram
-/// boundaries are the framing (contrast [`crate::link_pipeline::writer_task`],
+/// boundaries are the framing (contrast `crate::link_pipeline::writer_task`,
 /// which length-prefixes each payload through `StreamEnvelope`). Exits when
 /// the queue is SEALED and drained, when every [`UdpWriteDriver`] clone has
 /// dropped, or when a `send_to` fails / stalls past

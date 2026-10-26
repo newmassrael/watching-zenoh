@@ -188,7 +188,7 @@ pub unsafe extern "C" fn zp_config_insert(
 /// stable for the entry's life.
 ///
 /// The stored bytes carry the terminator, which is what makes the borrow a
-/// valid C string; see [`ConfigState::insert`].
+/// valid C string; see `ConfigState::insert`.
 ///
 /// # Safety
 /// `config` must be null or a live loaned config; the result must not outlive

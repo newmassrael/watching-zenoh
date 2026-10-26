@@ -26,7 +26,7 @@
 //! `z_querier_get` issues a query with them. wz's `Querier` is the same three
 //! fields (`wz-runtime-tokio/src/session/querier.rs`), so the C handle is that
 //! triple against the face registry, and `z_querier_get` delegates to the very
-//! body `z_get` uses ([`crate::get::issue_get`]). Restating the get instead of
+//! body `z_get` uses (`crate::get::issue_get`). Restating the get instead of
 //! sharing it would have put the `_anyke` selector normalisation and the
 //! receive-side reply gate in two places, and those two must agree or a reply is
 //! silently dropped.
@@ -106,7 +106,7 @@ crate::locality::locality_option_field!(
 /// without it the struct is the 24 B head). Both are HONOURED — `source_info`
 /// since R311y562, `cancellation_token` since R311y575, which is also when it
 /// stopped being a `c_void` that leaked one token per get. The two entry points
-/// describe the same query and share [`crate::get::issue_get`], so the
+/// describe the same query and share `crate::get::issue_get`, so the
 /// cancellation semantics here are the same ones `z_get` has by construction
 /// rather than by a second implementation.
 #[repr(C)]

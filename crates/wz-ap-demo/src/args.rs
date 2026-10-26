@@ -271,7 +271,7 @@ pub(crate) enum PushOperation {
 /// admin gate.
 ///
 /// Absent flags mean zenoh's defaults (30 s period, 86400 s lifespan), which is
-/// what [`GarbageCollectionConfig::default`] already supplies — so the struct
+/// what `GarbageCollectionConfig::default` already supplies — so the struct
 /// carries only the OVERRIDES and an un-flagged host is byte-identical to the
 /// pre-R311y503 one.
 #[cfg(feature = "adminspace-config-hotreload")]
@@ -9185,7 +9185,7 @@ pub(crate) struct DeclareEmitSpec {
     /// declare-time replay is the thing under test.
     pub(crate) liveliness_subscriber_on_sample: Option<String>,
     /// R311y442 — `--advanced-subscribe <keyexpr>`: declare an
-    /// [`wz::runtime_tokio::AdvancedSubscriber`] with a STARTUP HISTORY GET, so a
+    /// `wz::runtime_tokio::AdvancedSubscriber` with a STARTUP HISTORY GET, so a
     /// subscriber that joins after a publisher has already published recovers the
     /// cached samples from that publisher's `@adv` cache. Feature-uniform (always
     /// parsed) on the same terms as `namespace` / `lowlatency`: `None` without the
@@ -9194,11 +9194,11 @@ pub(crate) struct DeclareEmitSpec {
     /// a plain subscriber that would silently look like a working history.
     pub(crate) advanced_subscriber_keyexpr: Option<String>,
     /// R311y442 — `--history-max <N>`: the `_max=N` cap on the startup history GET
-    /// ([`HistoryConfig::max_samples`]). `None` leaves the GET uncapped, which is
+    /// (`HistoryConfig::max_samples`). `None` leaves the GET uncapped, which is
     /// the zenoh default. Only read when `advanced_subscriber_keyexpr` is `Some`.
     pub(crate) advanced_history_max: Option<usize>,
     /// R311y442 — `--history-max-age <secs>`: the `_time=[now(-secs)..]` age bound
-    /// on the startup history GET ([`HistoryConfig::max_age`]).
+    /// on the startup history GET (`HistoryConfig::max_age`).
     ///
     /// It exists to make the LIST SEPARATOR observable from outside, which no
     /// other knob can do. `_anyke` is provable with a single-parameter selector,
@@ -9210,7 +9210,7 @@ pub(crate) struct DeclareEmitSpec {
     /// when it is wrong — a foreign witness for the separator, not just a unit test.
     pub(crate) advanced_history_max_age: Option<f64>,
     /// R311y443 — `--advanced-recovery`: arm SAMPLE-DRIVEN retransmission on the
-    /// advanced subscriber ([`RecoveryConfig::sample_driven`]). Off by default,
+    /// advanced subscriber (`RecoveryConfig::sample_driven`). Off by default,
     /// which is zenoh's default too — `.recovery()` is opt-in there as well.
     ///
     /// The flag is what makes the recovery path's RED/GREEN twin a one-argument
@@ -9225,7 +9225,7 @@ pub(crate) struct DeclareEmitSpec {
     /// rather than to a timer or to a foreign publisher's beacon.
     pub(crate) advanced_recovery: bool,
     /// R311y444 — `--advanced-recovery-heartbeat`: additionally arm the HEARTBEAT
-    /// retransmission trigger ([`RecoveryConfig::with_heartbeat`]), which declares
+    /// retransmission trigger (`RecoveryConfig::with_heartbeat`), which declares
     /// a second subscriber on `<ke>/@adv/pub/**` and issues a recovery GET when a
     /// publisher's beacon reports samples past `last_delivered`.
     ///
@@ -9241,7 +9241,7 @@ pub(crate) struct DeclareEmitSpec {
     /// unobservable.
     pub(crate) advanced_recovery_heartbeat: bool,
     /// R311y447 — `--advanced-recovery-periodic <ms>`: additionally arm the
-    /// PERIODIC retransmission trigger ([`RecoveryConfig::with_periodic_queries`]),
+    /// PERIODIC retransmission trigger (`RecoveryConfig::with_periodic_queries`),
     /// a background loop that re-asks every known source `_sn=last+1..` on a
     /// cadence. `None` (default) leaves it unarmed.
     ///
@@ -9275,7 +9275,7 @@ pub(crate) struct DeclareEmitSpec {
     /// keyexpr namespace, independent of `@adv`).
     pub(crate) group_join: Option<GroupJoinSpec>,
     /// R311y442 — `--advanced-publish <keyexpr>`'s bundle. The ANSWERING half of
-    /// the advanced-pubsub plane: a wz [`AdvancedPublisher`] with a sample cache,
+    /// the advanced-pubsub plane: a wz `AdvancedPublisher` with a sample cache,
     /// which a FOREIGN advanced subscriber then drains. `None` without the flag.
     pub(crate) advanced_publish: Option<AdvancedPublishSpec>,
 }
@@ -9461,7 +9461,7 @@ pub(crate) enum QueryableReply {
         keyexprs: Vec<String>,
     },
     /// `--reply-err <text>` — an ERR-form Reply carrying `text` as the error
-    /// payload, via [`wz_session_core::query_sink::ReplyOut::reply_err`].
+    /// payload, via `wz_session_core::query_sink::ReplyOut::reply_err`.
     ///
     /// `reply_err` is signature-STABLE (ungated on the trait) but its emit is
     /// gated: `query.rs`'s impl calls `send_err` only under

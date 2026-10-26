@@ -13615,19 +13615,20 @@ layer_c1bz_docs_resolve() {
     # private items or to items of other crates and feature states (code spans), explicit
     # targets made redundant by a name already in scope (dropped), and a few paths that named
     # the wrong module.
+    # Every other crate -> 0, COUNTED on this lane's command, findings read from cargo's JSON
+    # messages so each had its place: wz-ap-demo 25, wz-capi-c 40, wz-capi-core 7, wz-capi-pico 40,
+    # wz-link-lwip 9, wz-mcu-session-acceptor 1, wz-routing-graph 5, wz-runtime-coop 7,
+    # wz-runtime-tokio 427, wz-switchboard-codegen 8, zenoh-pico-sys 3. None of them holds a
+    # budget line now, and a missing line reads as 0. The kinds were the ones of wz-session-core
+    # (outer `///` blocks of modules that have their own `//!`, now plain `//`; links to private
+    # items or to other crates and feature states, now code spans; explicit targets made
+    # redundant by a name in scope, dropped) and one more: zenoh-pico-sys documents the C
+    # headers bindgen reads, whose diagrams and `[x]` text rustdoc took for links, so its build
+    # script now hands every header comment through `rustdoc_safe` (`rustdoc_comment.rs`, tested)
+    # and the generated docs carry no finding of their own. `wz` stays at 4: its lane runs into
+    # the `compile_error!` that `--all-features` selects on purpose, which no doc edit moves.
     budget="
         wz:4
-        wz-ap-demo:25
-        wz-capi-c:40
-        wz-capi-core:7
-        wz-capi-pico:40
-        wz-link-lwip:9
-        wz-mcu-session-acceptor:1
-        wz-routing-graph:5
-        wz-runtime-coop:7
-        wz-runtime-tokio:427
-        wz-switchboard-codegen:8
-        zenoh-pico-sys:3
     "
     while read -r crate; do
         [[ -n "$crate" ]] || continue

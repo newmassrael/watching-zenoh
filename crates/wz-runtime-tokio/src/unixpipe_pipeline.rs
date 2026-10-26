@@ -38,7 +38,7 @@
 //! zenoh's writer-open (`PipeW::new`) try-locks `flock(LOCK_EX)` on the FIFO and
 //! `bail!("no listener")` if the lock is FREE — so a reader end a peer will write
 //! to MUST hold an exclusive advisory lock for its whole life, or the peer aborts
-//! the connection. wz mirrors this with raw [`libc::flock`] (== the `advisory_lock`
+//! the connection. wz mirrors this with raw `libc::flock` (== the `advisory_lock`
 //! crate zenoh uses; same OFD-based BSD lock, cross-compatible):
 //! - the listener holds `LOCK_EX` on the base request reader (`P_uplink`) — this
 //!   also enforces ONE listener per path (a 2nd bind's try-lock fails) and is what
@@ -235,7 +235,7 @@ fn unlink_node(path: &str) {
 
 /// Try to acquire an EXCLUSIVE advisory lock on `fd` without blocking. `Ok(())`
 /// = the lock was acquired (nobody else holds it); `Err(WouldBlock)` = someone
-/// holds it. Raw [`libc::flock`], the same OFD-based BSD lock zenoh's
+/// holds it. Raw `libc::flock`, the same OFD-based BSD lock zenoh's
 /// `advisory_lock` crate uses (cross-compatible). The lock releases only when the
 /// fd closes, so callers keep the owning [`Receiver`]/[`Sender`] alive to hold it.
 #[cfg(not(target_os = "macos"))]

@@ -770,7 +770,7 @@ fn run_scout(
 /// Adopt a loaned hello into an owned one (pico `z_hello_take_from_loaned`).
 ///
 /// R311y559 — a symbol the census found missing. A DEEP COPY that leaves the
-/// source EMPTY, routed through the same [`HelloState::new`] `z_hello_clone`
+/// source EMPTY, routed through the same `HelloState::new` `z_hello_clone`
 /// uses so the two cannot render a peer differently. Copying rather than moving
 /// the handle: a loaned hello is the scout dispatcher's own state, still
 /// borrowed by the frame around the callback — the same argument

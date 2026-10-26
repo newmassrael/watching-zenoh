@@ -331,7 +331,7 @@ impl<V> LinkstatepeerInterest<V> {
 
     /// The declared VALUES of every source under the EXACT `keyexpr` — the
     /// value-bearing twin of [`source_count`](Self::source_count). The router
-    /// forwarder folds these (with [`QueryableInfo::merge`]) into the MERGED
+    /// forwarder folds these (with `QueryableInfo::merge`) into the MERGED
     /// `QueryableInfo` it advertises cross-tier for `keyexpr` — zenoh's
     /// `local_*_qabl_info` fold over the opposite-tier table (`queries.rs:67-133`).
     /// Exact (per-`Resource`), self-excluding by construction (self is never a

@@ -6,7 +6,7 @@
 //! The datagram sibling of [`crate::quic_pipeline`]. Where reliable QUIC carries
 //! a zenoh batch over ONE bidirectional QUIC STREAM with StreamEnvelope
 //! length-prefix framing, this backend carries each batch as ONE QUIC unreliable
-//! DATAGRAM ([`quinn::Connection::send_datagram`] / [`read_datagram`], RFC9221) —
+//! DATAGRAM ([`quinn::Connection::send_datagram`] / `read_datagram`, RFC9221) —
 //! the datagram boundary IS the framing, exactly like UDP ([`crate::udp_pipeline`])
 //! and WS ([`crate::ws_pipeline`]). zenoh ships `zenoh-link-quic` +
 //! `zenoh-link-quic_datagram` as sibling crates sharing the TLS config; the
@@ -408,7 +408,7 @@ pub async fn dial_quic_datagram(
 /// owns the returned `Endpoint` and loops [`accept_quic_datagram_on`] over it.
 ///
 /// R311y454 — `iface` is the `#iface=<name>` LISTEN-side bind. It needs no code
-/// of its own: the shared [`quic_server_endpoint`] owns the pre-bind +
+/// of its own: the shared `quic_server_endpoint` owns the pre-bind +
 /// `SO_BINDTODEVICE` arm, so the datagram backend inherits the honor from the
 /// same SSOT that gives it the stream limits. One fix closed BOTH the quic and
 /// quic-datagram listen residuals for exactly this reason.

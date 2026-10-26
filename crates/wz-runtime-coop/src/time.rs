@@ -98,7 +98,7 @@ pub trait ClockSource: Send + Sync + 'static {
 /// subsequent `now_monotonic_ms` calls subtract the epoch and
 /// divide by 1000. Two independently-constructed `CoopTime`
 /// instances on the same runtime will report different epochs,
-/// mirroring [`wz_runtime_tokio::TokioTime`] per-instance epoch
+/// mirroring `wz_runtime_tokio::TokioTime` per-instance epoch
 /// semantics.
 pub struct CoopTime<C: ClockSource> {
     inner: InnerRef<C>,

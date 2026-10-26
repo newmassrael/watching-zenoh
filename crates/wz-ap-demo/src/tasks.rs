@@ -51,7 +51,7 @@ use crate::args::{LivelinessGetSpec, PublisherSpec, PushOperation};
 ///
 /// Why multi-copy emission (`PUBLISHER_BURST_COUNT`): zenoh-pico's
 /// `z_sub` declares its subscription AFTER the handshake
-/// completes (the DECLARE[DeclSubscriber] arrives in the first
+/// completes (the DECLARE\[DeclSubscriber\] arrives in the first
 /// Frame after the peer's OpenSyn). If wz-ap-demo emits the
 /// Push BEFORE that DECLARE lands, z_sub's local matcher has
 /// nothing to compare against and drops the message. Sending a
@@ -423,7 +423,7 @@ pub(crate) async fn group_join_task<T>(
     }
 }
 
-/// R311y442 — `--advanced-publish`: declare a wz [`AdvancedPublisher`] with a
+/// R311y442 — `--advanced-publish`: declare a wz `AdvancedPublisher` with a
 /// sample cache and emit a burst into it, then hold the session open so the
 /// cache keeps answering.
 ///
@@ -435,7 +435,7 @@ pub(crate) async fn group_join_task<T>(
 /// retrieve once the publishing is over.
 ///
 /// Declared INSIDE the task rather than pre-drive with the other handles because
-/// [`AdvancedPublisher::declare`] spawns the heartbeat beacon and therefore
+/// `AdvancedPublisher::declare` spawns the heartbeat beacon and therefore
 /// requires a live tokio runtime; the Established gate below is the same poll
 /// [`query_task`] uses.
 #[cfg(feature = "advanced")]
@@ -540,16 +540,16 @@ pub(crate) async fn advanced_publisher_task<T>(
 
 /// liveliness-get — single-shot snapshot task. Mirrors
 /// [`query_task`]'s Established gate, then issues one
-/// [`Session::liveliness_get`] on `keyexpr`. The peer's
+/// `Session::liveliness_get` on `keyexpr`. The peer's
 /// `LocalTokenRegistry` (a wz acceptor with `--declare-token`)
 /// replies with one `Declare(DeclToken)` per matching live token
 /// (logged as `LIVELINESS GET REPLY`) terminated by one
 /// `Declare(DeclFinal)` (logged as `LIVELINESS GET FINAL`). Unlike
 /// [`query_task`] this task DOES consume the inbound reply chain —
 /// `liveliness_get` registers the pending get + its callbacks
-/// internally — so it takes a [`Session`] (not bare
+/// internally — so it takes a `Session` (not bare
 /// `SessionLinkActions`). The Established gate is mandatory here: the
-/// surface enforces [`crate::Session::is_established`] (a one-shot get
+/// surface enforces `crate::Session::is_established` (a one-shot get
 /// emitted mid-handshake is discarded by the peer), so the task must
 /// not call before the gate fires.
 /// R311y353 — `spec.after_ms` holds the get that long AFTER Established, which is

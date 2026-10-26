@@ -35,7 +35,7 @@
 //!   what is already in it and terminates on its own — regardless of how many
 //!   sender clones the routing lifecycle still holds.
 //! - It is deliberately NOT
-//!   [`close_blocking`](crate::stream_link::StreamWriteDriver::close_blocking),
+//!   `close_blocking`,
 //!   whose no-op body documents why *close now* is wrong: it would race
 //!   in-flight enqueues. *Finish the queue, then exit* races nothing, which is
 //!   the whole reason it can be a new signal rather than a re-use of that one.

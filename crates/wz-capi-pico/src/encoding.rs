@@ -478,7 +478,7 @@ pub extern "C" fn z_encoding_loan_default() -> *const z_loaned_encoding_t {
 ///
 /// A DEEP copy, unlike the sibling zenoh-c ABI's handle copy. It has to be: the
 /// source may be one of the `'static` constants above OR a heap
-/// [`EncodingState`] a program built with [`z_encoding_from_str`], and
+/// `EncodingState` a program built with [`z_encoding_from_str`], and
 /// [`z_encoding_drop`] frees its handle. Copying the hint makes those two
 /// sources indistinguishable to the caller, which is what upstream's
 /// `_z_encoding_copy` does.
@@ -513,7 +513,7 @@ pub unsafe extern "C" fn z_encoding_clone(
 /// `z_encoding_take_from_loaned`).
 ///
 /// Hand-written rather than emitted by
-/// [`impl_value_ownership`](crate::abi::impl_value_ownership) because that
+/// `impl_value_ownership` because that
 /// macro clears a THREE-slot pad and `z_owned_encoding_t` carries four; a
 /// wrong-width clear would leave a stale pointer word in the source the caller
 /// is entitled to reuse.

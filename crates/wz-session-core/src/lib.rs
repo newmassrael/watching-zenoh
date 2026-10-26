@@ -1984,18 +1984,18 @@ pub mod drive;
 /// `lifecycle_query` re-exports it.
 pub mod lifecycle_wire;
 
-/// The lifecycle contract for every verb (decision D7): the request a transport reads
-/// ([`lifecycle_node::Command`]), the port a node answers it through
-/// ([`lifecycle_node::LifecycleNode`]) and the one function that decides it
-/// ([`lifecycle_node::lifecycle_verdict`]), written once for every transport and profile.
-/// Needs the status writer, so it is under `storage-profile`, which both profiles with a session
-/// tier select.
+// The lifecycle contract for every verb (decision D7): the request a transport reads
+// (`lifecycle_node::Command`), the port a node answers it through
+// (`lifecycle_node::LifecycleNode`) and the one function that decides it
+// (`lifecycle_node::lifecycle_verdict`), written once for every transport and profile.
+// Needs the status writer, so it is under `storage-profile`, which both profiles with a session
+// tier select.
 #[cfg(feature = "storage-profile")]
 pub mod lifecycle_node;
 
-/// The table every transport of the lifecycle contract is held to (decision D7), for a test of
-/// this crate or an adapter in a sibling (`lifecycle-contract`, which the census leg turns on so
-/// that the crate's own adapter runs). No production build names it.
+// The table every transport of the lifecycle contract is held to (decision D7), for a test of
+// this crate or an adapter in a sibling (`lifecycle-contract`, which the census leg turns on so
+// that the crate's own adapter runs). No production build names it.
 #[cfg(feature = "lifecycle-contract")]
 pub mod lifecycle_contract;
 

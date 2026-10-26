@@ -9,7 +9,7 @@
 //! `static inline` helpers take the address of that inner field and hand it to
 //! the exported writer functions. So a C program COMPILES code that passes a
 //! serializer-shaped pointer to `z_bytes_writer_write_all`. This module
-//! therefore shares ONE [`WriterState`](crate::bytes::WriterState) behind one
+//! therefore shares ONE `WriterState` behind one
 //! handle representation with [`crate::bytes`] — if the two had different handle
 //! shapes, that inline helper would corrupt memory silently.
 //!

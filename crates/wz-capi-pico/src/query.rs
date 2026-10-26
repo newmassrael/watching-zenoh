@@ -1438,7 +1438,7 @@ pub unsafe extern "C" fn z_query_attachment(
 /// moved `options->attachment`.
 ///
 /// Enforces zenoh's `reply ⊆ query` contract exactly as pico does — see
-/// [`reply_keyexpr_is_covered`]. The reply is accumulated and emitted when the
+/// `reply_keyexpr_is_covered`. The reply is accumulated and emitted when the
 /// callback returns; see the module doc for why that is observably identical to
 /// emitting inline.
 ///
@@ -1683,7 +1683,7 @@ pub unsafe extern "C" fn z_query_source_info(
 
 /// Deep-copy a query into an owned one (pico `z_query_clone`).
 ///
-/// Routed through the SAME [`clone_query_marshal`] `z_query_take_from_loaned`
+/// Routed through the SAME `clone_query_marshal` `z_query_take_from_loaned`
 /// uses, so the two cannot diverge; the only difference is that this leaves the
 /// source intact. Both are ESCAPES: the copy carries a deferred responder and
 /// holds the `ResponseFinal` open until it is dropped, which is what makes "the

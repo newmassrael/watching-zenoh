@@ -227,7 +227,7 @@ pub enum DataMode {
     FragmentChain,
     /// A single FIRST fragment (`more=1`) of a chain whose continuation never
     /// arrives. The acceptor arms a reassembly slot; the harness then advances
-    /// its [`OffsetClock`] past the chain's `reassembly_timeout_ms` deadline so
+    /// its `OffsetClock` past the chain's `reassembly_timeout_ms` deadline so
     /// the swept drive loop evicts the chain (raising `ReassemblyTimeout`) —
     /// the timeout-eviction path the [`FragmentChain`] mode (which completes
     /// before any deadline) cannot exercise. Host-only: it needs the advancing

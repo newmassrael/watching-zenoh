@@ -77,7 +77,7 @@
 //!
 //! TCP length-prefixes each frame (`StreamEnvelope`, 2-byte LE). SERIAL
 //! instead COBS-frames each payload with a `0x00` EOP delimiter
-//! ([`encode_frame`] / [`SerialFrameReader`]); [`serial_writer_task`]
+//! (`encode_frame` / [`SerialFrameReader`]); [`serial_writer_task`]
 //! encodes on the way out and [`SerialReadDriver`] re-frames on the way in.
 //! The wire shape is the R311ns codec catalog
 //! (`serial_envelope` / `cobs` / `crc32`), routed through the R311nt
@@ -826,7 +826,7 @@ pub async fn accept_serial(endpoint: &SerialEndpoint) -> io::Result<SerialStream
 /// read-until-`0x00` (serial_protocol.c:145-177).
 ///
 /// - Initiator: writes INIT, then INIT|ACK -> Ok; RESET -> back off
-///   ([`SERIAL_CONNECT_THROTTLE`]) and re-send INIT; anything else -> error.
+///   (`SERIAL_CONNECT_THROTTLE`) and re-send INIT; anything else -> error.
 /// - Responder: awaits INIT, writes INIT|ACK -> Ok; anything else -> error.
 pub async fn drive_serial_handshake<S>(stream: &mut S, role: SerialRole) -> io::Result<()>
 where
@@ -1125,7 +1125,7 @@ impl LinkDriver for SerialReadDriver {
 /// `OutboundTx` (R2919: priority lanes) whose receiver the [`serial_writer_task`]
 /// owns. Impls [`BoxedLinkDriver`] with a NON-blocking enqueue, the same
 /// sync-action / async-runtime decoupling
-/// [`crate::link_pipeline::TcpWriteDriver`] uses (a nested `block_on` from a
+/// `crate::link_pipeline::TcpWriteDriver` uses (a nested `block_on` from a
 /// sync FSM action handler would trip the runtime-reentrancy check).
 ///
 /// R3239 — the channel carries the FRAMED wire: this driver COBS-frames each
@@ -1331,7 +1331,7 @@ impl BoxedLinkDriver for SerialWriteDriver {
 /// Async writer task. Owns the [`WriteHalf`] and drains the outbound channel,
 /// writing + flushing the frames as they are: [`SerialWriteDriver`] has already
 /// COBS-framed each one through [`encode_frame_into`] (header
-/// [`SERIAL_DATA_HEADER`] + len + payload + crc32 -> COBS -> `0x00` EOP) when it
+/// `SERIAL_DATA_HEADER` + len + payload + crc32 -> COBS -> `0x00` EOP) when it
 /// enqueued it (R3239). Exits when the queue is SEALED and drained, when every
 /// [`SerialWriteDriver`] clone has dropped, or when a write fails / stalls past
 /// [`WRITER_STALL_MS`](crate::writer_queue::WRITER_STALL_MS) on a sealed queue

@@ -43,12 +43,12 @@
 //!
 //! ## The zenoh mapping (bundled per face on purpose)
 //!
-//! - [`ClientFutureInterests::interests`] = zenoh's per-`FaceState`
+//! - `ClientFutureInterests::interests` = zenoh's per-`FaceState`
 //!   `remote_interests` (the interests a face declared), filtered to FUTURE
 //!   declare interests. Keyed by the soliciting `interest_id` so an inbound
 //!   `Interest(Final)` (pico sends one on every publisher/querier drop —
 //!   `net/primitives.c:_z_remove_interest`) removes exactly one.
-//! - [`ClientFutureInterests::pushed`] = zenoh's `face_hat.local_subs` /
+//! - `ClientFutureInterests::pushed` = zenoh's `face_hat.local_subs` /
 //!   `local_qabls` (`reply keyexpr -> (decl id, last-declared value)`). Seeded by
 //!   the current dump and by every FUTURE push; read for the value-diff re-push
 //!   decision and to keep the `(decl_id, peer)` a pico write-filter target is keyed
@@ -92,7 +92,7 @@ pub type FutureQablStore = FutureInterestStore<QueryableInfo>;
 /// and whether the interest is AGGREGATE (a match reply is keyed on the interest
 /// keyexpr, not the concrete declaration — pico matches an aggregate interest's
 /// replies by keyexpr EQUALITY). Value-agnostic: the same shape for subs and qabls
-/// (the value lives on the [`ClientFutureInterests::pushed`] side, not here).
+/// (the value lives on the `ClientFutureInterests::pushed` side, not here).
 #[derive(Debug, Clone)]
 struct FutureInterest {
     target: String,
@@ -481,7 +481,7 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
     ///
     /// Inert for `V = ()` — a `()` value never differs, so the SUBSCRIBER plane never
     /// downgrades (a `DeclareSubscriber` carries no value; only
-    /// [`FutureQablStore`](crate::future_interest::FutureQablStore)'s `undeclare_push`
+    /// [`FutureQablStore`]'s `undeclare_push`
     /// drives this). Iterates `pushed` (the reply kes ALREADY declared to the face —
     /// zenoh `face_hat.local_qabls`), NOT `interests` (that is
     /// [`pushes_for_new`](Self::pushes_for_new)'s ingest domain): only an

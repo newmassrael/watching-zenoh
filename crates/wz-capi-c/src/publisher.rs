@@ -287,7 +287,7 @@ pub(crate) fn priority_from_c(p: z_priority_t) -> Priority {
 ///
 /// `encoding` is a `z_moved_encoding_t*`, and R311y545 made it a TYPED pointer
 /// because the field is now READ: the declare path resolves the label through
-/// [`take_moved_encoding`](crate::encoding::take_moved_encoding) and every put
+/// `take_moved_encoding` and every put
 /// on this publisher carries it. The layout is unchanged — a pointer is a
 /// pointer — but the type now says what the code does.
 #[repr(C)]

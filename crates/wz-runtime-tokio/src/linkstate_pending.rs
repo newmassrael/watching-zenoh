@@ -146,7 +146,7 @@ impl QueryFan {
     }
 }
 
-/// The pending-query return table — one [`FacePending`] per outbound face.
+/// The pending-query return table — one `FacePending` per outbound face.
 #[derive(Debug, Default)]
 pub struct PendingQueries {
     /// out face -> that face's local-qid allocator + live return mappings. A

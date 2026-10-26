@@ -141,7 +141,7 @@ pub mod session_rx_pool_mcu {
 
 /// SCE-codegen'd SLIM MCU session-rx buffer-pool SSOT — the constrained
 /// nrf51-class profile `sources/network/session_rx_pool_mcu_minimal.scxml`
-/// (4 x 256 ~= 1 KB). Selected over [`session_rx_pool_mcu`] by the
+/// (4 x 256 ~= 1 KB). Selected over `session_rx_pool_mcu` by the
 /// `buffer-pool-session-rx-slim` feature for Cortex-M0 / 16 KB-SRAM targets
 /// (see the scxml header for the small-control-frame derivation).
 #[cfg(feature = "buffer-pool-session-rx-slim")]
@@ -162,8 +162,8 @@ pub mod session_rx_pool_mcu_minimal {
 /// SCE-codegen'd MCU MULTICAST-session-rx buffer-pool SSOT
 /// (`sources/network/session_rx_pool_mcu_multicast.scxml`, 32 x 1536 ~=
 /// 49 KB) — the dims of the multicast transport receive socket
-/// ([`rx_sockets::SessionMulticastRxSocket`](crate::rx_sockets::SessionMulticastRxSocket)).
-/// A DISTINCT pool from [`session_rx_pool_mcu`] (the unicast session pool):
+/// ([`rx_sockets::SessionMulticastRxSocket`]).
+/// A DISTINCT pool from `session_rx_pool_mcu` (the unicast session pool):
 /// a node can run a unicast session and a multicast group at once, each
 /// with its own rx-queue, so the xtask always regenerates this committed pool
 /// (independent of the `buffer-pool-session-rx-slim` toggle, which only selects
@@ -239,17 +239,17 @@ pub mod tx_pool;
 
 pub mod rx_sockets;
 
-/// R311y599 — the receive SEAM over the buffer-pool emits: slots a reader
-/// borrows and returns, hiding whether the CPU copied the bytes in or a
-/// peripheral wrote them. [`rx_sockets`] consumes the same emits for their
-/// dims; this consumes their LIFECYCLE, which until now had no caller.
+// R311y599 — the receive SEAM over the buffer-pool emits: slots a reader
+// borrows and returns, hiding whether the CPU copied the bytes in or a
+// peripheral wrote them. `rx_sockets` consumes the same emits for their
+// dims; this consumes their LIFECYCLE, which until now had no caller.
 pub mod rx_pool;
 
-/// R311y606 — the same seam's ARMING half: slots a bus master fills through a
-/// published address. Split from [`rx_pool`] because a CPU-fill adapter must
-/// not have to implement arming, and because the two halves became buildable
-/// a pin apart — the address accessors this needs arrived in vendor/sce
-/// `62794d8c4b`.
+// R311y606 — the same seam's ARMING half: slots a bus master fills through a
+// published address. Split from `rx_pool` because a CPU-fill adapter must
+// not have to implement arming, and because the two halves became buildable
+// a pin apart — the address accessors this needs arrived in vendor/sce
+// `62794d8c4b`.
 pub mod rx_ring;
 
 /// R2835 — an Ethernet netif whose MAC is a Rust driver: the interface a

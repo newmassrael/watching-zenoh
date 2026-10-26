@@ -239,7 +239,7 @@ impl z_owned_slice_t {
 /// | 3    | 0                       | 0                  |
 ///
 /// Keeping `{ start, len }` at slots 0/1 for BOTH is what lets
-/// [`crate::keyexpr::keyexpr_str`] stay a single branchless read: the literal
+/// `crate::keyexpr::keyexpr_str` stay a single branchless read: the literal
 /// is always there, and the declaration is additive information a publish path
 /// may consult. The alternative — a handle at slot 0 for the owned form —
 /// would make slot 0 ambiguous (a non-null pointer means "literal" in one arm
@@ -440,7 +440,7 @@ macro_rules! impl_handle_ownership7 {
         }
 
         /// Drop the owned value (pico `z_*_drop`). Idempotent on a null
-        /// handle, and a NO-OP on a BORROWED one (see [`HandleOwnership`]).
+        /// handle, and a NO-OP on a BORROWED one (see `HandleOwnership`).
         /// Guarded because the payload's `Drop` runs here.
         #[no_mangle]
         pub unsafe extern "C" fn $drop(obj: *mut $Moved) {

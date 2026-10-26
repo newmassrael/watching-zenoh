@@ -124,7 +124,7 @@ pub trait InterceptorContext {
     /// (`net/routing/interceptor/downsampling.rs:90-116`). wz has no per-transport
     /// factory — one chain serves every face — so the subject is read per message
     /// off the face's already-held driver, which is a field read rather than a
-    /// re-resolution (see [`LinkSubject`](wz_session_core::link::LinkSubject)).
+    /// re-resolution (see [`LinkSubject`]).
     ///
     /// Returns a REFERENCE, not an owned value: this is read once per message per
     /// subject-narrowed rule, and an owned return would clone the interface-name

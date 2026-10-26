@@ -46,7 +46,7 @@
 //! Upstream creates the key's file in place and writes into it; its create
 //! truncates first, so a crash mid-write loses the previous value, and nothing
 //! in that repository fsyncs. wz writes the payload to a file in its staging
-//! directory ([`STAGING_DIR`](crate::filesystem_keypath::STAGING_DIR)), `fsync`s
+//! directory ([`STAGING_DIR`]), `fsync`s
 //! it, `rename`s it over the key's path,
 //! and `fsync`s the directory that now names it -- so the key's path only ever
 //! names a complete value, and a committed mutation survives a power loss. The
@@ -55,7 +55,7 @@
 //!
 //! ## A write that fails (R311y831, restated for a store with no copy)
 //!
-//! [`StorageWriteError`](wz_session_core::storage_backend::StorageWriteError)
+//! [`StorageWriteError`]
 //! means the mutation is not committed, and nothing above may record it: the
 //! newer-wins record, the replication log and the aligner digest all stay
 //! silent (`StorageState::process_put` propagates instead of recording), which

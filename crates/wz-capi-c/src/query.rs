@@ -8,7 +8,7 @@
 //!
 //! Same registry story as [`crate::sub`]: a zenoh-c session is "one session,
 //! many peers" while a wz unicast `Session` is one peer, so the declaration
-//! lands in [`wz_capi_core`](wz_capi_core)'s SSOT and is replayed onto each face
+//! lands in [`wz_capi_core`]'s SSOT and is replayed onto each face
 //! as it comes up. Declare-before-peer therefore works here too.
 //!
 //! ## A query may ESCAPE its dispatch, and that is what makes this plane hard
@@ -1105,7 +1105,7 @@ pub unsafe extern "C" fn z_query_parameters(
 /// `z_query_payload`).
 ///
 /// NULL is the absence signal `z_queryable.c` branches on — see
-/// [`QueryMarshal::payload`].
+/// `QueryMarshal::payload`.
 ///
 /// # Safety
 /// `this_` must be null or a live loaned query.
@@ -1360,7 +1360,7 @@ pub unsafe extern "C" fn z_query_reply(
 /// written against this ABI. Carried as named debt since R311y563.
 ///
 /// Upstream's fields in upstream's order, minus the encoding its Put sibling
-/// has — see [`PendingReply::Del`] for why a Del carries none.
+/// has — see `PendingReply::Del` for why a Del carries none.
 #[repr(C)]
 pub struct z_query_reply_del_options_t {
     /// Congestion control. Accepted and ignored, as on the Put reply (and as
@@ -1443,7 +1443,7 @@ pub unsafe extern "C" fn z_query_reply_err_options_default(
 /// `z_query_reply_err`).
 ///
 /// The third reply form, alongside [`z_query_reply`] and [`z_query_reply_del`],
-/// and the only one that takes NO keyexpr — see [`PendingReply::Err`] for why
+/// and the only one that takes NO keyexpr — see `PendingReply::Err` for why
 /// that is upstream's signature rather than an omission here, and why the
 /// coverage gate the other two run has nothing to check.
 ///
@@ -1588,7 +1588,7 @@ pub unsafe extern "C" fn z_query_loan_mut(this_: *mut z_owned_query_t) -> *mut z
 ///
 /// ## An ESCAPE, not merely a copy — and that is what makes it correct
 ///
-/// Routed through [`escape_query`], the same path `z_fifo_channel_query_new`
+/// Routed through `escape_query`, the same path `z_fifo_channel_query_new`
 /// takes, rather than through a plain field copy. The reason is the
 /// `ResponseFinal`: a cloned query can be REPLIED to, so it must carry a
 /// [`HeldQuery`] and hold the query like any escape, or the terminator would go

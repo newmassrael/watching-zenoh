@@ -590,7 +590,7 @@ const _: () = {
 /// A zero-sized TAG, for the same reason [`z_loaned_sample_t`] is: the C side
 /// never stack-allocates one — it receives a `z_loaned_query_t*` and hands it
 /// back to the accessors — so the pointer aims straight at wz's own
-/// [`QueryMarshal`](crate::query::QueryMarshal). The 136-byte `z_owned_query_t`
+/// `QueryMarshal`. The 136-byte `z_owned_query_t`
 /// above is the type that IS stack-allocated, and it carries a handle to the
 /// same marshal.
 #[cfg(feature = "queryable")]
@@ -761,7 +761,7 @@ const _: () = assert!(std::mem::size_of::<z_owned_closure_hello_t>() == 24);
 /// load-bearing: the C side never stack-allocates a `z_loaned_sample_t` — it only
 /// ever receives a `z_loaned_sample_t*` from the callback and hands it back to the
 /// accessors. So wz points that pointer straight at its own
-/// [`SampleMarshal`](crate::sample::SampleMarshal) and the accessors cast back,
+/// `SampleMarshal` and the accessors cast back,
 /// which keeps the marshal's fields directly reachable instead of hidden behind a
 /// handle slot the C side would then be free to mis-size.
 ///
@@ -1065,7 +1065,7 @@ const _: () = {
 /// that shape; the owned one is what `z_keyexpr_from_str` / `z_keyexpr_clone` /
 /// `z_declare_keyexpr` produce and what `z_keyexpr_drop` reclaims. Same
 /// footprint as the view and same `KeyexprState` behind the handle, so
-/// [`crate::keyexpr::keyexpr_str`] serves all three without a second path — the
+/// `crate::keyexpr::keyexpr_str` serves all three without a second path — the
 /// distinction is OWNERSHIP, which lives in whether a drop frees.
 #[repr(C)]
 pub struct z_owned_keyexpr_t {
@@ -1120,7 +1120,7 @@ const _: () = {
 /// The array form removes the hazard structurally. The caller says how many
 /// slots it has; this writes at most that many and returns the TRUE count, so a
 /// width disagreement surfaces as an assertion on a returned integer instead of
-/// as memory corruption. The names live in [`WZ_CAPI_C_LAYOUT_NAMES`] and are
+/// as memory corruption. The names live in `WZ_CAPI_C_LAYOUT_NAMES` and are
 /// read out of the same artifact, so the gate never re-transcribes them either.
 /// ## Why the table SPLITS in two (R311y543)
 ///
@@ -1505,7 +1505,7 @@ fn layout_values() -> Vec<usize> {
 ///
 /// R311y540. Exported so a gate written in another language reads the names out
 /// of the SAME artifact it reads the values from. The alternative is a second
-/// copy of [`WZ_CAPI_C_LAYOUT_NAMES`] in the tool, which is the drift hazard the
+/// copy of `WZ_CAPI_C_LAYOUT_NAMES` in the tool, which is the drift hazard the
 /// array form of `wz_capi_c_layout` was introduced to remove — putting it back
 /// one language over would have undone that.
 ///

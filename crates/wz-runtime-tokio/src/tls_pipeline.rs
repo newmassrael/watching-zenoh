@@ -8,7 +8,7 @@
 //! reuses the transport-neutral byte-stream machinery in [`crate::stream_link`]
 //! UNCHANGED — the [`StreamReadDriver`] framing `LinkDriver` impl, the
 //! [`StreamWriteDriver`] channel, and the StreamEnvelope
-//! [`writer_task`](crate::stream_link::writer_task). This module carries only
+//! [`writer_task`]. This module carries only
 //! the TLS-specific dial/accept (the rustls handshake) and the split, since a
 //! TLS stream is split with [`tokio::io::split`] (not `TcpStream::into_split`,
 //! which has no analogue on a `TlsStream`). The link MTU is the unbounded
@@ -126,7 +126,7 @@ pub async fn accept_tls(
 /// Split a handshaked [`TlsStream`] into the cooperating drivers the session
 /// FSM consumes: an inbound [`TlsReadDriver`] (`&mut LinkDriver` for the poll
 /// loop), an outbound `Arc<`[`StreamWriteDriver`]`>` (`BoxedLinkDriver` for
-/// `send_blocking`), and the [`writer_task`](crate::stream_link::writer_task)
+/// `send_blocking`), and the [`writer_task`]
 /// join handle. Mirrors [`crate::link_pipeline::wire_tcp_stream`]; a TLS stream
 /// is split with [`tokio::io::split`] (no owned-half split exists) but
 /// otherwise the StreamEnvelope framing and write driver are the SAME shared

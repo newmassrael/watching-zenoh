@@ -44,7 +44,7 @@
 //!
 //! Everything below the ABI — the face registry, the declaration SSOT replayed
 //! per face, the drive thread and its race-free close — is
-//! [`wz_capi_core`](wz_capi_core), the same code the zenoh-pico ABI runs on. Two
+//! [`wz_capi_core`], the same code the zenoh-pico ABI runs on. Two
 //! ABIs, one model; see that crate's docs for why duplicating it was the worse
 //! option.
 

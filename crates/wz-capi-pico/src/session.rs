@@ -30,7 +30,7 @@
 //!   InitSyn/InitAck/OpenSyn/OpenAck handshake and returns success, or an error
 //!   if the peer is unreachable (`src/transport/unicast/transport.c:280-287`).
 //!   So `z_open` here blocks until Established and lands exactly one peer
-//!   ([`DIAL_FACE_ID`]) in the registry.
+//!   (`DIAL_FACE_ID`) in the registry.
 //! - **`listen` (accept, peer)** — pico forces PEER mode, does a non-blocking
 //!   `bind()` + `listen()`, spawns an async accept task, and **returns
 //!   immediately with zero peers and no error** (`src/net/session.c:87-118`,

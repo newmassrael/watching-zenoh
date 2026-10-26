@@ -31,7 +31,7 @@
 //!    environment variable away from arming.
 //! 2. Even in a build that has it, the log is written only when
 //!    `SSLKEYLOGFILE` names a path. rustls reads that variable itself
-//!    ([`rustls::KeyLogFile`]), so wz neither parses nor stores the path.
+//!    (`rustls::KeyLogFile`), so wz neither parses nor stores the path.
 //!
 //! Both conditions must hold. Neither alone arms it.
 
@@ -54,7 +54,7 @@ pub const KEYLOG_ENV: &str = "SSLKEYLOGFILE";
 /// The key-log sink to install on a rustls config.
 ///
 /// Returns a real [`KeyLogFile`] in a build that selected
-/// `transport-link-tls-keylog`, and [`NoKeyLog`] otherwise. Callers install
+/// `transport-link-tls-keylog`, and `NoKeyLog` otherwise. Callers install
 /// the result unconditionally, so the two builds differ in behaviour and not
 /// in control flow — a `#[cfg]` at each of the four config builders would be
 /// four places to forget.

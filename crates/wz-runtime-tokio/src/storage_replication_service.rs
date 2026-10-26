@@ -11,7 +11,7 @@
 //! [`DigestPublisher`] spawns a task that, every `config.interval_ms`, builds
 //! the storage's current [`Digest`](wz_session_core::storage_replication::Digest)
 //! ([`StorageState::replication_digest`](wz_session_core::storage_state::StorageState::replication_digest)),
-//! encodes it ([`wire::encode`](wz_session_core::storage_replication::wire::encode)),
+//! encodes it ([`wire::encode`]),
 //! and publishes it on the digest keyexpr. It shares the live
 //! [`crate::storage_service::StorageService`] state (via
 //! [`StorageService::shared_state`](crate::storage_service::StorageService::shared_state)),
@@ -40,7 +40,7 @@
 //! `publication_delay_ms`, `post_publication_delay_ms`) so the schedule is
 //! testable without a wall clock; this module supplies only the clock reads.
 //! The jitter draws come from
-//! [`JitterSequence`](wz_session_core::storage_replication::JitterSequence),
+//! [`JitterSequence`],
 //! seeded per replica from its zid — see that type for why de-correlation
 //! does not want the entropy port.
 //!
@@ -75,9 +75,9 @@ use crate::timestamp_source::{wall_clock_ntp64, wall_clock_unix_ms};
 /// the replica zid and the configuration fingerprint (core.rs:136-148).
 ///
 /// Both components go through zenoh's `keformat` `set<S: Display>` (key_expr
-/// `format/mod.rs:487-493`), i.e. each is rendered via its [`Display`]: the zid
+/// `format/mod.rs:487-493`), i.e. each is rendered via its `Display`: the zid
 /// as zenoh's `ZenohId` Display (the
-/// [`zid_to_zenoh_hex`](wz_session_core::storage_replication::zid_to_zenoh_hex)
+/// [`zid_to_zenoh_hex`]
 /// SSOT — LE id read as a `u128`, big-endian hex, one leading zero stripped,
 /// NOT a naive per-byte hex) and the fingerprint as the `u64`'s decimal
 /// `Display` (`Fingerprint` `Deref`s to `u64`). Using the shared SSOT keeps
@@ -168,7 +168,7 @@ impl DigestPublisher {
     /// so the published digest reflects the live stored data. The loop is
     /// zenoh's `spawn_digest_publisher` (core.rs:161-272) — see the module's
     /// "publication schedule" note for the four sleeps it is built from. The
-    /// frame body is the deterministically tested [`digest_frame`]; this is
+    /// frame body is the deterministically tested `digest_frame`; this is
     /// the timer glue over it.
     /// The publisher runs on the APPLICATION subsystem
     /// ([`WzRuntime::Application`](crate::runtime_pool::WzRuntime)). Upstream's
@@ -326,7 +326,7 @@ fn handle_peer_digest<B: StorageBackend>(
     };
     let hot_upper = config.classify(now).0;
     let local = {
-        // `mut` since R2354 — see [`digest_frame`].
+        // `mut` since R2354 — see `digest_frame`.
         let mut guard = state.lock().expect("storage state mutex poisoned");
         guard.replication_digest(config, hot_upper)
     };

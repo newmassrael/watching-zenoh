@@ -10,7 +10,7 @@
 //! ends when the callback returns. The C side gets a `z_loaned_sample_t*` and is
 //! documented to copy anything it keeps, so the borrow is legal — but the wz view
 //! borrows a buffer the drive loop is about to reuse, so the fields are COPIED
-//! into a [`SampleMarshal`] that lives for exactly the duration of the call and
+//! into a `SampleMarshal` that lives for exactly the duration of the call and
 //! the C pointer is aimed at that.
 //!
 //! ## `bind` is separate from `new`, and the split is load-bearing
@@ -18,7 +18,7 @@
 //! The marshal caches loaned views that point at its OWN fields. A by-value
 //! constructor returns before the value reaches its final address, so binding
 //! inside `new` would hand C pointers into the dead constructor frame. `new`
-//! therefore leaves the cached views unbound and [`SampleMarshal::bind`] runs
+//! therefore leaves the cached views unbound and `SampleMarshal::bind` runs
 //! once the marshal is where it will stay. The sibling pico ABI records the same
 //! discipline for the same reason, having once got it wrong.
 
@@ -585,7 +585,7 @@ pub unsafe extern "C" fn z_sample_source_info(
 
 /// The sample's value ENCODING (zenoh-c `z_sample_encoding`).
 ///
-/// NEVER null for a live sample — see [`SampleMarshal::encoding`] for why the
+/// NEVER null for a live sample — see `SampleMarshal::encoding` for why the
 /// absent-E-flag case reports the default rather than NULL. Upstream's return
 /// type is non-optional in Rust, so a C program does not check.
 ///
@@ -1489,12 +1489,12 @@ pub unsafe extern "C" fn z_sample_loan_mut(
 ///
 /// Upstream MOVES the Rust `Sample` out of the loaned slot, leaving it
 /// moved-from. wz cannot: a `z_loaned_sample_t*` in this crate is a pointer at a
-/// [`SampleMarshal`] whose STORAGE belongs to someone else — the dispatcher's
-/// stack frame inside [`with_marshalled`], or a `Box` behind a live
+/// `SampleMarshal` whose STORAGE belongs to someone else — the dispatcher's
+/// stack frame inside `with_marshalled`, or a `Box` behind a live
 /// `z_owned_sample_t` — and nothing in the pointer says which. Stealing the
 /// marshal would leave either a dangling owned value or a freed stack slot.
 ///
-/// So this deep-copies, through the same [`escape_sample`] every channel handler
+/// So this deep-copies, through the same `escape_sample` every channel handler
 /// uses. The C contract is unaffected: `dst` is a valid owned sample and `src`
 /// must not be used again, which is exactly what upstream promises. The one
 /// thing a caller could observe is `src` still reading as live afterwards — and

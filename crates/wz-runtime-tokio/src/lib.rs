@@ -91,9 +91,9 @@ const _: () = assert!(
 #[cfg(feature = "link-interfaces")]
 pub mod link_interfaces;
 
-/// R311y492 (§5.22) — the dynamic plugin host: `dlopen` loading, the ABI gate,
-/// the lifecycle FSM and the runtime registry. AP/std/unix-only and opt-in; see
-/// the module doc for why four atoms R311y256 deprecated return with it.
+// R311y492 (§5.22) — the dynamic plugin host: `dlopen` loading, the ABI gate,
+// the lifecycle FSM and the runtime registry. AP/std/unix-only and opt-in; see
+// the module doc for why four atoms R311y256 deprecated return with it.
 #[cfg(all(unix, feature = "plugin-dynamic-loading"))]
 pub mod plugin;
 #[cfg(feature = "transport-unicast")]
@@ -183,19 +183,19 @@ pub mod session_rx_pool_ap {
     ));
 }
 
-/// R311mk — shared AP reassembly-pool wiring: the [`reassembly::TokioReassembly`]
-/// Router type + [`reassembly::reassembly_config`], hoisted out of
-/// [`session_glue`] (the unicast handshake driver) so a `transport-multicast`-only
-/// build reaches the pool config without `transport-unicast`. Transport-agnostic
-/// SSOT — both the unicast and multicast drive loops run a pool instance over
-/// the same SCE-sourced AP dims/knobs. Gated on `reassembly` (the dims come from
-/// [`reassembly_pool_ap`]).
+// R311mk — shared AP reassembly-pool wiring: the `reassembly::TokioReassembly`
+// Router type + `reassembly::reassembly_config`, hoisted out of
+// `session_glue` (the unicast handshake driver) so a `transport-multicast`-only
+// build reaches the pool config without `transport-unicast`. Transport-agnostic
+// SSOT — both the unicast and multicast drive loops run a pool instance over
+// the same SCE-sourced AP dims/knobs. Gated on `reassembly` (the dims come from
+// `reassembly_pool_ap`).
 #[cfg(feature = "reassembly")]
 pub mod reassembly;
 
-/// R311y589 — `runtime-zero-copy`: the pooled reassembly arena, and the FIRST
-/// consumer of an `sce:kind="buffer-pool"` emit's lifecycle FSM (the constants
-/// beside it have been read since R311in; the `Slot<S>` API had zero callers).
+// R311y589 — `runtime-zero-copy`: the pooled reassembly arena, and the FIRST
+// consumer of an `sce:kind="buffer-pool"` emit's lifecycle FSM (the constants
+// beside it have been read since R311in; the `Slot<S>` API had zero callers).
 #[cfg(feature = "runtime-zero-copy")]
 pub mod zero_copy;
 
@@ -327,25 +327,25 @@ pub mod session_tx_pool_ap_small {
 ))]
 pub mod link_tx_pool;
 
-/// R311y589 — `runtime-tokio-uring`: ARCHITECTURE §9.5 row 3. A pool registered
-/// with the kernel as fixed buffers so `IORING_OP_READ_FIXED` writes a link's
-/// bytes straight into a slot.
-///
-/// R2746 — that pool is now the LINK-RX table rather than the reassembly one,
-/// which is why this gate gained `transport-link-tcp`: the table it registers
-/// is [`link_rx_arena`]'s, and a frame is what a socket read lands. The
-/// implication was deliberately NOT put on the feature itself — Layer C1br's
-/// `--no-default-features --features runtime-tokio-uring` build is the tree's
-/// only `reassembly`-without-transport build, and giving the feature a link
-/// would have taken that away.
-///
-/// R2973 — and on Linux, because io_uring IS Linux and upstream's `uring` says
-/// so: its whole implementation is one module under `target_os = "linux"`
-/// (`commons/zenoh-uring/src/lib.rs` @ `mod linux;`), so on any other host the
-/// feature is inert and every link reads through tokio. wz named the feature
-/// alone, and a macOS or Windows build that enabled it did not compile at all
-/// (54 errors, the `io-uring` crate itself). Every site that names the feature
-/// now names the host beside it; `platform_surface_matrix.py` holds that.
+// R311y589 — `runtime-tokio-uring`: ARCHITECTURE §9.5 row 3. A pool registered
+// with the kernel as fixed buffers so `IORING_OP_READ_FIXED` writes a link's
+// bytes straight into a slot.
+//
+// R2746 — that pool is now the LINK-RX table rather than the reassembly one,
+// which is why this gate gained `transport-link-tcp`: the table it registers
+// is `link_rx_arena`'s, and a frame is what a socket read lands. The
+// implication was deliberately NOT put on the feature itself — Layer C1br's
+// `--no-default-features --features runtime-tokio-uring` build is the tree's
+// only `reassembly`-without-transport build, and giving the feature a link
+// would have taken that away.
+//
+// R2973 — and on Linux, because io_uring IS Linux and upstream's `uring` says
+// so: its whole implementation is one module under `target_os = "linux"`
+// (`commons/zenoh-uring/src/lib.rs` @ `mod linux;`), so on any other host the
+// feature is inert and every link reads through tokio. wz named the feature
+// alone, and a macOS or Windows build that enabled it did not compile at all
+// (54 errors, the `io-uring` crate itself). Every site that names the feature
+// now names the host beside it; `platform_surface_matrix.py` holds that.
 #[cfg(all(
     feature = "runtime-tokio-uring",
     feature = "transport-link-tcp",
@@ -1084,32 +1084,32 @@ pub use wz_session_core::zid_hex;
 /// MEMORY anchor's architectural deferral carve-out.
 pub mod pubsub;
 
-/// R121j-5b — application-layer queryable registry. Q-side mirror of
-/// [`pubsub::SubscriberRegistry`]: routes inbound
-/// `NetworkMessage::Request` records (Query body arm) to user-
-/// registered `on_query` callbacks, which emit Reply / Err records
-/// via a [`query::QueryResponder`] borrow. The runtime wiring that
-/// turns the accumulated `Vec<QueryReply>` into outbound Response
-/// frames lands in R121j-5c. See `query` module doc comment for the
-/// scope, threading, and Responder lifetime contract.
-///
-/// R311r — module is type-ungated. The `QueryableRegistry` struct,
-/// the `QueryResponder` internal type, the `QueryReply` accumulator
-/// enum, and the supporting types are always defined regardless of
-/// the `query-queryable` feature so that the model-B query seam
-/// contracts ([`query_sink::QueryView`] / [`query_sink::ReplyOut`])
-/// and the type-ungated `Session::declare_queryable{_aliased}`
-/// Result-form signatures compile unconditionally. The wire-emit
-/// terminal step (`QueryReply::into_response`) remains cfg-gated on
-/// `codec-response` — the dispatch / loopback / staging paths stage
-/// `QueryReply` records into a `Vec` without needing `codec-response`,
-/// so the module body compiles cleanly under any consumer-feature
-/// subset.
+// R121j-5b — application-layer queryable registry. Q-side mirror of
+// `pubsub::SubscriberRegistry`: routes inbound
+// `NetworkMessage::Request` records (Query body arm) to user-
+// registered `on_query` callbacks, which emit Reply / Err records
+// via a `query::QueryResponder` borrow. The runtime wiring that
+// turns the accumulated `Vec<QueryReply>` into outbound Response
+// frames lands in R121j-5c. See `query` module doc comment for the
+// scope, threading, and Responder lifetime contract.
+//
+// R311r — module is type-ungated. The `QueryableRegistry` struct,
+// the `QueryResponder` internal type, the `QueryReply` accumulator
+// enum, and the supporting types are always defined regardless of
+// the `query-queryable` feature so that the model-B query seam
+// contracts (`query_sink::QueryView` / `query_sink::ReplyOut`)
+// and the type-ungated `Session::declare_queryable{_aliased}`
+// Result-form signatures compile unconditionally. The wire-emit
+// terminal step (`QueryReply::into_response`) remains cfg-gated on
+// `codec-response` — the dispatch / loopback / staging paths stage
+// `QueryReply` records into a `Vec` without needing `codec-response`,
+// so the module body compiles cleanly under any consumer-feature
+// subset.
 pub mod query;
 
-/// R311y39 — the typed [`config::WzConfig`] runtime config SSOT (§5.23):
-/// read-at-open handshake mirror + the live interceptor/access-control
-/// subset, re-applied to the forwarder under `config-mutate-runtime`.
+// R311y39 — the typed `config::WzConfig` runtime config SSOT (§5.23):
+// read-at-open handshake mirror + the live interceptor/access-control
+// subset, re-applied to the forwarder under `config-mutate-runtime`.
 pub mod config;
 
 /// R2786 — the `plugins` section of a node's config and upstream's two runtime
@@ -1186,14 +1186,14 @@ pub use wz_session_core::raweth_link;
 #[cfg(all(feature = "live-capture", target_os = "linux"))]
 pub use wz_packet_socket::live_capture;
 
-/// R121k-2 — application-layer remote-declaration registries. Route
-/// decoded `Declare(Decl*|Undecl*)` records to user-registered
-/// callbacks. This round lands `RemoteSubscriberRegistry`
-/// (DeclSubscriber + UndeclSubscriber); R121k-3 adds
-/// `RemoteQueryableRegistry`, R121k-4 adds `LivelinessRegistry`. The
-/// dispatch wiring that fans inbound `Declare` envelopes through all
-/// three lands in R121k-5. See `declare` module doc comment for the
-/// scope and callback contract.
+// R121k-2 — application-layer remote-declaration registries. Route
+// decoded `Declare(Decl*|Undecl*)` records to user-registered
+// callbacks. This round lands `RemoteSubscriberRegistry`
+// (DeclSubscriber + UndeclSubscriber); R121k-3 adds
+// `RemoteQueryableRegistry`, R121k-4 adds `LivelinessRegistry`. The
+// dispatch wiring that fans inbound `Declare` envelopes through all
+// three lands in R121k-5. See `declare` module doc comment for the
+// scope and callback contract.
 pub mod declare;
 
 /// R121j-6 — application-layer reply registry. Z_get-side mirror of
@@ -1225,41 +1225,41 @@ pub mod reply;
 /// scope.
 pub mod observer;
 
-/// R228 — application-level [`session::Session`] bundle. Owns an
-/// outbound [`session_glue::SessionLinkActions`] handle plus a
-/// shared [`observer::ApplicationLayerObserver`] reference so a
-/// single [`session::Session::publish`] call routes through both the
-/// wire-side codec and the in-process subscriber loopback per
-/// [`session::PublishOptions::allowed_destination`]. Mirrors
-/// zenoh-pico's `_z_session_t`. R228 scope: literal-keyexpr Put +
-/// Del. Aliased publish + full Sample metadata are R229+ carries.
-///
-/// R311mk — gated on `transport-unicast`: the [`session::Session`] handle
-/// owns a [`session_glue::SessionLinkActions`] bundle (the unicast action
-/// machinery), so it is the unicast-session API surface. A
-/// `transport-multicast`-only build drives multicast through
-/// [`multicast_glue::drive_multicast_session`] over a shared
-/// [`observer::ApplicationLayerObserver`] instead of a `Session` handle.
-/// Unifying multicast under the `Session` handle (the zenoh-cpp
-/// transport-agnostic-session shape) is a separate north-star cascade.
-///
-/// R311mn (Level B, B2) — gate loosened from `transport-unicast` to
-/// `any(transport-unicast, transport-multicast)`: the module now also
-/// compiles in a multicast-ONLY build, where `Session` exposes only the
-/// transport-agnostic surface (observer / clock / drain_deferred_fires /
-/// zid) plus the `Session::new_multicast` constructor. The full unicast
-/// publish / query / declare surface inside the module stays
-/// `transport-unicast`-gated (it names `session_glue` types); the
-/// `session_glue` module itself remains `transport-unicast`.
+// R228 — application-level `session::Session` bundle. Owns an
+// outbound `session_glue::SessionLinkActions` handle plus a
+// shared `observer::ApplicationLayerObserver` reference so a
+// single `session::Session::publish` call routes through both the
+// wire-side codec and the in-process subscriber loopback per
+// `session::PublishOptions::allowed_destination`. Mirrors
+// zenoh-pico's `_z_session_t`. R228 scope: literal-keyexpr Put +
+// Del. Aliased publish + full Sample metadata are R229+ carries.
+//
+// R311mk — gated on `transport-unicast`: the `session::Session` handle
+// owns a `session_glue::SessionLinkActions` bundle (the unicast action
+// machinery), so it is the unicast-session API surface. A
+// `transport-multicast`-only build drives multicast through
+// `multicast_glue::drive_multicast_session` over a shared
+// `observer::ApplicationLayerObserver` instead of a `Session` handle.
+// Unifying multicast under the `Session` handle (the zenoh-cpp
+// transport-agnostic-session shape) is a separate north-star cascade.
+//
+// R311mn (Level B, B2) — gate loosened from `transport-unicast` to
+// `any(transport-unicast, transport-multicast)`: the module now also
+// compiles in a multicast-ONLY build, where `Session` exposes only the
+// transport-agnostic surface (observer / clock / drain_deferred_fires /
+// zid) plus the `Session::new_multicast` constructor. The full unicast
+// publish / query / declare surface inside the module stays
+// `transport-unicast`-gated (it names `session_glue` types); the
+// `session_glue` module itself remains `transport-unicast`.
 #[cfg(any(feature = "transport-unicast", feature = "transport-multicast"))]
 pub mod session;
 
-/// R4b — the §5.16 pubkey transport-auth method (`PubKeyMethod`, mutual RSA
-/// challenge-response, the wz mirror of zenoh `auth/pubkey.rs`). AP-only +
-/// std-gated because the `rsa` crate requires std — unlike usrpwd, which lives
-/// in the no_std session kernel. The `AuthMethod` trait + dispatch + ZBuf codec
-/// stay in `wz-session-core`; this is the concrete impl where its crypto dep
-/// mandates. Gated on `access-extauth-pubkey`.
+// R4b — the §5.16 pubkey transport-auth method (`PubKeyMethod`, mutual RSA
+// challenge-response, the wz mirror of zenoh `auth/pubkey.rs`). AP-only +
+// std-gated because the `rsa` crate requires std — unlike usrpwd, which lives
+// in the no_std session kernel. The `AuthMethod` trait + dispatch + ZBuf codec
+// stay in `wz-session-core`; this is the concrete impl where its crypto dep
+// mandates. Gated on `access-extauth-pubkey`.
 #[cfg(feature = "access-extauth-pubkey")]
 pub mod extauth_pubkey;
 
@@ -1290,15 +1290,15 @@ pub mod extauth_usrpwd_store;
 #[cfg(feature = "access-extauth-pubkey")]
 pub use rsa;
 
-/// R311y205 (transport-multilink IMPL-1) — the AP-side ephemeral-RSA glue for
-/// the §5.1 multi-link aggregation feature: the process-wide ephemeral RSA-512
-/// keypair ([`multilink::multilink_keypair`]) + the open / accept
-/// [`MultiLinkDispatch`](wz_session_core::extmultilink::MultiLinkDispatch)
-/// constructors. Injects the concrete (std-only) `PubKeyMethod` into the
-/// rsa-free session-kernel 0x4 dispatch — the wz analogue of zenoh's
-/// `MultiLink::make`. Gated on `transport-multilink` (which forwards
-/// `access-extauth-pubkey`). Not yet wired into the live establishment path
-/// (IMPL-2).
+// R311y205 (transport-multilink IMPL-1) — the AP-side ephemeral-RSA glue for
+// the §5.1 multi-link aggregation feature: the process-wide ephemeral RSA-512
+// keypair (`multilink::multilink_keypair`) + the open / accept
+// `wz_session_core::extmultilink::MultiLinkDispatch`
+// constructors. Injects the concrete (std-only) `PubKeyMethod` into the
+// rsa-free session-kernel 0x4 dispatch — the wz analogue of zenoh's
+// `MultiLink::make`. Gated on `transport-multilink` (which forwards
+// `access-extauth-pubkey`). Not yet wired into the live establishment path
+// (IMPL-2).
 #[cfg(feature = "transport-multilink")]
 pub mod multilink;
 
@@ -1312,20 +1312,20 @@ pub mod multilink;
 /// migration roadmap.
 pub mod sync;
 
-/// R252 — AP-profile concrete impls of the
-/// [`wz_runtime_core::Runtime`] and [`wz_runtime_core::TimeSource`]
-/// trait contracts authored in R251. [`runtime_impl::TokioRuntime`]
-/// spawns tasks via `tokio::task::spawn` and wraps the returned
-/// `tokio::task::JoinHandle` into a [`runtime_impl::TokioJoinHandle`]
-/// that satisfies the trait's `Future<Output = Result<T,
-/// RuntimeError>>` shape by mapping `tokio::task::JoinError` to
-/// [`wz_runtime_core::RuntimeError::JoinFailed`].
-/// [`runtime_impl::TokioTime`] samples a monotonic
-/// `tokio::time::Instant` for `now_monotonic_ms` and yields via
-/// `tokio::time::sleep(Duration)` for the async sleep contract. R252
-/// lands the impl but leaves the 111 std/tokio call sites unchanged;
-/// R253+ migrate them leaf-first, with `Session` last per the
-/// §5.P "leaf crates first" guidance.
+// R252 — AP-profile concrete impls of the
+// `wz_runtime_core::Runtime` and `wz_runtime_core::TimeSource`
+// trait contracts authored in R251. `runtime_impl::TokioRuntime`
+// spawns tasks via `tokio::task::spawn` and wraps the returned
+// `tokio::task::JoinHandle` into a `runtime_impl::TokioJoinHandle`
+// that satisfies the trait's `Future<Output = Result<T,
+// RuntimeError>>` shape by mapping `tokio::task::JoinError` to
+// `wz_runtime_core::RuntimeError::JoinFailed`.
+// `runtime_impl::TokioTime` samples a monotonic
+// `tokio::time::Instant` for `now_monotonic_ms` and yields via
+// `tokio::time::sleep(Duration)` for the async sleep contract. R252
+// lands the impl but leaves the 111 std/tokio call sites unchanged;
+// R253+ migrate them leaf-first, with `Session` last per the
+// §5.P "leaf crates first" guidance.
 pub mod runtime_impl;
 
 /// Subsystem runtime partitioning — five isolated tokio runtimes (`app`,
@@ -1458,10 +1458,10 @@ pub mod gossip_plane;
 #[cfg(all(feature = "scouting-static", feature = "routing-peer"))]
 pub mod scouting_static;
 
-/// Round C — multicast transport drive loop (the AP host loop that drives
-/// the `wz-session-core` `MulticastDispatcher` over a UDP-multicast link:
-/// periodic JOIN beacon, RX classify -> dispatch, lease sweep). Gated on
-/// `transport-multicast` (the §5.1 atom forwarding to `session-multicast`).
+// Round C — multicast transport drive loop (the AP host loop that drives
+// the `wz-session-core` `MulticastDispatcher` over a UDP-multicast link:
+// periodic JOIN beacon, RX classify -> dispatch, lease sweep). Gated on
+// `transport-multicast` (the §5.1 atom forwarding to `session-multicast`).
 #[cfg(feature = "transport-multicast")]
 pub mod multicast_glue;
 
@@ -1496,30 +1496,31 @@ pub use wz_session_core::link::{
     LinkEvent, LostCause, RxBytes, RxFrame, RxStorage, ShmChunkView, TxFrame,
 };
 
-/// R311et — canonical split-link session-open transport pipeline. Lifts the
-/// read/write-split + writer-task idiom (originally `wz-ap-demo`'s
-/// `link_driver.rs`) into the library so the production session-open path
-/// has a single home, parameterised by transport.
-///
-/// The session FSM needs the link in two shapes at once — an async
-/// `&mut LinkDriver` for the inbound poll loop
-/// ([`session_glue::drive_session_until_terminal`]) and a sync
-/// `Arc<dyn BoxedLinkDriver>` for the outbound `send_blocking` fired from
-/// Lua script-action handlers. A single `TcpStream` cannot satisfy both, so
-/// this module splits it into an [`link_pipeline::TcpReadDriver`] (owns the
-/// read half) plus an [`stream_link::StreamWriteDriver`] (a non-blocking
-/// channel enqueue) drained by a dedicated [`stream_link::writer_task`].
-/// The channel decouples the sync-action / async-runtime boundary WITHOUT
-/// `Handle::block_on` (the [`session_glue::TokioLinkDriverAdapter`] path
-/// carries a documented current-thread-runtime deadlock hazard and has
-/// never driven a full bidirectional session); this split is the model the
-/// production AP path actually uses.
-///
-/// R311oa — the transport-NEUTRAL byte-stream machinery (the read/write
-/// drivers + the StreamEnvelope `writer_task`) lives once in
-/// [`stream_link`]; `link_pipeline` (TCP) and [`tls_pipeline`] (TLS) carry
-/// only their dial/split and instantiate the shared drivers, so a TLS link
-/// frames identically to a TCP link with no duplicated impl.
+// R311et — canonical split-link session-open transport pipeline. Lifts the
+// read/write-split + writer-task idiom (originally `wz-ap-demo`'s
+// `link_driver.rs`) into the library so the production session-open path
+// has a single home, parameterised by transport.
+//
+// The session FSM needs the link in two shapes at once — an async
+// `&mut LinkDriver` for the inbound poll loop
+// (`session_glue::drive_session_until_terminal`) and a sync
+// `Arc<dyn BoxedLinkDriver>` for the outbound `send_blocking` fired from
+// Lua script-action handlers. A single `TcpStream` cannot satisfy both, so
+// this module splits it into an `link_pipeline::TcpReadDriver` (owns the
+// read half) plus an `stream_link::StreamWriteDriver` (a non-blocking
+// channel enqueue) drained by a dedicated `stream_link::writer_task`.
+// The channel decouples the sync-action / async-runtime boundary WITHOUT
+// `Handle::block_on` (the `session_glue::TokioLinkDriverAdapter` path
+// carries a documented current-thread-runtime deadlock hazard and has
+// never driven a full bidirectional session); this split is the model the
+// production AP path actually uses.
+//
+// R311oa — the transport-NEUTRAL byte-stream machinery (the read/write
+// drivers + the StreamEnvelope `writer_task`) lives once in
+// `stream_link`; `link_pipeline` (TCP) and `tls_pipeline` (TLS) carry
+// only their dial/split and instantiate the shared drivers, so a TLS link
+// frames identically to a TCP link with no duplicated impl.
+//
 // R311y519 — the outbound writer's lifecycle (the sealable queue + the handle
 // that seals it), shared by EVERY pipeline that spawns a writer task. Gated on
 // the union of those pipelines' own keys rather than on `transport-link-tcp`,
@@ -1776,67 +1777,67 @@ pub(crate) mod iface_bind {
     }
 }
 
-/// R311ez — datagram sibling of [`link_pipeline`] (UDP). A UDP socket is
-/// not split into owned read/write halves; the one socket is shared via
-/// `Arc` to back the inbound [`udp_pipeline::UdpReadDriver`] and the
-/// outbound [`udp_pipeline::udp_writer_task`]. `dial_udp` binds an
-/// ephemeral local socket; `wire_udp_socket` shares it into the
-/// read-driver / write-driver / writer-task triple the session FSM
-/// consumes. One datagram is exactly one wire message (no length-prefix
-/// envelope — UDP preserves boundaries).
+// R311ez — datagram sibling of `link_pipeline` (UDP). A UDP socket is
+// not split into owned read/write halves; the one socket is shared via
+// `Arc` to back the inbound `udp_pipeline::UdpReadDriver` and the
+// outbound `udp_pipeline::udp_writer_task`. `dial_udp` binds an
+// ephemeral local socket; `wire_udp_socket` shares it into the
+// read-driver / write-driver / writer-task triple the session FSM
+// consumes. One datagram is exactly one wire message (no length-prefix
+// envelope — UDP preserves boundaries).
 #[cfg(feature = "transport-link-udp")]
 pub mod udp_pipeline;
 
-/// R311nv — host tty backend for the SERIAL link (the 2nd layer of the
-/// R311nt 2-layer split; the transport-agnostic framing/handshake logic is
-/// [`wz_session_core::serial_link`]). `dial_serial`/`accept_serial` open the
-/// tty ([`tokio_serial`]) + drive the link handshake; `wire_serial_stream`
-/// splits the connected stream into the read/write-driver + writer-task
-/// triple the session FSM consumes, COBS-framing each payload via the R311ns
-/// serial codec. Gated `transport-link-serial` only — the drivers compile
-/// standalone; the `session_open` DialedLink::Serial integration rides the
-/// `transport-link-tcp`-gated session-open module as an additive serial arm.
+// R311nv — host tty backend for the SERIAL link (the 2nd layer of the
+// R311nt 2-layer split; the transport-agnostic framing/handshake logic is
+// `wz_session_core::serial_link`). `dial_serial`/`accept_serial` open the
+// tty (`tokio_serial`) + drive the link handshake; `wire_serial_stream`
+// splits the connected stream into the read/write-driver + writer-task
+// triple the session FSM consumes, COBS-framing each payload via the R311ns
+// serial codec. Gated `transport-link-serial` only — the drivers compile
+// standalone; the `session_open` DialedLink::Serial integration rides the
+// `transport-link-tcp`-gated session-open module as an additive serial arm.
 #[cfg(feature = "transport-link-serial")]
 pub mod serial_pipeline;
 
-/// R311oa — TLS-over-TCP backend for the TLS link. `dial_tls`/`accept_tls`
-/// run the rustls client/server handshake; `wire_tls_stream` splits the
-/// secured stream into the read/write-driver + writer-task triple the session
-/// FSM consumes, reusing the TCP pipeline's `StreamEnvelope` framing
-/// ([`link_pipeline::writer_task`] + [`poll_framed`]) — a TLS link frames
-/// identically to TCP, differing only in the stream type. Gated
-/// `transport-link-tls` (which forwards `transport-link-tcp`); the
-/// `session_open` DialedLink::Tls integration rides the
-/// `transport-link-tcp`-gated session-open module as an additive TLS arm,
-/// exactly like serial.
+// R311oa — TLS-over-TCP backend for the TLS link. `dial_tls`/`accept_tls`
+// run the rustls client/server handshake; `wire_tls_stream` splits the
+// secured stream into the read/write-driver + writer-task triple the session
+// FSM consumes, reusing the TCP pipeline's `StreamEnvelope` framing
+// (`link_pipeline::writer_task` + `poll_framed`) — a TLS link frames
+// identically to TCP, differing only in the stream type. Gated
+// `transport-link-tls` (which forwards `transport-link-tcp`); the
+// `session_open` DialedLink::Tls integration rides the
+// `transport-link-tcp`-gated session-open module as an additive TLS arm,
+// exactly like serial.
 #[cfg(feature = "transport-link-tls")]
 pub mod tls_pipeline;
 
-/// R311og — PEM cert/key material loader for the TLS link. Where
-/// [`tls_pipeline`] runs the handshake over a rustls config, this module BUILDS
-/// that config from the on-disk PEM an application supplies — the production
-/// answer to "where do the certs come from" (the e2e tests' `rcgen` fixture is
-/// test-only). `client_config_from_pem` / `server_config_from_pem` parse a PEM
-/// cert chain + private key (+ optional CA bundle) into the rustls
-/// [`tls_pipeline`]-ready `ClientConfig` / `ServerConfig`; the optional
-/// client-auth / client-CA arguments are the mTLS knob (the client presents a
-/// cert, the server requires + verifies one), and the client builder's
-/// `ServerNameVerification` argument is the verify-name knob (require the cert
-/// SAN to match the dialed name, or accept any CA-chained name). Mirrors
-/// zenoh-rust `zenoh-link-tls/src/utils.rs` and pico's TLS `session_cfg` cert
-/// keys (`ROOT_CA_CERTIFICATE` / `CONNECT_CERTIFICATE` / `LISTEN_CERTIFICATE` /
-/// `ENABLE_MTLS` / `VERIFY_NAME_ON_CONNECT`). Gated `transport-link-tls` OR
-/// `transport-link-quic` (R311xk — the QUIC link reuses the SAME PEM loaders +
-/// rustls 0.23 stack; [`quic_config`] builds its TLS-1.3 + ALPN config on top
-/// of these loaders).
+// R311og — PEM cert/key material loader for the TLS link. Where
+// `tls_pipeline` runs the handshake over a rustls config, this module BUILDS
+// that config from the on-disk PEM an application supplies — the production
+// answer to "where do the certs come from" (the e2e tests' `rcgen` fixture is
+// test-only). `client_config_from_pem` / `server_config_from_pem` parse a PEM
+// cert chain + private key (+ optional CA bundle) into the rustls
+// `tls_pipeline`-ready `ClientConfig` / `ServerConfig`; the optional
+// client-auth / client-CA arguments are the mTLS knob (the client presents a
+// cert, the server requires + verifies one), and the client builder's
+// `ServerNameVerification` argument is the verify-name knob (require the cert
+// SAN to match the dialed name, or accept any CA-chained name). Mirrors
+// zenoh-rust `zenoh-link-tls/src/utils.rs` and pico's TLS `session_cfg` cert
+// keys (`ROOT_CA_CERTIFICATE` / `CONNECT_CERTIFICATE` / `LISTEN_CERTIFICATE` /
+// `ENABLE_MTLS` / `VERIFY_NAME_ON_CONNECT`). Gated `transport-link-tls` OR
+// `transport-link-quic` (R311xk — the QUIC link reuses the SAME PEM loaders +
+// rustls 0.23 stack; `quic_config` builds its TLS-1.3 + ALPN config on top
+// of these loaders).
 #[cfg(any(feature = "transport-link-tls", feature = "transport-link-quic"))]
 pub mod tls_config;
 
-/// R311y578 (G10) — TLS / QUIC session-key export in the NSS key-log format,
-/// the mechanism that lets wz WITNESS its own encrypted transport rather than
-/// only assert that the handshake completed (the standing R311y534 debt).
-/// Off unless the `transport-link-tls-keylog` feature is selected AND
-/// `SSLKEYLOGFILE` names a destination — both, never either.
+// R311y578 (G10) — TLS / QUIC session-key export in the NSS key-log format,
+// the mechanism that lets wz WITNESS its own encrypted transport rather than
+// only assert that the handshake completed (the standing R311y534 debt).
+// Off unless the `transport-link-tls-keylog` feature is selected AND
+// `SSLKEYLOGFILE` names a destination — both, never either.
 #[cfg(any(feature = "transport-link-tls", feature = "transport-link-quic"))]
 pub mod tls_keylog;
 
@@ -1855,70 +1856,70 @@ pub mod tls_keylog;
 #[cfg(feature = "transport-link-ws")]
 pub mod ws_pipeline;
 
-/// R311xi — Unix-domain-stream backend for the unixsock link. The local-IPC
-/// STREAM sibling of [`link_pipeline`] (TCP), NOT a datagram transport: a unix
-/// socket is a reliable byte stream (zenoh's `unixsock_stream` link,
-/// `is_streamed = true`, MTU 65535), so it REUSES `stream_link`'s StreamEnvelope
-/// framing UNCHANGED — `dial_unixsock`/`bind_unixsock`/`accept_unixsock_on` over
-/// `tokio::net::UnixStream`/`UnixListener`, `wire_unixsock_stream` splitting the
-/// owned halves (`into_split`, like TCP). No new codec, no new dep (tokio's
-/// `net` feature carries the unix types on Unix). Gated `transport-link-unixsock`
-/// (which forwards `transport-link-tcp` for the shared `stream_link` SSOT); the
-/// `session_open` DialedLink::Unixsock integration rides the
-/// `transport-link-tcp`-gated session-open module as an additive arm, like
-/// serial/tls. A `unixsock-stream/...` locator dials from the locator like
-/// every other transport (no cert config needed).
-///
-/// R2973 — and gated on `unix` beside the feature, as upstream's link is: its
-/// implementation module (`io/zenoh-links/zenoh-link-unixsock_stream/src/lib.rs`
-/// @ `mod unicast;`) is declared under `target_family = "unix"`, so the crate
-/// builds everywhere and serves `unixsock-stream/` only on a Unix. Without it a Windows build that named the
-/// feature did not compile at all — twelve errors, measured against the
-/// `x86_64-pc-windows-gnu` target — where upstream's simply has no such link.
-/// Every other gate on this feature carries the same `unix` term, so the
-/// scheme reads as unsupported on Windows instead.
+// R311xi — Unix-domain-stream backend for the unixsock link. The local-IPC
+// STREAM sibling of `link_pipeline` (TCP), NOT a datagram transport: a unix
+// socket is a reliable byte stream (zenoh's `unixsock_stream` link,
+// `is_streamed = true`, MTU 65535), so it REUSES `stream_link`'s StreamEnvelope
+// framing UNCHANGED — `dial_unixsock`/`bind_unixsock`/`accept_unixsock_on` over
+// `tokio::net::UnixStream`/`UnixListener`, `wire_unixsock_stream` splitting the
+// owned halves (`into_split`, like TCP). No new codec, no new dep (tokio's
+// `net` feature carries the unix types on Unix). Gated `transport-link-unixsock`
+// (which forwards `transport-link-tcp` for the shared `stream_link` SSOT); the
+// `session_open` DialedLink::Unixsock integration rides the
+// `transport-link-tcp`-gated session-open module as an additive arm, like
+// serial/tls. A `unixsock-stream/...` locator dials from the locator like
+// every other transport (no cert config needed).
+//
+// R2973 — and gated on `unix` beside the feature, as upstream's link is: its
+// implementation module (`io/zenoh-links/zenoh-link-unixsock_stream/src/lib.rs`
+// @ `mod unicast;`) is declared under `target_family = "unix"`, so the crate
+// builds everywhere and serves `unixsock-stream/` only on a Unix. Without it a Windows build that named the
+// feature did not compile at all — twelve errors, measured against the
+// `x86_64-pc-windows-gnu` target — where upstream's simply has no such link.
+// Every other gate on this feature carries the same `unix` term, so the
+// scheme reads as unsupported on Windows instead.
 #[cfg(all(feature = "transport-link-unixsock", unix))]
 pub mod unixsock_pipeline;
 
-/// R311xj — AF_VSOCK backend for the vsock link (VM<->host / VM<->VM). The
-/// STREAM sibling of [`link_pipeline`] (TCP) / [`unixsock_pipeline`]: vsock is a
-/// reliable byte stream (zenoh's vsock link, `is_streamed = true`, MTU
-/// `BatchSize::MAX`), so it REUSES `stream_link`'s StreamEnvelope framing
-/// UNCHANGED — `dial_vsock`/`bind_vsock`/`accept_vsock_on` over a
-/// `tokio_vsock::VsockStream`/`VsockListener`, `wire_vsock_stream` splitting via
-/// `tokio::io::split` (the TLS pattern — VsockStream has no owned-half split).
-/// No new codec. Gated `transport-link-vsock` (forwards `transport-link-tcp` for
-/// the shared `stream_link` SSOT) AND `target_os = "linux"` (AF_VSOCK is
-/// Linux-only, via the optional `tokio-vsock` dep — the same platform gate
-/// zenoh-link-vsock carries). The `vsock/<CID>:<PORT>` locator PARSE is
-/// platform-independent + ungated in `wz-session-core`; only this dial/accept
-/// backend is gated. The `session_open` DialedLink::Vsock integration rides the
-/// `transport-link-tcp`-gated session-open module additively, like tls/unixsock.
+// R311xj — AF_VSOCK backend for the vsock link (VM<->host / VM<->VM). The
+// STREAM sibling of `link_pipeline` (TCP) / `unixsock_pipeline`: vsock is a
+// reliable byte stream (zenoh's vsock link, `is_streamed = true`, MTU
+// `BatchSize::MAX`), so it REUSES `stream_link`'s StreamEnvelope framing
+// UNCHANGED — `dial_vsock`/`bind_vsock`/`accept_vsock_on` over a
+// `tokio_vsock::VsockStream`/`VsockListener`, `wire_vsock_stream` splitting via
+// `tokio::io::split` (the TLS pattern — VsockStream has no owned-half split).
+// No new codec. Gated `transport-link-vsock` (forwards `transport-link-tcp` for
+// the shared `stream_link` SSOT) AND `target_os = "linux"` (AF_VSOCK is
+// Linux-only, via the optional `tokio-vsock` dep — the same platform gate
+// zenoh-link-vsock carries). The `vsock/<CID>:<PORT>` locator PARSE is
+// platform-independent + ungated in `wz-session-core`; only this dial/accept
+// backend is gated. The `session_open` DialedLink::Vsock integration rides the
+// `transport-link-tcp`-gated session-open module additively, like tls/unixsock.
 #[cfg(all(feature = "transport-link-vsock", target_os = "linux"))]
 pub mod vsock_pipeline;
 
-/// R311y10 — host Unix named-pipe (FIFO) backend. The same-host FIFO sibling of
-/// [`unixsock_pipeline`] (AF_UNIX stream): zenoh's `zenoh-link-unixpipe` carries
-/// a batch over a PAIR of named FIFOs (uplink + downlink), distinct from the
-/// AF_UNIX socket. wz uses tokio's NATIVE FIFO support (`tokio::net::unix::pipe`
-/// — `Sender` is `AsyncWrite`, `Receiver` is `AsyncRead`), so a FIFO link reuses
-/// the shared `stream_link` StreamEnvelope drivers UNCHANGED (a FIFO is a byte
-/// stream), needing only a one-call `libc::mkfifo` — no `unix_named_pipe` crate,
-/// no `advisory-lock`, no `AsyncFd` dance. Gated `transport-link-unixpipe`
-/// (forwards `transport-link-tcp` for the shared `stream_link` SSOT) AND
-/// `unix`, the host family upstream serves the link on (item 851: this gate was
-/// `target_os = "linux"` while tokio's `read_write` knob was the only reason, and
-/// the `O_RDWR` open the knob makes is now made through `std`). The
-/// `unixpipe/...` locator PARSE is platform-independent + ungated in
-/// `wz-session-core`; only this dial/accept backend is gated.
+// R311y10 — host Unix named-pipe (FIFO) backend. The same-host FIFO sibling of
+// `unixsock_pipeline` (AF_UNIX stream): zenoh's `zenoh-link-unixpipe` carries
+// a batch over a PAIR of named FIFOs (uplink + downlink), distinct from the
+// AF_UNIX socket. wz uses tokio's NATIVE FIFO support (`tokio::net::unix::pipe`
+// — `Sender` is `AsyncWrite`, `Receiver` is `AsyncRead`), so a FIFO link reuses
+// the shared `stream_link` StreamEnvelope drivers UNCHANGED (a FIFO is a byte
+// stream), needing only a one-call `libc::mkfifo` — no `unix_named_pipe` crate,
+// no `advisory-lock`, no `AsyncFd` dance. Gated `transport-link-unixpipe`
+// (forwards `transport-link-tcp` for the shared `stream_link` SSOT) AND
+// `unix`, the host family upstream serves the link on (item 851: this gate was
+// `target_os = "linux"` while tokio's `read_write` knob was the only reason, and
+// the `O_RDWR` open the knob makes is now made through `std`). The
+// `unixpipe/...` locator PARSE is platform-independent + ungated in
+// `wz-session-core`; only this dial/accept backend is gated.
 #[cfg(all(feature = "transport-link-unixpipe", unix))]
 pub mod unixpipe_pipeline;
 
-/// R311xk — TLS-1.3 + ALPN-`hq-29` rustls config builders for the QUIC link.
-/// QUIC mandates TLS 1.3, so its rustls config differs from the TLS link's two
-/// ways (TLS-1.3-only, ALPN `hq-29`); everything else (PEM loaders, `ring`
-/// provider, rustls 0.23 stack) is shared with [`tls_config`]. Gated
-/// `transport-link-quic`.
+// R311xk — TLS-1.3 + ALPN-`hq-29` rustls config builders for the QUIC link.
+// QUIC mandates TLS 1.3, so its rustls config differs from the TLS link's two
+// ways (TLS-1.3-only, ALPN `hq-29`); everything else (PEM loaders, `ring`
+// provider, rustls 0.23 stack) is shared with `tls_config`. Gated
+// `transport-link-quic`.
 #[cfg(feature = "transport-link-quic")]
 pub mod quic_config;
 
@@ -1936,12 +1937,12 @@ pub mod posix_shm;
 pub mod shm_backend;
 #[cfg(feature = "transport-shm")]
 pub mod shm_posix_backend;
-/// transport-shm — the AP POSIX shared-memory provider (memmap2 over /dev/shm):
-/// `ShmProvider` (a backend, a busy list, allocation policies) +
-/// `ShmBackedPayload` (owner alloc/write) + `PosixShmResolver` (the reader-side
-/// impl of the no_std `wz_session_core::extshm::ShmResolver` seam). The std mmap
-/// half of the scoped same-host SHM transport; the descriptor + 0x2 marker codec
-/// live in the no_std core.
+// transport-shm — the AP POSIX shared-memory provider (memmap2 over /dev/shm):
+// `ShmProvider` (a backend, a busy list, allocation policies) +
+// `ShmBackedPayload` (owner alloc/write) + `PosixShmResolver` (the reader-side
+// impl of the no_std `wz_session_core::extshm::ShmResolver` seam). The std mmap
+// half of the scoped same-host SHM transport; the descriptor + 0x2 marker codec
+// live in the no_std core.
 #[cfg(feature = "transport-shm")]
 pub mod shm_provider;
 // R3065 -- the reader's clients: how a received chunk is mapped, by the protocol its header
@@ -1967,33 +1968,33 @@ pub mod shm_watchdog;
 #[cfg(feature = "session-extshm")]
 pub mod shm_auth_segment;
 
-/// R311xk — host QUIC backend. The STREAM sibling of [`tls_pipeline`]: zenoh
-/// carries a batch over ONE bidirectional QUIC stream (uni rejected, bidi=1)
-/// with the SAME StreamEnvelope length-prefix as TCP/TLS (`is_streamed = true`,
-/// MTU `BatchSize::MAX`), so it REUSES `stream_link`'s drivers UNCHANGED — a
-/// `quinn::RecvStream` is `AsyncRead`, a `SendStream` is `AsyncWrite`, and they
-/// are ALREADY a split pair (no `into_split`/`tokio::io::split`). The endpoint +
-/// connection ride into the read driver as a keep-alive (QUIC's stream
-/// references its connection references the endpoint driver). Gated
-/// `transport-link-quic` (forwards `transport-link-tcp` for the shared
-/// `stream_link` SSOT, pulls `quinn` + the tls rustls cert stack). Cert config
-/// is threaded via `DialConfig.quic` (the tls pattern); the `session_open`
-/// DialedLink::Quic arm rides the `transport-link-tcp`-gated session-open module
-/// additively, like tls.
+// R311xk — host QUIC backend. The STREAM sibling of `tls_pipeline`: zenoh
+// carries a batch over ONE bidirectional QUIC stream (uni rejected, bidi=1)
+// with the SAME StreamEnvelope length-prefix as TCP/TLS (`is_streamed = true`,
+// MTU `BatchSize::MAX`), so it REUSES `stream_link`'s drivers UNCHANGED — a
+// `quinn::RecvStream` is `AsyncRead`, a `SendStream` is `AsyncWrite`, and they
+// are ALREADY a split pair (no `into_split`/`tokio::io::split`). The endpoint +
+// connection ride into the read driver as a keep-alive (QUIC's stream
+// references its connection references the endpoint driver). Gated
+// `transport-link-quic` (forwards `transport-link-tcp` for the shared
+// `stream_link` SSOT, pulls `quinn` + the tls rustls cert stack). Cert config
+// is threaded via `DialConfig.quic` (the tls pattern); the `session_open`
+// DialedLink::Quic arm rides the `transport-link-tcp`-gated session-open module
+// additively, like tls.
 #[cfg(feature = "transport-link-quic")]
 pub mod quic_pipeline;
 
-/// R311y8 — host QUIC unreliable-DATAGRAM backend (RFC9221). The DATAGRAM
-/// sibling of [`quic_pipeline`]: zenoh ships `zenoh-link-quic_datagram` beside
-/// `zenoh-link-quic`, sharing the TLS config but carrying each batch as ONE
-/// QUIC datagram (`send_datagram`/`read_datagram`, `rel=0`) instead of over a
-/// bidi stream — the datagram boundary is the framing, so it reuses the UDP
-/// read/write driver shape (shared `Connection` handle, one datagram = one
-/// frame), NOT the StreamEnvelope drivers. Gated `transport-link-quic-datagram`,
-/// which IMPLIES `transport-link-quic` (reuses [`quic_config`] + the quinn/rustls
-/// stack); the only new surface is the datagram path + the per-datagram MTU. The
-/// `session_open` DialedLink::QuicDatagram arm reuses `DialConfig.quic` (same
-/// cert), like tls/quic.
+// R311y8 — host QUIC unreliable-DATAGRAM backend (RFC9221). The DATAGRAM
+// sibling of `quic_pipeline`: zenoh ships `zenoh-link-quic_datagram` beside
+// `zenoh-link-quic`, sharing the TLS config but carrying each batch as ONE
+// QUIC datagram (`send_datagram`/`read_datagram`, `rel=0`) instead of over a
+// bidi stream — the datagram boundary is the framing, so it reuses the UDP
+// read/write driver shape (shared `Connection` handle, one datagram = one
+// frame), NOT the StreamEnvelope drivers. Gated `transport-link-quic-datagram`,
+// which IMPLIES `transport-link-quic` (reuses `quic_config` + the quinn/rustls
+// stack); the only new surface is the datagram path + the per-datagram MTU. The
+// `session_open` DialedLink::QuicDatagram arm reuses `DialConfig.quic` (same
+// cert), like tls/quic.
 #[cfg(feature = "transport-link-quic-datagram")]
 pub mod quic_datagram_pipeline;
 
@@ -2013,12 +2014,12 @@ mod quic_plaintext;
 #[cfg(feature = "transport-link-udp-reliable")]
 pub mod udp_reliable_pipeline;
 
-/// R311eu — mode-agnostic session-open orchestration over the R311et
-/// [`link_pipeline`]. `dial_locator` dispatches an `AnyLocator`'s scheme
-/// to a raw transport (R311nv: TCP/UDP/serial); `connect_and_open_session`
-/// dials, splits into the pipeline, wires the Initiator FSM, and drives the
-/// handshake to Established. Gated on `transport-unicast` too because it
-/// drives the `session_fsm_unicast` FSM.
+// R311eu — mode-agnostic session-open orchestration over the R311et
+// `link_pipeline`. `dial_locator` dispatches an `AnyLocator`'s scheme
+// to a raw transport (R311nv: TCP/UDP/serial); `connect_and_open_session`
+// dials, splits into the pipeline, wires the Initiator FSM, and drives the
+// handshake to Established. Gated on `transport-unicast` too because it
+// drives the `session_fsm_unicast` FSM.
 #[cfg(all(feature = "transport-link-tcp", feature = "transport-unicast"))]
 pub mod session_open;
 
@@ -2083,27 +2084,27 @@ pub use wz_node_time::timestamp_source;
 /// path it has always had.
 pub use wz_node_time::node_clock;
 
-/// R311uy — the storage service DRIVER (§5.11 storage, atom 3/4): the AP
-/// tokio binding for the runtime-agnostic storage kernel. A
-/// [`storage_service::StorageService`] declares a capture [`Subscriber`]
-/// and a complete [`Queryable`] on a storage keyexpr and drives the
-/// [`wz_session_core::storage_state::StorageState`] gate (Put / Delete
-/// capture -> newer-wins; query -> per-key reply). Gated on
-/// `storage-backend` (which forwards the kernel + `query-queryable`), so a
-/// profile without storage never compiles the driver.
+// R311uy — the storage service DRIVER (§5.11 storage, atom 3/4): the AP
+// tokio binding for the runtime-agnostic storage kernel. A
+// `storage_service::StorageService` declares a capture `Subscriber`
+// and a complete `Queryable` on a storage keyexpr and drives the
+// `wz_session_core::storage_state::StorageState` gate (Put / Delete
+// capture -> newer-wins; query -> per-key reply). Gated on
+// `storage-backend` (which forwards the kernel + `query-queryable`), so a
+// profile without storage never compiles the driver.
 #[cfg(feature = "storage-backend")]
 pub mod storage_service;
 
-/// R311y279 — the `storage-backend-filesystem` atom (§5.24 storage): a durable,
-/// filesystem-backed [`filesystem_storage::FilesystemVolume`] /
-/// [`filesystem_storage::FilesystemStorage`] — the wz counterpart of zenoh's
-/// `zenoh-backend-filesystem`. It implements the no_std storage seam
-/// ([`wz_session_core::storage_backend`] / [`wz_session_core::storage_volume`])
-/// over a directory tree that mirrors the key space (R2801): each value a raw
-/// file at its key's path, read from the directory on every get, written
-/// durably (fsync'd) so the store survives a restart and a power loss. std-only;
-/// lives here (not the no_std kernel) because it uses [`std::fs`]. Opt-in —
-/// never in `default`.
+// R311y279 — the `storage-backend-filesystem` atom (§5.24 storage): a durable,
+// filesystem-backed `filesystem_storage::FilesystemVolume` /
+// `filesystem_storage::FilesystemStorage` — the wz counterpart of zenoh's
+// `zenoh-backend-filesystem`. It implements the no_std storage seam
+// (`wz_session_core::storage_backend` / `wz_session_core::storage_volume`)
+// over a directory tree that mirrors the key space (R2801): each value a raw
+// file at its key's path, read from the directory on every get, written
+// durably (fsync'd) so the store survives a restart and a power loss. std-only;
+// lives here (not the no_std kernel) because it uses `std::fs`. Opt-in —
+// never in `default`.
 #[cfg(feature = "storage-backend-filesystem")]
 pub mod filesystem_storage;
 
@@ -2121,17 +2122,17 @@ pub mod filesystem_keypath;
 #[cfg(feature = "storage-backend-filesystem")]
 pub mod filesystem_datainfo;
 
-/// R311y497 — the `storage-mgr-dynamic-volume-loading` atom (§5.24): a `dlopen`ed
-/// storage [`Volume`](wz_session_core::storage_volume::Volume), the storage-side
-/// twin of [`plugin`]. R311y256 deprecated this atom on an explicit CONDITION —
-/// "if `plugin-dynamic-loading` is ever built, this returns with it" — which
-/// R311y492 fired; see the module doc. AP/std/unix-only and opt-in.
+// R311y497 — the `storage-mgr-dynamic-volume-loading` atom (§5.24): a `dlopen`ed
+// storage `Volume` (`wz_session_core::storage_volume::Volume`), the storage-side
+// twin of `plugin`. R311y256 deprecated this atom on an explicit CONDITION —
+// "if `plugin-dynamic-loading` is ever built, this returns with it" — which
+// R311y492 fired; see the module doc. AP/std/unix-only and opt-in.
 #[cfg(all(unix, feature = "storage-mgr-dynamic-volume-loading"))]
 pub mod dynamic_volume;
 
-/// R311y69 — `ext-pubsub-advanced-cache` (§5.25): the publisher-side
-/// sample ring + the `@adv` queryable answering `_sn` / `_max` recovery
-/// and history selectors from it.
+// R311y69 — `ext-pubsub-advanced-cache` (§5.25): the publisher-side
+// sample ring + the `@adv` queryable answering `_sn` / `_max` recovery
+// and history selectors from it.
 #[cfg(feature = "ext-pubsub-advanced-cache")]
 pub mod advanced_cache;
 
@@ -2156,9 +2157,9 @@ pub(crate) use wz_ext_pubsub::advanced_ke;
 #[cfg(feature = "ext-pubsub-advanced-publisher")]
 pub mod advanced_publisher;
 
-/// R311y70 — `ext-pubsub-advanced-subscriber` (§5.25): the per-source
-/// ordering / de-duplication subscriber consuming the `SourceInfo`
-/// sequence numbers the advanced publisher stamps.
+// R311y70 — `ext-pubsub-advanced-subscriber` (§5.25): the per-source
+// ordering / de-duplication subscriber consuming the `SourceInfo`
+// sequence numbers the advanced publisher stamps.
 #[cfg(feature = "ext-pubsub-advanced-subscriber")]
 pub mod advanced_subscriber;
 
@@ -2171,31 +2172,31 @@ pub mod advanced_subscriber;
 #[cfg(feature = "ext-pubsub-group-membership")]
 pub mod group;
 
-/// Round 311vm — the storage-replication DRIVER, digest publisher half
-/// (§5.11 storage, replication 6/N): the tokio binding that periodically
-/// publishes this storage's replication
-/// [`wz_session_core::storage_replication::Digest`] on
-/// `@-digest/<zid>/<config-fp>` so peer replicas can detect divergence. It
-/// shares the live [`storage_service::StorageService`] state (the digest
-/// reflects the actual stored data), and the spawned publish loop is
-/// RAII-bound (dropping the [`storage_replication_service::DigestPublisher`]
-/// aborts it). Gated on `storage-replication` (implies storage-backend).
+// Round 311vm — the storage-replication DRIVER, digest publisher half
+// (§5.11 storage, replication 6/N): the tokio binding that periodically
+// publishes this storage's replication
+// `wz_session_core::storage_replication::Digest` on
+// `@-digest/<zid>/<config-fp>` so peer replicas can detect divergence. It
+// shares the live `storage_service::StorageService` state (the digest
+// reflects the actual stored data), and the spawned publish loop is
+// RAII-bound (dropping the `storage_replication_service::DigestPublisher`
+// aborts it). Gated on `storage-replication` (implies storage-backend).
 #[cfg(feature = "storage-replication")]
 pub mod storage_replication_service;
 
-/// Round 311 A8c-2a — the storage-aligner DRIVER, ANSWER half (§5.11 storage,
-/// aligner): the tokio binding that declares a [`Queryable`](session::Queryable)
-/// on this replica's aligner keyexpr (`@zid/<zid>/<config-fp>/aligner`) and
-/// answers a peer's
-/// [`AlignmentQuery`](wz_session_core::storage_aligner::AlignmentQuery) with
-/// the entries it needs to converge. The decode / answer / emit core delegates
-/// to the no_std kernel
-/// ([`StorageState::answer_alignment_query`](wz_session_core::storage_state::StorageState::answer_alignment_query));
-/// this module reads the query attachment, locks the shared
-/// [`storage_service::StorageService`] state, and emits each response on the
-/// reply seam. The queryable is RAII-bound (dropping the
-/// [`storage_aligner_service::AlignerService`] undeclares it). Gated on
-/// `storage-aligner` (implies storage-replication).
+// Round 311 A8c-2a — the storage-aligner DRIVER, ANSWER half (§5.11 storage,
+// aligner): the tokio binding that declares a `session::Queryable`
+// on this replica's aligner keyexpr (`@zid/<zid>/<config-fp>/aligner`) and
+// answers a peer's
+// `wz_session_core::storage_aligner::AlignmentQuery` with
+// the entries it needs to converge. The decode / answer / emit core delegates
+// to the no_std kernel
+// (`wz_session_core::storage_state::StorageState::answer_alignment_query`);
+// this module reads the query attachment, locks the shared
+// `storage_service::StorageService` state, and emits each response on the
+// reply seam. The queryable is RAII-bound (dropping the
+// `storage_aligner_service::AlignerService` undeclares it). Gated on
+// `storage-aligner` (implies storage-replication).
 #[cfg(feature = "storage-aligner")]
 pub mod storage_aligner_service;
 
@@ -2209,43 +2210,43 @@ pub mod storage_aligner_service;
 #[cfg(feature = "storage-backend")]
 pub use wz_session_core::storage_volume;
 
-/// R311y62 — the storage MANAGER DRIVER (§5.24): the AP tokio binding that
-/// hosts N live [`storage_service::StorageService`]s over a volume registry.
-/// A [`storage_manager_service::RuntimeStorageManager`] reuses the kernel
-/// [`wz_session_core::storage_manager::StorageManager`] for volume
-/// registration + backend creation, then declares one live StorageService per
-/// [`StorageConfig`](wz_session_core::storage_config::StorageConfig) and holds
-/// it by name — the live-service counterpart of the sync kernel manager (which
-/// holds bare backends). Dropping the manager undeclares every hosted storage
-/// (each StorageService's RAII Drop). Gated on `storage-mgr-multi-storage-host`
-/// (which forwards the kernel manager + pulls `storage-backend` for the
-/// service).
+// R311y62 — the storage MANAGER DRIVER (§5.24): the AP tokio binding that
+// hosts N live `storage_service::StorageService`s over a volume registry.
+// A `storage_manager_service::RuntimeStorageManager` reuses the kernel
+// `wz_session_core::storage_manager::StorageManager` for volume
+// registration + backend creation, then declares one live StorageService per
+// `wz_session_core::storage_config::StorageConfig` and holds
+// it by name — the live-service counterpart of the sync kernel manager (which
+// holds bare backends). Dropping the manager undeclares every hosted storage
+// (each StorageService's RAII Drop). Gated on `storage-mgr-multi-storage-host`
+// (which forwards the kernel manager + pulls `storage-backend` for the
+// service).
 #[cfg(feature = "storage-mgr-multi-storage-host")]
 pub mod storage_manager_service;
 
-/// R311wt slice 4 — the storage garbage-collection DRIVER (§5.24
-/// `storage-mgr-garbage-collection`): the tokio timer binding that periodically
-/// sweeps stale wildcard-update registry entries out of a storage. A
-/// [`storage_gc_service::GarbageCollector`] spawns a loop that, every
-/// `config.garbage_collection.period`, locks the shared
-/// [`storage_service::StorageService`] state and calls the kernel
-/// [`StorageState::collect_garbage`](wz_session_core::storage_state::StorageState::collect_garbage)
-/// with a wall-clock cutoff. Caller-driven + RAII-bound (dropping the collector
-/// aborts the loop), mirroring [`storage_replication_service::DigestPublisher`].
-/// Gated on `storage-mgr-garbage-collection` (which pulls the kernel sweep +
-/// `storage-backend` for the shared state).
+// R311wt slice 4 — the storage garbage-collection DRIVER (§5.24
+// `storage-mgr-garbage-collection`): the tokio timer binding that periodically
+// sweeps stale wildcard-update registry entries out of a storage. A
+// `storage_gc_service::GarbageCollector` spawns a loop that, every
+// `config.garbage_collection.period`, locks the shared
+// `storage_service::StorageService` state and calls the kernel
+// `wz_session_core::storage_state::StorageState::collect_garbage`
+// with a wall-clock cutoff. Caller-driven + RAII-bound (dropping the collector
+// aborts the loop), mirroring `storage_replication_service::DigestPublisher`.
+// Gated on `storage-mgr-garbage-collection` (which pulls the kernel sweep +
+// `storage-backend` for the shared state).
 #[cfg(feature = "storage-mgr-garbage-collection")]
 pub mod storage_gc_service;
 
-/// R311qa — the multi-peer accept loop: the `routing-router` / `routing-peer`
-/// foundation. Binds once and holds N concurrent peer faces (bind -> accept
-/// loop -> per-face open + drive), the increment zenoh's role-agnostic
-/// `accept_task` provides over the one-shot [`session_open`] accept. No
-/// forwarding yet (that is the sibling `routing-routes` atom). Gated on the
-/// `routing-accept` feature (which pulls `transport-link-tcp` + `transport-unicast`
-/// + `futures-util`) — a selectable atom both role features compose, not an
-/// always-on module, so a profile that selects neither role never compiles it
-/// (nor pays for `futures-util`).
+// R311qa — the multi-peer accept loop: the `routing-router` / `routing-peer`
+// foundation. Binds once and holds N concurrent peer faces (bind -> accept
+// loop -> per-face open + drive), the increment zenoh's role-agnostic
+// `accept_task` provides over the one-shot `session_open` accept. No
+// forwarding yet (that is the sibling `routing-routes` atom). Gated on the
+// `routing-accept` feature (which pulls `transport-link-tcp` + `transport-unicast`
+// + `futures-util`) — a selectable atom both role features compose, not an
+// always-on module, so a profile that selects neither role never compiles it
+// (nor pays for `futures-util`).
 #[cfg(feature = "routing-accept")]
 pub mod accept_loop;
 /// Decision D5 of `docs/session-lifecycle-intent.md` — the peers a face loop is
@@ -2275,12 +2276,12 @@ pub mod routing_region;
 #[cfg(any(feature = "transport-unicast", feature = "transport-multicast"))]
 pub mod node_stats;
 
-/// P4 linkstate-peer routing — the driver (step c3) that connects the
-/// topology graph (the [`wz_routing_graph`] crate, lifted out of this
-/// runtime crate in R311qw) to the accept/peer-loop face lifecycle: a
-/// [`FaceForwarder`](accept_loop::FaceForwarder) that connects faces in the
-/// graph and ingests inbound `OAM_LINKSTATE` topology. Gated on
-/// `routing-peer`.
+// P4 linkstate-peer routing — the driver (step c3) that connects the
+// topology graph (the `wz_routing_graph` crate, lifted out of this
+// runtime crate in R311qw) to the accept/peer-loop face lifecycle: a
+// `accept_loop::FaceForwarder` that connects faces in the
+// graph and ingests inbound `OAM_LINKSTATE` topology. Gated on
+// `routing-peer`.
 #[cfg(feature = "routing-peer")]
 pub mod linkstate_forward;
 
@@ -2314,15 +2315,15 @@ pub mod session_lifecycle_open;
 #[cfg(any(feature = "routing-peer", feature = "access-acl"))]
 pub(crate) mod peer_identity;
 
-/// R311y108 — §5.21 router-hat slice 1a: the DUAL-mesh router forwarder. A 4th
-/// [`FaceForwarder`](accept_loop::FaceForwarder) (`RouterForwarder`) that ports
-/// zenoh `hat/router`'s two link-state graphs — `routers_net` (Router-tier
-/// faces) + `linkstatepeers_net` (Peer-tier faces) — distinct from the
-/// single-net [`linkstate_forward`] `LinkstateForwarder` it builds on. Slice 1a
-/// is the topology-STATE half: dual-net register/deregister/OAM-ingest with a
-/// TIER-SCOPED flood (the two graphs never cross-inject). The dual-tier Declare
-/// INGEST, the cross-tier bubble, route-compute, and master-election are later
-/// slices. Gated on `routing-router-hat` (which pulls `routing-peer`).
+// R311y108 — §5.21 router-hat slice 1a: the DUAL-mesh router forwarder. A 4th
+// `accept_loop::FaceForwarder` (`RouterForwarder`) that ports
+// zenoh `hat/router`'s two link-state graphs — `routers_net` (Router-tier
+// faces) + `linkstatepeers_net` (Peer-tier faces) — distinct from the
+// single-net `linkstate_forward` `LinkstateForwarder` it builds on. Slice 1a
+// is the topology-STATE half: dual-net register/deregister/OAM-ingest with a
+// TIER-SCOPED flood (the two graphs never cross-inject). The dual-tier Declare
+// INGEST, the cross-tier bubble, route-compute, and master-election are later
+// slices. Gated on `routing-router-hat` (which pulls `routing-peer`).
 #[cfg(feature = "routing-router-hat")]
 pub mod router_forward;
 
@@ -2335,29 +2336,29 @@ pub mod router_forward;
 ))]
 pub mod capacity_control;
 
-/// R311tt — the §5.16 access-control interceptor SEAM: the composable
-/// message-admission chain ([`interceptor::InterceptorChain`]) the ACL,
-/// downsampling, and low-pass enforcers plug into, plus the ACL enforcer
-/// adapter (`interceptor::access_control::AclInterceptor`). The wz mirror of
-/// zenoh `net/routing/interceptor/{mod.rs,access_control.rs}`. The seam +
-/// adapter reference the codec `NetworkMessage` types, so they live in this
-/// runtime crate and consume the pure `wz_access_control` policy engine (zenoh's
-/// `authorization.rs`), kept message-type-free in its own crate. Each concrete
-/// enforcer is an independent §5.16 knob (`access-acl` / `access-downsampling` /
-/// `access-quota`) so a build composes exactly the admission filters it needs —
-/// none of them is access control disabled.
-///
-/// R2702 — the seam compiles for a build that enables ANY of those knobs, where
-/// it used to be gated on `routing-peer` alone. That gate read as "the forwarder
-/// it gates is routing", and it was true of the CONSUMER rather than of the
-/// seam: after `interceptor::keyexpr` moved here, nothing under `interceptor/`
-/// names a routing type. Upstream installs its interceptors with no mode branch
-/// — they are a sibling field of the per-mode routing state, not something a
-/// mode selects (`zenoh/src/net/routing/dispatcher/tables.rs` @ `interceptors: interceptor_factories(config)?`)
-/// — and `access-acl`'s residual named this gate as the reason wz could not.
-/// `routing-peer` stays in the list because a routing build installs chains on
-/// its forwarders whether or not it enables a knob: the forwarder fields are
-/// unconditional and name the chain type.
+// R311tt — the §5.16 access-control interceptor SEAM: the composable
+// message-admission chain (`interceptor::InterceptorChain`) the ACL,
+// downsampling, and low-pass enforcers plug into, plus the ACL enforcer
+// adapter (`interceptor::access_control::AclInterceptor`). The wz mirror of
+// zenoh `net/routing/interceptor/{mod.rs,access_control.rs}`. The seam +
+// adapter reference the codec `NetworkMessage` types, so they live in this
+// runtime crate and consume the pure `wz_access_control` policy engine (zenoh's
+// `authorization.rs`), kept message-type-free in its own crate. Each concrete
+// enforcer is an independent §5.16 knob (`access-acl` / `access-downsampling` /
+// `access-quota`) so a build composes exactly the admission filters it needs —
+// none of them is access control disabled.
+//
+// R2702 — the seam compiles for a build that enables ANY of those knobs, where
+// it used to be gated on `routing-peer` alone. That gate read as "the forwarder
+// it gates is routing", and it was true of the CONSUMER rather than of the
+// seam: after `interceptor::keyexpr` moved here, nothing under `interceptor/`
+// names a routing type. Upstream installs its interceptors with no mode branch
+// — they are a sibling field of the per-mode routing state, not something a
+// mode selects (`zenoh/src/net/routing/dispatcher/tables.rs` @ `interceptors: interceptor_factories(config)?`)
+// — and `access-acl`'s residual named this gate as the reason wz could not.
+// `routing-peer` stays in the list because a routing build installs chains on
+// its forwarders whether or not it enables a knob: the forwarder fields are
+// unconditional and name the chain type.
 #[cfg(any(
     feature = "routing-peer",
     feature = "access-acl",
@@ -2366,15 +2367,15 @@ pub mod capacity_control;
 ))]
 pub mod interceptor;
 
-/// P4 linkstate-peer routing (step c3c-3 atom2) — the peer interest table
-/// [`linkstate_interest::LinkstatepeerInterest`]: which peers are interested in
-/// which key expression. ONE generic type the forwarder instantiates per
-/// interest plane (subscriptions, queryables). zenoh keeps this OFF the topology
-/// `Network` (it hangs on the routing `Resource`), so wz mirrors that separation
-/// — the graph is [`wz_routing_graph`], these interest sets are the HAT-analogue
-/// state the forwarder owns. Drives the declaration-filtered data route (atom4)
-/// / query route by feeding the interested-peer set to `directions_toward`.
-/// Gated on `routing-peer`.
+// P4 linkstate-peer routing (step c3c-3 atom2) — the peer interest table
+// `linkstate_interest::LinkstatepeerInterest`: which peers are interested in
+// which key expression. ONE generic type the forwarder instantiates per
+// interest plane (subscriptions, queryables). zenoh keeps this OFF the topology
+// `Network` (it hangs on the routing `Resource`), so wz mirrors that separation
+// — the graph is `wz_routing_graph`, these interest sets are the HAT-analogue
+// state the forwarder owns. Drives the declaration-filtered data route (atom4)
+// / query route by feeding the interested-peer set to `directions_toward`.
+// Gated on `routing-peer`.
 #[cfg(feature = "routing-peer")]
 pub mod linkstate_interest;
 
@@ -2396,50 +2397,50 @@ pub mod route_cache;
 #[cfg(feature = "routing-peer")]
 mod counter;
 
-/// FUTURE-mode subscriber-interest store (R311y146) —
-/// [`future_interest::FutureInterestStore`]: which CLIENT faces declared a FUTURE
-/// (`f()`) subscriber `Interest`, and which `DeclareSubscriber`s wz has pushed back
-/// to them. The FUTURE half of the interest handshake (the CURRENT half is the
-/// forwarder `respond_to_interest` dump): a matching subscriber learned LATER is
-/// proactively pushed so a pub-before-sub publisher's write-filter deactivates.
-/// zenoh's per-`FaceState` `remote_interests` + `face_hat.local_subs`, bundled per
-/// face; both forwarders own one. Gated on `routing-peer`.
+// FUTURE-mode subscriber-interest store (R311y146) —
+// `future_interest::FutureInterestStore`: which CLIENT faces declared a FUTURE
+// (`f()`) subscriber `Interest`, and which `DeclareSubscriber`s wz has pushed back
+// to them. The FUTURE half of the interest handshake (the CURRENT half is the
+// forwarder `respond_to_interest` dump): a matching subscriber learned LATER is
+// proactively pushed so a pub-before-sub publisher's write-filter deactivates.
+// zenoh's per-`FaceState` `remote_interests` + `face_hat.local_subs`, bundled per
+// face; both forwarders own one. Gated on `routing-peer`.
 #[cfg(feature = "routing-peer")]
 pub mod future_interest;
 
-/// P4 linkstate-peer routing (query-routing atom 3) — the pending-query return
-/// table [`linkstate_pending::PendingQueries`]: the per-outbound-face `out qid
-/// -> (inbound face, inbound rid)` map that routes a routed Query's `Response` /
-/// `ResponseFinal` BACK to the querier across the mesh (the reverse of the
-/// forward hop, reconstructed from this state, not the topology tree). The wz
-/// analogue of zenoh's per-`FaceState` `pending_queries`. Gated on
-/// `routing-peer`.
+// P4 linkstate-peer routing (query-routing atom 3) — the pending-query return
+// table `linkstate_pending::PendingQueries`: the per-outbound-face `out qid
+// -> (inbound face, inbound rid)` map that routes a routed Query's `Response` /
+// `ResponseFinal` BACK to the querier across the mesh (the reverse of the
+// forward hop, reconstructed from this state, not the topology tree). The wz
+// analogue of zenoh's per-`FaceState` `pending_queries`. Gated on
+// `routing-peer`.
 #[cfg(feature = "routing-peer")]
 pub mod linkstate_pending;
 
-/// R311y512 — §5.21 `routing-interest-pending-gc`: the PENDING-CURRENT-INTEREST
-/// table [`interest_broker::PendingCurrentInterests`] a p2p_peer-shaped broker
-/// keeps while a downstream CLIENT's CURRENT interest is propagated upstream,
-/// plus the GC that abandons a silent upstream and finalizes the client anyway.
-/// The interest twin of [`linkstate_pending`] (which is the QUERY return table):
-/// both exist so a downstream solicitation terminates even when the node it was
-/// forwarded to never answers. zenoh
-/// `dispatcher/interests.rs` (`PendingCurrentInterest` /
-/// `finalize_pending_interest` / `CurrentInterestCleanup`) driven from
-/// `zenoh/src/net/routing/hat/peer/interests.rs` @ `fn route_interest`. Gated on
-/// `routing-interest-pending-gc`, which
-/// pulls `routing-peer` (the forwarder that owns the table).
+// R311y512 — §5.21 `routing-interest-pending-gc`: the PENDING-CURRENT-INTEREST
+// table `interest_broker::PendingCurrentInterests` a p2p_peer-shaped broker
+// keeps while a downstream CLIENT's CURRENT interest is propagated upstream,
+// plus the GC that abandons a silent upstream and finalizes the client anyway.
+// The interest twin of `linkstate_pending` (which is the QUERY return table):
+// both exist so a downstream solicitation terminates even when the node it was
+// forwarded to never answers. zenoh
+// `dispatcher/interests.rs` (`PendingCurrentInterest` /
+// `finalize_pending_interest` / `CurrentInterestCleanup`) driven from
+// `zenoh/src/net/routing/hat/peer/interests.rs` @ `fn route_interest`. Gated on
+// `routing-interest-pending-gc`, which
+// pulls `routing-peer` (the forwarder that owns the table).
 #[cfg(feature = "routing-interest-pending-gc")]
 pub mod interest_broker;
 
-/// A4b (session-reconnect) — the re-dial + re-handshake supervisor over
-/// [`session_open`]: `open_session_with_reconnect` wires the actions
-/// bundle over a `SwappableLink`, and `ReconnectingSession::drive` re-runs
-/// the open loop + declaration replay whenever the steady-state loop
-/// terminates without the caller's stop signal. zenoh-pico
-/// `Z_FEATURE_AUTO_RECONNECT` (`_z_client_reopen_task_fn`) parity. Gated
-/// like [`session_open`] (it re-runs that module's open loop) plus the
-/// `session-reconnect` state tier it drives.
+// A4b (session-reconnect) — the re-dial + re-handshake supervisor over
+// `session_open`: `open_session_with_reconnect` wires the actions
+// bundle over a `SwappableLink`, and `ReconnectingSession::drive` re-runs
+// the open loop + declaration replay whenever the steady-state loop
+// terminates without the caller's stop signal. zenoh-pico
+// `Z_FEATURE_AUTO_RECONNECT` (`_z_client_reopen_task_fn`) parity. Gated
+// like `session_open` (it re-runs that module's open loop) plus the
+// `session-reconnect` state tier it drives.
 #[cfg(all(
     feature = "session-reconnect",
     feature = "transport-link-tcp",
@@ -3036,7 +3037,7 @@ impl TcpDriver {
     /// resulting stream (Initiator side). This is the dial half of the
     /// scouting locator seam: a [`wz_session_core::locator::ParsedLocator`]
     /// with `proto = Tcp` carries the numeric `addr` this constructor
-    /// connects to, mirroring [`from_stream`] for the acceptor side.
+    /// connects to, mirroring `from_stream` for the acceptor side.
     ///
     /// `open()` is a no-op afterwards because the stream is already
     /// connected — same post-condition as `from_stream`. Connect-timeout
@@ -3266,7 +3267,7 @@ impl UdpDriver {
     /// carries the numeric `peer` this constructor targets, mirroring
     /// [`TcpDriver::connect`] for the datagram transport.
     ///
-    /// Distinct from [`bind_multicast`], which joins a scouting group;
+    /// Distinct from `bind_multicast`, which joins a scouting group;
     /// this dials a single already-discovered unicast peer. The local
     /// bind address family mirrors `peer` so an IPv6 locator binds an
     /// IPv6 socket (a v4-bound socket cannot reach a v6 peer).

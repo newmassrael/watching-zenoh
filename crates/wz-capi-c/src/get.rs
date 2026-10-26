@@ -24,7 +24,7 @@
 //!
 //! A foreign peer is free to answer under a key the query does not cover, and
 //! upstream drops such a reply BEFORE building it — the callback never sees it.
-//! The gate is [`crate::reply_keyexpr::reply_keyexpr_is_covered`], the same SSOT the
+//! The gate is `crate::reply_keyexpr::reply_keyexpr_is_covered`, the same SSOT the
 //! responder side enforces, so the two halves cannot drift apart.
 
 use std::ffi::{c_char, c_int, c_void, CStr};
@@ -675,7 +675,7 @@ unsafe fn reply_err_marshal<'a>(this_: *const z_loaned_reply_err_t) -> Option<&'
 
 /// The error VALUE's encoding (zenoh-c `z_reply_err_encoding`).
 ///
-/// Reads [`ReplyMarshal::err_encoding`], which is the `ReplyView::err_encoding`
+/// Reads `ReplyMarshal::err_encoding`, which is the `ReplyView::err_encoding`
 /// pair — not the sample half's Put encoding. See that field for why the two are
 /// separate.
 ///

@@ -15,11 +15,11 @@
 //!   so a wz QUIC peer negotiates the same token a zenohd QUIC peer expects.
 //!
 //! Everything else is shared with the TLS link: the PEM → DER loaders
-//! ([`certs_from_pem`](crate::tls_config::certs_from_pem) /
-//! [`private_key_from_pem`](crate::tls_config::private_key_from_pem) /
-//! [`server_trust_roots`](crate::tls_config::server_trust_roots) /
-//! [`client_auth_roots`](crate::tls_config::client_auth_roots)), the
-//! [`ClientAuthPem`](crate::tls_config::ClientAuthPem) mTLS knob, the `ring`
+//! ([`certs_from_pem`] /
+//! [`private_key_from_pem`] /
+//! [`server_trust_roots`] /
+//! [`client_auth_roots`]), the
+//! [`ClientAuthPem`] mTLS knob, the `ring`
 //! crypto provider, and the rustls 0.23 stack itself (quinn 0.11 + tokio-rustls
 //! 0.26 share one `rustls` — verified at integration). The built rustls config
 //! feeds `quinn::crypto::rustls::{QuicClientConfig,QuicServerConfig}` in

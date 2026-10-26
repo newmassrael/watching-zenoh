@@ -55,7 +55,7 @@
 //! ([`link_protocols`](LowPassRule::link_protocols) /
 //! [`interfaces`](LowPassRule::interfaces)), resolved once at link open by
 //! [`crate::link_interfaces`] and matched through the shared
-//! [`LinkSubject`](wz_session_core::link::LinkSubject) predicates the downsampler
+//! [`LinkSubject`] predicates the downsampler
 //! and the ACL rule use — one policy, three interceptors, so they cannot drift.
 //! The three ways this is deliberately better than upstream (no process-lifetime
 //! interface cache; "could not determine" kept distinct from "no NIC";

@@ -560,7 +560,7 @@ pub use wz_session_core::metadata::PushMetadata;
 /// `wz_session_core::query_value_ext`).
 ///
 /// `#[derive(Default)]` makes the empty bundle trivially constructable
-/// for the no-metadata fast path; [`Self::is_empty`] mirrors
+/// for the no-metadata fast path; `Self::is_empty` mirrors
 /// [`PushMetadata::is_empty`] so callers can short-circuit the
 /// builder allocation.
 // R311di-9 — QueryMetadata moved to wz-session-core::metadata.
@@ -898,7 +898,7 @@ use wz_session_core::reassembly_dispatch::sweep_reporting;
 /// to pure `u64` ms arithmetic. The lease deadline computation,
 /// the remaining-window subtraction, and the
 /// [`check_lease_deadline`] call now read `clock.now_monotonic_ms()`
-/// directly; the [`SessionLinkActions::clock`] field carries a
+/// directly; the `SessionLinkActions::clock` field carries a
 /// value-copy of the same epoch so
 /// [`SessionLinkActions::handle_inbound`] + the
 /// `record_established_at` Lua action record `u64` ms stamps on
@@ -924,7 +924,7 @@ use wz_session_core::reassembly_dispatch::sweep_reporting;
 /// that today:
 ///
 /// - **The one length-prefixed driver was FIXED.** R311et hoisted
-///   the partial-read buffers into `&mut self` ([`crate::ReadState`])
+///   the partial-read buffers into `&mut self` (`crate::ReadState`)
 ///   over cancel-safe `AsyncReadExt::read`, precisely so a dropped
 ///   `poll_event` keeps its offset — and its doc names R264's
 ///   10x/s sweep cancellation as the fixture that surfaced it. So

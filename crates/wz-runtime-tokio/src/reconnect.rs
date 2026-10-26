@@ -21,7 +21,7 @@
 //!   under the transport mutex);
 //! - the reopen task = [`ReconnectingSession::drive`]'s reconnect loop:
 //!   `reset_for_reopen` (pico's fresh `_z_transport_t`) → re-dial the
-//!   retained [`ReconnectLocator`] → swap → the same [`initiator_open`]
+//!   retained [`ReconnectLocator`] → swap → the same `initiator_open`
 //!   bring-up the first open used (fresh engine over the same actions) →
 //!   [`SessionLinkActions::replay_declarations`] (pico's declaration-cache
 //!   walk) → resume the steady-state loop;
@@ -526,10 +526,10 @@ impl ReconnectingSession {
     /// connection; on a terminal without `stop`, enters the reopen loop
     /// (pico `_z_client_reopen_task_fn`): per attempt —
     /// [`SessionLinkActions::reset_for_reopen`], re-dial + re-handshake
-    /// ([`Self::open_attempt`]), then
+    /// (`Self::open_attempt`), then
     /// [`SessionLinkActions::replay_declarations`] — sleeping
     /// `policy.retry_delay_ms` between transient failures
-    /// ([`Self::open_error_is_transient`]) and giving up on permanent
+    /// (`Self::open_error_is_transient`) and giving up on permanent
     /// ones.
     ///
     /// `stop` is checked at loop boundaries only: to close locally, set it
@@ -865,7 +865,7 @@ pub async fn open_session_with_reconnect(
 /// STRING. The reconnect-path sibling of [`dial_endpoint`] (string → dialed
 /// link) and [`accept_endpoint`] (string → accepted link): the single library
 /// home of "turn a `--connect` string into a [`ReconnectingSession`]". It
-/// reuses the SHARED [`plan_endpoint`] classifier (scheme-less `tcp/`
+/// reuses the SHARED `plan_endpoint` classifier (scheme-less `tcp/`
 /// convenience included) so the dial / accept / reconnect paths parse a connect
 /// string by ONE set of rules, then narrows the parsed [`AnyLocator`] to the
 /// reconnectable subset via [`ReconnectLocator::try_from`] — a `serial/...`

@@ -4,7 +4,7 @@
 //! Shared AP reassembly-pool wiring (transport-agnostic SSOT).
 //!
 //! R311mk — the AP reassembly Router type ([`TokioReassembly`]) + its
-//! runtime config ([`reassembly_config`]) were hoisted out of
+//! runtime config (`reassembly_config`) were hoisted out of
 //! [`crate::session_glue`] (the unicast handshake driver) into this neutral
 //! module so they survive the `transport-unicast` decouple. They are NOT
 //! unicast machinery: both the unicast steady-state drive loop

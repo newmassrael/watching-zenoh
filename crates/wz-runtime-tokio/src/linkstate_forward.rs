@@ -17,21 +17,21 @@
 //! link change, with NO periodic keepalive. A self-link change floods the zenoh
 //! MINIMAL DELTA (D4), not the full topology: on `register` the NEW face is
 //! bootstrapped with the full topology while EXISTING faces get only a 2-entry
-//! `[neighbour zid-only, self links-only]` delta ([`flood_link_added`](LinkstateForwarder::flood_link_added));
+//! `[neighbour zid-only, self links-only]` delta (`flood_link_added`);
 //! on `deregister` every surviving face gets a 1-entry `[self links-only]` delta
-//! ([`flood_self_links_changed`](LinkstateForwarder::flood_self_links_changed)).
+//! (`flood_self_links_changed`).
 //! An inbound change re-floods transitively via `forward`'s `propagate`. Reliable transport
 //! (the mesh is TCP) delivers each flood, so the topology FLOOD needs no periodic
 //! re-send — but the spanning-tree RECOMPUTE each change triggers IS coalesced on
 //! a debounce timer (D2c, below), not run inline.
 //!
-//! Single-task model: like every [`FaceForwarder`](crate::accept_loop::FaceForwarder),
+//! Single-task model: like every [`FaceForwarder`],
 //! the whole loop is one `!Send` task, so the graph is held behind a plain
 //! `Rc<RefCell<…>>` — no `Mutex`, no `Send` bound. Each handler borrows
 //! the cell only for its own synchronous duration, never across an
 //! `.await`.
 //!
-//! Data forwarding (c3c): [`forward_push`](LinkstateForwarder::forward_push)
+//! Data forwarding (c3c): `forward_push`
 //! re-forwards a received Push, and [`publish`](LinkstateForwarder::publish)
 //! originates one — both subscription-FILTERED (c3c-3 atom4): the next hops are
 //! [`directions_toward`](wz_routing_graph::LinkstateNetwork::directions_toward)
@@ -40,7 +40,7 @@
 //! mesh (c3c-3 atom3):
 //! [`declare_subscription`](LinkstateForwarder::declare_subscription) floods a
 //! sourced `DeclareSubscriber`, and
-//! [`forward_subscription`](LinkstateForwarder::forward_subscription) registers
+//! `forward_subscription` registers
 //! the source peer's interest + re-floods it, so each peer learns who is
 //! interested in what ([`interested`](LinkstateForwarder::interested)), and a
 //! tree-change re-advertises a subscription to its source tree's NEW children
@@ -48,7 +48,7 @@
 //! COALESCES its spanning-tree recompute on a debounce timer rather than
 //! recomputing inline (c3c-3 D2c): the change handlers
 //! ([`forward`](FaceForwarder::forward) / [`deregister`](FaceForwarder::deregister))
-//! [`schedule_recompute`](LinkstateForwarder::schedule_recompute) and the
+//! `schedule_recompute` and the
 //! [`tick`](FaceForwarder::tick) flushes ONE
 //! [`compute_trees`](wz_routing_graph::LinkstateNetwork::compute_trees) +
 //! re-advertise per window, so a burst (a join flood, a flapping cascade)
@@ -63,7 +63,7 @@
 //! delay, NOT an on/off switch — the coalescing path is the single recompute
 //! SSOT. Data-plane keyexpr ALIASES are resolved (c3c-3 B1): a peer's sourced
 //! `Declare(DeclKexpr)` records `id -> keyexpr` in the inbound face's link-local
-//! table ([`absorb_keyexpr_declaration`](LinkstateForwarder::absorb_keyexpr_declaration)),
+//! table (`absorb_keyexpr_declaration`),
 //! a `Push` carrying that alias is resolved via the shared `resolve_wireexpr`
 //! SSOT, and the forward NORMALIZES the keyexpr to a literal so the downstream
 //! link (which does not share the inbound link's alias table) can resolve it.
@@ -277,7 +277,7 @@ const fn default_gossip_target(whatami: WhatAmI) -> WhatAmIMatcher {
 /// The default gossip-AUTOCONNECT matcher for a node of role `whatami` — zenoh's
 /// `scouting.gossip.autoconnect` per-local default
 /// (`commons/zenoh-config/src/defaults.rs`), the SIBLING of
-/// [`default_gossip_target`] and DELIBERATELY a different profile: a PEER
+/// `default_gossip_target` and DELIBERATELY a different profile: a PEER
 /// autoconnects to discovered routers and peers (`router|peer`), but a ROUTER
 /// autoconnects to NOBODY (the empty set — routers are reached via configured
 /// links, not gossip-dialed), as does a CLIENT. The role-correct matcher a
@@ -546,7 +546,7 @@ pub struct LinkstateForwarder {
     /// [`LinkstatepeerInterest`] type, a SEPARATE instance: subscriptions bound a
     /// Push fan-out, queryables bound a Query fan-out (the Request routing that
     /// reads this lands in the next atom). Populated by
-    /// [`forward_queryable`](Self::forward_queryable); a peer's interest is
+    /// `forward_queryable`; a peer's interest is
     /// purged whole on its face-down (`purge_detached_interest`). `RefCell` by
     /// the same single-task contract as `subs`.
     /// R311y509 — the MESH-tier liveliness-TOKEN table, the token twin of
@@ -601,7 +601,7 @@ pub struct LinkstateForwarder {
     /// `remote_interests` + `face_hat.local_subs`). The CURRENT half of the
     /// handshake is [`respond_to_interest`](Self::respond_to_interest)'s dump; this
     /// is the FUTURE half: a subscriber learned LATER — from the mesh
-    /// ([`forward_subscription`](Self::forward_subscription)) or this node's own
+    /// (`forward_subscription`) or this node's own
     /// local declaration ([`declare_subscription`](Self::declare_subscription)) — is
     /// proactively pushed via [`push_future_subscription`](Self::push_future_subscription)
     /// so a pub-BEFORE-sub client publisher's write-filter deactivates. FaceId-keyed
@@ -613,7 +613,7 @@ pub struct LinkstateForwarder {
     /// The QUERYABLE-plane FUTURE store (R311y150) — the value-aware twin of
     /// [`future_subs`](Self#structfield.future_subs): a queryable learned LATER
     /// (self-local [`declare_queryable`](Self::declare_queryable) or mesh
-    /// [`forward_queryable`](Self::forward_queryable)) is proactively pushed via
+    /// `forward_queryable`) is proactively pushed via
     /// [`push_future_queryable`](Self::push_future_queryable) so a querier-BEFORE-
     /// queryable querier's write-filter deactivates, and a completeness flip
     /// re-pushes the same id. Same OBLIGATION-1 purge as `future_subs`.
@@ -622,7 +622,7 @@ pub struct LinkstateForwarder {
     /// per-outbound-face `out qid -> (inbound face, inbound rid)` map that routes
     /// a routed Query's `Response` / `ResponseFinal` BACK to the querier — the wz
     /// analogue of zenoh's per-`FaceState` `pending_queries`.
-    /// [`forward_request`](Self::forward_request) allocates a qid + records a
+    /// `forward_request` allocates a qid + records a
     /// mapping per outbound face; [`forward_response`](Self::forward_response)
     /// peeks it and [`forward_response_final`](Self::forward_response_final) takes
     /// (frees) it; `deregister` drops a departed face's entries. `RefCell` by the
@@ -632,7 +632,7 @@ pub struct LinkstateForwarder {
     /// reply-producing handler (distinct from [`qabls`](Self#structfield.qabls),
     /// which only tracks remote interest for ROUTING). A routed Query whose only
     /// match is one of these reaches the empty-route branch of
-    /// [`forward_request`](Self::forward_request) (self is excluded from query
+    /// `forward_request` (self is excluded from query
     /// routing) and is dispatched to the matching handler, whose replies unwind
     /// back to the querier via the existing return path. `RefCell` (the handler is
     /// `FnMut`) by the same single-task contract; no `Send` (the handler may
@@ -677,7 +677,7 @@ pub struct LinkstateForwarder {
     native_qabls: RefCell<HashMap<String, QueryableInfo>>,
     local_subscribers: RefCell<Vec<LocalSubscriber>>,
     /// #3-c (R311y167) — the bounded self-echo redelivery queue for
-    /// [`dispatch_local_subscribers`](Self::dispatch_local_subscribers). A
+    /// `dispatch_local_subscribers`. A
     /// `LocalSubscriber` is a SYNCHRONOUS `FnMut` — zenoh's *callback* subscriber,
     /// which re-enters itself on a self-echo and recurses to a stack overflow. When
     /// a handler, mid-fire, re-drives a matching Put to ITSELF, `try_borrow_mut`
@@ -777,7 +777,7 @@ pub struct LinkstateForwarder {
     /// gate), exactly like zenoh's per-target `send_on_link`
     /// (`zenoh/src/net/protocol/gossip.rs` @ `send_on_link`; 1.10.0 moved gossip
     /// out of the hat layer). Seeded per THIS node's role via
-    /// [`default_gossip_target`] (the zenoh `scouting.gossip.target` default: a
+    /// `default_gossip_target` (the zenoh `scouting.gossip.target` default: a
     /// router or peer gossips to `router|peer`, a client to nobody) and
     /// config-sourceable by a deploy through [`set_gossip_target`](Self::set_gossip_target).
     /// `Cell` because the matcher is `Copy` and set through `&self`, like the
@@ -1340,8 +1340,8 @@ impl LinkstateForwarder {
     }
 
     /// The current instant from the injected clock — the SINGLE read site the
-    /// pending-query deadline stamp ([`forward_request`](Self::forward_request))
-    /// and the timeout sweep ([`reap_timed_out_queries`](Self::reap_timed_out_queries))
+    /// pending-query deadline stamp (`forward_request`)
+    /// and the timeout sweep (`reap_timed_out_queries`)
     /// share, so an injected test clock governs both halves of the deadline check.
     fn now(&self) -> Instant {
         (self.clock)()
@@ -1349,7 +1349,7 @@ impl LinkstateForwarder {
 
     /// Override the gossip target — the set of neighbour roles this node floods
     /// its link-state to (zenoh's `scouting.gossip.target`). The
-    /// [`new`](Self::new) default is [`default_gossip_target`] for this node's
+    /// [`new`](Self::new) default is `default_gossip_target` for this node's
     /// role; a deploy config-sources a different set here (e.g. a router that
     /// gossips only to routers). The config seam symmetric to the other policy
     /// knobs ([`enable_autoconnect`](Self::enable_autoconnect),
@@ -1763,7 +1763,7 @@ impl InterceptorContext for FaceContext<'_> {
     }
 }
 
-/// R311y43 — the production [`InterceptorSink`] impl: the typed `WzConfig` SSOT
+/// R311y43 — the production `InterceptorSink` impl: the typed `WzConfig` SSOT
 /// drives the live forwarder through this seam (decoupled from the concrete
 /// type, for the §5.23 combined node). Delegates to the inherent
 /// [`set_interceptors`](LinkstateForwarder::set_interceptors) — the path form
@@ -1865,7 +1865,7 @@ impl LinkstateForwarder {
     /// that face's graph link. Returns the ingest `Changes` the caller re-floods
     /// onward ([`propagate`](Self::propagate)). Does NOT recompute the spanning
     /// trees — the recompute is COALESCED (D2c): the caller
-    /// [`schedule_recompute`](Self::schedule_recompute)s and the
+    /// `schedule_recompute`s and the
     /// [`tick`](FaceForwarder::tick) runs one
     /// [`compute_trees`](wz_routing_graph::LinkstateNetwork::compute_trees) per
     /// window, so a burst of inbound lists collapses to a single recompute. (The
@@ -2426,7 +2426,7 @@ impl LinkstateForwarder {
     ///   live set to the reachable mesh).
     ///
     /// The single SSOT shared by [`forward_push`](Self::forward_push) (data)
-    /// and [`forward_subscription`](Self::forward_subscription) (a sourced
+    /// and `forward_subscription` (a sourced
     /// subscription declaration): both flood along the SOURCE's tree, so both
     /// resolve the source — and the self-source / range guards — identically.
     fn resolve_source(
@@ -2728,7 +2728,7 @@ impl LinkstateForwarder {
             ),
         };
         // R2902 (open-debt item 828) — the query twin of
-        // [`fan_out_south_push`](Self::fan_out_south_push): a query whose source lies
+        // `fan_out_south_push`: a query whose source lies
         // SOUTH of this peer (a co-attached client) is sent to every gateway face as
         // well, because a gateway does not declare what its other remotes host. The
         // pin adds each south-bound face with no queryable info
@@ -2876,7 +2876,7 @@ impl LinkstateForwarder {
     }
 
     /// Terminate a Query that routed NOWHERE — the shared unrouted tail of
-    /// [`forward_request`](Self::forward_request) (empty directions, or
+    /// `forward_request` (empty directions, or
     /// directions matching no live face): try the LOCAL self-hosted queryables
     /// (R311y44 — a routed Query whose only match is hosted by this node lands
     /// here, e.g. every admin GET; a local match emits its replies + the closing
@@ -3208,7 +3208,7 @@ impl LinkstateForwarder {
     ///
     /// # What it shares with `publish`, deliberately
     ///
-    /// The same route ([`fan_out_south_push`](Self::fan_out_south_push)), so a
+    /// The same route (`fan_out_south_push`), so a
     /// delete reaches exactly the interested subscribers and gateways a Put to
     /// the same keyexpr would, and with neither it goes nowhere (`Ok(0)`). Only the CARRIER
     /// differs, and it differs in the one way a Del differs on the wire: it has
@@ -3233,7 +3233,7 @@ impl LinkstateForwarder {
     /// self's own spanning tree (this node is the source), stamped
     /// self-originated (node_id 0 — `build_declare_subscriber` emits no
     /// `ext_nodeid`). Each child registers self's interest and re-forwards via
-    /// [`forward_subscription`](Self::forward_subscription). The control-plane
+    /// `forward_subscription`. The control-plane
     /// (interest) counterpart to [`publish`](Self::publish) (data). Mirrors
     /// zenoh `declare_linkstatepeer_subscription` -> `propagate_sourced_subscription`
     /// with source = self. Returns the number of tree-child faces reached.
@@ -3427,7 +3427,7 @@ impl LinkstateForwarder {
     /// The INTEREST fold: which faces asked for a keyexpr, bucketed by the tier
     /// each face sits on.
     ///
-    /// ⛔ It takes no MESH TABLE, unlike [`bucket_by_tier`](Self::bucket_by_tier),
+    /// ⛔ It takes no MESH TABLE, unlike `bucket_by_tier`,
     /// and the difference is not a missing arm. The fact these legs report — a
     /// face's declared interest — is not an entity and never propagates, so there
     /// is no network-wide table for it to come from. Upstream's own oracle test
@@ -3502,7 +3502,7 @@ impl LinkstateForwarder {
     /// naming WHICH TIER declared it: the [`subs`](Self#structfield.subs) mesh
     /// table fills `peers`, the [`client_subs`](Self#structfield.client_subs)
     /// per-face store fills `clients`. See
-    /// [`bucket_by_tier`](Self::bucket_by_tier) for why the bucketing is done
+    /// `bucket_by_tier` for why the bucketing is done
     /// here rather than left to the caller.
     #[cfg(feature = "adminspace-introspection-handlers")]
     pub fn subscriber_sources(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
@@ -3868,10 +3868,10 @@ impl LinkstateForwarder {
     /// ([`set_declare_queryable_info`]) — to self's CHILDREN in self's own
     /// spanning tree (this node is the source, node_id 0). Each child registers
     /// self's queryable (with completeness) via
-    /// [`forward_queryable`](Self::forward_queryable) and re-floods. The
+    /// `forward_queryable` and re-floods. The
     /// query-plane counterpart to [`declare_subscription`](Self::declare_subscription)
     /// (subs) and the SELF-origination twin of
-    /// [`forward_queryable`](Self::forward_queryable) (which re-floods a RECEIVED
+    /// `forward_queryable` (which re-floods a RECEIVED
     /// declaration). Mirrors zenoh `declare_queryable` ->
     /// `declare_linkstatepeer_queryable` -> `propagate_sourced_queryable` with
     /// source = self and the local `QueryableInfo`. Returns the number of
@@ -3881,7 +3881,7 @@ impl LinkstateForwarder {
     /// [`set_declare_queryable_info`] OMITS (no ext, byte-identical to the no-info
     /// wire — zenoh's omit-on-DEFAULT); only a `complete` queryable adds the ext
     /// that drives a downstream relay's BestMatching select
-    /// (the BestMatching arm of [`compute_query_directions`]).
+    /// (the BestMatching arm of `compute_query_directions`).
     pub fn declare_queryable(&self, keyexpr: &str, complete: bool) -> Result<usize, CodecError> {
         let self_zid = *self.net.borrow().self_zid();
         // The local QueryableInfo (distance 0 — the SSOT local-declaration
@@ -3940,7 +3940,7 @@ impl LinkstateForwarder {
     /// for the interest-registration + flood (so upstream peers route Queries
     /// toward this node), then stores the handler. A routed Query whose only match
     /// is this node is dispatched to the handler in
-    /// [`forward_request`](Self::forward_request)'s empty-route branch. Returns the
+    /// `forward_request`'s empty-route branch. Returns the
     /// declare flood reach (tree-child faces), like `declare_queryable`.
     pub fn register_local_queryable(
         &self,
@@ -3965,7 +3965,7 @@ impl LinkstateForwarder {
     /// interest flood (so upstream peers route matching Puts toward this node),
     /// then stores the handler. A Put whose concrete key matches the declared
     /// pattern is delivered to the handler at the Push ingress
-    /// ([`dispatch_local_subscribers`](Self::dispatch_local_subscribers)), in
+    /// (`dispatch_local_subscribers`), in
     /// ADDITION to the remote fan-out. Returns the declare flood reach.
     pub fn register_local_subscriber(
         &self,
@@ -4394,7 +4394,7 @@ impl LinkstateForwarder {
     const SELF_ECHO_QUEUE_CAP: usize = 256;
 
     /// #3-c (R311y167) — queue a self-echo sample for redelivery. Called by
-    /// [`dispatch_local_subscribers`](Self::dispatch_local_subscribers) when a
+    /// `dispatch_local_subscribers` when a
     /// matching handler is BUSY (it re-entered the dispatch for its own pattern, so
     /// `try_borrow_mut` fails). Materializes an OWNED [`Sample`] (the borrowed view
     /// cannot outlive the dispatch frame) and pushes it with the busy handler's
@@ -4452,7 +4452,7 @@ impl LinkstateForwarder {
     /// (the keyexpr carried in its `ext_keyexpr` extension, node_id 0 —
     /// self-originated) to self's CHILDREN in self's own spanning tree. Each
     /// child withdraws self's interest and re-forwards via
-    /// [`forward_unsubscription`](Self::forward_unsubscription). The retraction
+    /// `forward_unsubscription`. The retraction
     /// counterpart to [`declare_subscription`](Self::declare_subscription), and
     /// the control-plane mirror of zenoh's
     /// `undeclare_linkstatepeer_subscription` -> `propagate_forget_sourced_subscription`
@@ -4739,7 +4739,7 @@ impl LinkstateForwarder {
     /// id-first), NOT by an ext the client never sends (the prior keyexpr-keyed resolve
     /// NO-OP'd, leaving the advert stale until face-down). Then (union-gated) withdraws the
     /// mesh advertisement if this was the ke's last backer. The mesh-sourced form (id 0 +
-    /// ext) is a peer's and routes through [`forward_unsubscription`](Self::forward_unsubscription)
+    /// ext) is a peer's and routes through `forward_unsubscription`
     /// instead. The face-down path ([`deregister`](FaceForwarder::deregister)) drains every
     /// id the departing client held through the same
     /// [`withdraw_mesh_sub_if_unbacked`](Self::withdraw_mesh_sub_if_unbacked) seam.
@@ -5200,7 +5200,7 @@ impl LinkstateForwarder {
 
     /// R311y509 — a sourced `UndeclareToken`: withdraw the SOURCE peer's token from
     /// the mesh table and re-flood the retraction, the token twin of
-    /// [`forward_unsubscription`](Self::forward_unsubscription). The retracted
+    /// `forward_unsubscription`. The retracted
     /// keyexpr rides the `ext_keyexpr` extension (a mesh retraction carries id 0),
     /// so an id-only body is a no-op inside the shared withdrawal and the face-down
     /// purge stays the safety net for a departed peer.
@@ -5220,7 +5220,7 @@ impl LinkstateForwarder {
     }
 
     /// R311y509 — a sourced `DeclareToken` arrived on `inbound`: the liveliness
-    /// twin of [`forward_subscription`](Self::forward_subscription), through the
+    /// twin of `forward_subscription`, through the
     /// SAME [`forward_interest_declaration`](Self::forward_interest_declaration)
     /// seam; only the body extractor ([`declare_token_wireexpr`]), the table
     /// ([`tokens`](Self#structfield.tokens)) and the carrier builder differ.
@@ -5245,7 +5245,7 @@ impl LinkstateForwarder {
     }
 
     /// A sourced `DeclareQueryable` arrived on `inbound`: the queryable-plane
-    /// twin of [`forward_subscription`](Self::forward_subscription) — same shared
+    /// twin of `forward_subscription` — same shared
     /// [`forward_interest_declaration`](Self::forward_interest_declaration), only
     /// the body extractor ([`declare_queryable_wireexpr`]), the interest table
     /// ([`qabls`](Self#structfield.qabls)) and the `DeclareQueryable` carrier
@@ -5294,8 +5294,8 @@ impl LinkstateForwarder {
     }
 
     /// The shared sourced-interest-declaration re-flood, SSOT for both the
-    /// subscriber ([`forward_subscription`](Self::forward_subscription)) and the
-    /// queryable ([`forward_queryable`](Self::forward_queryable)) planes: register
+    /// subscriber (`forward_subscription`) and the
+    /// queryable (`forward_queryable`) planes: register
     /// the SOURCE peer's interest in the declared keyexpr in `table`, and — only
     /// if this NEWLY learned it — re-flood a CLEAN sourced literal declaration
     /// onward along the SOURCE's spanning tree to self's tree children (excluding
@@ -5383,7 +5383,7 @@ impl LinkstateForwarder {
     /// source. The "only on held"
     /// ([`LinkstatepeerInterest::withdraw`](crate::linkstate_interest::LinkstatepeerInterest::withdraw)
     /// returning `true`) is the change-gate bounding the flood — the exact mirror
-    /// of [`forward_subscription`](Self::forward_subscription)'s "only on new",
+    /// of `forward_subscription`'s "only on new",
     /// so a retraction cannot loop. zenoh
     /// `forget_linkstatepeer_subscription` -> `unregister_peer_subscription` +
     /// `propagate_forget_sourced_subscription`. Resolves the source + re-stamp
@@ -5411,7 +5411,7 @@ impl LinkstateForwarder {
     }
 
     /// A sourced `UndeclareQueryable` arrived on `inbound`: the query-plane twin
-    /// of [`forward_unsubscription`](Self::forward_unsubscription) — same shared
+    /// of `forward_unsubscription` — same shared
     /// [`forward_interest_withdrawal`](Self::forward_interest_withdrawal), only the
     /// body extractor, the interest table ([`qabls`](Self#structfield.qabls)) and
     /// the `UndeclareQueryable` carrier builder differ. The retracted keyexpr rides
@@ -5438,7 +5438,7 @@ impl LinkstateForwarder {
     }
 
     /// The shared sourced-interest-WITHDRAWAL re-flood, SSOT for both the
-    /// subscriber ([`forward_unsubscription`](Self::forward_unsubscription)) and
+    /// subscriber (`forward_unsubscription`) and
     /// the queryable ([`forward_queryable_undeclare`](Self::forward_queryable_undeclare))
     /// planes — the withdrawal twin of
     /// [`forward_interest_declaration`](Self::forward_interest_declaration).
@@ -5590,7 +5590,7 @@ impl LinkstateForwarder {
     /// and re-advertise known subscriptions AND queryables to whatever new
     /// children the recompute produced. The [`tick`](FaceForwarder::tick) calls
     /// this once per coalescing window after
-    /// [`schedule_recompute`](Self::schedule_recompute) marked a topology change
+    /// `schedule_recompute` marked a topology change
     /// pending — so EVERY production recompute funnels through here (zenoh's
     /// `TreesComputationWorker` body: `compute_trees` then `pubsub_tree_change` +
     /// `queries_tree_change`). The `compute_trees` borrow is released before the
@@ -5606,7 +5606,7 @@ impl LinkstateForwarder {
     /// pending-query RETURN route, NOT a tree fan-out. The reply path
     /// ([`forward_response`](Self::forward_response) /
     /// [`forward_response_final`](Self::forward_response_final)) and the timeout
-    /// sweep ([`reap_timed_out_queries`](Self::reap_timed_out_queries)) all route
+    /// sweep (`reap_timed_out_queries`) all route
     /// ONE message back to ONE recorded inbound face — this is the single seam
     /// they share, the broadcast [`fan_out`](Self::fan_out) gated to the one
     /// target so the egress ACL + drop-witness still apply. `build` is the
@@ -6668,7 +6668,7 @@ impl LinkstateForwarder {
     }
 
     /// The number of pending query BRANCHES the timeout sweep has reaped — the
-    /// GC witness ([`reap_timed_out_queries`](Self::reap_timed_out_queries)),
+    /// GC witness (`reap_timed_out_queries`),
     /// rising once per branch abandoned for want of a `ResponseFinal` on a
     /// still-up face (a 2-branch fan expiring counts 2). `0` on a healthy mesh;
     /// a test drives a short timeout to exercise it.
@@ -7205,7 +7205,7 @@ fn relay_answer_for_client(
 /// FRESH budget (`node_count`). Genuinely distinct route semantics (originate vs
 /// re-forward), kept as TWO cores exactly as the codebase keeps
 /// [`LinkstateForwarder::publish`] separate from
-/// [`forward_push`](LinkstateForwarder::forward_push).
+/// `forward_push`.
 ///
 /// Shared by [`LinkstateForwarder::publish`] (`build = build_push_literal`, a
 /// FRESH local sample) and [`RouterForwarder`](crate::router_forward)'s
@@ -7437,7 +7437,7 @@ pub(crate) fn compute_query_directions(
 /// SINGLE nearest COMPLETE queryable for `keyexpr` and return `(graph distance,
 /// tree direction)` — the next-hop neighbour toward it in the SOURCE's tree PLUS
 /// the self-relative graph distance used to rank it — or `None` when no complete
-/// queryable matches (the single-net [`compute_query_directions`] then falls back
+/// queryable matches (the single-net `compute_query_directions` then falls back
 /// to `QueryTarget::All`). "Nearest" is the GRAPH distance from THIS node to the
 /// queryable peer (zenoh's `insert_target_for_qabls` reads `net.distances[qabl_idx]`,
 /// `queries.rs:1107`, NOT the carried declaration distance). The inbound direction
@@ -7606,9 +7606,9 @@ pub(crate) fn build_declare_queryable_with_info(
 /// tree: its `zid` is one of `children` (the next hops), it is NOT the inbound
 /// face, and its zid is not the inbound neighbour's (a parallel link back
 /// toward the source). The single selection predicate shared by every
-/// tree-re-forward path — [`forward_push`](LinkstateForwarder::forward_push)
+/// tree-re-forward path — `forward_push`
 /// (data, directions-filtered `children`),
-/// [`forward_subscription`](LinkstateForwarder::forward_subscription) /
+/// `forward_subscription` /
 /// [`forward_unsubscription`](LinkstateForwarder::forward_unsubscription) /
 /// [`forward_interest_declaration`](LinkstateForwarder::forward_interest_declaration)
 /// (control, all tree `children`), and

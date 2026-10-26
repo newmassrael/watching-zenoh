@@ -9,7 +9,7 @@
 //! Every one of those structs has carried `timestamp` since the option surface
 //! was first laid out, as `*const c_void`, for LAYOUT only. The blocker was not
 //! the plumbing below it — wz has had a body-level timestamp on the publish path
-//! since R232 ([`PublishOptions::with_timestamp`], the `MsgPut`/`MsgDel` T-flag)
+//! since R232 (`PublishOptions::with_timestamp`, the `MsgPut`/`MsgDel` T-flag)
 //! — it was that the TYPE the pointer points at did not exist in this crate, so
 //! there was nothing to dereference and no way for a C program to construct one.
 //! This module is that type plus its three accessors, which is what turns the
@@ -21,7 +21,7 @@
 //! (`zenoh_opaque.h:257-259`) — because its Rust side holds a `uhlc::Timestamp`
 //! and the generator only knows the size. wz declares the same 24 bytes at the
 //! same alignment with its own fields named, which is the convention this crate
-//! already follows for [`z_id_t`](crate::zid::z_id_t): the C contract is the
+//! already follows for [`z_id_t`]: the C contract is the
 //! SIZE and the ALIGNMENT, both of which are asserted below and gated by the
 //! four-arm footprint comparison against upstream's own generator. A C program
 //! cannot see the difference — it only ever holds the struct through the

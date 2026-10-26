@@ -476,7 +476,7 @@ pub unsafe extern "C" fn z_liveliness_get_options_default(
 /// `Declare(DeclToken)` and the snapshot ends with one `DeclFinal`. wz models
 /// that through the engine's `liveliness_get_on_wire`, whose application surface is
 /// already reply-shaped — which is why this maps onto the same
-/// `z_owned_closure_reply_t` and the same [`crate::get::fire_reply`] marshal that
+/// `z_owned_closure_reply_t` and the same `crate::get::fire_reply` marshal that
 /// `z_get` uses, rather than a parallel one.
 ///
 /// Consumes the moved closure on EVERY path (pico's contract), and because the
@@ -645,7 +645,7 @@ pub(crate) unsafe fn declare_background_liveliness_subscriber(
 /// R311y559 — the BACKGROUND form of [`z_liveliness_declare_subscriber`]. It
 /// takes the same arguments minus the handle slot and installs the same
 /// subscription; the difference is ownership, not behaviour. See
-/// [`declare_background_liveliness_subscriber`] for how "lives for the
+/// `declare_background_liveliness_subscriber` for how "lives for the
 /// session" is implemented.
 ///
 /// # Safety

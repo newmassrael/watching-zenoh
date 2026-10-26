@@ -5,7 +5,7 @@
 //! codes.
 //!
 //! Neither the drive machinery nor the reading of the config is here. The drive is
-//! [`wz_capi_core::drive`](wz_capi_core::drive), shared with the zenoh-pico ABI, and what a config
+//! [`wz_capi_core::drive`], shared with the zenoh-pico ABI, and what a config
 //! document means for an open (the role, the endpoints, the phases, the security, and every
 //! refusal) is [`wz_capi_core::open_plan::OpenPlan`], one value for every client of the engine.
 //! This module is only the shim: hand the core the keys this ABI's flat config store holds, add

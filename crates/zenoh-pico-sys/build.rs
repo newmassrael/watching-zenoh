@@ -46,6 +46,21 @@ include!("src/cmake_cache.rs");
 // shared with the crate for the same reason.
 include!("src/platform_map.rs");
 
+// What bindgen is told to do with the comment above each declaration, shared with the
+// crate so the rule is tested.
+include!("src/rustdoc_comment.rs");
+
+/// bindgen's callbacks: the comment above a C declaration reaches the binding's doc
+/// comment through `rustdoc_safe`, so a diagram in a pico header cannot be read as a link.
+#[derive(Debug)]
+struct SafeComments;
+
+impl bindgen::callbacks::ParseCallbacks for SafeComments {
+    fn process_comment(&self, comment: &str) -> Option<String> {
+        Some(rustdoc_safe(comment))
+    }
+}
+
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     // `dunce::canonicalize` and not `Path::canonicalize`: on Windows the standard
@@ -139,6 +154,7 @@ fn main() {
     });
 
     let bindings = bindgen::Builder::default()
+        .parse_callbacks(Box::new(SafeComments))
         .header(main_header)
         .clang_arg(format!("-I{}", include_dir.display()))
         .clang_arg(format!("-I{}", installed_include.display()))

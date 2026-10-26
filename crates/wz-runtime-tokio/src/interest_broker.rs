@@ -22,15 +22,15 @@
 //! Three events retire a pending entry, and this module models all three:
 //!
 //! 1. the upstream's own `Declare(DeclFinal)` carrying the propagated id
-//!    (`dispatcher/interests.rs:79-94` `declare_final`) — [`resolve`];
+//!    (`dispatcher/interests.rs:79-94` `declare_final`) — `resolve`;
 //! 2. the upstream FACE dying before it answered
-//!    (`finalize_pending_interests`, :96-104) — [`drain_face`];
+//!    (`finalize_pending_interests`, :96-104) — `drain_face`;
 //! 3. the interest TIMEOUT — `CurrentInterestCleanup` (:131-188), the GC this
-//!    atom is named for — [`expired`].
+//!    atom is named for — `expired`.
 //!
 //! All three converge on the same act: drop this upstream's reference and, when
 //! it was the last one for that downstream interest, hand the caller the
-//! [`CurrentInterest`] so it can send the `DeclareFinal` DOWNSTREAM. That is the
+//! `CurrentInterest` so it can send the `DeclareFinal` DOWNSTREAM. That is the
 //! one place a wz-side interest unwind puts bytes on the wire toward a REMOTE
 //! face, which is what makes the atom foreign-observable at all.
 //!
@@ -40,9 +40,9 @@
 //! ONE `DeclareFinal` — after the last upstream, not the first. zenoh gets this
 //! from `Arc` strong counts; wz has no shared ownership here (the forwarder is a
 //! single-threaded actor holding everything in `RefCell`s), so the count is
-//! explicit: [`outstanding`](PendingCurrentInterests::outstanding) maps the
+//! explicit: `outstanding` maps the
 //! DOWNSTREAM key to how many upstream entries still reference it, and only the
-//! transition to zero yields a [`CurrentInterest`].
+//! transition to zero yields a `CurrentInterest`.
 //!
 //! ## Clock
 //!
@@ -79,7 +79,7 @@ pub(crate) struct CurrentInterest {
 /// One propagated upstream copy of a downstream client's CURRENT interest.
 struct PendingEntry {
     interest: CurrentInterest,
-    /// The instant [`expired`](PendingCurrentInterests::expired) abandons this
+    /// The instant `expired`(PendingCurrentInterests::expired) abandons this
     /// entry at — zenoh's `interests_timeout` applied per propagated copy.
     deadline: Instant,
 }
@@ -97,7 +97,7 @@ pub(crate) struct PendingCurrentInterests {
     /// The id generator for propagated copies. Monotonic per node, never reused
     /// while an entry holds it (zenoh's per-face `next_id` counter).
     next_id: u64,
-    /// Count of entries abandoned by [`expired`] — the GC witness, the interest
+    /// Count of entries abandoned by `expired` — the GC witness, the interest
     /// twin of the pending-QUERY sweep's `timed_out`.
     timed_out: usize,
 }

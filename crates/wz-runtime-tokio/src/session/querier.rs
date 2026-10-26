@@ -23,7 +23,7 @@ pub(crate) use wz_session_core::query_options::DEFAULT_QUERY_TIMEOUT_MS;
 /// zenoh-pico's `z_liveliness_get_options_t` (currently the timeout only).
 ///
 /// R311y326 — `timeout_ms == 0` is the "use the default" sentinel, resolved by
-/// [`Self::effective_timeout_ms`] to [`DEFAULT_QUERY_TIMEOUT_MS`]. This doc
+/// `Self::effective_timeout_ms` to [`DEFAULT_QUERY_TIMEOUT_MS`]. This doc
 /// previously called `0` a "no timeout" sentinel under which "the pending get
 /// never expires". RETRACTED: that was the liveliness twin of the R311y325
 /// §LEG A client-default defect. pico does NOT offer a never-expire liveliness
@@ -36,7 +36,7 @@ pub(crate) use wz_session_core::query_options::DEFAULT_QUERY_TIMEOUT_MS;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LivelinessGetOptions {
     /// Snapshot timeout in milliseconds. `0` = use the platform default
-    /// ([`DEFAULT_QUERY_TIMEOUT_MS`], via [`Self::effective_timeout_ms`]); any
+    /// ([`DEFAULT_QUERY_TIMEOUT_MS`], via `Self::effective_timeout_ms`); any
     /// value arms the driver-loop sweep to terminate the get if the peer never
     /// terminates the snapshot, so the pending slot cannot leak.
     /// R311y323 — the sweep fires `on_timeout`, not a bare `on_final`: an
@@ -47,7 +47,7 @@ pub struct LivelinessGetOptions {
 
 impl LivelinessGetOptions {
     /// Default options — `timeout_ms = 0` (the "use the default" sentinel;
-    /// [`Self::effective_timeout_ms`] resolves it to
+    /// `Self::effective_timeout_ms` resolves it to
     /// [`DEFAULT_QUERY_TIMEOUT_MS`]). Mirrors zenoh-pico's
     /// `z_liveliness_get_options_default`, whose `0` `z_liveliness_get` likewise
     /// rewrites to the default before issuing.
@@ -56,7 +56,7 @@ impl LivelinessGetOptions {
     }
 
     /// Builder — set the snapshot `timeout_ms`. `0` selects the platform
-    /// default rather than never-expire (see [`Self::effective_timeout_ms`]).
+    /// default rather than never-expire (see `Self::effective_timeout_ms`).
     pub fn with_timeout_ms(mut self, timeout_ms: u32) -> Self {
         self.timeout_ms = timeout_ms;
         self

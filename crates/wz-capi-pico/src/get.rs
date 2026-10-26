@@ -17,9 +17,9 @@
 //! (`_z_query`/`_z_trigger_query_reply_final`, and `_z_drop_handler_execute`
 //! directly when `remaining_finals == 0`, `src/net/primitives.c:560-562`). Here
 //! that signal is carried by the refcount of the shared
-//! [`Arc<CReplyClosure>`][CReplyClosure]: each face's pending query holds a
+//! `Arc<CReplyClosure>`: each face's pending query holds a
 //! clone through its `on_reply` closure, and the last release runs
-//! [`crate::ffi::CClosure`]'s `Drop` → the C `drop(context)`.
+//! `crate::ffi::CClosure`'s `Drop` → the C `drop(context)`.
 //!
 //! An N-finals COUNTER — the obvious alternative — is not merely inelegant, it
 //! is WRONG here, and the difference is a hang. A face that dies mid-flight
@@ -190,10 +190,10 @@ pub struct z_query_consolidation_t {
 /// R311y326 — wz now agrees on this build. `QueryOptions::effective_timeout_ms`
 /// resolves `timeout_ms == 0` to `DEFAULT_QUERY_TIMEOUT_MS`, and this crate
 /// composes `query-timeout` (Cargo.toml), so C's `0` would resolve to the same
-/// 10s whether or not [`get_timeout_ms`] rewrote it. This doc previously said
+/// 10s whether or not `get_timeout_ms` rewrote it. This doc previously said
 /// wz's `0` meant the OPPOSITE (never-expire, leaking the pending entry) — that
 /// held only before y326 and only on a `query-timeout`-off build. The rewrite in
-/// [`get_timeout_ms`] is now belt-and-suspenders on this build; see there for
+/// `get_timeout_ms` is now belt-and-suspenders on this build; see there for
 /// the half that is still load-bearing (the `u64 -> u32` saturation).
 pub const Z_GET_TIMEOUT_DEFAULT: u64 = 10_000;
 
@@ -707,7 +707,7 @@ pub struct z_get_options_t {
     /// Cancelling the token unregisters this get's pending replies on every
     /// face; an ALREADY-cancelled token fails the call with `Z_ERR_CANCELLED`
     /// and sends no Query, both mirroring upstream (see
-    /// [`crate::get::fan_get`]).
+    /// `crate::get::fan_get`).
     #[cfg(feature = "unstable-api")]
     pub cancellation_token: *mut crate::cancellation::z_moved_cancellation_token_t,
     pub accept_replies: z_reply_keyexpr_t,
@@ -1488,7 +1488,7 @@ impl LegReply {
 ///
 /// Of `options`: `payload`, `attachment`, `target`, `timeout_ms` and
 /// `accept_replies` are honoured — the last on BOTH halves (the `_anyke`
-/// selector append and the receive-side [`ReplyGate`]).
+/// selector append and the receive-side `ReplyGate`).
 ///
 /// `consolidation` is TRANSMITTED but not applied: see `THE CONSOLIDATION
 /// DIVERGENCE` in the module doc. `encoding` is unreachable (opaque, no exported
@@ -1626,7 +1626,7 @@ impl z_owned_reply_err_t {
 
 /// The ENCODING of an error reply's value (pico `z_reply_err_encoding`).
 ///
-/// Reads through the SAME [`ReplyMarshal`] both producers point at — see
+/// Reads through the SAME `ReplyMarshal` both producers point at — see
 /// [`z_reply_err_loan`] for why the owned form loans its POINTEE rather than
 /// itself, which is what makes one accessor serve both. The encoding lives on
 /// the marshal's sample half because that is where the reply body's E-flag is
@@ -1674,7 +1674,7 @@ pub unsafe extern "C" fn z_reply_err_clone(
 
 /// Borrow an owned reply error (pico `z_reply_err_loan`).
 ///
-/// Hands back the POINTEE — the boxed [`ReplyMarshal`] — not the owned struct's
+/// Hands back the POINTEE — the boxed `ReplyMarshal` — not the owned struct's
 /// own address, which is the same shape `z_reply_loan` and `z_sample_loan` take
 /// (`impl_boxed_element!`). It is load-bearing rather than stylistic: the OTHER
 /// producer of a `z_loaned_reply_err_t` is `z_reply_err(reply)`, which hands
@@ -1803,7 +1803,7 @@ pub unsafe extern "C" fn z_internal_reply_err_check(err: *const z_owned_reply_er
 
 /// Deep-copy a reply into an owned one (pico `z_reply_clone`).
 ///
-/// Routed through the SAME [`clone_reply_marshal`] `z_reply_take_from_loaned`
+/// Routed through the SAME `clone_reply_marshal` `z_reply_take_from_loaned`
 /// uses, so the two cannot diverge; the only difference is that this leaves the
 /// source intact.
 ///

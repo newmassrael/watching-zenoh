@@ -5,7 +5,7 @@
 //!
 //! A querier is exactly that in zenoh, in zenoh-pico and in wz, so
 //! [`z_querier_get`] resolves its three ingredients from the declaration and
-//! then calls the SAME [`issue_get`](crate::get::issue_get) `z_get` does.
+//! then calls the SAME `issue_get` `z_get` does.
 //! Restating the body would have put the receive-side reply gate in two places,
 //! and those two must agree or a reply is silently dropped.
 //!
@@ -391,7 +391,7 @@ pub unsafe extern "C" fn z_querier_id(
 
 /// The keyexpr a querier was declared under (zenoh-c `z_querier_keyexpr`).
 ///
-/// R311y568. Reads the querier's OWN [`KeyexprState`] — the same one
+/// R311y568. Reads the querier's OWN `KeyexprState` — the same one
 /// `z_querier_get` publishes against — rather than a second copy, so the
 /// accessor and the wire cannot disagree about what was declared.
 ///
