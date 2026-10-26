@@ -1372,8 +1372,9 @@ note = "the accepting side's handshake bound; wz holds it at one second, pico's 
 [[upstream_switch]]
 original = "zenoh-pico"
 switch = "FRAG_MAX_SIZE"
-class = "never"
-note = "the largest message pico reassembles; wz bounds reassembly by its own slot size with no switch: open-debt item 926"
+class = "maps"
+anchor = "limit:PICO_FRAG_MAX_BYTES"
+note = "the largest message a session rejoins from fragments, unicast and in a group; a chain that would grow past it is dropped"
 
 [[upstream_switch]]
 original = "zenoh-pico"
@@ -1945,6 +1946,18 @@ help = '''
 How long, in milliseconds, opening a cooperative zenoh-pico session waits for
 the session to be established before the open fails, as zenoh-pico's
 Z_TRANSPORT_CONNECT_TIMEOUT.
+'''
+
+[[limit]]
+id = "PICO_FRAG_MAX_BYTES"
+kconfig = "WZ_LIMIT_PICO_FRAG_MAX_BYTES"
+default = 4096
+help = '''
+The largest message, in bytes, a session of the zenoh-pico interface rejoins
+from fragments, unicast and in a multicast group, as zenoh-pico's
+FRAG_MAX_SIZE. A fragment that would take its message past it ends the chain
+and the message is dropped; a message that arrives in one frame is never
+measured against it.
 '''
 
 # A policy is behaviour upstream does not have; it is declared with what upstream does and

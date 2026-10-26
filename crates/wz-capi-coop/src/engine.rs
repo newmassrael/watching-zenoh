@@ -149,6 +149,9 @@ pub struct CoopConfig {
     pub batch_size: u16,
     /// The lease the session advertises, in milliseconds.
     pub lease_ms: u64,
+    /// What the session rejoins from fragments: a chain a fragment would take past its
+    /// `max_message_size` is dropped.
+    pub link_rx: LinkRxConf,
     /// The transmit model of the ABI the session stands for.
     pub tx_queue: TxQueueConf,
     /// The handshake's deadlines.
@@ -636,7 +639,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 initial_sn: 0,
                 cookie: Vec::new(),
                 tx_queue: self.config.tx_queue,
-                link_rx: LinkRxConf::default(),
+                link_rx: self.config.link_rx,
                 cookie_signing_key: SigningKey::from_entropy(&mut *self.entropy)
                     .map_err(|_| OpenError::EntropyUnavailable)?,
             };

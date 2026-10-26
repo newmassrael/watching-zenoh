@@ -72,7 +72,7 @@ use crate::result::{ZResult, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK};
 use wz_capi_core::drive::{
     open_blocking, CapiTlsConfig, DialPhase, OpenError, OpenStance, SessionState,
 };
-use wz_session_core::session_init_params::TxQueueConf;
+use wz_session_core::session_init_params::{LinkRxConf, TxQueueConf};
 use wz_session_core::WhatAmI;
 
 /// Open-debt item 913 — whether a `listen` endpoint names a multicast group: a `udp/`
@@ -104,6 +104,15 @@ const fn pico_batch(bytes: usize) -> u16 {
     );
     bytes as u16
 }
+
+/// What a session of this ABI rejoins from fragments, unicast and in a group, on either engine:
+/// pico's `FRAG_MAX_SIZE` as the build states it, whose rule is upstream's
+/// `transport/link/rx/max_message_size` (a chain a fragment would take past it is dropped,
+/// `vendor/zenoh-pico/src/transport/unicast/rx.c` @
+/// `if ((_z_wbuf_len(dbuf) + msg->_payload.len) > Z_FRAG_MAX_SIZE) {`).
+const PICO_LINK_RX: LinkRxConf = LinkRxConf {
+    max_message_size: wz_session_core::caps::PICO_FRAG_MAX_BYTES,
+};
 
 /// The cooperative engine's read wait, in milliseconds: a number of [`wz_session_core::caps`],
 /// refused when the build is made if it is past what the engine's wait holds.
@@ -592,6 +601,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             // zenoh's 65535, so this advertises the numbers the build states for them.
             batch_size: pico_batch(wz_session_core::caps::PICO_UNICAST_BATCH_BYTES),
             lease_ms: wz_session_core::caps::PICO_LEASE_MS as u64,
+            link_rx: PICO_LINK_RX,
             // pico negotiates no transport capability on unicast: its InitSyn
             // carries the patch ext and nothing else
             // (`vendor/zenoh-pico/src/protocol/codec/transport.c` @
@@ -728,10 +738,11 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
             zid: None,
             // The numbers of pico's value build switches, as this build states them: the
             // batch size and lease its InitSyn carries (`BATCH_UNICAST_SIZE`,
-            // `Z_TRANSPORT_LEASE`) and its handshake's receive deadline
-            // (`Z_TRANSPORT_CONNECT_TIMEOUT`).
+            // `Z_TRANSPORT_LEASE`), the largest message it rejoins (`FRAG_MAX_SIZE`) and its
+            // handshake's receive deadline (`Z_TRANSPORT_CONNECT_TIMEOUT`).
             batch_size: pico_batch(wz_session_core::caps::PICO_UNICAST_BATCH_BYTES),
             lease_ms: wz_session_core::caps::PICO_LEASE_MS as u64,
+            link_rx: PICO_LINK_RX,
             tx_queue: TxQueueConf::pico(),
             timeouts: wz_session_core::session_timeouts::SessionTimeouts::spec_defaults(),
             open_timeout_ms: wz_session_core::caps::PICO_CONNECT_TIMEOUT_MS as u64,

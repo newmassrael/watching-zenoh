@@ -1617,10 +1617,13 @@ impl SharedSession {
         let params = crate::drive::init_params(
             wz_runtime_tokio::session_glue::WhatAmI::Peer,
             zid,
-            crate::drive::LinkTx {
-                queue: wz_runtime_tokio::session_glue::TxQueueConf::default(),
-                batch_size: crate::drive::DEFAULT_BATCH_SIZE,
-                lease_ms: crate::drive::DEFAULT_LEASE_MS,
+            crate::drive::LinkConf {
+                tx: crate::drive::LinkTx {
+                    queue: wz_runtime_tokio::session_glue::TxQueueConf::default(),
+                    batch_size: crate::drive::DEFAULT_BATCH_SIZE,
+                    lease_ms: crate::drive::DEFAULT_LEASE_MS,
+                },
+                rx: wz_runtime_tokio::session_glue::LinkRxConf::default(),
             },
         )?;
         let actions = new_session_actions(driver, params, clock);

@@ -468,6 +468,7 @@ fn config(router: &Router) -> CoopConfig {
         zid: Some(vec![0xb1; 4]),
         batch_size: 1024,
         lease_ms: 10_000,
+        link_rx: LinkRxConf::default(),
         tx_queue: TxQueueConf::pico(),
         timeouts: SessionTimeouts::spec_defaults(),
         open_timeout_ms: 5_000,

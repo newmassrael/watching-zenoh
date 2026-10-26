@@ -16,10 +16,21 @@
 //! republished until the acceptor's closure reports it, bounded, so a
 //! propagation delay retries and a genuine loss fails fast.
 //!
-//! The 200- and 65000-byte cases ride a single batch and passed before the
-//! fix; they stay in the table as the calibration that the harness itself
-//! delivers, so a red on 131072 / 262144 is the fragmentation gap and not a
-//! broken fixture.
+//! The acceptor is this crate, so it rejoins what pico rejoins: no message past
+//! pico's `FRAG_MAX_SIZE` as the build states it
+//! (`wz_session_core::caps::PICO_FRAG_MAX_BYTES`, 4096 by default). A chain past
+//! that is dropped on arrival and the session goes on, as pico drops it
+//! (`vendor/zenoh-pico/src/transport/unicast/rx.c` @
+//! `if ((_z_wbuf_len(dbuf) + msg->_payload.len) > Z_FRAG_MAX_SIZE) {`), and its
+//! `z_put` still returns `Z_OK`: pico's sender fragments a message of any size
+//! and cannot know the peer's ceiling. So this file asserts both halves of pico's
+//! behaviour. Chains past the ceiling and up to the slot a wz receiver rejoins are
+//! measured where the receiver rejoins them, the zenoh-c ABI's
+//! `tests/fragmentation_roundtrip.rs`.
+//!
+//! The 200-byte case rides a single batch and passed before the fix; it stays in
+//! the table as the calibration that the harness itself delivers, so a red on the
+//! fragmented size is the fragmentation gap and not a broken fixture.
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -38,22 +49,31 @@ use wz_capi_pico::{
     Z_CONFIG_CONNECT_KEY, Z_CONFIG_LISTEN_KEY, Z_OK,
 };
 
-/// Payload sizes under test, in publish order.
-///
-/// 200 and 65000 sit inside the negotiated 65535-byte batch (the sizes
-/// R311y484 measured as reaching the wire). 131072 and 262144 are the two
-/// that produced zero wire bytes; they require TX fragmentation on the
-/// publisher and reassembly on the subscriber.
-/// 1044480 is the boundary case, and it is here to check the UNIT of the
-/// sender's refusal, not just its existence. The sender refuses a chain whose
-/// reassembled body exceeds the AP slot cap; the receiver stages that same
-/// body. If those two were measuring different things — the framed bytes on
-/// one side, the caller's payload on the other — there would be a band just
-/// under the cap that the sender accepts and the receiver still drops, which
-/// is the silent loss this round exists to remove. This size sits in that
-/// band (4 KiB under 1 MiB, so its envelope cannot push it over), and it must
-/// arrive.
-const SIZES: &[usize] = &[200, 65_000, 131_072, 262_144, 1_044_480];
+/// The largest message the acceptor rejoins from fragments, in bytes.
+const CEILING: usize = wz_session_core::caps::PICO_FRAG_MAX_BYTES;
+
+/// The payload of the largest put the test expects rejoined: the ceiling less
+/// the message's encoding beside its payload (the key and the headers, a few
+/// dozen bytes), so its message is within the ceiling whatever the key costs.
+const UNDER: usize = CEILING - 256;
+
+/// Payload sizes the acceptor must rejoin, in publish order: 200 rides one
+/// batch, and [`UNDER`] needs TX fragmentation on the publisher and reassembly
+/// on the subscriber.
+const SIZES: &[usize] = &[200, UNDER];
+
+/// A payload whose message is past the ceiling by its whole encoding: dropped.
+const PAST: usize = CEILING + 1;
+
+/// The put after the dropped one, which shows the session survived the drop.
+const AFTER: usize = 300;
+
+/// The fixture's sizes are what it claims of them, for the numbers this build
+/// states: [`UNDER`] fragments.
+const _: () = assert!(
+    UNDER > wz_session_core::caps::PICO_UNICAST_BATCH_BYTES,
+    "the rejoined size must be past one batch, or nothing fragments"
+);
 
 /// Deterministic, size-dependent filler: a same-length payload of a different
 /// size never collides, and a truncated delivery cannot masquerade as a whole
@@ -93,8 +113,32 @@ unsafe extern "C" fn on_drop(ctx: *mut c_void) {
 
 use wz_runtime_tokio_test_support::free_port;
 
+/// One `z_put` of `payload` on `key`, asserting it returns `Z_OK`.
+unsafe fn put(session: &z_owned_session_t, key: &std::ffi::CStr, payload: &[u8]) {
+    let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+    assert_eq!(z_view_keyexpr_from_str(&mut ke, key.as_ptr()), Z_OK);
+    let mut bytes = std::mem::zeroed();
+    assert_eq!(
+        z_bytes_copy_from_buf(&mut bytes, payload.as_ptr(), payload.len()),
+        Z_OK,
+        "z_bytes_copy_from_buf failed for {} bytes",
+        payload.len()
+    );
+    assert_eq!(
+        z_put(
+            z_session_loan(session),
+            z_view_keyexpr_loan(&ke),
+            wz_capi_pico::z_bytes_move(&mut bytes),
+            std::ptr::null(),
+        ),
+        Z_OK,
+        "z_put returned an error for {} bytes",
+        payload.len()
+    );
+}
+
 #[test]
-fn oversize_put_is_fragmented_and_delivered_whole() {
+fn a_fragmented_put_is_rejoined_up_to_the_ceiling_and_dropped_past_it() {
     let port = free_port();
     let listen = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
     let connect = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
@@ -216,31 +260,28 @@ fn oversize_put_is_fragmented_and_delivered_whole() {
                 got = true;
                 break;
             }
-            unsafe {
-                let mut ke: z_view_keyexpr_t = std::mem::zeroed();
-                assert_eq!(z_view_keyexpr_from_str(&mut ke, ke_str.as_ptr()), Z_OK);
-                let mut payload = std::mem::zeroed();
-                assert_eq!(
-                    z_bytes_copy_from_buf(&mut payload, expected.as_ptr(), expected.len()),
-                    Z_OK,
-                    "z_bytes_copy_from_buf failed for {size} bytes"
-                );
-                assert_eq!(
-                    z_put(
-                        z_session_loan(&session),
-                        z_view_keyexpr_loan(&ke),
-                        wz_capi_pico::z_bytes_move(&mut payload),
-                        std::ptr::null(),
-                    ),
-                    Z_OK,
-                    "z_put returned an error for {size} bytes"
-                );
-            }
+            unsafe { put(&session, &ke_str, &expected) };
             std::thread::sleep(Duration::from_millis(20));
         }
         if !got {
             missing.push(size);
         }
+    }
+
+    // Past the ceiling: published, accepted by `z_put` (asserted in `put`), and
+    // dropped by the acceptor. The put after it rides the same reliable conduit,
+    // so once it has arrived the acceptor has read every fragment of the dropped
+    // chain before it, and the absence below is a verdict and not an impatience.
+    unsafe { put(&session, c"frag/past", &payload_of(PAST)) };
+    let after = payload_of(AFTER);
+    let mut recovered = false;
+    for _ in 0..150 {
+        if delivered.lock().unwrap().contains_key(&AFTER) {
+            recovered = true;
+            break;
+        }
+        unsafe { put(&session, c"frag/after", &after) };
+        std::thread::sleep(Duration::from_millis(20));
     }
 
     done.store(true, Ordering::SeqCst);
@@ -271,6 +312,16 @@ fn oversize_put_is_fragmented_and_delivered_whole() {
              (reassembly reordered or corrupted the chain)"
         );
     }
+    assert!(
+        recovered,
+        "the session stopped delivering after a chain past the {CEILING}-byte \
+         ceiling: pico drops that chain and goes on"
+    );
+    assert!(
+        !delivered.lock().unwrap().contains_key(&PAST),
+        "a {PAST}-byte message was rejoined past the {CEILING}-byte ceiling \
+         this build states for pico's FRAG_MAX_SIZE, which pico drops"
+    );
 
     unsafe {
         z_close(z_session_loan_mut(&mut session), std::ptr::null());
@@ -290,10 +341,12 @@ fn oversize_put_is_fragmented_and_delivered_whole() {
 /// returns unless the sender refuses locally.
 ///
 /// It CAN refuse locally, and only locally: a peer's cap is not observable, but
-/// this profile's own is, and in the pico C-ABI topology both ends are this
-/// crate. So the contract asserted here is the locally decidable one — a put
-/// this profile could never reassemble must report an error rather than a
-/// success that silently goes nowhere.
+/// the slot a wz receiver rejoins into is this build's own. So the contract
+/// asserted here is the locally decidable one — a put no wz receiver could ever
+/// reassemble must report an error rather than a success that silently goes
+/// nowhere. A peer's lower ceiling, pico's `FRAG_MAX_SIZE` among them, is that
+/// peer's: pico's own sender returns `Z_OK` for a chain its peer drops, and the
+/// test above holds the drop.
 #[test]
 fn a_put_too_large_to_reassemble_reports_an_error_instead_of_z_ok() {
     let port = free_port();
@@ -434,7 +487,6 @@ fn a_put_too_large_to_reassemble_reports_an_error_instead_of_z_ok() {
     // reveals the size), so it leaves a 1-SN gap in that conduit's ring. If
     // the peer's half-window check did not tolerate the gap, THIS put — an
     // ordinary one, after the refusal — would never arrive.
-    const AFTER: usize = 4096;
     let after_payload = payload_of(AFTER);
     let mut recovered = false;
     for _ in 0..150 {

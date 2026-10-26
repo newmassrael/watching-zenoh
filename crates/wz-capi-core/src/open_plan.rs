@@ -33,7 +33,7 @@
 use wz_runtime_tokio::node_clock::TimestampingEnabled;
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::session::LocalDeliveryDrain;
-use wz_runtime_tokio::session_glue::{TxQueueConf, WhatAmI};
+use wz_runtime_tokio::session_glue::{LinkRxConf, TxQueueConf, WhatAmI};
 use wz_runtime_tokio::session_open::{SessionOffer, TransportMode};
 use wz_runtime_tokio::startup_phase::PhasePolicy;
 use wz_runtime_tokio::zenoh_config::{
@@ -45,7 +45,7 @@ use wz_runtime_tokio::zenoh_config::{
 use crate::drive::{
     names_a_group, open_blocking, CapiTlsConfig, ConfiguredZid, DialPhase, FaceDrive,
     GroupDeclarations, GroupJoin, GroupProfile, ListenPhase, OpenError, OpenStance, SessionState,
-    DEFAULT_BATCH_SIZE,
+    DEFAULT_BATCH_SIZE, DEFAULT_LEASE_MS,
 };
 use crate::faces::OpenShmClients;
 use crate::gossip::GossipPolicy;
@@ -498,6 +498,12 @@ pub struct OpenPlan {
     /// is negotiated down against (the smaller wins) and a frame past which is sent as fragments.
     /// A config that states none is zenoh's default.
     pub batch_size: u16,
+    /// The lease the session ADVERTISES, in milliseconds: `transport/link/tx/lease`, the one its
+    /// groups' Joins already carried. A config that states none is zenoh's default.
+    pub lease_ms: u64,
+    /// What the session's links rejoin from fragments: `transport/link/rx/max_message_size`. A
+    /// config that states none is zenoh's default.
+    pub link_rx: LinkRxConf,
     /// What the links offer at the handshake, without shared memory.
     pub offer: SessionOffer,
     /// The `transport/shared_memory` keys. Facts about the document; whether they reach the
@@ -553,6 +559,10 @@ impl OpenPlan {
         let batch_size = node
             .as_ref()
             .map_or(DEFAULT_BATCH_SIZE, |node| node.batch_size);
+        let lease_ms = node.as_ref().map_or(DEFAULT_LEASE_MS, |node| node.lease_ms);
+        let link_rx = node
+            .as_ref()
+            .map_or_else(LinkRxConf::default, |node| node.link_rx);
         let dial = node.as_ref().map(|node| dial_phase(node, role));
         // R3076 -- what an endpoint that cannot be bound does to the open (`listen/exit_on_failure`
         // for this node's role, true when the document says nothing, as upstream's default is),
@@ -746,6 +756,8 @@ impl OpenPlan {
             dial,
             listen_phase,
             batch_size,
+            lease_ms,
+            link_rx,
             offer,
             shm,
             zid,
@@ -787,6 +799,11 @@ impl OpenPlan {
         line(format!("dial: {:?}", self.dial));
         line(format!("listen_phase: {:?}", self.listen_phase));
         line(format!("batch_size: {}", self.batch_size));
+        line(format!("lease_ms: {}", self.lease_ms));
+        line(format!(
+            "max_message_size: {}",
+            self.link_rx.max_message_size
+        ));
         // The three facts of the offer a document decides, and not its `Debug`: a build that carries
         // the shared-memory protocols adds a list of them to the type, and a description that held
         // the list would differ with the features it is built with.
@@ -840,7 +857,8 @@ impl OpenPlan {
             stance: OpenStance {
                 tx_queue: abi.tx_queue,
                 batch_size: self.batch_size,
-                lease_ms: crate::drive::DEFAULT_LEASE_MS,
+                lease_ms: self.lease_ms,
+                link_rx: self.link_rx,
                 offer,
                 zid: self.zid,
                 start_read_task: abi.start_read_task,
@@ -1076,6 +1094,38 @@ mod tests {
             assert!(plan(true).into_arguments(abi(true)).stance.offer.shm);
             assert!(!plan(false).into_arguments(abi(true)).stance.offer.shm);
         }
+    }
+
+    /// The lease and the largest rejoined message a document states reach the session's stance,
+    /// and a document that states neither gives zenoh's defaults: the stance carried a constant
+    /// lease and no receive half before, so both keys were read and dropped.
+    #[test]
+    fn the_lease_and_the_rejoin_ceiling_a_document_states_reach_the_stance() {
+        let stance = |document: &str| {
+            plan_of(WhatAmI::Client, &["tcp/127.0.0.1:7447"], &[], document)
+                .expect("a client with an endpoint opens")
+                .into_arguments(AbiChoices {
+                    tx_queue: TxQueueConf::default(),
+                    start_read_task: true,
+                    local_delivery: LocalDeliveryDrain::Caller,
+                    initial_interest: true,
+                    face_drive: FaceDrive::PerFace,
+                    shm_clients: crate::faces::no_shm_clients(),
+                    offer_shm: false,
+                    groups_report_shm: false,
+                })
+                .stance
+        };
+        let stated = stance(
+            r#"{ transport: { link: { tx: { lease: 4000 }, rx: { max_message_size: 4096 } } } }"#,
+        );
+        assert_eq!(stated.lease_ms, 4000);
+        assert_eq!(stated.link_rx.max_message_size, 4096);
+        // Control: the same open with neither key is zenoh's defaults, so the numbers above are
+        // the document's and not the plan's own.
+        let silent = stance("{}");
+        assert_eq!(silent.lease_ms, DEFAULT_LEASE_MS);
+        assert_eq!(silent.link_rx, LinkRxConf::default());
     }
 
     /// The role is read from the `mode` key, and the default is the build's.
@@ -1342,6 +1392,8 @@ mod tests {
                  listen_phase: ListenPhase {{ policy: PhasePolicy {{ budget: PhaseBudget(0), \
                  exit_on_failure: true }}, schedule: {SCHEDULE} }}\n\
                  batch_size: 65535\n\
+                 lease_ms: 10000\n\
+                 max_message_size: 1073741824\n\
                  offer: mode=Qos compression=false shm=false\n\
                  shm: ShmKeys {{ enabled: true, transport_optimization: true, pool_size: 16777216 }}\n\
                  zid: None\n\

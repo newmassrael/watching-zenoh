@@ -276,6 +276,87 @@ fn a_put_past_the_negotiated_batch_leaves_as_fragments_and_arrives_whole() {
     }
 }
 
+/// Chains of many fragments, up to the largest message a session sends, arrive
+/// whole: the receiver rejoins what the sender let through.
+///
+/// 1044480 is the boundary case, and it is here to check the UNIT of the
+/// sender's refusal, not just its existence. The sender refuses a chain whose
+/// reassembled body exceeds its reassembly slot; the receiver stages that same
+/// body. If those two were measuring different things — the framed bytes on
+/// one side, the caller's payload on the other — there would be a band just
+/// under the slot that the sender accepts and the receiver still drops, a loss
+/// no caller could see. This size sits in that band (4 KiB under 1 MiB, so its
+/// envelope cannot push it over), and it must arrive. The receiver is this ABI's
+/// because it rejoins up to zenoh's `transport/link/rx/max_message_size` default
+/// and so up to the slot; zenoh-pico's ABI rejoins no message past pico's
+/// `FRAG_MAX_SIZE`, as pico, and its own test holds that.
+#[test]
+fn a_chain_up_to_the_largest_message_sent_arrives_whole() {
+    const LONG: &[usize] = &[131_072, 262_144, 1_044_480];
+    let port = free_port();
+    let delivered: Delivered = Arc::new(Mutex::new(HashMap::new()));
+    unsafe {
+        let acceptor = open("listen/endpoints", &format!("tcp/127.0.0.1:{port}"));
+        let ctx = Box::into_raw(Box::new(Ctx {
+            delivered: delivered.clone(),
+        })) as *mut c_void;
+        let mut closure: z_owned_closure_sample_t = std::mem::zeroed();
+        z_closure_sample(&mut closure, Some(on_sample), None, ctx);
+        let ke = CString::new(KEYEXPR).unwrap();
+        let mut view: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut view, ke.as_ptr()), Z_OK);
+        let mut sub: z_owned_subscriber_t = std::mem::zeroed();
+        assert_eq!(
+            z_declare_subscriber(
+                z_session_loan(&acceptor),
+                &mut sub,
+                z_view_keyexpr_loan(&view),
+                (&mut closure as *mut z_owned_closure_sample_t).cast::<z_moved_closure_sample_t>(),
+                std::ptr::null_mut(),
+            ),
+            Z_OK
+        );
+        let dialer = open("connect/endpoints", &format!("tcp/127.0.0.1:{port}"));
+        for &size in LONG {
+            let want = payload_of(size);
+            let until = Instant::now() + Duration::from_secs(30);
+            loop {
+                let mut payload: z_owned_bytes_t = std::mem::zeroed();
+                assert_eq!(
+                    z_bytes_copy_from_buf(&mut payload, want.as_ptr(), want.len()),
+                    Z_OK
+                );
+                let mut opts: z_put_options_t = std::mem::zeroed();
+                z_put_options_default(&mut opts);
+                assert_eq!(
+                    z_put(
+                        z_session_loan(&dialer),
+                        z_view_keyexpr_loan(&view),
+                        (&mut payload as *mut z_owned_bytes_t).cast::<z_moved_bytes_t>(),
+                        &mut opts,
+                    ),
+                    Z_OK,
+                    "the put of {size} bytes was refused"
+                );
+                std::thread::sleep(Duration::from_millis(200));
+                if delivered.lock().unwrap().get(&size) == Some(&want) {
+                    break;
+                }
+                assert!(
+                    Instant::now() < until,
+                    "{size} bytes never arrived whole at the subscriber"
+                );
+            }
+        }
+        z_undeclare_subscriber(
+            (&mut sub as *mut z_owned_subscriber_t).cast::<z_moved_subscriber_t>(),
+        );
+        close_session(dialer);
+        close_session(acceptor);
+        drop(Box::from_raw(ctx as *mut Ctx));
+    }
+}
+
 /// The sequence numbers of the reliable Frame and Fragment batches in a stream the
 /// dialer wrote, in order. A transport batch opens with its message header: Frame
 /// is `0x05` and Fragment `0x06`, each with the R flag (`0x20`) for the reliable

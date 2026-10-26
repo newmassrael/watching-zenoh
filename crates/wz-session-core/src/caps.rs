@@ -430,7 +430,8 @@ pub const DECLARATION_SYNC_INTERVAL_MS: usize = generated::DECLARATION_SYNC_INTE
 // to pico's own default (`upstream_switch_map.py` holds that, the `maps` rows of
 // `deploy/wz-config.toml` that anchor to these), so the drop-in's default build states what
 // pico's does, and a pico built with other numbers is matched by stating them
-// (`wz_config.py --env pico <config.h>`). None sizes memory; the two batch sizes bound frames.
+// (`wz_config.py --env pico <config.h>`). None sizes memory; the two batch sizes bound frames, and the fragment ceiling the
+// messages rejoined from them.
 
 /// The batch size a unicast session of the pico ABI advertises, pico's `BATCH_UNICAST_SIZE`
 /// (`vendor/zenoh-pico/src/protocol/definitions/transport.c` @
@@ -456,3 +457,10 @@ pub const PICO_SOCKET_TIMEOUT_MS: usize = generated::PICO_SOCKET_TIMEOUT_MS;
 /// (`vendor/zenoh-pico/src/transport/unicast/transport.c` @
 /// `z_clock_advance_ms(&recv_deadline, Z_TRANSPORT_CONNECT_TIMEOUT);`).
 pub const PICO_CONNECT_TIMEOUT_MS: usize = generated::PICO_CONNECT_TIMEOUT_MS;
+
+/// The largest message, in bytes, a session of the pico ABI rejoins from fragments, unicast and in
+/// a group: pico's `FRAG_MAX_SIZE`, whose rule is upstream's `transport/link/rx/max_message_size`
+/// (`vendor/zenoh-pico/src/transport/unicast/rx.c` @
+/// `if ((_z_wbuf_len(dbuf) + msg->_payload.len) > Z_FRAG_MAX_SIZE) {`), so it is the
+/// [`LinkRxConf`](crate::session_init_params::LinkRxConf) those sessions are given.
+pub const PICO_FRAG_MAX_BYTES: usize = generated::PICO_FRAG_MAX_BYTES;

@@ -350,4 +350,14 @@ config WZ_LIMIT_PICO_CONNECT_TIMEOUT_MS
 	  the session to be established before the open fails, as zenoh-pico's
 	  Z_TRANSPORT_CONNECT_TIMEOUT.
 
+config WZ_LIMIT_PICO_FRAG_MAX_BYTES
+	int "PICO_FRAG_MAX_BYTES"
+	default 4096
+	help
+	  The largest message, in bytes, a session of the zenoh-pico interface rejoins
+	  from fragments, unicast and in a multicast group, as zenoh-pico's
+	  FRAG_MAX_SIZE. A fragment that would take its message past it ends the chain
+	  and the message is dropped; a message that arrives in one frame is never
+	  measured against it.
+
 endmenu

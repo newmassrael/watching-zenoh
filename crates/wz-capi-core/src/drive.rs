@@ -40,8 +40,8 @@ use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session::LocalDeliveryDrain;
 use wz_runtime_tokio::session_glue::{
     drive_session_until_terminal_with_extra_deadline, EntropyUnavailable, ExtraDeadline,
-    IterationEvent, OsEntropy, SessionInitParams, SessionTimeouts, SigningKey, TxQueueConf,
-    WhatAmI,
+    IterationEvent, LinkRxConf, OsEntropy, SessionInitParams, SessionTimeouts, SigningKey,
+    TxQueueConf, WhatAmI,
 };
 #[cfg(feature = "peer")]
 use wz_runtime_tokio::session_open::{bind_endpoint_with_config, AcceptConfig, BoundListener};
@@ -1197,10 +1197,24 @@ pub struct LinkTx {
     pub queue: TxQueueConf,
     /// The batch size advertised, in bytes.
     pub batch_size: u16,
-    /// The lease advertised, in milliseconds. The ABIs state it differently: zenoh-c passes
-    /// [`DEFAULT_LEASE_MS`], and zenoh-pico's ABI the number its build states for pico's
-    /// `Z_TRANSPORT_LEASE`.
+    /// The lease advertised, in milliseconds: see [`OpenStance::lease_ms`].
     pub lease_ms: u64,
+}
+
+/// What a session's links are told, as upstream's `transport/link` block holds it: the transmit
+/// half [`LinkTx`] and the receive half [`LinkRxConf`].
+///
+/// The two halves travel as one value because they are read at the same place, `init_params` (not
+/// linked: it is private), and every role and every group that mints parameters is handed both.
+/// The receive half was `LinkRxConf::default()` there, so neither ABI could bound what its
+/// sessions rejoin from fragments: zenoh-c read `transport/link/rx/max_message_size` and dropped
+/// it, and zenoh-pico's `FRAG_MAX_SIZE` had nowhere to go.
+#[derive(Clone, Copy, Debug)]
+pub struct LinkConf {
+    /// The transmit half.
+    pub tx: LinkTx,
+    /// The receive half: see [`OpenStance::link_rx`].
+    pub rx: LinkRxConf,
 }
 
 /// The batch size a session advertises when its config states none: zenoh's own default
@@ -1223,19 +1237,19 @@ pub const DEFAULT_LEASE_MS: u64 = 10_000;
 pub(crate) fn init_params(
     whatami: WhatAmI,
     zid: Vec<u8>,
-    link_tx: LinkTx,
+    link_conf: LinkConf,
 ) -> Result<SessionInitParams, EntropyUnavailable> {
     Ok(SessionInitParams {
         whatami,
         zid,
         seq_num_res: 2,
         req_id_res: 2,
-        batch_size: link_tx.batch_size,
-        lease_ms: link_tx.lease_ms,
+        batch_size: link_conf.tx.batch_size,
+        lease_ms: link_conf.tx.lease_ms,
         initial_sn: 0,
         cookie: Vec::new(),
-        tx_queue: link_tx.queue,
-        link_rx: wz_runtime_tokio::session_glue::LinkRxConf::default(),
+        tx_queue: link_conf.tx.queue,
+        link_rx: link_conf.rx,
         cookie_signing_key: SigningKey::from_entropy(&mut OsEntropy)?,
     })
 }
@@ -1265,7 +1279,7 @@ struct DriveContext {
     clock: TokioTime,
     /// The transmit model the calling ABI stands for: zenoh's bounded queue for
     /// zenoh-c, pico's blocking write for zenoh-pico. See [`open_blocking`].
-    link_tx: LinkTx,
+    link_conf: LinkConf,
     /// The capabilities the calling ABI's session offers, dialled and accepted
     /// alike. See [`open_blocking`].
     offer: SessionOffer,
@@ -1334,7 +1348,7 @@ fn prepare_dial(
     // R311y820 — fallible the way the step above is: report the open failure to the C caller
     // rather than dial with a cookie key anybody could forge. Minted ONCE, before the phase: it
     // is not a connect failure, so it is not what `connect/retry` re-attempts.
-    let params = init_params(whatami, ctx.zid.to_vec(), ctx.link_tx).ok()?;
+    let params = init_params(whatami, ctx.zid.to_vec(), ctx.link_conf).ok()?;
     let dialer = Arc::new(Dialer {
         dial_cfgs,
         params,
@@ -1437,7 +1451,7 @@ async fn drive_dial(
         shutdown,
         stop,
         clock,
-        link_tx,
+        link_conf,
         offer,
         gate,
         scouting,
@@ -1460,7 +1474,7 @@ async fn drive_dial(
     // R3076 -- every endpoint the config states, in its order, under `listen/exit_on_failure`.
     // R3089 -- and under the budget and the retry of `listen/timeout_ms` and `listen/retry`.
     let BoundListeners { legs: listen, late } =
-        match bind_listeners(&listen, listen_phase, &tls, &zid, link_tx, offer, clock).await {
+        match bind_listeners(&listen, listen_phase, &tls, &zid, link_conf, offer, clock).await {
             Ok(bound) => bound,
             Err(cause) => {
                 let _ = tx.send(Err(cause));
@@ -2899,7 +2913,7 @@ struct LateBinds {
     pending: Vec<PendingBind>,
     tls: CapiTlsConfig,
     zid: Vec<u8>,
-    link_tx: LinkTx,
+    link_conf: LinkConf,
     offer: SessionOffer,
     clock: TokioTime,
     /// Where each listener that binds late is told to the scouting responder; the responder reads
@@ -2957,7 +2971,7 @@ impl LateBinds {
             pending,
             tls,
             zid,
-            link_tx,
+            link_conf,
             offer,
             clock,
             locators,
@@ -2972,7 +2986,7 @@ impl LateBinds {
                 let mut closing = closing.clone();
                 tokio::task::spawn_local(async move {
                     let bound = retry_until_bound(pending.schedule, |_| {
-                        bind_one(&pending.endpoint, &tls, &zid, link_tx)
+                        bind_one(&pending.endpoint, &tls, &zid, link_conf)
                     });
                     let listening = tokio::select! {
                         listening = bound => listening,
@@ -3004,7 +3018,7 @@ impl LateBinds {
             pending,
             tls,
             zid,
-            link_tx,
+            link_conf,
             locators,
             ..
         } = self;
@@ -3018,7 +3032,7 @@ impl LateBinds {
                         let locators = locators.clone();
                         tokio::task::spawn_local(async move {
                             let listening = retry_until_bound(pending.schedule, |_| {
-                                bind_one(&pending.endpoint, &tls, &zid, link_tx)
+                                bind_one(&pending.endpoint, &tls, &zid, link_conf)
                             })
                             .await;
                             // A client that answers a Scout names its listener as it binds.
@@ -3063,9 +3077,9 @@ async fn bind_one(
     endpoint: &str,
     tls: &CapiTlsConfig,
     zid: &[u8],
-    link_tx: LinkTx,
+    link_conf: LinkConf,
 ) -> Result<Listening, OpenError> {
-    bind_listener(endpoint, tls, zid, link_tx).await
+    bind_listener(endpoint, tls, zid, link_conf).await
 }
 
 /// Bind the endpoints a session's `listen` states, in the order the config states them, under the
@@ -3096,14 +3110,14 @@ async fn bind_listeners(
     phase: ListenPhase,
     tls: &CapiTlsConfig,
     zid: &[u8],
-    link_tx: LinkTx,
+    link_conf: LinkConf,
     offer: SessionOffer,
     clock: TokioTime,
 ) -> Result<BoundListeners, OpenError> {
     // A phase that fails names why its last attempt did; one cut off before any answered is a
     // link that did not open.
     let outcome = drive_bind_phase(phase.policy, phase.schedule, endpoints, |position, _| {
-        bind_one(&endpoints[position], tls, zid, link_tx)
+        bind_one(&endpoints[position], tls, zid, link_conf)
     })
     .await
     .map_err(|e| {
@@ -3135,7 +3149,7 @@ async fn bind_listeners(
             pending,
             tls: tls.clone(),
             zid: zid.to_vec(),
-            link_tx,
+            link_conf,
             offer,
             clock,
             locators: LateLocators::default(),
@@ -3156,7 +3170,7 @@ async fn bind_listener(
     endpoint: &str,
     tls: &CapiTlsConfig,
     zid: &[u8],
-    link_tx: LinkTx,
+    link_conf: LinkConf,
 ) -> Result<Listening, OpenError> {
     // Everything that can fail the open runs BEFORE the success signal the
     // caller sends, so a failure is reported to the C caller rather than
@@ -3202,7 +3216,7 @@ async fn bind_listener(
     // the open succeeded, so an entropy failure could only be reported as "no
     // peer ever connects". Built before the bind is announced, it is an ordinary
     // open failure like the two above.
-    let params = init_params(WhatAmI::Peer, zid.to_vec(), link_tx).map_err(|e| {
+    let params = init_params(WhatAmI::Peer, zid.to_vec(), link_conf).map_err(|e| {
         log_open_failure(&format!("session parameters for {endpoint}"), &e);
         OpenError::DriveFailed
     })?;
@@ -3326,7 +3340,7 @@ async fn drive_listen(
         shutdown,
         stop,
         clock,
-        link_tx,
+        link_conf,
         offer,
         gate,
         // A listener that is not also a dialler scouts for nobody (see `open_blocking`'s
@@ -3338,14 +3352,23 @@ async fn drive_listen(
         gossiping: _,
         listen_phase,
     } = ctx;
-    let BoundListeners { legs, late } =
-        match bind_listeners(&endpoints, listen_phase, &tls, &zid, link_tx, offer, clock).await {
-            Ok(bound) => bound,
-            Err(cause) => {
-                let _ = tx.send(Err(cause));
-                return;
-            }
-        };
+    let BoundListeners { legs, late } = match bind_listeners(
+        &endpoints,
+        listen_phase,
+        &tls,
+        &zid,
+        link_conf,
+        offer,
+        clock,
+    )
+    .await
+    {
+        Ok(bound) => bound,
+        Err(cause) => {
+            let _ = tx.send(Err(cause));
+            return;
+        }
+    };
     let listeners: Vec<&BoundListener> = legs.iter().map(|leg| &leg.listening.listener).collect();
     let _findable = match bound_responder(
         scouting.as_ref(),
@@ -3454,6 +3477,9 @@ struct GroupSetup {
     zid: Vec<u8>,
     whatami: WhatAmI,
     tx_queue: TxQueueConf,
+    /// The session's receive half, which bounds what each group rejoins from fragments as it
+    /// bounds the unicast links.
+    link_rx: LinkRxConf,
     /// Where a group that cannot be joined reports the open as failed, before the role
     /// reports anything.
     opened: OpenReport,
@@ -3497,6 +3523,7 @@ impl ResolvedGroup {
         zid: &[u8],
         whatami: WhatAmI,
         tx_queue: TxQueueConf,
+        link_rx: LinkRxConf,
     ) -> Option<Self> {
         let link = Self::link_of(&join.endpoint)?;
         let GroupProfile {
@@ -3522,7 +3549,7 @@ impl ResolvedGroup {
                 batch_size,
                 is_qos,
                 tx_queue,
-                link_rx: wz_runtime_tokio::session_glue::LinkRxConf::default(),
+                link_rx,
             },
         })
     }
@@ -3576,6 +3603,7 @@ async fn serve_beside_groups(setup: GroupSetup, role: impl Future<Output = ()>) 
         zid,
         whatami,
         tx_queue,
+        link_rx,
         opened,
     } = setup;
     if joins.is_empty() {
@@ -3584,7 +3612,7 @@ async fn serve_beside_groups(setup: GroupSetup, role: impl Future<Output = ()>) 
     }
     let Some(groups) = joins
         .iter()
-        .map(|join| ResolvedGroup::resolve(join, &zid, whatami, tx_queue))
+        .map(|join| ResolvedGroup::resolve(join, &zid, whatami, tx_queue, link_rx))
         .collect::<Option<Vec<_>>>()
     else {
         // An endpoint that names no group this build can join: pico's listen of it finds no
@@ -3799,8 +3827,16 @@ pub struct OpenStance {
     /// whose config states none passes [`DEFAULT_BATCH_SIZE`]; zenoh-pico's ABI has no such key
     /// and passes the number its build states for pico's `BATCH_UNICAST_SIZE`.
     pub batch_size: u16,
-    /// The lease the session advertises at its handshake, in milliseconds; see [`LinkTx`].
+    /// The lease the session advertises at its handshake, in milliseconds; see [`LinkTx`]. A
+    /// zenoh-c session reads it from `transport/link/tx/lease` and one whose config states none
+    /// passes [`DEFAULT_LEASE_MS`]; zenoh-pico's ABI passes the number its build states for pico's
+    /// `Z_TRANSPORT_LEASE`.
     pub lease_ms: u64,
+    /// What the session's links, unicast and every group's, rejoin from fragments; see
+    /// [`LinkConf`]. A zenoh-c session reads it from `transport/link/rx/max_message_size` and one
+    /// whose config states none passes [`LinkRxConf::default`]; zenoh-pico's ABI has no such key
+    /// and passes the number its build states for pico's `FRAG_MAX_SIZE`.
+    pub link_rx: LinkRxConf,
     /// What the session's links offer at their handshake, every dialled link and
     /// every accepted one alike: the other half of the same fact. A zenoh-c
     /// session offers what its config enables — QoS, and shared memory on the
@@ -4090,6 +4126,7 @@ pub fn open_blocking(
         tx_queue,
         batch_size,
         lease_ms,
+        link_rx,
         offer,
         zid,
         start_read_task,
@@ -4131,10 +4168,13 @@ pub fn open_blocking(
     if !listen.is_empty() || dial_whatami != WhatAmI::Client || (connect.is_empty() && !scouts) {
         return Err(OpenError::DriveFailed);
     }
-    let link_tx = LinkTx {
-        queue: tx_queue,
-        batch_size,
-        lease_ms,
+    let link_conf = LinkConf {
+        tx: LinkTx {
+            queue: tx_queue,
+            batch_size,
+            lease_ms,
+        },
+        rx: link_rx,
     };
     let clock = TokioTime::new();
     // R3074 -- where the nodes a peer is told of are posted. Made here because both ends are
@@ -4247,7 +4287,8 @@ pub fn open_blocking(
                 shared: drive_shared.clone(),
                 zid: wire_zid.clone(),
                 whatami: dial_whatami,
-                tx_queue: link_tx.queue,
+                tx_queue: link_conf.tx.queue,
+                link_rx: link_conf.rx,
                 opened: tx.clone(),
             };
             let ctx = DriveContext {
@@ -4257,7 +4298,7 @@ pub fn open_blocking(
                 shutdown: drive_shutdown,
                 stop: drive_stop,
                 clock,
-                link_tx,
+                link_conf,
                 offer,
                 gate: drive_gate.clone(),
                 #[cfg(feature = "scout")]
@@ -4334,6 +4375,29 @@ pub fn open_blocking(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both halves of what the links are told reach the parameters every role mints, the
+    /// receive half included: it was `LinkRxConf::default()` there whatever the ABI passed.
+    #[test]
+    fn the_parameters_a_session_is_given_carry_both_halves_of_its_link() {
+        let stated = LinkConf {
+            tx: LinkTx {
+                queue: TxQueueConf::pico(),
+                batch_size: 2048,
+                lease_ms: 4000,
+            },
+            rx: LinkRxConf {
+                max_message_size: 4096,
+            },
+        };
+        let params = init_params(WhatAmI::Client, vec![0xC1; 4], stated).expect("entropy");
+        assert_eq!(params.batch_size, 2048);
+        assert_eq!(params.lease_ms, 4000);
+        assert_eq!(params.link_rx, stated.rx);
+        // Control: the default receive half is another value, so the equality above is the
+        // stated one reaching the parameters and not a default both sides share.
+        assert_ne!(stated.rx, LinkRxConf::default());
+    }
 
     /// The session runtime is the drive thread's alone only for a serial drive,
     /// in a build that asked for it, whose node did not name workers; a
@@ -4525,10 +4589,13 @@ mod tests {
                 params: init_params(
                     WhatAmI::Client,
                     vec![0xC1; 4],
-                    LinkTx {
-                        queue: TxQueueConf::default(),
-                        batch_size: 1024,
-                        lease_ms: DEFAULT_LEASE_MS,
+                    LinkConf {
+                        tx: LinkTx {
+                            queue: TxQueueConf::default(),
+                            batch_size: 1024,
+                            lease_ms: DEFAULT_LEASE_MS,
+                        },
+                        rx: LinkRxConf::default(),
                     },
                 )
                 .expect("entropy"),
@@ -5108,6 +5175,7 @@ mod tests {
             tx_queue: TxQueueConf::pico(),
             batch_size: DEFAULT_BATCH_SIZE,
             lease_ms: DEFAULT_LEASE_MS,
+            link_rx: LinkRxConf::default(),
             offer: SessionOffer::universal(),
             zid: None,
             start_read_task: true,

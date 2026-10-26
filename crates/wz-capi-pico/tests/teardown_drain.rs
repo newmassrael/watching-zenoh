@@ -13,11 +13,13 @@
 //! queue more bytes than a single 65535-byte batch, and a single batch is small
 //! enough that the writer task always got it out before teardown.
 //!
-//! R311y485 removed that blocker — the C ABI now fragments and delivers up to
-//! the 1 MiB reassembly cap. So this fixture uses the lever the first five
-//! lacked: queue a chain far larger than the writer can hand to the kernel in
-//! the microseconds between `z_close` latching `stop` and the per-session
-//! runtime being dropped, and then require it to arrive anyway.
+//! R311y485 removed that blocker — the C ABI now fragments. So this fixture
+//! uses the lever the first five lacked: queue far more bytes than the writer
+//! can hand to the kernel in the microseconds between `z_close` latching `stop`
+//! and the per-session runtime being dropped, and then require them to arrive
+//! anyway. They are queued as many fragmented messages, each small enough for
+//! the acceptor to rejoin: it is this crate too, and it rejoins no message past
+//! pico's `FRAG_MAX_SIZE` as its build states it, exactly as pico drops one.
 //!
 //! What it binds to: `drive_dial` ended with `drop(writer_handle)`, which only
 //! DETACHES the writer task. The `rt` that owns that task is dropped on the very
@@ -65,25 +67,39 @@ use wz_capi_pico::{
     Z_CONFIG_CONNECT_KEY, Z_CONFIG_LISTEN_KEY, Z_OK,
 };
 
-/// The payload published immediately before `z_close`.
+/// One of the payloads published immediately before `z_close`.
 ///
-/// It is sized by what has to be TRUE of it, not by taste. It must exceed one
-/// negotiated 65535-byte batch by enough fragments that the writer task cannot
-/// possibly have handed them all to the kernel in the time `z_close` takes to
-/// latch `stop`, wake the drive future, and drop the runtime — that is what
-/// makes the un-drained loss deterministic rather than a race this fixture only
-/// sometimes wins. And it must stay under the 1 MiB AP reassembly cap
-/// (R311y485), or the sender would refuse it locally and the test would be
-/// measuring the refusal instead of the drain. 786432 = 12 batches, three
-/// quarters of the cap.
-const TAIL_BYTES: usize = 768 * 1024;
+/// It is sized by what has to be TRUE of it, not by taste. It must be past one
+/// negotiated batch, so each put leaves as fragments and an aborted writer can
+/// leave a prefix of a chain on the wire. And its message must stay within the
+/// largest one the acceptor rejoins (pico's `FRAG_MAX_SIZE`,
+/// `wz_session_core::caps::PICO_FRAG_MAX_BYTES`), or the acceptor would drop it
+/// as pico does and the test would be measuring that drop instead of the drain.
+/// The headroom covers the message's encoding beside its payload: the key and
+/// the headers, a few dozen bytes.
+const TAIL_BYTES: usize = wz_session_core::caps::PICO_FRAG_MAX_BYTES - 256;
+
+/// The bytes queued back-to-back before the close, which is what has to be TRUE
+/// in number: enough that the writer task cannot possibly have handed them all to
+/// the kernel in the time `z_close` takes to latch `stop`, wake the drive future,
+/// and drop the runtime. That makes the un-drained loss deterministic rather than
+/// a race this fixture only sometimes wins. Six MiB: more than a loopback
+/// socket pair buffers between a stalled reader and its writer.
+const TAIL_TOTAL_BYTES: usize = 6 * 1024 * 1024;
 
 /// How many tail puts are queued back-to-back before the close.
-const TAIL_COUNT: usize = 8;
+const TAIL_COUNT: usize = TAIL_TOTAL_BYTES / TAIL_BYTES;
 
-fn tail_size(i: usize) -> usize {
-    TAIL_BYTES + i * 1024
-}
+/// The fixture's sizes are what it claims of them, for the numbers this build
+/// states: a tail fragments, and the three kinds of put are told apart by length.
+const _: () = {
+    assert!(
+        TAIL_BYTES > wz_session_core::caps::PICO_UNICAST_BATCH_BYTES,
+        "a tail must be past one batch, or no put fragments"
+    );
+    assert!(STALL_TRIGGER_BYTES != TAIL_BYTES && CALIBRATION_BYTES != TAIL_BYTES);
+    assert!(STALL_TRIGGER_BYTES != CALIBRATION_BYTES);
+};
 
 /// The put whose delivery makes the acceptor stop reading.
 ///
@@ -96,8 +112,9 @@ fn tail_size(i: usize) -> usize {
 /// payload can produce it.
 ///
 /// A slow subscriber callback is also just what a pico C program does, so this
-/// is not a synthetic condition — it is the ordinary one.
-const STALL_TRIGGER_BYTES: usize = 8192;
+/// is not a synthetic condition — it is the ordinary one. Its size only names it,
+/// so it rides one batch.
+const STALL_TRIGGER_BYTES: usize = 1000;
 
 /// How long that closure sleeps.
 ///
@@ -137,7 +154,7 @@ const _: () = assert!(
 /// the tail is the teardown drain and not an un-propagated subscription. Three
 /// of R311y484's five fixtures were refuted by a fixture defect rather than by
 /// wz; this leg is what keeps a sixth from joining them.
-const CALIBRATION_BYTES: usize = 4096;
+const CALIBRATION_BYTES: usize = 1200;
 
 /// Deterministic, size-dependent filler: a truncated delivery cannot masquerade
 /// as a whole one because the trailing bytes are position-dependent.
@@ -145,7 +162,9 @@ fn payload_of(size: usize) -> Vec<u8> {
     (0..size).map(|i| (i % 251) as u8).collect()
 }
 
-type Delivered = Arc<Mutex<HashMap<usize, Vec<u8>>>>;
+/// Every delivered payload, by length, in arrival order: the tails share one length,
+/// so each is kept and counted rather than the last overwriting the rest.
+type Delivered = Arc<Mutex<HashMap<usize, Vec<Vec<u8>>>>>;
 
 struct Ctx {
     delivered: Delivered,
@@ -162,7 +181,12 @@ unsafe extern "C" fn on_sample(sample: *const z_loaned_sample_t, ctx: *mut c_voi
         let len = z_slice_len(loaned);
         if !data.is_null() {
             let bytes = std::slice::from_raw_parts(data, len).to_vec();
-            ctx.delivered.lock().unwrap().insert(len, bytes);
+            ctx.delivered
+                .lock()
+                .unwrap()
+                .entry(len)
+                .or_default()
+                .push(bytes);
         }
         z_slice_drop(z_slice_move(&mut slice));
 
@@ -351,7 +375,10 @@ fn a_put_immediately_before_z_close_is_drained_not_discarded() {
     //
     // Every buffer below is precomputed, because the whole publish-and-close
     // sequence has to fit inside the acceptor's STALL_MS sleep.
-    let tails: Vec<Vec<u8>> = (0..TAIL_COUNT).map(|i| payload_of(tail_size(i))).collect();
+    let tail = payload_of(TAIL_BYTES);
+    let tail_keys: Vec<std::ffi::CString> = (0..TAIL_COUNT)
+        .map(|i| std::ffi::CString::new(format!("teardown/tail/{i}")).unwrap())
+        .collect();
     let trigger = payload_of(STALL_TRIGGER_BYTES);
     let mut stalled = false;
     for _ in 0..300 {
@@ -390,8 +417,7 @@ fn a_put_immediately_before_z_close_is_drained_not_discarded() {
          would pass without measuring anything"
     );
 
-    for (i, tail) in tails.iter().enumerate() {
-        let ke_str = std::ffi::CString::new(format!("teardown/tail/{i}")).unwrap();
+    for (i, ke_str) in tail_keys.iter().enumerate() {
         let rc = unsafe {
             let mut ke: z_view_keyexpr_t = std::mem::zeroed();
             assert_eq!(z_view_keyexpr_from_str(&mut ke, ke_str.as_ptr()), Z_OK);
@@ -426,15 +452,15 @@ fn a_put_immediately_before_z_close_is_drained_not_discarded() {
     // ONE bounded wait for the whole set, not one per size: `z_close` has
     // already returned, so no further byte can leave this host and a per-size
     // timeout would only multiply the same expired deadline.
-    let mut missing: Vec<usize> = Vec::new();
+    let arrived = || {
+        delivered
+            .lock()
+            .unwrap()
+            .get(&TAIL_BYTES)
+            .map_or(0, Vec::len)
+    };
     for _ in 0..150 {
-        let map = delivered.lock().unwrap();
-        missing = (0..TAIL_COUNT)
-            .map(tail_size)
-            .filter(|size| !map.contains_key(size))
-            .collect();
-        drop(map);
-        if missing.is_empty() {
+        if arrived() >= TAIL_COUNT {
             break;
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -443,29 +469,26 @@ fn a_put_immediately_before_z_close_is_drained_not_discarded() {
     done.store(true, Ordering::SeqCst);
     acceptor.join().expect("acceptor thread panicked");
 
-    assert!(
-        missing.is_empty(),
-        "z_put returned Z_OK and then z_close discarded these payloads: \
-         {missing:?}. The peer received the {CALIBRATION_BYTES}-byte \
-         calibration but not every tail (delivered: {:?}). The dial role \
-         detaches its writer task instead of draining it, and the per-session \
-         runtime drop that follows aborts it with frames still queued.",
-        {
-            let mut k: Vec<usize> = delivered.lock().unwrap().keys().copied().collect();
-            k.sort_unstable();
-            k
-        }
+    let arrived = arrived();
+    assert_eq!(
+        arrived,
+        TAIL_COUNT,
+        "z_put returned Z_OK for {TAIL_COUNT} tails and then z_close discarded \
+         {} of them. The peer received the {CALIBRATION_BYTES}-byte \
+         calibration but not every tail. The dial role detaches its writer task \
+         instead of draining it, and the per-session runtime drop that follows \
+         aborts it with frames still queued.",
+        TAIL_COUNT.saturating_sub(arrived)
     );
 
     // Arrival is not enough: an aborted writer can also leave a PREFIX of a
     // chain on the wire, and a fixture that only counted samples would call a
-    // truncated reassembly a pass.
+    // truncated reassembly a pass. A truncated chain is a sample of another
+    // length, so it is not among these; each of these is checked byte for byte.
     let map = delivered.lock().unwrap();
-    for (i, tail) in tails.iter().enumerate() {
-        let size = tail_size(i);
-        let actual = map.get(&size).expect("checked above");
+    for (i, actual) in map[&TAIL_BYTES].iter().enumerate() {
         assert!(
-            actual == tail,
+            actual == &tail,
             "tail {i} arrived with {} bytes but they differ from what was \
              published — the drain flushed a partial chain",
             actual.len()
