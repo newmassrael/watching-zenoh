@@ -33,8 +33,13 @@
 //! (a query's, an interest's) are patterns and not data keys: they are not looked up here, and
 //! nothing refuses them.
 
-use crate::key_allowance::{ClassId, PeerAllowance, PeerOp};
-use crate::key_catalogue::{EntityId, EntityKind, KeyCatalogue, KeyId};
+// The types a gate numbers with are re-exported here so that a caller names them through
+// `key_gate` alone, which is the one path both builds of the gate have (the build without the
+// `key-set-closed` feature defines the same names with no value: `key_gate_open.rs`).
+use crate::key_allowance::PeerAllowance;
+pub use crate::key_allowance::{ClassId, PeerOp};
+use crate::key_catalogue::KeyCatalogue;
+pub use crate::key_catalogue::{EntityId, EntityKind, KeyId};
 
 /// Why a closed gate did not admit a key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

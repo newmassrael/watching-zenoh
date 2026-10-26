@@ -4378,6 +4378,7 @@ mod tests {
     /// A closed key set drops a reply a peer sent on a key outside the set, on every path that
     /// reaches the shared seam, and leaves an error reply and the application's own loopback reply
     /// alone. The pending query stays, since only its final removes it.
+    #[cfg(feature = "key-set-closed")]
     #[test]
     fn a_closed_key_set_drops_a_peers_reply_outside_it() {
         use crate::key_catalogue::tests::TABLE;

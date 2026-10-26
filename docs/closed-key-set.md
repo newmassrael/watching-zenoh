@@ -360,6 +360,38 @@ publishes it receives) is the per-peer allowance, phase 4.
 - **Not done.** No image calls `set_key_gate` on its reply registry yet; a node adopting its table
   gives the same gate to both registries.
 
+## The closed set is a build feature, as built
+
+The closed mode first shipped in every build, open or closed, and the open ones paid for it: hosted
+pico-client text grew from 1,828,525 to 1,833,173 bytes over the rounds of phases 3 to 4, and the
+session slot of the two admin node images grew 8 bytes (a number on every subscriber row and a class on
+every peer). A mode a build does not use should cost it nothing, so the closed set is now under the
+cargo feature `key-set-closed` of `wz-session-core`.
+
+- **What the feature adds.** `key_catalogue`, `key_allowance` and the closed `key_gate`. It is additive
+  and implies nothing: with it and an open policy a build starts with an open gate and may be handed a
+  closed one (the tests of the closed mode run so).
+- **What a build without it has.** The same path `key_gate` with the open gate only
+  (`key_gate_open.rs`): `KeyGate` has no field, and `KeyId`, `EntityId`, `ClassId` and `Refusal` are
+  enums with no value, so `Option<EntityId>` on every subscriber row and `Option<ClassId>` on every peer
+  are zero-sized, and the arm that delivers by a key's number cannot be taken and is not generated. The
+  calling code is written once, with no `cfg` at its call sites beyond the one function that reads a
+  selection. A test holds the sizes at zero.
+- **The policy and the feature agree or the build stops.** `key-set = closed` in a build without the
+  feature fails a const assertion that names the feature, so a build cannot ask for a mode it lacks and
+  silently run open. The closed value of the policy and the feature are two spellings of one fact, and
+  an image that states the first enables the second.
+- **A node declaration carries its table only when it is closed.** The generator no longer emits an
+  empty `key_set` module for an open node: it would name a module the open build does not have. Seven
+  generated files lost it.
+- **Measured** on 2026-10-26, same machine and compiler, before and after: the session slot of
+  `mcu-admin-node` 36,808 to 36,800 bytes and of `zephyr-admin-node` 36,800 to 36,792 (the allowance's
+  8 bytes, gone); pico-client text 1,793,878 to 1,790,934 bytes locally. The hosted reading is the
+  one the budgets hold and is read after the push.
+- **Tested** with the feature on (the whole crate under `--all-features`, and the two integration tests
+  `key_catalogue_model` and `key_set_cost`, which need it) and off (the crate's lib tests, which
+  include the zero-size test).
+
 ## What is not decided
 
 - **D4 for the owner.** Does a closed image admit a message whose key is undeclared but matches a

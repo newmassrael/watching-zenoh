@@ -96,6 +96,16 @@ storage-profile = []
 # fixed.
 bounded-heapless = []
 
+# `key-set-closed` compiles in the closed key set (docs/closed-key-set.md): the sealed key table,
+# the delivery of a message by the selection of its key, the refusal of a key outside the set and
+# the per-peer allowance. It is what the `key-set` policy's `closed` value needs, and a build whose
+# policy is `closed` without it does not compile. Without it the crate has the open gate only: a
+# gate of no size, no number on a subscriber row and no class on a peer, so an open image pays
+# neither the code nor the bytes of a mode it does not use. Additive (it adds modules and
+# removes nothing), and it implies nothing: a build with it and an open policy starts with an
+# open gate and may be given a closed one.
+key-set-closed = []
+
 # adminspace-core (§5.23) — the built-in `@/<zid>/<whatami>/**` admin queryable
 # keyexpr helpers + the `local_data` JSON body (the wz mirror of zenoh
 # `net/runtime/adminspace.rs` `local_data` + `AdminSpace::start`). Pure

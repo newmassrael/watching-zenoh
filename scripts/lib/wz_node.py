@@ -560,10 +560,12 @@ def key_set_entities(data: dict) -> list[dict]:
 
 def key_set_lines(data: dict) -> list[str]:
     """The module `key_set` of the node's `declared.rs`: its table when it states a closed key set
-    (`docs/closed-key-set.md`, the entities it declares are the keys), and `CLOSED = None` when it does
-    not, so the node's code reads one name for both. Valid input only."""
+    (`docs/closed-key-set.md`, the entities it declares are the keys), and nothing when it does not.
+    A node that is open has no table to adopt, and the closed key set is code a build has only with
+    the `key-set-closed` feature of `wz-session-core`, so a module that names it would not compile
+    in the open build. Valid input only."""
     if not states_closed_key_set(data):
-        return wz_key_set.open_lines()
+        return []
     entities = key_set_entities(data)
     allows = data.get("allow", [])
     allowance = wz_key_set.build_allowance(entities, allows) if allows else None
@@ -672,8 +674,7 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
             f"pub const PUBLISHERS: usize = {len(published)};",
             f"pub const PUBLISHED: [(&str, u32, usize); {len(published)}] = [{pubs}];",
             "",
-            *key_set_lines(data),
-            "",
+            *([*key_set_lines(data), ""] if states_closed_key_set(data) else []),
         ]
     )
 
@@ -1298,7 +1299,7 @@ document_bytes = 8
            problems(SAMPLE + '\n[policy]\ndeclaration-sync-pacing = "on"\nmulticast-loopback = "off"\n') == [])
 
     # A node that states a closed key set carries its table, and is held to what the table can carry;
-    # one that does not has `CLOSED = None` and is held to nothing new.
+    # one that does not has no key set module and is held to nothing new.
     closed = SAMPLE + '\n[policy]\nkey-set = "closed"\n'
     expect("a node that states a closed key set is valid", problems(closed) == [])
     closed_rs = emit("n", wz_config.read_decl_toml(closed), sha)
@@ -1306,8 +1307,8 @@ document_bytes = 8
            "pub const CATALOGUE: KeyCatalogue<'static>" in closed_rs
            and "pub const CLOSED: Option<&'static KeyCatalogue<'static>> = Some(&CATALOGUE);" in closed_rs
            and '"lab/doc/a",' in closed_rs)
-    expect("a node that states none has `CLOSED = None` and no table",
-           "pub mod key_set {" in rs and "= None;" in rs and "CATALOGUE" not in rs)
+    expect("a node that states none has no key set module at all, so it compiles without the feature",
+           "key_set" not in rs and "CATALOGUE" not in rs and "CLOSED" not in rs)
     refuses("a closed node's key that is not canonical",
             closed.replace("lab/doc/a", "lab/**/*"), "key set: ")
     refuses("a closed node's wildcard that nothing concrete meets",

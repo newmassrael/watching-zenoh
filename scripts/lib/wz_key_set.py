@@ -331,20 +331,6 @@ def header(source: str) -> list[str]:
     ]
 
 
-def open_lines() -> list[str]:
-    """What a node that states no closed key set has where a closed one has its table: the module, and
-    in it `CLOSED`, which is `None`. A node's code reads `key_set::CLOSED` whichever it is, and a node
-    that declares its keys is the one that has `Some`."""
-    return [
-        "/// The key set the node declares: none, since it does not state a closed one.",
-        "pub mod key_set {",
-        "    #![allow(dead_code)]",
-        "    pub const CLOSED: Option<&'static wz_session_core::key_catalogue::KeyCatalogue<'static>> = None;",
-        "    pub const ALLOWED_PEERS: Option<&'static wz_session_core::key_allowance::PeerAllowance<'static>> = None;",
-        "}",
-    ]
-
-
 def table_lines(
     table: dict, declared: bool = False, closed: bool = False, allowance: dict | None = None
 ) -> list[str]:
@@ -353,9 +339,9 @@ def table_lines(
     its includer's (a node's `declared.rs` has its own `MEMBERS`), carries its own `use` and inner
     attribute, and refers to the crate by its name, so it is the same text in an image and in a test.
     `declared` adds the declaration as the entities were numbered, which the model test reads and an
-    image has no use for. `closed` adds `CLOSED`, the table as an `Option`, which is `Some` here and
-    `None` in [`open_lines`], so that code reads one name for both; with it, `ALLOWED_PEERS` is the
-    peer allowance as an `Option` in the same way, `Some` when `allowance` is given."""
+    image has no use for. `closed` adds `CLOSED`, the table as an `Option` that is `Some`, and an open
+    node has no such module at all (its build has no closed key set to name); with it,
+    `ALLOWED_PEERS` is the peer allowance as an `Option`, `Some` when `allowance` is given."""
     skip = "    #[rustfmt::skip]"
     out = [
         "/// The key catalogue of the declaration, as `KeyCatalogue` reads it. A bad table is a build",
@@ -680,9 +666,6 @@ def _selftest() -> int:
     expect("`CLOSED` is `Some` of the table for a closed node and is not there otherwise",
            "pub const CLOSED: Option<&'static KeyCatalogue<'static>> = Some(&CATALOGUE);"
            in emit_table(table, "x.toml", closed=True) and "CLOSED" not in emit_table(table, "x.toml"))
-    expect("a node that states no closed key set has `CLOSED = None`",
-           "pub const CLOSED: Option<&'static wz_session_core::key_catalogue::KeyCatalogue<'static>> = None;"
-           in "\n".join(open_lines()))
     expect("an empty declaration is a table", "const KEY_TEXT: &str = \"\";" in emit_table(build([]), "x.toml"))
 
     # What it refuses.

@@ -104,12 +104,10 @@ use crate::caps;
 use crate::id_map::key_text_as;
 #[cfg(feature = "storage-profile")]
 use crate::id_map::{IdMap, PeerAliases};
-use crate::key_allowance::{ClassId, PeerOp};
-use crate::key_catalogue::{EntityId, EntityKind, KeyCatalogue, KeyId};
-use crate::key_gate::{Admitted, KeyGate, Refused};
-use crate::keyexpr_match::{
-    keyexpr_intersects_target, keyexpr_intersects_text, MAX_KEYEXPR_CHUNKS,
-};
+use crate::key_gate::{Admitted, ClassId, EntityId, EntityKind, KeyGate, KeyId, PeerOp, Refused};
+#[cfg(feature = "key-set-closed")]
+use crate::keyexpr_match::keyexpr_intersects_text;
+use crate::keyexpr_match::{keyexpr_intersects_target, MAX_KEYEXPR_CHUNKS};
 use crate::registry_error::RegisterError;
 
 // R311gb (Track 2) — `resolve_wireexpr` lives in the `alloc`-gated
@@ -352,7 +350,7 @@ pub struct SubscriberPeer<P: Storage = Profile> {
     #[cfg(feature = "declare-subscriber")]
     interests: InterestSide<P>,
     /// Which peer the image declares this session's peer to be, once the session knows its zid
-    /// ([`PeerAllowance::class_of`](crate::key_allowance::PeerAllowance::class_of)): the row of the
+    /// (`PeerAllowance::class_of`): the row of the
     /// allowance a message from it is asked against. `None` is a peer not declared, which a closed
     /// image that declares its peers allows nothing.
     class: Option<ClassId>,
@@ -805,14 +803,10 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         match self.admission(view.keyexpr(), true, class) {
             Admission::Refused => return 0,
             Admission::Numbered(key) => {
-                if let Some(catalogue) = self.key_gate.catalogue() {
-                    return fire_by_selection(
-                        &mut self.subscribers,
-                        catalogue,
-                        key,
-                        view.keyexpr(),
-                        |sink| sink.deliver(view),
-                    );
+                if let Some(fired) =
+                    self.deliver_by_selection(key, view.keyexpr(), |sink| sink.deliver(view))
+                {
+                    return fired;
                 }
             }
             Admission::Matched => {}
@@ -2129,14 +2123,10 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         match self.admission(view.keyexpr(), is_remote, class) {
             Admission::Refused => return 0,
             Admission::Numbered(key) => {
-                if let Some(catalogue) = self.key_gate.catalogue() {
-                    return fire_by_selection(
-                        &mut self.subscribers,
-                        catalogue,
-                        key,
-                        view.keyexpr(),
-                        |sink| sink.deliver(view),
-                    );
+                if let Some(fired) =
+                    self.deliver_by_selection(key, view.keyexpr(), |sink| sink.deliver(view))
+                {
+                    return fired;
                 }
             }
             Admission::Matched => {}
@@ -2150,6 +2140,35 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
             false,
             |sink| sink.deliver(view),
         )
+    }
+
+    /// Deliver a message on a numbered key of the closed key set to the subscribers its
+    /// selection names, or `None` when this gate holds no table to select from (a gate set open
+    /// after it numbered the key). A build without the `key-set-closed` feature has no number to
+    /// read and always answers `None`, and the call is not compiled.
+    #[inline]
+    fn deliver_by_selection(
+        &mut self,
+        key: KeyId,
+        text: &str,
+        deliver: impl FnMut(&mut C),
+    ) -> Option<usize> {
+        #[cfg(feature = "key-set-closed")]
+        {
+            let catalogue = self.key_gate.catalogue()?;
+            Some(fire_by_selection(
+                &mut self.subscribers,
+                catalogue,
+                key,
+                text,
+                deliver,
+            ))
+        }
+        #[cfg(not(feature = "key-set-closed"))]
+        {
+            let _ = (key, text, deliver);
+            None
+        }
     }
 
     /// [`Self::fire_to_subscribers`] for a plain `Put` of a frame
@@ -2167,14 +2186,10 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         match self.admission(sample.keyexpr(), is_remote, class) {
             Admission::Refused => return 0,
             Admission::Numbered(key) => {
-                if let Some(catalogue) = self.key_gate.catalogue() {
-                    return fire_by_selection(
-                        &mut self.subscribers,
-                        catalogue,
-                        key,
-                        sample.keyexpr(),
-                        |sink| sink.deliver_plain(sample),
-                    );
+                if let Some(fired) = self
+                    .deliver_by_selection(key, sample.keyexpr(), |sink| sink.deliver_plain(sample))
+                {
+                    return fired;
                 }
             }
             Admission::Matched => {}
@@ -2208,9 +2223,10 @@ enum Admission {
 ///
 /// A row that has no entity (made before the table was given, and not declared by it) is matched
 /// by its pattern, as `scan_subscribers` matches it, so no subscription is left without messages.
+#[cfg(feature = "key-set-closed")]
 fn fire_by_selection<C: SampleSink, P: Storage>(
     subscribers: &mut BoundedVec<Subscriber<C, P>, { caps::MAX_SUBSCRIPTIONS }, P>,
-    catalogue: &KeyCatalogue<'_>,
+    catalogue: &crate::key_catalogue::KeyCatalogue<'_>,
     key: KeyId,
     text: &str,
     mut deliver: impl FnMut(&mut C),
@@ -2649,7 +2665,7 @@ impl<P: Storage> SubscriberPeer<P> {
     }
 
     /// Say which declared peer this session's peer is, once its zid is known:
-    /// [`PeerAllowance::class_of`](crate::key_allowance::PeerAllowance::class_of) of the zid, or `None`
+    /// `PeerAllowance::class_of` of the zid, or `None`
     /// for a peer the image does not declare. A closed image that declares its peers allows a message
     /// from a peer with no class nothing; an image that declares none ignores the class. Forgotten with
     /// the peer ([`Self::forget_peer`]).

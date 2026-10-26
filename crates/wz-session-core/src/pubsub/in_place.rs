@@ -550,6 +550,7 @@ mod tests {
     }
 
     /// A literal Put on `key`, decoded from the wire bytes a peer would send, as both paths read it.
+    #[cfg(feature = "key-set-closed")]
     fn put_on<T>(key: &str, then: impl FnOnce(&Push<'_>) -> T) -> T {
         let built = crate::push_build::build_push_literal_with_meta(key, b"payload", &meta())
             .expect("build");
@@ -560,6 +561,7 @@ mod tests {
 
     /// The lent path was the one delivery that did not go through the key gate: it called the
     /// matcher directly. A closed key set must drop a key outside it there as on the copying path.
+    #[cfg(feature = "key-set-closed")]
     #[test]
     fn a_closed_key_set_drops_a_key_outside_it_on_the_lent_path_as_on_the_owned_path() {
         use crate::key_catalogue::tests::TABLE;
@@ -581,6 +583,7 @@ mod tests {
     }
 
     /// The peer's class, which the session says, is what the allowance is asked about on both paths.
+    #[cfg(feature = "key-set-closed")]
     #[test]
     fn a_peer_is_allowed_the_keys_of_its_class_on_the_lent_path_as_on_the_owned_path() {
         use crate::key_allowance::{tests::TABLE as ALLOWANCE, ClassId};

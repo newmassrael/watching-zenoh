@@ -29,6 +29,7 @@
 //! What IS asserted is that both deliveries fired the same subscribers the same number of times, so a
 //! delivery that dropped its work cannot read as a fast one.
 #![cfg(all(
+    feature = "key-set-closed",
     feature = "alloc",
     feature = "keyexpr-wildcard-single",
     feature = "keyexpr-wildcard-double",

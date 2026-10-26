@@ -15,6 +15,7 @@
 //!
 //! The fixture and the corpus are generated; `wz_key_set.py --check` fails when either is stale.
 #![cfg(all(
+    feature = "key-set-closed",
     feature = "keyexpr-wildcard-single",
     feature = "keyexpr-wildcard-double",
     feature = "keyexpr-dollar-star"

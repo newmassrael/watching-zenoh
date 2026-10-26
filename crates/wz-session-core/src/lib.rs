@@ -185,20 +185,32 @@ pub mod delivery_lane;
 /// The read-only table of a closed key set: [`key_catalogue::KeyCatalogue`], every key an image
 /// handles numbered, and for each key and entity kind the entities a message on it reaches
 /// (`docs/closed-key-set.md`). The arrays are generated and static; the table counts and
-/// indexes only, and a bad one stops the build that contains it. No host reads it yet.
-/// Unconditional, no_std and no_alloc.
+/// indexes only, and a bad one stops the build that contains it. Under the `key-set-closed`
+/// feature; no_std and no_alloc.
+#[cfg(feature = "key-set-closed")]
 pub mod key_catalogue;
 
 /// Which keys each declared peer may use: [`key_allowance::PeerAllowance`], one bit for each peer, each
 /// operation and each key of the closed key set (`docs/closed-key-set.md`, phase 4). The arrays are
-/// generated and static; a bad table stops the build that contains it. Unconditional, no_std and
-/// no_alloc.
+/// generated and static; a bad table stops the build that contains it. Under the `key-set-closed`
+/// feature; no_std and no_alloc.
+#[cfg(feature = "key-set-closed")]
 pub mod key_allowance;
 
 /// What a closed key set refuses and counts: [`key_gate::KeyGate`], open (admits every key, looks at
 /// none) or closed over a [`key_catalogue::KeyCatalogue`] (admits a key of the set, or a key the
-/// image declares in the role asked, and counts every refusal by reason). No host calls it yet.
-/// Unconditional, no_std and no_alloc.
+/// image declares in the role asked, and counts every refusal by reason). Under the
+/// `key-set-closed` feature; no_std and no_alloc.
+#[cfg(feature = "key-set-closed")]
+pub mod key_gate;
+
+/// The key gate of a build without the `key-set-closed` feature: [`key_gate::KeyGate`] is open and
+/// has no size, and the types a closed gate numbers its keys, entities and peers with have no
+/// value, so a field that would hold one costs no byte and a branch that would read one is not
+/// compiled. The same path as the closed module, so the code that calls the gate is written
+/// once. no_std and no_alloc.
+#[cfg(not(feature = "key-set-closed"))]
+#[path = "key_gate_open.rs"]
 pub mod key_gate;
 
 /// The pace of a paced declaration replay: [`replay_pacing::ReplayPacing`], the burst and the
