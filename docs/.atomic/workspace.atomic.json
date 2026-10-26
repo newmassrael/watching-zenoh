@@ -290370,6 +290370,54 @@
         "Node adoption of the closed key set (subscriber table, reply registry, peer class); selectors and alias rows; second allowance source; owner decisions on undeclared keys under declared wildcards."
       ]
     },
+    "Round 3705": {
+      "decision_summary": "Step 4b of the advanced plane: the subscriber is hosted on the engine port. EngineSubscriber (wz-ext-pubsub, feature engine-host) declares the same entities as the tokio host in the same order, issues each get through get_on_wire, and runs the retention sweep and the periodic re-ask as port tickers. A get is over when its last leg's reply callback is dropped, so the legs of one get share one counted end that finishes it once; a teardown sets a closing flag before it cancels the gets, and the jobs answer false once it is set. The port gains SessionEngine::now_ms, the engine's own clock the machine is handed, and Ticker::detach.",
+      "changes_bullets": [
+        "crates/wz-ext-pubsub: advanced_subscriber/host.rs and its tests (feature engine-host: the history features plus wz-capi-port and the session-core setters the gets use).",
+        "crates/wz-capi-port: SessionEngine::now_ms (the engine's monotonic clock in milliseconds; the tokio engine and the cooperative engine implement it) and Ticker::detach.",
+        "scripts/lib: the census row of wz-ext-pubsub names engine-host; its non-default test leg lists it (64 tests).",
+        "docs/advanced-pubsub-on-a-neutral-core.md: step 4 records the engine-port host and the three seams it settles."
+      ],
+      "verification_bullets": [
+        "13 host tests against a scripted engine (declaration order and retraction order, the gap get and its legs ending one by one, a get with no leg, teardown silencing a get in flight, heartbeat, the two tickers and their stop, the startup get, the late-publisher get, refusals, background): wz-ext-pubsub with the non-default leg's features, 64 passed.",
+        "clippy with -D warnings: wz-ext-pubsub (that feature set, all targets), wz-capi-port, wz-capi-coop (ticker), wz-capi-core (advanced). rustdoc of wz-ext-pubsub with all features and no private items: no finding.",
+        "The hook's gate array plus the surface gates: 116 run, 0 failed; the push went through the hooks and origin main equals HEAD.",
+        "Not done: no engine hosts it end to end yet (the scripted engine only); the interop legs and the hosted run are read next round; the remote build slots were not used (local builds), so the C1bz doc lane and the size gates are read from the hosted run."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "carry_forward_bullets": [
+        "Step 3b, the rest: pico's advanced module over the port without the tokio engine: its publisher and subscriber entry points call EngineSubscriber and the port plane, and pico's advanced feature stops selecting the tokio engine. First witness: a pico build on the cooperative engine that declares an advanced subscriber, then an end-to-end test of the host over the cooperative engine's test router (the scripted engine proves the host's own rules, not an engine's legs).",
+        "Read the hosted runs of the pushes of rounds 3701 and this one: C1cs size gates (the new engine-host feature must not reach a size build), C1bz doc budgets, C1bf and the interop legs of the advanced plane (zenoh-ext and pico).",
+        "Step 5: retire the tokio host's duplicate declarations and gets behind a differential test (the same events into both hosts give the same declarations and gets).",
+        "A test feeding wz-ext-pubsub's time_range and the zenoh-util family's the same strings.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine."
+      ],
+      "publishable_decision_summary": "Step 4b of the advanced plane: the subscriber is hosted on the engine port. EngineSubscriber (wz-ext-pubsub, feature engine-host) declares the same entities as the tokio host in the same order, issues each get through get_on_wire, and runs the retention sweep and the periodic re-ask as port tickers. A get is over when its last leg's reply callback is dropped, so the legs of one get share one counted end that finishes it once; a teardown sets a closing flag before it cancels the gets, and the jobs answer false once it is set. The port gains SessionEngine::now_ms, the engine's own clock the machine is handed, and Ticker::detach.",
+      "publishable_changes_bullets": [
+        "crates/wz-ext-pubsub: advanced_subscriber/host.rs and its tests (feature engine-host: the history features plus wz-capi-port and the session-core setters the gets use).",
+        "crates/wz-capi-port: SessionEngine::now_ms (the engine's monotonic clock in milliseconds; the tokio engine and the cooperative engine implement it) and Ticker::detach.",
+        "scripts/lib: the census row of wz-ext-pubsub names engine-host; its non-default test leg lists it (64 tests).",
+        "docs/advanced-pubsub-on-a-neutral-core.md: step 4 records the engine-port host and the three seams it settles."
+      ],
+      "publishable_verification_bullets": [
+        "13 host tests against a scripted engine (declaration order and retraction order, the gap get and its legs ending one by one, a get with no leg, teardown silencing a get in flight, heartbeat, the two tickers and their stop, the startup get, the late-publisher get, refusals, background): wz-ext-pubsub with the non-default leg's features, 64 passed.",
+        "clippy with -D warnings: wz-ext-pubsub (that feature set, all targets), wz-capi-port, wz-capi-coop (ticker), wz-capi-core (advanced). rustdoc of wz-ext-pubsub with all features and no private items: no finding.",
+        "The hook's gate array plus the surface gates: 116 run, 0 failed; the push went through the hooks and origin main equals HEAD.",
+        "Not done: no engine hosts it end to end yet (the scripted engine only); the interop legs and the hosted run are read next round; the remote build slots were not used (local builds), so the C1bz doc lane and the size gates are read from the hosted run."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 3b, the rest: pico's advanced module over the port without the tokio engine: its publisher and subscriber entry points call EngineSubscriber and the port plane, and pico's advanced feature stops selecting the tokio engine. First witness: a pico build on the cooperative engine that declares an advanced subscriber, then an end-to-end test of the host over the cooperative engine's test router (the scripted engine proves the host's own rules, not an engine's legs).",
+        "Read the hosted runs of the pushes of rounds 3701 and this one: C1cs size gates (the new engine-host feature must not reach a size build), C1bz doc budgets, C1bf and the interop legs of the advanced plane (zenoh-ext and pico).",
+        "Step 5: retire the tokio host's duplicate declarations and gets behind a differential test (the same events into both hosts give the same declarations and gets).",
+        "A test feeding wz-ext-pubsub's time_range and the zenoh-util family's the same strings.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
