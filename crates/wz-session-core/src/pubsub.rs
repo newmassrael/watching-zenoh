@@ -793,9 +793,10 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
 
     /// Deliver a message that was read in place, whose key may lie in the peer's own table so that
     /// this table is borrowed apart from it ([`SubscriberPeer`]): the gate, then the selection of a
-    /// key of a closed set or the match of every subscription (through the match cache, which a
-    /// fixed table holds only where `MATCH_MEMO_FIXED_SLOTS` asks for it). The delivery of the
-    /// in-place receive path, which a closed image of the fixed profile takes.
+    /// key of a closed set or the match of every subscription (through the match cache where the
+    /// table is fixed in size and `MATCH_MEMO_FIXED_SLOTS` asks for it; a heap table matches
+    /// afresh, so that this path allocates nothing for a key it has not seen). The delivery of
+    /// the in-place receive path, which a closed image of the fixed profile takes.
     #[cfg(all(
         feature = "storage-profile",
         any(feature = "pubsub-put", feature = "pubsub-delete")
@@ -815,6 +816,20 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
                 }
             }
             Admission::Matched => {}
+        }
+        // A heap table's cache slot allocates the first time it sees a key (the key's text and
+        // the list of what it matched), which the in-place path's contract does not allow: it
+        // costs the heap the matcher's scratch and nothing more. A fixed table's slots are
+        // already in place, so there the cache costs no allocation and is used.
+        if !P::ENFORCES_CAPACITY {
+            return scan_subscribers(
+                &mut self.subscribers,
+                view.keyexpr(),
+                true,
+                |sink| sink.deliver(view),
+                |_| {},
+            )
+            .unwrap_or(0);
         }
         fire_into_memoized(
             &mut self.subscribers,
@@ -7127,9 +7142,10 @@ mod tests {
     }
 
     /// With slots the memory answers a key that comes again without matching it, and with none
-    /// (`MATCH_MEMO_SLOTS` of 0) every message is matched: the one difference between the two
-    /// builds, which the test above shows is not a difference in what is delivered. A key a
-    /// subscription's registration made stale is matched again either way.
+    /// (the build's slot count for its profile's storage policy, `MATCH_MEMO_SLOTS` on the heap
+    /// and `MATCH_MEMO_FIXED_SLOTS` on fixed tables, of 0) every message is matched: the one
+    /// difference between the two builds, which the test above shows is not a difference in what
+    /// is delivered. A key a subscription's registration made stale is matched again either way.
     #[test]
     fn a_repeated_key_is_matched_once_with_slots_and_every_time_without() {
         use crate::sink::BorrowedSample;
@@ -7140,6 +7156,9 @@ mod tests {
             kind: SampleKind::Put,
             reliability: Reliability::Reliable,
         };
+        // `SubscriberRegistry::new()` is of this build's profile, so the count that applies is the
+        // one its storage policy reads.
+        let remembered = if memo_slots::<Profile>() == 0 { 5 } else { 1 };
         let mut reg = SubscriberRegistry::new();
         reg.register("a/*", |_: &dyn SampleView| {});
 
@@ -7148,11 +7167,7 @@ mod tests {
             assert_eq!(reg.dispatch_borrowed(&key("a/x"), true), 1);
         }
         let first_key = scans() - start;
-        assert_eq!(
-            first_key,
-            if caps::MATCH_MEMO_SLOTS == 0 { 5 } else { 1 },
-            "five messages on one key"
-        );
+        assert_eq!(first_key, remembered, "five messages on one key");
 
         reg.register("a/x", |_: &dyn SampleView| {});
         let start = scans();
@@ -7161,7 +7176,7 @@ mod tests {
         }
         assert_eq!(
             scans() - start,
-            if caps::MATCH_MEMO_SLOTS == 0 { 5 } else { 1 },
+            remembered,
             "a registration is seen by the next message, then the key is remembered again"
         );
     }
