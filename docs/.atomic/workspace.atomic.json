@@ -290800,6 +290800,48 @@
         "Read the first finished hosted run that holds rounds 3697 and this one: the C1m legs (the moved counts, the open query 6, the host node control channel 3). Open: the commands of the out-of-band remainder as rows of the table (close, reset, status, own zid, a locator target), the image witness with the lane owner, an open that succeeds over a real secure channel, the Hello hint source, the Qzb chain fall."
       ]
     },
+    "Round 3716": {
+      "decision_summary": "The field document moves to revision 45 at the analyzer design's request: each flow's context carries `parameters`, every negotiated value as `{value, basis}` with the basis `stated`, `inferred`, `conflicting` or `absent`, and each half its `lease_ms` the same way. Compression is the one value the bytes can infer: a batch header means the session negotiated it, a batch that reads whole without one means it did not, and the entry carries per direction the units that read whole in only one reading and the framings found again on one reading's boundaries. The counts live on the session and not on the context, because the context is kept once per value for every unit and the counts move on every deciding unit. The capture anonymiser now opens QUIC Initials, whose keys anyone derives, replaces the ClientHello's server name and reseals the packet, and its leak check reads their plaintext.",
+      "changes_bullets": [
+        "`wz-session-core` passive.rs: `Basis`, `Reading<T>`, `BatchHeaderEvidence`; `PassiveSession::batch_header_evidence` and `compression_reading`, over `FlowContext::compression_reading`. The batch-header probe counts every unit that decides, through the unit judge, and a resynchronisation counts its reading.",
+        "`wz-capture`: fields 45 (`push_parameters`, `BasisWord`, `FIELDS_R45_*`, family `basis`); the flat context cells are unchanged. A corpus test pins every zenoh file's compression reading in both builds. `wz_dissect.h` documents `parameters`, and the C consumer reads revision 45. The integer value of a parameters entry takes the integer rule and is declared in `json_integer_cell_gate.py`; the evidence counts stay bare numbers.",
+        "`scripts/lib/quic_initial.py` (AES-128, GCM, HKDF and header protection in the standard library) and `capture_anonymise.py`: QUIC Initials of the capturer's own traffic are opened, their server names scrubbed and resealed; a single-label DNS or TLS name is replaced, not kept as a top-level domain."
+      ],
+      "verification_bullets": [
+        "On the corpus, both builds: the three captures that hold the handshake state compression, and the three joined mid-session infer the same value (off, lz4, lz4). `cargo test` of wz-capture (dissect, and the corpus with compression), the passive tests of wz-session-core and wz-capi-dissect pass; clippy with -D warnings on each of the three crates, all targets.",
+        "The first placement of the counts on the context grew the per-unit context list on every capture without a handshake, and the memory matrix caught it; they moved to the session.",
+        "`quic_initial.py` reproduces the RFC 9001 and RFC 9369 sample client Initials byte for byte and opens their server Initials; the anonymiser selftest (52 checks) fails when the name scrub, the reseal or the plaintext leak check is disabled. `--verify-corpus` holds the 13 files unchanged. The pre-push static gate array passed after the append."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "The QUIC capture itself waits for its image (aioquic 1.2.0 server and client in containers); with it the corpus gains QUIC as an H0 protocol.",
+        "Lower bounds of the SN resolution and the batch size, from the largest SN and the largest unit a capture without the handshake shows, would say more than `absent`; they need a shape of their own (a bound is not a value), to be proposed to the analyzer design.",
+        "Lowlatency and QoS could be read from a capture without the handshake (the framing width and bare network messages; the priority extensions); no reader does it yet, so they are `stated` or `absent`."
+      ],
+      "publishable_decision_summary": "The field document moves to revision 45 at the analyzer design's request: each flow's context carries `parameters`, every negotiated value as `{value, basis}` with the basis `stated`, `inferred`, `conflicting` or `absent`, and each half its `lease_ms` the same way. Compression is the one value the bytes can infer: a batch header means the session negotiated it, a batch that reads whole without one means it did not, and the entry carries per direction the units that read whole in only one reading and the framings found again on one reading's boundaries. The counts live on the session and not on the context, because the context is kept once per value for every unit and the counts move on every deciding unit. The capture anonymiser now opens QUIC Initials, whose keys anyone derives, replaces the ClientHello's server name and reseals the packet, and its leak check reads their plaintext.",
+      "publishable_changes_bullets": [
+        "`wz-session-core` passive.rs: `Basis`, `Reading<T>`, `BatchHeaderEvidence`; `PassiveSession::batch_header_evidence` and `compression_reading`, over `FlowContext::compression_reading`. The batch-header probe counts every unit that decides, through the unit judge, and a resynchronisation counts its reading.",
+        "`wz-capture`: fields 45 (`push_parameters`, `BasisWord`, `FIELDS_R45_*`, family `basis`); the flat context cells are unchanged. A corpus test pins every zenoh file's compression reading in both builds. `wz_dissect.h` documents `parameters`, and the C consumer reads revision 45. The integer value of a parameters entry takes the integer rule and is declared in `json_integer_cell_gate.py`; the evidence counts stay bare numbers.",
+        "`scripts/lib/quic_initial.py` (AES-128, GCM, HKDF and header protection in the standard library) and `capture_anonymise.py`: QUIC Initials of the capturer's own traffic are opened, their server names scrubbed and resealed; a single-label DNS or TLS name is replaced, not kept as a top-level domain."
+      ],
+      "publishable_verification_bullets": [
+        "On the corpus, both builds: the three captures that hold the handshake state compression, and the three joined mid-session infer the same value (off, lz4, lz4). `cargo test` of wz-capture (dissect, and the corpus with compression), the passive tests of wz-session-core and wz-capi-dissect pass; clippy with -D warnings on each of the three crates, all targets.",
+        "The first placement of the counts on the context grew the per-unit context list on every capture without a handshake, and the memory matrix caught it; they moved to the session.",
+        "`quic_initial.py` reproduces the RFC 9001 and RFC 9369 sample client Initials byte for byte and opens their server Initials; the anonymiser selftest (52 checks) fails when the name scrub, the reseal or the plaintext leak check is disabled. `--verify-corpus` holds the 13 files unchanged. The pre-push static gate array passed after the append."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The QUIC capture itself waits for its image (aioquic 1.2.0 server and client in containers); with it the corpus gains QUIC as an H0 protocol.",
+        "Lower bounds of the SN resolution and the batch size, from the largest SN and the largest unit a capture without the handshake shows, would say more than `absent`; they need a shape of their own (a bound is not a value), to be proposed to the analyzer design.",
+        "Lowlatency and QoS could be read from a capture without the handshake (the framing width and bare network messages; the priority extensions); no reader does it yet, so they are `stated` or `absent`."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
