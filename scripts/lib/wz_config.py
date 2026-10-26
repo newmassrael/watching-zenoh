@@ -38,7 +38,8 @@ itself (their Kconfig symbol, default and help). This tool is everything that de
     --env pico CONFIG             the WZ_LIMIT_<NAME>=<n> environment of the wz-capi-pico build
                                   that states the numbers a pico config.h states for its value
                                   switches (batch sizes, lease, timeouts), each where it differs
-                                  from the default; with --features pico, the whole drop-in build
+                                  from the default; with the capabilities the --features mode
+                                  prints for the same header, the whole drop-in build
     --original-features ORIGINAL  resolve configs/<ORIGINAL>_defconfig alone and print the cargo
                                   arguments of the ABI that original is built through
     --resolve-env PRESET...       the same merge; print WZ_LIMIT_<NAME>=<value> for each limit it
@@ -3182,7 +3183,8 @@ def main(argv: list[str]) -> int:
         return 0
     if len(argv) == 4 and argv[1] == "--env" and argv[2] == "pico":
         # The numbers a pico `config.h` states for its value switches, as the environment of the
-        # cargo build of the drop-in; `--features pico` is the same header's capabilities.
+        # cargo build of the drop-in; the capabilities of the same header are the --features
+        # mode's.
         decl = load_decl()
         macros = pico_value_macros(PICO_CONFIG_IN.read_text(encoding="utf-8"))
         lines, problems = pico_value_env(decl, pathlib.Path(argv[3]).read_text(encoding="utf-8"), macros)
