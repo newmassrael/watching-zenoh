@@ -227,6 +227,22 @@ defect of this plane; it is documented on the plane and not worked around with a
    new give the same commands and deliveries) and the existing interop tests pass: the zenoh-ext
    interop (`wz_advanced_pubsub_zenoh_ext_interop`), the pico interop
    (`apfull_advanced_pubsub_pico_interop`) and `advanced_subscriber_faces`.
+   Done so far: what is retired is the face registry's advanced publisher and subscriber in
+   `wz-capi-core` (one tokio publisher and one tokio subscriber per face, replayed by hand onto
+   each face that comes up). Both C ABIs now host the neutral crate's: the pico ABI in step 3b and
+   4b, the zenoh-c ABI in two steps, its subscriber as an `EngineSubscriber` and its publisher as
+   the composite on a plane of the C session (`CPlane`), and then the registry's code, its per-face
+   entries and its replay were deleted, with the face-less tests that stood on them re-written on
+   the new hosts. The differential against the real library was run on this machine for each move,
+   with the cdylib built from the tree and the zenoh-c oracle of both arms and a real zenoh-pico:
+   the zenoh-ext families, history over a link, the declaration answered with the same code, a
+   subscriber hearing its own session's publisher, the node clock rows, upstream `z_advanced_pub`
+   and `z_advanced_sub`, and the shared-memory legs (a chunk put through an advanced publisher, a
+   cache-only publisher to a real `z_sub_shm`). The tokio runtime's own typed publisher and
+   subscriber stay: they are the Rust API's, typed over its session, and the machine they call is
+   the same code. What is left of this step is the differential of those two hosts against each
+   other, the same events into the typed one and into the port's, which has no harness yet because
+   the typed one needs a session the port cannot give it.
 
 ## What each step touches that a code change alone does not
 

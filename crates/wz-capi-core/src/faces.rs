@@ -73,14 +73,6 @@ use crate::cancellation::CancellableFan;
 use crate::group::{retire_copies, FaceGroup, GroupAggregate, GroupError, GroupId};
 #[cfg(feature = "peer")]
 use wz_runtime_tokio::accept_loop::{DialIntentSender, FaceForwarder, FaceId};
-#[cfg(feature = "advanced")]
-use wz_runtime_tokio::advanced_publisher::{
-    AdvancedPublisher, AdvancedPublisherError, AdvancedPublisherOptions,
-};
-#[cfg(feature = "advanced")]
-use wz_runtime_tokio::advanced_subscriber::{
-    AdvancedSubscriber, AdvancedSubscriberOptions, DeclarationForms, EntityForm, Miss,
-};
 use wz_runtime_tokio::declare::LivelinessSample;
 #[cfg(feature = "gossip")]
 use wz_runtime_tokio::gossip_plane::{FaceIdentity, GossipPlane, Outbound};
@@ -566,34 +558,6 @@ fn declare_liveliness_subscriber_on(
 /// one C queryable declaration spawned.
 pub type QblId = u64;
 
-/// A C-level ADVANCED publisher id — what a `ze_owned_advanced_publisher_t`
-/// carries. Its own id space rather than a shared one with [`SubId`]: an
-/// advanced publisher is a distinct C type with its own undeclare, so nothing
-/// ever has to look it up in two maps.
-#[cfg(feature = "advanced")]
-pub type AdvPubId = u64;
-
-/// A C-level ADVANCED subscriber id — what a `ze_owned_advanced_subscriber_t`
-/// carries. Separate from [`SubId`] for the same reason as [`AdvPubId`].
-#[cfg(feature = "advanced")]
-pub type AdvSubId = u64;
-
-/// Mints one advanced-subscriber `(on_sample, on_miss)` callback PAIR per face.
-///
-/// A pair rather than two sinks because an advanced subscriber is declared with
-/// both at once and the two share the C program's one subscription: the sample
-/// closure it moved in, and the miss closure it may install afterwards through
-/// `ze_advanced_subscriber_declare_sample_miss_listener`.
-#[cfg(feature = "advanced")]
-#[allow(clippy::type_complexity)]
-pub type AdvancedSubscriberSink = Arc<
-    dyn Fn() -> (
-            Box<dyn FnMut(wz_runtime_tokio::sample::Sample) + Send + 'static>,
-            Box<dyn FnMut(Miss) + Send + 'static>,
-        ) + Send
-        + Sync,
->;
-
 /// The first face id of the dial (`connect`) role: a client's one face is this
 /// id, and a peer's faces are this id plus the index of their endpoint.
 ///
@@ -629,51 +593,11 @@ struct FaceEntry {
     /// answering the filter's question; dropping it sends that face's
     /// `Interest(Final)`. Only filters that ask carry an entry.
     filters: BTreeMap<FilterId, MatchingInterestHold<TokioRuntime, TokioTime>>,
-    /// Per-face ADVANCED publishers. Dropping one tears down that face's `@adv`
-    /// cache queryable + liveliness token (RAII inside `AdvancedPublisher`).
-    #[cfg(feature = "advanced")]
-    adv_pubs: BTreeMap<AdvPubId, AdvancedPublisher<TokioRuntime, TokioTime>>,
-    /// Per-face ADVANCED subscribers, same replay contract as `subs`.
-    #[cfg(feature = "advanced")]
-    adv_subs: BTreeMap<AdvSubId, AdvancedSubscriber<TokioRuntime>>,
     /// R2932 — this session's copy of each C GROUP, same replay contract as
     /// `subs`. Each copy forwards what it hears into the C group's
     /// [`GroupAggregate`], which is what the C program reads.
     #[cfg(feature = "group")]
     groups: BTreeMap<GroupId, FaceGroup>,
-    /// R311y532 — the tokio runtime this face is DRIVEN by.
-    ///
-    /// Captured at `face_up`, which runs inside that runtime, and entered
-    /// again by any declaration that spawns. R311y532 added it because the
-    /// advanced publisher's heartbeat beacon was a bare `tokio::spawn`, so
-    /// `AdvancedPublisher::declare` failed `NoRuntime` when called from the C
-    /// APPLICATION thread — which is exactly where a C program declares. A
-    /// dialed session brings its face up BEFORE `z_open` returns, so that was
-    /// the ordinary path, not a corner: measured, the declare failed and was
-    /// swallowed by the best-effort loop, and the publisher then put to nobody
-    /// while still reporting `Z_OK`.
-    ///
-    /// R2366 — THAT PARTICULAR CAUSE IS GONE. The beacon names its subsystem
-    /// now (`WzRuntime::Net`, `advanced_publisher.rs`) and resolves its runtime
-    /// through the process partition, so it no longer asks the caller's thread
-    /// for one. The guard STAYS, and deliberately: this field's contract is
-    /// "any declaration that spawns", not "the beacon", and nothing has
-    /// measured the rest of a declare's body to be runtime-free. What changed
-    /// is that the guard is now a defence rather than the only thing holding
-    /// the C entry point up.
-    ///
-    /// R2580 — OPTIONAL, because the local plane is about to become a
-    /// `FaceEntry` too and it is constructed in `SharedSession::new`, which
-    /// runs on the C APPLICATION thread where `Handle::current()` panics.
-    /// `None` is therefore "this face has no captured runtime", not "the
-    /// runtime is gone": the two `enter()` sites simply do not enter. That is
-    /// sound for the plane on this field's own terms — its contract is "any
-    /// declaration that spawns", and R2366 already moved the one measured
-    /// spawner (the advanced publisher's beacon) onto the process partition,
-    /// so it no longer asks the caller's thread for a runtime. A real face
-    /// still captures `Some` at `face_up` and loses nothing.
-    #[cfg(feature = "advanced")]
-    runtime: Option<tokio::runtime::Handle>,
     /// R311y296 — the signal that this face's drive loop should re-arm its wake
     /// because a `z_get` just registered a pending query with a nearer deadline
     /// than whatever the loop is currently parked on. Owned per face because
@@ -786,78 +710,6 @@ struct LiveSubEntry {
     /// How the peer is told the key — see [`WireKey`].
     wire: WireKey,
     sink: LivelinessSink,
-}
-
-/// A C-declared ADVANCED publisher — the sixth SSOT, replayed onto every face
-/// exactly as the others are. The options are `Copy`, so the entry stores them
-/// by value and every replay declares an identical publisher.
-#[cfg(feature = "advanced")]
-struct AdvPubEntry {
-    id: AdvPubId,
-    keyexpr: String,
-    options: AdvancedPublisherOptions,
-}
-
-/// A host's [`DeclarationForms`] with the identity of the C advanced subscriber
-/// they were supplied for — its registry id, which is what the C handle reports.
-///
-/// Every other question goes to the host unchanged.
-#[cfg(feature = "advanced")]
-struct IdentifiedForms {
-    id: AdvSubId,
-    host: Arc<dyn DeclarationForms>,
-}
-
-/// What the LOCAL plane is told about naming: nothing. Every answer is the
-/// literal form, which is the trait's default for each.
-///
-/// The local plane has no wire. A key declaration exists to shorten what a peer
-/// is sent, so naming the local plane's entities by one would hold a declaration
-/// for an entity no peer sees — and, since that declaration is shared with the
-/// wire face's entities, would hold it past the wire face's own, which is where
-/// a peer sees it retracted.
-#[cfg(feature = "advanced")]
-struct Unnamed;
-
-#[cfg(feature = "advanced")]
-impl DeclarationForms for Unnamed {}
-
-#[cfg(feature = "advanced")]
-impl DeclarationForms for IdentifiedForms {
-    fn entity_id(&self) -> Option<u32> {
-        // A counter that has outrun `u32` has no spelling in the detection
-        // key: the per-declaration id is the honest answer then.
-        u32::try_from(self.id).ok()
-    }
-
-    fn subscriber(&self, keyexpr: &str) -> EntityForm {
-        self.host.subscriber(keyexpr)
-    }
-
-    fn late_publishers(&self, keyexpr: &str) -> EntityForm {
-        self.host.late_publishers(keyexpr)
-    }
-
-    fn heartbeat(&self, keyexpr: &str) -> EntityForm {
-        self.host.heartbeat(keyexpr)
-    }
-
-    fn token(&self, keyexpr: &str) -> EntityForm {
-        self.host.token(keyexpr)
-    }
-
-    fn retain(&self, anchor: Arc<dyn Send + Sync>) {
-        self.host.retain(anchor)
-    }
-}
-
-/// A C-declared ADVANCED subscriber — the seventh SSOT.
-#[cfg(feature = "advanced")]
-struct AdvSubEntry {
-    id: AdvSubId,
-    keyexpr: String,
-    options: AdvancedSubscriberOptions,
-    sink: AdvancedSubscriberSink,
 }
 
 /// R2932 — a C-joined GROUP, the eighth SSOT. The aggregate carries the group
@@ -1329,14 +1181,6 @@ struct Inner {
     next_match_id: MatchId,
     filters: Vec<FilterEntry>,
     next_filter_id: FilterId,
-    #[cfg(feature = "advanced")]
-    adv_pubs: Vec<AdvPubEntry>,
-    #[cfg(feature = "advanced")]
-    next_adv_pub_id: AdvPubId,
-    #[cfg(feature = "advanced")]
-    adv_subs: Vec<AdvSubEntry>,
-    #[cfg(feature = "advanced")]
-    next_adv_sub_id: AdvSubId,
     #[cfg(feature = "group")]
     groups: Vec<GroupEntry>,
     #[cfg(feature = "group")]
@@ -1460,64 +1304,6 @@ impl Inner {
     fn declaration_targets(&mut self) -> impl Iterator<Item = &mut FaceEntry> {
         self.faces.values_mut().chain(self.local_face.iter_mut())
     }
-
-    /// The shared-reference twin of [`Self::declaration_targets`], for the fans
-    /// that USE a declaration rather than install one — the advanced publisher's
-    /// `put` and `delete`, which reach handles they do not mutate.
-    ///
-    /// Two methods because `&` and `&mut` cannot be one in Rust, not because
-    /// they answer different questions: they must always name the same set, and
-    /// a `put` that skipped the plane would publish to every peer while the
-    /// session's own advanced subscriber heard nothing.
-    #[cfg(feature = "advanced")]
-    fn declaration_targets_ref(&self) -> impl Iterator<Item = &FaceEntry> {
-        self.faces.values().chain(self.local_face.iter())
-    }
-
-    /// [`Self::declaration_targets`] as values a declaration can be made on
-    /// AFTER the registry lock is released: each target's key, its session and
-    /// the runtime that drives it.
-    ///
-    /// For a declaration that must not run under the lock — one that calls back
-    /// into a host which takes the lock itself (see
-    /// [`SharedSession::declare_advanced_subscriber`]). The key is how the
-    /// finished declaration finds its way back
-    /// ([`SharedSession::attach_advanced_subscriber`]).
-    #[cfg(feature = "advanced")]
-    fn declaration_target_handles(
-        &self,
-    ) -> Vec<(
-        DeclarationTarget,
-        TokioSession,
-        Option<tokio::runtime::Handle>,
-    )> {
-        self.faces
-            .iter()
-            .map(|(id, face)| {
-                (
-                    DeclarationTarget::Face(*id),
-                    face.session.clone(),
-                    face.runtime.clone(),
-                )
-            })
-            .chain(self.local_face.iter().map(|face| {
-                (
-                    DeclarationTarget::Local,
-                    face.session.clone(),
-                    face.runtime.clone(),
-                )
-            }))
-            .collect()
-    }
-}
-
-/// Where a declaration made outside the registry lock is filed when it is done:
-/// a live face by id, or the session's own local plane.
-#[cfg(feature = "advanced")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DeclarationTarget {
-    Face(u64),
-    Local,
 }
 
 /// The registry behind a `z_owned_session_t`, shared between the C thread
@@ -1871,16 +1657,8 @@ impl SharedSession {
                 // The plane asks nobody: a write filter counts what PEERS
                 // declare, and the plane's link is inert.
                 filters: BTreeMap::new(),
-                #[cfg(feature = "advanced")]
-                adv_pubs: BTreeMap::new(),
-                #[cfg(feature = "advanced")]
-                adv_subs: BTreeMap::new(),
                 #[cfg(feature = "group")]
                 groups: BTreeMap::new(),
-                // `None`: this constructor runs on the C application thread,
-                // where `Handle::current()` panics. See the field.
-                #[cfg(feature = "advanced")]
-                runtime: None,
                 // The plane's re-arm signal is `local_wake`, held beside the
                 // session for the same outside-the-lock reason; this one is
                 // never notified.
@@ -2056,13 +1834,6 @@ impl SharedSession {
     /// refused link, and the caller closes it.
     pub fn face_up(&self, id: u64, actions: &Arc<SessionLinkActions>) -> bool {
         let observer = Arc::new(WzMutex::new(ApplicationLayerObserver::new()));
-        // This face's LOCAL zid, read off the handshake params the same way
-        // `Session::new` does. The advanced publisher stamps it into every
-        // sample's `SourceInfo` and renders it into the `@adv` keyexpr, so it
-        // must be the identity this face actually negotiated rather than a
-        // registry-wide copy.
-        #[cfg(feature = "advanced")]
-        let zid = actions.params.zid.clone();
         // R311y554 — THE hand-off that makes `allowed_destination` honourable.
         //
         // A FACE session's drain is `DriveTask` for both ABIs, and it is a
@@ -2236,28 +2007,6 @@ impl SharedSession {
                 filters.insert(entry.id, hold);
             }
         }
-        // Advanced pub/sub replay, on the same best-effort per-face contract
-        // as the four planes above. An advanced publisher declares its own
-        // `@adv` cache queryable and liveliness token on the face it binds to,
-        // so a per-face declaration is not merely convenient here — it is the
-        // only shape in which those two reach the peer at all.
-        #[cfg(feature = "advanced")]
-        let mut adv_pubs = BTreeMap::new();
-        #[cfg(feature = "advanced")]
-        for entry in &guard.adv_pubs {
-            if let Ok(pub_) = AdvancedPublisher::declare(
-                &session,
-                entry.keyexpr.clone(),
-                // R2619 — cloned, not copied: `AdvancedPublisherOptions` owns a
-                // `String` since it gained `publisher_detection_metadata`, so
-                // it is `Clone` and no longer `Copy`. The keyexpr beside it was
-                // already cloned for the same reason.
-                entry.options.clone(),
-                zid.to_vec(),
-            ) {
-                adv_pubs.insert(entry.id, pub_);
-            }
-        }
         // R3074 -- gossip: the new face is told every node this one knows and where each can be
         // reached, and the faces that hear of a new link are told this one is up. Sent from
         // here, with the face's identity read off its handshake (this runs past a completed
@@ -2275,35 +2024,6 @@ impl SharedSession {
         if self.initial_interest {
             let _ = session.send_initial_interest_final();
         }
-        // The advanced subscribers are NOT replayed here. Each declares a
-        // sequence of entities, and a host that declares keys takes this lock to
-        // declare the next one — so they are declared once the lock is released,
-        // from the snapshot taken here. Taking it in the SAME critical section as
-        // the face's insertion is what makes that safe: an entry recorded after
-        // this point finds the face in `declaration_target_handles`, and one
-        // recorded before it is in the snapshot, so each is declared on this face
-        // exactly once. See [`Self::declare_advanced_subscriber`].
-        #[cfg(feature = "advanced")]
-        let adv_sub_replays: Vec<_> = guard
-            .adv_subs
-            .iter()
-            .map(|entry| {
-                (
-                    entry.id,
-                    entry.keyexpr.clone(),
-                    // R311y826 — cloned, not moved: `AdvancedSubscriberOptions`
-                    // stopped being `Copy` when detection gained an owned
-                    // metadata key expression, and this entry is replayed on
-                    // every reconnect.
-                    entry.options.clone(),
-                    Arc::clone(&entry.sink),
-                )
-            })
-            .collect();
-        #[cfg(feature = "advanced")]
-        let adv_subs = BTreeMap::new();
-        #[cfg(feature = "advanced")]
-        let replay_session = session.clone();
         // R2932 — the groups, so a member joined before this peer connected
         // announces itself to it. Best-effort per face like every replay above:
         // the join's only fallible checks (canon, wildcards) already passed on
@@ -2333,17 +2053,8 @@ impl SharedSession {
                 live_subs,
                 matches,
                 filters,
-                #[cfg(feature = "advanced")]
-                adv_pubs,
-                #[cfg(feature = "advanced")]
-                adv_subs,
                 #[cfg(feature = "group")]
                 groups,
-                // `face_up` runs on the drive task, so this IS the runtime the
-                // face is driven by. Always `Some` for a real face; see the
-                // field for why the type admits `None`.
-                #[cfg(feature = "advanced")]
-                runtime: Some(tokio::runtime::Handle::current()),
                 revised: Arc::new(Notify::new()),
                 peer_zid,
             },
@@ -2354,32 +2065,6 @@ impl SharedSession {
         // is gone, so their members leave the union the way `face_down`'s do.
         if let Some(mut old) = replaced {
             old.retire_groups();
-        }
-        // The advanced subscribers, outside the lock — see where the snapshot is
-        // taken. This runs on the drive task, which is the runtime the face is
-        // driven by, so a declaration that spawns has the one it needs.
-        #[cfg(feature = "advanced")]
-        for (adv_id, keyexpr, options, sink) in adv_sub_replays {
-            let (on_sample, on_miss) = (sink)();
-            // R2814 — the seeded form: this is a replay of a subscriber the C
-            // program already holds, so its miss listener exists before the
-            // face's startup history GET can report anything.
-            // The REMOTE side only, as a subscriber declared while the face was up gets:
-            // the plane's own GET is the session's half (see `declare_advanced_subscriber`).
-            if let Ok(sub) = AdvancedSubscriber::declare_with_options_and_miss_listener(
-                &replay_session,
-                keyexpr,
-                options.with_get_locality(Locality::Remote),
-                on_sample,
-                on_miss,
-            ) {
-                self.attach_advanced_subscriber(
-                    DeclarationTarget::Face(id),
-                    &replay_session,
-                    adv_id,
-                    sub,
-                );
-            }
         }
         // Outside the lock, for the reason `fire_face_event` states: a C
         // listener may re-enter this registry.
@@ -4563,372 +4248,6 @@ impl SharedSession {
     }
 }
 
-/// The advanced publisher and subscriber planes of the registry: the sixth and seventh SSOT.
-/// Their own impl, so a build without the `advanced` feature carries none of it.
-#[cfg(feature = "advanced")]
-impl SharedSession {
-    /// Record a C ADVANCED publisher in the SSOT and declare it on every live
-    /// face, with the same declare-before-peer semantics as every other plane
-    /// here: no face yet -> the entry is still recorded and every future face
-    /// replays it.
-    ///
-    /// The per-face declaration is not an implementation detail of this
-    /// registry, it is what the plane needs: an advanced publisher owns an
-    /// `@adv` cache queryable and an `@adv` liveliness token, and both are
-    /// per-session entities a subscriber reaches over ONE face.
-    ///
-    /// R3064 -- THE IN-PROCESS PLANE IS THE AUTHORITY, and a refusal of its declaration is the
-    /// declaration's refusal. The plane is the SESSION as zenoh-c has it: one object that owns the
-    /// publisher whatever peers are or are not connected, so what it refuses, upstream's
-    /// `ze_declare_advanced_publisher` refuses, and the C ABI answers with an error and records
-    /// nothing. Before this the plane's `Err` was dropped with every face's, so a refusal that is a
-    /// property of the NODE (a cache with no miss detection on a node that holds no clock, which
-    /// upstream answers `Z_EGENERIC`) left a dead publisher and a success code: MEASURED, the
-    /// publisher put to nobody and its subscriber heard nothing. The faces stay best-effort,
-    /// because a face can be mid-teardown and a C caller has no per-face handle to retry with;
-    /// the plane has none of that, it cannot be mid-teardown while the session stands.
-    pub fn declare_advanced_publisher(
-        &self,
-        keyexpr: String,
-        options: AdvancedPublisherOptions,
-    ) -> Result<AdvPubId, AdvancedPublisherError> {
-        let mut guard = self.lock();
-        let id = guard.next_adv_pub_id;
-        guard.next_adv_pub_id = guard.next_adv_pub_id.wrapping_add(1);
-        // R2580 — the plane included. MEASURED against `libzenohc.so`: an
-        // advanced publisher and an advanced subscriber on ONE session saw
-        // nothing (`after=0` against upstream's `2`), while across a real face
-        // both saw both puts. The plane's `runtime` is `None`, so nothing is
-        // entered for it: its declaration asks the calling thread for no
-        // runtime (R2366 moved the beacon onto the process partition, and R3064
-        // removed the precondition that still said otherwise).
-        if let Some(plane) = guard.local_face.as_mut() {
-            let zid = plane.session.actions().params.zid.clone();
-            let pub_ =
-                AdvancedPublisher::declare(&plane.session, keyexpr.clone(), options.clone(), zid)?;
-            plane.adv_pubs.insert(id, pub_);
-        }
-        for face in guard.faces.values_mut() {
-            let zid = face.session.actions().params.zid.clone();
-            // Enter the face's own runtime: this call site is the C application
-            // thread, and a declaration may spawn. R2366 moved the beacon onto
-            // the `net` subsystem, which needs no ambient runtime, so this is
-            // now a defence for the rest of the declare rather than the single
-            // thing the beacon depended on. See `FaceEntry::runtime`.
-            let _guard = face.runtime.as_ref().map(|rt| rt.enter());
-            if let Ok(pub_) =
-                // R2619 — cloned per face, as the keyexpr beside it already is:
-                // the options own a `String` now and this loop declares one
-                // publisher per face from the same value.
-                AdvancedPublisher::declare(
-                    &face.session,
-                    keyexpr.clone(),
-                    options.clone(),
-                    zid,
-                )
-            {
-                face.adv_pubs.insert(id, pub_);
-            }
-        }
-        guard.adv_pubs.push(AdvPubEntry {
-            id,
-            keyexpr,
-            options,
-        });
-        Ok(id)
-    }
-
-    /// Publish one payload through a C advanced publisher, on every face that
-    /// carries it. Returns the number of faces that accepted it.
-    ///
-    /// Best-effort per face, like the ordinary fan-out publish: a face
-    /// mid-teardown is skipped rather than failing the whole put, because a C
-    /// caller has no per-face handle to retry with.
-    pub fn advanced_publisher_put(&self, id: AdvPubId, payload: &[u8]) -> usize {
-        let guard = self.lock();
-        let mut delivered = 0usize;
-        // R2580 — the plane included, or the put reaches every peer and not the
-        // session's own advanced subscriber.
-        for face in guard.declaration_targets_ref() {
-            if let Some(pub_) = face.adv_pubs.get(&id) {
-                if pub_.put(payload).is_ok() {
-                    delivered += 1;
-                }
-            }
-        }
-        delivered
-    }
-
-    /// R3063 -- [`Self::advanced_publisher_put`] for a payload that is a CHUNK of shared memory: each
-    /// face sends the sample as the chunk's descriptor to a peer that negotiated shared memory and as
-    /// its bytes to one that did not, stamps and sequences it exactly as the bytes would be, and
-    /// caches the chunk, not a copy of it, so a recovery reply replays it as shared memory. A face
-    /// takes the reference its receiver will release on its own, so several faces are several
-    /// references.
-    #[cfg(feature = "transport-shm")]
-    pub fn advanced_publisher_put_shm(
-        &self,
-        id: AdvPubId,
-        payload: &std::sync::Arc<wz_runtime_tokio::shm_provider::ShmBackedPayload>,
-    ) -> usize {
-        let guard = self.lock();
-        let mut delivered = 0usize;
-        // The plane included, for the reason the byte put names.
-        for face in guard.declaration_targets_ref() {
-            if let Some(pub_) = face.adv_pubs.get(&id) {
-                if pub_
-                    .put_shm_with(
-                        payload,
-                        wz_runtime_tokio::advanced_publisher::AdvancedPutOptions::default(),
-                    )
-                    .is_ok()
-                {
-                    delivered += 1;
-                }
-            }
-        }
-        delivered
-    }
-
-    /// Publish a DELETE through a C advanced publisher, on every face that
-    /// carries it (R311y559). `true` when at least one face accepted it.
-    ///
-    /// Best-effort per face for the same reason [`Self::advanced_publisher_put`]
-    /// is: a C caller has no per-face handle to retry with.
-    pub fn advanced_publisher_delete(&self, id: AdvPubId) -> bool {
-        let guard = self.lock();
-        let mut delivered = false;
-        // R2580 — the plane included, same reason as the put.
-        for face in guard.declaration_targets_ref() {
-            if let Some(pub_) = face.adv_pubs.get(&id) {
-                delivered |= pub_.delete().is_ok();
-            }
-        }
-        delivered
-    }
-
-    /// Retract a C advanced publisher: drop the SSOT entry so no future face
-    /// replays it, and drop every live face's publisher (which undeclares that
-    /// face's `@adv` cache queryable + liveliness token through RAII).
-    pub fn undeclare_advanced_publisher(&self, id: AdvPubId) {
-        let mut dropped = Vec::new();
-        {
-            let mut guard = self.lock();
-            if let Some(pos) = guard.adv_pubs.iter().position(|entry| entry.id == id) {
-                guard.adv_pubs.remove(pos);
-            }
-            // R2580 — the plane's copy too.
-            for face in guard.declaration_targets() {
-                if let Some(pub_) = face.adv_pubs.remove(&id) {
-                    dropped.push(pub_);
-                }
-            }
-        }
-        // Outside the lock: the teardown emits undeclares and may run C drops.
-        drop(dropped);
-    }
-
-    /// Record a C ADVANCED subscriber in the SSOT and declare it on every live
-    /// face. Mirror of [`Self::declare_advanced_publisher`].
-    pub fn declare_advanced_subscriber(
-        &self,
-        keyexpr: String,
-        options: AdvancedSubscriberOptions,
-        sink: AdvancedSubscriberSink,
-    ) -> AdvSubId {
-        self.declare_advanced_subscriber_with(keyexpr, options, None, sink)
-    }
-
-    /// [`Self::declare_advanced_subscriber`] for a host that declares KEYS:
-    /// `forms` says how each entity of the subscriber is named on the wire
-    /// ([`DeclarationForms`]).
-    ///
-    /// The registry adds the one thing it owns and a host has no way to know
-    /// before this call returns: the subscriber's identity, its own
-    /// [`AdvSubId`]. The subscriber is declared once per face, each face with
-    /// its own plain subscription id, and the identity the C handle reports and
-    /// the detection token is named with has to be the same on all of them.
-    pub fn declare_advanced_subscriber_declaring_keys(
-        &self,
-        keyexpr: String,
-        options: AdvancedSubscriberOptions,
-        forms: Arc<dyn DeclarationForms>,
-        sink: AdvancedSubscriberSink,
-    ) -> AdvSubId {
-        self.declare_advanced_subscriber_with(keyexpr, options, Some(forms), sink)
-    }
-
-    fn declare_advanced_subscriber_with(
-        &self,
-        keyexpr: String,
-        mut options: AdvancedSubscriberOptions,
-        forms: Option<Arc<dyn DeclarationForms>>,
-        sink: AdvancedSubscriberSink,
-    ) -> AdvSubId {
-        // ## THE PER-FACE DECLARATIONS RUN OUTSIDE THE REGISTRY LOCK
-        //
-        // An advanced subscriber is not one declaration but a sequence — the
-        // subscription, a startup history GET, the late-publisher and heartbeat
-        // subscriptions, a detection token — and a host that declares keys
-        // ([`wz_runtime_tokio::advanced_subscriber::DeclarationForms`]) declares
-        // a key for each of them as it goes, which takes this lock.
-        // Holding it across the sequence deadlocks that host on its first key.
-        //
-        // The history GET is the same hazard in another costume and was there
-        // before any host declared a key: in loopback it completes inside the
-        // declaration and runs the C sample callback, which a C program is
-        // entitled to use to re-enter the session. The matching listeners are
-        // installed outside the lock for the same reason.
-        //
-        // ## What makes that safe
-        //
-        // The entry is recorded and the targets taken in ONE critical section.
-        // A face that comes up afterwards replays the entry (`face_up` takes its
-        // own snapshot under the same lock it inserts the face under), and a
-        // face that is already up is in `targets` — so every face declares the
-        // subscriber exactly once, whichever side of this section it is on.
-        let hosted = forms.is_some();
-        let (id, targets) = {
-            let mut guard = self.lock();
-            let id = guard.next_adv_sub_id;
-            guard.next_adv_sub_id = guard.next_adv_sub_id.wrapping_add(1);
-            if let Some(host) = forms {
-                options = options.with_declaration_forms(Arc::new(IdentifiedForms { id, host }));
-            }
-            guard.adv_subs.push(AdvSubEntry {
-                id,
-                keyexpr: keyexpr.clone(),
-                options: options.clone(),
-                sink: Arc::clone(&sink),
-            });
-            (id, guard.declaration_target_handles())
-        };
-        // R2580 — the plane included; the receiving half of the advanced
-        // measurement recorded on `declare_advanced_publisher`.
-        for (target, session, runtime) in targets {
-            let (on_sample, on_miss) = (sink)();
-            // Same reason as the publisher's: a `recovery.periodic_queries`
-            // subscriber spawns a background task at declare time — and, since
-            // R2366, that task names the `app` subsystem, so this guard is the
-            // same defence-in-depth the publisher's now is.
-            let _guard = runtime.as_ref().map(|rt| rt.enter());
-            // The local plane has no wire to name anything on; see [`Unnamed`].
-            let for_target = match target {
-                // R3064 -- the plane's GETs are SESSION-LOCAL, as the groups' copy on it is
-                // (see `join_group`) and the plane's leg of a C `z_get` is. The plane has no
-                // wire: its link is inert, so a query issued with the default destination
-                // registers a remote half whose Final can never arrive, the pending entry waits
-                // for it, and nothing sweeps the plane's deadlines. For a subscriber with
-                // `history` that is the startup GET, and until it finishes every live sample is
-                // HELD for the history to come first: MEASURED, a same-session subscriber with
-                // history, with periodic recovery, or both received nothing while the real
-                // library delivered all three puts, and the declaration said success.
-                DeclarationTarget::Local if hosted => options
-                    .clone()
-                    .with_get_locality(Locality::SessionLocal)
-                    .with_declaration_forms(Arc::new(IdentifiedForms {
-                        id,
-                        host: Arc::new(Unnamed),
-                    })),
-                DeclarationTarget::Local => {
-                    options.clone().with_get_locality(Locality::SessionLocal)
-                }
-                // Cloned per face: the loop declares one subscriber on each,
-                // and the options are no longer `Copy` (R311y826).
-                //
-                // A face's GETs go to the REMOTE side only. The real library has one
-                // subscriber whose one startup GET reaches the session's own cache and
-                // every peer's once; here the plane's GET (above) is the session's
-                // half, so a face that also reached the copy of that cache it holds
-                // answered the same history a second time. MEASURED against the real
-                // library: a subscriber with history beside its publisher, with one
-                // link up, heard each of three cached samples twice, and the same
-                // subscriber on the far side of the link heard them once.
-                _ => options.clone().with_get_locality(Locality::Remote),
-            };
-            // R2814 — seeded for the same reason as the replay in `face_up`.
-            if let Ok(sub) = AdvancedSubscriber::declare_with_options_and_miss_listener(
-                &session,
-                keyexpr.clone(),
-                for_target,
-                on_sample,
-                on_miss,
-            ) {
-                self.attach_advanced_subscriber(target, &session, id, sub);
-            }
-        }
-        id
-    }
-
-    /// File a per-face advanced subscriber declared outside the registry lock
-    /// ([`Self::declare_advanced_subscriber`], [`Self::face_up`]) in its face.
-    ///
-    /// It is filed only if what it was declared for still stands: the C
-    /// subscriber is still declared (it may have been undeclared while this was
-    /// being made), and the target is still the very session it was declared on
-    /// (a face id is reused by a reconnect, and a subscriber declared on the old
-    /// session filed under the new one would be retracted on a session that is
-    /// gone). Otherwise it is dropped — outside the lock, because dropping it
-    /// retracts its entities and releases its C closures.
-    fn attach_advanced_subscriber(
-        &self,
-        target: DeclarationTarget,
-        session: &TokioSession,
-        id: AdvSubId,
-        sub: AdvancedSubscriber<TokioRuntime>,
-    ) {
-        let rejected = {
-            let mut guard = self.lock();
-            let declared = guard.adv_subs.iter().any(|entry| entry.id == id);
-            let face = match target {
-                DeclarationTarget::Face(face_id) => guard.faces.get_mut(&face_id),
-                DeclarationTarget::Local => guard.local_face.as_mut(),
-            };
-            match face {
-                Some(face) if declared && face.session.is_same_session(session) => {
-                    face.adv_subs.insert(id, sub)
-                }
-                _ => Some(sub),
-            }
-        };
-        drop(rejected);
-    }
-
-    /// Retract a C advanced subscriber. Mirror of
-    /// [`Self::undeclare_advanced_publisher`].
-    pub fn undeclare_advanced_subscriber(&self, id: AdvSubId) {
-        let mut dropped = Vec::new();
-        let mut dropped_entry = None;
-        {
-            let mut guard = self.lock();
-            if let Some(pos) = guard.adv_subs.iter().position(|entry| entry.id == id) {
-                dropped_entry = Some(guard.adv_subs.remove(pos));
-            }
-            // R2580 — the plane's copy too.
-            for face in guard.declaration_targets() {
-                if let Some(sub) = face.adv_subs.remove(&id) {
-                    dropped.push(sub);
-                }
-            }
-        }
-        // Outside the lock: the SSOT entry holds the sink factory, whose last
-        // release runs the C `drop(context)`.
-        drop(dropped);
-        drop(dropped_entry);
-    }
-
-    /// The keyexpr a C advanced subscriber was declared on, for the derived
-    /// `<ke>/@adv/pub/**` publisher-detection subscription.
-    pub fn advanced_subscriber_keyexpr(&self, id: AdvSubId) -> Option<String> {
-        let guard = self.lock();
-        guard
-            .adv_subs
-            .iter()
-            .find(|entry| entry.id == id)
-            .map(|entry| entry.keyexpr.clone())
-    }
-}
-
 impl SharedSession {
     /// R2932 — join the zenoh-ext GROUP `gid` as `member`: record it in the
     /// SSOT and join it on the local plane and on every live face. Returns
@@ -6268,177 +5587,6 @@ mod matching_aggregate_tests {
         assert!(
             retire_matching_sink(&state).is_some(),
             "the sink is still there to retire once the callback has left"
-        );
-    }
-}
-
-/// R3064 -- what a C advanced publisher's declaration answers, and whether the in-process plane
-/// holds the publisher it was declared on. The differential
-/// (`zenoh_c_advanced_publisher_declare_twice_and_diff`) is the proof against the real library; these
-/// are the registry-level cases that need no oracle and no drive thread.
-#[cfg(all(test, feature = "advanced"))]
-mod advanced_declaration_tests {
-    use super::*;
-    use std::time::Duration;
-    use wz_runtime_tokio::advanced_cache::CacheConfig;
-    use wz_runtime_tokio::advanced_publisher::{MissDetectionConfig, Sequencing};
-    use wz_runtime_tokio::node_clock::TimestampingEnabled;
-    use wz_runtime_tokio::session_glue::WhatAmI;
-
-    fn test_zid() -> Vec<u8> {
-        vec![0x22; 16]
-    }
-
-    /// A cache with no miss detection: it sequences by timestamp, so it needs a node clock.
-    fn cache_only() -> AdvancedPublisherOptions {
-        // Assigned field by field and not written as a literal: the options are
-        // `#[non_exhaustive]`, which is how the C ABI's own mapping fills them too.
-        let mut options = AdvancedPublisherOptions::default();
-        options.sequencing = Sequencing::Timestamp;
-        options.cache = Some(CacheConfig::default());
-        options
-    }
-
-    /// THE REFUSAL IS THE DECLARATION'S, and it records nothing. A node that holds no clock refuses
-    /// the declaration, as upstream's does, and the registry keeps no entry for a face that comes up
-    /// later to replay; a node that holds one accepts it, and the plane holds the publisher so a put
-    /// has somewhere to go.
-    #[test]
-    fn a_cache_without_miss_detection_is_refused_on_a_node_with_no_clock_and_accepted_on_one_with()
-    {
-        let bare = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
-        assert!(
-            matches!(
-                bare.declare_advanced_publisher("wz/adv".to_owned(), cache_only()),
-                Err(AdvancedPublisherError::TimestampingDisabled)
-            ),
-            "a node with no clock must refuse a publisher that sequences by timestamp"
-        );
-        assert_eq!(
-            bare.lock().adv_pubs.len(),
-            0,
-            "a refused declaration records no entry, so no later face replays it"
-        );
-
-        let clock = NodeHlc::for_node(&test_zid(), WhatAmI::Peer, TimestampingEnabled::all(true));
-        let clocked = SharedSession::new_with_node_clock(TokioTime::new(), test_zid(), clock)
-            .expect("test host entropy");
-        let id = clocked
-            .declare_advanced_publisher("wz/adv".to_owned(), cache_only())
-            .expect("a node that holds a clock accepts it");
-        assert_eq!(
-            clocked.advanced_publisher_put(id, b"x"),
-            1,
-            "the in-process plane holds the publisher, so the put has a place to go"
-        );
-    }
-
-    /// A publisher with a cache and miss detection on a node that holds a clock, and a subscriber of
-    /// the SAME session built with `subscriber`, and three puts. Returns how many the subscriber's
-    /// callback ran for once the plane has been drained to quiescence, which is the whole of what a
-    /// session with no peer can do: there is no drive thread here, so every delivery that happens
-    /// is one `drain_local_plane` made.
-    fn same_session_received(subscriber: AdvancedSubscriberOptions) -> usize {
-        let clock = NodeHlc::for_node(&test_zid(), WhatAmI::Peer, TimestampingEnabled::all(true));
-        let shared = SharedSession::new_with_node_clock(TokioTime::new(), test_zid(), clock)
-            .expect("test host entropy");
-        let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let counter = seen.clone();
-        let sink: AdvancedSubscriberSink = Arc::new(move || {
-            let counter = counter.clone();
-            (
-                Box::new(move |_sample| {
-                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                }),
-                Box::new(|_miss| {}),
-            )
-        });
-        shared.declare_advanced_subscriber("wz/adv/same".to_owned(), subscriber, sink);
-        let mut options = AdvancedPublisherOptions::default();
-        options.sequencing = Sequencing::SequenceNumber;
-        options.cache = Some(CacheConfig::default());
-        options.sample_miss_detection =
-            MissDetectionConfig::default().heartbeat(Duration::from_millis(50));
-        let id = shared
-            .declare_advanced_publisher("wz/adv/same".to_owned(), options)
-            .expect("a clocked node accepts it");
-        for _ in 0..3 {
-            shared.advanced_publisher_put(id, b"x");
-        }
-        // Drained until two passes in a row find nothing, with a bound so a plane that never
-        // quiesces fails the count and not the run.
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        let mut quiet = 0;
-        while quiet < 2 && std::time::Instant::now() < deadline {
-            if shared.drain_local_plane() == 0 {
-                quiet += 1;
-                std::thread::sleep(Duration::from_millis(20));
-            } else {
-                quiet = 0;
-            }
-        }
-        seen.load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    /// THE SUBSCRIBER'S OPTIONS DO NOT DECIDE WHETHER A SAME-SESSION PUBLISHER IS HEARD. MEASURED
-    /// against the real library, all of these hear all three puts; on wz the subscriber with history
-    /// heard none, because its startup GET was issued on the plane and nothing ever completed it, so
-    /// the live samples it was holding for the history never came out.
-    #[test]
-    fn a_history_subscriber_of_the_publishers_own_session_hears_it() {
-        let history = AdvancedSubscriberOptions::default()
-            .with_history(wz_runtime_tokio::advanced_subscriber::HistoryConfig::new());
-        assert_eq!(same_session_received(history), 3);
-    }
-
-    /// A subscriber with PERIODIC recovery: its declaration used to be refused on the plane for
-    /// want of a runtime on the calling thread, and the refusal was dropped, so the subscriber was
-    /// dead and the declare said success.
-    #[test]
-    fn a_periodic_recovery_subscriber_of_the_publishers_own_session_hears_it() {
-        let periodic = AdvancedSubscriberOptions::default().with_recovery(
-            wz_runtime_tokio::advanced_subscriber::RecoveryConfig::new()
-                .with_periodic_queries(Duration::from_millis(500)),
-        );
-        assert_eq!(same_session_received(periodic), 3);
-    }
-
-    /// Recovery driven by the publisher's HEARTBEAT, and recovery with history together: the two
-    /// shapes the measurement found delivering and the one it found dead, in one subscriber.
-    #[test]
-    fn heartbeat_recovery_and_recovery_with_history_hear_the_publishers_own_session() {
-        let heartbeat = AdvancedSubscriberOptions::default().with_recovery(
-            wz_runtime_tokio::advanced_subscriber::RecoveryConfig::new().with_heartbeat(),
-        );
-        assert_eq!(same_session_received(heartbeat), 3);
-        let all = AdvancedSubscriberOptions::default()
-            .with_history(wz_runtime_tokio::advanced_subscriber::HistoryConfig::new())
-            .with_recovery(
-                wz_runtime_tokio::advanced_subscriber::RecoveryConfig::new()
-                    .with_periodic_queries(Duration::from_millis(500)),
-            );
-        assert_eq!(same_session_received(all), 3);
-    }
-
-    /// THE PLANE ACCEPTS A HEARTBEAT FROM THE CALLING THREAD. This `#[test]` runs on a thread that is
-    /// inside no tokio runtime, as a C application thread is, and the declaration used to be refused
-    /// there on a precondition the beacon no longer had (it runs on the process's own runtime).
-    /// Before that was removed the refusal was dropped by the fan-out and the put below delivered to
-    /// nobody; the count is what separates a plane that holds the publisher from one that does not.
-    #[test]
-    fn a_heartbeat_declares_on_the_plane_from_a_thread_that_is_inside_no_runtime() {
-        let shared = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
-        let mut options = AdvancedPublisherOptions::default();
-        options.sequencing = Sequencing::SequenceNumber;
-        options.sample_miss_detection =
-            MissDetectionConfig::default().heartbeat(Duration::from_millis(50));
-        let id = shared
-            .declare_advanced_publisher("wz/adv".to_owned(), options)
-            .expect("a heartbeat asks the calling thread for no runtime");
-        assert_eq!(
-            shared.advanced_publisher_put(id, b"x"),
-            1,
-            "the plane must hold the publisher that was declared on it"
         );
     }
 }

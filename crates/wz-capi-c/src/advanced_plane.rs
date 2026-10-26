@@ -212,3 +212,180 @@ impl AdvancedPublisherPlane for CPlane {
         None
     }
 }
+
+/// What a C advanced publisher's declaration answers, and whether a subscriber of the SAME session
+/// hears it, with no peer and no drive thread: every delivery here is one `drain_local_plane` made.
+/// The differential (`zenoh_c_advanced_publisher_declare_twice_and_diff`) is the proof against the
+/// real library; these are the cases that need no oracle. They stood on the registry's own advanced
+/// publisher and subscriber until those were retired, and are the same cases on the hosts that
+/// replaced them.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
+
+    use wz_ext_pubsub::advanced_cache::CacheConfig;
+    use wz_ext_pubsub::advanced_publisher::{
+        AdvancedPublisherOn, AdvancedPublisherOptions, MissDetectionConfig, Sequencing,
+    };
+    use wz_ext_pubsub::advanced_subscriber::{
+        AdvancedSubscriberOptions, EngineSubscriber, HistoryConfig, RecoveryConfig,
+    };
+    use wz_runtime_tokio::node_clock::TimestampingEnabled;
+    use wz_runtime_tokio::runtime_impl::TokioTime;
+    use wz_runtime_tokio::session_glue::WhatAmI;
+
+    fn test_zid() -> Vec<u8> {
+        vec![0x22; 16]
+    }
+
+    /// A session of a node that holds a clock.
+    fn clocked() -> Arc<SharedSession> {
+        let clock = NodeHlc::for_node(&test_zid(), WhatAmI::Peer, TimestampingEnabled::all(true));
+        Arc::new(
+            SharedSession::new_with_node_clock(TokioTime::new(), test_zid(), clock)
+                .expect("test host entropy"),
+        )
+    }
+
+    fn declare(
+        shared: &Arc<SharedSession>,
+        keyexpr: &str,
+        options: AdvancedPublisherOptions,
+    ) -> Result<AdvancedPublisherOn<CPlane>, AdvancedPublisherError> {
+        AdvancedPublisherOn::declare_on(
+            Arc::new(CPlane::new(shared)),
+            keyexpr.to_owned(),
+            options,
+            test_zid(),
+        )
+    }
+
+    /// A cache with no miss detection: it sequences by timestamp, so it needs a node clock.
+    fn cache_only() -> AdvancedPublisherOptions {
+        // Assigned field by field and not written as a literal: the options are
+        // `#[non_exhaustive]`, which is how the C ABI's own mapping fills them too.
+        let mut options = AdvancedPublisherOptions::default();
+        options.sequencing = Sequencing::Timestamp;
+        options.cache = Some(CacheConfig::default());
+        options
+    }
+
+    /// THE REFUSAL IS THE DECLARATION'S. A node that holds no clock refuses a publisher that
+    /// sequences by timestamp, as upstream's does, and leaves nothing declared; a node that holds
+    /// one accepts it, and the plane holds the publisher so a put has somewhere to go.
+    #[test]
+    fn a_cache_without_miss_detection_is_refused_on_a_node_with_no_clock_and_accepted_on_one_with()
+    {
+        let bare =
+            Arc::new(SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy"));
+        assert!(
+            matches!(
+                declare(&bare, "wz/adv", cache_only()),
+                Err(AdvancedPublisherError::TimestampingDisabled)
+            ),
+            "a node with no clock must refuse a publisher that sequences by timestamp"
+        );
+
+        let clocked = clocked();
+        let publisher = declare(&clocked, "wz/adv", cache_only())
+            .unwrap_or_else(|_| panic!("a node that holds a clock accepts it"));
+        publisher.put(b"x").expect("the put is accepted");
+        assert_eq!(
+            publisher.cache().map(CacheStore::len),
+            Some(1),
+            "the publisher holds the sample it put, so it was declared and is live"
+        );
+    }
+
+    /// A publisher with a cache and miss detection on a node that holds a clock, and a subscriber
+    /// of the SAME session built with `subscriber`, and three puts. Returns how many the
+    /// subscriber's callback ran for once the plane has been drained to quiescence.
+    fn same_session_received(subscriber: AdvancedSubscriberOptions) -> usize {
+        let shared = clocked();
+        let seen = Arc::new(AtomicUsize::new(0));
+        let counter = seen.clone();
+        let _subscriber = EngineSubscriber::declare(
+            &shared.as_engine(),
+            "wz/adv/same",
+            subscriber,
+            move |_sample| {
+                counter.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .expect("the subscriber declares on the session's engine");
+        let mut options = AdvancedPublisherOptions::default();
+        options.sequencing = Sequencing::SequenceNumber;
+        options.cache = Some(CacheConfig::default());
+        options.sample_miss_detection =
+            MissDetectionConfig::default().heartbeat(Duration::from_millis(50));
+        let publisher = declare(&shared, "wz/adv/same", options)
+            .unwrap_or_else(|_| panic!("a clocked node accepts it"));
+        for _ in 0..3 {
+            let _ = publisher.put(b"x");
+        }
+        // Drained until two passes in a row find nothing, with a bound so a plane that never
+        // quiesces fails the count and not the run.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut quiet = 0;
+        while quiet < 2 && Instant::now() < deadline {
+            if shared.drain_local_plane() == 0 {
+                quiet += 1;
+                std::thread::sleep(Duration::from_millis(20));
+            } else {
+                quiet = 0;
+            }
+        }
+        seen.load(Ordering::SeqCst)
+    }
+
+    /// THE SUBSCRIBER'S OPTIONS DO NOT DECIDE WHETHER A SAME-SESSION PUBLISHER IS HEARD. MEASURED
+    /// against the real library, all of these hear all three puts.
+    #[test]
+    fn a_history_subscriber_of_the_publishers_own_session_hears_it() {
+        let history = AdvancedSubscriberOptions::default().with_history(HistoryConfig::new());
+        assert_eq!(same_session_received(history), 3);
+    }
+
+    /// A subscriber with PERIODIC recovery: the job is the engine's, and not a task of a runtime the
+    /// calling thread would have to be inside.
+    #[test]
+    fn a_periodic_recovery_subscriber_of_the_publishers_own_session_hears_it() {
+        let periodic = AdvancedSubscriberOptions::default()
+            .with_recovery(RecoveryConfig::new().with_periodic_queries(Duration::from_millis(500)));
+        assert_eq!(same_session_received(periodic), 3);
+    }
+
+    /// Recovery driven by the publisher's HEARTBEAT, and recovery with history together.
+    #[test]
+    fn heartbeat_recovery_and_recovery_with_history_hear_the_publishers_own_session() {
+        let heartbeat = AdvancedSubscriberOptions::default()
+            .with_recovery(RecoveryConfig::new().with_heartbeat());
+        assert_eq!(same_session_received(heartbeat), 3);
+        let all = AdvancedSubscriberOptions::default()
+            .with_history(HistoryConfig::new())
+            .with_recovery(RecoveryConfig::new().with_periodic_queries(Duration::from_millis(500)));
+        assert_eq!(same_session_received(all), 3);
+    }
+
+    /// THE PLANE ACCEPTS A HEARTBEAT FROM THE CALLING THREAD. This `#[test]` runs on a thread that is
+    /// inside no tokio runtime, as a C application thread is; the beacon is the engine's job and
+    /// asks the thread for none. The count is what separates a plane that holds the publisher from
+    /// one that does not.
+    #[test]
+    fn a_heartbeat_declares_on_the_plane_from_a_thread_that_is_inside_no_runtime() {
+        let shared =
+            Arc::new(SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy"));
+        let mut options = AdvancedPublisherOptions::default();
+        options.sequencing = Sequencing::SequenceNumber;
+        options.sample_miss_detection =
+            MissDetectionConfig::default().heartbeat(Duration::from_millis(50));
+        let publisher = declare(&shared, "wz/adv", options)
+            .unwrap_or_else(|_| panic!("a heartbeat asks the calling thread for no runtime"));
+        publisher
+            .put(b"x")
+            .expect("the plane holds the publisher that was declared on it");
+    }
+}
