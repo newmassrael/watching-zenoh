@@ -291728,6 +291728,54 @@
         "Hosted CI on main has not completed a run this evening: every run is cancelled by the next push."
       ]
     },
+    "Round 3739": {
+      "decision_summary": "Step L1 of the listening role: the cooperative engine holds its session on the slot observer. Core held an ApplicationLayerObserver (what the application registered and what the peer wrote in one object); it now holds one Registry of three parts: the SlotObserver (the application's registrations, once), the link's PeerTables, and the session's own pending gets. SlotObserver gains flush_pending_replies, which drains replies, interest answers and prunes and leaves the Finals owed in the peer's tables, so the engine still holds each Final behind the callbacks that may answer. SubscriberPeer::reconcile, which stages the push a subscription registered after a peer's interest is owed, had no caller in the tree; the registry calls it before each drain. The engine's 56 tests and the cooperative C1co legs pass unchanged. The eight cooperative size cases grew 13,704 bytes (client) to 24,848 (admin space) on pc2; their budgets move to the new readings.",
+      "changes_bullets": [
+        "crates/wz-capi-coop/src/engine/registry.rs (new): Registry, its dispatch, drain without Finals, taking the owed Finals, link-loss flushes. crates/wz-capi-coop/src/engine.rs and engine/get.rs: every use of the application observer goes through it.",
+        "crates/wz-session-core/src/slot_observer.rs: flush_pending_replies. tests/slot_observer_heap.rs: a fourth test (replies drained with the Final held back, then sent, is what the full drain sends). scripts/run-ci.sh: lane C1g counts 4.",
+        "scripts/lib/capability_cost_gate.py: the eight cooperative budgets and their notes (the client's note holds the symbol diff). docs/capi-pico-on-coop-engine.md: step L1 done."
+      ],
+      "verification_bullets": [
+        "wz-capi-coop with every plane on: 56 passed before and after the rebase; clippy with -D warnings and all targets on the default build, every plane on, and the thumbv7em no_std build. wz-session-core slot_observer_heap with the C1g features: 4 passed.",
+        "The cooperative legs of C1co against the full build's listener: answering 11, asking only 8, advanced 11, scout 1, each at its exact count.",
+        "Size, on pc2 at the commit before and the commit: pico-client-coop 899,119 to 912,823; unstable 902,337 to 916,041; local 905,671 to 919,291; connectivity 971,165 to 985,013; admin-space 1,115,141 to 1,139,989; query 1,163,252 to 1,186,508; local-queryable 1,176,860 to 1,199,576; scout 981,182 to 994,918. Judged on pc2 after the rebase: 8 cases within their new budgets. Symbol diff of the scout build on this machine: text +12,696; the observer's dispatch is 11,831 against 11,951; netted gained and lost symbols +4,472, grown ones +5,802. The extra 9,000 to 11,000 of the builds that answer queries is not attributed.",
+        "The hook's gate array plus the surface gates: 117 of 118; prose_named_identifier_gate is red because the pico numbers' commit made five pinned names carried (not this round's; its author was told and fixes it).",
+        "Not done: the hosted run that holds these commits has not finished."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "carry_forward_bullets": [
+        "L2 of the listening role (a face table of one: the link's id, wire, tables, replay, generation and requesters in one entry, Core holding a table of them; Registry.peer and Registry.gets move into it) is next; engine.rs is this session's.",
+        "Attribute the 9,000 to 11,000 bytes the query-answering cooperative builds grew beyond the client's (symbol diff of pico-client-coop-query at the commit before and after), and look at the subscriber table's owned dispatch (+4,402) and the Put's owned form (+3,567), which grew where the compiler placed them.",
+        "SubscriberPeer::reconcile had no caller before this round: a slot-profile node that serves a subscriber interest does not announce a subscription registered after the interest. Ask who owns the slot node whether that is meant, before anything is changed there.",
+        "Read C1cs, C1cc, C1ce, C1co and C1aq to C1av from the first hosted run that finishes and holds this round.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine; the differential of the typed tokio host against the port's host."
+      ],
+      "publishable_decision_summary": "Step L1 of the listening role: the cooperative engine holds its session on the slot observer. Core held an ApplicationLayerObserver (what the application registered and what the peer wrote in one object); it now holds one Registry of three parts: the SlotObserver (the application's registrations, once), the link's PeerTables, and the session's own pending gets. SlotObserver gains flush_pending_replies, which drains replies, interest answers and prunes and leaves the Finals owed in the peer's tables, so the engine still holds each Final behind the callbacks that may answer. SubscriberPeer::reconcile, which stages the push a subscription registered after a peer's interest is owed, had no caller in the tree; the registry calls it before each drain. The engine's 56 tests and the cooperative C1co legs pass unchanged. The eight cooperative size cases grew 13,704 bytes (client) to 24,848 (admin space) on pc2; their budgets move to the new readings.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-coop/src/engine/registry.rs (new): Registry, its dispatch, drain without Finals, taking the owed Finals, link-loss flushes. crates/wz-capi-coop/src/engine.rs and engine/get.rs: every use of the application observer goes through it.",
+        "crates/wz-session-core/src/slot_observer.rs: flush_pending_replies. tests/slot_observer_heap.rs: a fourth test (replies drained with the Final held back, then sent, is what the full drain sends). scripts/run-ci.sh: lane C1g counts 4.",
+        "scripts/lib/capability_cost_gate.py: the eight cooperative budgets and their notes (the client's note holds the symbol diff). docs/capi-pico-on-coop-engine.md: step L1 done."
+      ],
+      "publishable_verification_bullets": [
+        "wz-capi-coop with every plane on: 56 passed before and after the rebase; clippy with -D warnings and all targets on the default build, every plane on, and the thumbv7em no_std build. wz-session-core slot_observer_heap with the C1g features: 4 passed.",
+        "The cooperative legs of C1co against the full build's listener: answering 11, asking only 8, advanced 11, scout 1, each at its exact count.",
+        "Size, on pc2 at the commit before and the commit: pico-client-coop 899,119 to 912,823; unstable 902,337 to 916,041; local 905,671 to 919,291; connectivity 971,165 to 985,013; admin-space 1,115,141 to 1,139,989; query 1,163,252 to 1,186,508; local-queryable 1,176,860 to 1,199,576; scout 981,182 to 994,918. Judged on pc2 after the rebase: 8 cases within their new budgets. Symbol diff of the scout build on this machine: text +12,696; the observer's dispatch is 11,831 against 11,951; netted gained and lost symbols +4,472, grown ones +5,802. The extra 9,000 to 11,000 of the builds that answer queries is not attributed.",
+        "The hook's gate array plus the surface gates: 117 of 118; prose_named_identifier_gate is red because the pico numbers' commit made five pinned names carried (not this round's; its author was told and fixes it).",
+        "Not done: the hosted run that holds these commits has not finished."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "publishable_carry_forward_bullets": [
+        "L2 of the listening role (a face table of one: the link's id, wire, tables, replay, generation and requesters in one entry, Core holding a table of them; Registry.peer and Registry.gets move into it) is next; engine.rs is this session's.",
+        "Attribute the 9,000 to 11,000 bytes the query-answering cooperative builds grew beyond the client's (symbol diff of pico-client-coop-query at the commit before and after), and look at the subscriber table's owned dispatch (+4,402) and the Put's owned form (+3,567), which grew where the compiler placed them.",
+        "SubscriberPeer::reconcile had no caller before this round: a slot-profile node that serves a subscriber interest does not announce a subscription registered after the interest. Ask who owns the slot node whether that is meant, before anything is changed there.",
+        "Read C1cs, C1cc, C1ce, C1co and C1aq to C1av from the first hosted run that finishes and holds this round.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine; the differential of the typed tokio host against the port's host."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
