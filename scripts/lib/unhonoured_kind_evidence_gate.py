@@ -309,6 +309,43 @@ def citations(key: str, files: dict[str, str]) -> list[tuple[str, int, str]]:
     return citations_all([key], files)[key]
 
 
+#: The notice a file of the zenoh compatibility family carries when it is upstream's file with
+#: a header changed (`docs/build-configuration.md` C13, the family notice gate).
+DERIVED_FROM_UPSTREAM = re.compile(r"Derived from zenoh[\w-]* \d")
+
+
+def set_aside(files: dict[str, str], manifests: dict[str, str]) -> dict[str, str]:
+    """The files that say nothing about what wz's ENGINE honours, with the reason of each.
+
+    R3692. This gate grades the reader of the engine (`SOURCE`): whether a key an operator writes
+    does anything. Two kinds of file were swept as "wz's source" before the zenoh compatibility
+    family existed, and name upstream's keys and types by construction:
+
+      * a file derived from upstream's, which the family keeps as upstream wrote it, so that the
+        data model of the configuration (`QosOverwriteItemConf`, `LinkTxConf`, ...) is in wz's
+        tree whether or not anything acts on it. Told by the notice in its first lines, which the
+        family notice gate already requires of every such file;
+      * a test that drives upstream's own crate beside wz's (a package of `conformance/` that
+        depends on a `zenoh*` package from the registry), which names a key to compare how the
+        two read it and proves nothing about the engine.
+
+    A file of the family that wz WROTE (the table that maps the keys of a `Config` onto the
+    engine, when slice Z1 of `docs/zenoh-api-on-the-engine.md` brings it) has no such notice and
+    stays in the sweep, where its naming of a key is what a verdict is about.
+    """
+    aside: dict[str, str] = {}
+    for rel, text in files.items():
+        if DERIVED_FROM_UPSTREAM.search("\n".join(text.splitlines()[:40])):
+            aside[rel] = "derived from upstream's file"
+    for manifest, text in manifests.items():
+        if re.search(r'package\s*=\s*"zenoh[\w-]*"', text):
+            tree = manifest.rsplit("/", 1)[0] + "/"
+            for rel in files:
+                if rel.startswith(tree):
+                    aside.setdefault(rel, "drives upstream's crate beside wz's")
+    return aside
+
+
 def audit(src: str, files: dict[str, str]) -> tuple[list[str], list[str]]:
     """The whole judgement, as (failures, report lines).
 
@@ -768,8 +805,35 @@ def _selftest() -> int:
 
     print(f"unhonoured-kind-evidence selftest: {len(arms)} arm(s)")
     passed = sum(1 for a in arms if run(*a))
-    print(f"  {passed}/{len(arms)} arm(s) behaved as claimed")
-    return 0 if passed == len(arms) else 1
+
+    # ─── what is set aside (R3692) ───
+    #
+    # A file derived from upstream's and a test that drives upstream's crate are set aside; a file
+    # of the same crate that wz wrote, and a test of a package that depends on no upstream crate,
+    # are not.
+    notice = "// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-config 1.10.1, file\n"
+    fx_files = {
+        "crates/wz-zenoh-config/src/lib.rs": notice + "pub struct QosOverwriteItemConf;\n",
+        "crates/wz-zenoh/src/keys.rs": "pub struct OwnTable;\n",
+        "crates/wz-zenoh/src/late.rs": "\n" * 60 + "// Derived from zenoh 1.10.1\n",
+        "conformance/differential/tests/t.rs": "// names `qos.network`\n",
+        "conformance/other/tests/u.rs": "// names `qos.network`\n",
+    }
+    fx_manifests = {
+        "conformance/differential/Cargo.toml": 'up = { package = "zenoh", version = "=1.10.1" }\n',
+        "conformance/other/Cargo.toml": 'serde = "1"\n',
+    }
+    got = set(set_aside(fx_files, fx_manifests))
+    want = {"crates/wz-zenoh-config/src/lib.rs", "conformance/differential/tests/t.rs"}
+    aside_ok = got == want
+    print(
+        f"  {'ok  ' if aside_ok else 'FAIL'} set_aside: expected exactly {sorted(want)}"
+        + ("" if aside_ok else f", got {sorted(got)}")
+    )
+    passed += int(aside_ok)
+    total = len(arms) + 1
+    print(f"  {passed}/{total} arm(s) behaved as claimed")
+    return 0 if passed == total else 1
 
 
 def main() -> int:
@@ -802,8 +866,25 @@ def main() -> int:
             print(f"unhonoured-kind-evidence: FAIL -- cannot read {rel}: {exc}", file=sys.stderr)
             return 1
 
+    manifests: dict[str, str] = {}
+    for rel in subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "ls-files", "conformance/*Cargo.toml"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split():
+        manifests[rel] = (REPO_ROOT / rel).read_text()
+    aside = set_aside(files, manifests)
+    files = {p: t for p, t in files.items() if p not in aside}
+
     failures, report = audit(SOURCE.read_text(), files)
 
+    print(
+        f"unhonoured-kind-evidence: {len(aside)} file(s) set aside as upstream's own or as "
+        f"tests that drive upstream's crate beside wz's "
+        f"({sum(1 for r in aside.values() if r.startswith('derived'))} derived, "
+        f"{sum(1 for r in aside.values() if r.startswith('drives'))} driving)"
+    )
     for line in report:
         print(line)
     if args.verbose:
