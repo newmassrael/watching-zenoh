@@ -290624,6 +290624,42 @@
         "Still open: wait_declarations_stable and a synced query on the cooperative engine; scouting on the cooperative engine."
       ]
     },
+    "Round 3711": {
+      "decision_summary": "The zenoh verdict's corpus gains SOME/IP: upstream COVESA vsomeip 3.7.6, built in an ubuntu:24.04 container, runs one service that answers a method and notifies a field every 300 ms and one client that subscribes and calls the method every 250 ms, alternating UDP and TCP, in two containers on a docker network of its own, captured on its bridge. No flow reads yes in either build: five read no and two undecided. vsomeip starts service discovery only once a route to the SD multicast group exists, so each container is given a route to 224.0.0.0/4 before its application starts; without it the capture holds no SOME/IP at all.",
+      "changes_bullets": [
+        "`captures/corpus/stack-someip.pcap`, listed in `corpus.json5` with its source, capture and what the anonymiser dropped (ARP, IGMP with options, IPv6 hop-by-hop); the README table gains the row and the pending list loses SOME/IP.",
+        "`zenoh_corpus_tests.rs`: the file's tally (0 yes, 5 no, 2 undecided) pinned for both builds. `docs/flow-zenoh-verdict.md` 6.1 names vsomeip among the stacks."
+      ],
+      "verification_bullets": [
+        "Measured, both builds: SOME/IP 7 flows (0 yes, 5 no, 2 undecided); every other file keeps its tally. The client logged 119 calls answered and 101 notifications over thirty seconds.",
+        "`capture_anonymise.py --verify-corpus` over 13 files passes; no host or container name is left in the capture. The pre-push static gate array passed after the append."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "A TCP flow whose bytes never frame a unit is evidence model 1 does not weigh; step 3 can add it as a check with weights measured on this corpus.",
+        "Still to come for step 2: QUIC (a parser first, since its Initial carries the server name under keys anyone can derive), LLMNR, WS-Discovery, NTP and DHCP from a busier network, other zenoh versions and zenoh-pico."
+      ],
+      "publishable_decision_summary": "The zenoh verdict's corpus gains SOME/IP: upstream COVESA vsomeip 3.7.6, built in an ubuntu:24.04 container, runs one service that answers a method and notifies a field every 300 ms and one client that subscribes and calls the method every 250 ms, alternating UDP and TCP, in two containers on a docker network of its own, captured on its bridge. No flow reads yes in either build: five read no and two undecided. vsomeip starts service discovery only once a route to the SD multicast group exists, so each container is given a route to 224.0.0.0/4 before its application starts; without it the capture holds no SOME/IP at all.",
+      "publishable_changes_bullets": [
+        "`captures/corpus/stack-someip.pcap`, listed in `corpus.json5` with its source, capture and what the anonymiser dropped (ARP, IGMP with options, IPv6 hop-by-hop); the README table gains the row and the pending list loses SOME/IP.",
+        "`zenoh_corpus_tests.rs`: the file's tally (0 yes, 5 no, 2 undecided) pinned for both builds. `docs/flow-zenoh-verdict.md` 6.1 names vsomeip among the stacks."
+      ],
+      "publishable_verification_bullets": [
+        "Measured, both builds: SOME/IP 7 flows (0 yes, 5 no, 2 undecided); every other file keeps its tally. The client logged 119 calls answered and 101 notifications over thirty seconds.",
+        "`capture_anonymise.py --verify-corpus` over 13 files passes; no host or container name is left in the capture. The pre-push static gate array passed after the append."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A TCP flow whose bytes never frame a unit is evidence model 1 does not weigh; step 3 can add it as a check with weights measured on this corpus.",
+        "Still to come for step 2: QUIC (a parser first, since its Initial carries the server name under keys anyone can derive), LLMNR, WS-Discovery, NTP and DHCP from a busier network, other zenoh versions and zenoh-pico."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
