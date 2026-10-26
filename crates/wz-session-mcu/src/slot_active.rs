@@ -8,7 +8,7 @@
 //! ([`Replay`]) and queriers ([`Query`]) are arrays the image states. The publishers are played by
 //! [`Publishing`] (their arrival processes, their made bodies, how late each put was), the replays by
 //! [`Replaying`] (their recorded samples, paced and mutated) and the queriers by a
-//! [`Schedule`](crate::slot_schedule::Schedule). After it has dispatched what the iteration brought
+//! [`crate::slot_schedule::Schedule`]. After it has dispatched what the iteration brought
 //! it sends each due put (`send_push_literal`) and asks each due query, and tells the
 //! drive loop the earliest moment it needs to be awake next
 //! ([`set_app_wake_deadline_ms`](wz_session_core::session_actions::SessionLinkActions::set_app_wake_deadline_ms)),
