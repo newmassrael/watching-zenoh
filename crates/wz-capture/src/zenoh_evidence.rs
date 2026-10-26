@@ -8,7 +8,8 @@
 //!
 //! Every observation adds `log2(P(o | zenoh) / P(o | not zenoh))` to the flow's
 //! log likelihood ratio, and the verdict reads the sum against two thresholds
-//! fixed by the error rates ([`model::YES_AT`], [`model::NO_AT`]). The verdict
+//! fixed by the error rates ([`crate::zenoh_evidence::model::YES_AT`],
+//! [`crate::zenoh_evidence::model::NO_AT`]). The verdict
 //! is read at every moment and not frozen at the first crossing: with true
 //! conditional ratios, `2^L` is a nonnegative martingale under the null, and
 //! Ville's inequality bounds the chance that it EVER reaches `1/alpha` by
@@ -18,14 +19,18 @@
 //! # Counted at ingest, in whole millibits
 //!
 //! Each observation's weight is a whole number of millibits taken from
-//! [`model`], so a sum is exact and does not depend on the order the
+//! [`crate::zenoh_evidence::model`], so a sum is exact and does not depend on the order the
 //! observations arrived in. The tallies are kept where the data arrives, for the
 //! reason `session_table`'s module gives: a retention ceiling discards the
 //! oldest messages, and the handshake is the oldest.
 //!
+//! Every link in this doc is fully qualified: it is merged with the `pub mod`
+//! doc in `lib.rs` and resolved in the crate root.
+//!
 //! # What a weight claims
 //!
-//! Each side of each check names its [`Basis`]: a probability derived from
+//! Each side of each check names its [`crate::zenoh_evidence::Basis`]: a
+//! probability derived from
 //! field widths, one measured on the GENERATED corpus, or one assumed until a
 //! measurement replaces it. A weight is a statement against the null protocols
 //! its basis covers and no others, and the document carries the basis so that a
