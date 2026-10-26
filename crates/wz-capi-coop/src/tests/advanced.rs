@@ -65,6 +65,7 @@ fn wait_for(engine: &Arc<Engine>, router: &Router, delivered: &Delivered, expect
 fn a_get_answered_with_several_replies_hands_the_leg_all_of_them() {
     use wz_session_core::query_mode::{ConsolidationMode, QueryTarget};
     use wz_session_core::query_options::QueryOptions;
+    use wz_session_core::selector_params::ANYKE_PARAM;
 
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
@@ -76,7 +77,7 @@ fn a_get_answered_with_several_replies_hands_the_leg_all_of_them() {
     // selector's `_anyke` admits, each once and with its timestamp.
     let options = QueryOptions::get()
         .with_expose_timestamp(true)
-        .with_parameters(b"_anyke".to_vec())
+        .with_parameters(ANYKE_PARAM.as_bytes().to_vec())
         .with_target(QueryTarget::All)
         .with_consolidation(ConsolidationMode::None);
     assert_eq!(
