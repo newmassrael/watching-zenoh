@@ -186,11 +186,11 @@ defect of this plane; it is documented on the plane and not worked around with a
    publisher's own timer shares), and the cooperative engine runs it from the call that steps the
    session: the wait of a read is cut short to the job's time as it is for a get's deadline, and
    the job runs after the step with no lock held, one at a time, a period after its last run ended.
-   The pico plane's timer is that job, and its on-demand beacon is a port put. What is left of
-   step 3 is that pico's `advanced` feature still selects the tokio engine, because the module
-   that holds the publisher's entry points also holds the subscriber's; the cooperative
-   publisher then follows the subscriber (step 4), and its first witness is a pico build on the
-   cooperative engine that declares an advanced publisher.
+   The pico plane's timer is that job, and its on-demand beacon is a port put. Pico's `advanced`
+   feature selected the tokio engine until step 4, because the module that holds the
+   publisher's entry points also held the subscriber's; the cooperative publisher followed the
+   subscriber, and its first witness is a pico build on the cooperative engine that declares an
+   advanced publisher (see step 4).
 4. **The subscriber on it**: `State` and its helpers move to `wz-ext-pubsub` (about 1,500 lines,
    and the tests that drive it directly), with the clock made an argument; the tokio host keeps its wiring and calls the moved machine; the
    cooperative host writes its own. The largest step, and the moved code is not rewritten, so what
@@ -219,8 +219,10 @@ defect of this plane; it is documented on the plane and not worked around with a
    the tokio host's order, and the jobs answer `false` once the flag is set. The machine's
    clock is the engine's, which is why the port gained `SessionEngine::now_ms`. Its tests run
    against a scripted engine that records declarations and hands the test each callback.
-   Left for this step: the pico module's `advanced` entry points over this host, which retires
-   its use of the tokio engine.
+   The pico module's `advanced` entry points then moved over this host and the publisher's
+   plane, so the `advanced` feature of the pico crate no longer selects the tokio engine; its
+   witness on both engines is a subscriber that receives a publisher's cache and then its live
+   puts in order.
 5. **Retire the old paths** only after a differential test (the same events into the old and the
    new give the same commands and deliveries) and the existing interop tests pass: the zenoh-ext
    interop (`wz_advanced_pubsub_zenoh_ext_interop`), the pico interop

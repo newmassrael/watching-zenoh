@@ -47,11 +47,9 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-#[cfg(feature = "advanced")]
-use wz_capi_core::faces::SharedSession;
-#[cfg(feature = "advanced")]
-use wz_capi_core::runtime::node_clock::NodeHlc;
 use wz_capi_port::{FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink, WireKey};
+#[cfg(feature = "advanced")]
+use wz_node_time::node_clock::NodeHlc;
 use wz_session_core::declare_form::InterestForm;
 use wz_session_core::WhatAmI;
 
@@ -76,17 +74,12 @@ pub(crate) fn session_mode(handle: &PicoSessionHandle) -> WhatAmI {
 /// declarations and the entities live in, and the role the write filter and the
 /// retractions follow.
 ///
-/// The registry is held twice while the cooperative engine grows
-/// (`docs/capi-pico-on-coop-engine.md`): as the port's [`Engine`], which is all the
-/// client surface (keys, publishers, subscribers, matching, write filters) may
-/// name, and as the tokio engine's own registry for the capability the port does
-/// not carry yet (the advanced plane). A build without it has the port alone,
-/// which is what the client surface measures as.
+/// The registry is the port's [`Engine`], which is all the client surface (keys,
+/// publishers, subscribers, matching, write filters) and the advanced plane may
+/// name (`docs/capi-pico-on-coop-engine.md`).
 #[derive(Clone)]
 pub(crate) struct PicoSession {
     pub(crate) engine: Arc<Engine>,
-    #[cfg(feature = "advanced")]
-    pub(crate) shared: Arc<SharedSession>,
     pub(crate) mode: WhatAmI,
     /// The session's clock — `NodeHlc::disabled()` for a session this ABI did
     /// not open, which no C entry point can hand it. Read by the advanced plane alone, whose
@@ -100,14 +93,6 @@ impl PicoSession {
     pub(crate) fn of(handle: &PicoSessionHandle) -> Self {
         Self {
             engine: engine_of(handle),
-            // A build with the advanced plane runs every session on the tokio engine: the
-            // cooperative engine's build does not compile it (decision D4).
-            #[cfg(feature = "advanced")]
-            shared: handle
-                .tokio()
-                .expect("a build with the advanced plane opens every session on the tokio engine")
-                .shared
-                .clone(),
             mode: session_mode(handle),
             #[cfg(feature = "advanced")]
             hlc: handle.ext.hlc.clone(),

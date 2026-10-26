@@ -37,7 +37,7 @@
 
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
-use wz_capi_core::runtime::advanced_subscriber::{DeclarationForms, EntityForm};
+use wz_ext_pubsub::advanced_subscriber::{DeclarationForms, EntityForm};
 use wz_session_core::WhatAmI;
 
 use crate::keyexpr::DeclaredKeyexpr;
@@ -182,13 +182,13 @@ impl DeclarationForms for PicoSubscriberForms {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "engine-tokio"))]
 mod tests {
     use super::*;
 
     use wz_capi_core::faces::SharedSession;
-    use wz_capi_core::runtime::node_clock::NodeHlc;
     use wz_capi_core::runtime::runtime_impl::TokioTime;
+    use wz_node_time::node_clock::NodeHlc;
 
     /// The forms of an advanced subscriber on `key`, over a registry with no
     /// face: what they declare is read back from the registry's key table, which
@@ -199,7 +199,6 @@ mod tests {
         );
         let session = PicoSession {
             engine: shared.as_engine(),
-            shared: shared.clone(),
             mode: WhatAmI::Peer,
             hlc: NodeHlc::default(),
         };

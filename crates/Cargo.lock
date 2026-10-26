@@ -3896,6 +3896,8 @@ dependencies = [
  "wz-capi-port",
  "wz-cdylib-build",
  "wz-codecs",
+ "wz-ext-pubsub",
+ "wz-node-time",
  "wz-runtime-posix",
  "wz-runtime-tokio",
  "wz-runtime-tokio-test-support",

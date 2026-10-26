@@ -1562,3 +1562,180 @@ mod local {
         }
     }
 }
+
+/// The advanced plane in the build that cannot listen, on either engine: an advanced publisher
+/// that keeps a cache and an advanced subscriber that asks for its history, in one session whose
+/// own puts and gets reach its own subscribers and queryables.
+///
+/// The subscriber is declared AFTER the publisher has put, so what it receives of those puts it
+/// receives from the publisher's cache: the startup get the subscriber's host issues through the
+/// engine's port, answered by the cache queryable the publisher's plane declared through the same
+/// port. A put after the subscriber is declared then arrives live, and the order of all four is
+/// the order they were put in. Neither engine is named here: the same host runs on both, which is
+/// what this test is for.
+#[cfg(all(
+    feature = "advanced",
+    feature = "local-subscriber",
+    feature = "local-queryable"
+))]
+mod advanced {
+    use super::*;
+    use wz_capi_pico::advanced::{
+        ze_advanced_publisher_loan, ze_advanced_publisher_move,
+        ze_advanced_publisher_options_default, ze_advanced_publisher_options_t,
+        ze_advanced_publisher_put, ze_advanced_subscriber_move,
+        ze_advanced_subscriber_options_default, ze_advanced_subscriber_options_t,
+        ze_declare_advanced_publisher, ze_declare_advanced_subscriber,
+        ze_owned_advanced_publisher_t, ze_owned_advanced_subscriber_t,
+        ze_undeclare_advanced_publisher, ze_undeclare_advanced_subscriber,
+    };
+    use wz_capi_pico::{
+        z_bytes_to_string, z_owned_string_t, z_sample_payload, z_string_drop, z_string_loan,
+        z_string_move,
+    };
+
+    struct Payloads(Mutex<Vec<String>>);
+
+    unsafe extern "C" fn on_sample_record_payload(
+        sample: *const z_loaned_sample_t,
+        ctx: *mut c_void,
+    ) {
+        let payloads = &*(ctx as *const Payloads);
+        let mut text: z_owned_string_t = std::mem::zeroed();
+        if z_bytes_to_string(z_sample_payload(sample), &mut text) != Z_OK {
+            return;
+        }
+        let string = z_string_loan(&text);
+        let bytes =
+            std::slice::from_raw_parts(z_string_data(string) as *const u8, z_string_len(string));
+        payloads
+            .0
+            .lock()
+            .unwrap()
+            .push(String::from_utf8_lossy(bytes).into_owned());
+        z_string_drop(z_string_move(&mut text));
+    }
+
+    unsafe extern "C" fn on_drop_payloads(ctx: *mut c_void) {
+        drop(Arc::from_raw(ctx as *const Payloads));
+    }
+
+    unsafe fn advanced_put(publisher: &ze_owned_advanced_publisher_t, payload: &CStr) {
+        let mut buf = std::mem::zeroed();
+        assert_eq!(z_bytes_copy_from_str(&mut buf, payload.as_ptr()), Z_OK);
+        assert_eq!(
+            ze_advanced_publisher_put(
+                ze_advanced_publisher_loan(publisher),
+                z_bytes_move(&mut buf),
+                std::ptr::null_mut(),
+            ),
+            Z_OK
+        );
+    }
+
+    /// Step the session until `payloads` holds `count`, for at most ten seconds.
+    unsafe fn wait_for(session: &z_owned_session_t, payloads: &Payloads, count: usize) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while payloads.0.lock().unwrap().len() < count && Instant::now() < deadline {
+            step_for(session, Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn an_advanced_subscriber_is_handed_a_publishers_cache_and_then_its_live_puts_in_order() {
+        let port = free_port();
+        let _listener = Listener::start(port);
+        let payloads = Arc::new(Payloads(Mutex::new(Vec::new())));
+        // SAFETY: a fresh session, publisher and subscriber, all released before the function
+        // returns; the closure's context is an `Arc` reference its drop callback releases.
+        unsafe {
+            let mut session = open_to(port);
+
+            let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+            assert_eq!(z_view_keyexpr_from_str(&mut ke, c"demo/adv".as_ptr()), Z_OK);
+
+            let mut publisher_options: ze_advanced_publisher_options_t = std::mem::zeroed();
+            ze_advanced_publisher_options_default(&mut publisher_options);
+            publisher_options.cache.is_enabled = true;
+            publisher_options.cache.max_samples = 8;
+            // Sequence numbers, which is what a subscriber orders and recovers by.
+            publisher_options.sample_miss_detection.is_enabled = true;
+            let mut publisher: ze_owned_advanced_publisher_t = std::mem::zeroed();
+            assert_eq!(
+                ze_declare_advanced_publisher(
+                    z_session_loan(&session),
+                    &mut publisher,
+                    z_view_keyexpr_loan(&ke),
+                    &publisher_options,
+                ),
+                Z_OK,
+                "the advanced publisher was not declared"
+            );
+            for payload in [c"one", c"two", c"three"] {
+                advanced_put(&publisher, payload);
+            }
+            step_for(&session, Duration::from_millis(100));
+
+            let mut options: ze_advanced_subscriber_options_t = std::mem::zeroed();
+            ze_advanced_subscriber_options_default(&mut options);
+            options.history.is_enabled = true;
+            options.history.max_samples = 8;
+            options.recovery.is_enabled = true;
+            let mut closure = std::mem::zeroed();
+            assert_eq!(
+                z_closure_sample(
+                    &mut closure,
+                    Some(on_sample_record_payload),
+                    Some(on_drop_payloads),
+                    Arc::into_raw(payloads.clone()) as *mut c_void,
+                ),
+                Z_OK
+            );
+            let mut subscriber: ze_owned_advanced_subscriber_t = std::mem::zeroed();
+            assert_eq!(
+                ze_declare_advanced_subscriber(
+                    z_session_loan(&session),
+                    &mut subscriber,
+                    z_view_keyexpr_loan(&ke),
+                    z_closure_sample_move(&mut closure),
+                    &mut options,
+                ),
+                Z_OK,
+                "the advanced subscriber was not declared"
+            );
+
+            wait_for(&session, &payloads, 3);
+            assert_eq!(
+                *payloads.0.lock().unwrap(),
+                ["one", "two", "three"],
+                "the history the publisher's cache gave, in the order it was put"
+            );
+
+            advanced_put(&publisher, c"four");
+            wait_for(&session, &payloads, 4);
+            assert_eq!(
+                *payloads.0.lock().unwrap(),
+                ["one", "two", "three", "four"],
+                "a put after the declaration arrives live, behind the history"
+            );
+
+            assert_eq!(
+                ze_undeclare_advanced_subscriber(ze_advanced_subscriber_move(&mut subscriber)),
+                Z_OK
+            );
+            advanced_put(&publisher, c"five");
+            step_for(&session, Duration::from_millis(100));
+            assert_eq!(
+                payloads.0.lock().unwrap().len(),
+                4,
+                "an undeclared subscriber hears nothing"
+            );
+            assert_eq!(
+                ze_undeclare_advanced_publisher(ze_advanced_publisher_move(&mut publisher)),
+                Z_OK
+            );
+            z_close(z_session_loan_mut(&mut session), std::ptr::null());
+            z_session_drop(z_session_move(&mut session));
+        }
+    }
+}

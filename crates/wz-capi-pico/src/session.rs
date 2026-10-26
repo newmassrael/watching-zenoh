@@ -305,19 +305,6 @@ pub unsafe fn session_state<'a>(zs: *const z_loaned_session_t) -> Option<&'a Ses
     session_handle(zs)?.tokio()
 }
 
-/// The handle and the tokio engine's session behind a loaned session together, for a module that
-/// declares through the port and reaches the tokio engine for the rest.
-///
-/// # Safety
-/// As [`session_handle`].
-#[cfg(feature = "advanced")]
-pub(crate) unsafe fn tokio_session<'a>(
-    zs: *const z_loaned_session_t,
-) -> Option<(&'a PicoSessionHandle, &'a SessionState)> {
-    let handle = session_handle(zs)?;
-    Some((handle, handle.tokio()?))
-}
-
 /// The engine a session's client surface goes through: the port's [`SessionEngine`], so the
 /// modules that publish, subscribe, hold key expressions, watch for matches and filter writes
 /// name no engine (`docs/capi-pico-on-coop-engine.md`, decision D1).

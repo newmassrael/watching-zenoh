@@ -18,17 +18,17 @@
 //! same function the plain C entry point of that entity calls, so the two cannot
 //! describe one entity two ways.
 //!
-//! [`AdvancedPublisherOn`]: wz_capi_core::runtime::advanced_publisher::AdvancedPublisherOn
+//! [`AdvancedPublisherOn`]: wz_ext_pubsub::advanced_publisher::AdvancedPublisherOn
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use wz_capi_core::runtime::advanced_cache::{CacheStore, Retained};
-use wz_capi_core::runtime::advanced_publisher::{
+use wz_capi_port::{QueryCallback, QueryHolder, QueryableSink, Ticker, WireKey};
+use wz_ext_pubsub::advanced_cache::{CacheStore, Retained};
+use wz_ext_pubsub::advanced_publisher::{
     AdvancedPublisherError, AdvancedPublisherPlane, DeclaredPublisher,
 };
-use wz_capi_core::runtime::node_clock::NodeHlc;
-use wz_capi_port::{QueryCallback, QueryHolder, QueryableSink, Ticker, WireKey};
+use wz_node_time::node_clock::NodeHlc;
 use wz_session_core::publish_options::{PublishError, PublishOptions};
 use wz_session_core::reliability::Reliability;
 use wz_session_core::sample::SampleKind;
@@ -148,11 +148,11 @@ impl AdvancedPublisherPlane for PicoPlane {
         // One handler per face: each is a fresh closure over the same ring, and
         // none needs the face's session — a reply goes out on the query's own.
         let sink: QueryableSink = Arc::new(move |_face: Arc<dyn QueryHolder>| {
-            Box::new(store.query_handler(wz_capi_core::runtime::timestamp_source::wall_clock_ntp64))
+            Box::new(store.query_handler(wz_node_time::timestamp_source::wall_clock_ntp64))
                 as QueryCallback
         });
         // INCOMPLETE, which is the only honest answer a bounded ring can give
-        // (R2556, [`wz_capi_core::runtime::advanced_cache::AdvancedCache::declare`]).
+        // (R2556, the tokio runtime's `AdvancedCache::declare` answers the same).
         PlainQueryable::declare(&self.session, keyexpr, None, false, sink)
             .map_err(|code| Self::refusal("cache queryable", code))
     }
@@ -225,7 +225,7 @@ impl AdvancedPublisherPlane for PicoPlane {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "engine-tokio"))]
 mod tests {
     use super::*;
 
@@ -249,7 +249,6 @@ mod tests {
         let plane = PicoPlane::new(
             PicoSession {
                 engine: shared.as_engine(),
-                shared: shared.clone(),
                 mode: WhatAmI::Peer,
                 hlc: NodeHlc::default(),
             },

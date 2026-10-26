@@ -23,9 +23,10 @@
 use std::sync::Arc;
 
 #[cfg(feature = "advanced")]
-use wz_capi_core::runtime::node_clock::{NodeHlc, TimestampingEnabled};
 #[cfg(feature = "connectivity")]
 use wz_capi_port::SessionEngine;
+#[cfg(feature = "advanced")]
+use wz_node_time::node_clock::{NodeHlc, TimestampingEnabled};
 use wz_session_core::WhatAmI;
 
 #[cfg(feature = "connectivity")]

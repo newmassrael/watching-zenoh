@@ -10772,6 +10772,19 @@ layer_c1co_pico_client_dials_a_listener() {
                 --test client_only_dials_a_listener || return 1
         done
     done
+    # Two legs of the advanced plane, one per engine. The plane's rules are the neutral
+    # `wz-ext-pubsub`'s, hosted over the engine's port, so the same advanced publisher and
+    # subscriber run on either; a subscriber declared after the publisher put is handed the
+    # publisher's cache and then its live puts, in order (`mod advanced` of the same test). The
+    # count is MEASURED on each engine (11, the build with the liveliness and local switches and
+    # no admin space), and exact, as the legs above are.
+    for engine in engine-coop engine-tokio; do
+        _runci_guarded_test "C1co ${engine} advanced" 11 \
+            env WZ_PICO_LISTENER_BIN="$listener" \
+            cargo test -p wz-capi-pico --no-default-features \
+            --features "${engine},link-udp,query,queryable,liveliness,liveliness-get,advanced,unstable-api,connectivity,local-subscriber,local-queryable" \
+            --test client_only_dials_a_listener || return 1
+    done
     # A fifth leg: the cooperative client that scouts. A `z_open` that names no locator looks for
     # one over the engine's own window, and finds nobody on a group nobody answers, which the
     # tokio engine's default build already runs; this is the same test with no tokio engine in

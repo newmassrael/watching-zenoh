@@ -160,13 +160,31 @@ liveliness-get = [
 # subscription declared through the liveliness plane, and `queryable`, because the publisher's
 # cache is a queryable. And `unstable-api`, because pico declares the whole advanced API inside
 # `#ifdef Z_FEATURE_UNSTABLE_API` and its CMake forces the switch off without it.
+#
+# It names no engine: the publisher's and the subscriber's rules are the neutral
+# `wz-ext-pubsub`'s, hosted over the engine port (`docs/advanced-pubsub-on-a-neutral-core.md`),
+# so either engine runs it. The engine's own switch forwards where that engine is built in: the tokio engine's `advanced` turns
+# on the runtime's advanced features, the cooperative engine's `ticker` is the periodic job the
+# heartbeat and the sweeps are, and a build without either carries none.
 advanced = [
-    "engine-tokio",
     "liveliness",
     "queryable",
     "unstable-api",
-    "wz-capi-core/advanced",
-    # The heartbeat is a periodic job of the engine; a build without this carries none.
+    # The subscriber's gets are the engine's requesting end, which the engine is built with and
+    # which exports nothing: `query` itself is the C `z_get` and the querier, and `advanced`
+    # does not select them.
+    "wz-capi-core?/query",
+    "wz-capi-coop?/query",
+    "dep:wz-ext-pubsub",
+    "dep:wz-node-time",
+    "wz-ext-pubsub/advanced-publisher",
+    "wz-ext-pubsub/engine-host",
+    "wz-ext-pubsub/ext-pubsub-sample-miss-detection",
+    "wz-ext-pubsub/pubsub-qos",
+    "wz-ext-pubsub/pubsub-encoding",
+    "wz-ext-pubsub/pubsub-attachment",
+    "wz-node-time/time-hlc",
+    "wz-capi-core?/advanced",
     "wz-capi-coop?/ticker",
 ]
 # `admin-space` (`Z_FEATURE_ADMIN_SPACE`, off as upstream's is): `zp_start_admin_space` /
@@ -416,6 +434,13 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
 # serialization format, named where they live for the reason above. Nothing named: both modules
 # are ungated, and a feature named here would become every dependent's (R311y614).
 wz-codecs = { path = "../wz-codecs", default-features = false }
+# The advanced plane's rules (the `@adv` grammar, the cache, the publisher's composite, the
+# subscriber's machine and its host over the port) and the node's time its publisher stamps from,
+# which no engine owns: named where they live, so the plane runs on either engine
+# (`docs/advanced-pubsub-on-a-neutral-core.md`). Optional, and each feature the plane needs is
+# named by `advanced`.
+wz-ext-pubsub = { path = "../wz-ext-pubsub", optional = true }
+wz-node-time = { path = "../wz-node-time", optional = true }
 # The port between this ABI and the engine that runs its sessions: the vocabulary both name
 # (ids, callback factories, a key's wire form, the write filter's plane and answer), so the ABI
 # layer is spelled in no engine's types (docs/capi-pico-on-coop-engine.md, D1).

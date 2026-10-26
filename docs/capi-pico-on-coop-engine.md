@@ -505,8 +505,20 @@ it behaves as pico behaves in both of pico's threading arms.
   `stop_ticker` (with `Ticker`, which stops its job when dropped) are implemented by the tokio
   session as a task of the `net` runtime and by the cooperative engine from the call that steps
   the session, where the wait of a read is cut short to the job's time and the job runs after the
-  step with no lock held. The pico plane's heartbeat timer is that job. The advanced publisher's
-  entry points still build with the tokio engine, because the module holds the subscriber's too.
+  step with no lock held. The pico plane's heartbeat timer is that job.
+  Step 4 moved the subscriber's options, plans and machine to `wz-ext-pubsub` and wrote its host
+  over the port (`EngineSubscriber`: the declarations, the gets, the two jobs and the teardown),
+  which needed one more thing of the port, the engine's own clock (`SessionEngine::now_ms`).
+- 2026-10-26: pico's advanced module over the port. Its publisher and subscriber entry points
+  call the neutral crates (`wz-ext-pubsub`, `wz-node-time`) and the port, and the `advanced`
+  feature no longer selects the tokio engine, so a cooperative pico build declares an advanced
+  publisher and an advanced subscriber. The subscriber had been declared on the tokio session's
+  registry (`declare_advanced_subscriber_declaring_keys`); it is now an `EngineSubscriber` on the
+  session's engine, and the background form runs it in the background where it had leaked its
+  state. The tokio engine's own subscriber stays for the zenoh-c ABI and for the runtime's
+  users. First witness on the cooperative engine: a subscriber declared after a publisher put is
+  handed the publisher's cache and then its live puts in order (`client_only_dials_a_listener`,
+  `mod advanced`, run on both engines by Layer C1co).
 - Next: the rest of section 6, one step each.
 - Earlier plan note: the engine port proper. A `SessionEngine` trait holds what the single-threaded client
   calls on a session; the tokio engine implements it first, `session_state` returns the selected
@@ -528,5 +540,5 @@ it behaves as pico behaves in both of pico's threading arms.
   each as a redial replays them, with the port's factories (`SubscriberSink` and the like)
   minting one callback per face, as that vocabulary already says. A get then has one leg per
   face, which the port's `get_on_wire` already returns.
-- Scouting and the advanced publisher and subscriber on the cooperative engine.
+- Scouting on the cooperative engine (the advanced publisher and subscriber are there).
 - How the selection is spelled on the build-configuration axis (D5).

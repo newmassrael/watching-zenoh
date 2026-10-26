@@ -560,7 +560,7 @@ pub unsafe extern "C" fn z_liveliness_get(
 /// R311y498 — the ABI shim mints the callback; the engine only calls the factory (once per face).
 /// The `Arc<CClosure>` lives in the factory, so the C `drop(context)` still fires when the last
 /// one is released.
-fn sample_sink(cclosure: CClosure) -> LivelinessSink {
+pub(crate) fn sample_sink(cclosure: CClosure) -> LivelinessSink {
     let closure = Arc::new(cclosure);
     Arc::new(move || Box::new(crate::pubsub::make_liveliness_callback(closure.clone())) as Box<_>)
 }
