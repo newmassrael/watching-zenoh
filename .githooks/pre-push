@@ -912,6 +912,7 @@ round_fed_gates=(
     # build. --check-presets SKIPs, printing why, where kconfiglib is not provisioned.
     "wz_config.py --check"
     "wz_config.py --check-presets"
+    "sce_feature_model.py --check"
     # R3521 -- the package entry's selftest. Round-fed by deploy/wz-config.toml (it loads the
     # declaration and holds its artifact, role, platform and runtime-feature rows to the entry's own
     # rules, with a synthetic file for every refusal). A text read, no build; the entry itself builds

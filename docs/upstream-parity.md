@@ -146,9 +146,13 @@ derived from the declaration and never chosen by hand:
      gated by the `any(..)` of their users; every one of the 2^N worlds checked to be a valid
      machine; the Rust emit `cfg`-gated with `compile_error!` guards for the requires edges and
      a cargo `[features]` fragment beside it. The features are declared in a feature-model
-     document of their own that every machine imports, and wz GENERATES that document from
-     `deploy/wz-config.toml` (`wz_config.py`), so the declaration stays the one source and the
-     gate is that the committed model is the generated one.
+     document of their own that every machine imports (ADR 0057 approved on 2026-10-26). The
+     emitted `cfg` is read by the crate that compiles the generated module, so the names a
+     machine may gate on are that crate's cargo features: wz GENERATES each crate's model from
+     its own `Cargo.toml [features]` (`scripts/lib/sce_feature_model.py`, `sources/features/`),
+     and the gate is that the committed model is the generated one. `deploy/wz-config.toml`
+     stays the source above it: a capability turns on crate features (step 2 of this chain), and
+     those are the names the machines gate on.
   5. The C drop-in headers carry the original's own switch macros (`Z_FEATURE_*` for pico)
      generated from the same `.config` (C12's header generation).
   6. Gates: every feature an SCXML source names is declared (a C0 check), the emit compiles

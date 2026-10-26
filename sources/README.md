@@ -30,6 +30,7 @@ single source of truth.
 | `pools/` | `buffer-pool` | B7+ | RX/TX/reassembly pool. **MCU-class** |
 | `workers/` | `worker` | C2+ | RX/TX/keepalive worker. **MCU-class** |
 | `collections/` | `bounded-collection` | C6+ | Runtime sub/queryable/pending-query/reassembly tables |
+| `features/` | `feature-model` | D7 | 크레이트 하나의 상태기계가 게이트로 쓰는 기능 모델. 그 크레이트의 `Cargo.toml [features]` 에서 **생성**(`scripts/lib/sce_feature_model.py --write`, `--check` 가 낡음을 잡음). 손으로 고치지 않음. SCE ADR 0057, `docs/upstream-parity.md` D7 |
 
 **MCU-class** kind는 RFC §5.J.4에 따라 `(rust, *) + (c11, bare_metal)`
 에만 emit; cpp/kotlin/go/python은 `codegen/mcu-class-kind-on-non-mcu-

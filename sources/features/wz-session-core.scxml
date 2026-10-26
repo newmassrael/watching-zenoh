@@ -1,0 +1,131 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  GENERATED from crates/wz-session-core/Cargo.toml by scripts/lib/sce_feature_model.py --write.
+  Do not edit: `sce_feature_model.py --check` fails when this file is stale.
+
+  The features the state machines wz-session-core compiles may be gated on (SCE's ADR 0057,
+  docs/upstream-parity.md decision D7): the crate's cargo features, each with the features of
+  the same crate it implies. Left out: `default`, `no_std` (a name SCE cannot spell).
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml" xmlns:sce="http://sce.dev/ext"
+       version="1.0" sce:kind="feature-model" name="wz-session-core">
+  <sce:feature name="access-extauth-usrpwd" requires="session-extauth"/>
+  <sce:feature name="adminspace-config-hotreload" requires="adminspace-core storage-backend"/>
+  <sce:feature name="adminspace-core" requires="adminspace-fixed alloc"/>
+  <sce:feature name="adminspace-fixed" requires="keyexpr-wildcard-double keyexpr-wildcard-single pubsub-encoding storage-profile"/>
+  <sce:feature name="adminspace-introspection-handlers" requires="adminspace-core"/>
+  <sce:feature name="adminspace-metrics" requires="adminspace-core query-selector-parameters"/>
+  <sce:feature name="adminspace-plugins-handlers" requires="adminspace-core"/>
+  <sce:feature name="adminspace-router-linkstate" requires="adminspace-core"/>
+  <sce:feature name="adminspace-write" requires="keyexpr-wildcard-double keyexpr-wildcard-single"/>
+  <sce:feature name="alloc" requires="storage-profile"/>
+  <sce:feature name="attachment-bytes"/>
+  <sce:feature name="bounded-heapless"/>
+  <sce:feature name="codec-close"/>
+  <sce:feature name="codec-declare" requires="codec-frame"/>
+  <sce:feature name="codec-fragment"/>
+  <sce:feature name="codec-frame"/>
+  <sce:feature name="codec-hello"/>
+  <sce:feature name="codec-init-body"/>
+  <sce:feature name="codec-join"/>
+  <sce:feature name="codec-keep-alive"/>
+  <sce:feature name="codec-linkstate"/>
+  <sce:feature name="codec-open-body"/>
+  <sce:feature name="codec-push" requires="codec-frame"/>
+  <sce:feature name="codec-request" requires="codec-frame"/>
+  <sce:feature name="codec-response" requires="codec-frame"/>
+  <sce:feature name="codec-response-final"/>
+  <sce:feature name="codec-scout"/>
+  <sce:feature name="connect-endpoints"/>
+  <sce:feature name="declare-final" requires="codec-declare"/>
+  <sce:feature name="declare-interest" requires="codec-declare"/>
+  <sce:feature name="declare-keyexpr" requires="alloc codec-declare"/>
+  <sce:feature name="declare-queryable" requires="codec-declare"/>
+  <sce:feature name="declare-subscriber" requires="codec-declare declare-final"/>
+  <sce:feature name="declare-token" requires="codec-declare"/>
+  <sce:feature name="declare-undeclare" requires="codec-declare"/>
+  <sce:feature name="deferred-fire" requires="alloc"/>
+  <sce:feature name="dissect" requires="alloc codec-close codec-declare codec-fragment codec-frame codec-init-body codec-join codec-keep-alive codec-open-body codec-push codec-request codec-response codec-response-final"/>
+  <sce:feature name="dissect-serde" requires="dissect"/>
+  <sce:feature name="ext-pubsub-group-membership" requires="alloc"/>
+  <sce:feature name="ext-pubsub-serde-codec" requires="alloc"/>
+  <sce:feature name="key-set-closed"/>
+  <sce:feature name="keyexpr-dollar-star"/>
+  <sce:feature name="keyexpr-includes"/>
+  <sce:feature name="keyexpr-prefix"/>
+  <sce:feature name="keyexpr-wildcard-double"/>
+  <sce:feature name="keyexpr-wildcard-single"/>
+  <sce:feature name="liveliness-get" requires="codec-declare"/>
+  <sce:feature name="liveliness-subscriber" requires="codec-declare"/>
+  <sce:feature name="liveliness-token" requires="codec-declare declare-final"/>
+  <sce:feature name="multicast-declarations" requires="alloc codec-declare codec-push session-multicast"/>
+  <sce:feature name="multicast-ingress-gate" requires="alloc session-multicast"/>
+  <sce:feature name="pubsub-attachment" requires="attachment-bytes"/>
+  <sce:feature name="pubsub-congestion-control" requires="pubsub-qos"/>
+  <sce:feature name="pubsub-delete" requires="codec-push"/>
+  <sce:feature name="pubsub-encoding"/>
+  <sce:feature name="pubsub-express" requires="pubsub-qos"/>
+  <sce:feature name="pubsub-priority" requires="pubsub-qos"/>
+  <sce:feature name="pubsub-put" requires="codec-push"/>
+  <sce:feature name="pubsub-qos"/>
+  <sce:feature name="pubsub-source-info"/>
+  <sce:feature name="pubsub-timestamp"/>
+  <sce:feature name="query-attachment" requires="attachment-bytes"/>
+  <sce:feature name="query-consolidation" requires="query-get"/>
+  <sce:feature name="query-get"/>
+  <sce:feature name="query-queryable" requires="codec-request codec-response"/>
+  <sce:feature name="query-reply" requires="codec-response"/>
+  <sce:feature name="query-reply-err"/>
+  <sce:feature name="query-selector-parameters"/>
+  <sce:feature name="query-source-info"/>
+  <sce:feature name="query-target" requires="query-get"/>
+  <sce:feature name="query-timeout" requires="query-get"/>
+  <sce:feature name="query-value"/>
+  <sce:feature name="reassembly" requires="codec-frame"/>
+  <sce:feature name="reply-source-info"/>
+  <sce:feature name="routing-namespace" requires="alloc keyexpr-prefix"/>
+  <sce:feature name="rx-shared-bytes" requires="alloc"/>
+  <sce:feature name="scouting-active"/>
+  <sce:feature name="scouting-static"/>
+  <sce:feature name="secure-channel"/>
+  <sce:feature name="session-close-ingress"/>
+  <sce:feature name="session-extauth" requires="alloc"/>
+  <sce:feature name="session-extcompression" requires="codec-frame session-unicast transport-compression"/>
+  <sce:feature name="session-extqos" requires="transport-qos"/>
+  <sce:feature name="session-extshm" requires="session-unicast transport-shm"/>
+  <sce:feature name="session-matching" requires="alloc keyexpr-includes"/>
+  <sce:feature name="session-multicast"/>
+  <sce:feature name="session-reconnect" requires="alloc"/>
+  <sce:feature name="session-slot" requires="bounded-heapless storage-profile tx-lend-only"/>
+  <sce:feature name="session-unicast"/>
+  <sce:feature name="session-unicast-accept"/>
+  <sce:feature name="session-unicast-open"/>
+  <sce:feature name="storage-aligner" requires="storage-replication"/>
+  <sce:feature name="storage-backend" requires="alloc"/>
+  <sce:feature name="storage-history" requires="storage-backend"/>
+  <sce:feature name="storage-mgr-garbage-collection" requires="storage-mgr-wildcard-updates"/>
+  <sce:feature name="storage-mgr-multi-storage-host" requires="storage-backend"/>
+  <sce:feature name="storage-mgr-strip-prefix" requires="alloc keyexpr-prefix"/>
+  <sce:feature name="storage-mgr-wildcard-updates" requires="keyexpr-wildcard-double keyexpr-wildcard-single storage-backend"/>
+  <sce:feature name="storage-profile"/>
+  <sce:feature name="storage-replication" requires="storage-backend"/>
+  <sce:feature name="switchboard" requires="codec-push"/>
+  <sce:feature name="transport-batching"/>
+  <sce:feature name="transport-compose" requires="alloc codec-close codec-fragment codec-frame codec-init-body codec-keep-alive codec-open-body reassembly transport-qos"/>
+  <sce:feature name="transport-compression" requires="alloc"/>
+  <sce:feature name="transport-fragmentation" requires="codec-fragment reassembly"/>
+  <sce:feature name="transport-keepalive"/>
+  <sce:feature name="transport-link-raweth" requires="alloc"/>
+  <sce:feature name="transport-link-serial" requires="alloc"/>
+  <sce:feature name="transport-lowlatency" requires="alloc codec-frame session-unicast"/>
+  <sce:feature name="transport-multilink" requires="session-extauth"/>
+  <sce:feature name="transport-qos" requires="alloc codec-frame session-unicast"/>
+  <sce:feature name="transport-shm" requires="alloc"/>
+  <sce:feature name="transport-stats" requires="alloc"/>
+  <sce:feature name="transport-tx-lend"/>
+  <sce:feature name="tx-lend-only" requires="transport-tx-lend"/>
+</scxml>

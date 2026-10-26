@@ -3271,6 +3271,11 @@ layer_c0_test_discipline() {
     # Kconfig interpreter (C11, scripts/provision-kconfiglib.sh). A job without kconfiglib
     # SKIPs out loud; the validate job provisions it and arms WZ_KCONFIG_REQUIRE.
     python3 scripts/lib/wz_config.py --check-presets || return 1
+    # R3733 -- the feature model a crate's state machines are gated by (sources/features/, SCE's
+    # element gate) is generated from the crate's own cargo features, and is held to them: a model
+    # that drifted from the manifest lets a machine gate on a feature the crate does not have.
+    python3 scripts/lib/sce_feature_model.py --selftest || return 1
+    python3 scripts/lib/sce_feature_model.py --check || return 1
     # R2288 (open-debt item 610) — every refusal the framing loop can return is
     # named by a test that fires it, and the population is DERIVED from the
     # function body rather than listed.
