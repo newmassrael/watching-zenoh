@@ -214,13 +214,17 @@ CASES: tuple[Case, ...] = (
     # answers `@/<zid>/pico/**`, which needs the answering end and, for the peers it lists, the
     # engine's faces. It lists no connectivity listener, so that plane's exports stay out.
     Case("pico-client-coop-admin-space", "wz-capi-pico", "libwz_capi_pico.so",
-         "engine-coop,link-udp,admin-space", 1_115_000,
+         "engine-coop,link-udp,admin-space", 1_118_000,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
          note="the pico-client-coop build with the answering end, the unstable API and the "
               "admin space: 1,091,379 measured, 2.46 times the same pico (444,284), and 493 "
-              "exports"),
+              "exports. 1,115,141 on the bench host on 2026-10-26 against 1,114,729 at the "
+              "commit before (a7f11d66e), measured on the same host in both orders: +412 for "
+              "the engine's delivery and answering sets held under the port's lock instead of "
+              "in thread-locals, which an MCU kernel gives a Rust image none of "
+              "(docs/upstream-parity.md section 5a, E1); the budget moves over that reading"),
     # The cooperative client that asks and answers queries: the requesting end and the answering
     # end, which is what the next case adds its loopback leg to.
     Case("pico-client-coop-query", "wz-capi-pico", "libwz_capi_pico.so",
