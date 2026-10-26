@@ -290698,6 +290698,44 @@
         "Next of the same directive: the fixture corpus of step 7 (golden manifests per green platform, a synthetic corpus with expected verdicts that wz and a consumer both read), then the workload schema apart from the node declaration."
       ]
     },
+    "Round 3713": {
+      "decision_summary": "Step 7 of docs/target-build-contract.md lands as a shared conformance corpus, not a sample (owner, 2026-10-26: cost ignored, the textbook one; consumer-driven contract testing): deploy/fixtures/manifests/ holds whole synthetic packages the entry makes from synthetic files (valid: host library and executable, an Android package bundling the C++ runtime, a host declared node with its declaration; invalid: each with one defect), measured manifests of real builds from a committed tree, and index.json with each fixture's origin, platform and verdict, and for an invalid one the level the defect is at (shape, manifest alone, files) and this gate's finding words. The verdict lives in the index, never in a manifest. --check-fixtures, inside the entry's selftest and so on every push, remakes the synthetic corpus byte for byte and judges every case as indexed; a schema change is therefore a visible diff.",
+      "changes_bullets": [
+        "scripts/lib/wz_package.py: _fixture_packages, FIXTURE_DAMAGES (twelve one-defect cases at three levels), fixture_corpus, fixture_index, write_fixtures, fixture_findings, record_measured and --write-fixtures, --check-fixtures, --record-measured DIR; _synthetic takes the platform's triple (machine, loader, version needs); selftest arms for a drifted corpus, a missing index, recording, and refusing an unverified or uncommitted package.",
+        "deploy/fixtures/manifests/: README.md, index.json, fifteen synthetic packages, and measured manifests of the host's three artifacts, the host slot-answerer node and Android's three artifacts (NDK 30), built from commit 1a7ef19d with a clean tree.",
+        "docs/target-build-contract.md: step 7."
+      ],
+      "verification_bullets": [
+        "wz_package.py --check-fixtures passes and the selftest passes; the level check caught a case first filed at the wrong level (an unknown schema number is read from the manifest, not from its keys), which was refiled as manifest.",
+        "The measured manifests were packaged by the entry with bx --local (host three artifacts, host declared node, Android three artifacts with NDK 30), each manifest verified before it was recorded, and each recorded from a clean tree.",
+        "The round_fed_gates array, 116 gates, failed none, on the corpus before the measured manifests were added."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "Measured manifests for linux-aarch64-glibc and both QNX rows need the Yocto SDK and the QNX SDP machines, each use approved by the owner.",
+        "The workload plan apart from the node declaration (arrivals, payloads, stop, replay, mutation) is drafted from the consumer's vocabulary and goes to the owner before any schema is written."
+      ],
+      "publishable_decision_summary": "Step 7 of docs/target-build-contract.md lands as a shared conformance corpus, not a sample (owner, 2026-10-26: cost ignored, the textbook one; consumer-driven contract testing): deploy/fixtures/manifests/ holds whole synthetic packages the entry makes from synthetic files (valid: host library and executable, an Android package bundling the C++ runtime, a host declared node with its declaration; invalid: each with one defect), measured manifests of real builds from a committed tree, and index.json with each fixture's origin, platform and verdict, and for an invalid one the level the defect is at (shape, manifest alone, files) and this gate's finding words. The verdict lives in the index, never in a manifest. --check-fixtures, inside the entry's selftest and so on every push, remakes the synthetic corpus byte for byte and judges every case as indexed; a schema change is therefore a visible diff.",
+      "publishable_changes_bullets": [
+        "scripts/lib/wz_package.py: _fixture_packages, FIXTURE_DAMAGES (twelve one-defect cases at three levels), fixture_corpus, fixture_index, write_fixtures, fixture_findings, record_measured and --write-fixtures, --check-fixtures, --record-measured DIR; _synthetic takes the platform's triple (machine, loader, version needs); selftest arms for a drifted corpus, a missing index, recording, and refusing an unverified or uncommitted package.",
+        "deploy/fixtures/manifests/: README.md, index.json, fifteen synthetic packages, and measured manifests of the host's three artifacts, the host slot-answerer node and Android's three artifacts (NDK 30), built from commit 1a7ef19d with a clean tree.",
+        "docs/target-build-contract.md: step 7."
+      ],
+      "publishable_verification_bullets": [
+        "wz_package.py --check-fixtures passes and the selftest passes; the level check caught a case first filed at the wrong level (an unknown schema number is read from the manifest, not from its keys), which was refiled as manifest.",
+        "The measured manifests were packaged by the entry with bx --local (host three artifacts, host declared node, Android three artifacts with NDK 30), each manifest verified before it was recorded, and each recorded from a clean tree.",
+        "The round_fed_gates array, 116 gates, failed none, on the corpus before the measured manifests were added."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Measured manifests for linux-aarch64-glibc and both QNX rows need the Yocto SDK and the QNX SDP machines, each use approved by the owner.",
+        "The workload plan apart from the node declaration (arrivals, payloads, stop, replay, mutation) is drafted from the consumer's vocabulary and goes to the owner before any schema is written."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
