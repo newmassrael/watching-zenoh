@@ -612,6 +612,25 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         query-queryable,\
         query-reply-err\
         |"
+    # The closed key set (`docs/closed-key-set.md`), a row of its own because
+    # `key-set-closed` ADDS modules (the table, the allowance, the closed gate) and the
+    # tests of them: the three modules' unit tests, the lent and owned receive paths and
+    # the reply registry under a closed gate, and the proof files `key_catalogue_model`
+    # (the table against the matcher over generated corpora) and `key_set_cost`. A build
+    # without the feature compiles none of them, so no row above reaches them. The features
+    # are what those tests name, on the storage profile the in-place path needs; the filter
+    # is EMPTY so a test added later is claimed without touching this row.
+    "wz-session-core|hook|\
+        codec-push,\
+        codec-declare,\
+        codec-response,\
+        codec-response-final,\
+        key-set-closed,\
+        pubsub-delete,\
+        pubsub-put,\
+        query-reply,\
+        storage-profile\
+        |"
     # Fixed-memory step S4 — the LEND-ONLY send profile, a SEPARATE row for the
     # reason the fixed bounded backing is one: `tx-lend-only` is a selector, not
     # an addition. It compiles the heap send paths out (the frame vector, the
