@@ -31,11 +31,12 @@
 //! on the session it binds to, so a per-face declaration is the only shape in
 //! which a subscriber's recovery GET can reach the cache at all.
 //!
-//! The subscriber is no longer the registry's: it is the neutral `wz-ext-pubsub`'s
-//! `EngineSubscriber`, hosted over the engine's port exactly as the pico ABI's is
-//! (`docs/advanced-pubsub-on-a-neutral-core.md`), so the engine does the per-face
-//! fan-out of its entities and nothing here declares per face. The publisher is
-//! still the registry's.
+//! Neither end is the registry's any more. The subscriber is the neutral
+//! `wz-ext-pubsub`'s `EngineSubscriber`, hosted over the engine's port exactly as the pico
+//! ABI's is (`docs/advanced-pubsub-on-a-neutral-core.md`), and the publisher is that crate's
+//! composite on `advanced_plane::CPlane`. The engine does the per-face fan-out of the
+//! entities of both, so nothing here declares per face, and one publisher has one cache and
+//! one token however many peers the session has.
 //!
 //! ## The two ABIs' option structs are NOT the same shape
 //!
@@ -91,8 +92,9 @@ use crate::session::session_state;
 use crate::sub::{subscriber_state_handle, z_subscriber_options_t, CClosure};
 use crate::zid::{z_id_t, Z_ID_SIZE};
 
-use wz_capi_core::faces::{AdvPubId, SharedSession};
+use wz_capi_core::faces::SharedSession;
 use wz_capi_core::listeners::ListenerSet;
+use wz_ext_pubsub::advanced_publisher::AdvancedPublisherOn;
 use wz_ext_pubsub::advanced_subscriber::{EngineSubscriber, HostError};
 
 /// `true` when this build targets a zenoh-c compiled WITH
@@ -523,21 +525,16 @@ impl ze_owned_advanced_publisher_t {
     }
 }
 
-/// Behind a `ze_owned_advanced_publisher_t` handle: the registry entry to
-/// retract. Dropping it undeclares on every face, so an implicit `z_drop` and an
-/// explicit `ze_undeclare_advanced_publisher` take the identical path.
+/// Behind a `ze_owned_advanced_publisher_t` handle: the composite, on this
+/// session's plane. Dropping it retracts its entities in the order the reference
+/// library does, so an implicit `z_drop` and an explicit
+/// `ze_undeclare_advanced_publisher` take the identical path.
 struct AdvPubState {
     shared: Arc<SharedSession>,
-    id: AdvPubId,
+    publisher: AdvancedPublisherOn<crate::advanced_plane::CPlane>,
     /// R311y568 — the keyexpr this publisher was declared under, so
     /// [`ze_advanced_publisher_keyexpr`] can answer.
     keyexpr: crate::keyexpr::DeclaredKeyexpr,
-}
-
-impl Drop for AdvPubState {
-    fn drop(&mut self) {
-        self.shared.undeclare_advanced_publisher(self.id);
-    }
 }
 
 /// Read the state behind a loaned advanced publisher.
@@ -713,16 +710,24 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
         // SAFETY: the caller's contract.
         let opts = unsafe { advanced_publisher_options(options) };
         let declared = ke.clone();
+        // The publisher's source identity is the session's own zid, the one its peers see in the
+        // handshake.
+        let zid = state.shared.local_session().actions().params.zid.clone();
         // R3064 -- a declaration the session refuses is REFUSED, with upstream's code: its
         // `ze_declare_advanced_publisher` answers any construction error `Z_EGENERIC` (MEASURED:
         // `-128` for a cache with no miss detection on a node that holds no clock, on the real
         // library). The gravestone written above is what the caller is left holding.
-        let Ok(id) = state.shared.declare_advanced_publisher(ke, opts) else {
+        let Ok(composite) = AdvancedPublisherOn::declare_on(
+            Arc::new(crate::advanced_plane::CPlane::new(&state.shared)),
+            ke,
+            opts,
+            zid,
+        ) else {
             return Z_EGENERIC;
         };
         let mut boxed = Box::new(AdvPubState {
             shared: state.shared.clone(),
-            id,
+            publisher: composite,
             keyexpr: crate::keyexpr::DeclaredKeyexpr::new(declared),
         });
         // Bind AFTER boxing — the state is at its final address only here.
@@ -763,16 +768,25 @@ pub unsafe extern "C" fn ze_advanced_publisher_put(
         let (Some(state), Some(buf)) = (unsafe { adv_pub_state(this_) }, buf) else {
             return Z_ENULL;
         };
+        // Best-effort, as the ordinary publish is: a put no face took is not an error to a C
+        // caller, which has no per-face handle to retry with.
         match buf {
             Outbound::Bytes(bytes) => {
-                state.shared.advanced_publisher_put(state.id, &bytes);
+                let _ = state.publisher.put(&bytes);
             }
             #[cfg(all(
                 feature = "zenoh-c-shared-memory",
                 not(feature = "zenoh-c-no-unstable-api")
             ))]
             Outbound::Chunk(chunk) => {
-                state.shared.advanced_publisher_put_shm(state.id, &chunk);
+                // The chunk, and not a copy of it: a face that negotiated shared memory is sent
+                // the descriptor, and the cache holds the chunk so a recovery reply replays it
+                // as shared memory.
+                let chunk: Arc<dyn wz_ext_pubsub::advanced_publisher::ShmChunk> = chunk;
+                let _ = state.publisher.put_shm_with(
+                    &chunk,
+                    wz_ext_pubsub::advanced_publisher::AdvancedPutOptions::default(),
+                );
             }
         }
         Z_OK
@@ -811,9 +825,14 @@ pub unsafe extern "C" fn ze_advanced_publisher_id(
     guard_val(z_entity_global_id_t::empty(), || {
         // SAFETY: the caller's contract, delegated.
         match unsafe { adv_pub_state(publisher) } {
-            Some(state) => {
-                z_entity_global_id_t::for_entity(&state.shared, publisher as *const c_void)
-            }
+            // The identity the samples and the token name: the session's zid and the
+            // publisher's entity id.
+            Some(state) => z_entity_global_id_t {
+                zid: z_id_t {
+                    id: state.shared.zid(),
+                },
+                eid: state.publisher.eid(),
+            },
             None => z_entity_global_id_t::empty(),
         }
     })
@@ -872,7 +891,7 @@ pub unsafe extern "C" fn ze_advanced_publisher_delete(
         let Some(state) = (unsafe { adv_pub_state(this_) }) else {
             return Z_ENULL;
         };
-        if state.shared.advanced_publisher_delete(state.id) {
+        if state.publisher.delete().is_ok() {
             Z_OK
         } else {
             Z_EINVAL

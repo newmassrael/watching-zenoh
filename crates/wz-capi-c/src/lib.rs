@@ -72,6 +72,10 @@ pub mod abi_origin;
 // no upstream size to compare against.
 #[cfg(all(feature = "advanced", not(feature = "zenoh-c-no-unstable-api")))]
 pub mod advanced;
+// The plane an advanced publisher is hosted on for a C session: private, because what it serves
+// is `advanced`'s one entry point.
+#[cfg(all(feature = "advanced", not(feature = "zenoh-c-no-unstable-api")))]
+mod advanced_plane;
 pub mod bytes;
 // R2257 — MEASURED, not assumed: upstream's `nounstable` build defines no
 // `z_cancellation_token_*` symbol at all, so exporting this family

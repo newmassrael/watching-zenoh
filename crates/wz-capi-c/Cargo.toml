@@ -237,8 +237,9 @@ liveliness = ["wz-capi-core/liveliness"]
 liveliness-get = ["liveliness", "query", "wz-capi-core/liveliness-get"]
 # The advanced publisher and subscriber, with the plane they replay through.
 #
-# The subscriber is the neutral `wz-ext-pubsub`'s, hosted over the engine's port
-# (`docs/advanced-pubsub-on-a-neutral-core.md`), as the pico ABI's is. Its gets are the engine's
+# The publisher and the subscriber are the neutral `wz-ext-pubsub`'s: the publisher's composite
+# on a plane of this session and the subscriber hosted over the engine's port
+# (`docs/advanced-pubsub-on-a-neutral-core.md`), as the pico ABI's are. Its gets are the engine's
 # requesting end, which the core is built with and which exports nothing: `query` itself is the
 # C `z_get` and the querier, and `advanced` does not select them.
 advanced = [
@@ -250,6 +251,8 @@ advanced = [
     "dep:wz-ext-pubsub",
     "dep:wz-capi-port",
     "wz-ext-pubsub/engine-host",
+    "wz-ext-pubsub/advanced-publisher",
+    "wz-ext-pubsub/ext-pubsub-sample-miss-detection",
 ]
 # The group membership of zenoh-ext.
 group = ["wz-capi-core/group"]
