@@ -1082,8 +1082,9 @@
  * WHAT EACH DIRECTION'S SENDER HAS DONE:
  *
  *   "halves":[{"direction":"a","lease_ms":N|null,"last_seen_ts_ns":N|null,
- *              "close_seen":bool,"fin_seen":bool|null,"rst_seen":bool|null},
- *             {"direction":"b", ...the same six keys...}]
+ *              "close_seen":bool,"fin_seen":bool|null,"rst_seen":bool|null,
+ *              "batch_header":"absent"|"negotiated"|"inferred"},
+ *             {"direction":"b", ...the same seven keys...}]
  *
  *     Two entries, `a` then `b`, with the `direction` the rows carry. The
  *     context says what the handshake settled for the SESSION; whether a
@@ -1099,7 +1100,15 @@
  *     direction carried a `Close`, whichever scope the Close asked for (the
  *     Close row says). `fin_seen` and `rst_seen` are whether a TCP FIN or RST
  *     was observed on the direction, and `null` on a flow that is not TCP,
- *     where the flag does not exist.
+ *     where the flag does not exist. `batch_header` (revision 44) is whether
+ *     the direction's batches open with a BatchHeader: `negotiated` by the Init
+ *     pair the capture holds, `inferred` when the capture holds no Init and the
+ *     bytes showed a header (a compressed session joined after its handshake:
+ *     a unit read whole only behind a header byte, or the stream's framing was
+ *     found again on boundaries that open with one; the direction's rows are
+ *     read headed until the bytes show otherwise), or `absent`.
+ *
+ * @values fields batch_header
  *
  *     EVERY CELL IS AN OBSERVATION AND NONE IS A VERDICT. Whether a direction
  *     has expired is arithmetic the reader does on `lease_ms`,
@@ -1203,7 +1212,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":43,"key":"kind","values":[...],
+ *     {"name":"fields","revision":44,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -1234,6 +1243,7 @@
  * @carries census offset_space passenger
  * @carries census sender_end passenger
  * @carries fields announced_version passenger
+ * @carries fields batch_header passenger
  * @carries fields body passenger
  * @carries fields carried_state discriminant
  * @carries fields check passenger
@@ -4779,7 +4789,7 @@ int wz_dissect_transport_layout(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":43,"key":"state",
+ *     "value_families":[{"name":"fields","revision":44,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

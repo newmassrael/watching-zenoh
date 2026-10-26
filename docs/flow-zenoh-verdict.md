@@ -152,3 +152,32 @@ The selector's `zenoh` term takes the new words.
    measured per protocol, held by a test as a regression.
 3. **Measured weights.** The `generated` and `assumed` sides are replaced by
    measured ones and the model number moves.
+
+### 6.1 Where steps 1 and 2 stand (2026-10-26)
+
+The corpus is `captures/corpus/`, described file by file in its
+`corpus.json5`, and the ROC test is `crates/wz-capture/src/zenoh_corpus_tests.rs`:
+no flow of an `other` file may read `yes`, no flow of a `zenoh` file may read
+`no`, and every file's tally of the three words is pinned for both builds (with
+and without lz4). The anonymiser is `scripts/lib/capture_anonymise.py`; its
+selftest and `--verify-corpus` run in the pre-push static gate array.
+
+It holds six zenoh 1.10.1 captures (TCP and UDP, from before the handshake and
+joined mid-session, with and without lz4) and three of an office Wi-Fi (DNS,
+mDNS, SSDP). Every zenoh flow reads `yes`; no flow of the others reads `yes`.
+
+**The corpus's first finding** was a false `no`: both flows of a compressed UDP
+session joined mid-session read `no`. With no Init in the capture nothing told
+the reader that every batch opens with a header byte, so it read that byte as a
+message and every unit as undecodable. The reader now infers the header from
+the bytes where no Init was seen (`FlowContext::batch_header`, the halves'
+`batch_header` from field document revision 44): a unit that reads whole only
+behind a header byte makes a datagram direction headed, a unit that reads whole
+only as it stands makes it plain again, and a stream finds its framing again on
+a chain of boundaries all in one of the two readings. The model did not move;
+the evidence was misread.
+
+Still to come for step 2: RTPS, SOME/IP, CoAP, MQTT and QUIC captures, LLMNR,
+WS-Discovery, NTP and DHCP on a busier network, and several zenoh versions and
+zenoh-pico on the zenoh side. Step 3 waits for a corpus large enough to measure
+the weights it would replace.

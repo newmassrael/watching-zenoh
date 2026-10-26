@@ -1189,6 +1189,13 @@ round_fed_gates=(
     # waits on feeds it. MEASURED: about 14s, a parse with no build.
     "barrier_needle_gate.py --selftest"
     "barrier_needle_gate.py --check"
+    # The zenoh verdict's calibration corpus (captures/corpus/, docs/flow-zenoh-verdict.md 6).
+    # Round-fed by every capture added there: the selftest holds the anonymiser's replacements
+    # and its leak check, and --verify-corpus holds every listed file to being one the anonymiser
+    # would leave unchanged, which a raw capture committed by mistake is not. A read of a few
+    # hundred KB, no build.
+    "capture_anonymise.py --selftest"
+    "capture_anonymise.py --verify-corpus captures/corpus"
 )
 # ⚠ The module and its ARGUMENTS are expanded separately, and that too is
 # forced rather than chosen: `scripts/lib/"${cmd[@]}"` attaches the prefix to

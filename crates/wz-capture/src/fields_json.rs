@@ -4528,13 +4528,60 @@ fn push_halves(a: &crate::HalfObservation, b: &crate::HalfObservation, out: &mut
         }
         let _ = write!(
             out,
-            ",\"close_seen\":{},\"fin_seen\":{},\"rst_seen\":{}}}",
+            ",\"close_seen\":{},\"fin_seen\":{},\"rst_seen\":{},\"batch_header\":\"{}\"}}",
             half.close_seen,
             tri_state(half.fin_seen),
-            tri_state(half.rst_seen)
+            tri_state(half.rst_seen),
+            BatchHeaderWord::of(half.batch_header).name()
         );
     }
     out.push(']');
+}
+
+/// Revision 44 — the word a half's `batch_header` carries: whether the
+/// direction's batches open with a `BatchHeader`, and on what grounds
+/// ([`wz_session_core::passive::BatchHeader`]): `absent`, `negotiated` by the
+/// Init pair, or `inferred` from the bytes of a capture that holds no Init.
+#[derive(Clone, Copy)]
+pub(crate) enum BatchHeaderWord {
+    Absent,
+    Negotiated,
+    Inferred,
+}
+
+impl BatchHeaderWord {
+    pub(crate) fn of(header: wz_session_core::passive::BatchHeader) -> Self {
+        use wz_session_core::passive::BatchHeader;
+        match header {
+            BatchHeader::Absent => Self::Absent,
+            BatchHeader::Negotiated => Self::Negotiated,
+            BatchHeader::Inferred => Self::Inferred,
+        }
+    }
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Absent => "absent",
+            Self::Negotiated => "negotiated",
+            Self::Inferred => "inferred",
+        }
+    }
+
+    /// Every word, sorted: what the field document's family is held to.
+    #[cfg(test)]
+    pub(crate) fn names() -> Vec<&'static str> {
+        use wz_session_core::passive::BatchHeader;
+        let mut words: Vec<&'static str> = [
+            BatchHeader::Absent,
+            BatchHeader::Negotiated,
+            BatchHeader::Inferred,
+        ]
+        .into_iter()
+        .map(|h| Self::of(h).name())
+        .collect();
+        words.sort_unstable();
+        words
+    }
 }
 
 /// The word `context.phase` carries, one per `SessionPhase` variant.
@@ -7463,6 +7510,20 @@ mod tests {
             push_context(&context, &mut out);
             arms.push(out);
         }
+        // Every `batch_header` word, on a half.
+        for header in [
+            wz_session_core::passive::BatchHeader::Absent,
+            wz_session_core::passive::BatchHeader::Negotiated,
+            wz_session_core::passive::BatchHeader::Inferred,
+        ] {
+            let half = crate::HalfObservation {
+                batch_header: header,
+                ..crate::HalfObservation::default()
+            };
+            let mut out = String::new();
+            push_halves(&half, &half, &mut out);
+            arms.push(out);
+        }
         // Every `zenoh` and `announced_version` word, from the evidence that
         // decides it, and every check with both sides observed, so the check,
         // strength and basis words are all written.
@@ -9139,7 +9200,7 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 78] = [
+        let live: [(&str, &str, Vec<&'static str>); 79] = [
             // The session's per-frame verdicts, each held to the
             // walk its emitter's exhaustive match is bound to.
             (rev::FIELDS, "verdict", SnVerdictWord::names()),
@@ -9506,6 +9567,8 @@ mod tests {
                 "announced_version",
                 crate::session_table::AnnouncedVersion::names(),
             ),
+            // Whether a direction's batches open with a header, and why.
+            (rev::FIELDS, "batch_header", BatchHeaderWord::names()),
             (
                 rev::SESSION_TABLE,
                 "check",

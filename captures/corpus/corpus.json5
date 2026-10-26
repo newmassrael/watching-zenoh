@@ -1,0 +1,104 @@
+// The calibration corpus of the zenoh verdict (docs/flow-zenoh-verdict.md §6).
+//
+// Every file is a REAL capture, anonymised by scripts/lib/capture_anonymise.py
+// before it was committed; README.md says how. `hypothesis` is what its flows
+// are: "zenoh" or "other". `scope` is the anonymiser's: "lan" for traffic of
+// devices on a network, "loopback" for traffic the capturer made itself.
+// `packets` is the record count after anonymisation. The tally each file reads
+// as is pinned in crates/wz-capture/src/zenoh_corpus_tests.rs, and
+// `capture_anonymise.py --verify-corpus captures/corpus` holds every file to
+// being one the anonymiser would leave as it is.
+{
+  files: [
+    {
+      file: "zenoh-tcp-full.pcap",
+      hypothesis: "zenoh",
+      scope: "loopback",
+      protocol: "zenoh/tcp",
+      source: "zenohd 1.10.1 router, a publisher and a subscriber as clients, on loopback",
+      capture: "from before the first Init",
+      taken: "2026-10-26",
+      packets: 136,
+    },
+    {
+      file: "zenoh-tcp-midsession.pcap",
+      hypothesis: "zenoh",
+      scope: "loopback",
+      protocol: "zenoh/tcp",
+      source: "zenohd 1.10.1 router, a publisher and a subscriber as clients, on loopback",
+      capture: "joined six seconds after both sessions opened",
+      taken: "2026-10-26",
+      packets: 102,
+    },
+    {
+      file: "zenoh-udp-full.pcap",
+      hypothesis: "zenoh",
+      scope: "loopback",
+      protocol: "zenoh/udp",
+      source: "zenohd 1.10.1 router, a publisher and a subscriber as clients, on loopback",
+      capture: "from before the first Init",
+      taken: "2026-10-26",
+      packets: 67,
+    },
+    {
+      file: "zenoh-tcp-lz4.pcap",
+      hypothesis: "zenoh",
+      scope: "loopback",
+      protocol: "zenoh/tcp, lz4",
+      source: "zenohd 1.10.1 router and two clients, transport/unicast/compression/enabled on all three",
+      capture: "from before the first Init",
+      taken: "2026-10-26",
+      packets: 136,
+    },
+    {
+      file: "zenoh-udp-lz4-midsession.pcap",
+      hypothesis: "zenoh",
+      scope: "loopback",
+      protocol: "zenoh/udp, lz4",
+      source: "zenohd 1.10.1 router and two clients, transport/unicast/compression/enabled on all three",
+      capture: "joined six seconds after both sessions opened",
+      taken: "2026-10-26",
+      packets: 48,
+    },
+    {
+      file: "zenoh-tcp-lz4-midsession.pcap",
+      hypothesis: "zenoh",
+      scope: "loopback",
+      protocol: "zenoh/tcp, lz4",
+      source: "zenohd 1.10.1 router and two clients, transport/unicast/compression/enabled on all three",
+      capture: "joined six seconds after both sessions opened",
+      taken: "2026-10-26",
+      packets: 104,
+    },
+    {
+      file: "lan-dns.pcap",
+      hypothesis: "other",
+      scope: "lan",
+      protocol: "dns",
+      source: "one host's queries to its resolver and the answers, on an office Wi-Fi",
+      capture: "fifteen minutes",
+      taken: "2026-10-26",
+      packets: 378,
+    },
+    {
+      file: "lan-mdns.pcap",
+      hypothesis: "other",
+      scope: "lan",
+      protocol: "mdns",
+      source: "the devices answering on 224.0.0.251:5353 of an office Wi-Fi",
+      capture: "fifteen minutes",
+      taken: "2026-10-26",
+      packets: 36,
+    },
+    {
+      file: "lan-ssdp.pcap",
+      hypothesis: "other",
+      scope: "lan",
+      protocol: "ssdp",
+      source: "one host's search on 239.255.255.250:1900 of an office Wi-Fi and the devices' answers",
+      capture: "fifteen minutes",
+      taken: "2026-10-26",
+      packets: 26,
+    },
+  ],
+}

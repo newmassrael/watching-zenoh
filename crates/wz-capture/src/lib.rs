@@ -251,6 +251,8 @@ pub mod session_table;
 pub mod session_table_json;
 #[cfg(all(test, feature = "dissect"))]
 mod session_table_tests;
+#[cfg(test)]
+mod zenoh_corpus_tests;
 /// Whether a flow's bytes are zenoh, as a sequential test over the invariants a
 /// zenoh flow keeps: the checks, their weights and the tallies `session_table`
 /// keeps at ingest. Ungated for the reason the table is.
@@ -1696,6 +1698,7 @@ impl DatagramDissection {
             close_seen: facts.close_seen,
             fin_seen: None,
             rst_seen: None,
+            batch_header: self.session.context().batch_header(direction),
         }
     }
 
@@ -3462,6 +3465,7 @@ impl FlowDissection {
             close_seen: facts.close_seen,
             fin_seen: tcp.then(|| assembler.fin_seen()),
             rst_seen: tcp.then(|| assembler.rst_seen()),
+            batch_header: self.session.context().batch_header(direction),
         }
     }
 
@@ -5360,6 +5364,10 @@ pub struct HalfObservation {
     pub fin_seen: Option<bool>,
     /// Whether an RST was observed on this direction; `None` as `fin_seen` is.
     pub rst_seen: Option<bool>,
+    /// Whether this direction's batches open with a `BatchHeader`, and on
+    /// what grounds: negotiated by the Init pair, or inferred from the bytes
+    /// of a capture that holds no Init.
+    pub batch_header: wz_session_core::passive::BatchHeader,
 }
 
 /// R311y605 (F5) — the totals across a whole dissection.

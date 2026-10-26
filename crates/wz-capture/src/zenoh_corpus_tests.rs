@@ -1,0 +1,197 @@
+// SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+//! THE ZENOH TEST OVER REAL CAPTURES: the calibration corpus of
+//! `captures/corpus/`, read for the verdict of every flow
+//! (`docs/flow-zenoh-verdict.md` §6).
+//!
+//! Each file is a real capture, anonymised by `scripts/lib/capture_anonymise.py`,
+//! and `captures/corpus/corpus.json5` says what it is: whether its flows are
+//! zenoh (`hypothesis: "zenoh"`) or not (`"other"`), which protocol, and where it
+//! was taken. This module holds the two error rates to it:
+//!
+//! * the FALSE `yes`: no flow of an `other` file reads `yes`;
+//! * the FALSE `no`: no flow of a `zenoh` file reads `no`.
+//!
+//! Both are hard: a single flow breaks them. Beside them, every file's tally of
+//! the three words is pinned in [`EXPECTED`], so a change to the decoder or to
+//! the model that moves a flow from one word to another is a change this test
+//! names, in the direction it went, and the table is the ROC point the corpus
+//! measures. The tally of a file that carries lz4 depends on whether this build
+//! opens lz4, and the table says both.
+
+use alloc::string::String;
+use alloc::vec::Vec;
+
+use wz_session_core::json5::{self, Json5Value};
+
+use crate::session_table::ZenohVerdict;
+use crate::Dissection;
+
+/// The corpus directory, from the crate.
+fn corpus_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../captures/corpus")
+}
+
+/// One file of the corpus, as the manifest describes it.
+struct Entry {
+    file: String,
+    hypothesis: String,
+    packets: u64,
+}
+
+fn manifest() -> Vec<Entry> {
+    let text = std::fs::read_to_string(corpus_dir().join("corpus.json5"))
+        .expect("captures/corpus/corpus.json5 reads");
+    let doc = json5::parse(&text).unwrap_or_else(|e| panic!("the manifest is JSON5: {e:?}"));
+    let Some(Json5Value::Array(files)) = doc.get("files") else {
+        panic!("the manifest has a `files` array");
+    };
+    let text_of = |v: &Json5Value, key: &str| match v.get(key) {
+        Some(Json5Value::String(s)) => s.clone(),
+        other => panic!("`{key}` is a string in every entry: {other:?}"),
+    };
+    files
+        .iter()
+        .map(|v| Entry {
+            file: text_of(v, "file"),
+            hypothesis: text_of(v, "hypothesis"),
+            packets: match v.get("packets") {
+                Some(Json5Value::Number(n)) => n.parse().expect("`packets` is an integer"),
+                other => panic!("`packets` is a number in every entry: {other:?}"),
+            },
+        })
+        .collect()
+}
+
+/// A file's flows by verdict: `(yes, no, undecided)`.
+type Tally = (u64, u64, u64);
+
+/// Every flow's verdict in `d`: the stream flows, the datagram flows (a
+/// multicast group and a scouting flow included: the verdict is a statement
+/// about every flow, whether or not it is a session row), and the serial line.
+fn verdicts(d: &Dissection) -> Vec<ZenohVerdict> {
+    let mut out: Vec<ZenohVerdict> = d
+        .flows()
+        .iter()
+        .map(|f| ZenohVerdict::of(&f.zenoh_evidence()))
+        .chain(
+            d.datagram_flows()
+                .iter()
+                .map(|f| ZenohVerdict::of(&f.zenoh_evidence())),
+        )
+        .collect();
+    if d.serial_census().is_some() {
+        out.push(ZenohVerdict::of(&d.serial_zenoh_evidence()));
+    }
+    out
+}
+
+fn tally(words: &[ZenohVerdict]) -> Tally {
+    let n = |w: ZenohVerdict| words.iter().filter(|v| **v == w).count() as u64;
+    (
+        n(ZenohVerdict::Yes),
+        n(ZenohVerdict::No),
+        n(ZenohVerdict::Undecided),
+    )
+}
+
+/// Every file's tally, `(file, without lz4, with lz4)`, measured on the date the
+/// file entered the corpus (2026-10-26). A file with no lz4 batch has the same
+/// tally twice; the three lz4 files read alike in both builds because a build
+/// that cannot open lz4 weighs no unit it cannot open, and the batches too
+/// small to compress carry the SN steps.
+///
+/// Each zenoh file is two flows, the router's with each client, and every one
+/// reads `yes`, the two joined mid-session included: before the batch header
+/// was inferred from the bytes, both flows of `zenoh-udp-lz4-midsession` read
+/// `no`, the corpus's first finding. The DNS flows are one query and its
+/// answer each, two units, which decide nothing: `undecided` is what they
+/// should read.
+const EXPECTED: &[(&str, Tally, Tally)] = &[
+    ("zenoh-tcp-full.pcap", (2, 0, 0), (2, 0, 0)),
+    ("zenoh-tcp-midsession.pcap", (2, 0, 0), (2, 0, 0)),
+    ("zenoh-udp-full.pcap", (2, 0, 0), (2, 0, 0)),
+    ("zenoh-tcp-lz4.pcap", (2, 0, 0), (2, 0, 0)),
+    ("zenoh-udp-lz4-midsession.pcap", (2, 0, 0), (2, 0, 0)),
+    ("zenoh-tcp-lz4-midsession.pcap", (2, 0, 0), (2, 0, 0)),
+    ("lan-dns.pcap", (0, 2, 185), (0, 2, 185)),
+    ("lan-mdns.pcap", (0, 1, 18), (0, 1, 18)),
+    ("lan-ssdp.pcap", (0, 1, 1), (0, 1, 1)),
+];
+
+#[test]
+fn the_corpus_holds_both_error_rates_and_every_files_tally() {
+    let entries = manifest();
+    assert!(!entries.is_empty(), "the corpus holds no file");
+    let mut rows = Vec::new();
+    let mut failures = Vec::new();
+    for entry in &entries {
+        let bytes = std::fs::read(corpus_dir().join(&entry.file))
+            .unwrap_or_else(|e| panic!("{}: {e}", entry.file));
+        let d = Dissection::from_capture(&bytes)
+            .unwrap_or_else(|e| panic!("{}: the capture reads: {e:?}", entry.file));
+        let packets = crate::pcap::parse(&bytes)
+            .unwrap_or_else(|e| panic!("{}: a classic pcap: {e:?}", entry.file))
+            .packets
+            .len() as u64;
+        if packets != entry.packets {
+            failures.push(alloc::format!(
+                "{}: {packets} packets read, the manifest says {}",
+                entry.file,
+                entry.packets
+            ));
+        }
+        let got = tally(&verdicts(&d));
+        rows.push(alloc::format!(
+            "{}: {:?} (yes, no, undecided)",
+            entry.file,
+            got
+        ));
+        match entry.hypothesis.as_str() {
+            "other" if got.0 > 0 => failures.push(alloc::format!(
+                "{}: {} flow(s) of another protocol read `yes`",
+                entry.file,
+                got.0
+            )),
+            "zenoh" if got.1 > 0 => failures.push(alloc::format!(
+                "{}: {} zenoh flow(s) read `no`",
+                entry.file,
+                got.1
+            )),
+            "other" | "zenoh" => {}
+            other => failures.push(alloc::format!("{}: hypothesis {other:?}", entry.file)),
+        }
+        let pinned = EXPECTED.iter().find(|(f, _, _)| *f == entry.file);
+        match pinned {
+            Some((_, plain, lz4)) => {
+                let want = if wz_session_core::passive::OPENS_LZ4_BATCHES {
+                    lz4
+                } else {
+                    plain
+                };
+                if got != *want {
+                    failures.push(alloc::format!(
+                        "{}: {:?}, pinned {:?} (yes, no, undecided)",
+                        entry.file,
+                        got,
+                        want
+                    ));
+                }
+            }
+            None => failures.push(alloc::format!("{}: no pinned tally", entry.file)),
+        }
+    }
+    for (file, _, _) in EXPECTED {
+        if !entries.iter().any(|e| e.file == *file) {
+            failures.push(alloc::format!("{file}: pinned, and not in the manifest"));
+        }
+    }
+    std::println!("{}", rows.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "{}\n\n{}",
+        failures.join("\n"),
+        rows.join("\n")
+    );
+}

@@ -7,6 +7,10 @@ encoders** rather than a byte string somebody typed — the oracle that keeps it
 so is named beside the file below, and it is what makes the provenance claim
 checkable instead of merely written down.
 
+`corpus/` is the exception, and a different kind of file: real captures of
+real software, anonymised, that calibrate the zenoh verdict. Its own README
+says how they were taken and what keeps them anonymous.
+
 Read them through the published C door — `wz_dissect_pcap_summary`,
 `wz_dissect_pcap_census`, `wz_dissect_pcap_fields` and their `_bounded` /
 `_limited` siblings all take the bytes of a capture file

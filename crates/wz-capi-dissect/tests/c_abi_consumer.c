@@ -3981,8 +3981,11 @@ int main(void) {
      * arrive; nothing retires.
      * 43: `zenoh` is a sequential test's verdict (yes, no, undecided), and
      * every flow object carries `announced_version` and `zenoh_evidence`.
-     * Values move, keys arrive and families are declared; nothing retires. */
-    revisioned[2].revision = 43;
+     * Values move, keys arrive and families are declared; nothing retires.
+     * 44: every half carries `batch_header` (absent, negotiated, inferred), and
+     * a capture with no Init reads a compressed session's batches headed.
+     * A key arrives and a family is declared; nothing retires. */
+    revisioned[2].revision = 44;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
