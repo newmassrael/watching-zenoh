@@ -290576,6 +290576,54 @@
         "Making a bundled file reachable by a device's loader is the placing path's (the entry sets no RUNPATH); the SDP's libc++.so.1 carries its own RPATH, measured into the manifest."
       ]
     },
+    "Round 3710": {
+      "decision_summary": "Step 3b of the advanced plane, its rest: pico's advanced module runs over the engine port, and the pico crate's advanced feature no longer selects the tokio engine. The publisher already declared through the port; what read the tokio session was the subscriber, declared on the tokio registry and kept by a leaked state in its background form. It is now an EngineSubscriber on the session's engine (the background form runs it with EngineSubscriber::background), the plane and the forms name the neutral crates (wz-ext-pubsub, wz-node-time) and not the tokio runtime's re-exports, and PicoSession lost its tokio registry. A cooperative pico build declares an advanced publisher and an advanced subscriber; its first witness, run on both engines by Layer C1co, is a subscriber declared after a publisher put: it is handed the publisher's cache and then the live puts, in order.",
+      "changes_bullets": [
+        "crates/wz-capi-pico: advanced.rs (one declare_subscriber_state for the owned and the background entry points; EngineSubscriber; identities from the engine's zid and the subscriber's id), advanced_plane.rs and advanced_forms.rs (neutral imports; their tokio-session tests gated on engine-tokio), write_filter.rs (PicoSession no longer holds the tokio registry), session.rs (tokio_session removed), session_ext.rs, liveliness.rs (sample_sink visible to the crate).",
+        "crates/wz-capi-pico/Cargo.toml: advanced names no engine (wz-ext-pubsub features advanced-publisher, engine-host, miss detection, QoS, encoding, attachment; wz-node-time time-hlc; the engines' own query switch and wz-capi-core advanced / wz-capi-coop ticker where built); optional dependencies wz-ext-pubsub and wz-node-time.",
+        "crates/wz-capi-pico/tests/client_only_dials_a_listener.rs: mod advanced (publisher cache, then live puts, in order); scripts/run-ci.sh: Layer C1co gains one advanced leg per engine, 11 tests each.",
+        "docs: capi-pico-on-coop-engine.md and advanced-pubsub-on-a-neutral-core.md record the move."
+      ],
+      "verification_bullets": [
+        "client_only_dials_a_listener with the advanced switches, on each engine: 11 passed (engine-coop and engine-tokio), the new test among them; pico lib tests, advanced_subscriber_faces and pubsub_roundtrip on the tokio engine pass, so the replay of an advanced subscriber onto a face that arrives later (the former face-registry path) holds over the port.",
+        "clippy with -D warnings, all targets: wz-capi-pico default features, engine-coop with advanced, engine-tokio with peer and advanced. Doc budget on the lane's command: wz-capi-pico 40 (the budget).",
+        "The hook's gate array plus the surface gates: wz_config.py found the new query edge (advanced implies query on pico only), which was removed by forwarding the engines' own query switch instead of the C query surface; after that the config gate passes. self_report_lint.py fails on a FIXME comment of crates/wz-zenoh (not this round's); its owner was told.",
+        "Not done: the size gates and the hosted run are read from the hosted run; the heartbeat, periodic recovery and late-publisher paths of the host are tested against the scripted engine only, not end to end on the cooperative engine."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted runs of the pushes of rounds 3701, 3705 and this one: the size gates (C1cs, capability_cost_gate: pico builds that select advanced now carry wz-ext-pubsub's host), C1bz, C1bf, C1co's two new legs and the advanced interop legs (zenoh-ext and pico).",
+        "End-to-end witnesses on the cooperative engine of the heartbeat beacon, the periodic re-ask and the late-publisher detection (they are tested against the scripted engine; the cooperative witness covers history and live order only).",
+        "Step 5: retire the tokio host's duplicate declarations and gets behind a differential test (the same events into both hosts give the same declarations and gets).",
+        "A test feeding wz-ext-pubsub's time_range and the zenoh-util family's the same strings.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine; scouting on the cooperative engine."
+      ],
+      "publishable_decision_summary": "Step 3b of the advanced plane, its rest: pico's advanced module runs over the engine port, and the pico crate's advanced feature no longer selects the tokio engine. The publisher already declared through the port; what read the tokio session was the subscriber, declared on the tokio registry and kept by a leaked state in its background form. It is now an EngineSubscriber on the session's engine (the background form runs it with EngineSubscriber::background), the plane and the forms name the neutral crates (wz-ext-pubsub, wz-node-time) and not the tokio runtime's re-exports, and PicoSession lost its tokio registry. A cooperative pico build declares an advanced publisher and an advanced subscriber; its first witness, run on both engines by Layer C1co, is a subscriber declared after a publisher put: it is handed the publisher's cache and then the live puts, in order.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-pico: advanced.rs (one declare_subscriber_state for the owned and the background entry points; EngineSubscriber; identities from the engine's zid and the subscriber's id), advanced_plane.rs and advanced_forms.rs (neutral imports; their tokio-session tests gated on engine-tokio), write_filter.rs (PicoSession no longer holds the tokio registry), session.rs (tokio_session removed), session_ext.rs, liveliness.rs (sample_sink visible to the crate).",
+        "crates/wz-capi-pico/Cargo.toml: advanced names no engine (wz-ext-pubsub features advanced-publisher, engine-host, miss detection, QoS, encoding, attachment; wz-node-time time-hlc; the engines' own query switch and wz-capi-core advanced / wz-capi-coop ticker where built); optional dependencies wz-ext-pubsub and wz-node-time.",
+        "crates/wz-capi-pico/tests/client_only_dials_a_listener.rs: mod advanced (publisher cache, then live puts, in order); scripts/run-ci.sh: Layer C1co gains one advanced leg per engine, 11 tests each.",
+        "docs: capi-pico-on-coop-engine.md and advanced-pubsub-on-a-neutral-core.md record the move."
+      ],
+      "publishable_verification_bullets": [
+        "client_only_dials_a_listener with the advanced switches, on each engine: 11 passed (engine-coop and engine-tokio), the new test among them; pico lib tests, advanced_subscriber_faces and pubsub_roundtrip on the tokio engine pass, so the replay of an advanced subscriber onto a face that arrives later (the former face-registry path) holds over the port.",
+        "clippy with -D warnings, all targets: wz-capi-pico default features, engine-coop with advanced, engine-tokio with peer and advanced. Doc budget on the lane's command: wz-capi-pico 40 (the budget).",
+        "The hook's gate array plus the surface gates: wz_config.py found the new query edge (advanced implies query on pico only), which was removed by forwarding the engines' own query switch instead of the C query surface; after that the config gate passes. self_report_lint.py fails on a FIXME comment of crates/wz-zenoh (not this round's); its owner was told.",
+        "Not done: the size gates and the hosted run are read from the hosted run; the heartbeat, periodic recovery and late-publisher paths of the host are tested against the scripted engine only, not end to end on the cooperative engine."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted runs of the pushes of rounds 3701, 3705 and this one: the size gates (C1cs, capability_cost_gate: pico builds that select advanced now carry wz-ext-pubsub's host), C1bz, C1bf, C1co's two new legs and the advanced interop legs (zenoh-ext and pico).",
+        "End-to-end witnesses on the cooperative engine of the heartbeat beacon, the periodic re-ask and the late-publisher detection (they are tested against the scripted engine; the cooperative witness covers history and live order only).",
+        "Step 5: retire the tokio host's duplicate declarations and gets behind a differential test (the same events into both hosts give the same declarations and gets).",
+        "A test feeding wz-ext-pubsub's time_range and the zenoh-util family's the same strings.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine; scouting on the cooperative engine."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
