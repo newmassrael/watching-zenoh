@@ -291330,6 +291330,48 @@
         "Lower bounds of the SN resolution and the batch size, to be proposed to the analyzer design as a shape of their own."
       ]
     },
+    "Round 3729": {
+      "decision_summary": "A declared fixed-memory publisher now plays the workload of contract 5c in the driver's own words: period_ms or rate_per_s under periodic, poisson or burst arrivals, and a document or a body made for each put by a fill. wz-workload gained an alloc feature (default on) so the slot profile takes Arrivals, fill_into and Mutation::apply_into without an allocator; the allocating forms are built on the same functions. The slot publisher keeps intended times from the session start, rounds each up to the millisecond, makes up late puts (at most eight a round) and counts how late the latest was instead of thinning the load. Made bodies share one .bss buffer per node, so the task cell does not grow. The group plane plays the same state and refuses a made body, as the generator and the image do. The generator emits only the constants a build reads, which removes the unused-constant warnings of declared nodes.",
+      "changes_bullets": [
+        "crates/wz-workload: an alloc feature (default on) gates Payload, parse_hex and Mutation::apply; Mutation::apply_into(body, out) and output_len are the one definition; Arrivals is Copy with a const new.",
+        "crates/wz-session-mcu: slot_publisher plays Publication { key, arrivals: Process, body: Text or Made } through Publishing (begin_round, next, settle, wake, poll), CATCH_UP 8 a round, a shared MadeBuffer, late_max_ms in PublishCounts and PublishWatch; slot_active and slot_group play it; slot_schedule keeps the queriers.",
+        "scripts/lib/wz_node.py: the publisher takes rate_per_s, arrivals, arrival_seed, burst, payload_bytes, fill and seed; word, rate and conditional (with) values; one_of as groups; a made body refused on a group; only read constants generated; deploy/nodes/slot-reporter.toml gains lab/out/count at 20 a second with a counter fill.",
+        "deploy/host-slot-node declared_node.rs: const assertions on gaps and bodies, MADE_MAX, the late_max_ms line; Zpub witness gains the counted-stream leg (3); C1m and C1by counts and pins; contract 5b and 5c."
+      ],
+      "verification_bullets": [
+        "On the build machine: wz-workload tests with alloc (15) and without (12), clippy both ways, and a thumbv7em-none-eabihf build without alloc; wz-session-mcu slot publisher 12, slot group 4, slot tests with query-get, clippy with client-slot and query-get and with group.",
+        "The no-allocator link gate builds the seven declared nodes clean, slot-reporter's made-body stream included, with no warning (the unused generated constants are gone).",
+        "The publisher witness against zenohd 1.10.1 with its REST plugin passes 3 of 3 on the packaged slot-reporter: the document on its period, the counted stream in order at 20 a second, and the restart.",
+        "wz_node.py and wz_package.py selftests, the barrier needle gate, the feature surface and prose gates, and the guarded count gate (25 of 25) pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "The replay of a bounded trace compiled into a fixed-memory image is the slot interpreter's remaining part: one key per replay entity, samples as their own tables, the workload's Pacing walk and Mutation::apply_into into the node's buffer, played once per session.",
+        "A declared fixed-memory node takes no stop condition (count, duration_ms) and no written text or hex payload beyond a document; those stay the driver's."
+      ],
+      "publishable_decision_summary": "A declared fixed-memory publisher now plays the workload of contract 5c in the driver's own words: period_ms or rate_per_s under periodic, poisson or burst arrivals, and a document or a body made for each put by a fill. wz-workload gained an alloc feature (default on) so the slot profile takes Arrivals, fill_into and Mutation::apply_into without an allocator; the allocating forms are built on the same functions. The slot publisher keeps intended times from the session start, rounds each up to the millisecond, makes up late puts (at most eight a round) and counts how late the latest was instead of thinning the load. Made bodies share one .bss buffer per node, so the task cell does not grow. The group plane plays the same state and refuses a made body, as the generator and the image do. The generator emits only the constants a build reads, which removes the unused-constant warnings of declared nodes.",
+      "publishable_changes_bullets": [
+        "crates/wz-workload: an alloc feature (default on) gates Payload, parse_hex and Mutation::apply; Mutation::apply_into(body, out) and output_len are the one definition; Arrivals is Copy with a const new.",
+        "crates/wz-session-mcu: slot_publisher plays Publication { key, arrivals: Process, body: Text or Made } through Publishing (begin_round, next, settle, wake, poll), CATCH_UP 8 a round, a shared MadeBuffer, late_max_ms in PublishCounts and PublishWatch; slot_active and slot_group play it; slot_schedule keeps the queriers.",
+        "scripts/lib/wz_node.py: the publisher takes rate_per_s, arrivals, arrival_seed, burst, payload_bytes, fill and seed; word, rate and conditional (with) values; one_of as groups; a made body refused on a group; only read constants generated; deploy/nodes/slot-reporter.toml gains lab/out/count at 20 a second with a counter fill.",
+        "deploy/host-slot-node declared_node.rs: const assertions on gaps and bodies, MADE_MAX, the late_max_ms line; Zpub witness gains the counted-stream leg (3); C1m and C1by counts and pins; contract 5b and 5c."
+      ],
+      "publishable_verification_bullets": [
+        "On the build machine: wz-workload tests with alloc (15) and without (12), clippy both ways, and a thumbv7em-none-eabihf build without alloc; wz-session-mcu slot publisher 12, slot group 4, slot tests with query-get, clippy with client-slot and query-get and with group.",
+        "The no-allocator link gate builds the seven declared nodes clean, slot-reporter's made-body stream included, with no warning (the unused generated constants are gone).",
+        "The publisher witness against zenohd 1.10.1 with its REST plugin passes 3 of 3 on the packaged slot-reporter: the document on its period, the counted stream in order at 20 a second, and the restart.",
+        "wz_node.py and wz_package.py selftests, the barrier needle gate, the feature surface and prose gates, and the guarded count gate (25 of 25) pass."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The replay of a bounded trace compiled into a fixed-memory image is the slot interpreter's remaining part: one key per replay entity, samples as their own tables, the workload's Pacing walk and Mutation::apply_into into the node's buffer, played once per session.",
+        "A declared fixed-memory node takes no stop condition (count, duration_ms) and no written text or hex payload beyond a document; those stay the driver's."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
