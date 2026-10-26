@@ -34,10 +34,14 @@
 //! void  wz_os_sleep_ms(uint32_t ms);
 //! ```
 
-pub use imp::*;
-
 #[cfg(feature = "std")]
-mod imp {
+pub use host::*;
+#[cfg(not(feature = "std"))]
+pub use kernel::*;
+
+/// The host's: `std`.
+#[cfg(feature = "std")]
+mod host {
     use std::sync::PoisonError;
 
     /// The identity of a thread, comparable with another's.
@@ -107,8 +111,9 @@ mod imp {
     }
 }
 
+/// A kernel's, through the functions the image links (the module doc).
 #[cfg(not(feature = "std"))]
-mod imp {
+mod kernel {
     use alloc::boxed::Box;
     use core::cell::UnsafeCell;
     use core::ffi::{c_int, c_void};
