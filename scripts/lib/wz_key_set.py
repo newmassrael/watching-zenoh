@@ -21,8 +21,10 @@ adding an entity renumbers none that sort before it.
 
 ## What it refuses, and why a refusal is an exit
 
-* a key that is not a key expression (the node declaration's own rule, `wz_node.key_problem`), one
-  deeper than the matcher holds, or the same entity twice;
+* a key that is not a key expression (the node declaration's own rule, `wz_node.key_problem`) or
+  not a CANONICAL one (`a/**/*` is spelled `a/*/**`, a chunk of only `$*` is spelled `*`), since
+  the subscriber table registers a pattern in canonical form and a key spelled otherwise would
+  never be the text it holds; one deeper than the matcher holds; or the same entity twice;
 * a publisher or a token on a wildcard: both name one concrete key (a wildcard publisher is the
   open question of the design note);
 * a wildcard entity that no concrete key of the set meets: it could never select anything, and a
@@ -39,6 +41,11 @@ small vocabulary, up to three chunks deep, with this module's answer), and
 `crates/wz-session-core/tests/key_catalogue_model.rs` compares each answer with the real matcher and
 every selection of the fixture's table with it. A change to the matcher that this module does not
 follow fails that test, and the fixture's `--check` here fails when this module changes an answer.
+
+The canonical-form verdict (`is_key_expression`, a port of `keyexpr_canon::validate_keyexpr`) is held
+the same way: the corpus also carries its verdict on every text of up to six characters over
+`a / * $ ?`, and the model test compares each with the validator and checks that what the validator
+accepts is its own canonical form.
 """
 
 from __future__ import annotations
@@ -83,6 +90,12 @@ U16 = 0xFFFF
 CORPUS_CHUNKS = ("a", "b", "@v", "*", "**", "a$*", "$*b")
 CORPUS_DEPTH = 3
 
+# The verdict corpus: every text of one to VERDICT_MAX_LEN characters over this alphabet, in product
+# order, with whether `is_key_expression` accepts it. A literal, the separator, and the four
+# characters the validator's arms turn on.
+VERDICT_ALPHABET = ("a", "/", "*", "$", "?")
+VERDICT_MAX_LEN = 6
+
 ENTITY_KEYS = {"kind", "key"}
 GENERATED_NOTE = "scripts/lib/wz_key_set.py --write"
 
@@ -90,6 +103,67 @@ GENERATED_NOTE = "scripts/lib/wz_key_set.py --write"
 # ---------------------------------------------------------------------------------------------
 # the matcher, ported
 # ---------------------------------------------------------------------------------------------
+
+
+def is_key_expression(text: str) -> bool:
+    """`keyexpr_canon::validate_keyexpr`, as a verdict: whether `text` is a key expression, which means
+    a CANONICAL one (`a/**/*` is not: it is spelled `a/*/**`). The arms are the validator's, in its
+    order, over the bytes. A key the table stores is a pattern the subscriber table registers, and the
+    table registers it in canonical form, so a declared key that is not canonical would never be the
+    text the table holds."""
+    data = text.encode("utf-8")
+    size = len(data)
+
+    def at(position: int) -> int | None:
+        return data[position] if position < size else None
+
+    slash, star, dollar = 0x2F, 0x2A, 0x24
+    chunk_start = 0
+    i = 0
+    while i < size:
+        byte = data[i]
+        if byte == slash:
+            if i == chunk_start:
+                return False
+            i += 1
+            chunk_start = i
+        elif byte == star:
+            if i != chunk_start:
+                return False
+            following = at(i + 1)
+            if following is None:
+                break
+            if following == slash:
+                i += 2
+                chunk_start = i
+            elif following == star:
+                after = at(i + 2)
+                if after is None:
+                    break
+                if after == slash and at(i + 3) == star:
+                    return False
+                if after != slash:
+                    return False
+                i += 3
+                chunk_start = i
+            else:
+                return False
+        elif byte == dollar:
+            if at(i + 1) != star:
+                return False
+            after = at(i + 2)
+            if after == dollar:
+                return False
+            if (after == slash or after is None) and i == chunk_start:
+                return False
+            if after is None:
+                break
+            i += 2
+        elif byte in (0x23, 0x3F):  # `#` and `?`
+            return False
+        else:
+            i += 1
+    return chunk_start != size
 
 
 def is_wild(key: str) -> bool:
@@ -203,6 +277,12 @@ def validate(entities: object, limit: int) -> list[str]:
         why = wz_node.key_problem(key, limit)
         if why:
             problems.append(f"{who}: key {why}")
+            continue
+        if not is_key_expression(key):
+            problems.append(
+                f"{who}: key is not a canonical key expression (the table holds a pattern in "
+                "canonical form, so a key spelled otherwise would never be the text it holds)"
+            )
             continue
         if key.count("/") + 1 > MAX_CHUNKS:
             problems.append(f"{who}: key is deeper than {MAX_CHUNKS} chunks, which the matcher holds")
@@ -390,6 +470,35 @@ def emit_corpus() -> str:
     ]
     out += [f'    "{row}",' for row in rows]
     out.append("];")
+    verdicts = [
+        is_key_expression("".join(letters))
+        for length in range(1, VERDICT_MAX_LEN + 1)
+        for letters in itertools.product(VERDICT_ALPHABET, repeat=length)
+    ]
+    verdicts += [False] * (-len(verdicts) % 4)
+    digits = "".join(
+        f"{sum(1 << r for r in range(4) if verdicts[n + r]):x}" for n in range(0, len(verdicts), 4)
+    )
+    lines = [digits[at : at + 100] for at in range(0, len(digits), 100)]
+    out += [
+        "",
+        "/// The alphabet of the verdict corpus.",
+        "pub const VERDICT_ALPHABET: [char; "
+        + f"{len(VERDICT_ALPHABET)}] = ["
+        + ", ".join(f"'{letter}'" for letter in VERDICT_ALPHABET)
+        + "];",
+        "",
+        "/// The longest text of the verdict corpus.",
+        f"pub const VERDICT_MAX_LEN: usize = {VERDICT_MAX_LEN};",
+        "",
+        "/// Whether `is_key_expression` accepts each text of one to `VERDICT_MAX_LEN` characters over the",
+        "/// alphabet, in product order (the first letter varies slowest), four to a hex digit, bit `r` of",
+        "/// digit `n` being text `4n + r`, the digits split into lines.",
+        "#[rustfmt::skip]",
+        f"pub const VERDICT: [&str; {len(lines)}] = [",
+    ]
+    out += [f'    "{line}",' for line in lines]
+    out.append("];")
     return "\n".join(out) + "\n"
 
 
@@ -525,6 +634,15 @@ def _selftest() -> int:
     refuses("a key with a space", [entity("queryable", "a b")], "a character a key expression does not")
     refuses("a key past the key limit", [entity("queryable", "a" * (limit + 1))], "MAX_KEYEXPR_BYTES")
     refuses("a key too deep", [entity("queryable", "/".join("a" * 33))], "deeper than")
+    for text in ["a/b", "a/*/**", "lab/sensor/t$*", "**", "*", "@/lab/*", "a$*b/c", "a/$*b", "*/**/a"]:
+        expect(f"{text!r} is a key expression", is_key_expression(text))
+    for text in ["", "/", "a//b", "/a", "a/", "a/**/*", "a/**/**", "a/$*", "$*", "a*", "*a", "**a",
+                 "a$", "$a", "a$*$b", "a$*$*b", "a#", "a?", "a/*b", "a/**/*/b"]:
+        expect(f"{text!r} is not a key expression", not is_key_expression(text))
+    for text, why in [("a/$*", "a lone `$*` chunk"), ("a/**/*", "a `*` after a `**`"),
+                      ("a*b", "a star inside a chunk"), ("a$*$*b", "a run of `$*`"),
+                      ("a/**/**", "a `**` after a `**`")]:
+        refuses(why, [entity("queryable", text), entity("publisher", "a/b")], "canonical")
     refuses("an entity word outside the vocabulary", [{"kind": "queryable", "key": "a", "bytes": 1}], "is not a word")
     refuses("the same entity twice", [entity("queryable", "a"), entity("queryable", "a")], "declared twice")
     refuses("a wildcard publisher", [entity("subscriber", "a"), entity("publisher", "a/*")], "puts on one concrete key")

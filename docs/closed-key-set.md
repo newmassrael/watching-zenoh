@@ -253,10 +253,19 @@ publishes it receives) is the per-peer allowance, phase 4.
   table, an image on a target.
 - **Not done.** The alias row is still text and not a number (D5): resolution at the edge is what a
   peer's declared resource needs, and a resource is a prefix that a selector may be built on, so it is
-  not simply a key id. A declared key must be written in the canonical form the table stores a
-  pattern in, which the generator does not check yet (a pattern with a `$*` chunk the canonical form
-  would rewrite is registered in its canonical form and then is not the declared text). A reply's key
-  is not gated. No image supplies a table, and the match memory is still built in a closed image.
+  not simply a key id. A reply's key is not gated. No image supplies a table, and the match memory is
+  still built in a closed image. `wz_node.py` checks a node entity's key with its own, looser rule
+  (`key_problem`), so a node declaration is not yet held to canonical form; its table will be when the
+  node emits one.
+- **Canonical form, built after the first cut of this phase.** The subscriber table registers a pattern
+  in canonical form, so a declared key spelled otherwise (`a/**/*`, a chunk of only `$*`, `a*b`) would
+  never be the text the table holds and its subscription would be refused. The generator now refuses
+  such a key, by `is_key_expression`, a port of `keyexpr_canon::validate_keyexpr`. The port is held to
+  the validator as the matcher is: the corpus carries its verdict on every text of up to six
+  characters over `a / * $ ?` (19,530 texts, 108 accepted), and the model test compares each with the
+  validator and checks that every text the validator accepts is its own canonical form. The test was
+  run with the rule that a `$` may not follow a `$*` taken out of the port, and it failed; with the rule
+  back it passes.
 
 ## What is not decided
 

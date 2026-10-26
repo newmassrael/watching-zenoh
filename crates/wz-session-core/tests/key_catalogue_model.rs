@@ -427,6 +427,72 @@ fn a_key_that_is_not_declared_is_not_found_even_when_a_declared_pattern_covers_i
 }
 
 #[test]
+fn the_generators_key_verdict_agrees_with_the_validator_on_every_short_text() {
+    use corpus::{VERDICT, VERDICT_ALPHABET, VERDICT_MAX_LEN};
+    use wz_session_core::keyexpr_canon::{canonize_keyexpr, validate_keyexpr};
+
+    let digits: Vec<u8> = VERDICT.concat().into_bytes();
+    let alphabet = VERDICT_ALPHABET.len();
+    let mut index = 0usize;
+    let mut accepted = 0usize;
+    for length in 1..=VERDICT_MAX_LEN {
+        for number in 0..alphabet.pow(length as u32) {
+            // The first letter varies slowest: `number` read in base `alphabet`, most significant first.
+            let text: String = (0..length)
+                .map(|place| {
+                    let power = alphabet.pow((length - 1 - place) as u32);
+                    VERDICT_ALPHABET[(number / power) % alphabet]
+                })
+                .collect();
+            let digit = (digits[index / 4] as char)
+                .to_digit(16)
+                .expect("a hex digit");
+            let port = digit & (1 << (index % 4)) != 0;
+            let validator = validate_keyexpr(&text).is_ok();
+            assert_eq!(
+                validator, port,
+                "`{text}`: the validator and the generator's verdict"
+            );
+            if validator {
+                accepted += 1;
+                // What the validator accepts is what the subscriber table registers, byte for byte:
+                // the declared key is the text the table holds.
+                let stored = canonize_keyexpr(&text).expect("a key expression canonizes");
+                assert_eq!(
+                    &*stored,
+                    text.as_str(),
+                    "`{text}` is its own canonical form"
+                );
+            }
+            index += 1;
+        }
+    }
+    assert!(
+        !validate_keyexpr("").is_ok(),
+        "the empty text is not a key expression"
+    );
+    assert_eq!(
+        digits.len(),
+        index.div_ceil(4),
+        "the corpus has the texts it says"
+    );
+    // Both verdicts occur in numbers: a corpus of only refusals would test nothing.
+    assert!(
+        accepted >= 100 && accepted < index / 2,
+        "{accepted} of {index} texts accepted"
+    );
+}
+
+#[test]
+fn every_declared_key_of_the_fixture_is_a_key_expression() {
+    use wz_session_core::keyexpr_canon::validate_keyexpr;
+    for key in key_ids() {
+        let text = CATALOGUE.text(key);
+        assert!(validate_keyexpr(text).is_ok(), "`{text}`");
+    }
+}
+
+#[test]
 fn the_generators_port_agrees_with_the_matcher_on_every_pair() {
     use corpus::{KEYS, ROWS};
     assert_eq!(KEYS.len(), ROWS.len());
