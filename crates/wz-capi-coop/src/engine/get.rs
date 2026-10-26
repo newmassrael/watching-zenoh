@@ -16,7 +16,9 @@
 //! as the drop of the leg's callback, which is how a C program learns its get is over.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use wz_capi_port::os::Mutex;
 
 use wz_session_core::observer::ApplicationLayerObserver;
 use wz_session_core::reply::InboundReply;

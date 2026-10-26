@@ -61,6 +61,7 @@ pub mod cancellation;
 mod drive;
 mod engine;
 pub mod listeners;
+pub mod os;
 mod query;
 pub mod sync;
 pub use drive::{CalledFromReadTask, SessionClosed, SessionDrive};

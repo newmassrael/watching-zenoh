@@ -18,7 +18,9 @@
 //! held.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use wz_capi_port::os::Mutex;
 
 use wz_capi_port::{SubId, TokenId, WireKey};
 use wz_runtime_coop::ClockSource;

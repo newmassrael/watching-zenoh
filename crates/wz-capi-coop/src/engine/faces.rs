@@ -15,7 +15,9 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use wz_capi_port::os::Mutex;
 
 use wz_session_core::face::{FaceEventKind, FaceEventSink, FaceSnapshot};
 

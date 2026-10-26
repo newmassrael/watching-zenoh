@@ -97,6 +97,31 @@ config WZ_CODE_IN_RAM
 	  An experiment with a measurement attached to it where it is turned on (the overlay that
 	  turns it on states the numbers): off by default.
 
+config WZ_OS
+	bool "The kernel answers the engine's operating system (wz_os_*)"
+	select DYNAMIC_THREAD
+	select DYNAMIC_THREAD_ALLOC
+	select THREAD_NAME
+	help
+	  An image whose Rust half builds `wz-capi-port` without `std` (the pico C ABI on the
+	  cooperative engine, docs/upstream-parity.md section 5a) links the mutex, the thread
+	  identity, the threads and the sleep its `os` module names from
+	  deploy/zephyr-common/wz_os_zephyr.c: a `k_mutex` from the kernel heap, `k_current_get`,
+	  a dynamic thread, `k_msleep`.
+
+config WZ_OS_THREAD_STACK_SIZE
+	int "The stack of a thread the engine starts, in bytes"
+	depends on WZ_OS
+	default 4096
+	help
+	  zenoh-pico's read task is one such thread. The memory report (WZ_MEMORY_REPORT) says how
+	  much of it a run used.
+
+config WZ_OS_THREAD_PRIORITY
+	int "The priority of a thread the engine starts"
+	depends on WZ_OS
+	default 5
+
 config WZ_MEMORY_REPORT
 	bool "Report the kernel heap's peak and every thread's stack (a compare build)"
 	select SYS_HEAP_RUNTIME_STATS

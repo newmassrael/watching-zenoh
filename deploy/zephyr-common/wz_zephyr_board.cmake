@@ -166,6 +166,12 @@ function(wz_zephyr_rust_app)
     sys_clock_tick_get k_malloc k_free
     wz_log wz_yield_ms wz_delay_us wz_irq_lock wz_irq_unlock
     wzApplicationGetRandom wzApplicationGetTimeSinceEpoch)
+  if(CONFIG_WZ_OS)
+    list(APPEND kept
+      wz_os_mutex_new wz_os_mutex_lock wz_os_mutex_unlock wz_os_mutex_free
+      wz_os_thread_current wz_os_thread_spawn wz_os_thread_join wz_os_thread_is_finished
+      wz_os_sleep_ms)
+  endif()
   # CONFIG_WZ_LIBC_MEMCPY_FIRST: the C library goes BEFORE the staticlib, in addition to where
   # Zephyr puts it (last), so that its strong `memcpy` family is the image's and not the
   # staticlib's weak generic one (see the symbol's help for the measurement, which says when it
@@ -195,4 +201,11 @@ endfunction()
 # not a Rust image's alone, so it is added here and not in wz_zephyr_rust_app.
 if(CONFIG_WZ_MEMORY_REPORT)
   target_sources(app PRIVATE ${WZ_ZEPHYR_COMMON_DIR}/wz_memory_report.c)
+endif()
+
+# CONFIG_WZ_OS: the kernel's answers to the `os` module of a `wz-capi-port` built without `std`
+# (wz_os_zephyr.c). Only the Rust half calls them, so wz_zephyr_rust_app's kept symbols name them
+# when the image has them.
+if(CONFIG_WZ_OS)
+  target_sources(app PRIVATE ${WZ_ZEPHYR_COMMON_DIR}/wz_os_zephyr.c)
 endif()

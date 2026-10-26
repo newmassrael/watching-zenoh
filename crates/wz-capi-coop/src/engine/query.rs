@@ -26,13 +26,14 @@
 //! the session's: a router that asked on a link since lost will never read the answer, and a new
 //! router never asked.
 
-use std::cell::Cell;
 use std::collections::VecDeque;
 #[cfg(feature = "local-queryable")]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 
+use wz_capi_port::os::{self, Mutex, ThreadId};
+use wz_capi_port::sync::Lock;
 use wz_capi_port::{HeldQuery, QblId, QueryHolder};
 use wz_runtime_coop::session_drive::SessionLinks;
 use wz_runtime_coop::ClockSource;
@@ -240,24 +241,46 @@ impl QueryPlane {
     }
 }
 
-std::thread_local! {
-    /// The query this thread's callback is answering: its engine (by address), the generation of
-    /// its link and its request id. A hold taken from inside the callback is taken on it.
-    static ANSWERING: Cell<Option<(usize, u64, u64)>> = const { Cell::new(None) };
-}
+/// The query each thread's callback is answering now: the thread, its engine (by address), the
+/// generation of its link and its request id, the innermost of a thread last. One set for the
+/// process, as the thread-local slot it replaces was one per thread across every engine: a
+/// callback that steps another session and answers that session's query from inside its own
+/// answers the inner one until it returns, and a hold is taken only on the innermost. Kept here
+/// rather than in a thread-local because an MCU kernel gives a Rust image none.
+static ANSWERING: Lock<Vec<(ThreadId, usize, u64, u64)>> = Lock::new(Vec::new());
 
 /// This thread answers a query, from [`Self::enter`] to drop.
-pub(super) struct Answering(Option<(usize, u64, u64)>);
+pub(super) struct Answering {
+    thread: ThreadId,
+}
 
 impl Answering {
     pub(super) fn enter(engine: usize, generation: u64, rid: u64) -> Self {
-        Self(ANSWERING.with(|a| a.replace(Some((engine, generation, rid)))))
+        let thread = os::current();
+        ANSWERING.with(|a| a.push((thread, engine, generation, rid)));
+        Self { thread }
+    }
+
+    /// The query this thread answers innermost: its engine, generation and request id.
+    fn innermost() -> Option<(usize, u64, u64)> {
+        let thread = os::current();
+        ANSWERING.with(|a| {
+            a.iter()
+                .rev()
+                .find(|(t, ..)| *t == thread)
+                .map(|&(_, engine, generation, rid)| (engine, generation, rid))
+        })
     }
 }
 
 impl Drop for Answering {
     fn drop(&mut self) {
-        ANSWERING.with(|a| a.set(self.0));
+        let thread = self.thread;
+        ANSWERING.with(|a| {
+            if let Some(innermost) = a.iter().rposition(|(t, ..)| *t == thread) {
+                a.remove(innermost);
+            }
+        });
     }
 }
 
@@ -268,7 +291,7 @@ pub(super) struct CoopHolder<L: SessionLinks + 'static, C: ClockSource + Clone +
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> QueryHolder for CoopHolder<L, C> {
     fn hold_query(&self, view: &dyn QueryView) -> Box<dyn HeldQuery> {
-        let answering = ANSWERING.with(Cell::get);
+        let answering = Answering::innermost();
         let held = self.engine.upgrade().and_then(|engine| {
             let (at, generation, rid) = answering?;
             // Only the query this thread is answering, of this engine, can be held: a hold taken

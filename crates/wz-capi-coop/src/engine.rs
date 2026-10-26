@@ -33,9 +33,12 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
-use std::thread::{JoinHandle, ThreadId};
+use std::sync::{Arc, Weak};
 
+// The operating system the engine runs on: its mutex, its threads and its sleep are `std`'s on a
+// host and the kernel's on an MCU (`docs/upstream-parity.md` section 5a, E1).
+use wz_capi_port::os::{self, JoinHandle, Mutex, MutexGuard, ThreadId};
+use wz_capi_port::sync::Lock;
 use wz_capi_port::{
     CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink,
     SessionClosed, SessionDrive, SessionEngine, SubId, SubscriberSink, WireKey,
@@ -216,6 +219,9 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     closed: AtomicBool,
     next_entity: AtomicU64,
     reader: Mutex<Option<ReadTask>>,
+    /// The threads handing deliveries out for this engine now ([`Delivering`]): a callback that
+    /// steps its session again from one of them queues what it delivers for the outer delivery.
+    delivering: Lock<Vec<ThreadId>>,
     this: Weak<Self>,
 }
 
@@ -229,31 +235,33 @@ struct Confined<T>(T);
 // `Core` when another thread takes the lock, and none is used by two threads at once.
 unsafe impl<T> Send for Confined<T> {}
 
-std::thread_local! {
-    /// The engines this thread is handing deliveries out for, by address.
-    static DELIVERING: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+/// One thread's delivery for one engine, from `enter` to drop. The engine keeps the threads
+/// delivering for it ([`CoopEngine::delivering`]); a set held per engine and keyed by thread is
+/// what a thread-local set keyed by engine was, without a thread-local, which an MCU kernel does
+/// not give a Rust image.
+struct Delivering<'a> {
+    set: &'a Lock<Vec<ThreadId>>,
+    thread: ThreadId,
 }
 
-/// This thread's delivery for one engine, from `enter` to drop.
-struct Delivering(usize);
-
-impl Delivering {
-    /// `None` when this thread is already delivering for `engine`.
-    fn enter(engine: usize) -> Option<Self> {
-        DELIVERING.with(|set| {
-            let mut set = set.borrow_mut();
-            if set.contains(&engine) {
+impl<'a> Delivering<'a> {
+    /// `None` when this thread is already delivering for the engine whose set this is.
+    fn enter(set: &'a Lock<Vec<ThreadId>>) -> Option<Self> {
+        let thread = os::current();
+        set.with(|threads| {
+            if threads.contains(&thread) {
                 return None;
             }
-            set.push(engine);
-            Some(Self(engine))
+            threads.push(thread);
+            Some(Self { set, thread })
         })
     }
 }
 
-impl Drop for Delivering {
+impl Drop for Delivering<'_> {
     fn drop(&mut self) {
-        DELIVERING.with(|set| set.borrow_mut().retain(|e| *e != self.0));
+        let thread = self.thread;
+        self.set.with(|threads| threads.retain(|t| *t != thread));
     }
 }
 
@@ -281,7 +289,7 @@ enum Target {
 /// The read task: a thread that steps the session until it is told to stop.
 struct ReadTask {
     stop: Arc<AtomicBool>,
-    thread: JoinHandle<()>,
+    thread: JoinHandle,
     id: ThreadId,
 }
 
@@ -373,7 +381,7 @@ impl IdleWait {
         match self {
             IdleWait::None => {}
             IdleWait::Input(readiness, ms) => readiness.wait_readable(ms),
-            IdleWait::Dial(ms) => std::thread::sleep(std::time::Duration::from_millis(ms.into())),
+            IdleWait::Dial(ms) => os::sleep_ms(ms.into()),
         }
     }
 }
@@ -514,8 +522,10 @@ fn counted(plane: FilterPlane, count_local: bool) -> Locality {
     }
 }
 
+/// The engine's mutex, held until the guard drops; one poisoned by a panic is recovered, since
+/// every critical section here leaves its value consistent ([`os::Mutex::lock`]).
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+    mutex.lock()
 }
 
 /// The two planes' Interest kinds, an Interest held per plane and key.
@@ -977,6 +987,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             closed: AtomicBool::new(false),
             next_entity: AtomicU64::new(1),
             reader: Mutex::new(None),
+            delivering: Lock::new(Vec::new()),
             this: this.clone(),
         }))
     }
@@ -1042,7 +1053,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// what the inner step queued, in order. Delivering from the inner call would run a callback
     /// inside itself, waiting on its own lock.
     fn deliver(&self) {
-        let Some(_delivering) = Delivering::enter(self as *const Self as usize) else {
+        let Some(_delivering) = Delivering::enter(&self.delivering) else {
             return;
         };
         // Each popped under its queue's lock alone, which is released before the callback runs:
@@ -1518,15 +1529,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             let mut reader = lock(&self.reader);
             match reader.as_ref() {
                 None => return Ok(()),
-                Some(task) if task.id == std::thread::current().id() => {
-                    return Err(CalledFromReadTask)
-                }
+                Some(task) if task.id == os::current() => return Err(CalledFromReadTask),
                 Some(_) => reader.take(),
             }
         };
         if let Some(task) = task {
             task.stop.store(true, Ordering::Release);
-            let _ = task.thread.join();
+            task.thread.join();
         }
         Ok(())
     }
@@ -2418,7 +2427,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
     fn start_read_task(&self) -> Result<(), CalledFromReadTask> {
         let mut reader = lock(&self.reader);
         if let Some(task) = reader.as_ref() {
-            if task.id == std::thread::current().id() {
+            if task.id == os::current() {
                 return Err(CalledFromReadTask);
             }
             return Ok(());
@@ -2428,10 +2437,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         };
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = stop.clone();
-        let thread = std::thread::spawn(move || {
-            while !stopped.load(Ordering::Acquire) && engine.read(false).is_ok() {}
-        });
-        let id = thread.thread().id();
+        let Some((thread, id)) =
+            os::spawn(
+                move || {
+                    while !stopped.load(Ordering::Acquire) && engine.read(false).is_ok() {}
+                },
+            )
+        else {
+            // What `std::thread::spawn` did when the system gave no thread, kept as it was: the
+            // ABI's guard answers the C call with an error. The port's start has no answer for
+            // "no thread" yet (zenoh-pico's `_Z_ERR_SYSTEM_TASK_FAILED`), which is where this
+            // belongs.
+            panic!("the system gave no thread for the read task");
+        };
         *reader = Some(ReadTask { stop, thread, id });
         Ok(())
     }
@@ -2565,10 +2583,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopE
         // The last handle is gone, so no read task holds one: it has stopped, or is about to
         // drop the handle it held. A session never closed is closed now; a closed one has no
         // link left to end.
-        self.core
-            .get_mut()
-            .unwrap_or_else(PoisonError::into_inner)
-            .0
-            .end_link();
+        self.core.get_mut().0.end_link();
     }
 }
