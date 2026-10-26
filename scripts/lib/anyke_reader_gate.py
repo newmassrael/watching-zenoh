@@ -97,9 +97,9 @@ def is_family(path: pathlib.Path) -> bool:
 
     These crates reproduce upstream's files under upstream's package names (inventory atom
     `api-compat-rust`), so what they hold is upstream's code, not a wz reader: the file of the
-    top crate that declares the constant is the very `zenoh/src/api/selector.rs` the zenoh
-    reader above says it mirrors, and a copy of the reference is not a third rule-set. The
-    population this gate guards is wz's own.
+    top crate that declares the constant is the very file of the zenoh reader above (`zenoh/src/api/selector.rs` @ `fn reply_key_expr_any`),
+    and a copy of the reference is not a third rule-set. The population this gate guards is wz's
+    own.
     """
     parts = path.parts
     return len(parts) > 1 and parts[0] == "crates" and (
