@@ -51,13 +51,21 @@ fn text<T: Debug, E: std::fmt::Display>(r: Result<T, E>) -> String {
     }
 }
 
-/// A port nothing listens on.
+/// A port nothing listens on, that the kernel never picks for a socket that binds port 0 (below
+/// every platform's ephemeral range, so a session of this process that listens on `tcp/[::]:0`
+/// cannot be handed it between the choice and the use), and that no call of this function gives
+/// twice. The numbers are tried from one that depends on the process, not read back from a socket
+/// that is dropped.
 fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("a port")
-        .local_addr()
-        .expect("its address")
-        .port()
+    use std::sync::atomic::{AtomicU16, Ordering};
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    loop {
+        let offset = NEXT.fetch_add(1, Ordering::Relaxed);
+        let port = 12_000 + ((std::process::id() % 8_000) as u16 + offset) % 18_000;
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
 }
 
 /// Whether something answers on `port` of the loopback.

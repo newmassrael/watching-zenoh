@@ -907,13 +907,20 @@ mod tests {
         }
     }
 
+    /// A loopback port that nothing holds and that the kernel never picks for a socket that binds
+    /// port 0: below every platform's ephemeral range, so a session of this process that listens on
+    /// `tcp/[::]:0` cannot be handed it between the choice and the use. Chosen by trying numbers
+    /// from one that depends on the process, and not read back from a socket that is dropped.
+    fn unautoselected_port() -> u16 {
+        let start = 20_000 + (std::process::id() % 8_000) as u16;
+        (start..start + 2_000)
+            .find(|port| std::net::TcpListener::bind(("127.0.0.1", *port)).is_ok())
+            .expect("a free port below the ephemeral range")
+    }
+
     #[test]
     fn the_info_of_a_session_says_its_id_and_the_peers_it_is_connected_to() {
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .expect("a port")
-            .local_addr()
-            .expect("its address")
-            .port();
+        let port = unautoselected_port();
         let listener = open(
             Config::from_json5(&format!(
                 r#"{{ id: "a1b2d1", mode: "peer", listen: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
