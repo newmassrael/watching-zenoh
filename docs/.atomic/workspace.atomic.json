@@ -290140,6 +290140,56 @@
         "R29 statechart carry items unchanged. Codec / statechart tracks remain parallel; statechart side has had no advance since R29 first land."
       ]
     },
+    "Round 3700": {
+      "decision_summary": "Phase 4 of the closed key set (docs/closed-key-set.md): what each declared peer may publish, and a correction of phases 3a and 3b. The in-place receive path, which fixed-memory images take, called the matcher directly (deliver_lent in pubsub/in_place.rs), so a closed table neither refused a key outside its set nor delivered by selection there; the earlier check had found only the callers in pubsub.rs. It now goes through fire_lent, and tests hold the lent path to the owned path; with the gate bypassed again one fails. Phase 4: PeerAllowance, a const-checked bit row for each declared peer and key, found by zid; KeyGate::admit_key_from asks the set first, then the peer; SubscriberPeer holds the peer's class. A closed node may declare [[allow]] tables, written into declared.rs as key_set::ALLOWED_PEERS. Access control is std and AP only, so there are two possible sources of one table; only the direct one is built. Not done: the other source, other operations, node code.",
+      "changes_bullets": [
+        "crates/wz-session-core src/key_allowance.rs (new): PeerAllowance, PeerOp, ClassId; class_of by zid, allows by one bit; shape checked in a const; unit tests.",
+        "src/key_gate.rs: with_allowance, admit_key_from, peer_unknown and peer_not_allowed counts. src/pubsub.rs: SubscriberPeer holds the class (set_class), admission takes it, dispatch_borrowed_from, fire_lent. src/pubsub/in_place.rs: the lent path goes through fire_lent; the plain-Put path passes the class; two tests.",
+        "scripts/lib/wz_key_set.py: validate_allows, build_allowance and the Rust emission of the allowance; wz_node.py: [[allow]] in a closed node, key_set::ALLOWED_PEERS; wz_keyexpr.py: zid helpers; seven deploy/nodes/generated files regenerated.",
+        "tests/key_catalogue_model.rs and key_set_data: three declared peers, every bit compared with the matcher; the gate over the fixture's tables.",
+        "docs/closed-key-set.md: phase 4 as built, and the correction."
+      ],
+      "verification_bullets": [
+        "On the shared build machine: the model tests, all unit tests of wz-session-core in the default build, and the in-place and key tests with storage-profile, pubsub-put and pubsub-delete (the two lent-path tests match none without those features); clippy -D warnings for wz-session-core (default, none, storage-profile), wz-session-mcu, wz-capi-coop and wz-runtime-tokio; declared-node type-checks against a regenerated node file.",
+        "Oracles shown able to fail: the allowance generator with the rule that a pattern key is not allowed removed fails the model test; fire_lent ignoring a refusal fails the lent-path test.",
+        "wz_node.py --selftest and --check, wz_key_set.py --check, wz_package.py --selftest, wz_config.py --check, round_fed_gate_reach.py and gate_provenance_lint.py pass.",
+        "Not run: the hosted run (every earlier one was cancelled by the next push); a node image reading ALLOWED_PEERS."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "A node's code must read key_set::CLOSED and ALLOWED_PEERS, give the gate to its subscriber table and call set_class when a peer's zid is known; that is in the slot node and the cooperative engine, whose owning sessions are to be named by the user.",
+        "The second source: compile an AP closed image's access-control rules into the same table, with a model test against the access-control interpreter.",
+        "Other operations of an allowance (a peer's query, its declarations, what this node sends it); a reply's key is not gated and the selector side is as before.",
+        "Search child modules, not only the file, for callers when a seam claims to cover every delivery.",
+        "Read the hosted run of this push per job by head sha."
+      ],
+      "publishable_decision_summary": "Phase 4 of the closed key set (docs/closed-key-set.md): what each declared peer may publish, and a correction of phases 3a and 3b. The in-place receive path, which fixed-memory images take, called the matcher directly (deliver_lent in pubsub/in_place.rs), so a closed table neither refused a key outside its set nor delivered by selection there; the earlier check had found only the callers in pubsub.rs. It now goes through fire_lent, and tests hold the lent path to the owned path; with the gate bypassed again one fails. Phase 4: PeerAllowance, a const-checked bit row for each declared peer and key, found by zid; KeyGate::admit_key_from asks the set first, then the peer; SubscriberPeer holds the peer's class. A closed node may declare [[allow]] tables, written into declared.rs as key_set::ALLOWED_PEERS. Access control is std and AP only, so there are two possible sources of one table; only the direct one is built. Not done: the other source, other operations, node code.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core src/key_allowance.rs (new): PeerAllowance, PeerOp, ClassId; class_of by zid, allows by one bit; shape checked in a const; unit tests.",
+        "src/key_gate.rs: with_allowance, admit_key_from, peer_unknown and peer_not_allowed counts. src/pubsub.rs: SubscriberPeer holds the class (set_class), admission takes it, dispatch_borrowed_from, fire_lent. src/pubsub/in_place.rs: the lent path goes through fire_lent; the plain-Put path passes the class; two tests.",
+        "scripts/lib/wz_key_set.py: validate_allows, build_allowance and the Rust emission of the allowance; wz_node.py: [[allow]] in a closed node, key_set::ALLOWED_PEERS; wz_keyexpr.py: zid helpers; seven deploy/nodes/generated files regenerated.",
+        "tests/key_catalogue_model.rs and key_set_data: three declared peers, every bit compared with the matcher; the gate over the fixture's tables.",
+        "docs/closed-key-set.md: phase 4 as built, and the correction."
+      ],
+      "publishable_verification_bullets": [
+        "On the shared build machine: the model tests, all unit tests of wz-session-core in the default build, and the in-place and key tests with storage-profile, pubsub-put and pubsub-delete (the two lent-path tests match none without those features); clippy -D warnings for wz-session-core (default, none, storage-profile), wz-session-mcu, wz-capi-coop and wz-runtime-tokio; declared-node type-checks against a regenerated node file.",
+        "Oracles shown able to fail: the allowance generator with the rule that a pattern key is not allowed removed fails the model test; fire_lent ignoring a refusal fails the lent-path test.",
+        "wz_node.py --selftest and --check, wz_key_set.py --check, wz_package.py --selftest, wz_config.py --check, round_fed_gate_reach.py and gate_provenance_lint.py pass.",
+        "Not run: the hosted run (every earlier one was cancelled by the next push); a node image reading ALLOWED_PEERS."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A node's code must read key_set::CLOSED and ALLOWED_PEERS, give the gate to its subscriber table and call set_class when a peer's zid is known; that is in the slot node and the cooperative engine, whose owning sessions are to be named by the user.",
+        "The second source: compile an AP closed image's access-control rules into the same table, with a model test against the access-control interpreter.",
+        "Other operations of an allowance (a peer's query, its declarations, what this node sends it); a reply's key is not gated and the selector side is as before.",
+        "Search child modules, not only the file, for callers when a seam claims to cover every delivery.",
+        "Read the hosted run of this push per job by head sha."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
