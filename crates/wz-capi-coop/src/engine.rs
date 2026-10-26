@@ -66,7 +66,6 @@ use wz_session_core::entropy::EntropySource;
 use wz_session_core::interest_build::InterestKinds;
 use wz_session_core::locality::Locality;
 use wz_session_core::network_message::NetworkMessage;
-use wz_session_core::observer::ApplicationLayerObserver;
 use wz_session_core::publish_options::{PlainPutParams, PublishError, PublishOptions};
 use wz_session_core::pubsub::SubscriptionId;
 use wz_session_core::push_build;
@@ -77,8 +76,6 @@ use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
 use wz_session_core::sink::{BoxedSink, SampleView};
 use wz_session_core::WhatAmI;
-#[cfg(not(feature = "queryable"))]
-use wz_session_mcu::app_layer::dispatch_to;
 use wz_session_mcu::dial::{parse_locator, McuActions};
 #[cfg(feature = "queryable")]
 use {
@@ -91,6 +88,9 @@ use {
 
 #[cfg(feature = "queryable")]
 mod query;
+
+mod registry;
+use registry::Registry;
 
 mod replay;
 use replay::{Kind, OnRefusal, Replay};
@@ -304,8 +304,8 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     runtime: CoopRuntime<C>,
     clock: C,
     /// What the application holds and what the peer declared. It is the session's, so it
-    /// outlives each link: a new link is dispatched to the same observer.
-    observer: Rc<RefCell<ApplicationLayerObserver>>,
+    /// outlives each link: a new link is dispatched to the same registry.
+    registry: Rc<RefCell<Registry>>,
     link: Link<C>,
     /// Where a face coming up or going down is reported (`connectivity`).
     #[cfg(feature = "connectivity")]
@@ -552,27 +552,37 @@ fn leg(result: Result<(), SendWireError>) -> Result<usize, FanoutError> {
     }
 }
 
-/// The `on_event` of a link whose session answers queries outside its lock: the observer's
+/// The `on_event` of a link whose session answers queries outside its lock: the registry's
 /// dispatch, with the `ResponseFinal`s it owes held back for the queries a callback is still to
 /// answer (`query`). Everything else the dispatch staged (the replies of a queryable that answers
-/// in place, declare replies, get prunes) goes out at once, as `dispatch_to` sends it.
+/// in place, declare replies, get prunes) goes out at once, as [`dispatch_all`] sends it.
 #[cfg(feature = "queryable")]
 fn dispatch_holding_finals<C: ClockSource + 'static>(
-    observer: Rc<RefCell<ApplicationLayerObserver>>,
+    registry: Rc<RefCell<Registry>>,
     actions: Rc<McuActions<C>>,
     plane: Arc<QueryPlane>,
     generation: u64,
 ) -> impl FnMut(wz_session_core::driver_loop::IterationEvent<'_>) + 'static {
     move |event| {
-        let mut observer = observer.borrow_mut();
-        observer.dispatch_event(event);
-        observer.flush_pending_replies(&*actions);
-        for (rid, qos) in observer.take_pending_final_rids() {
+        let mut registry = registry.borrow_mut();
+        registry.dispatch_event(event);
+        registry.flush_pending_replies(&*actions);
+        for (rid, qos) in registry.take_pending_final_rids() {
             if lock(&plane.holds).owe(generation, rid, qos) {
                 actions.send_response_final(rid, qos);
             }
         }
     }
+}
+
+/// The `on_event` of a link whose session has no queryable: the registry's dispatch, with
+/// everything it staged sent at once.
+#[cfg(not(feature = "queryable"))]
+fn dispatch_all<C: ClockSource + 'static>(
+    registry: Rc<RefCell<Registry>>,
+    actions: Rc<McuActions<C>>,
+) -> impl FnMut(wz_session_core::driver_loop::IterationEvent<'_>) + 'static {
+    move |event| registry.borrow_mut().dispatch(event, &*actions)
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
@@ -637,13 +647,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             let generation = self.plane.generation.fetch_add(1, Ordering::AcqRel) + 1;
             #[cfg(feature = "queryable")]
             let dispatch = dispatch_holding_finals(
-                self.observer.clone(),
+                self.registry.clone(),
                 actions.clone(),
                 self.plane.clone(),
                 generation,
             );
             #[cfg(not(feature = "queryable"))]
-            let dispatch = dispatch_to(self.observer.clone(), actions.clone());
+            let dispatch = dispatch_all(self.registry.clone(), actions.clone());
             let task = spawn_session(
                 &self.local,
                 link.clone(),
@@ -817,24 +827,24 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     fn lose_link(&mut self) {
         // What the lost link's peer was told went with it: the next link's peer holds nothing.
         self.replay.discard();
-        let mut observer = self.observer.borrow_mut();
-        observer.flush_declarations_on_link_loss();
-        observer.flush_liveliness_on_link_loss();
+        let mut registry = self.registry.borrow_mut();
+        registry.flush_declarations_on_link_loss();
+        registry.flush_liveliness_on_link_loss();
         // A get's legs went with the link: the peer that owed their Finals is gone, so each
         // pending entry is dropped, which ends its leg (`get`).
         #[cfg(feature = "query")]
         for pending in self.pending_gets.drain(..) {
-            pending.unregister(&mut observer);
+            pending.unregister(&mut registry.gets);
         }
     }
 
     /// When the earliest pending get is due: a query's or a liveliness snapshot's.
     #[cfg(feature = "query")]
     fn next_get_deadline_ms(&self) -> Option<u64> {
-        let observer = self.observer.borrow();
-        let due = observer.replies.next_deadline_ms();
+        let registry = self.registry.borrow();
+        let due = registry.gets.replies.next_deadline_ms();
         #[cfg(feature = "liveliness-get")]
-        let due = [due, observer.liveliness_gets.next_deadline_ms()]
+        let due = [due, registry.gets.liveliness_gets.next_deadline_ms()]
             .into_iter()
             .flatten()
             .min();
@@ -932,7 +942,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             local,
             runtime,
             clock,
-            observer: Rc::new(RefCell::new(ApplicationLayerObserver::new())),
+            registry: Rc::new(RefCell::new(Registry::new())),
             link: Link::Waiting { at_us: u64::MAX },
             #[cfg(feature = "connectivity")]
             faces: Arc::new(FacePlane::default()),
@@ -1248,8 +1258,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let sample = opts.loopback_sample(keyexpr, payload);
         let reached = core
             .0
-            .observer
+            .registry
             .borrow_mut()
+            .app
             .subscribers
             .local_publish(&sample);
         drop(core);
@@ -1280,7 +1291,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             let core = &mut core.0;
             if let Some(at) = core.pending_gets.iter().position(|p| p.leg == leg) {
                 let pending = core.pending_gets.remove(at);
-                pending.unregister(&mut core.observer.borrow_mut());
+                pending.unregister(&mut core.registry.borrow_mut().gets);
             }
         }
         drop(self.take_target(leg));
@@ -1294,17 +1305,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let Some(core) = self.live() else {
             return;
         };
-        // The session's own get is answered to its pending entry, which is the observer's.
+        // The session's own get is answered to its pending entry, which is the registry's.
         #[cfg(feature = "local-queryable")]
         if generation == query::LOCAL_QUERY {
-            let mut observer = core.0.observer.borrow_mut();
+            let mut registry = core.0.registry.borrow_mut();
             for reply in replies {
-                observer.replies.deliver_local_reply(&reply.into());
+                registry.gets.replies.deliver_local_reply(&reply.into());
             }
             if release && lock(&self.plane.holds).release(generation, rid).is_some() {
-                observer.replies.deliver_local_final(rid);
+                registry.gets.replies.deliver_local_final(rid);
             }
-            drop(observer);
+            drop(registry);
             drop(core);
             self.deliver();
             return;
@@ -1338,19 +1349,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     fn step(&self, core: &mut Core<L, C>) -> bool {
         core.local.run_until_idle();
         // A get whose deadline has passed ends with zenoh's timeout reply and its Final, here,
-        // because this is what runs on every step and the entries are the observer's.
+        // because this is what runs on every step and the entries are the registry's.
         #[cfg(feature = "query")]
         {
             let now_ms = core.clock.now_us() / 1000;
-            let mut observer = core.observer.borrow_mut();
-            observer.replies.sweep_timed_out(now_ms);
+            let mut registry = core.registry.borrow_mut();
+            registry.gets.replies.sweep_timed_out(now_ms);
             // A liveliness snapshot that expired ends the same way. Its terminated ids are
             // staged for a reconnect cache this engine does not keep (it declares again from its
             // own entries), so they are drained and dropped: staged ones would pile up.
             #[cfg(feature = "liveliness-get")]
             {
-                observer.liveliness_gets.sweep_timed_out(now_ms);
-                drop(observer.liveliness_gets.take_finalized());
+                registry.gets.liveliness_gets.sweep_timed_out(now_ms);
+                drop(registry.gets.liveliness_gets.take_finalized());
             }
         }
         let redial_ms = core.config.redial_ms;
@@ -1413,12 +1424,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// Whether a peer declared what `plane` counts on `keyexpr`.
     fn peer_matches(core: &Core<L, C>, plane: FilterPlane, keyexpr: &str) -> bool {
-        let observer = core.observer.borrow();
+        let registry = core.registry.borrow();
         match plane {
-            FilterPlane::Subscribers => observer
+            FilterPlane::Subscribers => registry
+                .peer
                 .remote_subscribers
                 .has_matching_for(&PublisherCriterion::new(keyexpr, Locality::Remote)),
-            FilterPlane::Queryables { complete_required } => observer
+            FilterPlane::Queryables { complete_required } => registry
+                .peer
                 .remote_queryables
                 .has_matching_for(&QuerierCriterion::new(
                     keyexpr,
@@ -1435,16 +1448,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         #[cfg(feature = "local-subscriber")]
         if matches!(plane, FilterPlane::Subscribers) {
             return core
-                .observer
+                .registry
                 .borrow()
+                .app
                 .subscribers
                 .has_local_matching(keyexpr);
         }
         #[cfg(feature = "local-queryable")]
         if let FilterPlane::Queryables { complete_required } = plane {
             return core
-                .observer
+                .registry
                 .borrow()
+                .app
                 .queryables
                 .has_local_matching(keyexpr, complete_required);
         }
@@ -1472,33 +1487,36 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         };
         let query = opts.loopback_query();
         let mut staged = ReplyStage::new();
-        let mut observer = core.observer.borrow_mut();
+        let mut registry = core.registry.borrow_mut();
         self.plane.asking_locally(|| {
-            observer
-                .queryables
-                .local_query_with_value(envelope, keyexpr, &query, None, &mut staged)
+            registry.app.queryables.local_query_with_value(
+                envelope,
+                keyexpr,
+                &query,
+                None,
+                &mut staged,
+            )
         });
         for reply in staged {
-            observer.replies.deliver_local_reply(&reply.into());
+            registry.gets.replies.deliver_local_reply(&reply.into());
         }
         if lock(&self.plane.holds).owe(query::LOCAL_QUERY, rid, qos) {
-            observer.replies.deliver_local_final(rid);
+            registry.gets.replies.deliver_local_final(rid);
         }
     }
 
     /// The queryables' plane's counterpart of [`Self::reevaluate_subscriber_matching`].
     #[cfg(feature = "local-queryable")]
     fn reevaluate_queryable_matching(core: &Core<L, C>) {
-        let mut observer = core.observer.borrow_mut();
-        let ApplicationLayerObserver {
-            queryables,
-            remote_queryables,
-            ..
-        } = &mut *observer;
-        remote_queryables.reevaluate_matching(&|criterion| {
-            criterion.locality.allows_local()
-                && queryables.has_local_matching(&criterion.keyexpr, criterion.complete_required)
-        });
+        let mut registry = core.registry.borrow_mut();
+        let Registry { app, peer, .. } = &mut *registry;
+        let queryables = &app.queryables;
+        app.remote_queryables
+            .reevaluate_matching(&peer.remote_queryables, &|criterion| {
+                criterion.locality.allows_local()
+                    && queryables
+                        .has_local_matching(&criterion.keyexpr, criterion.complete_required)
+            });
     }
 
     /// What a write filter or a matching listener on `plane` reads: a peer's declaration, or with
@@ -1518,15 +1536,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// registry reads the remote half off its own membership and asks this for the local half.
     #[cfg(feature = "local-subscriber")]
     fn reevaluate_subscriber_matching(core: &Core<L, C>) {
-        let mut observer = core.observer.borrow_mut();
-        let ApplicationLayerObserver {
-            subscribers,
-            remote_subscribers,
-            ..
-        } = &mut *observer;
-        remote_subscribers.reevaluate_matching(&|criterion| {
-            criterion.locality.allows_local() && subscribers.has_local_matching(&criterion.keyexpr)
-        });
+        let mut registry = core.registry.borrow_mut();
+        let Registry { app, peer, .. } = &mut *registry;
+        let subscribers = &app.subscribers;
+        app.remote_subscribers
+            .reevaluate_matching(&peer.remote_subscribers, &|criterion| {
+                criterion.locality.allows_local()
+                    && subscribers.has_local_matching(&criterion.keyexpr)
+            });
     }
 
     /// Stop the read task, from a thread that is not it.
@@ -1650,7 +1667,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         };
         let core = &mut guard.0;
         let queue = self.samples.clone();
-        let registration = core.observer.borrow_mut().subscribers.register_sink(
+        let registration = core.registry.borrow_mut().app.subscribers.register_sink(
             &keyexpr,
             allowed_origin,
             BoxedSink::new(move |sample: &dyn SampleView| {
@@ -1692,8 +1709,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let at = core.live_subs.iter().position(|s| s.id == id)?;
             let link = core.retract(Kind::LiveSub, at);
             let entry = core.live_subs.remove(at);
-            core.observer
+            core.registry
                 .borrow_mut()
+                .app
                 .liveliness_subscribers
                 .unregister(id);
             if let Some(actions) = link {
@@ -1712,8 +1730,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let at = core.subscribers.iter().position(|s| s.id == id)?;
             let link = core.retract(Kind::Subscriber, at);
             let entry = core.subscribers.remove(at);
-            core.observer
+            core.registry
                 .borrow_mut()
+                .app
                 .subscribers
                 .unregister(entry.registration);
             match (link, &entry.retraction) {
@@ -1825,17 +1844,20 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // The watch is in the registry of what `plane` counts, with the criterion its write
         // filter reads ([`Self::plane_matches`]), so the listener and the filter cannot differ.
         let watch = {
-            let mut observer = core.observer.borrow_mut();
+            let mut registry = core.registry.borrow_mut();
+            let Registry { app, peer, .. } = &mut *registry;
             match plane {
-                FilterPlane::Subscribers => observer
-                    .remote_subscribers
-                    .declare_matching_listener_seeded(
+                FilterPlane::Subscribers => {
+                    app.remote_subscribers.declare_matching_listener_seeded(
+                        &peer.remote_subscribers,
                         PublisherCriterion::new(&keyexpr, counted(plane, count_local)),
                         local,
                         report,
-                    ),
+                    )
+                }
                 FilterPlane::Queryables { complete_required } => {
-                    observer.remote_queryables.declare_matching_listener_seeded(
+                    app.remote_queryables.declare_matching_listener_seeded(
+                        &peer.remote_queryables,
                         QuerierCriterion::new(
                             &keyexpr,
                             counted(plane, count_local),
@@ -1870,12 +1892,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             if let Some(at) = core.matches.iter().position(|m| m.id == id) {
                 let entry = core.matches.remove(at);
                 {
-                    let mut observer = core.observer.borrow_mut();
+                    let mut registry = core.registry.borrow_mut();
                     match entry.plane {
-                        FilterPlane::Subscribers => observer
+                        FilterPlane::Subscribers => registry
+                            .app
                             .remote_subscribers
                             .undeclare_matching_listener(entry.watch),
-                        FilterPlane::Queryables { .. } => observer
+                        FilterPlane::Queryables { .. } => registry
+                            .app
                             .remote_queryables
                             .undeclare_matching_listener(entry.watch),
                     };
@@ -1969,8 +1993,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         if params.destination.allows_local() {
             let wanted = self.live().is_some_and(|core| {
                 core.0
-                    .observer
+                    .registry
                     .borrow()
+                    .app
                     .subscribers
                     .has_local_matching(keyexpr)
             });
@@ -2036,12 +2061,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let id = self.next_entity_id();
         let mut guard = self.live()?;
         let core = &mut guard.0;
-        // The observer's queryable only copies a query out and holds its Final; the callback
+        // The registry's queryable only copies a query out and holds its Final; the callback
         // `sink` mints runs when the deliveries are handed out (`query`).
         let plane = self.plane.clone();
         let registration = core
-            .observer
+            .registry
             .borrow_mut()
+            .app
             .queryables
             .register_sink(
                 &keyexpr,
@@ -2120,7 +2146,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             opts.resolved_consolidation(),
             get::reply_sink(leg_id, &self.gets),
         );
-        let registered = core.observer.borrow_mut().replies.register_sink(
+        let registered = core.registry.borrow_mut().gets.replies.register_sink(
             rid,
             finals,
             deadline_ms,
@@ -2143,7 +2169,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             {
                 // Nothing went out: the entry and the leg go, and the get is over, with no
                 // local half asked, as zenoh-pico asks it only once the send succeeded.
-                core.observer.borrow_mut().replies.unregister(rid);
+                core.registry.borrow_mut().gets.replies.unregister(rid);
                 drop(guard);
                 drop(self.take_target(leg_id));
                 return Some(0);
@@ -2197,7 +2223,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let deadline_ms = Some(core.clock.now_us().div_ceil(1000) + u64::from(timeout_ms));
         // One DeclFinal: the link's peer's. Registered before the Interest goes out, so no
         // answer can arrive before its entry.
-        let registered = core.observer.borrow_mut().liveliness_gets.register(
+        let registered = core.registry.borrow_mut().gets.liveliness_gets.register(
             interest_id,
             deadline_ms,
             get::reply_sink(leg_id, &self.gets),
@@ -2216,8 +2242,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             .is_err()
         {
             // Nothing went out: the entry and the leg go, and the snapshot is over.
-            core.observer
+            core.registry
                 .borrow_mut()
+                .gets
                 .liveliness_gets
                 .unregister(interest_id);
             drop(guard);
@@ -2241,8 +2268,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let at = core.queryables.iter().position(|q| q.id == id)?;
             let link = core.retract(Kind::Queryable, at);
             let entry = core.queryables.remove(at);
-            core.observer
+            core.registry
                 .borrow_mut()
+                .app
                 .queryables
                 .unregister(entry.registration);
             if let Some(actions) = link {
@@ -2271,8 +2299,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let id = self.next_entity_id();
         let mut core = self.live()?;
         let core = &mut core.0;
-        core.observer
+        core.registry
             .borrow_mut()
+            .app
             .local_tokens
             .register(id, &keyexpr)
             .ok()?;
@@ -2296,7 +2325,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let at = core.tokens.iter().position(|t| t.id == id)?;
             let link = core.retract(Kind::Token, at);
             let entry = core.tokens.remove(at);
-            core.observer.borrow_mut().local_tokens.unregister(id);
+            core.registry.borrow_mut().app.local_tokens.unregister(id);
             if let Some(actions) = link {
                 entry.retract(&actions);
             }
@@ -2323,12 +2352,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // With `history`, the registration hands the sink the tokens the session already knows,
         // before the peer answers with the rest, as zenoh-pico's does
         // (`vendor/zenoh-pico/src/net/liveliness.c` @ `_z_liveliness_subscription_trigger_history`).
-        let registered = core.observer.borrow_mut().liveliness_subscribers.register(
-            id,
-            &keyexpr,
-            history,
-            liveliness::sample_sink(id, &self.live_samples),
-        );
+        let registered = {
+            let mut registry = core.registry.borrow_mut();
+            let Registry { app, peer, .. } = &mut *registry;
+            app.liveliness_subscribers.register(
+                &peer.tokens,
+                id,
+                &keyexpr,
+                history,
+                liveliness::sample_sink(id, &self.live_samples),
+            )
+        };
         if registered.is_err() {
             drop(guard);
             drop(self.take_target(id));
@@ -2387,11 +2421,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         // A get still pending ends with its session: its entry and its leg's callback go.
         #[cfg(feature = "query")]
         let gets: Vec<u64> = {
-            let mut observer = core.observer.borrow_mut();
+            let mut registry = core.registry.borrow_mut();
             core.pending_gets
                 .drain(..)
                 .map(|pending| {
-                    pending.unregister(&mut observer);
+                    pending.unregister(&mut registry.gets);
                     pending.leg
                 })
                 .collect()

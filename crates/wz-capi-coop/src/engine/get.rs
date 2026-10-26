@@ -20,11 +20,11 @@ use alloc::sync::Arc;
 
 use wz_capi_port::os::Mutex;
 
-use wz_session_core::observer::ApplicationLayerObserver;
 use wz_session_core::reply::InboundReply;
 use wz_session_core::reply_sink::{BoxedReplySink, ReplyView};
 
 use super::lock;
+use super::registry::Gets;
 
 /// What a get leg's sink queued, in the order it happened.
 ///
@@ -64,15 +64,16 @@ pub(super) struct PendingGet {
 }
 
 impl PendingGet {
-    /// Drop this leg's entry from the observer, which ends the leg (its sink's guard says so).
-    pub(super) fn unregister(&self, observer: &mut ApplicationLayerObserver) {
+    /// Drop this leg's entry from the session's pending gets, which ends the leg (its sink's
+    /// guard says so).
+    pub(super) fn unregister(&self, gets: &mut Gets) {
         match self.kind {
             GetKind::Query => {
-                observer.replies.unregister(self.rid);
+                gets.replies.unregister(self.rid);
             }
             #[cfg(feature = "liveliness-get")]
             GetKind::Liveliness => {
-                observer.liveliness_gets.unregister(self.rid);
+                gets.liveliness_gets.unregister(self.rid);
             }
         }
     }

@@ -10131,10 +10131,10 @@ layer_c1g_cargo_test_observer() {
     # the build's own, the heap's, so one registration serves several sessions with a table
     # of each peer's own. The same alias id from two peers names two keyexprs, two peers that
     # ask with one request id are answered each on its own session's send path, and for one
-    # session it sends and delivers what the one-session observer does, byte for byte. The
-    # file compiles only where the fixed-backing one above does not. 3 = what that command
-    # PRINTED.
-    _runci_guarded_test C1g 3 \
+    # session it sends and delivers what the one-session observer does, byte for byte, and a
+    # host that holds the `Final`s back drains the replies alone. The file compiles only where
+    # the fixed-backing one above does not. 4 = what that command PRINTED.
+    _runci_guarded_test C1g 4 \
         cargo test -p wz-session-core --test slot_observer_heap --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,declare-subscriber,declare-queryable,declare-undeclare,pubsub-put,pubsub-delete --quiet || return 1
     # R3315 -- the observer's place. The observer is 16 KB and the Zephyr node's stack is
     # 32 KB: a value of it passed through an install cost the node's main function 69 KB of

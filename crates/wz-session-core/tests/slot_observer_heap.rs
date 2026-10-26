@@ -260,6 +260,48 @@ fn two_sessions_asking_with_one_request_id_are_each_answered_on_their_own_sink()
     );
 }
 
+/// A host that holds each `Final` behind the callbacks still to answer drains the replies alone:
+/// the two replies leave, the `Final` stays owed in the session's tables, and sending it after
+/// is what the full drain would have sent, in the same order. The control is the full drain,
+/// which sends all three at once.
+#[test]
+fn the_replies_can_be_drained_with_the_final_held_back() {
+    let (mut observer, _seen) = slot();
+    let (mut peers, mut requesters) = (PeerTables::new(), Req::new());
+    let held = Sent::default();
+
+    let outcome = frame(vec![ask(7, "demo/q/a")]);
+    observer.dispatch_event(&mut peers, &mut requesters, IterationEvent::Poll(&outcome));
+    observer.flush_pending_replies(&mut peers, &mut requesters, &held);
+    let log = held.log();
+    assert_eq!(log.len(), 2, "two replies and no Final: {log:?}");
+    assert!(log.iter().all(|line| line.starts_with("reply")));
+
+    let owed = core::mem::take(&mut peers.finals);
+    let owed: Vec<(u64, _)> = owed.into_iter().collect();
+    assert_eq!(owed.len(), 1, "the Final is still owed");
+    assert_eq!(owed[0].0, 7);
+    for (rid, qos) in owed {
+        held.send_response_final(rid, qos);
+    }
+
+    let whole = Sent::default();
+    let (mut peers, mut requesters) = (PeerTables::new(), Req::new());
+    let (mut observer, _seen) = slot();
+    dispatch(
+        &mut observer,
+        &mut peers,
+        &mut requesters,
+        &whole,
+        vec![ask(7, "demo/q/a")],
+    );
+    assert_eq!(
+        held.log(),
+        whole.log(),
+        "held back and then sent is what the full drain sends"
+    );
+}
+
 /// For one session the slot observer sends and delivers what the one-session observer does: the
 /// same replies, byte for byte, the same Final after them, and the same samples to the same
 /// subscriber, for the same frames.

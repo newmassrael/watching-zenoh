@@ -597,6 +597,28 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
         actions.end_burst(burst);
     }
 
+    /// [`Self::flush_pending`] without the `Final`s: the replies, the answers to the
+    /// session's interests and the terminated-get prunes leave through `actions`, and
+    /// what is owed in `peers.finals` stays staged. For a host that holds each `Final`
+    /// behind the queries a callback may still answer, takes the owed ones with
+    /// `core::mem::take(&mut peers.finals)` and sends each when the last of them has,
+    /// so no `Final` overtakes a reply. The replies it drains are one burst, as
+    /// `flush_pending`'s are.
+    pub fn flush_pending_replies<S, R: ReplySink, G: ReplySink>(
+        &mut self,
+        peers: &mut PeerTables,
+        requesters: &mut Requesters<R, G>,
+        actions: &S,
+    ) where
+        S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
+    {
+        let burst = actions.begin_burst();
+        self.drain_query_replies(peers, actions);
+        self.drain_declare_replies(peers, actions);
+        self.drain_get_prunes(requesters, actions);
+        actions.end_burst(burst);
+    }
+
     /// Fan and drain in one call: [`Self::dispatch_event`] then
     /// [`Self::flush_pending`], the shape a session's `on_event` takes.
     pub fn dispatch<S, R: ReplySink, G: ReplySink>(
