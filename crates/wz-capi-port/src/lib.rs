@@ -37,8 +37,22 @@
 //! MINTS one, and the engine never learns what it closes over. The factory owns whatever the ABI
 //! captured (its C closure), so the last factory released still runs the C `drop(context)`, which
 //! is allowed to re-enter the session: an engine releases these outside its own locks.
+//!
+//! ## Where it builds
+//!
+//! `no_std` with `alloc`: an MCU image's pico ABI names the same port as the host's
+//! (`docs/upstream-parity.md` step M5, decision C12 of `docs/build-configuration.md`). The `std`
+//! feature, on by default, gives the port's lock to the process ([`sync`]) and adds the
+//! cancellation token, whose cancel blocks; without it the lock is a critical section the image
+//! links.
 
-use std::sync::Arc;
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::sync::Arc;
 
 use wz_session_core::declare::liveliness_sample::LivelinessSample;
 use wz_session_core::sink::SampleView;
@@ -48,6 +62,7 @@ mod drive;
 mod engine;
 pub mod listeners;
 mod query;
+pub mod sync;
 pub use drive::{CalledFromReadTask, SessionClosed, SessionDrive};
 pub use engine::SessionEngine;
 pub use query::{HeldQuery, QblId, QueryCallback, QueryHolder, QueryableSink, ReplyCallback};
@@ -225,8 +240,8 @@ pub struct WireKey {
     keeps: Option<Arc<dyn Send + Sync>>,
 }
 
-impl std::fmt::Debug for WireKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for WireKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("WireKey")
             .field("mapping_id", &self.mapping_id)
             .field("suffix", &self.suffix)

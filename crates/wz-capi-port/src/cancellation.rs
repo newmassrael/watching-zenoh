@@ -50,15 +50,33 @@
 //! property (its wait is on the same notifier), and it is named here rather
 //! than guarded because a guard would need to know which thread is inside
 //! which callback.
+//!
+//! ## Where it builds
+//!
+//! The token BLOCKS: its cancel waits on a condition variable until every
+//! registration is dropped, which is the host's (`std`). The fan only takes a
+//! lock ([`crate::sync::Lock`]), so it builds wherever the port does, and an
+//! engine on an MCU takes the same `get_on_wire` with it. The token and what
+//! registers against it ([`Registration`], [`register_fan`]) come with `std`;
+//! an MCU's token waits on the kernel's condition variable, which arrives with
+//! the pico ABI's MCU host layer.
 
+use alloc::boxed::Box;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+#[cfg(feature = "std")]
 use std::collections::BTreeMap;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+#[cfg(feature = "std")]
+use std::sync::{Condvar, Mutex, MutexGuard};
+
+use crate::sync::Lock;
 
 /// A one-shot on-cancel action.
 type OnCancel = Box<dyn FnOnce() + Send>;
 
 /// The token's state, under one lock so "cancel has started", "the handlers are
 /// gone" and "no registration can land" are one fact rather than three.
+#[cfg(feature = "std")]
 struct Inner {
     /// The handlers to run on cancel, keyed so a completed query can remove its
     /// own. `None` once cancel has started.
@@ -73,11 +91,13 @@ struct Inner {
 }
 
 /// A cancellation token shared by every handle a C program holds on it.
+#[cfg(feature = "std")]
 pub struct CancellationToken {
     inner: Mutex<Inner>,
     idle: Condvar,
 }
 
+#[cfg(feature = "std")]
 impl Default for CancellationToken {
     fn default() -> Self {
         Self {
@@ -92,6 +112,7 @@ impl Default for CancellationToken {
     }
 }
 
+#[cfg(feature = "std")]
 impl CancellationToken {
     /// A fresh, uncancelled token.
     pub fn new() -> Arc<Self> {
@@ -180,11 +201,13 @@ impl CancellationToken {
 
 /// One query's membership of a token: its on-cancel handler and its notifier.
 /// Dropping it is how the query tells the token it is over.
+#[cfg(feature = "std")]
 pub struct Registration {
     token: Arc<CancellationToken>,
     id: u64,
 }
 
+#[cfg(feature = "std")]
 impl Drop for Registration {
     fn drop(&mut self) {
         self.token.release(self.id);
@@ -202,13 +225,13 @@ impl Drop for Registration {
 pub struct CancellableFan {
     /// The undo for each registration issued so far, or `None` once cancelled:
     /// both "everything issued has been undone" and "issue nothing further".
-    undo: Mutex<Option<Vec<OnCancel>>>,
+    undo: Lock<Option<Vec<OnCancel>>>,
 }
 
 impl Default for CancellableFan {
     fn default() -> Self {
         Self {
-            undo: Mutex::new(Some(Vec::new())),
+            undo: Lock::new(Some(Vec::new())),
         }
     }
 }
@@ -223,14 +246,18 @@ impl CancellableFan {
     /// the fan was running — in which case `undo` runs HERE, since the handler
     /// that already ran could not have seen it.
     pub fn record(&self, undo: impl FnOnce() + Send + 'static) -> bool {
-        let mut slot = self.undo.lock().unwrap_or_else(|p| p.into_inner());
-        match slot.as_mut() {
+        let undo: OnCancel = Box::new(undo);
+        // Recorded under the lock, or handed back to be run once it is released.
+        let refused = self.undo.with(|slot| match slot.as_mut() {
             Some(pending) => {
-                pending.push(Box::new(undo));
-                true
+                pending.push(undo);
+                None
             }
-            None => {
-                drop(slot);
+            None => Some(undo),
+        });
+        match refused {
+            None => true,
+            Some(undo) => {
                 undo();
                 false
             }
@@ -239,7 +266,7 @@ impl CancellableFan {
 
     /// Take the set and run every undo in it.
     pub fn cancel(&self) {
-        let taken = self.undo.lock().unwrap_or_else(|p| p.into_inner()).take();
+        let taken = self.undo.with(Option::take);
         for undo in taken.into_iter().flatten() {
             undo();
         }
@@ -249,6 +276,7 @@ impl CancellableFan {
 /// Register a fan against a token: the token's on-cancel handler cancels the
 /// fan. `None` when the token has already started cancelling — the caller then
 /// fails the get without issuing it.
+#[cfg(feature = "std")]
 pub fn register_fan(token: &Arc<CancellationToken>) -> Option<(Arc<CancellableFan>, Registration)> {
     let fan = CancellableFan::new();
     let on_cancel = Arc::clone(&fan);
@@ -256,7 +284,7 @@ pub fn register_fan(token: &Arc<CancellationToken>) -> Option<(Arc<CancellableFa
     Some((fan, registration))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};

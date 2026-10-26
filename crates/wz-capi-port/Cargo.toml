@@ -33,7 +33,18 @@ name = "wz_capi_port"
 path = "src/lib.rs"
 crate-type = ["rlib"]
 
+[features]
+# The host: the port's lock is the process's, and the cancellation token (whose cancel blocks on a
+# condition variable) is built. Without it the port is `no_std` with `alloc`, its lock is the
+# critical section an MCU image links (src/sync.rs), and the token waits for the MCU host layer.
+default = ["std"]
+std = []
+
 [dependencies]
+# The lock of a build without `std` (src/sync.rs): the image links the implementation, as it does
+# for the cooperative runtime's cells. A host build takes `std`'s lock and this crate's code is
+# unused there, so it is a plain dependency rather than a feature a host build would have to name.
+critical-section = "1"
 # The sample view a subscriber callback reads, and the session-core types the vocabulary and the
 # engine's operations are spelled in. `alloc` for the owned suffix of a key's wire form and the
 # publish options; `session-matching` and `declare-interest` for `InterestForm`, which a write

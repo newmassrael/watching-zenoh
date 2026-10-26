@@ -18,6 +18,9 @@
 //! advanced publisher) is not here: an ABI module that needs one still names its engine, and
 //! joins this trait when a second engine implements it.
 
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use wz_session_core::declare_form::{InterestForm, RetractionKey};
 use wz_session_core::face::{FaceEventSink, FaceSnapshot};
 use wz_session_core::locality::Locality;

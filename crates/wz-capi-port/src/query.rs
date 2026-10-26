@@ -11,7 +11,8 @@
 //! `impl Drop for QueryInner {`). How an engine holds the Final open and which route a reply
 //! takes is the engine's; what an ABI needs of it is [`QueryHolder`] and [`HeldQuery`].
 
-use std::sync::Arc;
+use alloc::boxed::Box;
+use alloc::sync::Arc;
 
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::reply_sink::ReplyView;

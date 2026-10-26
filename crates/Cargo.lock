@@ -3911,6 +3911,7 @@ dependencies = [
 name = "wz-capi-port"
 version = "0.1.0"
 dependencies = [
+ "critical-section",
  "wz-session-core",
 ]
 

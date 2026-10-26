@@ -13,8 +13,8 @@
 //! calls as a live session does, and one the program steps does the work in them
 //! (`docs/capi-pico-on-coop-engine.md`, decisions D2 and D7).
 
-use std::any::Any;
-use std::sync::Arc;
+use alloc::sync::Arc;
+use core::any::Any;
 
 use crate::SessionEngine;
 

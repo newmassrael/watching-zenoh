@@ -33,12 +33,15 @@
 //! a listener that undeclares itself from inside its own callback must not find
 //! the set locked.
 
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, MutexGuard};
+use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+
+use crate::sync::Lock;
 
 /// The listeners declared on one C-level entity; see the module doc.
 pub struct ListenerSet<C> {
-    inner: Mutex<Entries<C>>,
+    inner: Lock<Entries<C>>,
 }
 
 struct Entries<C> {
@@ -49,7 +52,7 @@ struct Entries<C> {
 impl<C> Default for ListenerSet<C> {
     fn default() -> Self {
         Self {
-            inner: Mutex::new(Entries {
+            inner: Lock::new(Entries {
                 next_id: 0,
                 by_id: BTreeMap::new(),
             }),
@@ -65,40 +68,33 @@ impl<C> ListenerSet<C> {
 
     /// Add `listener`; the returned id is the only way to remove it.
     pub fn insert(&self, listener: Arc<C>) -> u64 {
-        let mut entries = self.lock();
-        let id = entries.next_id;
-        entries.next_id += 1;
-        entries.by_id.insert(id, listener);
-        id
+        self.inner.with(|entries| {
+            let id = entries.next_id;
+            entries.next_id += 1;
+            entries.by_id.insert(id, listener);
+            id
+        })
     }
 
     /// Remove the listener `id`, handing it back so the caller releases it
     /// OUTSIDE the lock. `None` when it was already removed.
     #[must_use = "drop the returned listener after this call, not inside it"]
     pub fn remove(&self, id: u64) -> Option<Arc<C>> {
-        self.lock().by_id.remove(&id)
+        self.inner.with(|entries| entries.by_id.remove(&id))
     }
 
     /// Every current listener, in declaration order, copied out so they can
     /// be called with the set unlocked.
     pub fn snapshot(&self) -> Vec<Arc<C>> {
-        self.lock().by_id.values().cloned().collect()
-    }
-
-    /// A poisoned lock still holds a consistent map — nothing here panics
-    /// between two writes — so it is recovered rather than propagated: a C
-    /// program must not lose its listeners because some earlier callback
-    /// panicked.
-    fn lock(&self) -> MutexGuard<'_, Entries<C>> {
         self.inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .with(|entries| entries.by_id.values().cloned().collect())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     /// The two claims the slot this replaced got wrong: a second listener
     /// does not displace the first, and removing one leaves the other.
