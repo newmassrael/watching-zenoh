@@ -1023,6 +1023,12 @@ Each step lands with its own done-when; sizes are not estimated here.
          `out-of-band` is declared with its control port in 7d and not
          before: an option that cannot be built is not declared. The
          no-allocator gate carries the declared build as a row, clean.
+         What the value saves, measured on pc2 as the sum of the text
+         symbols of the LTO staticlib (`llvm-nm -S`, the gate's two fixed
+         admin node builds, thumbv7em, release): 288,386 B in-band and
+         286,096 B declared, so 2,290 B. It is the archive's code, not the
+         linked image's `.text`, which the Zephyr link and its garbage
+         collection decide.
        - **7c** is two halves. The node: `ConnectManager::hold_declared` hints
          each `DeclaredPeer` (`Declared`, permanent) and opens it by its zid;
          `ClientNode` takes the list and stops at start, naming the peer,
