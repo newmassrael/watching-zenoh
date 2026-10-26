@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""Anonymise a real packet capture so it can be committed to `captures/corpus/`.
+"""R3703 (no register item) — anonymise a real packet capture so it can be
+committed to `captures/corpus/`, and hold the corpus to having been anonymised.
+
+The citation is `no register item`: the corpus answers a consumer's claim on the
+zenoh verdict (`docs/flow-zenoh-verdict.md` §6), which the open-debt register
+does not carry.
 
 ## Why this exists
 
