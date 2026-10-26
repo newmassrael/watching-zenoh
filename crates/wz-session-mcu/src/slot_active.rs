@@ -5,7 +5,8 @@
 //! answers does ([`SlotDispatch`]), and then the puts and the queries that are due.
 //!
 //! The layer is one, and the behaviours are data: a node's publishers ([`Publication`]), replays
-//! ([`Replay`]) and queriers ([`Query`]) are arrays the image states. The publishers are played by
+//! ([`Replay`]) and queriers (`slot_querier::Query`, which is `query-get`'s) are arrays the image
+//! states. The publishers are played by
 //! [`Publishing`] (their arrival processes, their made bodies, how late each put was), the replays by
 //! [`Replaying`] (their recorded samples, paced and mutated) and the queriers by a
 //! [`crate::slot_schedule::Schedule`]. After it has dispatched what the iteration brought
@@ -16,7 +17,7 @@
 //! next sample, the next query and the deadline of a query still pending. Nothing runs on the
 //! program's main loop and nothing is left in a mailbox, so the cadence is the session's.
 //!
-//! A query is asked with the sink of its reply ([`ReplyLatest`]), so
+//! A query is asked with the sink of its reply (`slot_querier::ReplyLatest`), so
 //! the layer is built with `query-get` for a node that has queriers and without it for one that has
 //! none; a node built without it holds no querier (`Q` is 0).
 //!
