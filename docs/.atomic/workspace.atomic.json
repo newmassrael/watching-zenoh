@@ -292226,6 +292226,52 @@
         "With client-slot alone, wz-session-mcu's documentation still fails on two links to the group plane (slot_plane.rs line 8 and slot_node.rs line 903), which exist only under the group features; those are the group plane's to name the same way."
       ]
     },
+    "Round 3752": {
+      "decision_summary": "Step L of the parity loop, the fixed client's stack, second part. The not-a-Frame dispatch of wz-session-core (a handshake, a KeepAlive, a Close) held the decoded message and the decode's own copies of it (two 720-byte copies of the transport message, a 712-byte frame, a 702-byte value) in one frame, which sat under the engine's answer to a handshake and under the reply's encode. It is three steps now: decode_unit_in, decide_unit_in, and the engine's event in dispatch_unit_in, so only the 720-byte message is held across them. Two cheaper cuts were tried first and dropped: the borrowed dispatch alone out of line, or that and the decode handler, each made the frame under it larger and the kit peak rose (7,032, then 7,760). The worst chain of the fixed client is now the connect manager's dial path.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/drive.rs: dispatch_unit_in is split into decode_unit_in, decide_unit_in and dispatch_lean_unit; the engine takes an admitted event after the judge returns; dispatch_unit_borrowed is out of line.",
+        "crates/wz-session-core/src/session_actions.rs: handle_inbound_consuming and its shared-unit twin return the parse where it lies.",
+        "deploy/resource_budget.json, scripts/lib/stack_frame_gate.py: chains 6,940, 6,940, 7,092 and 7,432 and kit peaks 6,060, 6,060, 6,648 and 6,752; the get row drops chain_misses.",
+        "docs/reason-review-pins.md: two pins of session-close-ingress move to this round, its clauses re-read against the two files."
+      ],
+      "verification_bullets": [
+        "Bench host, base and head built from the same files: chain 7,152 to 6,940 (fixed), 7,460 to 6,940 (batching), 7,784 to 7,092 (get); the tls image reads 7,432 on both. Kit, 2 runs each, no FAIL line: peak 6,336 to 6,060, 6,328 to 6,060, 8,328 to 6,648, and the tls image 6,864 to 6,752 with its session established and verified.",
+        "wz-session-core: 758 tests passed before the rebase onto round 3751; cargo check with default features and with transport-lowlatency; cargo fmt clean.",
+        "resource_budget_gate --check and the selftests of the budget and stack gates; reason_review_pin_gate OK; the 117 gates of the hook's round-fed array exit 0 on this tree."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "The worst chain is the connect manager's dial path: ConnectManager::reconcile 1,280 with two frames of its own (416, 112) and SlotDialer::dial_expecting 1,216 to 1,440. The session lifecycle work owns it.",
+        "The tls image's chain rose 416 since 2026-10-24 (7,016 to 7,432) with and without this change; not bisected, and the hosted lane runs the stack gate for the fixed client's overlay only.",
+        "wz_app_main is still 1,784 bytes, and the reply's 1,104-byte Response builder needs an encode from borrowed parts, asked of SCE.",
+        "Hosted C1bz of this push reads wz-session-core's doc lane at zero only once the six broken links of lifecycle_node.rs are repaired, which is the lifecycle session's unpushed commit."
+      ],
+      "publishable_decision_summary": "Step L of the parity loop, the fixed client's stack, second part. The not-a-Frame dispatch of wz-session-core (a handshake, a KeepAlive, a Close) held the decoded message and the decode's own copies of it (two 720-byte copies of the transport message, a 712-byte frame, a 702-byte value) in one frame, which sat under the engine's answer to a handshake and under the reply's encode. It is three steps now: decode_unit_in, decide_unit_in, and the engine's event in dispatch_unit_in, so only the 720-byte message is held across them. Two cheaper cuts were tried first and dropped: the borrowed dispatch alone out of line, or that and the decode handler, each made the frame under it larger and the kit peak rose (7,032, then 7,760). The worst chain of the fixed client is now the connect manager's dial path.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/drive.rs: dispatch_unit_in is split into decode_unit_in, decide_unit_in and dispatch_lean_unit; the engine takes an admitted event after the judge returns; dispatch_unit_borrowed is out of line.",
+        "crates/wz-session-core/src/session_actions.rs: handle_inbound_consuming and its shared-unit twin return the parse where it lies.",
+        "deploy/resource_budget.json, scripts/lib/stack_frame_gate.py: chains 6,940, 6,940, 7,092 and 7,432 and kit peaks 6,060, 6,060, 6,648 and 6,752; the get row drops chain_misses.",
+        "docs/reason-review-pins.md: two pins of session-close-ingress move to this round, its clauses re-read against the two files."
+      ],
+      "publishable_verification_bullets": [
+        "Bench host, base and head built from the same files: chain 7,152 to 6,940 (fixed), 7,460 to 6,940 (batching), 7,784 to 7,092 (get); the tls image reads 7,432 on both. Kit, 2 runs each, no FAIL line: peak 6,336 to 6,060, 6,328 to 6,060, 8,328 to 6,648, and the tls image 6,864 to 6,752 with its session established and verified.",
+        "wz-session-core: 758 tests passed before the rebase onto round 3751; cargo check with default features and with transport-lowlatency; cargo fmt clean.",
+        "resource_budget_gate --check and the selftests of the budget and stack gates; reason_review_pin_gate OK; the 117 gates of the hook's round-fed array exit 0 on this tree."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The worst chain is the connect manager's dial path: ConnectManager::reconcile 1,280 with two frames of its own (416, 112) and SlotDialer::dial_expecting 1,216 to 1,440. The session lifecycle work owns it.",
+        "The tls image's chain rose 416 since 2026-10-24 (7,016 to 7,432) with and without this change; not bisected, and the hosted lane runs the stack gate for the fixed client's overlay only.",
+        "wz_app_main is still 1,784 bytes, and the reply's 1,104-byte Response builder needs an encode from borrowed parts, asked of SCE.",
+        "Hosted C1bz of this push reads wz-session-core's doc lane at zero only once the six broken links of lifecycle_node.rs are repaired, which is the lifecycle session's unpushed commit."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
