@@ -290768,6 +290768,38 @@
         "Reds owned by other work: zenoh-config toml test, pico SessionEngine import under engine-coop with connectivity, advanced_ test count in the tokio runtime, zenohd aggregation lane, test-discipline and lane-reach, home-path-range in the hosted checkout, routing job time budget. Read the hosted run of this push per job."
       ]
     },
+    "Round 3715": {
+      "decision_summary": "The three transports of decision D7 are held to one table. wz_session_mcu::contract (test-support) lists fifteen cases of a request to hold a peer, each with the literal document the contract answers and the zid the opener must be asked for, run twice because idempotency is the contract's; a judge reads the answers and the asking, and is itself tested to fail on a drifting transport. Before, each transport had a test of its own and nothing held them to the same cases. The adapters: the verdict function and the control port (unit tests), the in-band query (admin_open_query) and the node as a process (the five cases a node with no room can show). The third transport is the case of a node that binds no opener. Also noted: the declared value saves 2,290 B of archive text, and the out-of-band remainder (close, reset, status, own zid, locator target, listen) is filed as open.",
+      "changes_bullets": [
+        "crates/wz-session-mcu: the module contract (four tests, which moved every leg running the crate's own tests by four: C1m mcu default 18, unicast app layer 19, adminspace-write 46, adminspace-core 22, read+write 56); admin_open_query gains the in-band adapter (leg C1m admin open query 6, with test-support); deploy/host-slot-node: a dev-dependency on the table and the process adapter (leg C1m host node control channel 3).",
+        "docs/session-lifecycle-intent.md: step 7e, the declared value's measured saving, D7 item 2 saying the agent writes session intent only, and two items of Open (the out-of-band remainder, the listen intent)."
+      ],
+      "verification_bullets": [
+        "On pc2 (bx): the four table tests, the in-band adapter (6 in its file), the process adapter (3 in its file) pass; each of the five wz-session-mcu legs was run and printed its count (18, 19, 46, 22, 56); clippy with warnings denied is clean for the crate with the slot and with the heap features and for the process test; rustfmt is clean; the whole round-fed gate array passed after the rebase.",
+        "Not run: the cases that need an opener a process cannot be given (an accepted open, a node that does not permit) through the process, an out-of-band open that succeeds over a secure channel, and the hosted run of these legs."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Read the first finished hosted run that holds rounds 3697 and this one: the C1m legs (the moved counts, the open query 6, the host node control channel 3). Open: the commands of the out-of-band remainder as rows of the table (close, reset, status, own zid, a locator target), the image witness with the lane owner, an open that succeeds over a real secure channel, the Hello hint source, the Qzb chain fall."
+      ],
+      "publishable_decision_summary": "The three transports of decision D7 are held to one table. wz_session_mcu::contract (test-support) lists fifteen cases of a request to hold a peer, each with the literal document the contract answers and the zid the opener must be asked for, run twice because idempotency is the contract's; a judge reads the answers and the asking, and is itself tested to fail on a drifting transport. Before, each transport had a test of its own and nothing held them to the same cases. The adapters: the verdict function and the control port (unit tests), the in-band query (admin_open_query) and the node as a process (the five cases a node with no room can show). The third transport is the case of a node that binds no opener. Also noted: the declared value saves 2,290 B of archive text, and the out-of-band remainder (close, reset, status, own zid, locator target, listen) is filed as open.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-mcu: the module contract (four tests, which moved every leg running the crate's own tests by four: C1m mcu default 18, unicast app layer 19, adminspace-write 46, adminspace-core 22, read+write 56); admin_open_query gains the in-band adapter (leg C1m admin open query 6, with test-support); deploy/host-slot-node: a dev-dependency on the table and the process adapter (leg C1m host node control channel 3).",
+        "docs/session-lifecycle-intent.md: step 7e, the declared value's measured saving, D7 item 2 saying the agent writes session intent only, and two items of Open (the out-of-band remainder, the listen intent)."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2 (bx): the four table tests, the in-band adapter (6 in its file), the process adapter (3 in its file) pass; each of the five wz-session-mcu legs was run and printed its count (18, 19, 46, 22, 56); clippy with warnings denied is clean for the crate with the slot and with the heap features and for the process test; rustfmt is clean; the whole round-fed gate array passed after the rebase.",
+        "Not run: the cases that need an opener a process cannot be given (an accepted open, a node that does not permit) through the process, an out-of-band open that succeeds over a secure channel, and the hosted run of these legs."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the first finished hosted run that holds rounds 3697 and this one: the C1m legs (the moved counts, the open query 6, the host node control channel 3). Open: the commands of the out-of-band remainder as rows of the table (close, reset, status, own zid, a locator target), the image witness with the lane owner, an open that succeeds over a real secure channel, the Hello hint source, the Qzb chain fall."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
