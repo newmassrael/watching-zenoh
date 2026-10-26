@@ -292166,6 +292166,38 @@
         "Step C: the fixed-memory node implements LifecycleNode (typed close, reset and status requests in the store's queue, the node mirror as (zid, links), a bounded generation record that refuses a peer outside its room, the control port commands close, reset, status and whoami), then open_verdict and NodeOpening become the open arm of the function; the rows run on the process and fixed in-band adapters. Step D: the capabilities lifecycle-close, lifecycle-reset and lifecycle-status and the capability document. Not re-measured: the four-in-flight stack peak of the asking client (about 9,000 bytes by estimate, 27 percent of its stack free), and the GET latency rows. The hosted runs holding rounds 3697 and 3715 were never read: each was cancelled by a later push."
       ]
     },
+    "Round 3750": {
+      "decision_summary": "The rustdoc findings of the eleven other crates of the doc budget are brought to zero on the doc lane's own command, and only wz keeps a line, at 4. wz-runtime-tokio held 427 of them, wz-ap-demo 25, wz-capi-c 40, wz-capi-pico 40, wz-link-lwip 9, wz-switchboard-codegen 8, wz-capi-core 7, wz-runtime-coop 7, wz-routing-graph 5, zenoh-pico-sys 3, wz-mcu-session-acceptor 1. The kinds are those of wz-session-core: module doc blocks beside modules that document themselves are plain comments, links to private items or to other crates are code spans, redundant targets are dropped. zenoh-pico-sys documents C headers, so its build script now hands each header comment through a tested sanitiser. wz stays, as its lane meets the compile_error that --all-features selects. The new lifecycle modules of wz-session-core carried the same defect and are fixed. Comments changed, plus the sanitiser.",
+      "changes_bullets": [
+        "crates: doc comments of twelve crates (comments only), and zenoh-pico-sys/src/rustdoc_comment.rs with its build.rs callback.",
+        "scripts/run-ci.sh: eleven lines removed from the doc budget of Layer C1bz, with the history comment; wz:4 stays.",
+        "docs/reason-review-pins.md: four pins of the close-ingress reason moved, their cited files having changed in comments only."
+      ],
+      "verification_bullets": [
+        "Layer C1bz on the twelve crates (WZ_C1BZ_ONLY) passes with no budget line for eleven of them. cargo fmt is clean, reason_review_pin_gate and duplicate_module_lint pass, and the five tests of the sanitiser pass in the 14 of zenoh-pico-sys. The full lane and the hosted run were not read before the push. Runs were local."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted C1bz of this push per crate (the full lane checks stale budget lines, which the local subset did not). Then wz alone remains in the doc budget; its lane needs a command that does not select the compile_error."
+      ],
+      "publishable_decision_summary": "The rustdoc findings of the eleven other crates of the doc budget are brought to zero on the doc lane's own command, and only wz keeps a line, at 4. wz-runtime-tokio held 427 of them, wz-ap-demo 25, wz-capi-c 40, wz-capi-pico 40, wz-link-lwip 9, wz-switchboard-codegen 8, wz-capi-core 7, wz-runtime-coop 7, wz-routing-graph 5, zenoh-pico-sys 3, wz-mcu-session-acceptor 1. The kinds are those of wz-session-core: module doc blocks beside modules that document themselves are plain comments, links to private items or to other crates are code spans, redundant targets are dropped. zenoh-pico-sys documents C headers, so its build script now hands each header comment through a tested sanitiser. wz stays, as its lane meets the compile_error that --all-features selects. The new lifecycle modules of wz-session-core carried the same defect and are fixed. Comments changed, plus the sanitiser.",
+      "publishable_changes_bullets": [
+        "crates: doc comments of twelve crates (comments only), and zenoh-pico-sys/src/rustdoc_comment.rs with its build.rs callback.",
+        "scripts/run-ci.sh: eleven lines removed from the doc budget of Layer C1bz, with the history comment; wz:4 stays.",
+        "docs/reason-review-pins.md: four pins of the close-ingress reason moved, their cited files having changed in comments only."
+      ],
+      "publishable_verification_bullets": [
+        "Layer C1bz on the twelve crates (WZ_C1BZ_ONLY) passes with no budget line for eleven of them. cargo fmt is clean, reason_review_pin_gate and duplicate_module_lint pass, and the five tests of the sanitiser pass in the 14 of zenoh-pico-sys. The full lane and the hosted run were not read before the push. Runs were local."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted C1bz of this push per crate (the full lane checks stale budget lines, which the local subset did not). Then wz alone remains in the doc budget; its lane needs a command that does not select the compile_error."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
