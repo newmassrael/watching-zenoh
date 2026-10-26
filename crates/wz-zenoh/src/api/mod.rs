@@ -32,4 +32,12 @@ pub(crate) mod encoding;
 // unused.
 #[allow(dead_code)]
 pub(crate) mod handlers;
+// R3702: the session's declaration of a key (`declare`, `to_wire`) and `KeyExprUndeclaration::new`
+// are slice Z1 of docs/zenoh-api-on-the-engine.md, and the anchor is implemented there; until then
+// the functions that take it have no caller.
+#[allow(dead_code)]
+pub(crate) mod key_expr;
+// R3702: the selector's users, the builders of `get` and the querier, are slice Z3.
+#[allow(dead_code)]
+pub(crate) mod selector;
 pub(crate) mod session;

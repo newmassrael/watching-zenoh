@@ -242,8 +242,19 @@ Each lands whole with its surface lines, tests and faults in one round.
     come with the slices that read them. 89 lines of each arm, 12 injected faults, none missed.
     The callback helpers upstream calls from the builders (`set_on_drop`, `call_with_message`) are
     unused until Z2 and Z3, so the module carries `allow(dead_code)` with the reason beside it.
-  - **Z0c onward.** `key_expr` and `selector` (the wire declaration of a key becomes an erased
-    anchor, D2), then `sample` and the quality-of-service types. Each is a part of Z0 that lands
+  - **Z0c, `key_expr` and `selector` (landed).** `KeyExpr` with all its constructors and
+    conversions and `Selector` with `ZenohParameters`, over the crate that holds the language. The
+    wire declaration of a key is the erased anchor of D2: where upstream's declaration holds a
+    `WeakSession`, this one holds a `Weak` of the trait `WireAnchor` (declare a prefix, undeclare
+    one), which the session of Z1 implements, so the module names no session. This is a change of
+    upstream's file and not a copy with a header: the functions that took a `&Session` take the
+    anchor of one, `UndeclarableSealed` joins `Session::undeclare`, and `From<&Query> for
+    Selector` joins `Query` in Z3. The public module `query` is partial and says so. The keyexpr
+    crate gains `get_nonwild_prefix`, an item of its `internal` arm that `KeyExpr` needs. 59 of
+    the default lines and 79 of each other arm's, 8 differential tests, 7 unit tests of the anchor
+    with a session that is a counter, and 14 injected faults, none missed (one canonizer
+    difference of the keyexpr crate, recorded where it was found, kept out of the strings).
+  - **Z0c onward.** `sample` and the quality-of-service types. Each is a part of Z0 that lands
     when its closure exists.
 - **Z1. Open, close, identity, config table, the choice of D5 and the rule of D4.** `zenoh::open`,
   `Session::zid`, `close`, `is_closed`, `id`, `config`, `info` (routers and peers only). The

@@ -150,6 +150,103 @@ pub mod cancellation {
     pub use crate::api::cancellation::{SyncGroup, SyncGroupNotifier};
 }
 
+/// # Key Expressions
+///
+/// [Key expressions](https://github.com/eclipse-zenoh/roadmap/blob/main/rfcs/ALL/Key%20Expressions.md) are Zenoh's address space.
+///
+/// In Zenoh, operations are performed on keys. To allow addressing multiple keys with a single operation, Zenoh uses Key Expressions (KEs).
+/// KEs are a small language that expresses sets of keys through a glob-like syntax.
+///
+/// These semantics can be a bit difficult to implement, so this module provides the following facilities:
+///
+/// # Storing Key Expressions
+/// This module provides three ways to store strings that have been validated to respect the KE syntax:
+/// - [`keyexpr`](crate::key_expr::keyexpr) is the equivalent of a [`str`],
+/// - [`OwnedKeyExpr`](crate::key_expr::OwnedKeyExpr) works like an [`std::sync::Arc<str>`],
+/// - [`KeyExpr`](crate::key_expr::KeyExpr) works like a [`std::borrow::Cow<str>`], but also stores some additional context internal to Zenoh to optimize
+///   routing and network usage.
+///
+/// The key expression object can be created using the [`KeyExpr::new`](crate::key_expr::KeyExpr::new) method,
+/// which validates the syntax of the provided string.
+/// The [`KeyExpr::from_str_unchecked`](crate::key_expr::KeyExpr::from_str_unchecked) method allows to
+/// accelerate the creation of key expressions when the user can guarantee that the provided string
+/// respects the KE syntax. There is also the
+/// [`Session::declare_keyexpr`](crate::session::Session::declare_keyexpr) method, which not only
+/// declares the key expression, but also informs the Zenoh network of its existence, which can
+/// accelerate routing.
+///
+/// All of these types implement [`Deref`](std::ops::Deref) to [`keyexpr`](crate::key_expr::keyexpr), which notably has methods to check whether a given key expression
+/// [`intersects`](crate::key_expr::keyexpr::intersects) with another, or whether it [`includes`](crate::key_expr::keyexpr::includes) another.
+///
+/// # Tying values to Key Expressions
+/// When storing values tied to Key Expressions, you might want something more specialized than a [`HashMap`](std::collections::HashMap) to respect
+/// Key Expression semantics with high performance.
+///
+/// Enter [`KeTrees`](crate::key_expr::keyexpr_tree). These are data structures built to store KE–value pairs in a manner that supports the set semantics of KEs.
+///
+/// # Building and parsing Key Expressions
+/// A common issue in REST APIs is assigning meaning to sections of the URL and respecting that API in a convenient manner.
+/// The same issue arises naturally when designing a KE space, and [`KeFormat`](crate::key_expr::format::KeFormat) was designed to help with this,
+/// both in constructing and parsing KEs that fit the formats you've defined.
+///
+/// [`kedefine`](crate::key_expr::format::kedefine) also lets you define formats at compile time, enabling a more performant—and, more importantly, safer and more convenient—use of said formats,
+/// as the [`keformat`](crate::key_expr::format::keformat) and [`kewrite`](crate::key_expr::format::kewrite) macros will tell you if you're attempting to set fields of the format that do not exist.
+///
+/// # Example
+/// ```no_run
+/// # #[tokio::main]
+/// # async fn main() {
+/// let sensor = zenoh::key_expr::KeyExpr::new("robot/sensor").unwrap();
+/// let sensor_temp = sensor.join("temp").unwrap();
+/// let sensors = sensor.join("**").unwrap();
+/// assert!(sensors.includes(&sensor_temp));
+/// # }
+/// ```
+pub mod key_expr {
+    #[zenoh_macros::unstable]
+    pub mod keyexpr_tree {
+        pub use zenoh_keyexpr::keyexpr_tree::{
+            impls::KeyedSetProvider,
+            support::{NonWild, UnknownWildness},
+            IKeyExprTree, IKeyExprTreeMut, KeBoxTree,
+        };
+    }
+    #[zenoh_macros::unstable]
+    pub use zenoh_keyexpr::SetIntersectionLevel;
+    pub use zenoh_keyexpr::{
+        canon::Canonize, keyexpr, nonwild_keyexpr, OwnedKeyExpr, OwnedNonWildKeyExpr,
+    };
+
+    pub use crate::api::key_expr::{KeyExpr, KeyExprUndeclaration};
+    // keyexpr format macro support
+    #[zenoh_macros::unstable]
+    pub mod format {
+        pub use zenoh_keyexpr::format::*;
+        pub use zenoh_macros::{ke, kedefine, keformat, kewrite};
+        pub mod macro_support {
+            pub use zenoh_keyexpr::format::macro_support::*;
+        }
+    }
+}
+
+/// # Query/reply primitives
+///
+/// This module provides the query/reply API of Zenoh. Of it, the selector, its parameters and the
+/// time range they carry are here; the rest of the module arrives with the slices that give a
+/// query, a queryable and a reply a body.
+///
+/// The selector syntax is a key expression followed by a question mark and the list of parameters in
+/// the format "name=value" separated by ';'. For example `key/expression?param1=value1;param2=value2`.
+pub mod query {
+    pub use zenoh_protocol::core::Parameters;
+    #[zenoh_macros::unstable]
+    pub use zenoh_util::time_range::{TimeBound, TimeExpr, TimeRange};
+
+    pub use crate::api::selector::Selector;
+    #[zenoh_macros::unstable]
+    pub use crate::api::selector::ZenohParameters;
+}
+
 /// # Callback handler trait.
 ///
 /// Zenoh allows two ways to get sequential data from Zenoh primitives, like

@@ -153,6 +153,47 @@ impl keyexpr {
         self.chunks_impl()
     }
 
+    /// Returns the longest prefix of `self` that doesn't contain any wildcard character (`**` or `$*`).
+    ///
+    /// NOTE: this operation can typically be used in a backend implementation, at creation of a Storage to get the keys prefix,
+    /// and then in `zenoh_backend_traits::Storage::on_sample()` this prefix has to be stripped from all received
+    /// `Sample::key_expr` to retrieve the corresponding key.
+    ///
+    /// # Examples:
+    /// ```
+    /// # use zenoh_keyexpr::keyexpr;
+    /// assert_eq!(
+    ///     Some(keyexpr::new("demo/example").unwrap()),
+    ///     keyexpr::new("demo/example/**").unwrap().get_nonwild_prefix());
+    /// assert_eq!(
+    ///     Some(keyexpr::new("demo").unwrap()),
+    ///     keyexpr::new("demo/**/test/**").unwrap().get_nonwild_prefix());
+    /// assert_eq!(
+    ///     Some(keyexpr::new("demo/example/test").unwrap()),
+    ///     keyexpr::new("demo/example/test").unwrap().get_nonwild_prefix());
+    /// assert_eq!(
+    ///     Some(keyexpr::new("demo").unwrap()),
+    ///     keyexpr::new("demo/ex$*/**").unwrap().get_nonwild_prefix());
+    /// assert_eq!(
+    ///     None,
+    ///     keyexpr::new("**").unwrap().get_nonwild_prefix());
+    /// assert_eq!(
+    ///     None,
+    ///     keyexpr::new("dem$*").unwrap().get_nonwild_prefix());
+    /// ```
+    #[cfg(feature = "internal")]
+    #[doc(hidden)]
+    pub fn get_nonwild_prefix(&self) -> Option<&keyexpr> {
+        match self.0.find('*') {
+            Some(i) => match self.0[..i].rfind('/') {
+                // SAFETY: upheld by the surrounding invariants and prior validation.
+                Some(j) => unsafe { Some(keyexpr::from_str_unchecked(&self.0[..j])) },
+                None => None, // wildcard in the first segment => no invariant prefix
+            },
+            None => Some(self), // no wildcard => return self
+        }
+    }
+
     /// The chunks of the key expression.
     pub(crate) const fn chunks_impl(&self) -> Chunks<'_> {
         Chunks {

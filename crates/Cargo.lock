@@ -4579,6 +4579,7 @@ dependencies = [
  "zenoh-collections",
  "zenoh-config",
  "zenoh-core",
+ "zenoh-keyexpr",
  "zenoh-macros",
  "zenoh-protocol",
  "zenoh-result",

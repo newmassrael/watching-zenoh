@@ -44,7 +44,7 @@ doctest = false
 # feature; they join the manifest with the slice that gives them meaning, and the three that the
 # surface gate's arms and the `zenoh_macros` attributes read are here from the first.
 [features]
-internal = ["zenoh-config/internal", "zenoh-protocol/internal"]
+internal = ["zenoh-config/internal", "zenoh-keyexpr/internal", "zenoh-protocol/internal"]
 # Upstream's marker for the plugin interface: with it the configuration's notifier can be
 # subscribed to (`Notifier::subscribe`).
 plugins = []
@@ -53,7 +53,7 @@ shared-memory = [
     "zenoh-buffers/shared-memory",
     "zenoh-protocol/shared-memory",
 ]
-unstable = ["zenoh-config/unstable", "zenoh-protocol/unstable"]
+unstable = ["zenoh-config/unstable", "zenoh-keyexpr/unstable", "zenoh-protocol/unstable"]
 
 [dependencies]
 bytes = "1.11.0"
@@ -68,6 +68,8 @@ zenoh-buffers = { path = "../wz-zenoh-buffers", features = ["std"] }
 zenoh-collections = { path = "../wz-zenoh-collections", features = ["std"] }
 zenoh-config = { path = "../wz-zenoh-config" }
 zenoh-core = { path = "../wz-zenoh-core" }
+# Upstream's `zenoh` takes this crate with its `internal` feature always on.
+zenoh-keyexpr = { path = "../wz-zenoh-keyexpr", default-features = false, features = ["internal"] }
 zenoh-macros = { path = "../wz-zenoh-macros" }
 zenoh-protocol = { path = "../wz-zenoh-protocol", features = ["std"] }
 zenoh-result = { path = "../wz-zenoh-result", default-features = false }
