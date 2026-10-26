@@ -689,7 +689,12 @@ for the previous number cannot survive moves it. `wz_node.py --validate FILE` ch
 without building it, and `wz_node.py --vocabulary slot` prints, as JSON, what the target builds: each
 endpoint role and entity kind with its keys and their bounds resolved to the target's numbers (a word
 it does not build carries the reason instead), what a group carries, and the budgets and policies a
-declaration may state with the values a node gets when it states none. The vocabulary and the
+declaration may state with the values a node gets when it states none. The JSON states its own
+shape's number, `vocabulary_schema`, apart from the declaration's `schema`: it moves when a reader of
+the previous shape would misread the new one (a field that changes type or meaning, or goes; a field
+added beside the others does not), so a reader that refuses a number it does not know stops and names
+both. Shape 2 (Round 3729) made `one_of` a list of groups of keys and added the values `word` and
+`rate`, a key's `with` condition and a kind's `group_refused_keys`. The vocabulary and the
 validator read one table of shapes (`ENDPOINT_SHAPES`, and `ENTITY_SHAPES` with the target's
 bounds), and the selftest holds them to each other: every integer of every word is accepted at the
 bound the vocabulary states and refused, by its name, one past it.

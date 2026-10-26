@@ -124,6 +124,16 @@ NODES = ROOT / "deploy" / "nodes"
 # change a declaration written for the previous number cannot survive moves it.
 DECLARATION_SCHEMA = 1
 
+# The shape of what `--vocabulary` prints, as `vocabulary_schema`: a number apart from the
+# declaration's, because the JSON a consumer parses can change shape while the declarations it
+# describes stay readable. It moves when a reader of the previous shape would misread the new one
+# (a field that changes type or meaning, or goes); a field added beside the others does not move it.
+# A reader refuses a number it does not know, so a mismatch stops and names both numbers.
+#   1: the first shape (`one_of` a list of keys; integer, key and locator values).
+#   2: Round 3729: `one_of` a list of groups of keys, values `word` (`choices`, `default`) and
+#      `rate` (`min_gap_ns`, `max_gap_ns`), a key's `with` condition, a kind's `group_refused_keys`.
+VOCABULARY_SCHEMA = 2
+
 # The shape of each word of the vocabulary: the keys it takes and the value of each. An integer's
 # bounds are numbers or the name of the target's field that holds the number, so the shape is stated
 # once and each target states its own numbers. `validate` reads this table for which keys a word may
@@ -1003,6 +1013,7 @@ def vocabulary(target_id: str, decl: dict) -> dict:
     policies = {pol["id"]: ["on", "off"] if pol["kind"] == "bool" else list(pol["choices"])
                 for pol in decl["policies"]}
     return {
+        "vocabulary_schema": VOCABULARY_SCHEMA,
         "schema": DECLARATION_SCHEMA,
         "target": target_id,
         "endpoints": endpoints,
@@ -1618,8 +1629,17 @@ document_bytes = 8
     # The vocabulary a consumer reads is what the validator holds: every integer of every word the
     # target builds is accepted at the bound the vocabulary states and refused, by its name, one past.
     vocab = vocabulary("slot", decl)
-    expect("the vocabulary states this reader's schema and its target",
-           vocab["schema"] == DECLARATION_SCHEMA and vocab["target"] == "slot")
+    expect("the vocabulary states its own shape's number, this reader's schema and its target",
+           vocab["vocabulary_schema"] == VOCABULARY_SCHEMA and vocab["schema"] == DECLARATION_SCHEMA
+           and vocab["target"] == "slot")
+    # The number names the shape it states: a shape-2 field is what each new field of shape 2 is.
+    expect("the shape the vocabulary_schema names is the one printed",
+           VOCABULARY_SCHEMA == 2
+           and all(isinstance(group, list) for e in vocab["entities"].values() for group in e.get("one_of", []))
+           and vocab["entities"]["publisher"]["keys"]["arrivals"]["value"] == "word"
+           and vocab["entities"]["publisher"]["keys"]["rate_per_s"]["value"] == "rate"
+           and "with" in vocab["entities"]["publisher"]["keys"]["seed"]
+           and "group_refused_keys" in vocab["entities"]["publisher"])
     head = 'schema = 1\n\n[node]\nid = "n"\nhelp = "A node."\ntarget = "slot"\n'
     dial = '\n[[endpoint]]\nrole = "dial"\nlocator = "tcp/10.0.0.1:7447"\n'
 
