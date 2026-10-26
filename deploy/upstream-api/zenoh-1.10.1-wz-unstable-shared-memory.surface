@@ -2,6 +2,11 @@
 # compatibility crate: zenoh 1.10.1
 # toolchain: nightly-2026-06-07
 # format_version: 57
+enum zenoh::qos::Priority
+enum zenoh::sample::Locality
+enum zenoh::sample::SampleKind
+enum zenoh::timestamp_stack::InstrumentationTimestamp
+enum zenoh::timestamp_stack::InterceptionPoint
 fn zenoh::bytes::Encoding::default() -> Self ; const ; in impl zenoh::bytes::Encoding
 fn zenoh::bytes::Encoding::with_schema<S>(Self, S) -> Self where S: core::convert::Into<alloc::string::String> ; in impl zenoh::bytes::Encoding
 fn zenoh::bytes::ZBytes::as_shm(&Self) -> core::option::Option<&zenoh::shm::zshm> ; in impl zenoh::bytes::ZBytes
@@ -87,6 +92,47 @@ fn zenoh::query::Selector::key_expr(&Self) -> &zenoh::key_expr::KeyExpr<'0> ; in
 fn zenoh::query::Selector::owned<K, P>(K, P) -> Self where K: core::convert::Into<zenoh::key_expr::KeyExpr<'0>>, P: core::convert::Into<zenoh::query::Parameters<'0>> ; in impl<'0> zenoh::query::Selector<'0>
 fn zenoh::query::Selector::parameters(&Self) -> &zenoh::query::Parameters<'0> ; in impl<'0> zenoh::query::Selector<'0>
 fn zenoh::query::Selector::split(Self) -> (zenoh::key_expr::KeyExpr<'0>, zenoh::query::Parameters<'0>) ; in impl<'0> zenoh::query::Selector<'0>
+fn zenoh::sample::Sample::attachment(&Self) -> core::option::Option<&zenoh::bytes::ZBytes> ; in impl zenoh::sample::Sample
+fn zenoh::sample::Sample::attachment_mut(&mut Self) -> core::option::Option<&mut zenoh::bytes::ZBytes> ; in impl zenoh::sample::Sample
+fn zenoh::sample::Sample::congestion_control(&Self) -> zenoh::qos::CongestionControl ; in impl zenoh::sample::Sample
+fn zenoh::sample::Sample::encoding(&Self) -> &zenoh::bytes::Encoding ; in impl zenoh::sample::Sample
+fn zenoh::sample::Sample::express(&Self) -> bool ; in impl zenoh::sample::Sample
+fn zenoh::sample::Sample::key_expr(&Self) -> &zenoh::key_expr::KeyExpr<'static> ; in impl zenoh::sample::Sample
+fn zenoh::sample::Sample::kind(&Self) -> zenoh::sample::SampleKind ; in impl zenoh::sample::Sample
+fn zenoh::sample::Sample::payload(&Self) -> &zenoh::bytes::ZBytes ; in impl zenoh::sample::Sample
+fn zenoh::sample::Sample::payload_mut(&mut Self) -> &mut zenoh::bytes::ZBytes ; in impl zenoh::sample::Sample
+fn zenoh::sample::Sample::priority(&Self) -> zenoh::qos::Priority ; in impl zenoh::sample::Sample
+fn zenoh::sample::Sample::reliability(&Self) -> zenoh::qos::Reliability ; in impl zenoh::sample::Sample
+fn zenoh::sample::Sample::source_info(&Self) -> core::option::Option<&zenoh::sample::SourceInfo> ; in impl zenoh::sample::Sample
+fn zenoh::sample::Sample::timestamp(&Self) -> core::option::Option<&zenoh::time::Timestamp> ; in impl zenoh::sample::Sample
+fn zenoh::sample::Sample::timestamp_stack(&Self) -> core::option::Option<&zenoh::timestamp_stack::TimestampStack> ; in impl zenoh::sample::Sample
+fn zenoh::sample::SampleBuilder::attachment<U: core::convert::Into<zenoh::bytes::OptionZBytes>>(Self, U) -> Self ; in impl<T> zenoh::sample::SampleBuilder<T>
+fn zenoh::sample::SampleBuilder::congestion_control(Self, zenoh::qos::CongestionControl) -> Self ; in impl<T> zenoh::sample::SampleBuilder<T>
+fn zenoh::sample::SampleBuilder::delete<IntoKeyExpr>(IntoKeyExpr) -> zenoh::sample::SampleBuilder<zenoh::sample::SampleBuilderDelete> where IntoKeyExpr: core::convert::Into<zenoh::key_expr::KeyExpr<'static>> ; in impl zenoh::sample::SampleBuilder<zenoh::sample::SampleBuilderDelete>
+fn zenoh::sample::SampleBuilder::encoding<T: core::convert::Into<zenoh::bytes::Encoding>>(Self, T) -> Self ; in impl zenoh::sample::SampleBuilder<zenoh::sample::SampleBuilderPut>
+fn zenoh::sample::SampleBuilder::express(Self, bool) -> Self ; in impl<T> zenoh::sample::SampleBuilder<T>
+fn zenoh::sample::SampleBuilder::keyexpr<IntoKeyExpr>(Self, IntoKeyExpr) -> Self where IntoKeyExpr: core::convert::Into<zenoh::key_expr::KeyExpr<'static>> ; in impl<T> zenoh::sample::SampleBuilder<T>
+fn zenoh::sample::SampleBuilder::payload<IntoZBytes>(Self, IntoZBytes) -> Self where IntoZBytes: core::convert::Into<zenoh::bytes::ZBytes> ; in impl zenoh::sample::SampleBuilder<zenoh::sample::SampleBuilderPut>
+fn zenoh::sample::SampleBuilder::priority(Self, zenoh::qos::Priority) -> Self ; in impl<T> zenoh::sample::SampleBuilder<T>
+fn zenoh::sample::SampleBuilder::put<IntoKeyExpr, IntoZBytes>(IntoKeyExpr, IntoZBytes) -> zenoh::sample::SampleBuilder<zenoh::sample::SampleBuilderPut> where IntoKeyExpr: core::convert::Into<zenoh::key_expr::KeyExpr<'static>>, IntoZBytes: core::convert::Into<zenoh::bytes::ZBytes> ; in impl zenoh::sample::SampleBuilder<zenoh::sample::SampleBuilderPut>
+fn zenoh::sample::SampleBuilder::reliability(Self, zenoh::qos::Reliability) -> Self ; in impl<T> zenoh::sample::SampleBuilder<T>
+fn zenoh::sample::SampleBuilder::source_info<S: core::convert::Into<core::option::Option<zenoh::sample::SourceInfo>>>(Self, S) -> Self ; in impl<T> zenoh::sample::SampleBuilder<T>
+fn zenoh::sample::SampleBuilder::timestamp<U: core::convert::Into<core::option::Option<zenoh::time::Timestamp>>>(Self, U) -> Self ; in impl<T> zenoh::sample::SampleBuilder<T>
+fn zenoh::sample::SampleBuilder::timestamp_instrumentation<TS: core::convert::Into<core::option::Option<zenoh::timestamp_stack::TimestampInstrumentation>>>(Self, TS) -> Self ; in impl<T> zenoh::sample::SampleBuilder<T>
+fn zenoh::sample::SourceInfo::new(zenoh::session::EntityGlobalId, zenoh::sample::SourceSn) -> Self ; in impl zenoh::sample::SourceInfo
+fn zenoh::sample::SourceInfo::source_id(&Self) -> &zenoh::session::EntityGlobalId ; in impl zenoh::sample::SourceInfo
+fn zenoh::sample::SourceInfo::source_sn(&Self) -> zenoh::sample::SourceSn ; in impl zenoh::sample::SourceInfo
+fn zenoh::timestamp_stack::TimestampInstrumentation::is_instrumented(&Self, zenoh::timestamp_stack::InterceptionPoint) -> bool ; in impl zenoh::timestamp_stack::TimestampInstrumentation
+fn zenoh::timestamp_stack::TimestampInstrumentationBuilder::build(Self) -> zenoh::Result<zenoh::timestamp_stack::TimestampInstrumentation> ; in impl zenoh::timestamp_stack::TimestampInstrumentationBuilder
+fn zenoh::timestamp_stack::TimestampInstrumentationBuilder::new() -> Self ; in impl zenoh::timestamp_stack::TimestampInstrumentationBuilder
+fn zenoh::timestamp_stack::TimestampInstrumentationBuilder::set_receive(Self, bool) -> Self ; in impl zenoh::timestamp_stack::TimestampInstrumentationBuilder
+fn zenoh::timestamp_stack::TimestampInstrumentationBuilder::set_route(Self, bool) -> Self ; in impl zenoh::timestamp_stack::TimestampInstrumentationBuilder
+fn zenoh::timestamp_stack::TimestampInstrumentationBuilder::set_send(Self, bool) -> Self ; in impl zenoh::timestamp_stack::TimestampInstrumentationBuilder
+fn zenoh::timestamp_stack::TimestampStack::instrumentation(&Self) -> zenoh::timestamp_stack::TimestampInstrumentation ; in impl zenoh::timestamp_stack::TimestampStack
+fn zenoh::timestamp_stack::TimestampStack::records(&Self) -> &[zenoh::timestamp_stack::TimestampStackRecord] ; in impl zenoh::timestamp_stack::TimestampStack
+fn zenoh::timestamp_stack::TimestampStackRecord::is_custom(&Self) -> bool ; in impl zenoh::timestamp_stack::TimestampStackRecord
+fn zenoh::timestamp_stack::TimestampStackRecord::point(&Self) -> zenoh::timestamp_stack::InterceptionPoint ; in impl zenoh::timestamp_stack::TimestampStackRecord
+fn zenoh::timestamp_stack::TimestampStackRecord::timestamp(&Self) -> &zenoh::timestamp_stack::InstrumentationTimestamp ; in impl zenoh::timestamp_stack::TimestampStackRecord
 glob zenoh::key_expr::format::* = zenoh_keyexpr::key_expr::format
 glob zenoh::key_expr::format::macro_support::* = zenoh_keyexpr::key_expr::format::macro_support
 glob zenoh::shm::* = zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend
@@ -103,34 +149,83 @@ impl core::clone::Clone for zenoh::handlers::Callback
 impl core::clone::Clone for zenoh::handlers::fifo::FifoChannelHandler
 impl core::clone::Clone for zenoh::handlers::fifo::RecvStream
 impl core::clone::Clone for zenoh::key_expr::KeyExpr
+impl core::clone::Clone for zenoh::qos::Priority
 impl core::clone::Clone for zenoh::query::Selector
+impl core::clone::Clone for zenoh::sample::Locality
+impl core::clone::Clone for zenoh::sample::Sample
+impl core::clone::Clone for zenoh::sample::SampleBuilder
+impl core::clone::Clone for zenoh::sample::SampleBuilderAny
+impl core::clone::Clone for zenoh::sample::SampleBuilderDelete
+impl core::clone::Clone for zenoh::sample::SampleBuilderPut
+impl core::clone::Clone for zenoh::sample::SampleFields
+impl core::clone::Clone for zenoh::sample::SampleKind
+impl core::clone::Clone for zenoh::sample::SourceInfo
+impl core::clone::Clone for zenoh::timestamp_stack::InstrumentationTimestamp
+impl core::clone::Clone for zenoh::timestamp_stack::InterceptionPoint
+impl core::clone::Clone for zenoh::timestamp_stack::TimestampInstrumentation
+impl core::clone::Clone for zenoh::timestamp_stack::TimestampInstrumentationBuilder
+impl core::clone::Clone for zenoh::timestamp_stack::TimestampStack
+impl core::clone::Clone for zenoh::timestamp_stack::TimestampStackRecord
 impl core::cmp::Eq for zenoh::bytes::Encoding
 impl core::cmp::Eq for zenoh::bytes::OptionZBytes
 impl core::cmp::Eq for zenoh::bytes::ZBytes
 impl core::cmp::Eq for zenoh::key_expr::KeyExpr
+impl core::cmp::Eq for zenoh::qos::Priority
 impl core::cmp::Eq for zenoh::query::Selector
+impl core::cmp::Eq for zenoh::sample::Locality
+impl core::cmp::Eq for zenoh::sample::SampleKind
+impl core::cmp::Eq for zenoh::timestamp_stack::InstrumentationTimestamp
+impl core::cmp::Eq for zenoh::timestamp_stack::InterceptionPoint
+impl core::cmp::Eq for zenoh::timestamp_stack::TimestampInstrumentation
+impl core::cmp::Eq for zenoh::timestamp_stack::TimestampStack
+impl core::cmp::Eq for zenoh::timestamp_stack::TimestampStackRecord
 impl core::cmp::PartialEq for zenoh::bytes::Encoding
 impl core::cmp::PartialEq for zenoh::bytes::OptionZBytes
 impl core::cmp::PartialEq for zenoh::bytes::ZBytes
 impl core::cmp::PartialEq for zenoh::key_expr::KeyExpr
+impl core::cmp::PartialEq for zenoh::qos::Priority
 impl core::cmp::PartialEq for zenoh::query::Selector
+impl core::cmp::PartialEq for zenoh::sample::Locality
+impl core::cmp::PartialEq for zenoh::sample::SampleKind
+impl core::cmp::PartialEq for zenoh::timestamp_stack::InstrumentationTimestamp
+impl core::cmp::PartialEq for zenoh::timestamp_stack::InterceptionPoint
+impl core::cmp::PartialEq for zenoh::timestamp_stack::TimestampInstrumentation
+impl core::cmp::PartialEq for zenoh::timestamp_stack::TimestampStack
+impl core::cmp::PartialEq for zenoh::timestamp_stack::TimestampStackRecord
 impl core::convert::AsRef for zenoh::key_expr::KeyExpr
 impl core::convert::From for alloc::borrow::Cow
 impl core::convert::From for alloc::string::String
 impl core::convert::From for core::option::Option
 impl core::convert::From for tuple
+impl core::convert::From for u8
 impl core::convert::From for zenoh::bytes::Encoding
 impl core::convert::From for zenoh::bytes::OptionZBytes
 impl core::convert::From for zenoh::bytes::ZBytes
 impl core::convert::From for zenoh::handlers::Callback
 impl core::convert::From for zenoh::key_expr::KeyExpr
 impl core::convert::From for zenoh::key_expr::OwnedKeyExpr
+impl core::convert::From for zenoh::qos::Priority
 impl core::convert::From for zenoh::query::Selector
+impl core::convert::From for zenoh::sample::Locality
+impl core::convert::From for zenoh::sample::Sample
+impl core::convert::From for zenoh::sample::SampleBuilder
+impl core::convert::From for zenoh::sample::SampleFields
+impl core::convert::From for zenoh::sample::SourceInfo
 impl core::convert::From for zenoh_buffers::zbuf::ZBuf
+impl core::convert::From for zenoh_config::qos::PriorityConf
+impl core::convert::From for zenoh_config::qos::PublisherLocalityConf
+impl core::convert::From for zenoh_protocol::core::Priority
 impl core::convert::From for zenoh_protocol::core::encoding::Encoding
+impl core::convert::From for zenoh_protocol::network::timestamp_stack::TimestampStack
 impl core::convert::From for zenoh_protocol::zenoh::ext::AttachmentType
+impl core::convert::From for zenoh_protocol::zenoh::ext::SourceInfoType
 impl core::convert::TryFrom for zenoh::key_expr::KeyExpr
+impl core::convert::TryFrom for zenoh::qos::Priority
 impl core::convert::TryFrom for zenoh::query::Selector
+impl core::convert::TryFrom for zenoh::sample::SampleBuilder
+impl core::convert::TryFrom for zenoh::sample::SampleKind
+impl core::convert::TryFrom for zenoh::timestamp_stack::InterceptionPoint
+impl core::convert::TryFrom for zenoh::timestamp_stack::TimestampStack
 impl core::default::Default for zenoh::bytes::Encoding
 impl core::default::Default for zenoh::bytes::OptionZBytes
 impl core::default::Default for zenoh::bytes::ZBytes
@@ -139,6 +234,11 @@ impl core::default::Default for zenoh::config::Config
 impl core::default::Default for zenoh::handlers::DefaultHandler
 impl core::default::Default for zenoh::handlers::RingChannel
 impl core::default::Default for zenoh::handlers::fifo::FifoChannel
+impl core::default::Default for zenoh::qos::Priority
+impl core::default::Default for zenoh::sample::Locality
+impl core::default::Default for zenoh::sample::SampleKind
+impl core::default::Default for zenoh::timestamp_stack::TimestampInstrumentation
+impl core::default::Default for zenoh::timestamp_stack::TimestampInstrumentationBuilder
 impl core::fmt::Debug for zenoh::bytes::Encoding
 impl core::fmt::Debug for zenoh::bytes::OptionZBytes
 impl core::fmt::Debug for zenoh::bytes::ZBytes
@@ -163,15 +263,33 @@ impl core::fmt::Debug for zenoh::handlers::fifo::RecvStream
 impl core::fmt::Debug for zenoh::handlers::fifo::TryIter
 impl core::fmt::Debug for zenoh::key_expr::KeyExpr
 impl core::fmt::Debug for zenoh::key_expr::KeyExprUndeclaration
+impl core::fmt::Debug for zenoh::qos::Priority
 impl core::fmt::Debug for zenoh::query::Selector
+impl core::fmt::Debug for zenoh::sample::Locality
+impl core::fmt::Debug for zenoh::sample::Sample
+impl core::fmt::Debug for zenoh::sample::SampleBuilder
+impl core::fmt::Debug for zenoh::sample::SampleBuilderAny
+impl core::fmt::Debug for zenoh::sample::SampleBuilderDelete
+impl core::fmt::Debug for zenoh::sample::SampleBuilderPut
+impl core::fmt::Debug for zenoh::sample::SampleFields
+impl core::fmt::Debug for zenoh::sample::SampleKind
+impl core::fmt::Debug for zenoh::sample::SourceInfo
+impl core::fmt::Debug for zenoh::timestamp_stack::InstrumentationTimestamp
+impl core::fmt::Debug for zenoh::timestamp_stack::InterceptionPoint
+impl core::fmt::Debug for zenoh::timestamp_stack::TimestampInstrumentation
+impl core::fmt::Debug for zenoh::timestamp_stack::TimestampInstrumentationBuilder
+impl core::fmt::Debug for zenoh::timestamp_stack::TimestampStack
+impl core::fmt::Debug for zenoh::timestamp_stack::TimestampStackRecord
 impl core::fmt::Display for zenoh::bytes::Encoding
 impl core::fmt::Display for zenoh::config::Config
 impl core::fmt::Display for zenoh::key_expr::KeyExpr
 impl core::fmt::Display for zenoh::query::Selector
+impl core::fmt::Display for zenoh::sample::SampleKind
 impl core::future::future::Future for zenoh::handlers::fifo::RecvFut
 impl core::future::into_future::IntoFuture for zenoh::key_expr::KeyExprUndeclaration
 impl core::hash::Hash for zenoh::bytes::Encoding
 impl core::hash::Hash for zenoh::key_expr::KeyExpr
+impl core::hash::Hash for zenoh::qos::Priority
 impl core::iter::traits::collect::IntoIterator for &zenoh::handlers::fifo::FifoChannelHandler
 impl core::iter::traits::collect::IntoIterator for zenoh::handlers::fifo::FifoChannelHandler
 impl core::iter::traits::exact_size::ExactSizeIterator for zenoh::handlers::fifo::Drain
@@ -180,10 +298,24 @@ impl core::iter::traits::iterator::Iterator for zenoh::handlers::fifo::Drain
 impl core::iter::traits::iterator::Iterator for zenoh::handlers::fifo::IntoIter
 impl core::iter::traits::iterator::Iterator for zenoh::handlers::fifo::Iter
 impl core::iter::traits::iterator::Iterator for zenoh::handlers::fifo::TryIter
+impl core::marker::Copy for zenoh::qos::Priority
+impl core::marker::Copy for zenoh::sample::Locality
+impl core::marker::Copy for zenoh::sample::SampleKind
+impl core::marker::Copy for zenoh::timestamp_stack::InterceptionPoint
+impl core::marker::Copy for zenoh::timestamp_stack::TimestampInstrumentation
+impl core::marker::Copy for zenoh::timestamp_stack::TimestampInstrumentationBuilder
 impl core::marker::StructuralPartialEq for zenoh::bytes::Encoding
 impl core::marker::StructuralPartialEq for zenoh::bytes::OptionZBytes
 impl core::marker::StructuralPartialEq for zenoh::bytes::ZBytes
+impl core::marker::StructuralPartialEq for zenoh::qos::Priority
 impl core::marker::StructuralPartialEq for zenoh::query::Selector
+impl core::marker::StructuralPartialEq for zenoh::sample::Locality
+impl core::marker::StructuralPartialEq for zenoh::sample::SampleKind
+impl core::marker::StructuralPartialEq for zenoh::timestamp_stack::InstrumentationTimestamp
+impl core::marker::StructuralPartialEq for zenoh::timestamp_stack::InterceptionPoint
+impl core::marker::StructuralPartialEq for zenoh::timestamp_stack::TimestampInstrumentation
+impl core::marker::StructuralPartialEq for zenoh::timestamp_stack::TimestampStack
+impl core::marker::StructuralPartialEq for zenoh::timestamp_stack::TimestampStackRecord
 impl core::ops::arith::Div for &zenoh::key_expr::KeyExpr
 impl core::ops::arith::Div for zenoh::key_expr::KeyExpr
 impl core::ops::deref::Deref for zenoh::config::Config
@@ -200,8 +332,13 @@ impl futures_core::stream::FusedStream for zenoh::handlers::fifo::RecvStream
 impl futures_core::stream::Stream for zenoh::handlers::fifo::RecvStream
 impl serde_core::de::Deserialize for zenoh::config::Config
 impl serde_core::de::Deserialize for zenoh::key_expr::KeyExpr
+impl serde_core::de::Deserialize for zenoh::qos::Priority
+impl serde_core::de::Deserialize for zenoh::sample::Locality
+impl serde_core::de::Deserialize for zenoh::sample::SampleKind
 impl serde_core::ser::Serialize for zenoh::config::Config
 impl serde_core::ser::Serialize for zenoh::key_expr::KeyExpr
+impl serde_core::ser::Serialize for zenoh::sample::Locality
+impl serde_core::ser::Serialize for zenoh::sample::SampleKind
 impl std::io::Read for zenoh::bytes::ZBytesReader
 impl std::io::Seek for zenoh::bytes::ZBytesReader
 impl std::io::Write for zenoh::bytes::ZBytesWriter
@@ -221,11 +358,18 @@ mod zenoh::key_expr
 mod zenoh::key_expr::format
 mod zenoh::key_expr::format::macro_support
 mod zenoh::key_expr::keyexpr_tree
+mod zenoh::qos
 mod zenoh::query
+mod zenoh::sample
+mod zenoh::session
 mod zenoh::shm
+mod zenoh::time
+mod zenoh::timestamp_stack
 reexport enum zenoh::config::EndPoints = zenoh_protocol::core::endpoint::EndPoints
 reexport enum zenoh::config::WhatAmI = zenoh_protocol::core::whatami::WhatAmI
 reexport enum zenoh::key_expr::SetIntersectionLevel = zenoh_keyexpr::key_expr::borrowed::SetIntersectionLevel
+reexport enum zenoh::qos::CongestionControl = zenoh_protocol::core::CongestionControl
+reexport enum zenoh::qos::Reliability = zenoh_protocol::core::Reliability
 reexport enum zenoh::query::TimeBound = zenoh_util::time_range::TimeBound
 reexport enum zenoh::query::TimeExpr = zenoh_util::time_range::TimeExpr
 reexport enum zenoh::shm::BufferRelayoutError = zenoh_shm::api::buffer::traits::BufferRelayoutError
@@ -254,6 +398,8 @@ reexport struct zenoh::key_expr::keyexpr_tree::UnknownWildness = zenoh_keyexpr::
 reexport struct zenoh::key_expr::nonwild_keyexpr = zenoh_keyexpr::key_expr::borrowed::nonwild_keyexpr
 reexport struct zenoh::query::Parameters = zenoh_protocol::core::parameters::Parameters
 reexport struct zenoh::query::TimeRange = zenoh_util::time_range::TimeRange
+reexport struct zenoh::session::EntityGlobalId = zenoh_config::wrappers::EntityGlobalId
+reexport struct zenoh::session::ZenohId = zenoh_config::wrappers::ZenohId
 reexport struct zenoh::shm::AllocAlignment = zenoh_shm::api::provider::types::AllocAlignment
 reexport struct zenoh::shm::AllocBuilder = zenoh_shm::api::provider::shm_provider::AllocBuilder
 reexport struct zenoh::shm::AllocatedChunk = zenoh_shm::api::provider::chunk::AllocatedChunk
@@ -278,6 +424,8 @@ reexport struct zenoh::shm::ZShm = zenoh_shm::api::buffer::zshm::ZShm
 reexport struct zenoh::shm::ZShmMut = zenoh_shm::api::buffer::zshmmut::ZShmMut
 reexport struct zenoh::shm::zshm = zenoh_shm::api::buffer::zshm::zshm
 reexport struct zenoh::shm::zshmmut = zenoh_shm::api::buffer::zshmmut::zshmmut
+reexport struct zenoh::time::NTP64 = uhlc::ntp64::NTP64
+reexport struct zenoh::time::Timestamp = uhlc::timestamp::Timestamp
 reexport trait zenoh::Resolvable = zenoh_core::Resolvable
 reexport trait zenoh::Resolve = zenoh_core::Resolve
 reexport trait zenoh::Wait = zenoh_core::Wait
@@ -301,10 +449,12 @@ reexport trait zenoh::shm::ShmSegment = zenoh_shm::api::client::shm_segment::Shm
 reexport trait zenoh::shm::WithProtocolID = zenoh_shm::api::common::with_id::WithProtocolID
 reexport type zenoh::Error = zenoh_result::Error
 reexport type zenoh::Result = zenoh_result::ZResult
+reexport type zenoh::session::EntityId = zenoh_protocol::core::EntityId
 reexport type zenoh::shm::ChunkAllocResult = zenoh_shm::api::provider::types::ChunkAllocResult
 reexport type zenoh::shm::ChunkID = zenoh_shm::api::common::types::ChunkID
 reexport type zenoh::shm::ProtocolID = zenoh_shm::api::common::types::ProtocolID
 reexport type zenoh::shm::SegmentID = zenoh_shm::api::common::types::SegmentID
+reexport type zenoh::time::TimestampId = zenoh_protocol::core::TimestampId
 struct zenoh::Config
 struct zenoh::bytes::Encoding
 struct zenoh::bytes::OptionZBytes
@@ -333,5 +483,18 @@ struct zenoh::handlers::fifo::TryIter
 struct zenoh::key_expr::KeyExpr
 struct zenoh::key_expr::KeyExprUndeclaration
 struct zenoh::query::Selector
+struct zenoh::sample::Sample
+struct zenoh::sample::SampleBuilder
+struct zenoh::sample::SampleBuilderAny
+struct zenoh::sample::SampleBuilderDelete
+struct zenoh::sample::SampleBuilderPut
+struct zenoh::sample::SampleFields
+struct zenoh::sample::SourceInfo
+struct zenoh::timestamp_stack::TimestampContext
+struct zenoh::timestamp_stack::TimestampInstrumentation
+struct zenoh::timestamp_stack::TimestampInstrumentationBuilder
+struct zenoh::timestamp_stack::TimestampStack
+struct zenoh::timestamp_stack::TimestampStackRecord
 trait zenoh::handlers::IntoHandler
 trait zenoh::query::ZenohParameters
+type zenoh::sample::SourceSn

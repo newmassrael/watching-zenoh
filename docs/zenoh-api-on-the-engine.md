@@ -254,8 +254,19 @@ Each lands whole with its surface lines, tests and faults in one round.
     the default lines and 79 of each other arm's, 8 differential tests, 7 unit tests of the anchor
     with a session that is a counter, and 14 injected faults, none missed (one canonizer
     difference of the keyexpr crate, recorded where it was found, kept out of the strings).
-  - **Z0c onward.** `sample` and the quality-of-service types. Each is a part of Z0 that lands
-    when its closure exists.
+  - **Z0c, `sample` and the quality-of-service types (landed; Z0 is complete).** `Sample`,
+    `SampleBuilder`, `SampleFields`, the kind and the locality of a sample, `SourceInfo`, the
+    priority, the modules `qos`, `time`, `timestamp_stack` and the identifiers of `session`, and the
+    `internal::traits` the builders implement. The closure was wider than the two files: `Sample`
+    reads the priority, which upstream keeps in the publisher's file, and the timestamp stack, which
+    keeps a function that asks a runtime for the node's clock. So `publisher.rs` is here as a
+    partial derivative holding the priority only, `timestamp_stack.rs` is here without
+    `push_ts_interception` (Z6b), `builders/sample.rs` without its two `internal` conversions of a
+    publication builder (Z2), and `session.rs` still only holds its one constant. 90 of the
+    default lines and 163 of each other arm's, 6 differential tests (one of them runs
+    `from_message` as the runtime of a session does, over 336 combinations of frame, quality of
+    service, reliability and stack) and 16 injected faults, none missed. With this part the data
+    modules of upstream's crate are all here; what remains is behaviour, and it starts at Z1.
 - **Z1. Open, close, identity, config table, the choice of D5 and the rule of D4.** `zenoh::open`,
   `Session::zid`, `close`, `is_closed`, `id`, `config`, `info` (routers and peers only). The
   first slice that names an engine. Router mode is decided HERE and not later: 15 of upstream's 31

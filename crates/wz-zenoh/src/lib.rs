@@ -247,6 +247,216 @@ pub mod query {
     pub use crate::api::selector::ZenohParameters;
 }
 
+/// # Sample primitives
+///
+/// The [`Sample`](crate::sample::Sample) structure is the data unit received
+/// by [`Subscriber`](crate::pubsub::Subscriber) or [`Querier`](crate::query::Querier)
+/// or [`Session::get`]. It contains the payload and all metadata associated with the data.
+///
+/// The module contains the definitions of the `Sample` itself, definitions of
+/// types of its fields, and builders to create the sample.
+///
+/// In practice, users do not need to create samples manually, as they are created
+/// by the Zenoh runtime when data is published or replied to a query. But sometimes
+/// it's useful to create samples, for example, for the simulation of data reception,
+/// so the [`SampleBuilder`](crate::sample::SampleBuilder) is provided.
+///
+/// The [`SampleFields`](crate::sample::SampleFields) structure contains `Sample`
+/// fields as public members, unlike the `Sample` itself where fields are private.
+/// This allows deconstructing a sample to fields without cloning, which is more efficient
+/// than using getter methods.
+pub mod sample {
+    #[zenoh_macros::unstable]
+    pub use crate::api::sample::{SourceInfo, SourceSn};
+    pub use crate::api::{
+        builders::sample::{
+            SampleBuilder, SampleBuilderAny, SampleBuilderDelete, SampleBuilderPut,
+        },
+        sample::{Locality, Sample, SampleFields, SampleKind},
+    };
+}
+
+/// # Quality of service primitives
+///
+/// This module provides types and enums to configure the quality of service (QoS) of Zenoh
+/// operations, such as reliability and congestion control.
+/// These parameters can be set via the corresponding builder methods, e.g.,
+/// [`reliability`](crate::pubsub::PublisherBuilder::reliability),
+/// [`priority`](crate::pubsub::PublisherBuilder::priority) or
+/// [`congestion_control`](crate::pubsub::PublisherBuilder::congestion_control).
+///
+/// # Example
+///
+/// ```no_run
+/// # #[tokio::main]
+/// # async fn main() {
+/// # let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// let publisher = session.declare_publisher("key/expression")
+///   .reliability(zenoh::qos::Reliability::Reliable)
+///   .priority(zenoh::qos::Priority::InteractiveHigh)
+///   .congestion_control(zenoh::qos::CongestionControl::Block)
+///   .await.unwrap();
+/// # }
+///
+pub mod qos {
+    pub use zenoh_protocol::core::CongestionControl;
+    #[zenoh_macros::unstable]
+    pub use zenoh_protocol::core::Reliability;
+
+    pub use crate::api::publisher::Priority;
+}
+
+/// Timestamp instrumentation for Zenoh messages.
+///
+/// Timestamp instrumentation allows you to track the temporal path of a message
+/// as it travels through the Zenoh topology. By enabling one or more
+/// *interception points*, timestamps are recorded at each matching node and
+/// accumulated into a **timestamp stack** carried alongside the message.
+///
+/// # Interception Points
+///
+/// | Point | Where recorded | Meaning |
+/// |-------|---------------|---------|
+/// | [`Send`](crate::timestamp_stack::InterceptionPoint::Send) | Data source | Message leaves the application |
+/// | [`Route`](crate::timestamp_stack::InterceptionPoint::Route) | Routing layer of any instance | Message transits the routing layer |
+/// | [`Receive`](crate::timestamp_stack::InterceptionPoint::Receive) | Data receiver | Message arrives at the application |
+///
+/// Records are appended in traversal order. For example, in a routed
+/// client→router→client topology with all three points enabled, a subscriber
+/// will receive a stack ordered: `Send → Route → Route → Route → Receive`.
+///
+/// # Timestamp Sources
+///
+/// By default, each interception point records a Zenoh [UHLC] timestamp.
+/// Alternatively, you can register a custom callback on the session via
+/// [`OpenBuilder::with_timestamp_callback`](crate::api::builders::session::OpenBuilder::with_timestamp_callback)
+/// to produce arbitrary timestamp formats.
+///
+/// # Usage
+///
+/// ```no_run
+/// # #[tokio::main]
+/// # async fn main() {
+/// use zenoh::timestamp_stack::{
+///     InstrumentationTimestamp, InterceptionPoint, TimestampInstrumentationBuilder,
+/// };
+///
+/// // Build an instrumentation config: record at send and receive.
+/// let instr = TimestampInstrumentationBuilder::new()
+///     .set_send(true)
+///     .set_receive(true)
+///     .build()
+///     .unwrap();
+///
+/// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// let publisher = session.declare_publisher("key/expr").await.unwrap();
+/// let subscriber = session.declare_subscriber("key/expr").await.unwrap();
+///
+/// publisher
+///     .put("payload")
+///     .timestamp_instrumentation(instr)
+///     .await
+///     .unwrap();
+///
+/// let sample = subscriber.recv_async().await.unwrap();
+/// if let Some(stack) = sample.timestamp_stack() {
+///     for record in stack.records() {
+///         println!("{:?} at {:?}", record.point(), record.timestamp());
+///     }
+/// }
+/// # }
+/// ```
+///
+/// [UHLC]: https://github.com/eclipse-zenoh/uhlc-rs
+#[zenoh_macros::unstable]
+pub mod timestamp_stack {
+    pub use crate::api::timestamp_stack::{
+        InstrumentationTimestamp, InterceptionPoint, TimestampContext, TimestampInstrumentation,
+        TimestampInstrumentationBuilder, TimestampStack, TimestampStackRecord,
+    };
+}
+
+/// What zenoh's own crates and the language bindings reach into. Of it the traits of the builders
+/// are here, which the builders of a sample implement; the rest (the runtime, the plugins, the
+/// helpers re-exported from the family's crates) arrives with the slices that give them a body.
+#[zenoh_macros::internal]
+pub mod internal {
+    pub mod traits {
+        pub use crate::api::builders::sample::{
+            EncodingBuilderTrait, QoSBuilderTrait, SampleBuilderTrait, TimestampBuilderTrait,
+            TimestampInstrumentationBuilderTrait,
+        };
+    }
+}
+
+/// Timestamp support
+///
+/// Each [`Sample`](crate::sample::Sample) has an optional [`Timestamp`](crate::time::Timestamp) associated with it.
+/// The timestamp can be set using the
+/// [`PublicationBuilder::timestamp`](crate::pubsub::PublicationBuilder::timestamp) method when performing a
+/// [`put`](crate::pubsub::Publisher::put) operation or by
+/// [`ReplyBuilder::timestamp`](crate::query::ReplyBuilder::timestamp) when replying to a query with
+/// [`reply`](crate::query::Query::reply).
+///
+/// The timestamp consists of the time value itself and a unique
+/// [clock](https://docs.rs/uhlc/latest/uhlc/) identifier. Each
+/// [`Session`] has its own clock. The [`new_timestamp`](crate::session::Session::new_timestamp)
+/// method can be used to create a new timestamp with the session's identifier.
+///
+/// # Examples
+/// Sending a value with a timestamp
+/// ```no_run
+/// # #[tokio::main]
+/// # async fn main() {
+/// # use zenoh::time::Timestamp;
+/// # let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// # let publisher = session.declare_publisher("key/expression").await.unwrap();
+/// let timestamp = session.new_timestamp();
+/// publisher.put("value").timestamp(timestamp).await.unwrap();
+/// # }
+/// ```
+///
+/// Receiving a value with a timestamp
+/// ```no_run
+/// # #[tokio::main]
+/// # async fn main() {
+/// # let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// # let subscriber = session.declare_subscriber("key/expression").await.unwrap();
+/// while let Ok(sample) = subscriber.recv_async().await {
+///     if let Some(timestamp) = sample.timestamp() {
+///         println!("Received value with timestamp: {}", timestamp.to_string_rfc3339_lossy());
+///     }
+/// }
+/// # }
+/// ```
+pub mod time {
+    pub use zenoh_protocol::core::{Timestamp, TimestampId, NTP64};
+}
+
+/// # Zenoh [`Session`] and associated types
+///
+/// The [`Session`] is the main component of Zenoh. It holds the zenoh runtime object,
+/// which maintains the state of the connection of the node to the Zenoh network.
+///
+/// The session allows declaring other zenoh entities like publishers, subscribers, queriers, queryables, etc.
+/// and keeps them functioning. Closing the session will close all associated entities.
+///
+/// The session is cloneable so it's easy to share it between tasks and threads. Each clone of the
+/// session is an `Arc` to the internal session object, so cloning is cheap and fast.
+///
+/// A Zenoh session is instantiated using [`zenoh::open`](crate::open)
+/// with parameters specified in the [`Config`] object.
+///
+/// Of this module the identifiers of a session and of its entities are here; the session itself,
+/// its builders and its information arrive with slice Z1 of docs/zenoh-api-on-the-engine.md.
+pub mod session {
+    #[zenoh_macros::unstable]
+    pub use zenoh_config::wrappers::EntityGlobalId;
+    pub use zenoh_config::wrappers::ZenohId;
+    #[zenoh_macros::unstable]
+    pub use zenoh_protocol::core::EntityId;
+}
+
 /// # Callback handler trait.
 ///
 /// Zenoh allows two ways to get sequential data from Zenoh primitives, like

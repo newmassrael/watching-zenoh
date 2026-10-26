@@ -16,6 +16,10 @@
 // src/api/mod.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). Only the modules of the
 // slices that have landed are declared here.
 
+// R3706: `SampleBuilder::qos` is used by the builders of a reply and of a publication, which are
+// slices Z2 and Z3 of docs/zenoh-api-on-the-engine.md.
+#[allow(dead_code)]
+pub(crate) mod builders;
 pub(crate) mod bytes;
 // R3681: the token's users, the builders of `get` that take it, are slice Z3 of
 // docs/zenoh-api-on-the-engine.md; until they land the helpers upstream calls from there are unused.
@@ -32,6 +36,13 @@ pub(crate) mod encoding;
 // unused.
 #[allow(dead_code)]
 pub(crate) mod handlers;
+// R3706: the publisher and its undeclaration are slice Z2 of docs/zenoh-api-on-the-engine.md; of the
+// file only the priority is here, which the sample reads.
+pub(crate) mod publisher;
+// R3706: the sample's users, the subscriber and the reply, are slices Z2 and Z3; until they land the
+// constructor from a frame and the builders' crate-private methods have no caller.
+#[allow(dead_code)]
+pub(crate) mod sample;
 // R3702: the session's declaration of a key (`declare`, `to_wire`) and `KeyExprUndeclaration::new`
 // are slice Z1 of docs/zenoh-api-on-the-engine.md, and the anchor is implemented there; until then
 // the functions that take it have no caller.
@@ -41,3 +52,7 @@ pub(crate) mod key_expr;
 #[allow(dead_code)]
 pub(crate) mod selector;
 pub(crate) mod session;
+// R3706: the instrumentation of a frame at a node (`push_ts_interception`) is slice Z6b.
+#[cfg(feature = "unstable")]
+#[allow(dead_code)]
+pub(crate) mod timestamp_stack;

@@ -51,6 +51,7 @@ plugins = []
 shared-memory = [
     "dep:zenoh-shm",
     "zenoh-buffers/shared-memory",
+    "zenoh-codec/shared-memory",
     "zenoh-protocol/shared-memory",
 ]
 unstable = ["zenoh-config/unstable", "zenoh-keyexpr/unstable", "zenoh-protocol/unstable"]
@@ -64,7 +65,9 @@ phf = { version = "0.13.1", features = ["macros"] }
 serde = { version = "1.0.225", features = ["default"] }
 tokio = { version = "1.47.1", default-features = false, features = ["macros", "rt", "sync", "time"] }
 tracing = "0.1.41"
+uhlc = { version = "0.8.0", default-features = false }
 zenoh-buffers = { path = "../wz-zenoh-buffers", features = ["std"] }
+zenoh-codec = { path = "../wz-zenoh-codec" }
 zenoh-collections = { path = "../wz-zenoh-collections", features = ["std"] }
 zenoh-config = { path = "../wz-zenoh-config" }
 zenoh-core = { path = "../wz-zenoh-core" }
