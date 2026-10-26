@@ -24,7 +24,7 @@ use sce_forge_runtime::heapless::Vec as HeaplessVec;
 
 use super::ext_entry::ExtEntry;
 
-use sce_forge_runtime::codec::ListView;
+use sce_forge_runtime::codec::{ListView, ListWalk};
 use super::ext_entry::ExtEntryView;
 
 // pub API: codecs are intended for cross-crate consumption (SCE_FORGE.md
@@ -219,10 +219,23 @@ impl<'a> DeclFinal<'a> {
 // frames `DeclFinal::decode` refuses, with the same error: the entries
 // are decoded once to check them, and a walk afterwards cannot fail.
 #[allow(dead_code)]
+pub struct DeclFinalExtensionsWalk;
+
+impl ListWalk<0> for DeclFinalExtensionsWalk {
+    type Entry<'b> = ExtEntryView<'b>;
+
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
+        ExtEntryView::decode(_c)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeclFinalView<'a> {
     pub header: u8,
-    pub extensions: Option<ListView<'a, ExtEntryView<'a>, 0>>,
+    pub extensions: Option<ListView<'a, DeclFinalExtensionsWalk, 0>>,
 }
 
 impl<'a> Default for DeclFinalView<'a> {
@@ -290,7 +303,7 @@ impl<'a> DeclFinalView<'a> {
             if _more {
                 return Err(CodecError::TlvChainOverflow);
             }
-            _out.extensions = Some(ListView::new(_rest, _count, [], |_c, _a| ExtEntryView::decode(_c), |_, _| {}));
+            _out.extensions = Some(ListView::new(_rest, _count, []));
         } else {
             _out.extensions = None;
         }

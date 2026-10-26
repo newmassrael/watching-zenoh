@@ -454,12 +454,15 @@ dependencies = [
  "libxml",
  "minijinja",
  "minijinja-contrib",
+ "proc-macro2",
+ "quote",
  "regex",
  "roxmltree",
  "serde",
  "serde_json",
  "serde_yaml_ng",
  "sha2",
+ "syn",
  "thiserror",
 ]
 

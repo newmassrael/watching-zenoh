@@ -33,7 +33,7 @@ use super::undecl_subscriber::UndeclSubscriber;
 use super::undecl_queryable::UndeclQueryable;
 use super::undecl_token::UndeclToken;
 
-use sce_forge_runtime::codec::ListView;
+use sce_forge_runtime::codec::{ListView, ListWalk};
 use super::ext_entry::ExtEntryView;
 use super::decl_final::DeclFinalView;
 use super::decl_kexpr::DeclKexprView;
@@ -419,11 +419,24 @@ impl<'a> Default for DeclareViewVariant<'a> {
 }
 
 #[allow(dead_code)]
+pub struct DeclareExtensionsWalk;
+
+impl ListWalk<0> for DeclareExtensionsWalk {
+    type Entry<'b> = ExtEntryView<'b>;
+
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
+        ExtEntryView::decode(_c)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeclareView<'a> {
     pub header: u8,
     pub interest_id: Option<u64>,
-    pub extensions: Option<ListView<'a, ExtEntryView<'a>, 0>>,
+    pub extensions: Option<ListView<'a, DeclareExtensionsWalk, 0>>,
     pub body: DeclareViewVariant<'a>,
 }
 
@@ -495,7 +508,7 @@ impl<'a> DeclareView<'a> {
             if _more {
                 return Err(CodecError::TlvChainOverflow);
             }
-            _out.extensions = Some(ListView::new(_rest, _count, [], |_c, _a| ExtEntryView::decode(_c), |_, _| {}));
+            _out.extensions = Some(ListView::new(_rest, _count, []));
         } else {
             _out.extensions = None;
         }

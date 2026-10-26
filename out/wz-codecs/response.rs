@@ -27,7 +27,7 @@ use super::ext_entry::ExtEntry;
 use super::reply::Reply;
 use super::err::Err;
 
-use sce_forge_runtime::codec::ListView;
+use sce_forge_runtime::codec::{ListView, ListWalk};
 use super::wireexpr::{WireexprView, WireexprViewVariant};
 use super::ext_entry::ExtEntryView;
 use super::reply::ReplyView;
@@ -345,12 +345,25 @@ impl<'a> Default for ResponseViewVariant<'a> {
 }
 
 #[allow(dead_code)]
+pub struct ResponseExtensionsWalk;
+
+impl ListWalk<0> for ResponseExtensionsWalk {
+    type Entry<'b> = ExtEntryView<'b>;
+
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
+        ExtEntryView::decode(_c)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResponseView<'a> {
     pub header: u8,
     pub request_id: u64,
     pub keyexpr: WireexprView<'a>,
-    pub extensions: Option<ListView<'a, ExtEntryView<'a>, 0>>,
+    pub extensions: Option<ListView<'a, ResponseExtensionsWalk, 0>>,
     pub body: ResponseViewVariant<'a>,
 }
 
@@ -419,7 +432,7 @@ impl<'a> ResponseView<'a> {
             if _more {
                 return Err(CodecError::TlvChainOverflow);
             }
-            _out.extensions = Some(ListView::new(_rest, _count, [], |_c, _a| ExtEntryView::decode(_c), |_, _| {}));
+            _out.extensions = Some(ListView::new(_rest, _count, []));
         } else {
             _out.extensions = None;
         }

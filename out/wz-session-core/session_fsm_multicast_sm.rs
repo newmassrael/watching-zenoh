@@ -17,7 +17,8 @@
 // emitter. It compiles against `sce-rust-runtime` with or without that
 // crate's `std` feature, and the generated crate omits `std::*` paths — Duration comes from
 // `core::time`, the configuration and history records are the runtime's
-// capacity-bounded `StateChain`, and the parent-event queue field is elided
+// capacity-bounded `BoundedVec`, sized to this document's state tree, and the
+// parent-event queue field is elided
 // (SCXML `<invoke>` is rejected at codegen time under `--no-std` per the
 // `codegen/no-std-invoke-not-supported` diagnostic).
 
@@ -104,6 +105,18 @@ pub enum SessionFsmMulticastEvent {
 }
 
 // ======================================================================
+// What this document's state tree bounds (W3C SCXML 3.4)
+// ======================================================================
+
+/// A set of this machine's states that are, or are about to be, in one
+/// configuration: the configuration a host observes, and what the runtime's
+/// microstep builds from it (an exit set, an entry set, a history's record).
+/// Its capacity, 1, is the most states one configuration of this document holds,
+/// read from its state tree; the runtime names no size of its own. A `Vec` under
+/// std, where the capacity is not read.
+pub type SessionFsmMulticastConfiguration = ::sce_rust_runtime::helpers::hierarchy::BoundedVec<SessionFsmMulticastState, 1>;
+
+// ======================================================================
 // Externally-drivable event surface (W3C SCXML 3.12 / 5.10)
 // ======================================================================
 
@@ -155,7 +168,7 @@ pub struct SessionFsmMulticastPolicy<A: SessionFsmMulticastActions + 'static> {
 }
 
 impl<A: SessionFsmMulticastActions + 'static> SessionFsmMulticastPolicy<A> {
-    fn build(session_id: &'static str, actions: A) -> Self {
+    const fn build(session_id: &'static str, actions: A) -> Self {
         Self {
             actions,
             session_id,
@@ -204,6 +217,35 @@ impl<A: SessionFsmMulticastActions + 'static> SessionFsmMulticastPolicy<A> {
         Ok(Self::build(::sce_rust_runtime::helpers::session_id::checked(session_id)?, actions))
     }
 
+    /// [`new_with_session_id`](Self::new_with_session_id), in a constant
+    /// expression: the machine a program keeps in a `static`, with
+    /// `Engine::new_const`, so that nothing is built at start-up and no copy of
+    /// it is made on a stack. A host whose `REALIZATION` is
+    /// `Simulates` does not compile here.    ///
+    /// # Panics
+    ///
+    /// At compile time, when the id is not an XML Nmtoken (the empty text, a
+    /// space, a `#`): a `static` holding such an id does not build. The reason
+    /// is the one `new_with_session_id` gives for the same id.
+    pub const fn new_const(session_id: &'static str, actions: A) -> Self {
+        let () = Self::HOST_PERFORMS_DUTIES;
+        Self::build(Self::held_session_id(session_id), actions)
+    }
+
+    /// [`new_const`](Self::new_const) with a host that only simulates its duties
+    /// — a recorder, a test double — as the caller's statement that it means to.
+    pub const fn new_simulated_const(session_id: &'static str, actions: A) -> Self {
+        Self::build(Self::held_session_id(session_id), actions)
+    }
+
+    /// `session_id`, held to the Nmtoken rule in a constant expression.
+    const fn held_session_id(session_id: &'static str) -> &'static str {
+        match ::sce_rust_runtime::helpers::session_id::checked(session_id) {
+            Ok(id) => id,
+            Err(_) => panic!("the session id is not an XML Nmtoken"),
+        }
+    }
+
     /// W3C SCXML G.7: the host the `<sce:action>` operations are dispatched
     /// to — read back, e.g. a recording host's calls, since the machine owns it.
     pub fn actions(&self) -> &A {
@@ -215,6 +257,14 @@ impl<A: SessionFsmMulticastActions + 'static> SessionFsmMulticastPolicy<A> {
 
 }
 
+
+// The two constants `Engine::new_const` builds its engine from: the state it
+// names before it initialises and an empty queue, as `initial_state` and
+// `EventQueue::default()` give them below.
+impl<A: SessionFsmMulticastActions + 'static> sce_rust_runtime::ConstStatePolicy for SessionFsmMulticastPolicy<A> {
+    const INITIAL_STATE: Self::State = SessionFsmMulticastState::Idle;
+    const EMPTY_EVENT_QUEUE: Self::EventQueue = sce_rust_runtime::EventQueueManager::new();
+}
 
 // ======================================================================
 // StatePolicy trait implementation
@@ -257,6 +307,24 @@ impl<A: SessionFsmMulticastActions + 'static> StatePolicy for SessionFsmMulticas
     // EventQueue per-machine sizing lever above.
     type ScheduledSendId = sce_rust_runtime::ElidedSendId;
 
+    // W3C SCXML 3.4: what this document's state tree bounds, read by the
+    // generator and written here so every buffer of the runtime's microstep is
+    // this document's size and no larger. A configuration holds 1 state(s) at
+    // most; a selection enables 1 transition(s) at most, one from each atomic state
+    // of one; the deepest state sits 1 level(s) down. Under std the buffers
+    // are `Vec`s and the capacities are not read.
+    type Configuration = SessionFsmMulticastConfiguration;
+    type EnabledSet = ::sce_rust_runtime::helpers::hierarchy::BoundedVec<::sce_rust_runtime::EnabledTransition<Self::State, Self::History>, 1>;
+    type HistoryDefaults = ::sce_rust_runtime::helpers::hierarchy::BoundedVec<(Self::State, Self::History), 0>;
+    // Appendix D's entry procedures, the effective targets and the completion
+    // check are run over a stack of steps and not by recursion, so a call needs
+    // no depth the program has to assume: 6 step(s) at most, three for each level
+    // of the tree, one for each `<history>` and three of headroom.
+    type EntryWalk = ::sce_rust_runtime::helpers::hierarchy::BoundedVec<::sce_rust_runtime::helpers::microstep::WalkStep<Self::State, Self::History>, 6>;
+    const MAX_CONFIGURATION: usize = 1;
+    const MAX_ENABLED: usize = 1;
+    const MAX_DEPTH: usize = 1;
+
     // W3C SCXML feature flags
     const HAS_PARALLEL_STATES: bool = false;
     const NEEDS_SCRIPT_ENGINE: bool = false;
@@ -278,7 +346,7 @@ impl<A: SessionFsmMulticastActions + 'static> StatePolicy for SessionFsmMulticas
         // concept, sourced from one computation (`default_state_id`) so
         // they can never diverge: `<scxml initial>`, or the first sorted
         // state when the initial attribute is unset.
-        SessionFsmMulticastState::Idle
+        <Self as sce_rust_runtime::ConstStatePolicy>::INITIAL_STATE
     }
 
     fn is_final_state(state: Self::State) -> bool {
@@ -376,7 +444,7 @@ impl<A: SessionFsmMulticastActions + 'static> StatePolicy for SessionFsmMulticas
 
     // The inverse of the table above, emitted from the same loop over the
     // document's states so the two age together. It is what lets a host turn a
-    // recorded configuration back into the `StateChain` `enter_at` takes.
+    // recorded configuration back into the slice `enter_at` takes.
     fn get_state_from_name(name: &str) -> Option<Self::State> {
         match name {
             "Idle" => Some(SessionFsmMulticastState::Idle),

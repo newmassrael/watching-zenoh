@@ -109,6 +109,24 @@ impl StatePolicy for TimerProbePolicy {
         sce_rust_runtime::EventWithMetadata<Self::Event, Self::Payload>,
     >;
     type ScheduledSendId = sce_rust_runtime::SceString;
+    // What a document's state tree bounds, which a generated machine's policy
+    // reads off its document: this one is a single state with no `<history>`,
+    // one level below `<scxml>`, so a configuration holds 1 state and a
+    // selection enables 1 transition, and the walk of Appendix D's procedures
+    // takes three steps for the one level and three of headroom.
+    type Configuration = sce_rust_runtime::helpers::hierarchy::BoundedVec<St, 1>;
+    type EnabledSet = sce_rust_runtime::helpers::hierarchy::BoundedVec<
+        sce_rust_runtime::EnabledTransition<St, NoHistory>,
+        1,
+    >;
+    type HistoryDefaults = sce_rust_runtime::helpers::hierarchy::BoundedVec<(St, NoHistory), 0>;
+    type EntryWalk = sce_rust_runtime::helpers::hierarchy::BoundedVec<
+        sce_rust_runtime::helpers::microstep::WalkStep<St, NoHistory>,
+        6,
+    >;
+    const MAX_CONFIGURATION: usize = 1;
+    const MAX_ENABLED: usize = 1;
+    const MAX_DEPTH: usize = 1;
 
     fn initial_state() -> Self::State {
         St::S0

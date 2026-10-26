@@ -25,7 +25,7 @@ use sce_forge_runtime::heapless::Vec as HeaplessVec;
 use super::ext_entry::ExtEntry;
 use super::interest_body::InterestBody;
 
-use sce_forge_runtime::codec::ListView;
+use sce_forge_runtime::codec::{ListView, ListWalk};
 use super::ext_entry::ExtEntryView;
 use super::interest_body::InterestBodyView;
 
@@ -260,12 +260,25 @@ impl<'a> Interest<'a> {
 // frames `Interest::decode` refuses, with the same error: the entries
 // are decoded once to check them, and a walk afterwards cannot fail.
 #[allow(dead_code)]
+pub struct InterestExtensionsWalk;
+
+impl ListWalk<0> for InterestExtensionsWalk {
+    type Entry<'b> = ExtEntryView<'b>;
+
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
+        ExtEntryView::decode(_c)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct InterestView<'a> {
     pub header: u8,
     pub interest_id: u64,
     pub body: Option<InterestBodyView<'a>>,
-    pub extensions: Option<ListView<'a, ExtEntryView<'a>, 0>>,
+    pub extensions: Option<ListView<'a, InterestExtensionsWalk, 0>>,
 }
 
 impl<'a> Default for InterestView<'a> {
@@ -341,7 +354,7 @@ impl<'a> InterestView<'a> {
             if _more {
                 return Err(CodecError::TlvChainOverflow);
             }
-            _out.extensions = Some(ListView::new(_rest, _count, [], |_c, _a| ExtEntryView::decode(_c), |_, _| {}));
+            _out.extensions = Some(ListView::new(_rest, _count, []));
         } else {
             _out.extensions = None;
         }

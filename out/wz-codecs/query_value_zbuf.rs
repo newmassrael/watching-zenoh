@@ -25,7 +25,7 @@ use sce_forge_runtime::heapless::Vec as HeaplessVec;
 use super::encoding::Encoding;
 use super::zbuf_slice::ZbufSlice;
 
-use sce_forge_runtime::codec::ListView;
+use sce_forge_runtime::codec::{ListView, ListWalk};
 use super::encoding::EncodingView;
 use super::zbuf_slice::ZbufSliceView;
 
@@ -204,13 +204,26 @@ impl<'a> QueryValueZbuf<'a> {
 // frames `QueryValueZbuf::decode` refuses, with the same error: the entries
 // are decoded once to check them, and a walk afterwards cannot fail.
 #[allow(dead_code)]
+pub struct QueryValueZbufSlicesWalk;
+
+impl ListWalk<0> for QueryValueZbufSlicesWalk {
+    type Entry<'b> = ZbufSliceView<'b>;
+
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
+        ZbufSliceView::decode(_c)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
+#[allow(dead_code)]
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct QueryValueZbufView<'a> {
     pub value_len: u64,
     pub value: Option<&'a [u8]>,
     pub encoding: Option<EncodingView<'a>>,
     pub slice_count: Option<u32>,
-    pub slices: Option<ListView<'a, ZbufSliceView<'a>, 0>>,
+    pub slices: Option<ListView<'a, QueryValueZbufSlicesWalk, 0>>,
 }
 
 #[allow(dead_code)]
@@ -283,7 +296,7 @@ impl<'a> QueryValueZbufView<'a> {
                 }
                 _count += 1;
             }
-            _out.slices = Some(ListView::new(_rest, _count, [], |_c, _a| ZbufSliceView::decode(_c), |_, _| {}));
+            _out.slices = Some(ListView::new(_rest, _count, []));
         } else {
             _out.slices = None;
         }

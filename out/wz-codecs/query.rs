@@ -24,7 +24,7 @@ use sce_forge_runtime::heapless::Vec as HeaplessVec;
 
 use super::query_ext_entry::QueryExtEntry;
 
-use sce_forge_runtime::codec::ListView;
+use sce_forge_runtime::codec::{ListView, ListWalk};
 use super::query_ext_entry::QueryExtEntryView;
 
 // pub API: codecs are intended for cross-crate consumption (SCE_FORGE.md
@@ -288,13 +288,26 @@ impl<'a> Query<'a> {
 // frames `Query::decode` refuses, with the same error: the entries
 // are decoded once to check them, and a walk afterwards cannot fail.
 #[allow(dead_code)]
+pub struct QueryExtensionsWalk;
+
+impl ListWalk<1> for QueryExtensionsWalk {
+    type Entry<'b> = QueryExtEntryView<'b>;
+
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 1]) -> Result<Self::Entry<'b>, CodecError> {
+        QueryExtEntryView::decode(_c, _a[0])
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 1]) { _s[0] = u8::from((u64::from(_e.header) & 127u64) == 4u64); }
+}
+
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueryView<'a> {
     pub header: u8,
     pub consolidation: Option<u8>,
     pub parameters_len: Option<u64>,
     pub parameters: Option<&'a [u8]>,
-    pub extensions: Option<ListView<'a, QueryExtEntryView<'a>, 1>>,
+    pub extensions: Option<ListView<'a, QueryExtensionsWalk, 1>>,
 }
 
 impl<'a> Default for QueryView<'a> {
@@ -390,7 +403,7 @@ impl<'a> QueryView<'a> {
             if _more {
                 return Err(CodecError::TlvChainOverflow);
             }
-            _out.extensions = Some(ListView::new(_rest, _count, [0], |_c, _a| QueryExtEntryView::decode(_c, _a[0]), |_e, _s| { _s[0] = u8::from((u64::from(_e.header) & 127u64) == 4u64); }));
+            _out.extensions = Some(ListView::new(_rest, _count, [0]));
         } else {
             _out.extensions = None;
         }

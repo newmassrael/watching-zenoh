@@ -26,7 +26,7 @@ use super::linkstate_link::LinkstateLink;
 use super::linkstate_weight::LinkstateWeight;
 use super::locator::Locator;
 
-use sce_forge_runtime::codec::ListView;
+use sce_forge_runtime::codec::{ListView, ListWalk};
 use super::linkstate_link::LinkstateLinkView;
 use super::linkstate_weight::LinkstateWeightView;
 use super::locator::LocatorView;
@@ -324,6 +324,45 @@ impl<'a> Linkstate<'a> {
 // frames `Linkstate::decode` refuses, with the same error: the entries
 // are decoded once to check them, and a walk afterwards cannot fail.
 #[allow(dead_code)]
+pub struct LinkstateLocatorsWalk;
+
+impl ListWalk<0> for LinkstateLocatorsWalk {
+    type Entry<'b> = LocatorView<'b>;
+
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
+        LocatorView::decode(_c)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
+#[allow(dead_code)]
+pub struct LinkstateLinksWalk;
+
+impl ListWalk<0> for LinkstateLinksWalk {
+    type Entry<'b> = LinkstateLinkView;
+
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
+        LinkstateLinkView::decode(_c)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
+#[allow(dead_code)]
+pub struct LinkstateWeightsWalk;
+
+impl ListWalk<0> for LinkstateWeightsWalk {
+    type Entry<'b> = LinkstateWeightView;
+
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
+        LinkstateWeightView::decode(_c)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
+#[allow(dead_code)]
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct LinkstateView<'a> {
     pub options: u8,
@@ -333,10 +372,10 @@ pub struct LinkstateView<'a> {
     pub zid: Option<&'a [u8]>,
     pub whatami: Option<u8>,
     pub num_locators: Option<u64>,
-    pub locators: Option<ListView<'a, LocatorView<'a>, 0>>,
+    pub locators: Option<ListView<'a, LinkstateLocatorsWalk, 0>>,
     pub links_len: u64,
-    pub links: ListView<'a, LinkstateLinkView, 0>,
-    pub weights: Option<ListView<'a, LinkstateWeightView, 0>>,
+    pub links: ListView<'a, LinkstateLinksWalk, 0>,
+    pub weights: Option<ListView<'a, LinkstateWeightsWalk, 0>>,
 }
 
 #[allow(dead_code)]
@@ -420,7 +459,7 @@ impl<'a> LinkstateView<'a> {
                 }
                 _count += 1;
             }
-            _out.locators = Some(ListView::new(_rest, _count, [], |_c, _a| LocatorView::decode(_c), |_, _| {}));
+            _out.locators = Some(ListView::new(_rest, _count, []));
         } else {
             _out.locators = None;
         }
@@ -435,7 +474,7 @@ impl<'a> LinkstateView<'a> {
                 }
                 _count += 1;
             }
-            _out.links = ListView::new(_rest, _count, [], |_c, _a| LinkstateLinkView::decode(_c), |_, _| {});
+            _out.links = ListView::new(_rest, _count, []);
         }
         if (options & 0x08u8) != 0 {
             let _n = links_len;
@@ -448,7 +487,7 @@ impl<'a> LinkstateView<'a> {
                 }
                 _count += 1;
             }
-            _out.weights = Some(ListView::new(_rest, _count, [], |_c, _a| LinkstateWeightView::decode(_c), |_, _| {}));
+            _out.weights = Some(ListView::new(_rest, _count, []));
         } else {
             _out.weights = None;
         }

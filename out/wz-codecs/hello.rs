@@ -24,7 +24,7 @@ use sce_forge_runtime::heapless::Vec as HeaplessVec;
 
 use super::locator::Locator;
 
-use sce_forge_runtime::codec::ListView;
+use sce_forge_runtime::codec::{ListView, ListWalk};
 use super::locator::LocatorView;
 
 // pub API: codecs are intended for cross-crate consumption (SCE_FORGE.md
@@ -225,13 +225,26 @@ impl<'a> Hello<'a> {
 // frames `Hello::decode` refuses, with the same error: the entries
 // are decoded once to check them, and a walk afterwards cannot fail.
 #[allow(dead_code)]
+pub struct HelloLocatorsWalk;
+
+impl ListWalk<0> for HelloLocatorsWalk {
+    type Entry<'b> = LocatorView<'b>;
+
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
+        LocatorView::decode(_c)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
+#[allow(dead_code)]
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct HelloView<'a> {
     pub version: u8,
     pub cbyte: u8,
     pub zid: &'a [u8],
     pub num_locators: Option<u64>,
-    pub locators: Option<ListView<'a, LocatorView<'a>, 0>>,
+    pub locators: Option<ListView<'a, HelloLocatorsWalk, 0>>,
 }
 
 #[allow(dead_code)]
@@ -308,7 +321,7 @@ impl<'a> HelloView<'a> {
                 }
                 _count += 1;
             }
-            _out.locators = Some(ListView::new(_rest, _count, [], |_c, _a| LocatorView::decode(_c), |_, _| {}));
+            _out.locators = Some(ListView::new(_rest, _count, []));
         } else {
             _out.locators = None;
         }

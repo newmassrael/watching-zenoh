@@ -24,7 +24,7 @@ use sce_forge_runtime::heapless::Vec as HeaplessVec;
 
 use super::ext_entry::ExtEntry;
 
-use sce_forge_runtime::codec::ListView;
+use sce_forge_runtime::codec::{ListView, ListWalk};
 use super::ext_entry::ExtEntryView;
 
 // pub API: codecs are intended for cross-crate consumption (SCE_FORGE.md
@@ -174,10 +174,23 @@ impl<'a> ExtEnvelope<'a> {
 // frames `ExtEnvelope::decode` refuses, with the same error: the entries
 // are decoded once to check them, and a walk afterwards cannot fail.
 #[allow(dead_code)]
+pub struct ExtEnvelopeExtensionsWalk;
+
+impl ListWalk<0> for ExtEnvelopeExtensionsWalk {
+    type Entry<'b> = ExtEntryView<'b>;
+
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
+        ExtEntryView::decode(_c)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
+#[allow(dead_code)]
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct ExtEnvelopeView<'a> {
     pub header_flags: u8,
-    pub extensions: ListView<'a, ExtEntryView<'a>, 0>,
+    pub extensions: ListView<'a, ExtEnvelopeExtensionsWalk, 0>,
 }
 
 #[allow(dead_code)]
@@ -236,7 +249,7 @@ impl<'a> ExtEnvelopeView<'a> {
             if _more {
                 return Err(CodecError::TlvChainOverflow);
             }
-            _out.extensions = ListView::new(_rest, _count, [], |_c, _a| ExtEntryView::decode(_c), |_, _| {});
+            _out.extensions = ListView::new(_rest, _count, []);
         }
         _out.header_flags = header_flags;
         Ok(())

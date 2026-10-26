@@ -27,7 +27,7 @@ use super::ext_unit::ExtUnit;
 use super::ext_zint::ExtZint;
 use super::ext_zbuf::ExtZbuf;
 
-use sce_forge_runtime::codec::ListView;
+use sce_forge_runtime::codec::{ListView, ListWalk};
 use super::ext_entry::ExtEntryView;
 use super::ext_unit::ExtUnitView;
 use super::ext_zint::ExtZintView;
@@ -329,11 +329,24 @@ impl<'a> Default for OamViewVariant<'a> {
 }
 
 #[allow(dead_code)]
+pub struct OamExtensionsWalk;
+
+impl ListWalk<0> for OamExtensionsWalk {
+    type Entry<'b> = ExtEntryView<'b>;
+
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
+        ExtEntryView::decode(_c)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct OamView<'a> {
     pub header: u8,
     pub id: u64,
-    pub extensions: Option<ListView<'a, ExtEntryView<'a>, 0>>,
+    pub extensions: Option<ListView<'a, OamExtensionsWalk, 0>>,
     pub body: OamViewVariant<'a>,
 }
 
@@ -400,7 +413,7 @@ impl<'a> OamView<'a> {
             if _more {
                 return Err(CodecError::TlvChainOverflow);
             }
-            _out.extensions = Some(ListView::new(_rest, _count, [], |_c, _a| ExtEntryView::decode(_c), |_, _| {}));
+            _out.extensions = Some(ListView::new(_rest, _count, []));
         } else {
             _out.extensions = None;
         }

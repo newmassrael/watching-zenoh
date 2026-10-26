@@ -27,7 +27,7 @@ use super::encoding::Encoding;
 use super::ext_entry::ExtEntry;
 use super::zbuf_slice::ZbufSlice;
 
-use sce_forge_runtime::codec::ListView;
+use sce_forge_runtime::codec::{ListView, ListWalk};
 use super::timestamp::TimestampView;
 use super::encoding::EncodingView;
 use super::ext_entry::ExtEntryView;
@@ -356,16 +356,42 @@ impl<'a> MsgPut<'a> {
 // frames `MsgPut::decode` refuses, with the same error: the entries
 // are decoded once to check them, and a walk afterwards cannot fail.
 #[allow(dead_code)]
+pub struct MsgPutExtensionsWalk;
+
+impl ListWalk<0> for MsgPutExtensionsWalk {
+    type Entry<'b> = ExtEntryView<'b>;
+
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
+        ExtEntryView::decode(_c)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
+#[allow(dead_code)]
+pub struct MsgPutSlicesWalk;
+
+impl ListWalk<0> for MsgPutSlicesWalk {
+    type Entry<'b> = ZbufSliceView<'b>;
+
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
+        ZbufSliceView::decode(_c)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct MsgPutView<'a> {
     pub header: u8,
     pub timestamp: Option<TimestampView<'a>>,
     pub encoding: Option<EncodingView<'a>>,
-    pub extensions: Option<ListView<'a, ExtEntryView<'a>, 0>>,
+    pub extensions: Option<ListView<'a, MsgPutExtensionsWalk, 0>>,
     pub payload_len: Option<u64>,
     pub payload: Option<&'a [u8]>,
     pub slice_count: Option<u32>,
-    pub slices: Option<ListView<'a, ZbufSliceView<'a>, 0>>,
+    pub slices: Option<ListView<'a, MsgPutSlicesWalk, 0>>,
 }
 
 impl<'a> Default for MsgPutView<'a> {
@@ -449,7 +475,7 @@ impl<'a> MsgPutView<'a> {
             if _more {
                 return Err(CodecError::TlvChainOverflow);
             }
-            _out.extensions = Some(ListView::new(_rest, _count, [], |_c, _a| ExtEntryView::decode(_c), |_, _| {}));
+            _out.extensions = Some(ListView::new(_rest, _count, []));
         } else {
             _out.extensions = None;
         }
@@ -486,7 +512,7 @@ impl<'a> MsgPutView<'a> {
                 }
                 _count += 1;
             }
-            _out.slices = Some(ListView::new(_rest, _count, [], |_c, _a| ZbufSliceView::decode(_c), |_, _| {}));
+            _out.slices = Some(ListView::new(_rest, _count, []));
         } else {
             _out.slices = None;
         }

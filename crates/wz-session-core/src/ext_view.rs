@@ -115,9 +115,12 @@ impl<'c, T: ExtEntryView + ?Sized> ExtEntryBytes<'c> for &'c T {
 /// The entries of an optional chain a record carries where its frame lies, in order, each decoded as
 /// the walk reaches it: nothing for a record with no chain. What the readers written over the
 /// entries a chain yields are handed, in place of the slice a held chain would give them.
-pub fn walked<'a, E: 'a, const K: usize>(
-    chain: Option<&sce_forge_runtime::codec::ListView<'a, E, K>>,
-) -> impl Iterator<Item = E> + 'a {
+///
+/// `W` is the list's walk marker (`ExtEntryWalk` for an extension chain), which says how an entry is
+/// read and names the entry view it yields.
+pub fn walked<'a, W: sce_forge_runtime::codec::ListWalk<K> + 'a, const K: usize>(
+    chain: Option<&sce_forge_runtime::codec::ListView<'a, W, K>>,
+) -> impl Iterator<Item = W::Entry<'a>> + 'a {
     chain.map(|list| list.iter()).into_iter().flatten()
 }
 

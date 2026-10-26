@@ -24,7 +24,7 @@ use sce_forge_runtime::heapless::Vec as HeaplessVec;
 
 use super::linkstate::Linkstate;
 
-use sce_forge_runtime::codec::ListView;
+use sce_forge_runtime::codec::{ListView, ListWalk};
 use super::linkstate::LinkstateView;
 
 // pub API: codecs are intended for cross-crate consumption (SCE_FORGE.md
@@ -156,10 +156,23 @@ impl<'a> LinkstateList<'a> {
 // frames `LinkstateList::decode` refuses, with the same error: the entries
 // are decoded once to check them, and a walk afterwards cannot fail.
 #[allow(dead_code)]
+pub struct LinkstateListLinkStatesWalk;
+
+impl ListWalk<0> for LinkstateListLinkStatesWalk {
+    type Entry<'b> = LinkstateView<'b>;
+
+    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
+        LinkstateView::decode(_c)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
+#[allow(dead_code)]
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct LinkstateListView<'a> {
     pub num_link_states: u64,
-    pub link_states: ListView<'a, LinkstateView<'a>, 0>,
+    pub link_states: ListView<'a, LinkstateListLinkStatesWalk, 0>,
 }
 
 #[allow(dead_code)]
@@ -206,7 +219,7 @@ impl<'a> LinkstateListView<'a> {
                 }
                 _count += 1;
             }
-            _out.link_states = ListView::new(_rest, _count, [], |_c, _a| LinkstateView::decode(_c), |_, _| {});
+            _out.link_states = ListView::new(_rest, _count, []);
         }
         _out.num_link_states = num_link_states;
         Ok(())
