@@ -565,8 +565,11 @@ what each step proves; nothing here is built.
   `generation` names the link a query came in on (`QueryPlane`), one `FacePlane` snapshot lists
   the transport.
 - The link layer opens a UDP acceptor that takes the first `InitSyn` and no other (`SessionLinks::
-  open_acceptor`). A peer-accepting stack exists beside it, for the slot profile: `Accept<D>` and
-  `IpAcceptor` (`wz-runtime-coop`), which yield one driver for each peer that connects.
+  open_acceptor`). A peer-accepting stack exists beside it, for the slot profile and for streams
+  only: `Accept<D>` and `IpAcceptor` (`wz-runtime-coop`, under `session-slot`), which a node's
+  loop polls and which yield one driver for each `tcp/` connection taken off the port. A UDP
+  socket is one peer, so a UDP face for each peer needs the datagrams demultiplexed by their
+  source address, which nothing does yet.
 
 ### The shape: registrations once, tables per face
 
