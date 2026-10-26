@@ -333,7 +333,10 @@ transport-link-unixpipe,transport-link-ws|"
     # its own queryables is compiled only with `local-subscriber` and `local-queryable`
     # (`tests::local::`, `tests::local_query::`), and its faces, which a connectivity plane
     # reads, only with `connectivity` (`tests::faces::`), and its periodic jobs only with `ticker`
-    # (`tests::ticker::`, 7). MEASURED: 32 passed with the seven before `ticker`, 6 s.
+    # (`tests::ticker::`, 7). MEASURED: 32 passed with the seven before `ticker`, 6 s. The
+    # advanced subscriber's host runs on this engine against a stand-in that plays the advanced
+    # publisher (`tests::advanced::`, 5, compiled with `ticker`, `query` and `liveliness`), and
+    # the crate's own tests were 56 passed with all of them, 4 s.
     "wz-capi-coop|hook|connectivity,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker|"
     # What a hosted OS tells a node about its network, and the multicast sockets built from it,
     # which the tokio runtime and the cooperative host both open. The `#iface=` honor (the v4 and

@@ -41,6 +41,15 @@ use crate::{CoopConfig, CoopEngine};
 
 const LOOPBACK: [u8; 4] = [127, 0, 0, 1];
 
+/// The identity of the advanced publisher the router stands in for, and the key its cache and its
+/// liveliness token share (`<base>/@adv/pub/<zid in hex>/<eid>/_`).
+#[cfg(feature = "query")]
+const ADVANCED_PUBLISHER_ZID: [u8; 1] = [0x02];
+#[cfg(feature = "query")]
+const ADVANCED_PUBLISHER_EID: u32 = 7;
+#[cfg(feature = "query")]
+const ADVANCED_PUBLISHER_KEY: &str = "demo/data/@adv/pub/2/7/_";
+
 type Engine = CoopEngine<PosixLinks, PosixClock>;
 
 fn params(whatami: WhatAmI, zid: u8) -> SessionInitParams {
@@ -92,6 +101,15 @@ enum Command {
     /// tokens alive.
     #[cfg(feature = "liveliness")]
     HoldToken(u64, &'static str),
+    /// Push `.1` on the key as the advanced publisher of identity `(zid 2, eid 7)` would, with
+    /// sequence number `.2`.
+    #[cfg(feature = "query")]
+    PushSequenced(&'static str, &'static [u8], u32),
+    /// Hold the cache of that advanced publisher: a queryable on its `@adv` key that answers as
+    /// the publisher's own cache does, out of the samples with the sequence numbers `.0`, each
+    /// carrying its number as its payload. The selectors it is asked are recorded.
+    #[cfg(feature = "query")]
+    HoldCache(&'static [u8]),
 }
 
 /// What reached the router.
@@ -109,6 +127,9 @@ struct Seen {
     /// The queries the session asked.
     #[cfg(feature = "query")]
     queries: usize,
+    /// The parameters of each query the held cache was asked, in the order they arrived.
+    #[cfg(feature = "query")]
+    selectors: Vec<String>,
     /// Whether the router has done what the test told it about queries: holds the queryable it
     /// was told to, or has gone quiet.
     #[cfg(feature = "query")]
@@ -371,6 +392,66 @@ fn run_router(
             #[cfg(feature = "query")]
             Ok(Command::Silence) => {
                 silent.set(true);
+                counted_queries.lock().unwrap().settled = true;
+            }
+            #[cfg(feature = "query")]
+            Ok(Command::PushSequenced(key, value, sn)) => {
+                let meta = wz_session_core::metadata::PushMetadata {
+                    source_info: Some(wz_session_core::sample::SourceInfo::new(
+                        &ADVANCED_PUBLISHER_ZID,
+                        ADVANCED_PUBLISHER_EID,
+                        sn,
+                    )),
+                    ..Default::default()
+                };
+                let _ = actions.send_push_with_meta_literal(key, value, true, &meta);
+            }
+            #[cfg(feature = "query")]
+            Ok(Command::HoldCache(sns)) => {
+                use wz_ext_pubsub::advanced_cache::{CacheConfig, CacheStore, CachedSample};
+                use wz_session_core::sample::{SampleKind, SourceInfo, TimestampHint};
+                // The ring holds every sample it is given: the default depth is one, and a cache
+                // of one answers a range with its last sample alone.
+                let store = CacheStore::new(CacheConfig {
+                    max_samples: sns.len().max(1),
+                    ..CacheConfig::default()
+                });
+                for &sn in sns {
+                    store.cache_sample(CachedSample::new(
+                        "demo/data",
+                        vec![sn],
+                        Some(SourceInfo::new(
+                            &ADVANCED_PUBLISHER_ZID,
+                            ADVANCED_PUBLISHER_EID,
+                            u32::from(sn),
+                        )),
+                        TimestampHint {
+                            time: 100 + u64::from(sn),
+                            zid: ADVANCED_PUBLISHER_ZID.to_vec(),
+                        },
+                        SampleKind::Put,
+                    ));
+                }
+                let mut cache = store.query_handler(|| 0);
+                let asked = counted_queries.clone();
+                answering
+                    .borrow_mut()
+                    .queryables
+                    .register_sink(
+                        ADVANCED_PUBLISHER_KEY,
+                        Locality::Any,
+                        false,
+                        BoxedQuerySink::new(
+                            move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
+                                asked.lock().unwrap().selectors.push(
+                                    String::from_utf8_lossy(query.parameters().unwrap_or(&[]))
+                                        .into_owned(),
+                                );
+                                cache(query, out);
+                            },
+                        ),
+                    )
+                    .expect("the router's cache");
                 counted_queries.lock().unwrap().settled = true;
             }
             Err(TryRecvError::Empty) => {}
@@ -855,6 +936,8 @@ fn a_session_that_redials_none_ends_with_its_link() {
     assert!(SessionDrive::read(&*engine, false).is_err());
 }
 
+#[cfg(all(feature = "ticker", feature = "query", feature = "liveliness"))]
+mod advanced;
 #[cfg(feature = "connectivity")]
 mod faces;
 #[cfg(feature = "query")]

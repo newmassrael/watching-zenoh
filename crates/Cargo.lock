@@ -3850,6 +3850,7 @@ version = "0.1.0"
 dependencies = [
  "log",
  "wz-capi-port",
+ "wz-ext-pubsub",
  "wz-host-net",
  "wz-runtime-coop",
  "wz-runtime-posix",

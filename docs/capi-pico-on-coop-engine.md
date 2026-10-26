@@ -518,7 +518,11 @@ it behaves as pico behaves in both of pico's threading arms.
   state. The tokio engine's own subscriber stays for the zenoh-c ABI and for the runtime's
   users. First witness on the cooperative engine: a subscriber declared after a publisher put is
   handed the publisher's cache and then its live puts in order (`client_only_dials_a_listener`,
-  `mod advanced`, run on both engines by Layer C1co).
+  `mod advanced`, run on both engines by Layer C1co). The engine's own tests (`tests::advanced`)
+  run the subscriber's host on it against a stand-in that plays the publisher, answering out of a
+  real cache ring: the gap recovery, the heartbeat, the periodic re-ask and the detection of a
+  publisher that appears late, each of which the scripted-engine tests had proved rule by rule
+  and none of which had run on an engine, and a get answered with several replies.
 - Next: the rest of section 6, one step each.
 - Earlier plan note: the engine port proper. A `SessionEngine` trait holds what the single-threaded client
   calls on a session; the tokio engine implements it first, `session_state` returns the selected
