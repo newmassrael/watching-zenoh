@@ -1281,6 +1281,43 @@ pub struct SnAccounting {
     pub without_resolution: u64,
 }
 
+/// Per direction, how many data frames took the NEXT INTEGER after the previous
+/// frame on their conduit and how many did not, judged with or without a ring.
+///
+/// A different question from [`SnAccounting`], which is the wire's loss
+/// accounting and refuses to judge without the ring
+/// ([`SnVerdict::WithoutResolution`]): a mask too wide or too narrow would
+/// misread a wraparound or a gap. "The next integer" needs no mask, which is the
+/// rule `reassembly_dispatch::SnRing::Unknown` applies to a chain it follows
+/// without a ring, and it is what a sequence counter of another protocol
+/// rarely satisfies by chance. So a session the capture joined after its
+/// handshake still says something about whether its bytes are zenoh.
+///
+/// With a ring, a [`SnVerdict::Continuous`] frame `follows` and a gap, a
+/// duplicate or a frame out of the window `breaks`. Without one, a frame whose SN
+/// is the previous one plus one `follows` and any other value `breaks`, a
+/// wraparound included. A conduit's first frame is neither.
+#[cfg(feature = "codec-frame")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SnSteps {
+    /// Frames one step after the previous frame on their conduit.
+    pub follows: u64,
+    /// Frames with an earlier frame on their conduit that are not one step
+    /// after it.
+    pub breaks: u64,
+}
+
+#[cfg(feature = "codec-frame")]
+impl SnSteps {
+    /// Two directions, or two sessions, together.
+    pub fn and(self, other: SnSteps) -> SnSteps {
+        SnSteps {
+            follows: self.follows.saturating_add(other.follows),
+            breaks: self.breaks.saturating_add(other.breaks),
+        }
+    }
+}
+
 /// R311y608 — does the link a datagram arrived on have a HANDSHAKE?
 ///
 /// Named after what it decides rather than after the link kind, because the
@@ -1648,6 +1685,15 @@ pub struct PassiveSession {
     /// R311y609 (C12) — cumulative, per direction.
     #[cfg(feature = "codec-frame")]
     sn_accounting: [SnAccounting; 2],
+    /// Cumulative, per direction. See [`SnSteps`].
+    #[cfg(feature = "codec-frame")]
+    sn_steps: [SnSteps; 2],
+    /// Per direction, whether [`Self::sn_last`] holds SNs written before the
+    /// session had a ring. They are cleared when the ring arrives, so the first
+    /// frame judged against the ring is a [`SnVerdict::Baseline`] as it was
+    /// before unringed SNs were kept.
+    #[cfg(feature = "codec-frame")]
+    sn_unringed: [bool; 2],
     /// R311y611 (§1.4b) — messages decoded whose header set a flag bit its own
     /// MID does not define, per direction.
     ///
@@ -1700,6 +1746,12 @@ const BATCH_HEADER_COMPRESSION: u8 = 0x01;
 
 #[cfg(feature = "transport-compression")]
 const _: () = assert!(BATCH_HEADER_COMPRESSION == crate::compression::BATCH_HEADER_COMPRESSION);
+
+/// Whether this build opens lz4 batches. Without `transport-compression` every
+/// lz4 batch reads [`Carried::Undecompressible`] whatever its bytes are, so that
+/// reading is a statement about the build and not about the bytes, and a reader
+/// that weighs units as evidence must not weigh it.
+pub const OPENS_LZ4_BATCHES: bool = cfg!(feature = "transport-compression");
 
 /// Open one headed batch whose COMPRESSION bit is set: `wire` is
 /// the unit, header byte included.
@@ -1815,6 +1867,10 @@ impl Default for PassiveSession {
             sn_last: [[None; SN_CONDUITS]; 2],
             #[cfg(feature = "codec-frame")]
             sn_accounting: [SnAccounting::default(); 2],
+            #[cfg(feature = "codec-frame")]
+            sn_steps: [SnSteps::default(); 2],
+            #[cfg(feature = "codec-frame")]
+            sn_unringed: [false; 2],
             reserved_headers: [0; 2],
             undefined_mandatory_exts: [0; 2],
             unaccounted_batch_bytes: [0; 2],
@@ -2404,6 +2460,12 @@ impl PassiveSession {
         self.sn_accounting[usize::from(direction == Direction::B)]
     }
 
+    /// The SN steps for one direction so far. See [`SnSteps`].
+    #[cfg(feature = "codec-frame")]
+    pub fn sn_steps(&self, direction: Direction) -> SnSteps {
+        self.sn_steps[usize::from(direction == Direction::B)]
+    }
+
     /// R311y609 — the resynchronisation accounting for one direction so far.
     /// Always zero on a datagram link, which has no framing to lose.
     pub fn resync_accounting(&self, direction: Direction) -> ResyncAccounting {
@@ -2484,11 +2546,27 @@ impl PassiveSession {
         let idx = usize::from(direction == Direction::B);
         let acc = &mut self.sn_accounting[idx];
         acc.frames += 1;
+        let conduit = sn_conduit(priority, reliable);
+        let steps = &mut self.sn_steps[idx];
         let Some(mask) = self.context.sn_mask() else {
             acc.without_resolution += 1;
+            // No ring, so no verdict; the step to the next integer is still a
+            // fact (see `SnSteps`). A repeated SN leaves the slot as it is.
+            let slot = &mut self.sn_last[idx][conduit];
+            if let Some(last) = *slot {
+                if sn == last.wrapping_add(1) {
+                    steps.follows += 1;
+                } else {
+                    steps.breaks += 1;
+                }
+            }
+            *slot = Some(sn);
+            self.sn_unringed[idx] = true;
             return Some(SnVerdict::WithoutResolution);
         };
-        let conduit = sn_conduit(priority, reliable);
+        if core::mem::take(&mut self.sn_unringed[idx]) {
+            self.sn_last[idx] = [None; SN_CONDUITS];
+        }
         let slot = &mut self.sn_last[idx][conduit];
         let verdict = match *slot {
             None => SnVerdict::Baseline,
@@ -2504,6 +2582,13 @@ impl PassiveSession {
                 }
             }
         };
+        match verdict {
+            SnVerdict::Continuous => steps.follows += 1,
+            SnVerdict::Duplicate | SnVerdict::OutOfWindow | SnVerdict::Gap { .. } => {
+                steps.breaks += 1;
+            }
+            SnVerdict::Baseline | SnVerdict::WithoutResolution => {}
+        }
         match verdict {
             SnVerdict::Duplicate => acc.duplicates += 1,
             SnVerdict::OutOfWindow => acc.out_of_window += 1,
@@ -6544,6 +6629,82 @@ mod tests {
         let acc = s.sn_accounting(Direction::A);
         assert_eq!(acc.without_resolution, 2);
         assert_eq!((acc.missing, acc.gaps), (0, 0), "absence is not zero loss");
+    }
+
+    /// Without a ring there is no verdict, and the step to the next integer is
+    /// still counted: 7, 8, 9 follow, 20 breaks, 21 follows, and a repeated 21
+    /// breaks. The first frame is neither.
+    #[test]
+    fn an_unresolved_session_still_counts_steps_to_the_next_integer() {
+        let mut s = PassiveSession::new();
+        let sns = [7u64, 8, 9, 20, 21, 21];
+        for sn in sns {
+            s.push(Direction::A, &framed(&frame_wire(sn, &oam_record(sn)), 2));
+        }
+        for _ in sns {
+            assert_eq!(
+                s.next_frame(Direction::A).expect("frame").sn_verdict,
+                Some(SnVerdict::WithoutResolution)
+            );
+        }
+        assert_eq!(
+            s.sn_steps(Direction::A),
+            SnSteps {
+                follows: 3,
+                breaks: 2
+            }
+        );
+        assert_eq!(s.sn_steps(Direction::B), SnSteps::default());
+    }
+
+    /// With a ring the steps are the verdicts: a continuous frame follows, and a
+    /// gap, a duplicate and a reorder break.
+    #[test]
+    fn a_resolved_session_counts_steps_from_its_verdicts() {
+        let mut s = established(vec![]);
+        for sn in [4u64, 5, 5, 3, 6, 9] {
+            s.push(Direction::A, &framed(&frame_wire(sn, &oam_record(sn)), 2));
+        }
+        for _ in 0..6 {
+            s.next_frame(Direction::A).expect("frame");
+        }
+        assert_eq!(
+            s.sn_steps(Direction::A),
+            SnSteps {
+                follows: 2,
+                breaks: 3
+            }
+        );
+    }
+
+    /// SNs seen before the ring arrived are not a baseline for the ring: the
+    /// first frame judged against it is a `Baseline`, as it was before unringed
+    /// SNs were kept, and the steps before and after are both counted.
+    #[test]
+    fn the_ring_arriving_starts_its_verdicts_from_a_baseline() {
+        let mut s = PassiveSession::new();
+        for sn in [1u64, 2] {
+            s.push(Direction::A, &framed(&frame_wire(sn, &oam_record(sn)), 2));
+            s.next_frame(Direction::A).expect("unringed frame");
+        }
+        let mut s = establish(s, vec![]);
+        for sn in [3u64, 4] {
+            s.push(Direction::A, &framed(&frame_wire(sn, &oam_record(sn)), 2));
+        }
+        let verdicts: Vec<Option<SnVerdict>> = (0..2)
+            .map(|_| s.next_frame(Direction::A).expect("frame").sn_verdict)
+            .collect();
+        assert_eq!(
+            verdicts,
+            vec![Some(SnVerdict::Baseline), Some(SnVerdict::Continuous)]
+        );
+        assert_eq!(
+            s.sn_steps(Direction::A),
+            SnSteps {
+                follows: 2,
+                breaks: 0
+            }
+        );
     }
 
     /// A duplicate and a reorder are NOT loss, and neither may move the
