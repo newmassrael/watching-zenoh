@@ -289598,6 +289598,48 @@
         "The keys of the configuration that upstream's tests exercise (acl, authentication, low pass, downsampling, qos overwrite, namespace, admin space, connection retry, tcp buffers) are each a slice or a recorded refusal, not yet owned."
       ]
     },
+    "Round 3689": {
+      "decision_summary": "Phase 2 of the closed key set (docs/closed-key-set.md) is built as a pure gate, not as the refusal at declare time the first cut of the note named. KeyGate is open (admits every key, looks at none, counts nothing) or closed over the catalogue: admit_key admits a key of the set, and admit_declared also needs an entity of that kind declared on it; both answer with the key's number, and a refusal is OutsideSet or RoleNotDeclared, counted by reason and saturating. The catalogue gains find_entity, sound because the table now checks in a const that entities ascend strictly by kind and key. The first cut was dropped on reading the tokio host: its declare calls return a handle and not a Result, over a dozen entry points exist, and an image built from a declaration declares exactly its entities, so what a closed image must refuse at run time is what a peer sends. The key-set policy therefore waits for the first host that refuses on it. No host calls the gate; nothing is measured.",
+      "changes_bullets": [
+        "crates/wz-session-core src/key_gate.rs (new): KeyGate, Admitted, Refusal and Refused; open and closed constructors, admit_key, admit_declared; five unit tests over the catalogue's test table.",
+        "src/key_catalogue.rs: find_entity(kind, key), and a const check that entities ascend strictly by kind and then key (TableError::EntityOrder); two unit tests.",
+        "tests/key_catalogue_model.rs: the gate over the fixture admits every declared role, refuses every other pair by role and every key a declared pattern covers by the set, and counts them.",
+        "scripts/lib/wz_key_set.py --selftest holds the entity order; docs/closed-key-set.md records phase 2 as built and why it changed."
+      ],
+      "verification_bullets": [
+        "The catalogue and gate unit tests (27 matched by the key_ filter) and the six model tests pass on the shared build machine; clippy -D warnings over all targets passes with default features and with default features off for wz-session-core; cargo fmt --check passes; wz_key_set.py --selftest exits 0.",
+        "Not run: the hosted run; any host calling the gate; the receive path; any measurement."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "Phase 3: the key-set policy (open is the default) lands with the first host that refuses on it, with the receive path: the peer's alias row holds a key number, a peer's resource or message outside the set is refused and counted, open stays unchanged and is tested, and the first measurement is taken against open on one machine and condition.",
+        "The tokio receive path (pubsub.rs dispatch and PeerNaming) is shared with other sessions; ask who touched it last before editing.",
+        "Owner decisions still open: undeclared key under a declared wildcard (the note refuses it), one declaration or two with access control, publisher wildcards, sender-fixed resource ids.",
+        "Read the hosted run of this push per job, compared by head sha; the run of the previous push was cancelled by the next push and graded nothing."
+      ],
+      "publishable_decision_summary": "Phase 2 of the closed key set (docs/closed-key-set.md) is built as a pure gate, not as the refusal at declare time the first cut of the note named. KeyGate is open (admits every key, looks at none, counts nothing) or closed over the catalogue: admit_key admits a key of the set, and admit_declared also needs an entity of that kind declared on it; both answer with the key's number, and a refusal is OutsideSet or RoleNotDeclared, counted by reason and saturating. The catalogue gains find_entity, sound because the table now checks in a const that entities ascend strictly by kind and key. The first cut was dropped on reading the tokio host: its declare calls return a handle and not a Result, over a dozen entry points exist, and an image built from a declaration declares exactly its entities, so what a closed image must refuse at run time is what a peer sends. The key-set policy therefore waits for the first host that refuses on it. No host calls the gate; nothing is measured.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core src/key_gate.rs (new): KeyGate, Admitted, Refusal and Refused; open and closed constructors, admit_key, admit_declared; five unit tests over the catalogue's test table.",
+        "src/key_catalogue.rs: find_entity(kind, key), and a const check that entities ascend strictly by kind and then key (TableError::EntityOrder); two unit tests.",
+        "tests/key_catalogue_model.rs: the gate over the fixture admits every declared role, refuses every other pair by role and every key a declared pattern covers by the set, and counts them.",
+        "scripts/lib/wz_key_set.py --selftest holds the entity order; docs/closed-key-set.md records phase 2 as built and why it changed."
+      ],
+      "publishable_verification_bullets": [
+        "The catalogue and gate unit tests (27 matched by the key_ filter) and the six model tests pass on the shared build machine; clippy -D warnings over all targets passes with default features and with default features off for wz-session-core; cargo fmt --check passes; wz_key_set.py --selftest exits 0.",
+        "Not run: the hosted run; any host calling the gate; the receive path; any measurement."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Phase 3: the key-set policy (open is the default) lands with the first host that refuses on it, with the receive path: the peer's alias row holds a key number, a peer's resource or message outside the set is refused and counted, open stays unchanged and is tested, and the first measurement is taken against open on one machine and condition.",
+        "The tokio receive path (pubsub.rs dispatch and PeerNaming) is shared with other sessions; ask who touched it last before editing.",
+        "Owner decisions still open: undeclared key under a declared wildcard (the note refuses it), one declaration or two with access control, publisher wildcards, sender-fixed resource ids.",
+        "Read the hosted run of this push per job, compared by head sha; the run of the previous push was cancelled by the next push and graded nothing."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
