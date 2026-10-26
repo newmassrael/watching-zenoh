@@ -53,7 +53,7 @@ doctest = false
 # transports below have meaning today, and the rest join the manifest with the slice that maps the
 # engine's capabilities onto them (the catalogue of docs/build-configuration.md, C1).
 default = ["engine-tokio", "transport_tcp", "transport_udp"]
-engine-tokio = ["dep:wz-capi-core"]
+engine-tokio = ["dep:wz-capi-core", "dep:wz-runtime-tokio"]
 # `transport_tcp` is what gives the configuration its default listening endpoints (`tcp/[::]:7447`
 # for a router, `tcp/[::]:0` for a peer), as it does upstream; the engine carries the link always.
 transport_tcp = ["zenoh-config/transport_tcp"]
@@ -85,7 +85,22 @@ tokio = { version = "1.47.1", default-features = false, features = ["macros", "r
 tracing = "0.1.41"
 uhlc = { version = "0.8.0", default-features = false }
 # The tokio engine: what opens a session from the plan of a configuration (`open_plan`) and runs it.
-wz-capi-core = { path = "../wz-capi-core", optional = true }
+#
+# The unicast capabilities a session OFFERS are chosen by the crate that takes the engine, and an
+# offer for one the build lacks is refused at the handshake, which closes the link: a session that
+# offers QoS (upstream's default) without `transport-qos` opens, listens, and then drops every
+# connection. The C ABI names them for the same reason (see its manifest), and this crate, which
+# replaces upstream's, names the same set: QoS and lowlatency, the endpoint's QoS band, and
+# fragmentation of what is larger than a batch. Compression and the user and password method are
+# capabilities of the engine that its default features carry.
+wz-capi-core = { path = "../wz-capi-core", optional = true, features = ["transport-qos"] }
+wz-runtime-tokio = { path = "../wz-runtime-tokio", optional = true, default-features = false, features = [
+    "routing-accept",
+    "transport-fragmentation",
+    "zenoh-config",
+    "session-extqos",
+    "transport-lowlatency",
+] }
 zenoh-buffers = { path = "../wz-zenoh-buffers", features = ["std"] }
 zenoh-codec = { path = "../wz-zenoh-codec" }
 zenoh-collections = { path = "../wz-zenoh-collections", features = ["std"] }

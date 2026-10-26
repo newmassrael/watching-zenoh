@@ -66,6 +66,77 @@ fn answers(port: u16) -> bool {
     TcpStream::connect_timeout(&address, Duration::from_millis(500)).is_ok()
 }
 
+/// What upstream's own sessions see of the node a test opens, which is how the role a node plays is
+/// observed: the handshake carries it, and the other side reads it (`routers_zid`, `peers_zid`, and
+/// the transports with the role and the qualities each announced).
+mod observer {
+    use std::time::{Duration, Instant};
+
+    use up_zenoh::{Config, Session, Wait};
+
+    /// An upstream node of `mode` with id `id`, that listens on `listen` and dials `connect` of the
+    /// loopback, and scouts for nobody.
+    pub fn open(
+        id: &str,
+        mode: &str,
+        listen: Option<u16>,
+        connect: Option<u16>,
+    ) -> Result<Session, String> {
+        let endpoints = |port: Option<u16>| match port {
+            Some(port) => format!(r#"["tcp/127.0.0.1:{port}"]"#),
+            None => "[]".to_owned(),
+        };
+        let config = Config::from_json5(&format!(
+            r#"{{ id: "{id}", mode: "{mode}",
+                  listen: {{ endpoints: {} }}, connect: {{ endpoints: {} }},
+                  scouting: {{ multicast: {{ enabled: false }} }} }}"#,
+            endpoints(listen),
+            endpoints(connect)
+        ))
+        .expect("a configuration zenoh reads");
+        up_zenoh::open(config).wait().map_err(|error| error.to_string())
+    }
+
+    /// The routers and peers this session sees, and its transports (id, role, qos, multicast), each
+    /// sorted.
+    pub fn seen(session: &Session) -> String {
+        let sorted = |mut list: Vec<String>| {
+            list.sort();
+            list
+        };
+        let info = session.info();
+        let routers = sorted(info.routers_zid().wait().map(|z| z.to_string()).collect());
+        let peers = sorted(info.peers_zid().wait().map(|z| z.to_string()).collect());
+        let transports = sorted(
+            info.transports()
+                .wait()
+                .map(|t| {
+                    format!(
+                        "{} {:?} qos={} multicast={}",
+                        t.zid(),
+                        t.whatami(),
+                        t.is_qos(),
+                        t.is_multicast()
+                    )
+                })
+                .collect(),
+        );
+        format!("routers {routers:?} peers {peers:?} transports {transports:?}")
+    }
+
+    /// [`seen`] once the session sees `count` transports, or after five seconds.
+    pub fn seen_with(session: &Session, count: usize) -> String {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let now = seen(session);
+            if now.matches(" qos=").count() >= count || Instant::now() > deadline {
+                return now;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
 fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -92,6 +163,62 @@ macro_rules! session_cases {
 
             fn config(json5: &str) -> Config {
                 Config::from_json5(json5).expect("a configuration zenoh reads")
+            }
+
+            /// A node of this crate of `mode` with id `id`, that listens on `listen` and dials
+            /// `connect` of the loopback, and scouts for nobody.
+            fn node(id: &str, mode: &str, listen: Option<u16>, connect: Option<u16>) -> Config {
+                let endpoints = |port: Option<u16>| match port {
+                    Some(port) => format!(r#"["tcp/127.0.0.1:{port}"]"#),
+                    None => "[]".to_owned(),
+                };
+                config(&format!(
+                    r#"{{ id: "{id}", mode: "{mode}",
+                          listen: {{ endpoints: {} }}, connect: {{ endpoints: {} }},
+                          scouting: {{ multicast: {{ enabled: false }} }} }}"#,
+                    endpoints(listen),
+                    endpoints(connect)
+                ))
+            }
+
+            /// The role this crate's node plays, as upstream's nodes on the other side of a link
+            /// read it: each line is what an upstream node sees of the one opened here.
+            pub fn roles() -> Vec<String> {
+                let mut out = vec![];
+                // A node of this crate that listens, seen by an upstream node that dials it.
+                for (id, mode, observer_id, observer_mode) in [
+                    ("5a0001", "router", "b00001", "client"),
+                    ("5a0002", "peer", "b00002", "peer"),
+                ] {
+                    let port = free_port();
+                    let subject = $z::open(node(id, mode, Some(port), None)).wait();
+                    let line = match &subject {
+                        Err(error) => format!("the {mode} did not open: {}", plain(&error.to_string())),
+                        Ok(_) => match observer::open(observer_id, observer_mode, None, Some(port)) {
+                            Ok(observer) => observer::seen(&observer),
+                            Err(error) => format!("the observer did not open: {}", plain(&error)),
+                        },
+                    };
+                    out.push(format!("{mode} listening, {observer_mode} dials: {line}"));
+                }
+                // A client, a peer and a router of this crate that each dial an upstream router,
+                // seen by it.
+                for (id, mode) in [
+                    ("5a0003", "client"),
+                    ("5a0004", "peer"),
+                    ("5a0005", "router"),
+                ] {
+                    let port = free_port();
+                    let upstream = observer::open("a00001", "router", Some(port), None)
+                        .expect("the upstream router opens");
+                    let subject = $z::open(node(id, mode, None, Some(port))).wait();
+                    let line = match &subject {
+                        Err(error) => format!("the {mode} did not open: {}", plain(&error.to_string())),
+                        Ok(_) => observer::seen_with(&upstream, 1),
+                    };
+                    out.push(format!("{mode} dials an upstream router: {line}"));
+                }
+                out
             }
 
             pub fn identity() -> Vec<String> {
@@ -243,11 +370,21 @@ fn known_differences() -> Vec<(&'static str, &'static str, &'static str)> {
     // why, so a session that listens and dials says "LinkFailed" where upstream says what the
     // operating system answered. The slice that carries the cause of a failed open through the
     // engine closes these two.
+    //
+    // The role of a router is the other: this engine's session announces a peer's role to a node
+    // that dials it whatever `mode` says, and a router is the router data plane, which a session
+    // does not carry yet, so it is refused by its key and not opened as what it is not. The two
+    // lines of the roles test that open one hold the words of both.
     vec![
         (
             "refusals",
             "Can not create a new TCP listener bound to",
             "the session could not be opened: LinkFailed",
+        ),
+        (
+            "roles",
+            "Router qos=true multicast=false",
+            "the router did not open: `mode` = \"router\"",
         ),
     ]
 }
@@ -318,6 +455,47 @@ fn the_configurations_that_cannot_be_opened() {
     drop(taken);
     assert!(u.iter().all(|l| l.contains(": Err(")), "{u:#?}");
     compare("refusals", &u, &w);
+}
+
+/// The control of the roles test: upstream's own nodes as the subject, which must read as the
+/// roles they play, so that a comparison that passes is not a comparison of two nothings.
+#[test]
+fn upstream_nodes_see_each_other_in_the_roles_they_play() {
+    let u = up::roles();
+    assert!(
+        u.iter().any(|l| l.starts_with("router listening") && l.contains("routers [\"5a0001\"]")),
+        "{u:#?}"
+    );
+    assert!(
+        u.iter().any(|l| l.starts_with("peer listening") && l.contains("peers [\"5a0002\"]")),
+        "{u:#?}"
+    );
+    assert!(
+        u.iter().any(|l| l.starts_with("client dials") && l.contains("5a0003 Client")),
+        "{u:#?}"
+    );
+    assert!(
+        u.iter().any(|l| l.starts_with("peer dials") && l.contains("5a0004 Peer")),
+        "{u:#?}"
+    );
+    assert!(
+        u.iter().any(|l| l.starts_with("router dials") && l.contains("5a0005 Router")),
+        "{u:#?}"
+    );
+}
+
+#[test]
+fn the_role_a_node_plays_is_what_upstream_nodes_see_of_it() {
+    // The log of upstream's nodes, for a run that is asked for it with `RUST_LOG`.
+    up_zenoh::try_init_log_from_env();
+    let (u, w) = (up::roles(), wz::roles());
+    assert!(
+        u.iter().any(|l| l.contains("Router") && l.starts_with("router listening")),
+        "{u:#?}"
+    );
+    assert!(u.iter().any(|l| l.starts_with("client dials") && l.contains("Client")), "{u:#?}");
+    assert!(u.iter().any(|l| l.starts_with("peer dials") && l.contains("Peer")), "{u:#?}");
+    compare("roles", &u, &w);
 }
 
 #[test]

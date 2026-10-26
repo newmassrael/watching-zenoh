@@ -80,8 +80,23 @@ impl Engine {
             listen: Vec::new(),
         };
         let document = tokio_engine::document_of(&expanded, role, &zid)?;
-        let plan = OpenPlan::resolve(role, stated, Some(&document))
+        let plan = OpenPlan::resolve(role, stated, Some(&document.to_string()))
             .map_err(tokio_engine::refusal_error)?;
+        // A router is refused by the key that makes the session one (decision D6 of the seam note).
+        // The engine opens a session that listens and dials, and what it announces to a node that
+        // dials it is a peer's role whatever `mode` says: a router is the router data plane, which
+        // this session does not carry, and is a slice of its own. Announcing the role without being
+        // one would be the silent fallback the other refusals of this function exist against.
+        if expanded.mode() == zenoh_protocol::core::WhatAmI::Router {
+            bail!(
+                "`mode` = \"router\": this engine's session is a peer or a client; a router needs \
+                 the router data plane, which a session does not carry yet"
+            );
+        }
+        // Decision D6: a key the configuration states with a value other than its default, that
+        // upstream acts on and this engine does not, is refused by its name, and not left to do
+        // nothing.
+        tokio_engine::refuse_unmapped(&plan.ignored, &document)?;
         // The engine says that a link did not open and not which one. When the session was only
         // to dial, the one that did not is among the endpoints it was told of, and upstream says
         // so in these words; when it was to listen as well, the engine does not say which of the
@@ -176,7 +191,9 @@ mod tokio_engine {
     pub(super) use wz_capi_core::runtime::session::LocalDeliveryDrain;
     pub(super) use wz_capi_core::{drive::FaceDrive, faces::no_shm_clients};
     use wz_capi_core::{
-        drive::OpenError, open_plan::OpenRefusal, runtime::session_glue::WhatAmI as EngineWhatAmI,
+        drive::OpenError,
+        open_plan::{key_state, KeyState, OpenRefusal},
+        runtime::session_glue::WhatAmI as EngineWhatAmI,
     };
     use zenoh_config::{wrappers::ZenohId, ExpandedConfig, ModeDependent};
     use zenoh_protocol::core::{EndPoints, WhatAmI};
@@ -218,14 +235,45 @@ mod tokio_engine {
         config: &ExpandedConfig,
         role: EngineWhatAmI,
         zid: &ZenohId,
-    ) -> ZResult<String> {
+    ) -> ZResult<serde_json::Value> {
         let mut document = serde_json::to_value::<&zenoh_config::Config>(config)?;
         let object = document
             .as_object_mut()
             .ok_or_else(|| zerror!("the configuration is not an object"))?;
         object.insert("mode".to_owned(), role.to_str().into());
         object.insert("id".to_owned(), zid.to_string().into());
-        Ok(document.to_string())
+        Ok(document)
+    }
+
+    /// Decision D6: refuse, by name, the keys of `document` that `ignored` says the engine does not
+    /// act on, that upstream acts on, and whose value is not the default's.
+    ///
+    /// `ignored` lists every leaf the document carries that the engine does not act on, and the
+    /// document is the whole configuration, so most of them hold the default. A key that upstream
+    /// itself does nothing with ([`KeyState::Inert`]) is accepted whatever its value, and a key no
+    /// list knows ([`None`]) is refused as the unmapped ones are.
+    pub(super) fn refuse_unmapped(ignored: &[String], document: &serde_json::Value) -> ZResult<()> {
+        let default = serde_json::to_value(zenoh_config::Config::default())?;
+        let unmapped: Vec<String> = ignored
+            .iter()
+            .filter(|key| key_state(key) != Some(KeyState::Inert))
+            .filter(|key| {
+                let pointer = format!("/{key}");
+                document.pointer(&pointer) != default.pointer(&pointer)
+            })
+            .map(|key| match document.pointer(&format!("/{key}")) {
+                Some(value) => format!("`{key}` = {value}"),
+                None => format!("`{key}`"),
+            })
+            .collect();
+        if unmapped.is_empty() {
+            Ok(())
+        } else {
+            bail!(
+                "this engine does not act on the configuration it is given: {}",
+                unmapped.join(", ")
+            )
+        }
     }
 
     /// An open the plan refuses, in the words upstream refuses it in where it does, and by the key
@@ -699,6 +747,91 @@ mod tests {
                 .starts_with("No peer specified and multicast scouting deactivated!"),
             "{error}"
         );
+    }
+
+    /// Decision D6: every key of the default configuration is in a state, so a key that a bump of
+    /// the pinned upstream adds fails here until it is given one.
+    #[test]
+    fn every_key_of_the_default_configuration_has_a_state() {
+        use wz_capi_core::open_plan::{is_section_of_keys_with_a_state, key_state, KeyState};
+
+        let all: Vec<String> = Config::default().0.keys().collect();
+        // The configuration lists its sections beside its leaves; a section has no state of its
+        // own, its leaves do.
+        let keys: Vec<String> = all
+            .iter()
+            .filter(|key| {
+                !all.iter()
+                    .any(|other| other.starts_with(&format!("{key}/")))
+            })
+            .cloned()
+            .collect();
+        assert!(keys.len() > 100, "{} keys", keys.len());
+        let stateless: Vec<&String> = keys
+            .iter()
+            .filter(|key| key_state(key).is_none() && !is_section_of_keys_with_a_state(key))
+            .collect();
+        assert!(stateless.is_empty(), "keys with no state: {stateless:#?}");
+        let count = |wanted| {
+            keys.iter()
+                .filter(|key| key_state(key) == Some(wanted))
+                .count()
+        };
+        // The three states are all in use: a table whose refused state is empty refuses nothing.
+        assert!(count(KeyState::Mapped) > 0);
+        assert!(count(KeyState::Inert) > 0);
+        assert!(count(KeyState::Unmapped) > 0);
+    }
+
+    /// A configuration with `key` set to the json5 `value` and a peer that listens on the loopback.
+    fn peer_with(key: &str, value: &str) -> Config {
+        let mut config = peer("a1b2ca");
+        config.insert_json5(key, value).expect("a key zenoh reads");
+        config
+    }
+
+    #[test]
+    fn a_key_the_engine_does_not_act_on_is_refused_by_its_name_unless_it_is_the_default() {
+        // `transport/unicast/accept_timeout` is upstream's (10 s by default) and this engine's
+        // handshake does not read it: stating another value asks for what will not happen.
+        let error = open(peer_with("transport/unicast/accept_timeout", "1234"))
+            .wait()
+            .expect_err("an unmapped key with a value of its own");
+        let text = error.to_string();
+        assert!(
+            text.contains("`transport/unicast/accept_timeout` = 1234"),
+            "{text}"
+        );
+        // CONTROL: the same key at its default is no instruction, and the session opens.
+        let default = Config::default()
+            .get_json("transport/unicast/accept_timeout")
+            .expect("a default");
+        open(peer_with("transport/unicast/accept_timeout", &default))
+            .wait()
+            .expect("the default of an unmapped key opens");
+    }
+
+    #[test]
+    fn a_mapped_key_with_a_value_of_its_own_opens_and_an_inert_one_does_too() {
+        // `connect/timeout_ms` is read by the engine (the dial phase).
+        open(peer_with("connect/timeout_ms", "500"))
+            .wait()
+            .expect("a mapped key");
+        // `transport/auth/pubkey/key_size` is declared and serialised upstream and read by nothing.
+        open(peer_with("transport/auth/pubkey/key_size", "4096"))
+            .wait()
+            .expect("an inert key");
+    }
+
+    #[test]
+    fn a_router_is_refused_by_the_key_that_makes_the_session_one() {
+        let config = Config::from_json5(
+            r#"{ mode: "router", listen: { endpoints: ["tcp/127.0.0.1:0"] },
+                 scouting: { multicast: { enabled: false } } }"#,
+        )
+        .expect("a configuration zenoh reads");
+        let error = open(config).wait().expect_err("a router");
+        assert!(error.to_string().contains("`mode` = \"router\""), "{error}");
     }
 
     #[test]

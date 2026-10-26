@@ -36,7 +36,11 @@ use wz_runtime_tokio::session::LocalDeliveryDrain;
 use wz_runtime_tokio::session_glue::{TxQueueConf, WhatAmI};
 use wz_runtime_tokio::session_open::{SessionOffer, TransportMode};
 use wz_runtime_tokio::startup_phase::PhasePolicy;
-use wz_runtime_tokio::zenoh_config::{default_listen_endpoint, ZenohConfigIngest, ZenohNodeConfig};
+use wz_runtime_tokio::zenoh_config::{
+    default_listen_endpoint, honours_config_key, ZenohConfigIngest, ZenohNodeConfig,
+    UNHONOURED_READER_GAP, UNHONOURED_UPSTREAM_CONFIG_KEYS, UPSTREAM_INERT_CONFIG_KEYS,
+    WZ_EXTENSION_CONFIG_KEYS,
+};
 
 use crate::drive::{
     names_a_group, open_blocking, CapiTlsConfig, ConfiguredZid, DialPhase, FaceDrive,
@@ -71,6 +75,77 @@ pub fn dial_role(mode: Option<&str>) -> WhatAmI {
         _ if cfg!(feature = "peer") => WhatAmI::Peer,
         _ => WhatAmI::Client,
     }
+}
+
+/// What the engine does with one key of a configuration document.
+///
+/// Every leaf key of a zenoh configuration is in exactly one of three states (decision D6 of
+/// `docs/zenoh-api-on-the-engine.md`), kept beside the lists of the runtime's reader that say it
+/// ([`key_state`]). The plan reports the keys a document states that are not [`Self::Mapped`]
+/// ([`OpenPlan::ignored`]), and what an open does with them is its client's: the C ABI accepts them,
+/// as the reference library's own C binding accepts a key it does nothing with, and the Rust API
+/// refuses the ones that are [`Self::Unmapped`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyState {
+    /// The engine acts on the key.
+    Mapped,
+    /// Upstream itself does nothing with the key (it declares and serialises it and no code reads it,
+    /// or it parses and discards it), so stating it changes nothing here either.
+    Inert,
+    /// Upstream acts on the key and this engine does not yet: stating it with a value other than its
+    /// default asks for something that will not happen.
+    Unmapped,
+}
+
+/// The state of the key `path` (`transport/link/tx/threads`), or `None` for a key no list of the
+/// runtime's reader knows: one a bump of the pinned upstream added, which has no state until it is
+/// given one, and which a test over the default configuration fails on until then.
+pub fn key_state(path: &str) -> Option<KeyState> {
+    if honours_config_key(path) {
+        Some(KeyState::Mapped)
+    } else if UPSTREAM_INERT_CONFIG_KEYS.contains(&path) || WZ_EXTENSION_CONFIG_KEYS.contains(&path)
+    {
+        Some(KeyState::Inert)
+    } else if UNHONOURED_UPSTREAM_CONFIG_KEYS.contains(&path)
+        || UNHONOURED_READER_GAP.contains(&path)
+        || INLINE_CERTIFICATE_KEYS.contains(&path)
+    {
+        Some(KeyState::Unmapped)
+    } else {
+        None
+    }
+}
+
+/// The five keys that give a certificate or a key of the `tls/` and `quic/` links inline, base64
+/// encoded, where the keys [`tls_of`] reads name a file.
+///
+/// Upstream declares them as options with no default, so a running zenohd's resolved configuration
+/// does not carry them and the lists of the runtime's reader, which are adjudicated against that
+/// resolved configuration, do not name them; they are named here, so that stating one is refused as
+/// an instruction the engine does not carry out and not taken for a key nobody has a state for.
+pub const INLINE_CERTIFICATE_KEYS: &[&str] = &[
+    "transport/link/tls/root_ca_certificate_base64",
+    "transport/link/tls/listen_private_key_base64",
+    "transport/link/tls/listen_certificate_base64",
+    "transport/link/tls/connect_private_key_base64",
+    "transport/link/tls/connect_certificate_base64",
+];
+
+/// Whether `path` is not a leaf but a section that holds keys with a state (`gateway`, which holds
+/// `gateway/south`): the configuration lists a section as a key when it is an option that holds
+/// nothing, and such a key has no state of its own.
+pub fn is_section_of_keys_with_a_state(path: &str) -> bool {
+    let prefix = format!("{path}/");
+    [
+        wz_runtime_tokio::zenoh_config::HONOURED_CONFIG_KEYS,
+        UPSTREAM_INERT_CONFIG_KEYS,
+        WZ_EXTENSION_CONFIG_KEYS,
+        UNHONOURED_UPSTREAM_CONFIG_KEYS,
+        UNHONOURED_READER_GAP,
+        INLINE_CERTIFICATE_KEYS,
+    ]
+    .iter()
+    .any(|list| list.iter().any(|key| key.starts_with(&prefix)))
 }
 
 /// The endpoint lists the caller's own reading of the configuration states, before the document is
@@ -446,6 +521,10 @@ pub struct OpenPlan {
     pub policy: NodePolicy,
     /// The certificate material for the `tls/` and `quic/` links.
     pub tls: CapiTlsConfig,
+    /// The keys the document states that the engine does not act on, sorted: the leaves the
+    /// reader reports ignored, whether or not the value is the default. What an open does about
+    /// them is its client's (see [`KeyState`]).
+    pub ignored: Vec<String>,
 }
 
 impl OpenPlan {
@@ -467,6 +546,9 @@ impl OpenPlan {
             TimestampingEnabled::default,
             ZenohConfigIngest::timestamping_enabled,
         );
+        let ignored = ingest
+            .as_ref()
+            .map_or_else(Vec::new, |ingest| ingest.ignored.clone());
         let node = ingest.map(|ingest| ingest.config);
         let batch_size = node
             .as_ref()
@@ -674,6 +756,7 @@ impl OpenPlan {
             auth,
             policy,
             tls,
+            ignored,
         })
     }
 
@@ -1308,6 +1391,45 @@ mod tests {
                 &gossip(0)
             )
         );
+    }
+
+    /// Each key is mapped, inert or unmapped, and a key no list knows has no state.
+    #[test]
+    fn a_key_is_mapped_inert_or_unmapped_and_a_key_nobody_lists_has_none() {
+        assert_eq!(key_state("connect/timeout_ms"), Some(KeyState::Mapped));
+        assert_eq!(
+            key_state("transport/auth/pubkey/key_size"),
+            Some(KeyState::Inert)
+        );
+        assert_eq!(
+            key_state("transport/unicast/accept_timeout"),
+            Some(KeyState::Unmapped)
+        );
+        assert_eq!(
+            key_state("transport/link/tls/root_ca_certificate_base64"),
+            Some(KeyState::Unmapped)
+        );
+        assert_eq!(key_state("a/key/nobody/lists"), None);
+        assert!(is_section_of_keys_with_a_state("gateway"));
+        assert!(!is_section_of_keys_with_a_state(
+            "transport/unicast/accept_timeout"
+        ));
+    }
+
+    /// The plan reports every key the document states that the engine does not act on, and the
+    /// keys it acts on are not among them.
+    #[test]
+    fn the_plan_reports_the_keys_the_document_states_that_the_engine_does_not_act_on() {
+        let plan = plan_of(
+            WhatAmI::Client,
+            &["tcp/127.0.0.1:1"],
+            &[],
+            r#"{ connect: { timeout_ms: 500 },
+                 scouting: { multicast: { enabled: false } },
+                 transport: { unicast: { accept_timeout: 1234 } } }"#,
+        )
+        .expect("opens");
+        assert_eq!(plan.ignored, ["transport/unicast/accept_timeout"]);
     }
 
     /// A plan's description never holds a credential, so a golden built from it cannot leak one.
