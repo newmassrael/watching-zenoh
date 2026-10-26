@@ -1379,8 +1379,9 @@ note = "the largest message a session rejoins from fragments, unicast and in a g
 [[upstream_switch]]
 original = "zenoh-pico"
 switch = "Z_TRANSPORT_LEASE_EXPIRE_FACTOR"
-class = "never"
-note = "pico sends a keepalive every lease divided by this; wz has no switch for the divisor: open-debt item 926"
+class = "maps"
+anchor = "limit:PICO_KEEPALIVES_PER_LEASE"
+note = "a keepalive goes out whenever the line has been idle for the adopted lease divided by this"
 
 [[upstream_switch]]
 original = "zenoh-pico"
@@ -1958,6 +1959,17 @@ from fragments, unicast and in a multicast group, as zenoh-pico's
 FRAG_MAX_SIZE. A fragment that would take its message past it ends the chain
 and the message is dropped; a message that arrives in one frame is never
 measured against it.
+'''
+
+[[limit]]
+id = "PICO_KEEPALIVES_PER_LEASE"
+kconfig = "WZ_LIMIT_PICO_KEEPALIVES_PER_LEASE"
+default = 3
+help = '''
+How many keepalives a session of the zenoh-pico interface sends in one lease,
+as zenoh-pico's Z_TRANSPORT_LEASE_EXPIRE_FACTOR: whenever the line has been
+idle for the adopted lease divided by this, the session sends one. At least 1.
+The lease is the smaller of the two the peers advertised.
 '''
 
 # A policy is behaviour upstream does not have; it is declared with what upstream does and

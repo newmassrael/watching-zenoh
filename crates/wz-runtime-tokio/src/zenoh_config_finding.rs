@@ -56,6 +56,7 @@ const KEY_UNICAST_LOWLATENCY: &str = "transport/unicast/lowlatency";
 const KEY_BATCH_SIZE: &str = "transport/link/tx/batch_size";
 /// `transport/link/tx/lease`.
 const KEY_LEASE: &str = "transport/link/tx/lease";
+const KEY_KEEP_ALIVE: &str = "transport/link/tx/keep_alive";
 /// `transport/unicast/max_links`.
 const KEY_MAX_LINKS: &str = "transport/unicast/max_links";
 
@@ -182,6 +183,7 @@ impl ConfigDefect {
             }
             ConfigDefect::ZeroBatchSize => (None, vec![KEY_BATCH_SIZE]),
             ConfigDefect::ZeroLease => (None, vec![KEY_LEASE]),
+            ConfigDefect::ZeroKeepAlive => (None, vec![KEY_KEEP_ALIVE]),
             ConfigDefect::ZeroMaxLinks => (None, vec![KEY_MAX_LINKS]),
         };
         Finding::describing(self, endpoint, sites_in(node, &keys))
@@ -341,6 +343,10 @@ mod tests {
             lease_ms: 0,
             ..Default::default()
         };
+        let zero_keep_alive = ZenohNodeConfig {
+            keep_alive: 0,
+            ..Default::default()
+        };
         let zero_links = ZenohNodeConfig {
             max_links: 0,
             ..Default::default()
@@ -348,11 +354,12 @@ mod tests {
         let duplicated = ZenohNodeConfig::default()
             .listening_on("tcp/10.0.0.5:7447")
             .listening_on("tcp/10.0.0.5:7447");
-        let cases: [(&str, ZenohNodeConfig); 6] = [
+        let cases: [(&str, ZenohNodeConfig); 7] = [
             ("Unreachable", unreachable),
             ("QosWithLowlatency", qos_lowlatency),
             ("ZeroBatchSize", zero_batch),
             ("ZeroLease", zero_lease),
+            ("ZeroKeepAlive", zero_keep_alive),
             ("ZeroMaxLinks", zero_links),
             ("DuplicateListenEndpoint", duplicated),
         ];
@@ -424,6 +431,7 @@ mod tests {
             ConfigDefect::QosWithLowlatency,
             ConfigDefect::ZeroBatchSize,
             ConfigDefect::ZeroLease,
+            ConfigDefect::ZeroKeepAlive,
             ConfigDefect::ZeroMaxLinks,
         ] {
             findings.push(defect.finding(None));

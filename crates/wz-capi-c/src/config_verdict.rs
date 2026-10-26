@@ -905,6 +905,10 @@ pub(crate) mod tests {
                 "ZeroLease",
             ),
             (
+                vec![listen_one, ("transport/link/tx/keep_alive", "0")],
+                "ZeroKeepAlive",
+            ),
+            (
                 vec![listen_one, ("transport/unicast/max_links", "0")],
                 "ZeroMaxLinks",
             ),

@@ -30,7 +30,9 @@ use wz_session_core::observer::ApplicationLayerObserver;
 use wz_session_core::publish_options::PublishOptions;
 #[cfg(feature = "query")]
 use wz_session_core::query_sink::{BoxedQuerySink, QueryView, ReplyOut};
-use wz_session_core::session_init_params::{LinkRxConf, SessionInitParams, TxQueueConf};
+use wz_session_core::session_init_params::{
+    KeepAliveConf, LinkRxConf, SessionInitParams, TxQueueConf,
+};
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
 use wz_session_core::sink::{BoxedSink, SampleView};
@@ -60,6 +62,7 @@ fn params(whatami: WhatAmI, zid: u8) -> SessionInitParams {
         req_id_res: 2,
         batch_size: 1024,
         lease_ms: 10_000,
+        keep_alive: KeepAliveConf::PICO,
         initial_sn: 0,
         cookie: vec![],
         tx_queue: TxQueueConf::default(),
@@ -468,6 +471,7 @@ fn config(router: &Router) -> CoopConfig {
         zid: Some(vec![0xb1; 4]),
         batch_size: 1024,
         lease_ms: 10_000,
+        keep_alive: KeepAliveConf::PICO,
         link_rx: LinkRxConf::default(),
         tx_queue: TxQueueConf::pico(),
         timeouts: SessionTimeouts::spec_defaults(),

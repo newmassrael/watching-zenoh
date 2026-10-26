@@ -71,7 +71,9 @@ use wz_session_core::pubsub::SubscriptionId;
 use wz_session_core::push_build;
 use wz_session_core::sample::{Sample, SampleKind};
 use wz_session_core::send_wire_error::SendWireError;
-use wz_session_core::session_init_params::{LinkRxConf, SessionInitParams, TxQueueConf};
+use wz_session_core::session_init_params::{
+    KeepAliveConf, LinkRxConf, SessionInitParams, TxQueueConf,
+};
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
 use wz_session_core::sink::{BoxedSink, SampleView};
@@ -149,6 +151,8 @@ pub struct CoopConfig {
     pub batch_size: u16,
     /// The lease the session advertises, in milliseconds.
     pub lease_ms: u64,
+    /// How often the session's keepalive speaks on an idle link.
+    pub keep_alive: KeepAliveConf,
     /// What the session rejoins from fragments: a chain a fragment would take past its
     /// `max_message_size` is dropped.
     pub link_rx: LinkRxConf,
@@ -636,6 +640,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 req_id_res: 2,
                 batch_size: self.config.batch_size,
                 lease_ms: self.config.lease_ms,
+                keep_alive: self.config.keep_alive,
                 initial_sn: 0,
                 cookie: Vec::new(),
                 tx_queue: self.config.tx_queue,

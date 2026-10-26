@@ -8987,6 +8987,9 @@ pub(crate) fn session_init_params_for(
         // this ten-second one.
         batch_size: tuning.batch_size,
         lease_ms: tuning.lease_ms,
+        // The cadence the demo's sessions have always kept, which the router's capacity model
+        // is calibrated on; the key `transport/link/tx/keep_alive` is the C ABI session's.
+        keep_alive: wz::runtime_tokio::session_glue::KeepAliveConf::default(),
         // R2925 — the queue sizes and congestion waits the operator gave.
         tx_queue: tuning.tx_queue,
         // And the largest message its sessions rejoin from fragments.

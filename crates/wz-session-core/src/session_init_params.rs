@@ -228,7 +228,12 @@ pub enum LeaseBasis {
 /// `transport/link/tx/keep_alive` (4 by default) and zenoh-pico builds it in as
 /// `Z_TRANSPORT_LEASE_EXPIRE_FACTOR` (3 by default); the two also divide
 /// different leases ([`LeaseBasis`]), so each interface states both halves.
-/// `Default` is zenoh's.
+///
+/// `Default` is the cadence every wz session kept before this was a value:
+/// the adopted lease in three, which is zenoh-pico's. The zenoh interface
+/// states zenoh's own, [`Self::ZENOH`], and a node that honours the key
+/// `transport/link/tx/keep_alive` builds it from the key; a router's
+/// capacity model still reads the three it was calibrated on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeepAliveConf {
     /// Keepalives in one lease; at least 1 (a config stating 0 is refused
@@ -240,13 +245,16 @@ pub struct KeepAliveConf {
 
 impl Default for KeepAliveConf {
     fn default() -> Self {
-        Self::zenoh(KEEP_ALIVE_PER_LEASE)
+        Self::PICO
     }
 }
 
 impl KeepAliveConf {
     /// zenoh-pico's keepalive at its default factor.
     pub const PICO: Self = Self::pico(PICO_LEASE_EXPIRE_FACTOR);
+
+    /// zenoh's keepalive at its default `transport/link/tx/keep_alive`.
+    pub const ZENOH: Self = Self::zenoh(KEEP_ALIVE_PER_LEASE);
 
     /// zenoh's keepalive: `per_lease` of them in the session's own lease.
     pub const fn zenoh(per_lease: u32) -> Self {
@@ -501,6 +509,42 @@ mod shape_tests {
         assert_eq!((udp.batch_bytes, udp.queue_unit_bytes), (1450, 65535));
         let small = conf.shape(true, 2048, 1024);
         assert_eq!((small.batch_bytes, small.queue_unit_bytes), (2048, 2048));
+    }
+}
+
+#[cfg(test)]
+mod keep_alive_tests {
+    use super::{KeepAliveConf, PICO_LEASE_EXPIRE_FACTOR};
+
+    /// The two originals divide different leases by different numbers, and a session built for
+    /// one is not the other when the peer advertises a shorter lease than its own: zenoh keeps
+    /// its own lease's share, zenoh-pico the adopted (smaller) lease's.
+    #[test]
+    fn zenoh_divides_its_own_lease_and_pico_the_adopted_one() {
+        let (own, adopted) = (10_000, 4_000);
+        assert_eq!(KeepAliveConf::ZENOH.interval_ms(own, adopted), 2_500);
+        assert_eq!(KeepAliveConf::PICO.interval_ms(own, adopted), 1_333);
+        // Control: with no shorter peer lease the two bases agree on the lease, so the
+        // difference above is the basis and the number, not the arithmetic.
+        assert_eq!(KeepAliveConf::pico(4).interval_ms(10_000, 10_000), 2_500);
+        assert_eq!(KeepAliveConf::zenoh(3).interval_ms(10_000, 10_000), 3_333);
+    }
+
+    /// What no session was given is what every wz session kept: pico's cadence.
+    #[test]
+    fn the_default_is_the_cadence_wz_sessions_kept_before_it_was_a_value() {
+        assert_eq!(KeepAliveConf::default(), KeepAliveConf::PICO);
+        assert_eq!(KeepAliveConf::PICO.per_lease, PICO_LEASE_EXPIRE_FACTOR);
+        assert_ne!(KeepAliveConf::default(), KeepAliveConf::ZENOH);
+    }
+
+    /// The interval is never zero (the emitter would spin on it), and a count of zero reads as
+    /// one rather than dividing by it.
+    #[test]
+    fn a_degenerate_lease_or_count_never_gives_a_zero_interval() {
+        assert_eq!(KeepAliveConf::pico(3).interval_ms(0, 0), 1);
+        assert_eq!(KeepAliveConf::zenoh(4).interval_ms(2, 2), 1);
+        assert_eq!(KeepAliveConf::zenoh(0).interval_ms(10_000, 10_000), 10_000);
     }
 }
 

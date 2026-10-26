@@ -291,6 +291,9 @@ pub enum ConfigDefect {
     ZeroBatchSize,
     /// A zero lease. Every link is instantly expired.
     ZeroLease,
+    /// Zero keepalives in a lease. Upstream divides the lease by it, so a session would
+    /// panic when it started its link's keepalive.
+    ZeroKeepAlive,
     /// Fewer than one link per session.
     ZeroMaxLinks,
 }
@@ -341,6 +344,7 @@ impl core::fmt::Display for ConfigDefect {
             ),
             ConfigDefect::ZeroBatchSize => write!(f, "batch_size is 0"),
             ConfigDefect::ZeroLease => write!(f, "lease is 0"),
+            ConfigDefect::ZeroKeepAlive => write!(f, "keep_alive is 0"),
             ConfigDefect::ZeroMaxLinks => write!(f, "max_links is 0"),
         }
     }
@@ -1078,6 +1082,13 @@ pub struct ZenohNodeConfig {
     pub batch_size: u16,
     /// `transport/link/tx/lease` (milliseconds).
     pub lease_ms: u64,
+    /// `transport/link/tx/keep_alive`: keepalives in one lease, so a session sends one whenever
+    /// its line has been idle for the lease divided by this. Read by the zenoh-c session
+    /// ([`C_ABI_SESSION_HONOURED_KEYS`]), which divides its own lease as upstream does
+    /// (`io/zenoh-transport/src/unicast/universal/transport.rs` @
+    /// `/ self.manager.config.unicast.keep_alive as u32;`); upstream's default is 4
+    /// (`commons/zenoh-config/src/defaults.rs` @ `keep_alive: 4,`).
+    pub keep_alive: u32,
     /// R2925 — `transport/link/tx/queue/size/*` (batches per priority, each in
     /// upstream's `1..=16`) and the two congestion waits,
     /// `.../congestion_control/drop/wait_before_drop` and
@@ -1452,6 +1463,7 @@ impl Default for ZenohNodeConfig {
             peer_linkstate: false,
             batch_size: 65_535,
             lease_ms: 10_000,
+            keep_alive: wz_session_core::session_init_params::KEEP_ALIVE_PER_LEASE,
             tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             max_links: 1,
@@ -1726,6 +1738,9 @@ impl ZenohNodeConfig {
         if self.lease_ms == 0 {
             out.push(ConfigDefect::ZeroLease);
         }
+        if self.keep_alive == 0 {
+            out.push(ConfigDefect::ZeroKeepAlive);
+        }
         if self.max_links == 0 {
             out.push(ConfigDefect::ZeroMaxLinks);
         }
@@ -1915,6 +1930,7 @@ impl ZenohNodeConfig {
         out.push_str("    \"link\": {\n      \"tx\": {\n");
         let _ = writeln!(out, "        \"batch_size\": {},", self.batch_size);
         let _ = writeln!(out, "        \"lease\": {},", self.lease_ms);
+        let _ = writeln!(out, "        \"keep_alive\": {},", self.keep_alive);
         // R2925 — the queue sizes and the two congestion waits, in upstream's
         // `queue` shape.
         out.push_str("        \"queue\": {\n          \"size\": {");
@@ -2563,7 +2579,8 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     "transport/link/tls/connect_private_key",
     "transport/link/tls/enable_mtls",
     "transport/link/tls/verify_name_on_connect",
-    "transport/link/tx/keep_alive",
+    // `transport/link/tx/keep_alive` LEFT this list for [`C_ABI_SESSION_HONOURED_KEYS`]: the
+    // zenoh-c session's keepalive speaks at its own lease divided by it.
     "transport/link/tx/queue/allocation/mode",
     "transport/link/tx/queue/batching/enabled",
     "transport/link/tx/queue/batching/time_limit",
@@ -2765,7 +2782,8 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // R2593 — the four socket-buffer keys left this half with the surface's
     // other half: wz acts on them now.
     "transport/link/tls/close_link_on_expiration",
-    "transport/link/tx/keep_alive",
+    // `transport/link/tx/keep_alive` LEFT here, and its group below: the zenoh-c session reads
+    // it ([`C_ABI_SESSION_HONOURED_KEYS`]).
     "transport/link/tx/queue/allocation/mode",
     "transport/link/tx/queue/batching/enabled",
     "transport/link/tx/queue/batching/time_limit",
@@ -2974,7 +2992,8 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
             // `transport/link/rx/max_message_size` LEFT this group: wz now has
             // the bound it configures, a session's reassembly cap.
             "transport/link/tls/close_link_on_expiration",
-            "transport/link/tx/keep_alive",
+            // `transport/link/tx/keep_alive` LEFT this group: a keepalive's share of a lease is
+            // a parameter of the session, as its lease is.
             "transport/link/tx/queue/allocation/mode",
             "transport/link/tx/queue/batching/enabled",
             "transport/link/tx/queue/batching/time_limit",
@@ -3628,11 +3647,17 @@ pub const DEEPENABLE_UPSTREAM_KEYS: &[&str] = &[
 /// Open-debt item 913 -- and `transport/multicast/join_interval`, how often each group the
 /// zenoh-c session joins sends its JOIN. The demo's groups take their interval from its command
 /// line, so it is the C ABI session's alone.
+///
+/// Open-debt item 926 -- and `transport/link/tx/keep_alive`, the keepalives a session sends in
+/// one of its own leases. The demo and the router keep the cadence their capacity model was
+/// calibrated on (the adopted lease in three), so it is the C ABI session's alone until that
+/// model takes the count from the session.
 pub const C_ABI_SESSION_HONOURED_KEYS: &[&str] = &[
     "scouting/gossip/autoconnect",
     "scouting/gossip/autoconnect_strategy",
     "scouting/gossip/enabled",
     "scouting/gossip/target",
+    "transport/link/tx/keep_alive",
     "transport/multicast/join_interval",
     "transport/shared_memory/transport_optimization/enabled",
     "transport/shared_memory/transport_optimization/pool_size",
@@ -6704,6 +6729,13 @@ impl ZenohNodeConfig {
             out.lease_ms = v;
             named.push("transport/link/tx/lease");
         }
+        if let Some(v) = want_u64(&doc, "transport/link/tx/keep_alive")? {
+            out.keep_alive = u32::try_from(v).map_err(|_| ConfigIngestError::OutOfRange {
+                path: "transport/link/tx/keep_alive",
+                value: v.to_string(),
+            })?;
+            named.push("transport/link/tx/keep_alive");
+        }
         // R2925 — the queue sizes, each refused outside upstream's `1..=16` at
         // its own key, as upstream's config validator refuses the section.
         for (path, _, byte) in TX_QUEUE_SIZE_KEYS {
@@ -7285,6 +7317,7 @@ mod tests {
         let c = ZenohNodeConfig {
             batch_size: 0,
             lease_ms: 0,
+            keep_alive: 0,
             max_links: 0,
             ..Default::default()
         };
@@ -7293,6 +7326,7 @@ mod tests {
             vec![
                 ConfigDefect::ZeroBatchSize,
                 ConfigDefect::ZeroLease,
+                ConfigDefect::ZeroKeepAlive,
                 ConfigDefect::ZeroMaxLinks
             ]
         );

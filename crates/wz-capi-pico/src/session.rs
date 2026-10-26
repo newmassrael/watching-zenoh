@@ -72,7 +72,7 @@ use crate::result::{ZResult, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK};
 use wz_capi_core::drive::{
     open_blocking, CapiTlsConfig, DialPhase, OpenError, OpenStance, SessionState,
 };
-use wz_session_core::session_init_params::{LinkRxConf, TxQueueConf};
+use wz_session_core::session_init_params::{KeepAliveConf, LinkRxConf, TxQueueConf};
 use wz_session_core::WhatAmI;
 
 /// Open-debt item 913 — whether a `listen` endpoint names a multicast group: a `udp/`
@@ -113,6 +113,22 @@ const fn pico_batch(bytes: usize) -> u16 {
 const PICO_LINK_RX: LinkRxConf = LinkRxConf {
     max_message_size: wz_session_core::caps::PICO_FRAG_MAX_BYTES,
 };
+
+/// How often a session of this ABI sends a keepalive on an idle link, on either engine: pico's
+/// `Z_TRANSPORT_LEASE_EXPIRE_FACTOR` as the build states it, dividing the adopted lease. Refused
+/// when the build is made if the build states none (a division by zero in pico's own task).
+const PICO_KEEP_ALIVE: KeepAliveConf = KeepAliveConf::pico(pico_keepalives_per_lease(
+    wz_session_core::caps::PICO_KEEPALIVES_PER_LEASE,
+));
+
+/// The factor as a `u32`, at least 1.
+const fn pico_keepalives_per_lease(factor: usize) -> u32 {
+    assert!(
+        factor >= 1 && factor <= u32::MAX as usize,
+        "zenoh-pico divides its lease by a factor of at least 1"
+    );
+    factor as u32
+}
 
 /// The cooperative engine's read wait, in milliseconds: a number of [`wz_session_core::caps`],
 /// refused when the build is made if it is past what the engine's wait holds.
@@ -601,6 +617,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             // zenoh's 65535, so this advertises the numbers the build states for them.
             batch_size: pico_batch(wz_session_core::caps::PICO_UNICAST_BATCH_BYTES),
             lease_ms: wz_session_core::caps::PICO_LEASE_MS as u64,
+            keep_alive: PICO_KEEP_ALIVE,
             link_rx: PICO_LINK_RX,
             // pico negotiates no transport capability on unicast: its InitSyn
             // carries the patch ext and nothing else
@@ -738,10 +755,12 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
             zid: None,
             // The numbers of pico's value build switches, as this build states them: the
             // batch size and lease its InitSyn carries (`BATCH_UNICAST_SIZE`,
-            // `Z_TRANSPORT_LEASE`), the largest message it rejoins (`FRAG_MAX_SIZE`) and its
-            // handshake's receive deadline (`Z_TRANSPORT_CONNECT_TIMEOUT`).
+            // `Z_TRANSPORT_LEASE`), the largest message it rejoins (`FRAG_MAX_SIZE`), how often
+            // its keepalive speaks (`Z_TRANSPORT_LEASE_EXPIRE_FACTOR`) and its handshake's
+            // receive deadline (`Z_TRANSPORT_CONNECT_TIMEOUT`).
             batch_size: pico_batch(wz_session_core::caps::PICO_UNICAST_BATCH_BYTES),
             lease_ms: wz_session_core::caps::PICO_LEASE_MS as u64,
+            keep_alive: PICO_KEEP_ALIVE,
             link_rx: PICO_LINK_RX,
             tx_queue: TxQueueConf::pico(),
             timeouts: wz_session_core::session_timeouts::SessionTimeouts::spec_defaults(),

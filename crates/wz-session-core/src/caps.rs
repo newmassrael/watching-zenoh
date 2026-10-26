@@ -464,3 +464,10 @@ pub const PICO_CONNECT_TIMEOUT_MS: usize = generated::PICO_CONNECT_TIMEOUT_MS;
 /// `if ((_z_wbuf_len(dbuf) + msg->_payload.len) > Z_FRAG_MAX_SIZE) {`), so it is the
 /// [`LinkRxConf`](crate::session_init_params::LinkRxConf) those sessions are given.
 pub const PICO_FRAG_MAX_BYTES: usize = generated::PICO_FRAG_MAX_BYTES;
+
+/// How many keepalives a session of the pico ABI sends in one lease: pico's
+/// `Z_TRANSPORT_LEASE_EXPIRE_FACTOR`, the divisor of the adopted lease in its keepalive task
+/// (`vendor/zenoh-pico/src/transport/unicast/lease.c` @
+/// `return _z_fut_fn_result_wake_up_after((unsigned long)ztu->_common._lease / Z_TRANSPORT_LEASE_EXPIRE_FACTOR);`).
+/// At least 1.
+pub const PICO_KEEPALIVES_PER_LEASE: usize = generated::PICO_KEEPALIVES_PER_LEASE;

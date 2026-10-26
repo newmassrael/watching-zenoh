@@ -40,8 +40,8 @@ use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session::LocalDeliveryDrain;
 use wz_runtime_tokio::session_glue::{
     drive_session_until_terminal_with_extra_deadline, EntropyUnavailable, ExtraDeadline,
-    IterationEvent, LinkRxConf, OsEntropy, SessionInitParams, SessionTimeouts, SigningKey,
-    TxQueueConf, WhatAmI,
+    IterationEvent, KeepAliveConf, LinkRxConf, OsEntropy, SessionInitParams, SessionTimeouts,
+    SigningKey, TxQueueConf, WhatAmI,
 };
 #[cfg(feature = "peer")]
 use wz_runtime_tokio::session_open::{bind_endpoint_with_config, AcceptConfig, BoundListener};
@@ -1199,6 +1199,9 @@ pub struct LinkTx {
     pub batch_size: u16,
     /// The lease advertised, in milliseconds: see [`OpenStance::lease_ms`].
     pub lease_ms: u64,
+    /// How often the session's keepalive speaks on an idle link: see
+    /// [`OpenStance::keep_alive`].
+    pub keep_alive: KeepAliveConf,
 }
 
 /// What a session's links are told, as upstream's `transport/link` block holds it: the transmit
@@ -1246,6 +1249,7 @@ pub(crate) fn init_params(
         req_id_res: 2,
         batch_size: link_conf.tx.batch_size,
         lease_ms: link_conf.tx.lease_ms,
+        keep_alive: link_conf.tx.keep_alive,
         initial_sn: 0,
         cookie: Vec::new(),
         tx_queue: link_conf.tx.queue,
@@ -3832,6 +3836,12 @@ pub struct OpenStance {
     /// passes [`DEFAULT_LEASE_MS`]; zenoh-pico's ABI passes the number its build states for pico's
     /// `Z_TRANSPORT_LEASE`.
     pub lease_ms: u64,
+    /// How often the session's keepalive speaks on an idle link; see [`LinkTx`]. A zenoh-c
+    /// session reads it from `transport/link/tx/keep_alive` (keepalives in its own lease) and one
+    /// whose config states none passes [`KeepAliveConf::default`]; zenoh-pico's ABI passes the
+    /// number its build states for pico's `Z_TRANSPORT_LEASE_EXPIRE_FACTOR`, which divides the
+    /// adopted lease.
+    pub keep_alive: KeepAliveConf,
     /// What the session's links, unicast and every group's, rejoin from fragments; see
     /// [`LinkConf`]. A zenoh-c session reads it from `transport/link/rx/max_message_size` and one
     /// whose config states none passes [`LinkRxConf::default`]; zenoh-pico's ABI has no such key
@@ -4126,6 +4136,7 @@ pub fn open_blocking(
         tx_queue,
         batch_size,
         lease_ms,
+        keep_alive,
         link_rx,
         offer,
         zid,
@@ -4173,6 +4184,7 @@ pub fn open_blocking(
             queue: tx_queue,
             batch_size,
             lease_ms,
+            keep_alive,
         },
         rx: link_rx,
     };
@@ -4385,6 +4397,7 @@ mod tests {
                 queue: TxQueueConf::pico(),
                 batch_size: 2048,
                 lease_ms: 4000,
+                keep_alive: KeepAliveConf::PICO,
             },
             rx: LinkRxConf {
                 max_message_size: 4096,
@@ -4393,10 +4406,12 @@ mod tests {
         let params = init_params(WhatAmI::Client, vec![0xC1; 4], stated).expect("entropy");
         assert_eq!(params.batch_size, 2048);
         assert_eq!(params.lease_ms, 4000);
+        assert_eq!(params.keep_alive, KeepAliveConf::PICO);
         assert_eq!(params.link_rx, stated.rx);
-        // Control: the default receive half is another value, so the equality above is the
-        // stated one reaching the parameters and not a default both sides share.
+        // Control: the defaults are other values, so the equalities above are the stated ones
+        // reaching the parameters and not defaults both sides share.
         assert_ne!(stated.rx, LinkRxConf::default());
+        assert_ne!(stated.tx.keep_alive, KeepAliveConf::default());
     }
 
     /// The session runtime is the drive thread's alone only for a serial drive,
@@ -4594,6 +4609,7 @@ mod tests {
                             queue: TxQueueConf::default(),
                             batch_size: 1024,
                             lease_ms: DEFAULT_LEASE_MS,
+                            keep_alive: KeepAliveConf::default(),
                         },
                         rx: LinkRxConf::default(),
                     },
@@ -5175,6 +5191,7 @@ mod tests {
             tx_queue: TxQueueConf::pico(),
             batch_size: DEFAULT_BATCH_SIZE,
             lease_ms: DEFAULT_LEASE_MS,
+            keep_alive: KeepAliveConf::PICO,
             link_rx: LinkRxConf::default(),
             offer: SessionOffer::universal(),
             zid: None,

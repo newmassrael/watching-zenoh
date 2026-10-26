@@ -33,7 +33,7 @@
 use wz_runtime_tokio::node_clock::TimestampingEnabled;
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::session::LocalDeliveryDrain;
-use wz_runtime_tokio::session_glue::{LinkRxConf, TxQueueConf, WhatAmI};
+use wz_runtime_tokio::session_glue::{KeepAliveConf, LinkRxConf, TxQueueConf, WhatAmI};
 use wz_runtime_tokio::session_open::{SessionOffer, TransportMode};
 use wz_runtime_tokio::startup_phase::PhasePolicy;
 use wz_runtime_tokio::zenoh_config::{
@@ -501,6 +501,10 @@ pub struct OpenPlan {
     /// The lease the session ADVERTISES, in milliseconds: `transport/link/tx/lease`, the one its
     /// groups' Joins already carried. A config that states none is zenoh's default.
     pub lease_ms: u64,
+    /// How often the session's keepalive speaks on an idle link: `transport/link/tx/keep_alive`
+    /// keepalives in the session's own lease, as upstream divides it. A config that states none
+    /// is zenoh's default.
+    pub keep_alive: KeepAliveConf,
     /// What the session's links rejoin from fragments: `transport/link/rx/max_message_size`. A
     /// config that states none is zenoh's default.
     pub link_rx: LinkRxConf,
@@ -560,6 +564,9 @@ impl OpenPlan {
             .as_ref()
             .map_or(DEFAULT_BATCH_SIZE, |node| node.batch_size);
         let lease_ms = node.as_ref().map_or(DEFAULT_LEASE_MS, |node| node.lease_ms);
+        let keep_alive = node.as_ref().map_or(KeepAliveConf::ZENOH, |node| {
+            KeepAliveConf::zenoh(node.keep_alive)
+        });
         let link_rx = node
             .as_ref()
             .map_or_else(LinkRxConf::default, |node| node.link_rx);
@@ -757,6 +764,7 @@ impl OpenPlan {
             listen_phase,
             batch_size,
             lease_ms,
+            keep_alive,
             link_rx,
             offer,
             shm,
@@ -800,6 +808,10 @@ impl OpenPlan {
         line(format!("listen_phase: {:?}", self.listen_phase));
         line(format!("batch_size: {}", self.batch_size));
         line(format!("lease_ms: {}", self.lease_ms));
+        line(format!(
+            "keep_alive: {} per lease, of the {:?} lease",
+            self.keep_alive.per_lease, self.keep_alive.basis
+        ));
         line(format!(
             "max_message_size: {}",
             self.link_rx.max_message_size
@@ -858,6 +870,7 @@ impl OpenPlan {
                 tx_queue: abi.tx_queue,
                 batch_size: self.batch_size,
                 lease_ms: self.lease_ms,
+                keep_alive: self.keep_alive,
                 link_rx: self.link_rx,
                 offer,
                 zid: self.zid,
@@ -1117,14 +1130,17 @@ mod tests {
                 .stance
         };
         let stated = stance(
-            r#"{ transport: { link: { tx: { lease: 4000 }, rx: { max_message_size: 4096 } } } }"#,
+            r#"{ transport: { link: { tx: { lease: 4000, keep_alive: 2 },
+                                      rx: { max_message_size: 4096 } } } }"#,
         );
         assert_eq!(stated.lease_ms, 4000);
+        assert_eq!(stated.keep_alive, KeepAliveConf::zenoh(2));
         assert_eq!(stated.link_rx.max_message_size, 4096);
-        // Control: the same open with neither key is zenoh's defaults, so the numbers above are
-        // the document's and not the plan's own.
+        // Control: the same open with none of the keys is zenoh's defaults, so the numbers above
+        // are the document's and not the plan's own.
         let silent = stance("{}");
         assert_eq!(silent.lease_ms, DEFAULT_LEASE_MS);
+        assert_eq!(silent.keep_alive, KeepAliveConf::ZENOH);
         assert_eq!(silent.link_rx, LinkRxConf::default());
     }
 
@@ -1393,6 +1409,7 @@ mod tests {
                  exit_on_failure: true }}, schedule: {SCHEDULE} }}\n\
                  batch_size: 65535\n\
                  lease_ms: 10000\n\
+                 keep_alive: 4 per lease, of the Own lease\n\
                  max_message_size: 1073741824\n\
                  offer: mode=Qos compression=false shm=false\n\
                  shm: ShmKeys {{ enabled: true, transport_optimization: true, pool_size: 16777216 }}\n\

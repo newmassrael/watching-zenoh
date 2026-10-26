@@ -78,3 +78,5 @@ pub(super) const PICO_CONNECT_TIMEOUT_MS: usize =
     limit(option_env!("WZ_LIMIT_PICO_CONNECT_TIMEOUT_MS"), 10000);
 pub(super) const PICO_FRAG_MAX_BYTES: usize =
     limit(option_env!("WZ_LIMIT_PICO_FRAG_MAX_BYTES"), 4096);
+pub(super) const PICO_KEEPALIVES_PER_LEASE: usize =
+    limit(option_env!("WZ_LIMIT_PICO_KEEPALIVES_PER_LEASE"), 3);

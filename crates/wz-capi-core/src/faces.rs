@@ -1622,6 +1622,7 @@ impl SharedSession {
                     queue: wz_runtime_tokio::session_glue::TxQueueConf::default(),
                     batch_size: crate::drive::DEFAULT_BATCH_SIZE,
                     lease_ms: crate::drive::DEFAULT_LEASE_MS,
+                    keep_alive: wz_runtime_tokio::session_glue::KeepAliveConf::default(),
                 },
                 rx: wz_runtime_tokio::session_glue::LinkRxConf::default(),
             },
