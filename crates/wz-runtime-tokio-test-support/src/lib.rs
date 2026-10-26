@@ -53,6 +53,7 @@ pub fn fixture_session_init_params() -> SessionInitParams {
         req_id_res: 0,
         batch_size: 0,
         lease_ms: 10_000,
+        keep_alive: wz_runtime_tokio::session_glue::KeepAliveConf::default(),
         initial_sn: 0,
         cookie: Vec::new(),
         // Deterministic 32-byte test key. Production callers MUST
@@ -90,6 +91,7 @@ pub fn zenoh_interop_session_init_params(whatami: WhatAmI, zid: Vec<u8>) -> Sess
         req_id_res: 2,
         batch_size: 65535,
         lease_ms: 10_000,
+        keep_alive: wz_runtime_tokio::session_glue::KeepAliveConf::default(),
         initial_sn: 0,
         cookie: Vec::new(),
         // Deterministic 32-byte test key (same discipline as the fixture).

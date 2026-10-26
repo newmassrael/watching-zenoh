@@ -4397,7 +4397,7 @@ mod tests {
                 queue: TxQueueConf::pico(),
                 batch_size: 2048,
                 lease_ms: 4000,
-                keep_alive: KeepAliveConf::PICO,
+                keep_alive: KeepAliveConf::ZENOH,
             },
             rx: LinkRxConf {
                 max_message_size: 4096,
@@ -4406,7 +4406,7 @@ mod tests {
         let params = init_params(WhatAmI::Client, vec![0xC1; 4], stated).expect("entropy");
         assert_eq!(params.batch_size, 2048);
         assert_eq!(params.lease_ms, 4000);
-        assert_eq!(params.keep_alive, KeepAliveConf::PICO);
+        assert_eq!(params.keep_alive, KeepAliveConf::ZENOH);
         assert_eq!(params.link_rx, stated.rx);
         // Control: the defaults are other values, so the equalities above are the stated ones
         // reaching the parameters and not defaults both sides share.

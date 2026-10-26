@@ -249,6 +249,61 @@ mod keepalive_emitter {
         );
     }
 
+    /// An established session built with `keep_alive` over the fixture's other parameters.
+    fn established_with(
+        keep_alive: wz_runtime_tokio::session_glue::KeepAliveConf,
+    ) -> Arc<SessionLinkActions> {
+        let recorder = Arc::new(LifecycleRecordingDriver::default());
+        let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = recorder;
+        let params = wz_runtime_tokio::session_glue::SessionInitParams {
+            keep_alive,
+            ..fixture_session_init_params()
+        };
+        let actions = new_session_actions(outbound, params, TokioTime::new());
+        let mut engine = new_session_engine(&actions);
+        engine.initialize();
+        drive_to_established(&mut engine);
+        actions
+    }
+
+    /// The two originals divide different leases by different numbers, and the session
+    /// keeps the one it was given. zenoh divides its OWN lease by `keep_alive`, so a peer
+    /// that advertises less moves nothing; zenoh-pico divides the ADOPTED lease, so it does.
+    /// The 10_000 ms lease of the fixture is 2_500 ms in four and 3_333 ms in three, and
+    /// the peer's 3_000 ms is 1_000 ms in three.
+    #[test]
+    fn the_interval_is_the_sessions_own_share_of_the_lease_it_divides() {
+        use wz_runtime_tokio::session_glue::KeepAliveConf;
+
+        let zenoh = established_with(KeepAliveConf::ZENOH);
+        assert_eq!(zenoh.keepalive_interval_ms(), 2_500);
+        *zenoh.peer_open_lease_ms.lock().unwrap() = Some(3_000);
+        assert_eq!(
+            zenoh.keepalive_interval_ms(),
+            2_500,
+            "a zenoh session divides its own lease, whatever the peer advertised"
+        );
+        let idle = zenoh.clock.now_monotonic_ms() + 2_600;
+        assert_eq!(
+            check_keepalive_deadline(&zenoh, idle),
+            KeepAliveCheckOutcome::Emitted,
+            "2_600 ms idle is past the 2_500 ms interval"
+        );
+
+        // Control: the same peer lease under pico's division moves the interval, so the
+        // 2_500 above is the basis and not an interval nothing could have moved.
+        let pico = established_with(KeepAliveConf::PICO);
+        assert_eq!(pico.keepalive_interval_ms(), 3_333);
+        *pico.peer_open_lease_ms.lock().unwrap() = Some(3_000);
+        assert_eq!(pico.keepalive_interval_ms(), 1_000);
+        let idle = pico.clock.now_monotonic_ms() + 900;
+        assert_eq!(
+            check_keepalive_deadline(&pico, idle),
+            KeepAliveCheckOutcome::WithinInterval,
+            "900 ms idle is inside pico's 1_000 ms interval"
+        );
+    }
+
     /// A driver with a queue between the hand-over of a frame and its write: it
     /// reports when its writer last finished a write, which the test sets.
     struct QueuedDriver {

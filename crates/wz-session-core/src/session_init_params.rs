@@ -536,6 +536,12 @@ mod keep_alive_tests {
         assert_eq!(KeepAliveConf::default(), KeepAliveConf::PICO);
         assert_eq!(KeepAliveConf::PICO.per_lease, PICO_LEASE_EXPIRE_FACTOR);
         assert_ne!(KeepAliveConf::default(), KeepAliveConf::ZENOH);
+        // The capacity model, which compiles without this module, divides by its own constant;
+        // it is the default's, or the bounds it computes are for another cadence.
+        assert_eq!(
+            u64::from(KeepAliveConf::default().per_lease),
+            crate::lease::LEASE_EXPIRE_FACTOR
+        );
     }
 
     /// The interval is never zero (the emitter would spin on it), and a count of zero reads as

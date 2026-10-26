@@ -262,6 +262,7 @@ mod tests {
             req_id_res: 2,
             batch_size: 1024,
             lease_ms: 10_000,
+            keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
             initial_sn: 0,
             cookie: vec![0u8; 16],
             tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),

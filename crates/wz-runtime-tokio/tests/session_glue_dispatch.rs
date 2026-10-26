@@ -65,6 +65,7 @@ fn fixture_params() -> SessionInitParams {
         req_id_res: 0x02,
         batch_size: 0xCAFE,
         lease_ms: 30_000,
+        keep_alive: wz_runtime_tokio::session_glue::KeepAliveConf::default(),
         initial_sn: 0x42,
         cookie: vec![0xDE, 0xAD, 0xBE, 0xEF, 0x77],
         tx_queue: wz_runtime_tokio::session_glue::TxQueueConf::default(),

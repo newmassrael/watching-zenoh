@@ -1725,3 +1725,28 @@ pub extern "C" fn z_priority_default() -> std::ffi::c_int {
 pub extern "C" fn z_reliability_default() -> std::ffi::c_int {
     crate::pubsub::Z_RELIABILITY_RELIABLE
 }
+
+#[cfg(test)]
+mod build_numbers {
+    use super::*;
+
+    /// The keepalive of this ABI divides the ADOPTED lease by the factor the build states for
+    /// pico's `Z_TRANSPORT_LEASE_EXPIRE_FACTOR`, as pico's task does, and not the session's own
+    /// lease as zenoh does.
+    #[test]
+    fn the_keepalive_divides_the_adopted_lease_by_the_builds_factor() {
+        let factor = wz_session_core::caps::PICO_KEEPALIVES_PER_LEASE as u64;
+        let (own, adopted) = (10_000u64, 6_000u64);
+        assert_eq!(
+            PICO_KEEP_ALIVE.interval_ms(own, adopted),
+            adopted / factor,
+            "pico divides the lease it adopted at the handshake"
+        );
+        // Control: the zenoh interface divides the other lease, so the number above is the
+        // basis this ABI states and not one every interface shares.
+        assert_ne!(
+            KeepAliveConf::zenoh(factor as u32).interval_ms(own, adopted),
+            PICO_KEEP_ALIVE.interval_ms(own, adopted)
+        );
+    }
+}

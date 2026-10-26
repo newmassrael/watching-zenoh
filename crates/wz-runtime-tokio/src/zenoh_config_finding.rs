@@ -255,8 +255,8 @@ impl TopologyDefect {
 mod tests {
     use super::*;
     use crate::zenoh_config::{
-        validate_labelled_topology, validate_topology, LabelledNode, WhatAmI, ZenohNodeConfig,
-        HONOURED_CONFIG_KEYS,
+        honours_config_key, validate_labelled_topology, validate_topology, LabelledNode, WhatAmI,
+        ZenohNodeConfig,
     };
     use wz_session_core::json5::{self, Json5Value, UpstreamNumberError};
 
@@ -470,8 +470,10 @@ mod tests {
         assert!(findings.len() > 15, "the population shrank: {findings:?}");
         for finding in &findings {
             for key in keys_of(finding) {
+                // Honoured by the node, or by a C ABI session ([`C_ABI_SESSION_HONOURED_KEYS`]):
+                // a defect in a key either reads is one writing the key can cause.
                 assert!(
-                    HONOURED_CONFIG_KEYS.contains(&key),
+                    honours_config_key(key),
                     "{} blames `{key}`, which the reader does not honour",
                     finding.variant
                 );

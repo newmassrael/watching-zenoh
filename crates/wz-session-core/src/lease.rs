@@ -17,6 +17,13 @@
 /// when nothing was transmitted in the window (unicast/lease.c:191/210,
 /// multicast/lease.c:181), so a peer observes at least factor-1 liveness
 /// signals inside any lease window even on an otherwise idle link.
+///
+/// This is the number a session keeps when it was given none
+/// (`KeepAliveConf::default`, a profile with `storage-profile`), and the one
+/// the router capacity model ([`crate::capacity`]) is calibrated on, which
+/// compiles on every profile and so cannot read the session's value. A test
+/// holds the two together. A session's own cadence is
+/// `SessionLinkActions::keepalive_interval_ms`.
 pub const LEASE_EXPIRE_FACTOR: u64 = 3;
 
 /// R311ku — encode-side lease wire-unit projection, the one home for the

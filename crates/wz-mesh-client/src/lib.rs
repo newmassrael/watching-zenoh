@@ -309,6 +309,7 @@ fn session_params() -> Result<SessionInitParams, ClientError> {
         req_id_res: 2,
         batch_size: BATCH_SIZE,
         lease_ms: LEASE_MS,
+        keep_alive: Default::default(),
         tx_queue: Default::default(),
         link_rx: Default::default(),
         initial_sn: 0,

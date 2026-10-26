@@ -56,6 +56,7 @@ fn params(zid: &[u8], cookie: &[u8]) -> SessionInitParams {
         req_id_res: 1,
         batch_size: 1472,
         lease_ms: 10_000,
+        keep_alive: wz_session_core::session_init_params::KeepAliveConf::default(),
         initial_sn: 77,
         cookie: cookie_bytes(cookie),
         tx_queue: TxQueueConf::default(),

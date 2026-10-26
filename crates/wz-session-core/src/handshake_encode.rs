@@ -514,6 +514,7 @@ mod tests {
             req_id_res: 0,
             batch_size: 0,
             lease_ms,
+            keep_alive: crate::session_init_params::KeepAliveConf::default(),
             initial_sn: 0,
             cookie: crate::session_init_params::cookie_bytes(&[]),
             tx_queue: crate::session_init_params::TxQueueConf::default(),

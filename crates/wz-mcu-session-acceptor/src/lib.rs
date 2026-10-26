@@ -786,6 +786,7 @@ pub(crate) fn acceptor_params(
         req_id_res: 2,
         batch_size: 1024,
         lease_ms: 10_000,
+        keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
         initial_sn: 0,
         cookie: cookie_bytes(&[0u8; 16]),
         // R311y820 — through the SAME §2.5 port the cookie nonce uses, so this
