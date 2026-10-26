@@ -291556,6 +291556,46 @@
         "Mutation at the wire rather than the payload stays out of the workload; it is a codec's fault injection."
       ]
     },
+    "Round 3734": {
+      "decision_summary": "zenoh-pico has build switches that carry a number, not on or off: the eleven CMake variables its config template substitutes as @NAME@ (batch sizes, lease, timeouts, its executor's table, a platform header). The C7 map counted only Z_FEATURE_*, so these were judged nowhere, and the pico ABI held five of them as literals: a pico built with another number could not be matched, and the unicast batch was not even pico's default (its InitSyn advertised zenoh's 65535 where zenoh-pico 1.10.1 advertises BATCH_UNICAST_SIZE, 2048). The map's population now takes the template's value lines; a value switch is maps to a limit whose default is pico's own (held by the gate), never with a register item, or n/a, and never always, since a number held fixed reproduces pico's default build only. Five are limits the pico ABI reads on both engines, and wz_config.py --env pico <config.h> turns a header's numbers into them.",
+      "changes_bullets": [
+        "scripts/lib/upstream_switch_map.py: pico_value_defaults (the population from config.h.in, defaults from the CMakeLists), value_arm (maps only to a limit that starts at pico's number; no always), limit: anchors in shape_arm; selftest 8 value cases and the reader.",
+        "scripts/lib/wz_config.py: pico_value_macros, limit_rows, pico_value_env and --env pico CONFIG; limit: anchors validated; pico_reference leaves value switches at pico's number; selftest cases.",
+        "deploy/wz-config.toml: 11 zenoh-pico value rows (5 maps, 3 never citing open-debt items 925 and 926, 3 n/a) and limits PICO_UNICAST_BATCH_BYTES 2048, PICO_MULTICAST_BATCH_BYTES 2048, PICO_LEASE_MS 10000, PICO_SOCKET_TIMEOUT_MS 100, PICO_CONNECT_TIMEOUT_MS 10000; deploy/Kconfig.limits and caps_generated.rs regenerated, caps.rs binds them.",
+        "crates/wz-capi-core: LinkTx and OpenStance carry lease_ms (DEFAULT_LEASE_MS for zenoh-c, unchanged); init_params reads it. crates/wz-capi-pico/src/session.rs: PICO_GROUP, the tokio stance and the cooperative config read the limits; tests/advertised_pico_numbers.rs."
+      ],
+      "verification_bullets": [
+        "upstream_switch_map.py: before the rows, the real run failed on exactly the eleven value switches (\"arrived UNJUDGED\"); after, rc=0; selftest adds 8 value cases and the reader. wz_config.py --check rc=0 and --selftest all arms pass, with cases for the template reader, --env pico (decimal, hex, silent, non-numeric) and limit anchors.",
+        "tests/advertised_pico_numbers.rs reads the first InitSyn off a bare TCP listener: 2048 on the default build, 1024 on a build with WZ_LIMIT_PICO_UNICAST_BATCH_BYTES=1024, both engines (tokio default and engine-coop); negative control with the old literal fails 65535 vs 2048.",
+        "Through bx: wz-capi-pico 161, wz-capi-core 107, wz-capi-c 287 passed; clippy -D warnings of wz-capi-pico, wz-capi-core, wz-capi-c and wz-session-core."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "open-debt item 926: FRAG_MAX_SIZE (pico reassembles at most 4096 by default; wz's pico sessions by their slot size) and Z_TRANSPORT_LEASE_EXPIRE_FACTOR (keepalive every lease/3 in pico) have no wz switch. Item 925 gains pico's Z_TRANSPORT_ACCEPT_TIMEOUT."
+      ],
+      "publishable_decision_summary": "zenoh-pico has build switches that carry a number, not on or off: the eleven CMake variables its config template substitutes as @NAME@ (batch sizes, lease, timeouts, its executor's table, a platform header). The C7 map counted only Z_FEATURE_*, so these were judged nowhere, and the pico ABI held five of them as literals: a pico built with another number could not be matched, and the unicast batch was not even pico's default (its InitSyn advertised zenoh's 65535 where zenoh-pico 1.10.1 advertises BATCH_UNICAST_SIZE, 2048). The map's population now takes the template's value lines; a value switch is maps to a limit whose default is pico's own (held by the gate), never with a register item, or n/a, and never always, since a number held fixed reproduces pico's default build only. Five are limits the pico ABI reads on both engines, and wz_config.py --env pico <config.h> turns a header's numbers into them.",
+      "publishable_changes_bullets": [
+        "scripts/lib/upstream_switch_map.py: pico_value_defaults (the population from config.h.in, defaults from the CMakeLists), value_arm (maps only to a limit that starts at pico's number; no always), limit: anchors in shape_arm; selftest 8 value cases and the reader.",
+        "scripts/lib/wz_config.py: pico_value_macros, limit_rows, pico_value_env and --env pico CONFIG; limit: anchors validated; pico_reference leaves value switches at pico's number; selftest cases.",
+        "deploy/wz-config.toml: 11 zenoh-pico value rows (5 maps, 3 never citing open-debt items 925 and 926, 3 n/a) and limits PICO_UNICAST_BATCH_BYTES 2048, PICO_MULTICAST_BATCH_BYTES 2048, PICO_LEASE_MS 10000, PICO_SOCKET_TIMEOUT_MS 100, PICO_CONNECT_TIMEOUT_MS 10000; deploy/Kconfig.limits and caps_generated.rs regenerated, caps.rs binds them.",
+        "crates/wz-capi-core: LinkTx and OpenStance carry lease_ms (DEFAULT_LEASE_MS for zenoh-c, unchanged); init_params reads it. crates/wz-capi-pico/src/session.rs: PICO_GROUP, the tokio stance and the cooperative config read the limits; tests/advertised_pico_numbers.rs."
+      ],
+      "publishable_verification_bullets": [
+        "upstream_switch_map.py: before the rows, the real run failed on exactly the eleven value switches (\"arrived UNJUDGED\"); after, rc=0; selftest adds 8 value cases and the reader. wz_config.py --check rc=0 and --selftest all arms pass, with cases for the template reader, --env pico (decimal, hex, silent, non-numeric) and limit anchors.",
+        "tests/advertised_pico_numbers.rs reads the first InitSyn off a bare TCP listener: 2048 on the default build, 1024 on a build with WZ_LIMIT_PICO_UNICAST_BATCH_BYTES=1024, both engines (tokio default and engine-coop); negative control with the old literal fails 65535 vs 2048.",
+        "Through bx: wz-capi-pico 161, wz-capi-core 107, wz-capi-c 287 passed; clippy -D warnings of wz-capi-pico, wz-capi-core, wz-capi-c and wz-session-core."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "open-debt item 926: FRAG_MAX_SIZE (pico reassembles at most 4096 by default; wz's pico sessions by their slot size) and Z_TRANSPORT_LEASE_EXPIRE_FACTOR (keepalive every lease/3 in pico) have no wz switch. Item 925 gains pico's Z_TRANSPORT_ACCEPT_TIMEOUT."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
