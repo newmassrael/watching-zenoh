@@ -47,6 +47,9 @@ live = ["dep:wz", "dep:tokio", "dep:log"]
 wz-analyze = { path = "../wz-analyze" }
 wz-capture = { path = "../wz-capture" }
 wz-session-core = { path = "../wz-session-core", features = ["dissect"] }
+# The pacing and the mutation of a plan, which are the workload's: the traffic driver plays the same
+# words without the analyzer this crate reads captures with. Re-exported at this crate's own paths.
+wz-workload = { path = "../wz-workload" }
 
 # R311y702 — the smallest coherent facade subset that DIALS a peer and
 # PUBLISHES, which is verbatim the subset `wz-e2e-pubsub` pins for the same

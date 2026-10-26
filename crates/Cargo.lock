@@ -4238,6 +4238,7 @@ dependencies = [
  "wz-packet-fixtures",
  "wz-runtime-tokio-test-support",
  "wz-session-core",
+ "wz-workload",
 ]
 
 [[package]]
@@ -4534,6 +4535,10 @@ dependencies = [
  "wz-cdylib-build",
  "wz-volume-abi",
 ]
+
+[[package]]
+name = "wz-workload"
+version = "0.1.0"
 
 [[package]]
 name = "x509-parser"

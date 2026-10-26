@@ -106,6 +106,10 @@ members = [
     # The node's time (§5.18): the wall clock in NTP64, the node HLC with its per-role switch, and
     # the stamper that borrows it, which every engine that stamps shares.
     "wz-node-time",
+    # What a node or a driver sends over time (docs/target-build-contract.md 5c): arrivals, payloads,
+    # the pacing of a recorded sequence and payload mutation, which the replay tool and the traffic
+    # driver both play.
+    "wz-workload",
     "wz-capi-dissect",
     # Round 2441 (open-debt item 693) — the C ABI over `wz-replay`'s PLAN half.
     # Its own crate rather than a door in `wz-capi-dissect` for the reason that

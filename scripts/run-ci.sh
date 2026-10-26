@@ -12887,6 +12887,34 @@ layer_c1by_replay_engine() {
     # `name` is LOCAL. Measured: without it the loop variable leaked into the
     # caller's scope and run-ci announced the layer under the last test's name.
     local listing missing name
+    # The pacing and the mutation the engine plays are the workload's (`wz-workload`), where the
+    # definitions moved with their byte vectors: the crate's clippy and tests are this lane's, and
+    # its tests are pinned as a SET like the engine's, so a round that dropped the vectors would
+    # leave the contract unheld while the suite stayed green.
+    (cd crates && cargo clippy -p wz-workload --all-targets --quiet -- -D warnings) || return 1
+    (cd crates && cargo test -p wz-workload --quiet) || {
+        echo "  C1by FAIL: wz-workload does not pass in isolation"; return 1; }
+    listing="$(cd crates && cargo test -p wz-workload --lib -- --list 2>/dev/null)" \
+        || { echo "  C1by FAIL: the workload tests did not list"; return 1; }
+    missing=0
+    for name in \
+        mutation::tests::the_generator_is_splitmix64 \
+        mutation::tests::the_mutations_are_these_bytes \
+        pacing::tests::the_rounding_is_the_standard_one \
+        pacing::tests::the_downstream_vectors_hold \
+        pacing::tests::a_speed_that_cannot_be_played_is_refused \
+        arrivals::tests::a_decimal_is_its_digits \
+        arrivals::tests::a_rate_gives_its_gap_exactly \
+        arrivals::tests::the_schedule_keeps_absolute_deadlines \
+        payload::tests::the_fills_are_these_bytes \
+        payload::tests::hex_is_two_digits_a_byte
+    do
+        grep -qF "$name: test" <<<"$listing" || {
+            echo "  C1by FAIL: $name is absent from the wz-workload lib target"
+            missing=1
+        }
+    done
+    [[ $missing -eq 0 ]] || return 1
     (cd crates && cargo clippy -p wz-replay --all-targets --quiet -- -D warnings) || return 1
     (cd crates && cargo build -p wz-replay --bins --quiet) || {
         echo "  C1by FAIL: the wz-replay binary does not build"; return 1; }

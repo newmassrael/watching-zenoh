@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-workload — what a node or a driver SENDS over time, apart from what it IS
+# (docs/target-build-contract.md 5c): the arrival process, the payload, the pacing of a recorded
+# sequence and the mutation of a payload. A node declaration says what is up (endpoints, entities,
+# budgets) and is checked when the node is built; a workload says what flows, and is played.
+#
+# The pacing and the mutation were `wz-replay`'s plan half, which a downstream product already calls
+# through `wz-capi-replay`. They are here because the traffic driver of `wz-ap-demo` plays the same
+# words and must not carry the analyzer to do it (`wz-replay` reads captures through `wz-analyze` and
+# `wz-capture`); `wz-replay` re-exports them at the paths it has always had, so its C ABI and its
+# callers are unchanged. `no_std` with `alloc`, so a fixed-memory interpreter can take the parts
+# that fit without a second definition.
+#
+# `rlib` only: a Rust-internal seam, like `wz-node-time` and `wz-ext-pubsub`.
+
+[package]
+name = "wz-workload"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The workload a node or driver plays: arrival processes, payload generators, the pacing of a recorded sequence and payload mutation; no_std with alloc."
+publish = false
+
+[lib]
+name = "wz_workload"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+
+[lints]
+workspace = true

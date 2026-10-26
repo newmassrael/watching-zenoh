@@ -66,6 +66,7 @@ on:
       - "crates/wz-host-net/**"
       - "crates/wz-ext-pubsub/**"
       - "crates/wz-node-time/**"
+      - "crates/wz-workload/**"
       - "crates/wz-tls-record/**"
       - "crates/wz-capture/**"
       - "crates/wz-cdylib-build/**"
