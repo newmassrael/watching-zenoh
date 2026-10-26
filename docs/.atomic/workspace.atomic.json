@@ -291820,6 +291820,34 @@
         "Still red on the last hosted runs and not of this family: the module lint on the key gate of wz-session-core (a module declared under complementary configurations, which the lint refuses by design), the repository-captures test of wz-capture, Layer C1cs for the size of the C ABI builds, and wz-ext-pubsub in the audit of Layer C1bf. Hosted runs of this family's pushes were cancelled by the next push each time, so their per-job result is still to be read."
       ]
     },
+    "Round 3741": {
+      "decision_summary": "The prose-name gate pins the upstream constants this tree's prose cites and does not carry. Round 3734 judged pico's value build switches as rows of deploy/wz-config.toml, which names five pinned ones in code (Z_BATCH_MULTICAST_SIZE, Z_CONFIG_SOCKET_TIMEOUT, Z_RUNTIME_IDLE_READ_TASK_SLEEP, Z_TRANSPORT_LEASE, Z_TRANSPORT_LEASE_EXPIRE_FACTOR), so the gate read them as carried and failed on origin/main; the pins come down, as the gate asks, and the row's class is the record they stood in for. The hook defers this gate, so the push of 3734 passed; it was found by a peer session before the hosted run.",
+      "changes_bullets": [
+        "scripts/lib/prose_named_identifier_gate.py: five names out of UPSTREAM_UNCARRIED with one note in place of their three entry comments; the comment-cannot-spell warning kept as a general note."
+      ],
+      "verification_bullets": [
+        "prose_named_identifier_gate.py --check and --selftest rc=0; the Layer C0 python gates run one by one: 233 of 234 rc=0, the one other (anyke_reader_gate) on files of two other sessions, reported to them."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "None from this round."
+      ],
+      "publishable_decision_summary": "The prose-name gate pins the upstream constants this tree's prose cites and does not carry. Round 3734 judged pico's value build switches as rows of deploy/wz-config.toml, which names five pinned ones in code (Z_BATCH_MULTICAST_SIZE, Z_CONFIG_SOCKET_TIMEOUT, Z_RUNTIME_IDLE_READ_TASK_SLEEP, Z_TRANSPORT_LEASE, Z_TRANSPORT_LEASE_EXPIRE_FACTOR), so the gate read them as carried and failed on origin/main; the pins come down, as the gate asks, and the row's class is the record they stood in for. The hook defers this gate, so the push of 3734 passed; it was found by a peer session before the hosted run.",
+      "publishable_changes_bullets": [
+        "scripts/lib/prose_named_identifier_gate.py: five names out of UPSTREAM_UNCARRIED with one note in place of their three entry comments; the comment-cannot-spell warning kept as a general note."
+      ],
+      "publishable_verification_bullets": [
+        "prose_named_identifier_gate.py --check and --selftest rc=0; the Layer C0 python gates run one by one: 233 of 234 rc=0, the one other (anyke_reader_gate) on files of two other sessions, reported to them."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "None from this round."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
