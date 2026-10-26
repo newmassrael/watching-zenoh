@@ -289910,6 +289910,50 @@
         "Read the hosted run of this push per job, compared by head sha."
       ]
     },
+    "Round 3696": {
+      "decision_summary": "The closed key set's generator now holds a declared key to canonical form (docs/closed-key-set.md). The subscriber table registers a pattern in canonical form, so a declared key spelled otherwise (a/**/*, a chunk of only $*, a*b) would never be the text the table holds, and its subscription would be refused. The generator refuses such a key through is_key_expression, a port of keyexpr_canon::validate_keyexpr, arm for arm. The port is held to the validator as the matcher port is: the generated corpus carries its verdict on every text of up to six characters over a / * $ ?, 19530 texts of which 108 are accepted, and the model test compares each with the validator and checks that every text it accepts is its own canonical form. With the rule that a $ may not follow a $* removed from the port the test failed; with it back it passes. Not done: a node declaration is checked by wz_node.py's own looser rule, and a node's generated file does not carry its table.",
+      "changes_bullets": [
+        "scripts/lib/wz_key_set.py: is_key_expression, a verdict port of validate_keyexpr; validate refuses a key that is not canonical; the corpus emitter writes the verdict on every text over a / * $ ? up to six characters; selftest cases for accepted and refused texts.",
+        "crates/wz-session-core tests/key_catalogue_model.rs: the verdict corpus against validate_keyexpr and canonize_keyexpr, and every fixture key a key expression; tests/key_set_data/corpus.rs regenerated.",
+        "docs/closed-key-set.md: why the table needs canonical keys, how the port is held, and what remains."
+      ],
+      "verification_bullets": [
+        "On the shared build machine: the twelve model tests pass; clippy -D warnings over all targets of wz-session-core passes; cargo fmt --check passes; wz_key_set.py --selftest exits 0.",
+        "The oracle was shown able to fail: with the rule that a dollar may not follow a $* removed from the port and the corpus regenerated, the verdict test failed; with the rule back all pass. The first run of the verdict test failed on a lower bound I had guessed for the number of accepted texts (200); the comparison itself had passed, and the bound is now the measured 108 with a floor of 100.",
+        "Not run: the hosted run of this push, and the previous two were cancelled by the pushes that followed; a node declaration under this rule."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "wz_node.py should hold a node entity's key to the same canonical rule (it uses a looser key_problem) when the node emits a table.",
+        "A node's generated declared.rs does not carry its key table, so no image supplies one to the subscriber table; the slot node and the cooperative engine (sessions ef and 11) adopt it.",
+        "The alias row stays text, a reply's key is not gated, and the selector side is as before.",
+        "Owner decisions still open: undeclared key under a declared wildcard (data keys), one declaration or two with access control, publisher wildcards, sender-fixed resource ids.",
+        "Read the hosted run of this push per job, compared by head sha; several consecutive pushes were cancelled before they were graded, so push in batches."
+      ],
+      "publishable_decision_summary": "The closed key set's generator now holds a declared key to canonical form (docs/closed-key-set.md). The subscriber table registers a pattern in canonical form, so a declared key spelled otherwise (a/**/*, a chunk of only $*, a*b) would never be the text the table holds, and its subscription would be refused. The generator refuses such a key through is_key_expression, a port of keyexpr_canon::validate_keyexpr, arm for arm. The port is held to the validator as the matcher port is: the generated corpus carries its verdict on every text of up to six characters over a / * $ ?, 19530 texts of which 108 are accepted, and the model test compares each with the validator and checks that every text it accepts is its own canonical form. With the rule that a $ may not follow a $* removed from the port the test failed; with it back it passes. Not done: a node declaration is checked by wz_node.py's own looser rule, and a node's generated file does not carry its table.",
+      "publishable_changes_bullets": [
+        "scripts/lib/wz_key_set.py: is_key_expression, a verdict port of validate_keyexpr; validate refuses a key that is not canonical; the corpus emitter writes the verdict on every text over a / * $ ? up to six characters; selftest cases for accepted and refused texts.",
+        "crates/wz-session-core tests/key_catalogue_model.rs: the verdict corpus against validate_keyexpr and canonize_keyexpr, and every fixture key a key expression; tests/key_set_data/corpus.rs regenerated.",
+        "docs/closed-key-set.md: why the table needs canonical keys, how the port is held, and what remains."
+      ],
+      "publishable_verification_bullets": [
+        "On the shared build machine: the twelve model tests pass; clippy -D warnings over all targets of wz-session-core passes; cargo fmt --check passes; wz_key_set.py --selftest exits 0.",
+        "The oracle was shown able to fail: with the rule that a dollar may not follow a $* removed from the port and the corpus regenerated, the verdict test failed; with the rule back all pass. The first run of the verdict test failed on a lower bound I had guessed for the number of accepted texts (200); the comparison itself had passed, and the bound is now the measured 108 with a floor of 100.",
+        "Not run: the hosted run of this push, and the previous two were cancelled by the pushes that followed; a node declaration under this rule."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "wz_node.py should hold a node entity's key to the same canonical rule (it uses a looser key_problem) when the node emits a table.",
+        "A node's generated declared.rs does not carry its key table, so no image supplies one to the subscriber table; the slot node and the cooperative engine (sessions ef and 11) adopt it.",
+        "The alias row stays text, a reply's key is not gated, and the selector side is as before.",
+        "Owner decisions still open: undeclared key under a declared wildcard (data keys), one declaration or two with access control, publisher wildcards, sender-fixed resource ids.",
+        "Read the hosted run of this push per job, compared by head sha; several consecutive pushes were cancelled before they were graded, so push in batches."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
