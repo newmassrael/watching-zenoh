@@ -291596,6 +291596,34 @@
         "open-debt item 926: FRAG_MAX_SIZE (pico reassembles at most 4096 by default; wz's pico sessions by their slot size) and Z_TRANSPORT_LEASE_EXPIRE_FACTOR (keepalive every lease/3 in pico) have no wz switch. Item 925 gains pico's Z_TRANSPORT_ACCEPT_TIMEOUT."
       ]
     },
+    "Round 3735": {
+      "decision_summary": "The key gate module is declared once. The closed key set round split it into two declarations of one name under opposite cfgs, which the duplicate-module lint counts as a defect under every feature combination, and it turned the hosted gate red on main. The fix leaves the lint as it is: one declaration whose file is chosen by cfg_attr, key_gate.rs with the key-set-closed feature and key_gate_open.rs without it. The path of the module is unchanged for every caller. The lint passes and the crate compiles with the feature on and off, and the zero-size test of the open gate runs in the open build.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/lib.rs: one declaration of the key_gate module, its file picked by cfg_attr."
+      ],
+      "verification_bullets": [
+        "duplicate_module_lint.py reports 0 duplicate declarations over 1843 files. cargo check of wz-session-core passes for all targets with default features and with all features, and the open gate's zero-size test passes in the default build. The lint's failure was reproduced before the change."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted run of this push per job; the pico size budgets of the earlier round are tightened once the feature's reading is known."
+      ],
+      "publishable_decision_summary": "The key gate module is declared once. The closed key set round split it into two declarations of one name under opposite cfgs, which the duplicate-module lint counts as a defect under every feature combination, and it turned the hosted gate red on main. The fix leaves the lint as it is: one declaration whose file is chosen by cfg_attr, key_gate.rs with the key-set-closed feature and key_gate_open.rs without it. The path of the module is unchanged for every caller. The lint passes and the crate compiles with the feature on and off, and the zero-size test of the open gate runs in the open build.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/lib.rs: one declaration of the key_gate module, its file picked by cfg_attr."
+      ],
+      "publishable_verification_bullets": [
+        "duplicate_module_lint.py reports 0 duplicate declarations over 1843 files. cargo check of wz-session-core passes for all targets with default features and with all features, and the open gate's zero-size test passes in the default build. The lint's failure was reproduced before the change."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted run of this push per job; the pico size budgets of the earlier round are tightened once the feature's reading is known."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
