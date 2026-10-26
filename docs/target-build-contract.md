@@ -976,11 +976,32 @@ is the same stream in the same words, played by `wz_session_mcu::slot_publisher`
 caller owns). The generator turns a rate into its gap by the same integer rule
 (`wz_node.py`'s `rate_gap_ns`, held to the crate's vectors by its selftest), and the image holds
 each publisher's gap to the millisecond its clock counts. What the fixed-memory node does not
-take: a stop condition (`count`, `duration_ms`: it publishes while a session is up), a payload
-written as text or hex beyond a document, and the replay.
+take: a stop condition (`count`, `duration_ms`: it publishes while a session is up) and a payload
+written as text or hex beyond a document.
 
-Not yet: the replay of a bounded trace compiled into a fixed-memory image, and mutation at the wire
-rather than the payload, which is a codec's fault injection and not a workload.
+**The fixed-memory replay (landed).** `kind = "replay"` with the driver's `timing`, `gap_ms`,
+`speed` (a decimal written as a string) and `max_gap_ms`, and its samples as tables of their own,
+`[[sample]]`, since a declaration's tables do not nest: each names its replay by the replay's key
+(as a queryable's `from` names a cell), states `text` or `hex`, an optional `key` (the replay's
+when none), `captured_at_ms`, and a `mutation` with the driver's parameters (`flip_bit` with
+`at_bit`, `truncate` with `keep`, `extend` with `count` and `seed`, `scramble` with `seed`). The
+generator writes the samples as read-only data of the image and each replay as a range of them; the
+image builds each schedule with the speed's float from `Decimal::as_f64` (the one the driver's
+`replay` reads too), and `wz_session_mcu::slot_replay` plays the same `Pacing` walk and
+`Mutation::apply_into` at run time, into the node's one buffer, so no second definition of either
+exists. A replay is put on each session from the moment it is established, each sample's time the
+previous one's plus its delay (no drift), late samples put at once and the lateness counted; the
+node says `HOST-WZ-REPLAYED <key> sent= refused= mutated= late_max_ms= played=`. A closed key set
+sees the keys a replay puts on as a publisher's. Bounds of the slot target: two replays, 64 samples,
+a sample and its mutated form at most what a put carries; a node with a group refuses a replay,
+since a mutated sample is made in a buffer a put on the group cannot borrow. What it does not take:
+`max_total_ms` and the growth ceilings, which a plan held to 64 samples of at most a put each and a
+capped gap bounds already. The witness opens the router's REST stream before the node dials and
+sees the three samples of `slot-reporter`'s replay in order, mutated, the first two the plan's
+200 ms apart.
+
+Not yet: mutation at the wire rather than the payload, which is a codec's fault injection and not a
+workload.
 
 ## 6. Open
 

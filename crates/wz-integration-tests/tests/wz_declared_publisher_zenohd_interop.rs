@@ -20,6 +20,10 @@
 //! - the second publisher's stream, declared at a rate with a body made for each put by the
 //!   `counter` fill (`wz_workload`, played without an allocator), shows eight bytes that are the
 //!   put's sequence number, each one more than the last (none lost, none repeated), at the rate;
+//! - the replay (a recorded sequence compiled into the image, paced by its capture times at twice
+//!   their speed and mutated as declared, by `wz_workload` without an allocator) shows its three
+//!   puts in order, each the declared bytes after its mutation, the first two the plan's 200 ms
+//!   apart; the stream is opened before the node dials, since a replay starts with the session;
 //! - the router is stopped and started again: the node says its session was lost, dials the new
 //!   router, and the puts start again at once with the next session.
 //!
@@ -45,6 +49,7 @@ use wz_runtime_tokio_test_support::free_port;
 // prints are declared here, each for the needle the tests wait for.
 // barrier-producer: deploy/host-slot-node/src/bin/declared_node.rs @ "HOST-WZ-PUBLISHED {} sent={} refused={} late_max_ms={}" for "HOST-WZ-PUBLISHED lab/out/beat sent="
 // barrier-producer: deploy/host-slot-node/src/bin/declared_node.rs @ "HOST-WZ-PUBLISHED {} sent={} refused={} late_max_ms={}" for "HOST-WZ-PUBLISHED lab/out/count sent="
+// barrier-producer: deploy/host-slot-node/src/bin/declared_node.rs @ "HOST-WZ-REPLAYED {} sent={} refused={} mutated={} late_max_ms={} played={}" for "HOST-WZ-REPLAYED lab/out/replay sent=3 refused=0 mutated=2"
 
 /// The router the node dials, as its declaration states it.
 const ROUTER_PORT: u16 = 17472;
@@ -180,19 +185,36 @@ struct Fixture {
     rest: SocketAddr,
 }
 
+/// The node, with its output captured.
+fn spawn_node() -> (ChildGuard, std::fs::File) {
+    let node_out = tempfile::tempfile().expect("a capture for the node");
+    let node = ChildGuard::wrap(
+        "slot-reporter (declared node)",
+        Command::new(node_binary())
+            .stdout(Stdio::from(node_out.try_clone().expect("dup capture")))
+            .stderr(Stdio::from(node_out.try_clone().expect("dup capture")))
+            .spawn()
+            .expect("spawn the node"),
+    );
+    (node, node_out)
+}
+
 impl Fixture {
     fn start() -> Self {
-        let mut node_out = tempfile::tempfile().expect("a capture for the node");
-        let node = ChildGuard::wrap(
-            "slot-reporter (declared node)",
-            Command::new(node_binary())
-                .stdout(Stdio::from(node_out.try_clone().expect("dup capture")))
-                .stderr(Stdio::from(node_out.try_clone().expect("dup capture")))
-                .spawn()
-                .expect("spawn the node"),
-        );
+        let (node, node_out) = spawn_node();
         let rest_port = free_port();
         let (router, router_out) = start_router(rest_port);
+        Self::established(node, node_out, router, router_out, rest_port)
+    }
+
+    /// The node and the router, once the node's session is established and the REST plugin listens.
+    fn established(
+        node: ChildGuard,
+        mut node_out: std::fs::File,
+        router: ChildGuard,
+        router_out: std::fs::File,
+        rest_port: u16,
+    ) -> Self {
         let fixture = Self {
             node_out: node_out.try_clone().expect("dup capture"),
             router_out,
@@ -335,6 +357,55 @@ fn zenohd_sees_the_made_stream_in_order_at_its_rate() {
             Duration::from_secs(5)
         ),
         "the node did not say what it published\n{report}"
+    );
+    fx.finish();
+}
+
+// wz-proves: none -- the same node, for the same reason: the replay of the fixed-memory profile is its own seam (wz_session_mcu::slot_replay) and has no catalog atom
+#[test]
+#[ignore = "binary-dep e2e (the packaged slot-reporter, which Layer Z makes, + zenohd and its REST plugin); runs via --ignored"]
+fn zenohd_sees_the_replay_paced_and_mutated_from_the_session_s_start() {
+    // A replay starts when the session is established, so the stream is opened first: the router
+    // comes up, the REST plugin is subscribed, and then the node dials.
+    let rest_port = free_port();
+    let (router, router_out) = start_router(rest_port);
+    let rest: SocketAddr = format!("127.0.0.1:{rest_port}")
+        .parse()
+        .expect("an address");
+    wait_for_rest(rest, "the router started before the node");
+    let mut sse = Sse::open(rest, "lab/out/replay");
+    let (node, node_out) = spawn_node();
+    let fx = Fixture::established(node, node_out, router, router_out, rest_port);
+    let puts = sse.puts(3, PUTS_BUDGET);
+    let report = fx.report();
+    // `one` as recorded; `00 ff 10` with bit 0 flipped; `three` cut to three bytes; as the REST
+    // plugin renders a payload with no encoding, base64.
+    let wanted = ["b25l", "Af8Q", "dGhy"];
+    assert_eq!(
+        puts.len(),
+        3,
+        "the stream showed {} of the replay's 3 puts\n{report}",
+        puts.len()
+    );
+    for ((_, data), value) in puts.iter().zip(wanted) {
+        assert!(
+            data.contains(&format!("\"value\":\"{value}\"")),
+            "a replayed put is not {value}: {data}\n{report}"
+        );
+    }
+    // The capture's 400 ms at twice its speed: 200 ms between the first two, give or take the
+    // stream's own jitter, and not a burst.
+    let gap = puts[1].0.duration_since(puts[0].0);
+    assert!(
+        gap >= Duration::from_millis(100) && gap <= Duration::from_millis(800),
+        "the first two replayed puts are {gap:?} apart, the plan's is 200 ms\n{report}"
+    );
+    assert!(
+        fx.node_says(
+            "HOST-WZ-REPLAYED lab/out/replay sent=3 refused=0 mutated=2",
+            Duration::from_secs(5)
+        ),
+        "the node did not say what it replayed\n{report}"
     );
     fx.finish();
 }

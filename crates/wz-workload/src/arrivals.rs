@@ -110,6 +110,14 @@ impl Decimal {
     pub fn scale(&self) -> u32 {
         self.scale
     }
+
+    /// The decimal as a float, for a multiplier that is one (a replay's speed): the mantissa over
+    /// ten to the scale, each exact in a float (a scale of at most 18 is a power of ten below 2^53
+    /// times a power of two), so the one rounding is the division's and every reader of the same
+    /// digits gets the same float.
+    pub fn as_f64(&self) -> f64 {
+        self.mantissa as f64 / 10u64.pow(self.scale) as f64
+    }
 }
 
 /// The shortest gap a rate may give: one microsecond, which is a million sends a second. A faster
@@ -264,6 +272,10 @@ mod tests {
         assert_eq!((d.mantissa(), d.scale()), (100, 0));
         let d = Decimal::parse("007.250").unwrap();
         assert_eq!((d.mantissa(), d.scale()), (725, 2));
+        // As a float, the digits' nearest float: what the same digits written in Rust read as.
+        for (text, float) in [("2.5", 2.5), ("0.3", 0.3), ("7.25", 7.25), ("1", 1.0)] {
+            assert_eq!(Decimal::parse(text).unwrap().as_f64(), float, "{text}");
+        }
         for bad in [
             "", ".5", "5.", "-1", "+1", "1e3", "1.2.3", " 1", "0x10", "١",
         ] {

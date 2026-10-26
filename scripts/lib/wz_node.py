@@ -56,7 +56,15 @@ not build the node.
                                that key every period and keeps the latest reply; a queryable's
                                from may name its key);
                                kind = "liveliness-token", key (a literal, declared on every
-                               session and kept by the router for as long as it lasts)
+                               session and kept by the router for as long as it lasts);
+                               kind = "replay", key, and the driver's timing ("declared", the
+                               default, or "capture"), gap_ms, speed (a decimal written as a string)
+                               and max_gap_ms (a recorded sequence put on each session from the
+                               moment it is established)
+    [[sample]]               replay = "<replay key>", text or hex (the bytes as recorded), an
+                               optional key (the replay's when none), captured_at_ms, and a mutation
+                               ("none", the default; "flip_bit" with at_bit; "truncate" with keep;
+                               "extend" with count and seed; "scramble" with seed)
     [limits]                   <LIMIT_ID> = <integer>, any limit `deploy/wz-config.toml` declares
     [policy]                   <policy-id> = "<value>", any policy `deploy/wz-config.toml` declares
                                (`"on"` or `"off"` for a bool, one of its choices otherwise): the
@@ -132,6 +140,8 @@ DECLARATION_SCHEMA = 1
 #   1: the first shape (`one_of` a list of keys; integer, key and locator values).
 #   2: Round 3729: `one_of` a list of groups of keys, values `word` (`choices`, `default`) and
 #      `rate` (`min_gap_ns`, `max_gap_ns`), a key's `with` condition, a kind's `group_refused_keys`.
+#      Added beside it since (the number stays): the `replay` kind, the `samples` section, the values
+#      `decimal`, `text` and `hex`, and a `with` that lists its values (`in`).
 VOCABULARY_SCHEMA = 2
 
 # The shape of each word of the vocabulary: the keys it takes and the value of each. An integer's
@@ -167,7 +177,15 @@ def _rate(min_gap: int | str, max_gap: int | str) -> dict:
     return {"value": "rate", "required": False, "min_gap_ns": min_gap, "max_gap_ns": max_gap}
 
 
-def _when(spec: dict, key: str, value: str | None = None) -> dict:
+def _decimal() -> dict:
+    return {"value": "decimal", "required": False}
+
+
+def _when(spec: dict, key: str, value: str | tuple[str, ...] | None = None) -> dict:
+    """`spec`, read only when `key` is stated (`value` None), has `value`, or has one of the values
+    of a tuple (`in`)."""
+    if isinstance(value, tuple):
+        return {**spec, "with": {"key": key, "in": list(value)}}
     return {**spec, "with": {"key": key, **({"value": value} if value is not None else {})}}
 
 
@@ -175,6 +193,10 @@ def _when(spec: dict, key: str, value: str | None = None) -> dict:
 # `PROCESSES` and `FILLS`), so a declared publisher and a driven one are written alike.
 PROCESSES = ("periodic", "poisson", "burst")
 FILLS = ("zero", "counter", "seeded")
+# The words of a replay, as the driver's `replay` role names them (`roles/replay.rs`, `TIMINGS` and
+# `MUTATIONS`; a mutation's parameters keep its names, `at_bit`, `keep`, `count`, `seed`).
+TIMINGS = ("declared", "capture")
+MUTATIONS = ("none", "flip_bit", "truncate", "extend", "scramble")
 
 
 ENDPOINT_SHAPES = {
@@ -209,7 +231,28 @@ ENTITY_SHAPES = {
                 "keys": {"key": _key("key-expression"), "period_ms": _int(1, "period_max"),
                          "timeout_ms": _int(1, "timeout_max"), "reply_bytes": _int(1, "sample_max")}},
     "liveliness-token": {"is": "is only its key", "count": {"max": "max_tokens"}, "keys": {"key": _key("key")}},
+    "replay": {"is": "puts a recorded sequence of samples on each session", "count": {"max": "max_replays"},
+               "keys": {"key": _key("key"), "timing": _word(TIMINGS, "declared"),
+                        "gap_ms": _int(0, "period_max", required=False, default=100),
+                        "speed": _decimal(),
+                        "max_gap_ms": _int(0, "period_max", required=False, default=10_000)}},
 }
+
+# A replay's samples are tables of their own (`[[sample]]`), since a declaration's tables do not
+# nest: each names the replay it belongs to by that replay's key (as a queryable's `from` names a
+# cell), and is put on its own `key` or, when it states none, on the replay's.
+SAMPLE_SHAPE = {
+    "keys": {"replay": _key("replay-key"), "key": _key("key", required=False),
+             "text": _key("text", required=False), "hex": _key("hex", required=False),
+             "captured_at_ms": _int(0, "seed_max", required=False),
+             "mutation": _word(MUTATIONS, "none"),
+             "at_bit": _when(_int(0, "bit_max"), "mutation", "flip_bit"),
+             "keep": _when(_int(0, "publish_max"), "mutation", "truncate"),
+             "count": _when(_int(0, "publish_max"), "mutation", "extend"),
+             "seed": _when(_int(0, "seed_max"), "mutation", ("extend", "scramble"))},
+    "one_of": [["text", "hex"]],
+}
+SAMPLE_KEYS = set(SAMPLE_SHAPE["keys"])
 
 # The words a declaration may use. A word outside these is a typo; one inside them that a target does
 # not build is a refusal with the target's own reason.
@@ -218,7 +261,7 @@ ENTITY_KINDS = tuple(ENTITY_SHAPES)
 NODE_KEYS = {"id", "help", "target"}
 ENDPOINT_KEYS = {"role"} | {k for shape in ENDPOINT_SHAPES.values() for k in shape["keys"]}
 ENTITY_KEYS = {"kind"} | {k for shape in ENTITY_SHAPES.values() for k in shape["keys"]}
-TOP_KEYS = {"schema", "node", "endpoint", "entity", "limits", "policy", "allow"}
+TOP_KEYS = {"schema", "node", "endpoint", "entity", "sample", "limits", "policy", "allow"}
 
 
 def bound(target: dict, value: int | str) -> int:
@@ -234,11 +277,10 @@ def owners(shapes: dict, key: str) -> list[str]:
 DECIMAL_RE = re.compile(r"([0-9]+)(?:\.([0-9]+))?")
 
 
-def rate_gap_ns(text: object) -> tuple[int | None, str | None]:
-    """The gap between two puts of a rate written as `text`, in nanoseconds rounded down, or why
-    `text` is not a rate: `wz_workload::arrivals::Decimal::parse` and `gap_nanos` (at most 18
-    significant digits, greater than zero, exactly 10^9 x 10^scale / mantissa), so a declared rate
-    and a driven one give one gap to the nanosecond."""
+def decimal_parts(text: object) -> tuple[tuple[int, int] | None, str | None]:
+    """The (mantissa, scale) of a positive decimal written as `text`, or why it is not one:
+    `wz_workload::arrivals::Decimal::parse` (digits, and a point and digits if any; at most 18
+    significant digits; greater than zero)."""
     match = DECIMAL_RE.fullmatch(text) if isinstance(text, str) else None
     if match is None:
         return None, "not a positive decimal written as a string: digits, and a point and digits if any"
@@ -248,30 +290,50 @@ def rate_gap_ns(text: object) -> tuple[int | None, str | None]:
     mantissa = int(whole + fraction)
     if mantissa == 0:
         return None, "must be greater than zero"
-    return 10**9 * 10 ** len(fraction) // mantissa, None
+    return (mantissa, len(fraction)), None
+
+
+def rate_gap_ns(text: object) -> tuple[int | None, str | None]:
+    """The gap between two puts of a rate written as `text`, in nanoseconds rounded down, or why
+    `text` is not a rate: `wz_workload::arrivals::Decimal::parse` and `gap_nanos` (exactly
+    10^9 x 10^scale / mantissa), so a declared rate and a driven one give one gap to the nanosecond."""
+    parts, why = decimal_parts(text)
+    if parts is None:
+        return None, why
+    mantissa, scale = parts
+    return 10**9 * 10**scale // mantissa, None
+
+
+HEX_RE = re.compile(r"(?:[0-9a-fA-F]{2})*")
 
 
 def holds(item: dict, keys: dict, condition: dict) -> bool:
     """Whether the `with` condition of a key holds for `item`: the key it names is stated, or has
-    the value it names (a word's default counting as stated)."""
-    if "value" not in condition:
+    the value it names, or one of the values it lists (a word's default counting as stated)."""
+    if "value" not in condition and "in" not in condition:
         return condition["key"] in item
-    return item.get(condition["key"], keys[condition["key"]].get("default")) == condition["value"]
+    value = item.get(condition["key"], keys[condition["key"]].get("default"))
+    return value in condition["in"] if "in" in condition else value == condition["value"]
 
 
 def value_problems(who: str, item: dict, keys: dict, target: dict) -> list[str]:
-    """Each integer, word or rate key of a word's shape that is missing (when required) or outside
-    its bounds, and each key stated where its `with` condition does not hold."""
+    """Each integer, word, rate, decimal, text or hex key of a word's shape that is missing (when
+    required) or outside its bounds, and each key stated where its `with` condition does not hold."""
     out = []
     for key, spec in keys.items():
         condition = spec.get("with")
         if condition is not None and not holds(item, keys, condition):
             if key in item:
-                when = (f"`{condition['key']}` is {condition['value']!r}" if "value" in condition
-                        else f"`{condition['key']}` is stated")
+                if "in" in condition:
+                    when = f"`{condition['key']}` is one of {', '.join(map(repr, condition['in']))}"
+                elif "value" in condition:
+                    when = f"`{condition['key']}` is {condition['value']!r}"
+                else:
+                    when = f"`{condition['key']}` is stated"
                 out.append(f"{who}: `{key}` is read only when {when}")
             continue
-        if spec["value"] not in ("integer", "word", "rate") or (key not in item and not spec["required"]):
+        kinds = ("integer", "word", "rate", "decimal", "text", "hex")
+        if spec["value"] not in kinds or (key not in item and not spec["required"]):
             continue
         value = item.get(key)
         if spec["value"] == "integer":
@@ -281,6 +343,16 @@ def value_problems(who: str, item: dict, keys: dict, target: dict) -> list[str]:
         elif spec["value"] == "word":
             if value not in spec["choices"]:
                 out.append(f"{who}: {key} is {value!r}, not one of {', '.join(spec['choices'])}")
+        elif spec["value"] == "decimal":
+            _, why = decimal_parts(value)
+            if why is not None:
+                out.append(f"{who}: {key} is {value!r}, {why}")
+        elif spec["value"] == "text":
+            if not isinstance(value, str):
+                out.append(f"{who}: {key} is {value!r}, not a string")
+        elif spec["value"] == "hex":
+            if not isinstance(value, str) or HEX_RE.fullmatch(value) is None:
+                out.append(f"{who}: {key} is {value!r}, not hex: two digits a byte")
         else:
             gap, why = rate_gap_ns(value)
             low, high = bound(target, spec["min_gap_ns"]), bound(target, spec["max_gap_ns"])
@@ -320,6 +392,8 @@ TARGETS = {
             "group's emit yet",
             "liveliness-token": "the answer a token gives to an interest (DeclareReply) has no form "
             "without an allocator in the group's emit yet",
+            "replay": "a replay's sample is mutated into the node's one buffer, which a put on the "
+            "group cannot borrow for as long as the group's pump holds it",
         },
         # A key of a kind the group carries that the group cannot carry, by kind and key.
         "group_refused_keys": {
@@ -338,7 +412,7 @@ TARGETS = {
         # The sessions a peer opened that the node holds at once; each is a session slot, a pump
         # cell and a task cell of the node's tables, and a pair of link buffers.
         "max_accepts": 4,
-        "entity_kinds": {"queryable", "subscriber", "publisher", "querier", "liveliness-token"},
+        "entity_kinds": {"queryable", "subscriber", "publisher", "querier", "liveliness-token", "replay"},
         # `DOC_MAX` of the same file: the static every document is a prefix of.
         "document_max": 4096,
         # The bytes of a payload a subscription keeps (`LatestCells` of `wz_session_mcu::latest`).
@@ -348,6 +422,12 @@ TARGETS = {
         # the schedules of at most `max_publishers` in the session's task cell.
         "publish_max": 1024,
         "max_publishers": 4,
+        # A replay's samples are read-only data of the image and its state is in the session's task
+        # cell beside the publishers'; a sample is put as written or mutated into the same buffer, so
+        # it and its mutated form are held to `publish_max`, and a flipped bit to the bits of that.
+        "max_replays": 2,
+        "max_samples": 64,
+        "bit_max": 1024 * 8 - 1,
         # The gaps of a publisher's arrivals: its clock is the millisecond, so a gap shorter than one
         # would be puts the node makes in the same tick (a rate of at most 1000 a second), and the
         # longest is `period_max`'s. A Poisson process draws gaps shorter than its mean; those are made
@@ -516,11 +596,10 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
                    f"{held['peer']} peers by their zid")
     has_group = "multicast" in held
 
-    seen: dict[str, set[str]] = {"queryable": set(), "subscriber": set(), "publisher": set(),
-                                 "querier": set(), "liveliness-token": set()}
+    seen: dict[str, set[str]] = {kind: set() for kind in ENTITY_KINDS}
     sample_sizes: dict[str, int] = {}
     mirrors: list[tuple[str, object]] = []
-    queryables = subscribers = publishers = queriers = tokens = 0
+    queryables = subscribers = publishers = queriers = tokens = replays = 0
     for n, ent in enumerate(data.get("entity", []), 1):
         who = f"entity {n}"
         for extra in sorted(set(ent) - ENTITY_KEYS):
@@ -542,6 +621,7 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
         subscribers += kind == "subscriber"
         publishers += kind == "publisher"
         queriers += kind == "querier"
+        replays += kind == "replay"
         shape = ENTITY_SHAPES[kind]
         for extra in sorted((set(ent) & ENTITY_KEYS) - set(shape["keys"]) - {"kind"}):
             out.append(f"{who}: a {kind} {shape['is']} and has no `{extra}` (only "
@@ -588,6 +668,10 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
     if publishers > target["max_publishers"]:
         out.append(f"{publishers} publishers; the {node['target']} target keeps the schedule of "
                    f"{target['max_publishers']} in the session's task cell")
+    if replays > target["max_replays"]:
+        out.append(f"{replays} replays; the {node['target']} target keeps the state of "
+                   f"{target['max_replays']} in the session's task cell")
+    out += sample_problems(data.get("sample", []), seen["replay"], target, values)
     if tokens > target["max_tokens"]:
         out.append(f"{tokens} liveliness tokens; the {node['target']} target declares at most "
                    f"{target['max_tokens']} in the declarations of a session establishing")
@@ -618,6 +702,70 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
     elif "allow" in data:
         out.append("allow: an allowance is over a closed key set; the node states `key-set = \"closed\"` "
                    "in [policy] or declares no [[allow]]")
+    return out
+
+
+def sample_body(sample: dict) -> bytes | None:
+    """The bytes a valid sample records: its text's UTF-8, or its hex. `None` for neither."""
+    if isinstance(sample.get("text"), str):
+        return sample["text"].encode("utf-8")
+    if isinstance(sample.get("hex"), str) and HEX_RE.fullmatch(sample["hex"]):
+        return bytes.fromhex(sample["hex"])
+    return None
+
+
+def mutated_len(sample: dict, body_len: int) -> int:
+    """How long a sample is once mutated: `wz_workload::mutation::Mutation::output_len`."""
+    mutation = sample.get("mutation", "none")
+    if mutation == "truncate" and isinstance(sample.get("keep"), int):
+        return min(body_len, sample["keep"])
+    if mutation == "extend" and isinstance(sample.get("count"), int):
+        return body_len + sample["count"]
+    return body_len
+
+
+def sample_problems(samples: list, replays: set[str], target: dict, values: dict) -> list[str]:
+    """Every reason the `[[sample]]` tables are not the samples of this node's replays: a key the
+    shape does not have, a value outside its bounds, a sample of no replay or one put on a pattern,
+    a sample or its mutated form longer than a put carries, a replay with no sample, more samples
+    than the target holds."""
+    out = []
+    per_replay = {key: 0 for key in replays}
+    for n, sample in enumerate(samples, 1):
+        who = f"sample {n}"
+        for extra in sorted(set(sample) - SAMPLE_KEYS):
+            out.append(f"{who}: `{extra}` is not a key of [[sample]]")
+        for group in SAMPLE_SHAPE["one_of"]:
+            stated = [k for k in group if k in sample]
+            if len(stated) != 1:
+                out.append(f"{who}: a sample is recorded bytes: state exactly one of "
+                           f"{', '.join(f'`{k}`' for k in group)}" + (", not both" if stated else ""))
+        out += value_problems(who, sample, SAMPLE_SHAPE["keys"], target)
+        replay = sample.get("replay")
+        if replay not in per_replay:
+            out.append(f"{who}: `replay` is {replay!r}, which is not the key of a replay of this node")
+        else:
+            per_replay[replay] += 1
+        if "key" in sample:
+            key = sample["key"]
+            why = key_problem(key, values["MAX_KEYEXPR_BYTES"]) if isinstance(key, str) else "is not a string"
+            if why:
+                out.append(f"{who}: key {key!r} {why}")
+            elif "*" in key or "$" in key:
+                out.append(f"{who}: a sample is put on one key, and {key!r} is a pattern (`*` or `$`)")
+        body = sample_body(sample)
+        if body is not None:
+            most = target["publish_max"]
+            if len(body) > most:
+                out.append(f"{who}: its bytes are {len(body)}, more than a put carries ({most})")
+            elif mutated_len(sample, len(body)) > most:
+                out.append(f"{who}: mutated, its bytes are {mutated_len(sample, len(body))}, more than a "
+                           f"put carries ({most})")
+    for key, count in sorted(per_replay.items()):
+        if count == 0:
+            out.append(f"replay {key!r} has no sample: give it [[sample]] tables with replay = {key!r}")
+    if len(samples) > target["max_samples"]:
+        out.append(f"{len(samples)} samples; the target holds {target['max_samples']} in the image")
     return out
 
 
@@ -675,8 +823,20 @@ def peer_zids_of(data: dict) -> set[str]:
 
 def key_set_entities(data: dict) -> list[dict]:
     """The node's entities as the key set sees them: a kind and a key. An entity that is not a table
-    counts for nothing here; `validate` has already said so."""
-    return [{"kind": e.get("kind"), "key": e.get("key")} for e in data.get("entity", []) if isinstance(e, dict)]
+    counts for nothing here; `validate` has already said so. A replay is not a declaration: what the
+    key set sees of it is the keys its samples put on, each a publisher's (once, and not again where
+    a publisher of the node already puts on it)."""
+    entities = [e for e in data.get("entity", []) if isinstance(e, dict)]
+    rows = [{"kind": e.get("kind"), "key": e.get("key")} for e in entities if e.get("kind") != "replay"]
+    put = {row["key"] for row in rows if row["kind"] == "publisher"}
+    for sample in data.get("sample", []):
+        if not isinstance(sample, dict):
+            continue
+        key = sample.get("key", sample.get("replay"))
+        if isinstance(key, str) and key not in put:
+            put.add(key)
+            rows.append({"kind": "publisher", "key": key})
+    return rows
 
 
 def key_set_lines(data: dict) -> list[str]:
@@ -728,6 +888,45 @@ def body_literal(publisher: dict) -> str:
     return f"{publisher['payload_bytes']}, Some({PUBLISHER}::Fill::{made})"
 
 
+# The module the generated replay constants are written in: `wz_session_mcu::slot_replay`
+# re-exports the workload's `Timing` and `Mutation`.
+REPLAY = "wz_session_mcu::slot_replay"
+
+
+def mutation_literal(sample: dict) -> str:
+    """The `Mutation` of a valid sample, as Rust, from the driver's words."""
+    mutation = sample.get("mutation", "none")
+    if mutation == "flip_bit":
+        return f"{REPLAY}::Mutation::FlipBit {{ at: {sample['at_bit']} }}"
+    if mutation == "truncate":
+        return f"{REPLAY}::Mutation::Truncate {{ to: {sample['keep']} }}"
+    if mutation == "extend":
+        return f"{REPLAY}::Mutation::Extend {{ count: {sample['count']}, seed: {sample['seed']} }}"
+    if mutation == "scramble":
+        return f"{REPLAY}::Mutation::Scramble {{ seed: {sample['seed']} }}"
+    return f"{REPLAY}::Mutation::None"
+
+
+def replay_rows(data: dict) -> tuple[list[str], list[str]]:
+    """The generated rows of a valid node's replays and of their samples, every replay's samples
+    together and in the order written, so a replay is a range of the samples."""
+    replays, samples = [], []
+    for replay in (e for e in data.get("entity", []) if e["kind"] == "replay"):
+        own = [s for s in data.get("sample", []) if s["replay"] == replay["key"]]
+        timing = "Capture" if replay.get("timing", "declared") == "capture" else "Declared"
+        replays.append(
+            f"({rust_string(replay['key'])}, {REPLAY}::Timing::{timing}, {replay.get('gap_ms', 100)}, "
+            f"{rust_string(replay.get('speed', '1'))}, {replay.get('max_gap_ms', 10_000)}, "
+            f"{len(samples)}, {len(own)})")
+        for sample in own:
+            at = sample.get("captured_at_ms")
+            body = ", ".join(str(b) for b in sample_body(sample))
+            samples.append(
+                f"({rust_string(sample.get('key', replay['key']))}, &[{body}], "
+                f"{'None' if at is None else f'Some({at})'}, {mutation_literal(sample)})")
+    return replays, samples
+
+
 def emit(name: str, data: dict, declaration_sha256: str) -> str:
     """The `declared.rs` the node's code includes. Valid input only: `validate` ran first."""
     dialed = [ep["locator"] for ep in data["endpoint"] if ep["role"] == "dial"]
@@ -765,6 +964,7 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
     mirrors = ", ".join(f"({rust_string(k)}, {at})" for k, at in mirrored)
     published = [e for e in every if e["kind"] == "publisher"]
     pubs = ", ".join(f"({rust_string(e['key'])}, {process_literal(e)}, {body_literal(e)})" for e in published)
+    replayed, samples = replay_rows(data)
     alive = [e["key"] for e in every if e["kind"] == "liveliness-token"]
     token_keys = ", ".join(rust_string(k) for k in alive)
     # The constants of a plane the node does not have are not generated: the node's code reads them
@@ -845,6 +1045,15 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
             f"pub const PUBLISHERS: usize = {len(published)};",
             f"pub const PUBLISHED: [(&str, {PUBLISHER}::Process, usize, Option<{PUBLISHER}::Fill>); "
             f"{len(published)}] = [{pubs}];",
+            "/// The replays: (key, timing, the declared gap in milliseconds, the speed as written, the",
+            "/// ceiling of a gap in milliseconds, the first of its samples, how many).",
+            f"pub const REPLAYS: usize = {len(replayed)};",
+            f"pub const REPLAYED: [(&str, {REPLAY}::Timing, u64, &str, u64, usize, usize); {len(replayed)}] = "
+            f"[{', '.join(replayed)}];",
+            "/// The replays' samples, each replay's together: (key, bytes, capture time in milliseconds,",
+            "/// mutation).",
+            f"pub const REPLAY_SAMPLES: [(&str, &[u8], Option<u64>, {REPLAY}::Mutation); {len(samples)}] = "
+            f"[{', '.join(samples)}];",
             "",
             *([*key_set_lines(data), ""] if states_closed_key_set(data) else []),
         ]
@@ -1018,6 +1227,9 @@ def vocabulary(target_id: str, decl: dict) -> dict:
         "target": target_id,
         "endpoints": endpoints,
         "entities": entities,
+        "samples": {"of": "replay", "is": "the tables `[[sample]]`, each naming its replay by its key",
+                    "count": {"max": target["max_samples"]}, "keys": resolved(SAMPLE_SHAPE["keys"]),
+                    "one_of": [list(group) for group in SAMPLE_SHAPE["one_of"]]},
         "group": {"carries": sorted(target["group_kinds"]), "refused": dict(sorted(target["group_refused"].items()))},
         "limits": dict(sorted(limits.items())),
         "policies": policies,
@@ -1239,6 +1451,45 @@ document_bytes = 8
     refuses("a body made for each put on a node with a group",
             group_node.replace("document_bytes = 8", "payload_bytes = 8"),
             "`payload_bytes` is not carried by the group")
+    refuses("a replay on a node with a group",
+            group_node + '\n[[entity]]\nkind = "replay"\nkey = "lab/r"\n'
+            '\n[[sample]]\nreplay = "lab/r"\ntext = "a"\n', "a `replay` is not carried by the group")
+
+    # A replay: its samples in the driver's words, each naming the replay by its key.
+    replay = ('\n[[entity]]\nkind = "replay"\nkey = "lab/r"\ntiming = "capture"\nspeed = "2.5"\n'
+              '\n[[sample]]\nreplay = "lab/r"\ntext = "ab"\ncaptured_at_ms = 1000\n'
+              '\n[[sample]]\nreplay = "lab/r"\nkey = "lab/r/other"\nhex = "00ff"\nmutation = "flip_bit"\n'
+              'at_bit = 9\n'
+              '\n[[sample]]\nreplay = "lab/r"\ntext = "xyz"\nmutation = "extend"\ncount = 2\nseed = 5\n')
+    expect("a replay and its samples are valid", problems(SAMPLE + replay) == [])
+    rrs = emit("n", wz_config.read_decl_toml(SAMPLE + replay), sha)
+    expect("the replay is a row of its schedule and a range of the samples",
+           'pub const REPLAYED: [(&str, wz_session_mcu::slot_replay::Timing, u64, &str, u64, usize, usize); 1] = '
+           '[("lab/r", wz_session_mcu::slot_replay::Timing::Capture, 100, "2.5", 10000, 0, 3)];' in rrs)
+    expect("each sample is its key, its bytes, its time and its mutation",
+           '("lab/r", &[97, 98], Some(1000), wz_session_mcu::slot_replay::Mutation::None)' in rrs
+           and '("lab/r/other", &[0, 255], None, wz_session_mcu::slot_replay::Mutation::FlipBit { at: 9 })' in rrs
+           and 'Mutation::Extend { count: 2, seed: 5 })' in rrs)
+    expect("a node with no replay declares none",
+           "pub const REPLAYS: usize = 0;" in rs and "REPLAY_SAMPLES: [(&str, &[u8], Option<u64>, "
+           "wz_session_mcu::slot_replay::Mutation); 0] = [];" in rs)
+    refuses("a replay with no sample", SAMPLE + '\n[[entity]]\nkind = "replay"\nkey = "lab/r"\n', "has no sample")
+    refuses("a sample of no replay", SAMPLE + '\n[[sample]]\nreplay = "lab/r"\ntext = "a"\n',
+            "not the key of a replay")
+    refuses("a sample with text and hex", SAMPLE + replay + '\n[[sample]]\nreplay = "lab/r"\ntext = "a"\nhex = "00"\n',
+            "not both")
+    refuses("a sample put on a pattern", SAMPLE + replay.replace("lab/r/other", "lab/r/*"), "is a pattern")
+    refuses("a sample mutated past what a put carries",
+            SAMPLE + replay.replace("count = 2", "count = 1024"), "mutated, its bytes are 1027")
+    refuses("a seed of a flipped bit", SAMPLE + replay.replace("at_bit = 9", "at_bit = 9\nseed = 1"),
+            "`seed` is read only when `mutation` is one of 'extend', 'scramble'")
+    refuses("a speed that is not a decimal", SAMPLE + replay.replace('"2.5"', '"fast"'), "speed is 'fast'")
+    refuses("more replays than the task cell keeps", SAMPLE + "".join(
+        f'\n[[entity]]\nkind = "replay"\nkey = "lab/r{i}"\n\n[[sample]]\nreplay = "lab/r{i}"\ntext = "a"\n'
+        for i in range(3)), "3 replays")
+    expect("a closed key set sees a replay's sample keys as publishers",
+           key_set_entities(wz_config.read_decl_toml(SAMPLE + replay))[-2:]
+           == [{"kind": "publisher", "key": "lab/r"}, {"kind": "publisher", "key": "lab/r/other"}])
     expect("a ttl the declaration states is the one generated",
            "pub const GROUP_TTL: u8 = 8;" in emit(
                "n", wz_config.read_decl_toml(group_node.replace("members = 4", "members = 4\nttl = 8")), sha))
@@ -1649,7 +1900,8 @@ document_bytes = 8
 
     def at_least(spec: dict, kind: str) -> object:
         return {"integer": spec.get("min"), "key": f"lab/v/{kind}", "key-expression": f"lab/v/{kind}",
-                "word": spec.get("default"), "rate": "1"}[spec["value"]]
+                "word": spec.get("default"), "rate": "1", "decimal": "1", "text": "t", "hex": "00",
+                "replay-key": "lab/v/replay"}[spec["value"]]
 
     def stating(entry: dict, item: dict, key: str, value: object) -> dict:
         """`item` with `key` stated as `value`: the other keys of its `one_of` group left out, and
@@ -1659,48 +1911,69 @@ document_bytes = 8
         condition = entry["keys"][key].get("with")
         if condition is not None and not holds(out, entry["keys"], condition):
             need = condition["key"]
-            out = stating(entry, out, need, condition.get("value", at_least(entry["keys"][need], kind)))
+            wanted = condition["in"][0] if "in" in condition else condition.get("value")
+            out = stating(entry, out, need, wanted if wanted is not None else at_least(entry["keys"][need], kind))
         return {**out, key: value}
 
-    for kind, entry in vocab["entities"].items():
-        expect(f"the slot target builds a {kind}", entry["built"])
-        base = {"kind": kind, **{k: at_least(s, kind) for k, s in entry["keys"].items()
-                                 if s["required"] and "with" not in s}}
+    # A replay holds a sample, and a sample belongs to a replay: each word is judged beside the least
+    # of the other, so the arms below judge one word at a time.
+    least_sample = toml_item("sample", {"replay": "lab/v/replay", "text": "t"})
+    least_replay = toml_item("entity", {"kind": "replay", "key": "lab/v/replay"})
+
+    def judge_word(kind: str, entry: dict, render) -> None:
+        """Hold one word of the vocabulary to the validator: its least valid, each condition, word,
+        rate and integer bound accepted where the vocabulary says and refused by name past it."""
+        base = {k: at_least(s, kind) for k, s in entry["keys"].items() if s["required"] and "with" not in s}
+        base = {"kind": kind, **base} if kind != "sample" else base
         for group in entry.get("one_of", []):
             base = stating(entry, base, group[0], at_least(entry["keys"][group[0]], kind))
         expect(f"a {kind} with the keys the vocabulary requires, at their least, is valid",
-               problems(head + dial + toml_item("entity", base)) == [])
+               problems(render(base)) == [])
         for key, spec in entry["keys"].items():
             if "with" in spec:
-                stray = problems(head + dial + toml_item("entity", {**base, key: at_least(spec, kind)}))
+                stray = problems(render({**base, key: at_least(spec, kind)}))
                 expect(f"a {kind}'s {key} where its condition does not hold is refused ({stray})",
                        any(f"`{key}` is read only when" in p for p in stray))
             if spec["value"] == "word":
-                odd = problems(head + dial + toml_item("entity", stating(entry, base, key, "odd")))
+                odd = problems(render(stating(entry, base, key, "odd")))
                 expect(f"a {kind}'s {key} outside the vocabulary's words is refused by name ({odd})",
                        any(f"{key} is 'odd', not one of {', '.join(spec['choices'])}" in p for p in odd))
+            if spec["value"] in ("decimal", "hex"):
+                odd = problems(render(stating(entry, base, key, "1.")))
+                expect(f"a {kind}'s {key} that is not one is refused by name ({odd})",
+                       any(f"{key} is '1.'" in p for p in odd))
             if spec["value"] == "rate":
                 fastest = 10**9 // spec["min_gap_ns"]
                 expect(f"the vocabulary's shortest gap of a {kind}'s {key} is a whole rate",
                        rate_gap_ns(str(fastest)) == (spec["min_gap_ns"], None))
-                at_max = problems(head + dial + toml_item("entity", stating(entry, base, key, str(fastest))))
-                past = problems(head + dial + toml_item("entity", stating(entry, base, key, str(fastest + 1))))
+                at_max = problems(render(stating(entry, base, key, str(fastest))))
+                past = problems(render(stating(entry, base, key, str(fastest + 1))))
                 expect(f"a {kind}'s {key} at the vocabulary's shortest gap is valid ({at_max})", at_max == [])
                 expect(f"a {kind}'s {key} past it is refused by name ({past})",
                        any(f"{key} is '{fastest + 1}'" in p for p in past))
             if spec["value"] != "integer":
                 continue
-            at_max = problems(head + dial + toml_item("entity", stating(entry, base, key, spec["max"])))
-            past = problems(head + dial + toml_item("entity", stating(entry, base, key, spec["max"] + 1)))
+            at_max = problems(render(stating(entry, base, key, spec["max"])))
+            past = problems(render(stating(entry, base, key, spec["max"] + 1)))
             expect(f"a {kind}'s {key} at the vocabulary's bound {spec['max']} is valid ({at_max})",
                    not any(f"{key} is" in p for p in at_max))
             expect(f"a {kind}'s {key} one past the vocabulary's bound is refused by name ({past})",
                    any(f"{key} is {spec['max'] + 1}" in p for p in past))
+        if kind == "sample":
+            return
         foreign = sorted(ENTITY_KEYS - set(entry["keys"]) - {"kind"})
         if foreign:
             expect(f"a key the vocabulary does not give a {kind} is refused",
-                   any(f"has no `{foreign[0]}`" in p for p in problems(
-                       head + dial + toml_item("entity", {**base, foreign[0]: 1}))))
+                   any(f"has no `{foreign[0]}`" in p for p in problems(render({**base, foreign[0]: 1}))))
+
+    for kind, entry in vocab["entities"].items():
+        expect(f"the slot target builds a {kind}", entry["built"])
+        sample_of = (lambda item: toml_item("sample", {"replay": item["key"], "text": "t"})) \
+            if kind == "replay" else (lambda item: "")
+        judge_word(kind, entry, lambda item, tail=sample_of: head + dial + toml_item("entity", item) + tail(item))
+    judge_word("sample", vocab["samples"], lambda item: head + dial + least_replay + toml_item("sample", item))
+    expect("the least sample and the least replay are each other's",
+           problems(head + dial + least_replay + least_sample) == [])
     endpoint_base = {"listen": {"role": "listen", "locator": "tcp/127.0.0.1:7500"},
                      "multicast": {"role": "multicast", "locator": "udp/224.0.0.224:7490"}}
     for role, base in endpoint_base.items():

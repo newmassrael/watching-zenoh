@@ -55,3 +55,10 @@ pub const MIRRORED: [(&str, usize); 0] = [];
 /// made with, or `None` for a document of that many bytes).
 pub const PUBLISHERS: usize = 1;
 pub const PUBLISHED: [(&str, wz_session_mcu::slot_publisher::Process, usize, Option<wz_session_mcu::slot_publisher::Fill>); 1] = [("lab/group/beat", wz_session_mcu::slot_publisher::Process::Periodic { gap_nanos: 200000000 }, 8, None)];
+/// The replays: (key, timing, the declared gap in milliseconds, the speed as written, the
+/// ceiling of a gap in milliseconds, the first of its samples, how many).
+pub const REPLAYS: usize = 0;
+pub const REPLAYED: [(&str, wz_session_mcu::slot_replay::Timing, u64, &str, u64, usize, usize); 0] = [];
+/// The replays' samples, each replay's together: (key, bytes, capture time in milliseconds,
+/// mutation).
+pub const REPLAY_SAMPLES: [(&str, &[u8], Option<u64>, wz_session_mcu::slot_replay::Mutation); 0] = [];

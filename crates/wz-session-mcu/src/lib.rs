@@ -101,6 +101,10 @@ pub mod latest;
 // the session's own application layer or the group's pump.
 #[cfg(all(feature = "session-slot", feature = "client-core"))]
 pub mod slot_publisher;
+// The client node as a replayer: a recorded sequence of puts compiled into the image, paced and
+// mutated as the replay tool does, played on each session from the session's application layer.
+#[cfg(all(feature = "session-slot", feature = "client-core"))]
+pub mod slot_replay;
 // What the client node knows of a plane it holds beside its sessions (a group, today): two traits and
 // the plane of a node that has none.
 #[cfg(all(feature = "session-slot", feature = "client-core"))]

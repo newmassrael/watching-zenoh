@@ -60,6 +60,7 @@ use wz_session_mcu::slot_publisher::{
 };
 #[cfg(feature = "get")]
 use wz_session_mcu::slot_querier::{Query, QueryState, QueryWatch};
+use wz_session_mcu::slot_replay::{Decimal, Replay, ReplayCounts, ReplayWatch, Sample, Schedule};
 
 wz_runtime_posix::posix_image_no_heap!();
 
@@ -73,8 +74,8 @@ mod declared {
 use declared::QUERIED;
 use declared::{
     ACCEPTS, CELLS, DECLARATION_SHA256, DIALED, DOCS, DOCUMENTS, GROUPS, LISTEN, LISTENS, MIRRORED,
-    MIRRORS, NODE_ID, PEERS, PEER_NODES, PUBLISHED, PUBLISHERS, QUERIERS, SAMPLE_MAX, SESSIONS,
-    SUBSCRIBERS, SUBSCRIPTIONS, TLS, TOKENS, TOKEN_KEYS,
+    MIRRORS, NODE_ID, PEERS, PEER_NODES, PUBLISHED, PUBLISHERS, QUERIERS, REPLAYED, REPLAYS,
+    REPLAY_SAMPLES, SAMPLE_MAX, SESSIONS, SUBSCRIBERS, SUBSCRIPTIONS, TLS, TOKENS, TOKEN_KEYS,
 };
 #[cfg(feature = "multicast")]
 use declared::{GROUP, GROUP_ADDR, GROUP_PORT, GROUP_TTL, MEMBERS};
@@ -217,8 +218,8 @@ const _: () = {
     }
 };
 
-/// The longest body the node makes for a put: the size of its one buffer, and none for a node whose
-/// publishers put documents.
+/// The longest body the node makes for a put, a publisher's or a replayed sample's once mutated: the
+/// size of its one buffer, and none for a node that makes no body.
 const MADE_MAX: usize = {
     let (mut at, mut most) = (0, 0);
     while at < PUBLISHERS {
@@ -227,7 +228,61 @@ const MADE_MAX: usize = {
         }
         at += 1;
     }
+    let mut at = 0;
+    while at < REPLAY_SAMPLES.len() {
+        let (_, body, _, mutation) = REPLAY_SAMPLES[at];
+        let len = mutation.output_len(body.len());
+        if len > most {
+            most = len;
+        }
+        at += 1;
+    }
     most
+};
+
+// Every replay is a range of the samples, and the ranges are the samples: the generator writes them
+// so, and a row that did not would play another replay's samples.
+const _: () = {
+    let (mut at, mut next) = (0, 0);
+    while at < REPLAYS {
+        let (_, _, _, _, _, first, count) = REPLAYED[at];
+        assert!(
+            first == next && count >= 1,
+            "a replay is not the next range of the samples"
+        );
+        next = first + count;
+        at += 1;
+    }
+    assert!(
+        next == REPLAY_SAMPLES.len(),
+        "a sample belongs to no replay"
+    );
+    assert!(
+        REPLAYS == 0 || GROUPS == 0,
+        "a replay of a node with a group mutates its samples into a buffer the group cannot carry"
+    );
+};
+
+/// The replays' samples, as the layer plays them: read-only data.
+static SAMPLES: [Sample; REPLAY_SAMPLES.len()] = {
+    let mut out = [Sample {
+        key: "",
+        body: &[],
+        captured_at_ms: None,
+        mutation: wz_session_mcu::slot_replay::Mutation::None,
+    }; REPLAY_SAMPLES.len()];
+    let mut at = 0;
+    while at < REPLAY_SAMPLES.len() {
+        let (key, body, captured_at_ms, mutation) = REPLAY_SAMPLES[at];
+        out[at] = Sample {
+            key,
+            body,
+            captured_at_ms,
+            mutation,
+        };
+        at += 1;
+    }
+    out
 };
 const _: () = assert!(
     TLS == cfg!(feature = "tls"),
@@ -313,8 +368,12 @@ static LATEST: LatestCells<CELLS, SAMPLE_MAX> = LatestCells::new();
 /// How many puts each publisher sent and had refused, and how late the latest was.
 static COUNTS: PublishCounts<PUBLISHERS> = PublishCounts::new();
 
-/// The bytes a body made for each put is written into, one for the node's sessions.
+/// The bytes a body made for each put, or a replayed sample mutated, is written into, one for the
+/// node's sessions.
 static MADE: MadeBuffer<MADE_MAX> = MadeBuffer::new();
+
+/// What each replay put, had refused and mutated, how late, and how many times it played through.
+static REPLAY_COUNTS: ReplayCounts<REPLAYS> = ReplayCounts::new();
 
 /// Where the replies of the queriers are kept, and how many queries each asked and had answered.
 #[cfg(feature = "get")]
@@ -391,16 +450,49 @@ fn publications() -> [Publication; PUBLISHERS] {
     })
 }
 
+/// The replays the declaration chose: each a range of the samples and the schedule its words make,
+/// or the console line, as the reason, when a speed is not a decimal (the generator refuses one, so
+/// this is the image refusing to start rather than to guess a speed).
+fn replays() -> Result<[Replay; REPLAYS], &'static str> {
+    let mut out = [Replay {
+        name: "",
+        samples: &[],
+        schedule: Schedule::default(),
+    }; REPLAYS];
+    for (slot, &(name, timing, gap_ms, speed, max_gap_ms, first, count)) in
+        out.iter_mut().zip(REPLAYED.iter())
+    {
+        let speed = Decimal::parse(speed)
+            .map_err(|_| "wz: FAIL - a replay's speed is not a decimal")?
+            .as_f64();
+        *slot = Replay {
+            name,
+            samples: &SAMPLES[first..first + count],
+            schedule: Schedule {
+                timing,
+                gap_millis: gap_ms,
+                speed,
+                max_gap_millis: Some(max_gap_ms),
+                max_total_millis: None,
+            },
+        };
+    }
+    Ok(out)
+}
+
 /// What the node says when a subscription takes a sample: the console line a lab waits for, once for
 /// each round that found a cell moved. The payload is in hex, so the line is one line whatever the
 /// bytes are; `seq` is how many samples the cell has taken, so a run of samples that arrived between
 /// two rounds shows as a jump. A publisher is said the same way, as `HOST-WZ-PUBLISHED <key>
 /// sent=<n> refused=<n> late_max_ms=<n>`, once for each round that found its counts moved: the last
 /// is how late its latest put was against its intended time, which a node that could not keep its
-/// arrival process says rather than thin its puts.
+/// arrival process says rather than thin its puts. A replay is said as `HOST-WZ-REPLAYED <key>
+/// sent=<n> refused=<n> mutated=<n> late_max_ms=<n> played=<n>`, `played` the times it was put to
+/// its last sample (once a session).
 struct Report {
     watch: LatestWatch<CELLS>,
     published: PublishWatch<PUBLISHERS>,
+    replayed: ReplayWatch<REPLAYS>,
     #[cfg(feature = "get")]
     queried: QueryWatch<QUERIERS>,
     /// The group's joins, join refusals, JOINs its member table turned away and members when they
@@ -439,6 +531,15 @@ impl NodeApp for Report {
                     PUBLISHED[at].0, sent, refused, late_max_ms
                 ));
             });
+        self.replayed.poll(
+            &REPLAY_COUNTS,
+            |at, (sent, refused, mutated, late_max_ms, played)| {
+                log_args(format_args!(
+                    "HOST-WZ-REPLAYED {} sent={} refused={} mutated={} late_max_ms={} played={}",
+                    REPLAYED[at].0, sent, refused, mutated, late_max_ms, played
+                ));
+            },
+        );
         #[cfg(feature = "get")]
         self.queried.poll(&QUERY_STATE, |at, tally| {
             log_args(format_args!(
@@ -533,6 +634,14 @@ fn run() -> i32 {
         }
     };
 
+    let played = match replays() {
+        Ok(played) => played,
+        Err(why) => {
+            log(why);
+            return 3;
+        }
+    };
+
     let (subscribed, mirrored) = (subscriptions(), mirrors());
     #[cfg(not(feature = "tls"))]
     let stack =
@@ -588,9 +697,11 @@ fn run() -> i32 {
             mirrors: &mirrored,
             tokens: &TOKEN_KEYS,
         },
-        layer: Active::<PUBLISHERS, QUERIERS, MADE_MAX> {
+        layer: Active::<PUBLISHERS, QUERIERS, REPLAYS, MADE_MAX> {
             publications: publications(),
             counts: &COUNTS,
+            replays: played,
+            replay_counts: &REPLAY_COUNTS,
             made: &MADE,
             #[cfg(feature = "get")]
             queries: queries(),
@@ -608,6 +719,7 @@ fn run() -> i32 {
     let report = Report {
         watch: LatestWatch::new(),
         published: PublishWatch::new(),
+        replayed: ReplayWatch::new(),
         #[cfg(feature = "get")]
         queried: QueryWatch::new(),
         #[cfg(feature = "multicast")]

@@ -3,9 +3,9 @@
 # A fixed-memory node that publishes: it dials one router and, while the session is up, puts an
 # eight-byte document on `lab/out/beat` every 200 ms and, at twenty a second, eight bytes made for
 # each put on `lab/out/count` (the `counter` fill: the put's sequence number, little-endian, which
-# is what a receiver measures loss and order with), on the per-session slot profile (no
-# allocator). The first puts go out when the session is established, and a new session starts both
-# streams over.
+# is what a receiver measures loss and order with), and replays a recorded sequence of three puts
+# on `lab/out/replay`, on the per-session slot profile (no allocator). The first puts go out when
+# the session is established, and a new session starts the streams and the replay over.
 #
 # The endpoint is this machine's loopback on a port of its own, because this is the node the
 # interop test builds and runs against the reference router
@@ -16,7 +16,7 @@ schema = 1
 
 [node]
 id = "slot-reporter"
-help = "A fixed-memory client that dials a router over TCP and puts a document on one key every period and a counted stream on another."
+help = "A fixed-memory client that dials a router over TCP, puts a document every period and a counted stream, and replays a recorded sequence."
 target = "slot"
 
 [[endpoint]]
@@ -35,3 +35,31 @@ key = "lab/out/count"
 rate_per_s = "20"
 payload_bytes = 8
 fill = "counter"
+
+# A recorded sequence, put on each session from the moment it is established: paced by the capture
+# at twice its speed (the second sample 200 ms after the first, the third, which carries no time,
+# the declared 100 ms halved after that), the second with its lowest bit flipped and the third cut
+# to three bytes.
+[[entity]]
+kind = "replay"
+key = "lab/out/replay"
+timing = "capture"
+speed = "2"
+
+[[sample]]
+replay = "lab/out/replay"
+text = "one"
+captured_at_ms = 1000
+
+[[sample]]
+replay = "lab/out/replay"
+hex = "00ff10"
+captured_at_ms = 1400
+mutation = "flip_bit"
+at_bit = 0
+
+[[sample]]
+replay = "lab/out/replay"
+text = "three"
+mutation = "truncate"
+keep = 3

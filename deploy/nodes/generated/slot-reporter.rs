@@ -6,7 +6,7 @@
 
 pub const NODE_ID: &str = "slot-reporter";
 /// The digest of the declaration file this was generated from; the node's facts note carries it.
-pub const DECLARATION_SHA256: &str = "8bf65a68dc8258f595e01354914413e6b2ff2042c310f021bb0013e4f6dfa8da";
+pub const DECLARATION_SHA256: &str = "b9235f601664bf35d2c9392a99f91b177e014b581c76934993253a6fdde5ae70";
 /// The routers the node dials, as locators.
 pub const DIALS: usize = 1;
 pub const DIALED: [&str; 1] = ["tcp/127.0.0.1:17472"];
@@ -48,3 +48,10 @@ pub const MIRRORED: [(&str, usize); 0] = [];
 /// made with, or `None` for a document of that many bytes).
 pub const PUBLISHERS: usize = 2;
 pub const PUBLISHED: [(&str, wz_session_mcu::slot_publisher::Process, usize, Option<wz_session_mcu::slot_publisher::Fill>); 2] = [("lab/out/beat", wz_session_mcu::slot_publisher::Process::Periodic { gap_nanos: 200000000 }, 8, None), ("lab/out/count", wz_session_mcu::slot_publisher::Process::Periodic { gap_nanos: 50000000 }, 8, Some(wz_session_mcu::slot_publisher::Fill::Counter))];
+/// The replays: (key, timing, the declared gap in milliseconds, the speed as written, the
+/// ceiling of a gap in milliseconds, the first of its samples, how many).
+pub const REPLAYS: usize = 1;
+pub const REPLAYED: [(&str, wz_session_mcu::slot_replay::Timing, u64, &str, u64, usize, usize); 1] = [("lab/out/replay", wz_session_mcu::slot_replay::Timing::Capture, 100, "2", 10000, 0, 3)];
+/// The replays' samples, each replay's together: (key, bytes, capture time in milliseconds,
+/// mutation).
+pub const REPLAY_SAMPLES: [(&str, &[u8], Option<u64>, wz_session_mcu::slot_replay::Mutation); 3] = [("lab/out/replay", &[111, 110, 101], Some(1000), wz_session_mcu::slot_replay::Mutation::None), ("lab/out/replay", &[0, 255, 16], Some(1400), wz_session_mcu::slot_replay::Mutation::FlipBit { at: 0 }), ("lab/out/replay", &[116, 104, 114, 101, 101], None, wz_session_mcu::slot_replay::Mutation::Truncate { to: 3 })];

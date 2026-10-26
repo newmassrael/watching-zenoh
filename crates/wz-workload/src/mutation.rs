@@ -74,10 +74,13 @@ pub struct Applied {
 
 impl Mutation {
     /// How long the mutated payload of a `body_len`-byte body is: the buffer [`Self::apply_into`]
-    /// needs, which an interpreter with no allocator sizes its storage by.
-    pub fn output_len(&self, body_len: usize) -> usize {
+    /// needs, which an interpreter with no allocator sizes its storage by. `const`, so an image
+    /// sizes that storage when it is built.
+    pub const fn output_len(&self, body_len: usize) -> usize {
         match *self {
-            Self::Truncate { to } => body_len.min(to),
+            // `min` is not `const`.
+            Self::Truncate { to } if to < body_len => to,
+            Self::Truncate { .. } => body_len,
             Self::Extend { count, .. } => body_len.saturating_add(count),
             _ => body_len,
         }

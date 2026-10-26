@@ -240,9 +240,8 @@ fn mutation_of(value: &Json5Value) -> Mutation {
 
 /// The schedule of a replay's keys.
 fn schedule(args: &Args) -> Schedule {
-    let speed = args
-        .decimal("speed")
-        .map_or(1.0, |d| d.mantissa() as f64 / 10f64.powi(d.scale() as i32));
+    // The workload's float of the digits, which a fixed-memory replay of the same words reads too.
+    let speed = args.decimal("speed").map_or(1.0, |d| d.as_f64());
     Schedule {
         timing: match args.text("timing") {
             Some("capture") => Timing::Capture,

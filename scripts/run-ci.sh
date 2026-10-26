@@ -11537,6 +11537,13 @@ layer_c1m_session_lwip() {
     # the watch that says them: 12 = what that command PRINTED.
     _runci_guarded_test "C1m mcu publisher" 12 \
         cargo test -p wz-session-mcu --features client-slot --lib slot_publisher::tests --quiet || return 1
+    # The replay (`slot_replay`), which plays a recorded sequence by the workload's pacing walk and
+    # mutations: the capture's pace with each sample mutated as written and the end counted, a late
+    # round catching up on the plan's times, a retry that does not move on and a lost session
+    # playing again from the start, a sample longer than the buffer refused while the replay goes
+    # on, and the watch that says the counts once: 5 = what that command PRINTED.
+    _runci_guarded_test "C1m mcu replay" 5 \
+        cargo test -p wz-session-mcu --features client-slot --lib slot_replay::tests --quiet || return 1
     # The querier (`slot_querier`, which is `query-get`'s): a reply into the cell of its query after
     # the subscriptions', cut at the size it keeps, an error counted and kept nowhere, a delete, the
     # end of a query as one final or one timeout, and the watch that says the counts.
@@ -20320,9 +20327,10 @@ layer_z_zenohd_interop() {
         -- --ignored --quiet --test-threads=1 || decl_rc=1; }
     # The publisher, the same way: the router's REST stream shows the declared document on the
     # declared period, the counted stream declared at a rate with a body made for each put shows
-    # every sequence number in order at the rate, and the node puts again with the session that
+    # every sequence number in order at the rate, the replay compiled into the image shows its
+    # samples in order, mutated and paced as declared, and the node puts again with the session that
     # follows a router restart.
-    [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Zpub 3 env WZ_ZENOHD_BIN="$zenohd" \
+    [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Zpub 4 env WZ_ZENOHD_BIN="$zenohd" \
         WZ_DECLARED_NODE_REPORTER="$decl_pkg/slot-reporter/bin/declared-node" \
         cargo test -p wz-integration-tests --test wz_declared_publisher_zenohd_interop \
         -- --ignored --quiet --test-threads=1 || decl_rc=1; }
