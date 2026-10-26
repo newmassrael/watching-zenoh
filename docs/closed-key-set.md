@@ -253,10 +253,8 @@ publishes it receives) is the per-peer allowance, phase 4.
   table, an image on a target.
 - **Not done.** The alias row is still text and not a number (D5): resolution at the edge is what a
   peer's declared resource needs, and a resource is a prefix that a selector may be built on, so it is
-  not simply a key id. A reply's key is not gated. No image supplies a table, and the match memory is
-  still built in a closed image. `wz_node.py` checks a node entity's key with its own, looser rule
-  (`key_problem`), so a node declaration is not yet held to canonical form; its table will be when the
-  node emits one.
+  not simply a key id. A reply's key is not gated. No node's code calls `set_key_gate` with its table
+  yet (see "The node's table, as built"), and the match memory is still built in a closed image.
 - **Canonical form, built after the first cut of this phase.** The subscriber table registers a pattern
   in canonical form, so a declared key spelled otherwise (`a/**/*`, a chunk of only `$*`, `a*b`) would
   never be the text the table holds and its subscription would be refused. The generator now refuses
@@ -266,6 +264,27 @@ publishes it receives) is the per-peer allowance, phase 4.
   validator and checks that every text the validator accepts is its own canonical form. The test was
   run with the rule that a `$` may not follow a `$*` taken out of the port, and it failed; with the rule
   back it passes.
+
+## The node's table, as built
+
+- **A node that states `[policy] key-set = "closed"` carries its table.** `scripts/lib/wz_node.py` takes
+  the node's entities, each a kind and a key, as its key set, holds them to what the table can carry
+  (canonical keys, concrete publishers and tokens, no wildcard that nothing concrete meets, no entity
+  twice; a refusal says `key set:`), and writes the table into the node's generated `declared.rs` as
+  a module `key_set` with `CATALOGUE` and `CLOSED`. A node that states nothing, or `open`, has the
+  module with `CLOSED = None` and is held to nothing new, so the seven registered nodes keep their
+  declarations and gain five lines each.
+- **One name for both.** A node's code reads `declared::key_set::CLOSED`: `Some(table)` for a closed
+  node and `None` for any other. The adoption is the three lines `if let Some(table) = CLOSED {
+  subscribers.set_key_gate(KeyGate::closed(table)); }` before the first subscription is made, which is
+  the part of the slot node and the cooperative engine that sessions ef and 11 own and which is not
+  made here. `CLOSED` is the node's own declaration, so the node needs no second read of the policy.
+- **The table is a module that names nothing of its includer's.** It carries its own `use` and inner
+  attribute and refers to the crate by name, because a node's file already has a `MEMBERS` of its own
+  and is `include!`d. The model test includes the generated fixture the same way, which compiles the
+  form; the type-check of `declared-node` against a regenerated node file passes on pc2.
+- **The matcher and verdict ports moved to `scripts/lib/wz_keyexpr.py`**, with `key_problem` and
+  `rust_string`, so that `wz_node.py` uses them without importing the generator that imports it.
 
 ## What is not decided
 

@@ -58,3 +58,9 @@ pub const MIRRORED: [(&str, usize); 0] = [];
 /// The publishers: (key, the period in milliseconds, the bytes of the document it puts).
 pub const PUBLISHERS: usize = 1;
 pub const PUBLISHED: [(&str, u32, usize); 1] = [("lab/out/beat", 200, 8)];
+
+/// The key set the node declares: none, since it does not state a closed one.
+pub mod key_set {
+    #![allow(dead_code)]
+    pub const CLOSED: Option<&'static wz_session_core::key_catalogue::KeyCatalogue<'static>> = None;
+}

@@ -22,10 +22,13 @@
 
 #[path = "key_set_data/corpus.rs"]
 mod corpus;
-#[path = "key_set_data/fixture.rs"]
-mod fixture;
+// The generated table is a module of its own (`key_set`) that a file includes, as a node's
+// generated `declared.rs` does.
+mod fixture {
+    include!("key_set_data/fixture.rs");
+}
 
-use fixture::{CATALOGUE, DECLARED};
+use fixture::key_set::{CATALOGUE, DECLARED};
 use wz_session_core::key_catalogue::{EntityId, EntityKind, KeyId};
 use wz_session_core::keyexpr_match::keyexpr_intersects_text;
 
@@ -263,6 +266,27 @@ fn delivery_by_selection_is_what_the_scan_delivers_in_the_order_it_delivers() {
         "the keys reach several subscribers each, {delivered}"
     );
     assert_eq!(numbered.key_gate_refused().total, 0);
+}
+
+#[cfg(feature = "alloc")]
+#[test]
+fn a_node_adopts_its_table_by_reading_closed() {
+    use wz_session_core::key_gate::KeyGate;
+
+    // What a node's code does with its generated `declared.rs`: one name, `Some` for a node that
+    // states a closed key set, and the gate over it.
+    let closed = fixture::key_set::CLOSED.expect("the fixture states a closed key set");
+    assert_eq!(closed.key_count(), CATALOGUE.key_count());
+    let fired = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut table: wz_session_core::pubsub::SubscriberTable<Counted> =
+        wz_session_core::pubsub::SubscriberTable::with_sink_backing();
+    if let Some(catalogue) = fixture::key_set::CLOSED {
+        table.set_key_gate(KeyGate::closed(catalogue));
+    }
+    register_the_fixtures_subscribers(&mut table, &fired);
+    assert!(!fired_on(&mut table, &fired, "lab/sensor/temp").is_empty());
+    assert!(fired_on(&mut table, &fired, "lab/sensor/pressure").is_empty());
+    assert_eq!(table.key_gate_refused().outside_set, 1);
 }
 
 #[cfg(feature = "alloc")]

@@ -35,15 +35,18 @@
     feature = "keyexpr-dollar-star"
 ))]
 
-#[path = "key_set_data/fixture.rs"]
-mod fixture;
+// The generated table is a module of its own (`key_set`) that a file includes, as a node's
+// generated `declared.rs` does.
+mod fixture {
+    include!("key_set_data/fixture.rs");
+}
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use fixture::{CATALOGUE, DECLARED};
+use fixture::key_set::{CATALOGUE, DECLARED};
 use wz_session_core::key_catalogue::EntityKind;
 use wz_session_core::key_gate::KeyGate;
 use wz_session_core::locality::Locality;

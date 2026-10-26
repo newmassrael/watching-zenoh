@@ -88,6 +88,11 @@ import tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import wz_config  # noqa: E402
+import wz_key_set  # noqa: E402
+
+# `key_problem` and `rust_string` moved to `wz_keyexpr.py`, which `wz_key_set.py` shares; they stay
+# names of this module, which its selftest and `wz_package.py` read.
+from wz_keyexpr import key_problem, rust_string  # noqa: E402,F401
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 NODES = ROOT / "deploy" / "nodes"
@@ -217,19 +222,6 @@ def policy_problems(decl: dict, stated: dict) -> list[str]:
         if not isinstance(value, str) or value not in allowed:
             problems.append(f"policy: `{name}` is {value!r}, one of {', '.join(allowed)}")
     return problems
-
-
-def key_problem(key: str, limit: int) -> str | None:
-    """Why `key` is not a key expression a node can declare, or None."""
-    if not key:
-        return "is empty"
-    if len(key.encode("utf-8")) > limit:
-        return f"is longer than MAX_KEYEXPR_BYTES ({limit})"
-    if key.startswith("/") or key.endswith("/") or "//" in key:
-        return "has an empty chunk"
-    if any(c in key for c in "?#") or any(ord(c) < 0x21 or ord(c) == 0x7F for c in key):
-        return "has a character a key expression does not (`?`, `#`, a space or a control)"
-    return None
 
 
 def validate(name: str, data: dict, decl: dict) -> list[str]:
@@ -455,6 +447,10 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
         if name in stated and isinstance(stated[name], int) and stated[name] < need:
             out.append(f"{need} {what}; the declaration states {name} = {stated[name]} (state at least "
                        f"{need}, or nothing, and it follows from the entities)")
+    # A node that states a closed key set is held to what the table can carry: canonical keys, concrete
+    # publishers and tokens, no wildcard that nothing concrete meets, no entity twice.
+    if states_closed_key_set(data):
+        out += [f"key set: {why}" for why in wz_key_set.validate(key_set_entities(data), values["MAX_KEYEXPR_BYTES"])]
     return out
 
 
@@ -493,14 +489,31 @@ def budgets(data: dict, decl: dict) -> dict[str, int]:
     return dict(sorted(stated.items()))
 
 
-def rust_string(text: str) -> str:
-    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
-
-
 def digest(name: str, directory: pathlib.Path = NODES) -> str:
     """The SHA-256 of the declaration file's bytes, lower-case hex: what a built node says it was
     built from, so a declaration edited after the build is a difference a tool can see."""
     return hashlib.sha256((directory / f"{name}.toml").read_bytes()).hexdigest()
+
+
+def states_closed_key_set(data: dict) -> bool:
+    """Whether the node states the `key-set` policy as `closed`."""
+    stated = data.get("policy", {})
+    return isinstance(stated, dict) and stated.get("key-set") == "closed"
+
+
+def key_set_entities(data: dict) -> list[dict]:
+    """The node's entities as the key set sees them: a kind and a key. An entity that is not a table
+    counts for nothing here; `validate` has already said so."""
+    return [{"kind": e.get("kind"), "key": e.get("key")} for e in data.get("entity", []) if isinstance(e, dict)]
+
+
+def key_set_lines(data: dict) -> list[str]:
+    """The module `key_set` of the node's `declared.rs`: its table when it states a closed key set
+    (`docs/closed-key-set.md`, the entities it declares are the keys), and `CLOSED = None` when it does
+    not, so the node's code reads one name for both. Valid input only."""
+    if not states_closed_key_set(data):
+        return wz_key_set.open_lines()
+    return wz_key_set.table_lines(wz_key_set.build(key_set_entities(data)), closed=True)
 
 
 def emit(name: str, data: dict, declaration_sha256: str) -> str:
@@ -604,6 +617,8 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
             "/// The publishers: (key, the period in milliseconds, the bytes of the document it puts).",
             f"pub const PUBLISHERS: usize = {len(published)};",
             f"pub const PUBLISHED: [(&str, u32, usize); {len(published)}] = [{pubs}];",
+            "",
+            *key_set_lines(data),
             "",
         ]
     )
@@ -1133,6 +1148,24 @@ document_bytes = 8
             SAMPLE + '\n[policy]\nmulticast-loopback = "sometimes"\n', "one of os-default, on, off")
     expect("a bool policy and a choice policy state their values",
            problems(SAMPLE + '\n[policy]\ndeclaration-sync-pacing = "on"\nmulticast-loopback = "off"\n') == [])
+
+    # A node that states a closed key set carries its table, and is held to what the table can carry;
+    # one that does not has `CLOSED = None` and is held to nothing new.
+    closed = SAMPLE + '\n[policy]\nkey-set = "closed"\n'
+    expect("a node that states a closed key set is valid", problems(closed) == [])
+    closed_rs = emit("n", wz_config.read_decl_toml(closed), sha)
+    expect("it carries its table, and `CLOSED` is `Some` of it",
+           "pub const CATALOGUE: KeyCatalogue<'static>" in closed_rs
+           and "pub const CLOSED: Option<&'static KeyCatalogue<'static>> = Some(&CATALOGUE);" in closed_rs
+           and '"lab/doc/a",' in closed_rs)
+    expect("a node that states none has `CLOSED = None` and no table",
+           "pub mod key_set {" in rs and "= None;" in rs and "CATALOGUE" not in rs)
+    refuses("a closed node's key that is not canonical",
+            closed.replace("lab/doc/a", "lab/**/*"), "key set: ")
+    refuses("a closed node's wildcard that nothing concrete meets",
+            closed.replace("lab/doc/a", "lab/doc/*"), "no concrete key")
+    expect("the same keys in an open node are not held to it",
+           problems(SAMPLE.replace("lab/doc/a", "lab/doc/*")) == [])
     refuses("no help", SAMPLE.replace('help = "A node."\n', ""), "help is missing")
     refuses("no node table", "[limits]\nMAX_QUERYABLES = 2\n", "no [node] table")
 
