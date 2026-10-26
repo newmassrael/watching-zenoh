@@ -591,23 +591,25 @@ bundles. D9 chooses it, for these reasons.
 - The two profiles stop having two implementations of the dispatch order, which the module
   documentation of `slot_observer` states "step for step" as a promise two files keep.
 
-### What is not as is
+### What was not as is, and is now
 
-`slot_observer` is compiled only with `bounded-heapless` (the fixed backing, which flips the
-build's whole storage policy to static), and its `dispatch` takes `PeerTables` and `Requesters`
-of the build's policy. A heap build cannot name it. `PeerTables<P: Storage>` is already generic
-over the policy, and `Requesters<R, G>` over the reply sinks, so the work is in the observer: its
-dispatch and drain made generic over the policy, ungated from `bounded-heapless`, and held equal
-to `ApplicationLayerObserver::dispatch` by a differential (the same events into both give the
-same sends and the same deliveries). The AP observer stays as the tokio engine's until it is
-rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables<Heap>` and one `Requesters`, which is
-the end state and is not this work.
+`slot_observer` was compiled only with `bounded-heapless` (the fixed backing, which flips the
+build's whole storage policy to static), so a heap build could not name it. Its `dispatch` takes
+`PeerTables` and `Requesters` of the BUILD's policy, which in a heap build is the heap's, so the
+gate was the only thing in the way and nothing in the observer needed to be made generic: the
+module compiles in a heap build as it is (L0, below). The AP observer stays as the tokio
+engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables` and one
+`Requesters`, which is the end state and is not this work.
 
 ### The steps, each of which stands alone and proves what it says
 
-- **L0. The observer, generic.** `SlotObserverOf`'s dispatch over `PeerTables<P>`, in a heap
-  build, with the differential against `ApplicationLayerObserver`. Nothing in the engine moves.
-  Proof: the differential, and `session-core`'s existing tests on both profiles.
+- **L0. The observer in a heap build. Done.** The module is no longer gated on the fixed
+  backing; `tests/slot_observer_heap.rs` holds, in a heap build, that two peers numbering from the
+  same ids are each served under their own, that two peers asking with one request id are each
+  answered on their own session's send path with the Final after the replies, and that for one
+  session it sends (byte for byte) and delivers what `ApplicationLayerObserver` does. The module's
+  own unit tests, which compare the two observers, run in the heap build too. Layer C1g runs the
+  file.
 - **L1. The engine on it, with one link.** `Core` holds a `SlotObserver`, the link's
   `PeerTables<Heap>` and its `Requesters`, and dispatches against them. No behaviour change: the
   engine's whole test suite and the size gate's cooperative cases (whose budgets leave almost no
