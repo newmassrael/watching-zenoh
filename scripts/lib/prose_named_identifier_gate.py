@@ -259,15 +259,17 @@ UPSTREAM_UNCARRIED = frozenset(
         "ZENOH_COMPILER_GCC",
         # R3487 — `ZENOH_RUNTIME` left this set: the `zenoh-runtime` crate of the family
         # provides it (`ZENOH_RUNTIME_ENV`, the variable it reads), so the tree carries it.
-        "Z_BATCH_MULTICAST_SIZE",
+        # The round after 3733 — five of pico's value build switches left this set:
+        # BATCH_MULTICAST_SIZE, CONFIG_SOCKET_TIMEOUT, RUNTIME_IDLE_READ_TASK_SLEEP,
+        # TRANSPORT_LEASE, TRANSPORT_LEASE_EXPIRE_FACTOR (each with its Z_ prefix). The C7 map
+        # now judges every value switch of pico's config template as a row of
+        # `deploy/wz-config.toml`, so the tree names each one in code; what wz does with it
+        # (a PICO_* limit, a register item, or n/a) is that row's class, the record these
+        # pins stood in for.
         "Z_CONFIG_MULTICAST_IPV4_ADDRESS_KEY",
         "Z_CONFIG_MULTICAST_LOCATOR_DEFAULT",
         "Z_CONFIG_SCOUTING_TIMEOUT_DEFAULT",
         "Z_CONFIG_SCOUTING_WHAT_DEFAULT",
-        # Round 3562 — pico's socket receive timeout, which the cooperative engine's prose
-        # cites as what its idle wait matches. wz carries the value (the pico ABI hands the
-        # engine 100 ms as its idle wait), not a constant of that name. Described, not spelled.
-        "Z_CONFIG_SOCKET_TIMEOUT",
         "Z_CONGESTION_CONTROL_DEFAULT",
         # R3406 — seven `Z_FEATURE_*` switches left this set: BATCHING, ENCODING_VALUES,
         # FRAGMENTATION, MATCHING, MULTICAST_DECLARATIONS, PUBLICATION, SUBSCRIPTION.
@@ -287,19 +289,12 @@ UPSTREAM_UNCARRIED = frozenset(
         "Z_LINK_CAP_TRANSPORT_RAWETH",
         "Z_LINK_CAP_TRANSPORT_UNICAST",
         "Z_LISTEN_MAX_CONNECTION_NB",
-        # R2534 — pico's idle-read-task sleep knob, entered because
-        # `wz-capi-pico/src/session.rs` cites it to explain why wz's single-shot
-        # spin call never answers false on a LIVE session: that branch exists
-        # upstream only when the knob is set, and wz has no task queue to be
-        # idle. The row below is deliberately the only place in this tree that
-        # spells the name.
-        # ⚠ THE COMMENT CANNOT CODE-SPELL IT. A first draft explained this in
-        # backticks and the gate then reported the tree as CARRYING the name —
-        # a classification defeated by its own justification. Describe, do not
-        # spell. (The 1.10.1 header-delta note in `upstream_release_distance.py`
-        # hit the same wall and was reworded instead of classified, because for
-        # a `scripts/lib` file this gate asks for ABSENT rather than this set.)
-        "Z_RUNTIME_IDLE_READ_TASK_SLEEP",
+        # ⚠ A COMMENT IN THIS SET CANNOT CODE-SPELL THE NAME IT EXPLAINS. A first draft
+        # (R2534) explained an entry in backticks and the gate then reported the tree as
+        # CARRYING the name — a classification defeated by its own justification. Describe,
+        # do not spell. (The 1.10.1 header-delta note in `upstream_release_distance.py` hit
+        # the same wall and was reworded instead of classified, because for a `scripts/lib`
+        # file this gate asks for ABSENT rather than this set.)
         # The protocol version byte is wz's own `PROTOCOL_VERSION` (codecs and
         # the wire fixtures), not pico's config macro. Entered when the
         # acceptor's version refusal replaced the demo's version knob and the
@@ -310,11 +305,6 @@ UPSTREAM_UNCARRIED = frozenset(
         "Z_SAMPLE_KIND_DEFAULT",
         "Z_SELECTOR_QUERY_MATCH",
         "Z_SELECTOR_TIME",
-        # Open-debt item 913 — pico's lease, which its multicast JOIN advertises. wz carries
-        # the value in the pico ABI's group profile and no constant of that name; the group
-        # beacon's interval and batch beside it in the same prose were already here.
-        "Z_TRANSPORT_LEASE",
-        "Z_TRANSPORT_LEASE_EXPIRE_FACTOR",
         "Z_ZID_LENGTH",
     }
 )
