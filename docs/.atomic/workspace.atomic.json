@@ -291930,6 +291930,38 @@
         "Lower bounds of the SN resolution and the batch size, to be proposed to the analyzer design."
       ]
     },
+    "Round 3744": {
+      "decision_summary": "zenoh-pico's z_view_keyexpr_from_str is documented to fail when the string is not in canon form, and its body refuses with Z_EINVAL (it is z_view_keyexpr_from_substr, which calls _z_keyexpr_is_canon). The pico ABI's two view constructors checked only UTF-8, so a key with an empty chunk (inside, at the end or at the start) or a spelling canonizing would change was viewed, declared and published where pico refuses it at the view. Measured from outside: a program on the pico C API that declares a key with an empty chunk, and one that puts on a key ending in a slash, were each refused by zenoh-pico and accepted by the wz drop-in. Both views now refuse with Z_EINVAL, and one function holds the judgement that z_keyexpr_is_canon, the views and the checked owned constructor share. The owned constructor stays stricter than pico, whose z_keyexpr_from_substr copies without checking; that difference is recorded, not followed.",
+      "changes_bullets": [
+        "crates/wz-capi-pico/src/keyexpr.rs: is_pico_canon; z_view_keyexpr_from_str and z_view_keyexpr_from_substr refuse a text not in canon form with Z_EINVAL; z_keyexpr_is_canon and z_keyexpr_from_substr call the same function; unit test the_checked_views_refuse_a_text_not_in_canon_form."
+      ],
+      "verification_bullets": [
+        "Negative control: with the str form's check forced off the new test fails (zenoh//test viewed, 0 against -75); with it on, wz-capi-pico 162 passed and clippy --all-targets -D warnings clean.",
+        "Layer E's preparation (demo, silent peer, the TLS build and the three pico arms each built from its config.h) then the pico drop-in C examples with Layer E's skip list: 33 passed, 0 failed. The layer as a whole was not green here: its crate-wide test build links an unrelated test binary that crashes mold (signal 6), and the fleet account has no python3-venv for kconfiglib.",
+        "prose-name, reason pin, upstream citation anchor and store reason citation gates rc=0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "The owned keyexpr constructor of the pico ABI refuses a text that is not canon where zenoh-pico 1.10.1's copies it unchecked; whether the drop-in should follow pico there is open."
+      ],
+      "publishable_decision_summary": "zenoh-pico's z_view_keyexpr_from_str is documented to fail when the string is not in canon form, and its body refuses with Z_EINVAL (it is z_view_keyexpr_from_substr, which calls _z_keyexpr_is_canon). The pico ABI's two view constructors checked only UTF-8, so a key with an empty chunk (inside, at the end or at the start) or a spelling canonizing would change was viewed, declared and published where pico refuses it at the view. Measured from outside: a program on the pico C API that declares a key with an empty chunk, and one that puts on a key ending in a slash, were each refused by zenoh-pico and accepted by the wz drop-in. Both views now refuse with Z_EINVAL, and one function holds the judgement that z_keyexpr_is_canon, the views and the checked owned constructor share. The owned constructor stays stricter than pico, whose z_keyexpr_from_substr copies without checking; that difference is recorded, not followed.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-pico/src/keyexpr.rs: is_pico_canon; z_view_keyexpr_from_str and z_view_keyexpr_from_substr refuse a text not in canon form with Z_EINVAL; z_keyexpr_is_canon and z_keyexpr_from_substr call the same function; unit test the_checked_views_refuse_a_text_not_in_canon_form."
+      ],
+      "publishable_verification_bullets": [
+        "Negative control: with the str form's check forced off the new test fails (zenoh//test viewed, 0 against -75); with it on, wz-capi-pico 162 passed and clippy --all-targets -D warnings clean.",
+        "Layer E's preparation (demo, silent peer, the TLS build and the three pico arms each built from its config.h) then the pico drop-in C examples with Layer E's skip list: 33 passed, 0 failed. The layer as a whole was not green here: its crate-wide test build links an unrelated test binary that crashes mold (signal 6), and the fleet account has no python3-venv for kconfiglib.",
+        "prose-name, reason pin, upstream citation anchor and store reason citation gates rc=0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The owned keyexpr constructor of the pico ABI refuses a text that is not canon where zenoh-pico 1.10.1's copies it unchecked; whether the drop-in should follow pico there is open."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
