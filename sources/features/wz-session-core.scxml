@@ -59,6 +59,7 @@
   <sce:feature name="keyexpr-prefix"/>
   <sce:feature name="keyexpr-wildcard-double"/>
   <sce:feature name="keyexpr-wildcard-single"/>
+  <sce:feature name="lifecycle-contract"/>
   <sce:feature name="liveliness-get" requires="codec-declare"/>
   <sce:feature name="liveliness-subscriber" requires="codec-declare"/>
   <sce:feature name="liveliness-token" requires="codec-declare declare-final"/>
