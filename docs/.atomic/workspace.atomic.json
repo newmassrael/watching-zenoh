@@ -289954,6 +289954,38 @@
         "Read the hosted run of this push per job, compared by head sha; several consecutive pushes were cancelled before they were graded, so push in batches."
       ]
     },
+    "Round 3697": {
+      "decision_summary": "The heap UDP dialer now holds a dial made for a node to that node (decision D4 of the session lifecycle intent). UdpDialer gains dial_for and Dialer::VERIFIES_NODES is true: dial_for sets expect_peer_zid on the session's actions before the session is spawned, the call the slot host makes, so an InitAck from another node closes the session Invalid before any OpenSyn, and a dial that names no node (a configured endpoint) still admits whichever node answers. Before this the port refused every node over this dialer for want of the claim, so a heap build could not open a peer by its zid. The dial is one helper, dial_expecting, shared by dial and dial_for.",
+      "changes_bullets": [
+        "crates/wz-session-mcu/src/dial.rs: UdpDialer::dial_for, VERIFIES_NODES, the shared dial_expecting; one test dials three acceptors, all node a1, for a1, for another zid and for no node.",
+        "scripts/run-ci.sh: C1m mcu adminspace-write 41 -> 42 and adminspace read+write 51 -> 52, the two legs that compile the dial module; docs/session-lifecycle-intent.md: the heap dialer no longer listed as not verifying."
+      ],
+      "verification_bullets": [
+        "On pc2 (bx): the five tests of the dial module pass (the new one among them) with the dial and adminspace-core features; each of the five wz-session-mcu legs was run and printed its count (14, 15, 42, 18, 52); clippy with warnings denied is clean for the lib and its tests; rustfmt is clean. The test checks close_reason and the action trace, since a session task sleeps to its next deadline and a frozen test clock never wakes it to end.",
+        "Not run here: a node opened by its zid over a real heap UDP session between two nodes, and the hosted run of these legs."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Read the first finished hosted run that holds rounds 3674, 3678, 3679, 3686 and this one: the C1m legs (the moved counts and the two new ones), Qzb and the no-allocator rows. Open: an out-of-band open and a declared peer that succeed over a real secure channel, the text the declared value saves (not measured), the Hello hint source, the image witness, the Qzb chain fall and the C1cn shard 1 time budget."
+      ],
+      "publishable_decision_summary": "The heap UDP dialer now holds a dial made for a node to that node (decision D4 of the session lifecycle intent). UdpDialer gains dial_for and Dialer::VERIFIES_NODES is true: dial_for sets expect_peer_zid on the session's actions before the session is spawned, the call the slot host makes, so an InitAck from another node closes the session Invalid before any OpenSyn, and a dial that names no node (a configured endpoint) still admits whichever node answers. Before this the port refused every node over this dialer for want of the claim, so a heap build could not open a peer by its zid. The dial is one helper, dial_expecting, shared by dial and dial_for.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-mcu/src/dial.rs: UdpDialer::dial_for, VERIFIES_NODES, the shared dial_expecting; one test dials three acceptors, all node a1, for a1, for another zid and for no node.",
+        "scripts/run-ci.sh: C1m mcu adminspace-write 41 -> 42 and adminspace read+write 51 -> 52, the two legs that compile the dial module; docs/session-lifecycle-intent.md: the heap dialer no longer listed as not verifying."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2 (bx): the five tests of the dial module pass (the new one among them) with the dial and adminspace-core features; each of the five wz-session-mcu legs was run and printed its count (14, 15, 42, 18, 52); clippy with warnings denied is clean for the lib and its tests; rustfmt is clean. The test checks close_reason and the action trace, since a session task sleeps to its next deadline and a frozen test clock never wakes it to end.",
+        "Not run here: a node opened by its zid over a real heap UDP session between two nodes, and the hosted run of these legs."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the first finished hosted run that holds rounds 3674, 3678, 3679, 3686 and this one: the C1m legs (the moved counts and the two new ones), Qzb and the no-allocator rows. Open: an out-of-band open and a declared peer that succeed over a real secure channel, the text the declared value saves (not measured), the Hello hint source, the image witness, the Qzb chain fall and the C1cn shard 1 time budget."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
