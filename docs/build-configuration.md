@@ -180,8 +180,9 @@ original reproduced by naming it. Three things follow from it:
   first slices are the `bytes` module, `ZBytes` with its reader, writer and slice iterator and
   `Encoding`, the `shm` module without its provider state, the `cancellation` module of the
   `unstable` arm, the `config` module with its notifier, the `handlers` module with its
-  channels, `key_expr` and `selector`, and `sample` with the quality of service: 327 of 709
-  default lines present, 440 of 965 with `unstable` and 496 of 1,025 with `unstable` and
+  channels, `key_expr` and `selector`, `sample` with the quality of service, and the opening and
+  closing of a session (`open`, `Session`, `close`, `is_closed`, `zid`, `id`): 352 of 709
+  default lines present, 467 of 965 with `unstable` and 523 of 1,025 with `unstable` and
   `shared-memory`; the seam over the engine is
   `docs/zenoh-api-on-the-engine.md`).
   Behaviour is held beside the surface by Layer E18 (`conformance/`): a differential test of each

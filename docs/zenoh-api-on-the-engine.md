@@ -362,6 +362,30 @@ Each lands whole with its surface lines, tests and faults in one round.
   is either to carry router mode in the top crate through the engine's router data plane
   (`docs/router-data-plane-scaling.md`) or to record that half of the gate does not apply.
   Cut in four after the read of section 5.2: Z1-pre (lift the open out of `z_open`), Z1a, Z1b, Z1c.
+  - **Z1-pre (landed).** See section 5.2: `wz_capi_core::open_plan`, the plan and its twelve
+    refusals, `z_open` mapping them.
+  - **Z1a (landed).** `zenoh::open` and `OpenBuilder`, `Session` (clone, equality, drop, `close`,
+    `is_closed`, `zid`, and `id` with `unstable`), `CloseBuilder` and `SessionClosedError`, over
+    the tokio engine selected by the feature `engine-tokio` (D5; a build that selects none says so
+    at `open`). `Session::open` reads the `Config` as the plan's document, with the mode and the
+    id stated, and the engine's `open_blocking` runs it; the handle is `Arc<SessionInner>` with a
+    count of the handles, so the last one dropped closes the session whatever else holds it, and
+    the session implements the anchor of the key expression (`WireAnchor`: `acquire_keyexpr` and
+    `release_keyexpr` of the port). A close joins the engine's threads, so it runs where blocking
+    is allowed (`ZRuntime::Net.spawn_blocking`) and `wait_callbacks` changes nothing. The
+    features `transport_tcp` (the configuration's default listening endpoints) and
+    `transport_udp` join the manifest and its default set. 25 of the default lines, 27 of the
+    `unstable` and the shared-memory arms', 6 differential tests (the last handle, the lifecycle
+    seen from a port that stops answering, the identity, the asynchronous close, the refusals in
+    upstream's words) and 12 injected faults, none missed after two gaps were closed (equality by
+    id, and a listening endpoint stated twice). Two differences are held, both of the cause of a
+    failed open: a session that listens and dials, and a listener that cannot bind, report
+    `LinkFailed` where upstream reports what the operating system answered, because the engine
+    says that a link did not open and not which or why. The D5 fold of the engine's two runtime
+    creation points onto the family's pools is not done here: the engine keeps its thread per
+    session, which is what the C ABI measured, and folding changes the join of `close`; it is a
+    slice of its own. The router's role mapping is held by Z1b, where a router is opened and
+    observed.
 - **Z2. Publish and subscribe.** `put`, `delete`, `declare_publisher`, `declare_subscriber` with
   the handlers the surface has (callback, callback with a drop, the default handler, fifo, ring),
   QoS, attachments, encodings, localities, express, congestion control, `new_timestamp`, the
