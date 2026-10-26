@@ -43,6 +43,18 @@ bytes READ and that depends on the layout and not on the names.
   containers the capturer started on a network of its own) also admits TCP
   and UDP on any port with the payload as it is, because every payload is
   what the capturer chose to send; its addresses are mapped all the same.
+* QUIC, in a capture of the capturer's own traffic. An Initial packet is
+  protected under keys anyone derives from the capture (RFC 9001 §5.2), and
+  the client's carry a ClientHello whose `server_name` names a host, so the
+  Initials are opened (`quic_initial.py`, versions 1 and 2), every label of
+  every server name is replaced as a DNS label is, and the packet is
+  protected again at its length, packet number and with a valid tag. A
+  connection whose ClientHello the capture does not hold whole has its
+  Initials dropped. Every other packet of a flow a verified Initial was seen
+  on is kept as it is: only its two endpoints hold its keys.
+* A name of a single label (an LLMNR query, a TLS server name) names a host
+  and is replaced; only the last label of a longer name is kept as its
+  top-level domain.
 * A packet of any other protocol, or one a parser cannot read, is DROPPED and
   counted by reason in the report. Dropping is honest where a guess is not: a
   payload kept unscrubbed could carry an identity, and a payload replaced
@@ -52,8 +64,9 @@ bytes READ and that depends on the layout and not on the names.
 
 After writing, every original unicast MAC and IP address (as bytes) and every
 replaced name or value of `LEAK_MIN` or more characters (as bytes, either case)
-is searched for in the output file, with any words given as `--forbid`. A hit
-refuses the output: nothing is written and the exit code is 1.
+is searched for in the output file and in the plaintext of every QUIC Initial
+it holds, with any words given as `--forbid`. A hit refuses the output:
+nothing is written and the exit code is 1.
 
 ## Usage
 
@@ -79,6 +92,9 @@ import json
 import os
 import struct
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import quic_initial  # noqa: E402
 
 LINKTYPE_ETHERNET = 1
 REBASE_EPOCH = 1767225600  # 2026-01-01T00:00:00Z
@@ -133,6 +149,7 @@ class Maps:
         self.v6 = {}
         self.labels = {}
         self.originals = set()
+        self.quic = Quic()
 
     def mac_of(self, mac):
         if mac[0] & 1 or mac == b"\0" * 6:
@@ -205,6 +222,7 @@ def scrub_name(msg, pos, maps, out):
     """Scrub the name at `pos` in place in `out`; return the offset after it."""
     jumps = 0
     end = None
+    first = True
     while True:
         if pos >= len(msg):
             raise Refused("dns_name_truncated")
@@ -231,16 +249,136 @@ def scrub_name(msg, pos, maps, out):
         label = bytes(msg[pos + 1 : pos + 1 + length])
         if len(label) != length:
             raise Refused("dns_name_truncated")
-        # The last label of a name is its top-level domain, which names a
-        # registry and not a device.
+        # The last label of a name of two or more is its top-level domain,
+        # which names a registry and not a device; the one label of a
+        # single-label name (an LLMNR query) names the host.
         last = pos + 1 + length < len(msg) and msg[pos + 1 + length] == 0
-        tld = last and label.isalpha() and len(label) <= 6
+        tld = last and not first and label.isalpha() and len(label) <= 6
         if end is None and not keep_label(label) and not tld:
             # Only labels the walk reaches before its first pointer are this
             # name's own bytes; the rest belong to an earlier name, which was
             # scrubbed where it stood.
             out[pos + 1 : pos + 1 + length] = maps.label_of(label)
+        first = False
         pos += 1 + length
+
+
+def scrub_hostname(name, maps):
+    """A dotted host name (a TLS `server_name`) scrubbed label by label as
+    `scrub_name` scrubs a DNS name. The last label of a name of two or more
+    is its top-level domain and is kept; the one label of a single-label name
+    names the host."""
+    labels = name.split(b".")
+    out = []
+    for i, label in enumerate(labels):
+        tld = 0 < i == len(labels) - 1 and label.isalpha() and len(label) <= 6
+        out.append(label if not label or keep_label(label) or tld else maps.label_of(label))
+    return b".".join(out)
+
+
+def assemble(pieces):
+    """The bytes of a stream from offset 0 up to its first gap, out of the
+    pieces {offset: bytes} a capture holds of it."""
+    out = bytearray()
+    while True:
+        more = None
+        for off, data in pieces.items():
+            if off <= len(out) < off + len(data):
+                more = data[len(out) - off :]
+                break
+        if more is None:
+            return bytes(out)
+        out += more
+
+
+class Quic:
+    """The QUIC connections of one capture of the capturer's own traffic.
+
+    An Initial packet is protected under keys anyone derives from the
+    capture (RFC 9001 §5.2), and the client's carry its ClientHello, whose
+    `server_name` names a host. The prescan reads every Initial
+    (`quic_initial.Reader`, in capture order), assembles each client's
+    Initial CRYPTO stream and plans the replacement of every host name in
+    its ClientHello; the main pass opens the same packets, writes the
+    replacements into their CRYPTO frames and protects them again, so each
+    keeps its length, packet number and a valid tag.
+
+    A connection whose ClientHello the capture does not hold whole is
+    unreadable: its Initials are DROPPED, because a name in the missing part
+    could not be found. Every other datagram of a UDP flow a verified Initial
+    was seen on is kept as it is: its packets are protected under keys only
+    the two endpoints hold."""
+
+    def __init__(self):
+        self.reader = quic_initial.Reader()
+        self.flows = set()
+        self.crypto = {}
+        self.patches = {}
+        self.unreadable = {}
+        self.initials = 0
+        self.names = 0
+
+    def observe(self, flow, payload):
+        found = self.reader.datagram(payload)
+        if found:
+            self.flows.add(flow)
+        for initial in found:
+            if initial.side != quic_initial.CLIENT:
+                continue
+            key = (initial.version, initial.odcid)
+            pieces = self.crypto.setdefault(key, {})
+            try:
+                frames = initial.crypto_frames()
+            except quic_initial.Malformed:
+                self.unreadable[key] = "quic_initial_frames"
+                continue
+            for off, at, n in frames:
+                pieces.setdefault(off, initial.plaintext[at : at + n])
+
+    def plan(self, maps):
+        for key, pieces in self.crypto.items():
+            if key in self.unreadable:
+                continue
+            stream = assemble(pieces)
+            try:
+                names = quic_initial.client_hello_server_names(stream)
+            except quic_initial.Incomplete:
+                self.unreadable[key] = "quic_client_hello_incomplete"
+                continue
+            except (quic_initial.Malformed, IndexError):
+                self.unreadable[key] = "quic_client_hello_malformed"
+                continue
+            patches = []
+            for off, n in names:
+                name = stream[off : off + n]
+                new = scrub_hostname(name, maps)
+                if new != name:
+                    patches.append((off, new))
+            self.patches[key] = patches
+            self.names += len(names)
+
+    def rewrite(self, flow, payload):
+        """The payload with its client Initials carrying the planned names,
+        or None for a datagram of a flow that is not QUIC."""
+        if flow not in self.flows:
+            return None
+        out = bytearray(payload)
+        for initial in self.reader.datagram(payload):
+            key = (initial.version, initial.odcid)
+            if key in self.unreadable:
+                raise Refused(self.unreadable[key])
+            self.initials += 1
+            if initial.side != quic_initial.CLIENT:
+                continue
+            plain = bytearray(initial.plaintext)
+            for off, at, n in initial.crypto_frames():
+                for poff, new in self.patches.get(key, ()):
+                    lo, hi = max(off, poff), min(off + n, poff + len(new))
+                    if lo < hi:
+                        plain[at + lo - off : at + hi - off] = new[lo - poff : hi - poff]
+            if plain != initial.plaintext:
+                out[initial.start : initial.end] = quic_initial.protect(initial, bytes(plain))
+        return bytes(out)
 
 
 def scrub_value(value):
@@ -337,7 +475,7 @@ def scrub_ntp(payload, maps):
     return bytes(out)
 
 
-def scrub_udp_payload(sport, dport, payload, maps, scope):
+def scrub_udp_payload(flow, sport, dport, payload, maps, scope):
     ports = {sport, dport}
     if ports & DNS_PORTS:
         return scrub_dns(payload, maps)
@@ -346,7 +484,8 @@ def scrub_udp_payload(sport, dport, payload, maps, scope):
     if NTP_PORT in ports:
         return scrub_ntp(payload, maps)
     if scope == "own":
-        return own_payload(payload, maps)
+        quic = maps.quic.rewrite(flow, payload)
+        return quic if quic is not None else own_payload(payload, maps)
     raise Refused("udp_port_%d_%d" % (min(ports), max(ports)))
 
 
@@ -366,9 +505,10 @@ def own_payload(payload, maps):
     return out
 
 
-def prescan(frame, maps):
+def prescan(frame, maps, scope):
     """Map the addresses of one frame's headers, so a payload read before the
-    frame that first carries an address still has its mapping."""
+    frame that first carries an address still has its mapping, and, in the
+    capturer's own traffic, read the QUIC Initials the frame carries."""
     maps.mac_of(bytes(frame[0:6]))
     maps.mac_of(bytes(frame[6:12]))
     ethertype = struct.unpack("!H", frame[12:14])[0]
@@ -378,6 +518,45 @@ def prescan(frame, maps):
     elif ethertype == ETH_IPV6:
         maps.v6_of(bytes(frame[22:38]))
         maps.v6_of(bytes(frame[38:54]))
+    udp = udp_of(frame)
+    if scope == "own" and udp is not None:
+        src, sport, dst, dport, payload = udp
+        maps.quic.observe(udp_flow(maps_addr(maps, src), sport, maps_addr(maps, dst), dport), payload)
+
+
+def udp_of(frame):
+    """(source, source port, destination, destination port, payload) of a UDP
+    datagram in an unfragmented IPv4 packet with no options or an IPv6 packet
+    with no extension header; None for any other frame."""
+    if len(frame) < 14:
+        return None
+    ethertype = struct.unpack("!H", frame[12:14])[0]
+    ip = 14
+    if ethertype == ETH_IPV4 and len(frame) >= ip + 28:
+        if frame[ip] != 0x45 or frame[ip + 9] != PROTO_UDP:
+            return None
+        if struct.unpack("!H", frame[ip + 6 : ip + 8])[0] & 0x3FFF:
+            return None
+        src, dst, udp = bytes(frame[ip + 12 : ip + 16]), bytes(frame[ip + 16 : ip + 20]), ip + 20
+    elif ethertype == ETH_IPV6 and len(frame) >= ip + 48:
+        if frame[ip + 6] != PROTO_UDP:
+            return None
+        src, dst, udp = bytes(frame[ip + 8 : ip + 24]), bytes(frame[ip + 24 : ip + 40]), ip + 40
+    else:
+        return None
+    sport, dport, length = struct.unpack("!3H", frame[udp : udp + 6])
+    if length < 8 or udp + length > len(frame):
+        return None
+    return src, sport, dst, dport, bytes(frame[udp + 8 : udp + length])
+
+
+def maps_addr(maps, raw):
+    return maps.v4_of(raw) if len(raw) == 4 else maps.v6_of(raw)
+
+
+def udp_flow(src, sport, dst, dport):
+    """One UDP flow, either way, by its endpoints' mapped addresses."""
+    return frozenset(((src, sport), (dst, dport)))
 
 
 def transport_checksum(src, dst, proto, segment, v6):
@@ -397,7 +576,7 @@ def rewrite_transport(proto, src, dst, segment, maps, scope, v6):
         body = bytes(seg[8:length]) if length <= len(seg) else None
         if body is None:
             raise Refused("udp_truncated")
-        body = scrub_udp_payload(sport, dport, body, maps, scope)
+        body = scrub_udp_payload(udp_flow(src, sport, dst, dport), sport, dport, body, maps, scope)
         seg = bytearray(seg[:8] + body + seg[length:])
         seg[6:8] = b"\0\0"
         if old != 0 or v6:
@@ -505,9 +684,10 @@ def anonymise(data, scope):
         base = REBASE_EPOCH
     for _, _, frame in records:
         try:
-            prescan(frame, maps)
+            prescan(frame, maps, scope)
         except (Refused, IndexError, struct.error):
             pass  # the main pass counts this frame under its reason
+    maps.quic.plan(maps)
     for sec, frac, frame in records:
         try:
             out = rewrite_frame(frame, maps, scope)
@@ -525,11 +705,27 @@ def anonymise(data, scope):
         "ipv6_mapped": len(maps.v6),
         "labels_replaced": len(maps.labels),
     }
+    if maps.quic.flows:
+        report["quic_initials"] = maps.quic.initials
+        report["quic_server_names"] = maps.quic.names
     return write_pcap(kept, nano), maps, report
+
+
+def quic_plaintexts(data):
+    """The plaintexts of every QUIC Initial a capture holds, which anyone can
+    open, so the leak check reads what the file's bytes hide."""
+    reader = quic_initial.Reader()
+    out = []
+    for _, _, frame in read_pcap(data)[0]:
+        udp = udp_of(frame)
+        if udp is not None:
+            out.extend(i.plaintext for i in reader.datagram(udp[4]))
+    return b"".join(out)
 
 
 def leaks(output, maps, forbid):
     found = []
+    output = output + quic_plaintexts(output)
     lowered = output.lower()
     for value in sorted(maps.originals):
         if len(value) < LEAK_MIN:
@@ -620,6 +816,50 @@ def _dns_name(name):
     return b"".join(bytes([len(p)]) + p for p in name.split(b".")) + b"\0"
 
 
+def _quic_client(stream_frames):
+    """A version 1 client Initial of the RFC 9001 sample connection whose
+    payload is `stream_frames`, padded."""
+    q = quic_initial
+    header, _, _ = q.SAMPLES[q.VERSION_1]
+    keys = q.Keys(q.VERSION_1, q.SAMPLE_ODCID, q.CLIENT)
+    return q.seal(keys, header, 4, 2, stream_frames.ljust(1162, b"\0"))
+
+
+def _selftest_quic(check, client, server):
+    q = quic_initial
+    q.selftest(check)
+    # The RFC's connection between two containers: the client's Initial names
+    # example.com, the server answers.
+    raw = write_pcap(
+        [
+            (1700000000, 0, _udp4(client, server, 50000, 443, q.sample_client_packet(q.VERSION_1))),
+            (1700000001, 0, _udp4(server, client, 443, 50000, q.SAMPLES[q.VERSION_1][2])),
+        ],
+        False,
+    )
+    out, maps, report = anonymise(raw, "own")
+    hidden = quic_plaintexts(out)
+    check(report.get("quic_initials") == 2 and report.get("quic_server_names") == 1, "both Initials are read: %r" % report)
+    check(b"example" in quic_plaintexts(raw) and b"example" not in hidden, "the server name is replaced inside the Initial")
+    check(b".com" in hidden, "its top-level domain is kept")
+    check(len(hidden) == len(quic_plaintexts(raw)), "the Initials still open, at their lengths")
+    check(not leaks(out, maps, ["example"]), "the leak check reads the Initials it can open")
+    check(q.SAMPLES[q.VERSION_1][2] in out, "the server's Initial, which names nothing, is kept as it was")
+    check(anonymise(out, "own")[0] == out, "a QUIC capture is a fixed point")
+    # A single-label server name names the host.
+    stream = q.SAMPLE_CLIENT_CRYPTO[4:]
+    single = q.SAMPLE_CLIENT_CRYPTO[:4] + stream.replace(b"example.com", b"quicserverx")
+    raw = write_pcap([(1700000000, 0, _udp4(client, server, 50000, 443, _quic_client(single)))], False)
+    out, _, _ = anonymise(raw, "own")
+    check(b"quicserverx" not in quic_plaintexts(out), "a single-label server name is replaced")
+    # A ClientHello the capture holds only the start of is not read as
+    # whole: its Initial is dropped.
+    part = b"\x06\x00\x40\x64" + stream[:100]
+    raw = write_pcap([(1700000000, 0, _udp4(client, server, 50000, 443, _quic_client(part)))], False)
+    _, _, report = anonymise(raw, "own")
+    check(report["dropped"] == {"quic_client_hello_incomplete": 1}, "a partial ClientHello is dropped: %r" % report)
+
+
 def selftest():
     failures = []
     checks = []
@@ -690,6 +930,11 @@ def selftest():
     check(not leaks(own_out, own_maps, []), "an own payload holds no original address")
     check(b"RTPS" + own_maps.v4[host] + b"tail" in own_out, "the locator carries the mapped address")
     check(anonymise(own_out, "own")[0] == own_out, "an own capture is a fixed point too")
+    # LLMNR asks for a single-label name, which names the host.
+    llmnr = struct.pack("!6H", 7, 0, 1, 0, 0, 0) + _dns_name(b"printer") + struct.pack("!HH", 1, 1)
+    l_out, _, _ = anonymise(write_pcap([(1700000000, 0, _udp4(host, b"\xe0\x00\x00\xfc", 5355, 5355, llmnr))], False), "lan")
+    check(b"printer" not in l_out, "a single-label DNS name is replaced, not kept as a top-level domain")
+    _selftest_quic(check, host, peer)
     if failures:
         print("capture-anonymise selftest FAIL:")
         for f in failures:
