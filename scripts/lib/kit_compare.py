@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-"""docs/upstream-parity.md M1 -- the verdict of a compare run of the kit lane, cell by cell.
+"""R3723 (no register item) -- the verdict of a compare run of the kit lane, cell by cell
+(docs/upstream-parity.md step M1, decision D1).
 
 ## What this reads
 
