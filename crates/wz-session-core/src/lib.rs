@@ -198,19 +198,15 @@ pub mod key_catalogue;
 pub mod key_allowance;
 
 /// What a closed key set refuses and counts: [`key_gate::KeyGate`], open (admits every key, looks at
-/// none) or closed over a [`key_catalogue::KeyCatalogue`] (admits a key of the set, or a key the
-/// image declares in the role asked, and counts every refusal by reason). Under the
-/// `key-set-closed` feature; no_std and no_alloc.
-#[cfg(feature = "key-set-closed")]
-pub mod key_gate;
-
-/// The key gate of a build without the `key-set-closed` feature: [`key_gate::KeyGate`] is open and
-/// has no size, and the types a closed gate numbers its keys, entities and peers with have no
-/// value, so a field that would hold one costs no byte and a branch that would read one is not
-/// compiled. The same path as the closed module, so the code that calls the gate is written
-/// once. no_std and no_alloc.
-#[cfg(not(feature = "key-set-closed"))]
-#[path = "key_gate_open.rs"]
+/// none) or, under the `key-set-closed` feature, closed over a `KeyCatalogue` (admits a key of the
+/// set, or a key the image declares in the role asked, and counts every refusal by reason).
+///
+/// One module with two files. With the feature it is `key_gate.rs`; without it, `key_gate_open.rs`,
+/// where the gate is open and has no size and the types a closed gate numbers its keys, entities
+/// and peers with have no value, so a field that would hold one costs no byte and a branch that
+/// would read one is not compiled. The path is the same either way, so the code that calls the
+/// gate is written once. no_std and no_alloc.
+#[cfg_attr(not(feature = "key-set-closed"), path = "key_gate_open.rs")]
 pub mod key_gate;
 
 /// The pace of a paced declaration replay: [`replay_pacing::ReplayPacing`], the burst and the
