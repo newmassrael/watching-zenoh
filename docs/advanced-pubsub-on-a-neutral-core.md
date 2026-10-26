@@ -195,6 +195,17 @@ defect of this plane; it is documented on the plane and not worked around with a
    and the tests that drive it directly), with the clock made an argument; the tokio host keeps its wiring and calls the moved machine; the
    cooperative host writes its own. The largest step, and the moved code is not rewritten, so what
    changes is where it lives and what it is handed.
+   Done so far, in `wz-ext-pubsub` (the `advanced-subscriber`, `advanced-recovery` and
+   `advanced-history` features, which the tokio runtime's of the same names forward): the options
+   (`RecoveryConfig`, `HistoryConfig`, the detection and the declaration forms), the plans (the
+   timeout of a get, the history selector, a reply turned back into a sample, the `@adv` token a
+   liveliness sample names, the table of the gets in flight) and the machine itself (`State`, the
+   per-source states, the miss listeners and their registry). The machine reads no clock: every
+   method that reaches a source takes the host's reading in milliseconds, and the retention of a
+   source is measured in them. Twenty tests moved with it and run against no session; the tokio
+   host keeps its declarations, its gets, its two timers and the tests that need a session, and
+   passes its session's clock. Left for this step: the cooperative host, which declares the same
+   entities and issues the same gets over the engine port.
 5. **Retire the old paths** only after a differential test (the same events into the old and the
    new give the same commands and deliveries) and the existing interop tests pass: the zenoh-ext
    interop (`wz_advanced_pubsub_zenoh_ext_interop`), the pico interop

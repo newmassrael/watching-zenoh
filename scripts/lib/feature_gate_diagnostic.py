@@ -745,6 +745,10 @@ PATH_ITEM = re.compile(
     r"^pub\s+(?:async\s+|unsafe\s+|extern\s+\"[^\"]*\"\s+|const\s+|default\s+)*"
     r"(?:fn|struct|enum|trait|type|const|static|union|mod)\s+"
     r"([A-Za-z_][A-Za-z0-9_]*)"
+    # A re-export of ONE name is a path too: `pub use a::b::Name;` makes `<module>::Name`
+    # resolve only with the feature on. A brace group, a glob and a rename name more than
+    # one thing (or something else), and are left to the census's own account of them.
+    r"|^pub\s+use\s+(?:[A-Za-z_][A-Za-z0-9_]*::)+([A-Za-z_][A-Za-z0-9_]*)\s*;"
 )
 
 
@@ -828,7 +832,7 @@ def negated_names(lines: list[str]) -> set[str]:
                 continue
             m = PATH_ITEM.match(lines[j])
             if m:
-                out.add(m.group(1))
+                out.add(m.group(1) or m.group(2))
             break
     return out
 
@@ -1018,9 +1022,10 @@ def submodule_probes(
             if following is None:
                 continue
             im = PATH_ITEM.match(following)
-            if not im or im.group(1) in twins:
+            name = im and (im.group(1) or im.group(2))
+            if not im or name in twins:
                 continue
-            path = "::".join(chain + (im.group(1),))
+            path = "::".join(chain + (name,))
             found.setdefault(feature, []).append(
                 (
                     f"an import of `{path}`",

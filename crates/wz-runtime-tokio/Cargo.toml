@@ -369,6 +369,7 @@ ext-pubsub-advanced-subscriber = [
     "pubsub-timestamp",
     "liveliness-token",
     "liveliness-subscriber",
+    "wz-ext-pubsub/advanced-subscriber",
 ]
 # R311y82 — ext-pubsub-advanced-subscriber + the gap-recovery query plane:
 # turns the advanced subscriber's forward-gap handling from "miss + deliver"
@@ -389,6 +390,7 @@ ext-pubsub-advanced-subscriber = [
 # ext-pubsub-sample-miss-detection atom.
 ext-pubsub-advanced-recovery = [
     "ext-pubsub-advanced-subscriber",
+    "wz-ext-pubsub/advanced-recovery",
     "ext-pubsub-serde-codec",
     "query-get",
     "query-selector-parameters",
@@ -442,7 +444,11 @@ reply-source-info = ["wz-session-core/reply-source-info"]
 # publisher already present at declare (incl. one visible only in the window
 # after the startup-history snapshot) also re-triggers its GET; that needs
 # `liveliness-history` (which implies `liveliness-subscriber`).
-ext-pubsub-advanced-history = ["ext-pubsub-advanced-recovery", "liveliness-history"]
+ext-pubsub-advanced-history = [
+    "ext-pubsub-advanced-recovery",
+    "liveliness-history",
+    "wz-ext-pubsub/advanced-history",
+]
 # R311y85 — ext-pubsub-sample-miss-detection (§5.25): the heartbeat PRODUCER
 # beacon. An AdvancedPublisher with sample_miss_detection spawns a background
 # task that periodically publishes its last published sequence number

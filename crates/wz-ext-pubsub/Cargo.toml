@@ -47,6 +47,14 @@ advanced-publisher = [
     "wz-session-core/pubsub-source-info",
     "wz-session-core/pubsub-timestamp",
 ]
+# The advanced subscriber's rules (`advanced_subscriber`): its options and, as they move here, the
+# per-source ordering machine. `advanced-recovery` adds the gap-recovery half (the reorder buffer, the
+# `_sn` gets, the heartbeat and periodic triggers, the retention sweep) and `advanced-history` the
+# startup and late-publisher history. The tokio runtime's `ext-pubsub-advanced-subscriber`,
+# `-recovery` and `-history` forward here, and a build that leaves them off carries none of it.
+advanced-subscriber = []
+advanced-recovery = ["advanced-subscriber"]
+advanced-history = ["advanced-recovery"]
 # A cached sample may hold a buffer of shared memory and a recovery reply sends its descriptor
 # again (`CachedSample::shared`). The tokio runtime's feature of the same name forwards here.
 transport-shm = ["wz-session-core/transport-shm"]
@@ -76,10 +84,12 @@ log = "0.4"
 
 [dev-dependencies]
 # The responder a test drives the cache's answer through (`QueryResponder`, which stages replies
-# the way a queryable's does) is the request codec's.
+# the way a queryable's does) is the request codec's. `rx-shared-bytes` is what makes a range of a
+# lent frame a second reference to it and not a copy, which the recovered-sample test measures.
 wz-session-core = { path = "../wz-session-core", default-features = false, features = [
     "alloc",
     "codec-request",
+    "rx-shared-bytes",
 ] }
 
 [lints]

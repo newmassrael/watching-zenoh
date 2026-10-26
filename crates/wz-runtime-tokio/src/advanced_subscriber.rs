@@ -86,12 +86,6 @@
 //! timestamp-less — a documented fidelity gap, not silent (the recovery
 //! essential is the source identity that re-keys it).
 
-use std::collections::HashMap;
-// R311y592 — `HashSet` backs [`InFlight`] only, whose whole type is
-// `ext-pubsub-advanced-recovery`-gated; the import carries that same gate so a
-// recovery-off build does not warn on an unused import.
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
-use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use wz_runtime_core::TimeSource;
@@ -104,24 +98,13 @@ use crate::session::{
 };
 use crate::session_glue::SessionLinkActions;
 
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
-use std::collections::BTreeMap;
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
-use std::time::Duration;
-// R2621 — the retention surface's clock; scoped like the surface itself.
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
-use std::time::Instant;
 use wz_session_core::locality::Locality;
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
-use wz_session_core::reply_sink::{ReplyKind, ReplyView};
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
-use wz_session_core::sample::EncodingHint;
+use wz_session_core::reply_sink::ReplyView;
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 use wz_session_core::sample_kind::SampleKind;
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
 use wz_session_core::serde_codec::z_deserialize;
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
-use wz_session_core::zid_hex::zenoh_hex_to_zid;
 use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
@@ -133,333 +116,10 @@ use crate::declare::{LivelinessSample, LivelinessSampleKind};
 #[cfg(feature = "ext-pubsub-advanced-history")]
 use crate::session::{LivelinessSubscriberAliasError, LivelinessSubscriberOptions};
 
-/// A detected gap in a sequenced source's stream: `nb` samples between the
-/// last in-order delivery and the just-received `sn` were missed. Mirror of
-/// `zenoh-ext/src/advanced_subscriber.rs` @ `pub struct Miss {`, field for
-/// field and accessor for accessor.
-///
-/// R2814 — the source is ONE [`EntityGlobalId`], as upstream's is. It used to
-/// be two public fields, `source_zid: Vec<u8>` and `source_eid: u32`: the same
-/// information, split, so a caller that wanted to key on "which publisher"
-/// had to rebuild the pair itself, and the zid cost an allocation per miss.
-/// The fields are private because upstream's are; a `Miss` is something this
-/// module reports, not something a caller constructs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Miss {
-    source: EntityGlobalId,
-    nb: u32,
-}
-
-impl Miss {
-    /// The source whose samples were missed.
-    pub fn source(&self) -> EntityGlobalId {
-        self.source
-    }
-
-    /// How many samples were skipped (`sn - last_delivered - 1`).
-    pub fn nb(&self) -> u32 {
-        self.nb
-    }
-}
-
-/// R2814 — THE MISS-LISTENER REGISTRY, upstream's
-/// `zenoh-ext/src/advanced_subscriber.rs` @ `miss_handlers: HashMap<usize, Callback<Miss>>,`
-/// with its `register_miss_callback` / `unregister_miss_callback` pair.
-///
-/// # Why a registry and not the one `on_miss` closure this module took before
-///
-/// Upstream declares a subscriber with NO miss callback at all; listeners are
-/// declared afterwards, any number of them, each retractable on its own
-/// (`sample_miss_listener()`). wz fixed exactly one closure at declare time, and
-/// that one fact generated a defect in each C ABI that mirrors the upstream
-/// call order: both kept a single slot that a listener "installs into", so a
-/// second listener REPLACED the first, and dropping the first then cleared the
-/// slot out from under the second. Nothing in either ABI was wrong locally —
-/// the shape they were adapting to could not say "two listeners".
-///
-/// # Order
-///
-/// A `BTreeMap` keyed by registration id rather than upstream's `HashMap`, so
-/// listeners fire in the order they were declared. Upstream promises no order;
-/// registration order is one of the orders it permits, and a deterministic one
-/// is what a test (or a C program) can reason about.
-#[derive(Default)]
-struct MissHandlers {
-    next_id: usize,
-    handlers: std::collections::BTreeMap<usize, Box<dyn FnMut(Miss) + Send>>,
-}
-
-impl MissHandlers {
-    fn register(&mut self, handler: Box<dyn FnMut(Miss) + Send>) -> usize {
-        let id = self.next_id;
-        self.next_id += 1;
-        self.handlers.insert(id, handler);
-        id
-    }
-
-    fn unregister(&mut self, id: usize) {
-        self.handlers.remove(&id);
-    }
-
-    /// Report one miss to every registered listener. A miss with no listener
-    /// is dropped, which is upstream's behaviour: the sample stream never
-    /// depends on anyone listening for its holes.
-    fn fire(&mut self, miss: Miss) {
-        for handler in self.handlers.values_mut() {
-            handler(miss);
-        }
-    }
-}
-
-/// R2814 — a declared sample-miss listener: upstream's
-/// `zenoh-ext/src/advanced_subscriber.rs` @ `pub struct SampleMissListener<Handler> {`.
-///
-/// Dropping it retracts the listener, as upstream's `Drop` does; [`Self::undeclare`]
-/// says when explicitly, and [`Self::background`] keeps it registered for the
-/// life of the subscriber (upstream's `.background()` builder form).
-///
-/// It holds the subscriber's state WEAKLY. A listener that outlives its
-/// subscriber has nothing left to hear from, and must not keep the
-/// subscriber's callbacks alive by existing; retracting it afterwards is then
-/// a no-op rather than an error.
-///
-/// ⚠ Listeners run while the subscriber's state is locked, exactly as
-/// upstream's run under its `zlock!` — so a listener must not declare or
-/// undeclare a listener on the same subscriber from inside its own callback.
-pub struct SampleMissListener {
-    id: usize,
-    statesref: std::sync::Weak<Mutex<State>>,
-    undeclare_on_drop: bool,
-}
-
-impl SampleMissListener {
-    /// Retract this listener now. Upstream's `undeclare`; consuming, so a
-    /// retracted listener cannot be retracted twice.
-    pub fn undeclare(mut self) {
-        self.undeclare_impl();
-    }
-
-    /// Keep this listener registered until the subscriber itself goes away,
-    /// without holding a handle — upstream's `.background()`, which declares
-    /// a listener nobody can retract.
-    pub fn background(mut self) {
-        self.undeclare_on_drop = false;
-    }
-
-    fn undeclare_impl(&mut self) {
-        // Cleared first, as upstream does, so a panic in here cannot make the
-        // `Drop` below try again.
-        self.undeclare_on_drop = false;
-        if let Some(state) = self.statesref.upgrade() {
-            state
-                .lock()
-                .expect("advanced subscriber state mutex poisoned")
-                .miss_handlers
-                .unregister(self.id);
-        }
-    }
-}
-
-impl Drop for SampleMissListener {
-    fn drop(&mut self) {
-        if self.undeclare_on_drop {
-            self.undeclare_impl();
-        }
-    }
-}
-
-impl std::fmt::Debug for SampleMissListener {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SampleMissListener")
-            .field("id", &self.id)
-            .field("undeclare_on_drop", &self.undeclare_on_drop)
-            .finish()
-    }
-}
-
-/// Per-source ordering state. Tracks the last in-order delivered sequence
-/// number; the recovery build adds the reorder buffer ([`Self::pending_samples`],
-/// sn-ordered) + the in-flight recovery-GET count ([`Self::pending_queries`])
-/// — the wz mirror of zenoh-ext `SourceState<u32>` (advanced_subscriber.rs:
-/// 444-448).
-/// R2621 — THE RETENTION BOOKKEEPING EVERY PER-SOURCE STATE CARRIES, and the
-/// reason it is one type rather than two fields copied into three structs.
-///
-/// wz's source maps were never reclaimed: `sequenced` and `timestamped` grew one
-/// entry per distinct source ever seen, for the life of the subscriber, where
-/// upstream bounds them by a retention period
-/// (`zenoh-ext/src/advanced_subscriber.rs` @ `async fn gc_task(statesref: Weak<Mutex<State>>, retention_period: Duration) {`).
-/// That sweep needs exactly two things from a state — WHEN it was last touched,
-/// and whether its publisher is still ALIVE — so they live together in the type
-/// that exists because the sweep does.
-///
-/// ⚠ THE PAIR IS INDIVISIBLE AND THIS MODULE ALREADY SAID SO. Upstream's sweep
-/// spares a live publisher rather than popping it
-/// (`zenoh-ext/src/advanced_subscriber.rs` @ `} else if state.alive {`), so a
-/// sweep shipped without `alive` reclaims LIVE sources and destroys their
-/// `last_delivered`, turning the next sample from that publisher into a false
-/// gap. And `alive` shipped without the sweep is the write-only flag
-/// [`TimestampedState`]'s own doc refuses — "a condition that can never be false
-/// reads as coverage while grading nothing". Neither half is shippable alone,
-/// which is why they arrive in one type in one round.
-///
-/// `Default` is `now()` + alive, and that is correct rather than convenient:
-/// a state is created through `entry(..).or_default()` at the moment its source
-/// is first seen, so creation IS the first access.
-///
-/// ⚠ SCOPED TO THE RECOVERY FEATURE, and the limit is stated rather than hidden:
-/// the retention PERIOD is configured through [`RecoveryConfig`], because that
-/// is where upstream puts it, so a subscriber built without recovery has no
-/// knob, no sweep, and keeps the unbounded growth this closes. Upstream has the
-/// same scope — its `gc_task` is spawned from the recovery path — and compiling
-/// the bookkeeping into a build that can never sweep would be the dead surface
-/// this module refuses elsewhere.
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
-struct Retention {
-    /// When this source was last touched. Upstream's `latest_access`, which its
-    /// sweep compares against `now` and its heartbeat arm refreshes.
-    latest_access: Instant,
-    /// Whether a LIVENESS TOKEN says this publisher is live — upstream's own
-    /// wording, "Alive as per liveliness subscriber". Set true by the token's
-    /// Put arm and false by its Delete arm; read only by the sweep.
-    ///
-    /// ⚠ DEFAULTS FALSE, and that is upstream's default rather than a guess:
-    /// `zenoh-ext/src/advanced_subscriber.rs` @ `alive: false,` in its
-    /// `SourceState`'s `Default`. Defaulting TRUE was this round's first
-    /// attempt and it is a silent no-op bug — nothing would ever clear the flag
-    /// on a source that has no liveliness token, so the sweep would refresh
-    /// every entry forever and reclaim nothing while appearing to run. False is
-    /// also the right MEANING: the flag records a positive statement by a token,
-    /// so its absence is "no token says so", not "assume live".
-    alive: bool,
-}
-
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
-impl Default for Retention {
-    fn default() -> Self {
-        Self {
-            latest_access: Instant::now(),
-            alive: false,
-        }
-    }
-}
-
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
-impl Retention {
-    /// Mark this source touched. Called wherever a state is reached for a
-    /// sample, a beacon or a reply, so the sweep's age means "unheard from"
-    /// rather than "declared long ago".
-    fn touch(&mut self) {
-        self.latest_access = Instant::now();
-    }
-}
-
-#[derive(Default)]
-struct SourceState {
-    /// R2621 — see [`Retention`]. Carried by both shapes, because the gap this
-    /// closes is the SUBSCRIBER surface's and not either shape's.
-    #[cfg(feature = "ext-pubsub-advanced-recovery")]
-    retention: Retention,
-    /// Last in-order delivered sequence number (`None` before the first
-    /// sample from this source).
-    last_delivered: Option<u32>,
-    /// Recovery reorder buffer: forward-gap samples held sn-ordered until a
-    /// `_sn`-range recovery GET back-fills the hole, then drained in order.
-    #[cfg(feature = "ext-pubsub-advanced-recovery")]
-    pending_samples: BTreeMap<u32, Sample>,
-    /// In-flight recovery GETs for this source (zenoh `pending_queries`): a
-    /// new GET is only issued when this is 0, and the buffer is flushed when
-    /// it returns to 0.
-    #[cfg(feature = "ext-pubsub-advanced-recovery")]
-    pending_queries: u64,
-}
-
-/// R2553 — per-TIMESTAMPED-source state: the sibling of [`SourceState`] for a
-/// publisher that orders by its timestamp's own id rather than by a sequence
-/// number (the `uhlc` discriminator [`AdvPublisherSource::Timestamped`] names).
-///
-/// # Why a separate struct rather than the same one
-///
-/// Upstream shares it. At
-/// `zenoh-ext/src/advanced_subscriber.rs` @ `timestamped_states: LruCache<ID, SourceState<Timestamp>>,`
-/// it is the SAME
-/// `SourceState<T>` the sequenced map holds, parameterised on `Timestamp`
-/// instead of a sequence number. wz's [`SourceState`] is NOT generic (its
-/// `last_delivered` is a `u32` and its buffer a `BTreeMap<u32, Sample>`), so
-/// sharing it here would mean making the sequenced side generic over a
-/// parameter only one arm ever varies. The fields that survive the change of
-/// parameter are exactly the two below; the ones that do not — the miss
-/// arithmetic — are the ones upstream never runs for a timestamped source
-/// either. So the split follows the arithmetic rather than the type.
-///
-/// # What upstream carries here that this does not, and why it is not dropped quietly
-///
-/// * `pending_samples` — the reorder buffer. Absent by the deferral
-///   [`State::timestamped`] documents; it is the NEXT part of this build.
-/// * `alive` — upstream sets it from the liveliness Put/Delete pair and reads
-///   it in ONE place:
-///   `zenoh-ext/src/advanced_subscriber.rs` @ `} else if state.alive {`,
-///   which is its LRU retention sweep. wz has no
-///   retention sweep and no LRU: neither this map nor `sequenced` is ever
-///   reclaimed, so an `alive` flag here would be written by the Delete arm and
-///   read by nobody. That is the shape this module's own `timestamped` doc
-///   calls out — "a condition that can never be false reads as coverage while
-///   grading nothing" — so the flag waits for the sweep that would read it, and
-///   the absence is recorded as a residual of the SUBSCRIBER surface (it is
-///   missing for the sequenced shape in exactly the same way) rather than of
-///   the `uhlc` shape this round builds.
-#[cfg(feature = "ext-pubsub-advanced-history")]
-#[derive(Default)]
-struct TimestampedState {
-    /// R2621 — see [`Retention`]. The `alive` flag this doc used to say was
-    /// waiting for a sweep now HAS that sweep, so it lands here.
-    #[cfg(feature = "ext-pubsub-advanced-recovery")]
-    retention: Retention,
-    /// Newest instant delivered for this timestamp-id (`None` before the
-    /// first). Upstream's `last_delivered: Option<T>` at `T = Timestamp`.
-    last_delivered: Option<wz_session_core::sample::TimestampHint>,
-    /// In-flight history GETs for this source, the timestamped twin of
-    /// [`SourceState::pending_queries`]: the `uhlc` late-publisher trigger
-    /// opens a slot and the GET's terminal Final closes it, so a second token
-    /// Put for the same publisher while its cache GET is still outstanding does
-    /// not fan a duplicate.
-    pending_queries: u64,
-    /// R2555 — the reorder buffer, upstream's `pending_samples: BTreeMap<T, Sample>`
-    /// at `T = Timestamp`. A live sample that arrives while a history GET is in
-    /// flight waits here so the OLDER recovered samples deliver ahead of it.
-    ///
-    /// # Why the key is a bare `u64` where upstream's is a whole `Timestamp`
-    ///
-    /// Not a simplification of the order — an application of the map it sits
-    /// in. This state is reached through `timestamped[ts.zid]`, so every sample
-    /// that can enter this buffer carries the SAME timestamp-id, and uhlc's
-    /// `(time, 16-byte LE id)` order therefore reduces to `time` exactly within
-    /// one state. `TimestampHint` is `Eq + Hash` but not `Ord`, so a
-    /// `BTreeMap<TimestampHint, _>` is not available anyway; the comparison
-    /// against `last_delivered` still goes through
-    /// [`wz_session_core::sample::timestamp_strictly_newer`], which is this
-    /// tree's single encoding of uhlc's `Ord` contract, rather than a second
-    /// `u64` comparison written here.
-    pending_samples: BTreeMap<u64, Sample>,
-}
-
-/// The timestamped ordering state when the history feature is OFF: the `uhlc`
-/// late-publisher GET does not exist in that build, so there is no query to
-/// count. Kept as a distinct definition rather than a `#[cfg]`-d-away field so
-/// the history-off build carries no `pending_queries` it could never move —
-/// the same reason [`SourceState`] gates its own two recovery fields.
-#[cfg(not(feature = "ext-pubsub-advanced-history"))]
-#[derive(Default)]
-struct TimestampedState {
-    /// R2621 — see [`Retention`]. Present in the history-off build too: an
-    /// unreclaimed map grows the same either way, so the retention surface is
-    /// not a history feature — though it IS a recovery one, because that is
-    /// where its period is configured.
-    #[cfg(feature = "ext-pubsub-advanced-recovery")]
-    retention: Retention,
-    /// Newest instant delivered for this timestamp-id (`None` before the first).
-    last_delivered: Option<wz_session_core::sample::TimestampHint>,
-}
+use wz_ext_pubsub::advanced_subscriber::RecoveryRequest;
+pub use wz_ext_pubsub::advanced_subscriber::{Miss, SampleMissListener};
+use wz_ext_pubsub::advanced_subscriber::{MissHandlers, State};
 
 /// R311y90 (review C5) — why declaring an advanced subscriber failed.
 /// Distinct from the base [`SubscribeError`] (which stays the plain
@@ -570,435 +230,20 @@ impl From<crate::session::LivelinessAliasError> for AdvancedSubscribeError {
     }
 }
 
-/// Retransmission (gap-recovery) configuration
-/// ([`AdvancedSubscriberOptions::with_recovery`]). Mirror of zenoh-ext
-/// `RecoveryConfig` (advanced_subscriber.rs:91-134): it carries ONLY the
-/// retransmission triggers. The sample-driven `_sn`-range recovery GET is implied
-/// by recovering at all (`RecoveryConfig::default()`); [`Self::periodic_queries`] +
-/// [`Self::heartbeat`] add the periodic / beacon triggers. The GET locality + GET
-/// timeout + the (independent) startup history live on [`AdvancedSubscriberOptions`],
-/// NOT here — zenoh keeps `.recovery()` and `.history()` SEPARATE so
-/// history-without-retransmission is representable (R311y91, review M1).
-/// R2617 — THE PAIR IS NOW UNREPRESENTABLE, not merely unwise.
-///
-/// `periodic_queries` and `heartbeat` are two triggers for the same recovery
-/// GET, and upstream makes choosing both a TYPE error rather than a validation:
-/// `zenoh-ext/src/advanced_subscriber.rs` @ `pub struct RecoveryConfig<const CONFIGURED: bool = true> {`
-/// with both setters living on @ `impl RecoveryConfig<false> {` and each
-/// returning `RecoveryConfig<true>`, so the second call has no method to reach.
-/// wz carried a plain struct with public fields, so the invalid pair was
-/// constructible here and unrepresentable there.
-///
-/// THIS IS NOT A TIDINESS CHANGE. Upstream's heartbeat handler relies on the
-/// exclusion as a load-bearing invariant, and says so at the line that spawns
-/// the periodic task for a newly-seen source: `zenoh-ext/src/advanced_subscriber.rs` @ `// NOTE: API does not allow both heartbeat and periodic_queries`.
-/// Porting that handler's guard onto a tree where both CAN be set would be
-/// inheriting an invariant this crate does not hold, which is why the type
-/// moves first and the guard follows it.
-///
-/// THE FIELDS ARE PRIVATE, and that is the half that does the work.
-/// `#[non_exhaustive]` stops an external crate writing a struct LITERAL but not
-/// assigning to a field of a value it already holds -- which is exactly what
-/// both C ABIs were doing. Each setter also CLEARS the other trigger, mirroring
-/// upstream, so even the in-crate path cannot leave both set.
-///
-/// `new()` is generic over the flag on purpose: `RecoveryConfig::new()` in a
-/// position wanting the default `true` infers it and stays sample-driven, while
-/// `RecoveryConfig::new().with_heartbeat()` infers `false` because that is the
-/// only parameter for which the method exists. That is upstream's own
-/// inference trick, and it is why no caller of the builder form had to change.
+#[cfg(feature = "ext-pubsub-advanced-history")]
+pub use wz_ext_pubsub::advanced_subscriber::options::HistoryConfig;
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
-#[derive(Clone, Copy, Debug, Default)]
-#[non_exhaustive]
-pub struct RecoveryConfig<const CONFIGURED: bool = true> {
-    /// R311y83 — when `Some(period)`, a background task re-asks every known
-    /// source `_sn=last+1..` every `period`, catching a lost LAST sample that
-    /// no further live sample would trigger sample-driven recovery for (zenoh's
-    /// `RecoveryConfig::periodic_queries`, advanced_subscriber.rs:111-116 + the
-    /// `PeriodicQuery` TimedEvent :580-643). `None` (default) = sample-driven
-    /// recovery only. NB enabling this spawns a task at declare time, on the
-    /// process's `Application` runtime (R3064: the caller need not be inside a
-    /// tokio runtime context).
-    periodic_queries: Option<Duration>,
-    /// R311y84 — when `true`, declare a second subscriber on
-    /// `<key_expr>/@adv/pub/**` that decodes each publisher's last-sn heartbeat
-    /// beacon (`z_deserialize::<u32>`) and issues a BOUNDED `_sn=last+1..hb`
-    /// recovery GET when the beacon reports samples past `last_delivered` (zenoh
-    /// heartbeat subscriber, advanced_subscriber.rs:1045-1149). Catches a lost
-    /// last sample like the periodic trigger, but driven by the publisher's
-    /// beacon instead of a local timer (the producer beacon is the separate
-    /// `ext-pubsub-sample-miss-detection` atom). `false` (default) = off.
-    heartbeat: bool,
-    /// R2621 — how long a source's ordering state survives unheard-from before
-    /// the retention sweep reclaims it. `None` means
-    /// [`Self::RETENTION_PERIOD_DEFAULT`], upstream's own 1h.
-    retention_period: Option<Duration>,
-}
-
+pub use wz_ext_pubsub::advanced_subscriber::options::RecoveryConfig;
+pub use wz_ext_pubsub::advanced_subscriber::options::{
+    AdvancedSubscriberOptions, DeclarationForms, EntityForm, FormsHandle, SubscriberDetection,
+};
+#[cfg(feature = "ext-pubsub-advanced-history")]
+use wz_ext_pubsub::advanced_subscriber::plans::history_selector;
 #[cfg(feature = "ext-pubsub-advanced-recovery")]
-impl<const CONFIGURED: bool> RecoveryConfig<CONFIGURED> {
-    /// R2621 — upstream's own default, `zenoh-ext/src/advanced_subscriber.rs`
-    /// @ `const RETENTION_PERIOD_DEFAULT: Duration = Duration::from_secs(3600);`.
-    /// Hours rather than milliseconds, which is what makes a full-scan sweep an
-    /// acceptable trade against upstream's LRU.
-    pub const RETENTION_PERIOD_DEFAULT: Duration = Duration::from_secs(3600);
-
-    /// Sample-driven recovery (no periodic / heartbeat trigger).
-    ///
-    /// Generic over the flag so both spellings keep working: used directly it
-    /// infers the default `true` and is a complete, trigger-less config; used
-    /// as the receiver of a `with_*` call it infers `false`, because that is
-    /// the only parameter for which those methods exist.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// The configured periodic re-ask period, if that trigger was chosen.
-    ///
-    /// An accessor rather than a public field (R2617): a public field is
-    /// assignable from another crate even under `#[non_exhaustive]`, which is
-    /// how both C ABIs used to set a trigger and is precisely the hole the
-    /// typestate exists to close.
-    pub fn periodic_queries(&self) -> Option<Duration> {
-        self.periodic_queries
-    }
-
-    /// Whether the heartbeat trigger was chosen.
-    pub fn heartbeat(&self) -> bool {
-        self.heartbeat
-    }
-
-    /// R2621 — how long a source's ordering state survives without being heard
-    /// from, upstream's
-    /// `zenoh-ext/src/advanced_subscriber.rs` @ `pub fn retention_period(mut self, period: Duration) -> RecoveryConfig<CONFIGURED> {`.
-    ///
-    /// On the GENERIC impl rather than the `<false>` one, exactly as upstream
-    /// places it: retention is orthogonal to WHICH trigger was chosen, so it
-    /// must remain settable after a trigger has moved the type to `<true>`.
-    pub fn with_retention_period(mut self, period: Duration) -> Self {
-        self.retention_period = Some(period);
-        self
-    }
-
-    /// The configured retention period, or [`Self::RETENTION_PERIOD_DEFAULT`].
-    pub fn retention_period(&self) -> Duration {
-        self.retention_period
-            .unwrap_or(Self::RETENTION_PERIOD_DEFAULT)
-    }
-}
-
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
-impl RecoveryConfig<false> {
-    /// Enable the periodic recovery trigger with the given re-ask period.
-    /// Requires a tokio runtime at declare time.
-    ///
-    /// CLEARS the heartbeat trigger, exactly as upstream's does
-    /// (`zenoh-ext/src/advanced_subscriber.rs` @ `pub fn periodic_queries(self, period: Duration) -> RecoveryConfig<true> {`,
-    /// whose body writes `heartbeat: false`). Returning `RecoveryConfig<true>`
-    /// is what removes the other setter from the value's type.
-    pub fn with_periodic_queries(self, period: Duration) -> RecoveryConfig<true> {
-        RecoveryConfig {
-            periodic_queries: Some(period),
-            heartbeat: false,
-            // R2621 — carried across the typestate transition, as upstream
-            // carries it (`retention_period: self.retention_period`): choosing a
-            // trigger must not silently reset an orthogonal setting.
-            retention_period: self.retention_period,
-        }
-    }
-
-    /// Enable the heartbeat recovery trigger.
-    ///
-    /// CLEARS the periodic trigger, mirroring
-    /// `zenoh-ext/src/advanced_subscriber.rs` @ `pub fn heartbeat(self) -> RecoveryConfig<true> {`.
-    pub fn with_heartbeat(self) -> RecoveryConfig<true> {
-        RecoveryConfig {
-            periodic_queries: None,
-            heartbeat: true,
-            retention_period: self.retention_period,
-        }
-    }
-}
-
-/// Options for a configured advanced subscriber
-/// ([`AdvancedSubscriber::declare_with_options`]). Mirror of the zenoh-ext
-/// `AdvancedSubscriberBuilder` knobs wz implements: the (independent) retransmission
-/// and startup-history configs, the shared GET locality, and the shared GET timeout.
-/// zenoh exposes `.recovery()` / `.history()` as SEPARATE builder methods
-/// (advanced_subscriber.rs:261/287), so [`Self::recovery`] and [`Self::history`] are
-/// independent `Option`s — a `history`-only subscriber (no retransmission) is
-/// representable (R311y91, review M1: the prior `RecoveryConfig`-carries-everything
-/// shape made history-without-retransmission unrepresentable).
-///
-/// R311y826 — no longer `Copy`: [`Self::subscriber_detection_metadata`] is a
-/// caller-supplied key expression and so owns a `String`. `Clone` stays.
-///
-/// R2819 — IN EVERY ADVANCED-SUBSCRIBER BUILD, not behind
-/// `ext-pubsub-advanced-recovery`. Upstream's builder offers
-/// `zenoh-ext/src/advanced_subscriber.rs` @ `pub fn subscriber_detection(mut self) -> Self {`
-/// and @ `pub fn allowed_origin(mut self, origin: Locality) -> Self {` on every
-/// advanced subscriber, independent of @ `pub fn recovery(mut self, conf: RecoveryConfig) -> Self {`;
-/// here both were reachable only with recovery compiled in, because the whole
-/// options type was. Now the type and those two knobs are unconditional, and
-/// each remaining field carries the gate of the machinery that reads it:
-/// `recovery`, `get_locality` and `query_timeout` configure GETs, which only a
-/// recovery build issues; `history` configures the history GET.
-#[derive(Clone, Debug)]
-#[non_exhaustive]
-pub struct AdvancedSubscriberOptions {
-    /// Retransmission (gap recovery). `None` (default) = no recovery: a forward gap
-    /// reports a [`Miss`] and delivers past the hole. `Some` enables the reorder
-    /// buffer + the sample-driven `_sn`-range recovery GET (+ the periodic /
-    /// heartbeat triggers the [`RecoveryConfig`] selects). Mirror of zenoh
-    /// `.recovery()`.
-    #[cfg(feature = "ext-pubsub-advanced-recovery")]
-    pub recovery: Option<RecoveryConfig>,
-    /// Startup history query. `None` (default) = no history. `Some` issues a
-    /// `<key_expr>/@adv/**` GET on declare so a LATE JOINER recovers the publishers'
-    /// cached history. INDEPENDENT of [`Self::recovery`] (zenoh `.history()` is a
-    /// separate builder method): history-without-retransmission is valid.
-    #[cfg(feature = "ext-pubsub-advanced-history")]
-    pub history: Option<HistoryConfig>,
-    /// The live (+ heartbeat) subscription's origin: which publishers' samples this
-    /// subscriber accepts. `Any` (default) accepts wire + loopback; `SessionLocal`
-    /// loopback only; `Remote` wire only. Faithful to zenoh's `conf.origin` /
-    /// `AdvancedSubscriberBuilder::allowed_origin` (advanced_subscriber.rs:141/249).
-    /// INDEPENDENT of [`Self::get_locality`] — zenoh keeps the sub origin and the GET
-    /// axis separate (R311y96 split them after the review found the prior single
-    /// `allowed_destination` knob conflated the two orthogonal concepts).
-    pub allowed_origin: Locality,
-    /// The recovery / history GET destination locality. `Any` (default) fans the GET
-    /// to a remote publisher's `@adv` cache AND the local loopback; `SessionLocal`
-    /// pins it to loopback (single-host composition — a loopback-only GET completes
-    /// synchronously without the deadline sweep). wz models the GET reach as a
-    /// `Locality`; zenoh hardwires the GET destination to `Any`. `Any` is the
-    /// zenoh-faithful default; the `SessionLocal` pin is a wz single-host
-    /// superset.
-    ///
-    /// R2505 — THIS PARAGRAPH USED TO SAY the GET axis upstream exposes is
-    /// `query_target: QueryTarget`, "a DIFFERENT axis wz does not model here".
-    /// Half of that is still true and half is now false, so both halves are
-    /// stated rather than the sentence quietly deleted:
-    /// · STILL TRUE — `Locality` and `QueryTarget` are different axes, and wz
-    ///   still exposes no `query_target` KNOB on `AdvancedSubscriberOptions`.
-    /// · NO LONGER TRUE — wz does not model the axis, but it now SENDS it:
-    ///   `issue_recovery_get` pins `QueryTarget::All` on every recovery and
-    ///   history GET. Not exposing a knob is an API choice; sending no target
-    ///   ext was a WIRE consequence, because an absent ext reads back as
-    ///   BestMatching and one queryable then answers a history GET.
-    /// ⚠ The old sentence also carried two upstream coordinates,
-    /// `advanced_subscriber.rs:143/638`, and BOTH were rot: at the 1.10.0 pin
-    /// :143 is the tail of a `retention_period` builder and :638 is inside the
-    /// `max_history_depth == 1` fast path. The field and its default are at
-    /// `zenoh-ext/src/advanced_subscriber.rs` @ `pub(crate) query_target: QueryTarget,`
-    /// and @ `query_target: QueryTarget::All,` — anchored, because a corrected
-    /// number rots again at the next pin bump.
-    #[cfg(feature = "ext-pubsub-advanced-recovery")]
-    pub get_locality: Locality,
-    /// Timeout applied to BOTH the recovery + history GETs (zenoh's builder
-    /// `query_timeout`, shared by history + retransmission; default 10s). A
-    /// no-answerer GET (no `@adv` cache replies) would otherwise wait on a peer
-    /// `Final` that never arrives; the non-zero timeout lets the reply registry's
-    /// deadline sweep ([`crate::reply::ReplyRegistry::sweep_timed_out`]) fire the
-    /// synthetic `Final` so [`State::finish_recovery`] / [`State::finish_history`]
-    /// run (R311y89, review C3). Converted by [`recovery_query_timeout_ms`].
-    #[cfg(feature = "ext-pubsub-advanced-recovery")]
-    pub query_timeout: Duration,
-    /// Make this subscriber DETECTABLE: declare a liveliness token on
-    /// `<key_expr>/@adv/sub/<zid>/<eid>/[meta|_]` so a third party can see the
-    /// subscriber exists (zenoh `.subscriber_detection()`,
-    /// advanced_subscriber.rs:292-309; zenoh-pico's `_has_token` / `_token`,
-    /// advanced_subscriber.h:118-119).
-    ///
-    /// `None` (default) declares no token, matching BOTH references (zenoh's
-    /// builder starts at `liveliness: false`, advanced_subscriber.rs:164) —
-    /// the token is extra wire traffic that only an observer wants. This
-    /// differs from wz's `AdvancedPublisherOptions::publisher_detection`,
-    /// which defaults `true` because wz's OWN recovery plane consumes the
-    /// `@adv/pub` token; nothing in wz consumes `@adv/sub`, and neither
-    /// reference consumes it either — `KE_SUB` is `pub use`d for third parties
-    /// and read nowhere inside zenoh or pico.
-    pub subscriber_detection: Option<SubscriberDetection>,
-    /// How a host that declares keys names each entity on the wire. `None`
-    /// (default) declares every entity on its literal key, which is what a
-    /// runtime session does; see [`DeclarationForms`].
-    pub forms: Option<FormsHandle>,
-}
-
-/// Detection configuration ([`AdvancedSubscriberOptions::with_subscriber_detection`]).
-///
-/// R2815 — it carries no zid any more. It held the caller's `local_zid`
-/// because wz's `Session` had no zid getter, so a detection token could be
-/// named with a zid other than its session's. The token is now named with the
-/// subscriber's own [`AdvancedSubscriber::id`], which reads [`Session::zid`].
-///
-/// R2819 — in every advanced-subscriber build; see [`AdvancedSubscriberOptions`].
-#[derive(Clone, Debug, Default)]
-pub struct SubscriberDetection {
-    /// A key expression appended to the detection token's key expression to
-    /// convey application metadata (zenoh
-    /// `.subscriber_detection_metadata()`, advanced_subscriber.rs:299-309).
-    ///
-    /// `None` puts the concrete `_` chunk there instead — NOT an empty chunk.
-    /// Both references do this deliberately: zenoh's own comment calls it a
-    /// workaround for a routing matching bug, and a wildcard-tailed observer
-    /// query stops matching without it.
-    pub metadata: Option<String>,
-}
-
-impl SubscriberDetection {
-    /// Detectable, with no metadata chunk.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Append a metadata key expression to the token's key expression.
-    pub fn with_metadata(mut self, meta: impl Into<String>) -> Self {
-        self.metadata = Some(meta.into());
-        self
-    }
-}
-
-/// How ONE entity of an advanced subscriber is named on the wire, and what keeps
-/// that name valid for as long as the entity stands.
-///
-/// An advanced subscriber is four plain entities — the subscription, a
-/// heartbeat subscription, a late-publisher liveliness subscription and a
-/// detection token — and a host that declares KEYS (a C session's resource
-/// table) names each of them differently from the literal this crate would
-/// announce: a declared id and the rest of the key, a retraction that names the
-/// key, and a declaration that has to outlive the entity and go right after it.
-/// The runtime cannot know any of that, so it asks ([`DeclarationForms`]) and
-/// declares the entity the way it is told.
-///
-/// [`Self::literal`] is what the runtime does on its own.
-#[derive(Clone, Default)]
-pub struct EntityForm {
-    /// The declaration the wire names, `0` for the literal key.
-    mapping_id: u64,
-    /// What follows the declared prefix; `None` when it covers the whole key.
-    suffix: Option<String>,
-    /// The key a subscriber's retraction names beside its id, when it names one.
-    retraction: Option<crate::session::RetractionKey>,
-    /// Whether a TOKEN's retraction names its key beside its id.
-    names_key_on_retraction: bool,
-    /// What keeps the declaration alive; let go of AFTER the entity is.
-    keeps: Option<Arc<dyn Send + Sync>>,
-}
-
-impl EntityForm {
-    /// The key itself, announced literally, retracted by id alone.
-    pub fn literal() -> Self {
-        Self::default()
-    }
-
-    /// Declaration `mapping_id` followed by `suffix`.
-    pub fn aliased(mapping_id: u64, suffix: Option<String>) -> Self {
-        Self {
-            mapping_id,
-            suffix,
-            ..Self::default()
-        }
-    }
-
-    /// Make a subscriber's retraction name `key` beside its id.
-    pub fn with_retraction_naming(mut self, key: Option<crate::session::RetractionKey>) -> Self {
-        self.retraction = key;
-        self
-    }
-
-    /// Make a token's retraction name its own key beside its id.
-    pub fn with_token_retraction_naming_the_key(mut self, on: bool) -> Self {
-        self.names_key_on_retraction = on;
-        self
-    }
-
-    /// Hold `anchor` for as long as the entity declared in this form stands.
-    pub fn keeping(mut self, anchor: Arc<dyn Send + Sync>) -> Self {
-        self.keeps = Some(anchor);
-        self
-    }
-
-    /// Whether the entity is announced on the literal key.
-    fn is_literal(&self) -> bool {
-        self.mapping_id == 0
-    }
-}
-
-impl std::fmt::Debug for EntityForm {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EntityForm")
-            .field("mapping_id", &self.mapping_id)
-            .field("suffix", &self.suffix)
-            .field("retraction", &self.retraction)
-            .field("names_key_on_retraction", &self.names_key_on_retraction)
-            .field("keeps", &self.keeps.is_some())
-            .finish()
-    }
-}
-
-/// What a host that declares keys tells an advanced subscriber about how each of
-/// its entities is named — see [`EntityForm`].
-///
-/// Each method is called ONCE PER DECLARATION OF THAT ENTITY, in the order the
-/// subscriber declares them, and is the moment the host declares the key the
-/// entity will be named by. An advanced subscriber declared on a session with
-/// several faces is declared once per face, so a host is expected to answer the
-/// same question the same way: the first answer declares, the later ones reuse.
-///
-/// Every default is the literal form, so a host overrides only what it names.
-pub trait DeclarationForms: Send + Sync {
-    /// The identity the subscriber reports and names its detection token with,
-    /// when it is not the plain subscription's own. A host with ONE identity for
-    /// a subscriber that is declared on many faces supplies it here; `None`
-    /// keeps the per-declaration id.
-    fn entity_id(&self) -> Option<u32> {
-        None
-    }
-
-    /// The live subscription on `keyexpr`.
-    fn subscriber(&self, _keyexpr: &str) -> EntityForm {
-        EntityForm::literal()
-    }
-
-    /// The late-publisher liveliness subscription on `keyexpr`.
-    fn late_publishers(&self, _keyexpr: &str) -> EntityForm {
-        EntityForm::literal()
-    }
-
-    /// The heartbeat subscription on `keyexpr`.
-    fn heartbeat(&self, _keyexpr: &str) -> EntityForm {
-        EntityForm::literal()
-    }
-
-    /// The detection token on `keyexpr`.
-    fn token(&self, _keyexpr: &str) -> EntityForm {
-        EntityForm::literal()
-    }
-
-    /// Take over an entity's declaration when the subscriber runs in the
-    /// background: its handle is gone and nothing is left to let go of the
-    /// declaration after the entity, so the host keeps it until its own end.
-    fn retain(&self, _anchor: Arc<dyn Send + Sync>) {}
-}
-
-/// A host's [`DeclarationForms`], shareable and printable, for
-/// [`AdvancedSubscriberOptions::forms`].
-#[derive(Clone)]
-pub struct FormsHandle(Arc<dyn DeclarationForms>);
-
-impl FormsHandle {
-    /// Wrap `forms`.
-    pub fn new(forms: Arc<dyn DeclarationForms>) -> Self {
-        Self(forms)
-    }
-}
-
-impl std::fmt::Debug for FormsHandle {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("FormsHandle")
-    }
-}
+use wz_ext_pubsub::advanced_subscriber::plans::{
+    parse_heartbeat_source, recovered_sample_from_reply, recovery_query_timeout_ms,
+    AdvPublisherSource, PendingGets,
+};
 
 /// An entity and what keeps its wire name valid. The entity is the FIRST field,
 /// so it is retracted first and the name goes right after it — which is the
@@ -1012,1109 +257,9 @@ impl<E> Held<E> {
     fn new(entity: E, form: &EntityForm) -> Self {
         Self {
             entity,
-            _keeps: form.keeps.clone(),
+            _keeps: form.kept().cloned(),
         }
     }
-}
-
-impl Default for AdvancedSubscriberOptions {
-    fn default() -> Self {
-        Self {
-            #[cfg(feature = "ext-pubsub-advanced-recovery")]
-            recovery: None,
-            #[cfg(feature = "ext-pubsub-advanced-history")]
-            history: None,
-            allowed_origin: Locality::Any,
-            #[cfg(feature = "ext-pubsub-advanced-recovery")]
-            get_locality: Locality::Any,
-            #[cfg(feature = "ext-pubsub-advanced-recovery")]
-            query_timeout: Duration::from_secs(10),
-            subscriber_detection: None,
-            forms: None,
-        }
-    }
-}
-
-impl AdvancedSubscriberOptions {
-    /// Default options: no recovery, no history, `Any` sub origin + GET locality,
-    /// 10s GET timeout.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Allow this subscriber to be detected through liveliness (zenoh
-    /// `.subscriber_detection()` + `.subscriber_detection_metadata()`, which
-    /// [`SubscriberDetection`] carries as one value): declares a token on
-    /// `<key_expr>/@adv/sub/<zid>/<eid>/[meta|_]`.
-    pub fn with_subscriber_detection(mut self, detection: SubscriberDetection) -> Self {
-        self.subscriber_detection = Some(detection);
-        self
-    }
-
-    /// Name each entity the way `forms` says — see [`DeclarationForms`].
-    pub fn with_declaration_forms(mut self, forms: Arc<dyn DeclarationForms>) -> Self {
-        self.forms = Some(FormsHandle::new(forms));
-        self
-    }
-
-    /// Enable retransmission (gap recovery) with the given [`RecoveryConfig`]
-    /// (zenoh `.recovery()`).
-    #[cfg(feature = "ext-pubsub-advanced-recovery")]
-    pub fn with_recovery(mut self, recovery: RecoveryConfig) -> Self {
-        self.recovery = Some(recovery);
-        self
-    }
-
-    /// Enable the startup history query with the given [`HistoryConfig`]
-    /// (zenoh `.history()`). Independent of [`Self::with_recovery`].
-    #[cfg(feature = "ext-pubsub-advanced-history")]
-    pub fn with_history(mut self, history: HistoryConfig) -> Self {
-        self.history = Some(history);
-        self
-    }
-
-    /// Pin the live (+ heartbeat) subscription's origin (zenoh `allowed_origin`;
-    /// e.g. `Remote` to ignore loopback echoes).
-    pub fn with_allowed_origin(mut self, origin: Locality) -> Self {
-        self.allowed_origin = origin;
-        self
-    }
-
-    /// Pin the recovery + history GET destination locality (e.g. `SessionLocal` for
-    /// a single-host loopback composition; `Any` is the zenoh-faithful default).
-    #[cfg(feature = "ext-pubsub-advanced-recovery")]
-    pub fn with_get_locality(mut self, locality: Locality) -> Self {
-        self.get_locality = locality;
-        self
-    }
-
-    /// Pin the recovery + history GET timeout (zenoh `.query_timeout()`). Converted
-    /// to the `QueryOptions::with_timeout_ms` value by [`recovery_query_timeout_ms`],
-    /// clamped to `>= 1` ms. R311y326 — the clamp no longer prevents a wedge (a `0`
-    /// now resolves to the platform default, not never-expire); it pins that a
-    /// recovery GET carries ITS configured timeout rather than silently inheriting
-    /// the 10s default. See [`recovery_query_timeout_ms`].
-    #[cfg(feature = "ext-pubsub-advanced-recovery")]
-    pub fn with_query_timeout(mut self, query_timeout: Duration) -> Self {
-        self.query_timeout = query_timeout;
-        self
-    }
-}
-
-/// Startup-history configuration ([`AdvancedSubscriberOptions::with_history`]).
-/// Mirror of zenoh-ext `HistoryConfig` (advanced_subscriber.rs:54-89). R311y86
-/// builds the `max_samples` (`_max`) cap; R311y98 the `max_age` age filter
-/// (`_time`); R311y100 the `detect_late_publishers` liveliness trigger — the
-/// full zenoh `HistoryConfig` surface.
-#[cfg(feature = "ext-pubsub-advanced-history")]
-#[derive(Clone, Copy, Debug, Default)]
-#[non_exhaustive]
-pub struct HistoryConfig {
-    /// `Some(N)` caps the startup history GET to the newest `N` samples per
-    /// source (the `_max=N` selector); `None` recovers the publishers' whole
-    /// caches (zenoh `HistoryConfig::max_samples`).
-    pub sample_depth: Option<usize>,
-    /// `Some(secs)` bounds the startup history GET to samples no older than
-    /// `secs` seconds (the `_time=[now(-secs)..]` selector); `None` applies no
-    /// age bound (zenoh `HistoryConfig::max_age`). Composes with `sample_depth`
-    /// — both selectors ride the one GET.
-    pub max_age: Option<f64>,
-    /// `true` declares a liveliness subscriber on `<ke>/@adv/pub/**` so a
-    /// publisher appearing AFTER this subscriber joined (its `@adv` liveliness
-    /// token Put) triggers a per-publisher history GET — recovering its cache
-    /// the way the startup GET recovered the publishers present at declare time
-    /// (zenoh `HistoryConfig::detect_late_publishers`). The `_max` / `_time`
-    /// bounds above ride the per-publisher GET too.
-    pub detect_late_publishers: bool,
-}
-
-#[cfg(feature = "ext-pubsub-advanced-history")]
-impl HistoryConfig {
-    /// History with no cap (recover each publisher's whole cache).
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Cap the startup history GET to the newest `depth` samples per source
-    /// (the `_max` selector).
-    pub fn max_samples(mut self, depth: usize) -> Self {
-        self.sample_depth = Some(depth);
-        self
-    }
-
-    /// Bound the startup history GET to samples no older than `seconds`
-    /// (the `_time=[now(-seconds)..]` selector; zenoh `HistoryConfig::max_age`).
-    /// `seconds` must be non-negative — a negative age has no meaning for a
-    /// "no older than" window and would render the malformed `now(--Ns)` form
-    /// (the lower-bound emit negates it). Asserted in debug builds.
-    pub fn max_age(mut self, seconds: f64) -> Self {
-        debug_assert!(
-            seconds >= 0.0,
-            "HistoryConfig::max_age must be non-negative, got {seconds}"
-        );
-        self.max_age = Some(seconds);
-        self
-    }
-
-    /// Enable late-publisher detection (zenoh
-    /// `HistoryConfig::detect_late_publishers`): recover the history of a
-    /// publisher that appears AFTER this subscriber joined.
-    pub fn detect_late_publishers(mut self) -> Self {
-        self.detect_late_publishers = true;
-        self
-    }
-}
-
-/// What a recovery trigger asks the caller to do AFTER releasing the state
-/// lock: issue a recovery GET against `(zid, eid)`'s `@adv` cache. Returned
-/// (not issued inline) so the re-entrant `Session::query` runs without the
-/// state mutex held. `to_sn = None` is the OPEN `_sn={from_sn}..` selector
-/// (sample-driven + periodic); `Some(hb)` is the BOUNDED `_sn={from_sn}..{hb}`
-/// the heartbeat trigger uses (it knows the publisher's last sn).
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
-struct RecoveryRequest {
-    zid: Vec<u8>,
-    eid: u32,
-    from_sn: u32,
-    to_sn: Option<u32>,
-}
-
-/// Per-source last-in-order-delivered tracking + the user callbacks.
-/// Behind an `Arc<Mutex>` because the session may fire the subscriber
-/// callback from different worker threads (the storage-service idiom).
-///
-/// R311y95 (review L1) — the `on_sample` / miss-listener callbacks are invoked
-/// WHILE this `State` mutex is held (`deliver_and_flush` / `flush_sequenced` /
-/// the ingest path all call them under the guard). This matches zenoh holding
-/// the `zlock` across `callback.call` (advanced_subscriber.rs): a callback that
-/// re-enters this same subscriber's `State` (e.g. by inspecting it) would
-/// deadlock, so callbacks must stay self-contained. Issuing a recovery / history
-/// GET is deliberately deferred OUTSIDE the lock (the `RecoveryRequest` return +
-/// [`issue_recovery_get`]) for exactly this reason.
-struct State {
-    /// `(zid, eid)` -> per-source ordering state.
-    sequenced: HashMap<(Vec<u8>, u32), SourceState>,
-    /// R2522 — TIMESTAMP-mode ordering: the newest instant delivered per
-    /// timestamp-id, which is the second of upstream's three `handle_sample`
-    /// arms (`zenoh-ext/src/advanced_subscriber.rs` @ `} else if let Some(timestamp) = sample.timestamp() {`).
-    ///
-    /// # Why the key is the TIMESTAMP's id and not a source_info zid
-    ///
-    /// These samples carry no source_info at all — that is what makes them the
-    /// timestamped case. Upstream keys on `*timestamp.get_id()`, so the identity
-    /// is the clock's, and two publishers sharing a zid share a state exactly as
-    /// they do upstream.
-    ///
-    /// # Why a bare instant and not a `SourceState`, and what that gives up
-    ///
-    /// Read at the pin rather than assumed, because the assumption was wrong:
-    /// upstream does NOT keep a bare instant. `zenoh-ext/src/advanced_subscriber.rs`
-    /// @ `timestamped_states: LruCache<ID, SourceState<Timestamp>>,` reuses the
-    /// SAME struct as the sequenced side, so the timestamped state carries
-    /// `pending_samples` and `pending_queries` too.
-    ///
-    /// Two of those fields genuinely do not apply here and one does:
-    ///
-    /// * `Miss` / `nb` — never computed for a timestamped source in either
-    ///   implementation. "The sample after this one" is not a thing a clock
-    ///   defines, and upstream's timestamped arm calls no miss handler.
-    /// * `pending_queries` — R2553 BUILT it ([`TimestampedState`]), because the
-    ///   `uhlc` late-publisher GET needs the same one-in-flight gate the
-    ///   sequenced side has.
-    /// * `pending_samples` — still absent, and still the named residual: upstream
-    ///   buffers a timestamped sample while a history GET is in flight
-    ///   (`if (states.global_pending_queries == 0 && state.pending_queries == 0)
-    ///   || states.max_history_depth == 1`) so the older recovered samples
-    ///   deliver before the live ones, spilling through
-    ///   `flush_timestamped_source` at the depth bound. wz's map holds the
-    ///   ordering core plus the query gate, so a timestamped source seen DURING
-    ///   the startup history query still delivers live-first.
-    ///
-    /// That remaining gap is a named residual of `ext-pubsub-advanced-history`,
-    /// not an oversight of this field: it is the same buffering the sequenced
-    /// side gets from `history_pending` + `max_history_depth` above, and the
-    /// order this doc prescribed — the `uhlc` shape first, so the buffering has
-    /// a subject — is the order R2552 + R2553 took.
-    ///
-    /// The comparison is `wz_session_core::sample::timestamp_strictly_newer`,
-    /// which already implements uhlc's `(time, 16-byte LE id)` `Ord` — the
-    /// primitive the storage plane's newer-wins gate keys off. STRICTLY newer,
-    /// so a retransmission at an equal instant is dropped; upstream's
-    /// `last_delivered.map(|t| t < *timestamp)` says the same.
-    ///
-    /// Ungated on purpose: `ext-pubsub-advanced-subscriber` (this module's own
-    /// gate) now pulls `pubsub-timestamp`, so a `#[cfg]` here would be
-    /// vacuously true — a condition that can never be false reads as coverage
-    /// while grading nothing.
-    timestamped: HashMap<Vec<u8>, TimestampedState>,
-    on_sample: Box<dyn FnMut(Sample) + Send>,
-    /// R2814 — every declared sample-miss listener; see [`MissHandlers`].
-    miss_handlers: MissHandlers,
-    /// R311y82 — whether forward gaps BUFFER + trigger a recovery GET (true,
-    /// [`AdvancedSubscriber::declare_with_options`]) or report a [`Miss`] and
-    /// deliver past the gap (false, the plain [`AdvancedSubscriber::declare`]).
-    #[cfg(feature = "ext-pubsub-advanced-recovery")]
-    retransmission: bool,
-    /// R311y86 — how many GLOBAL history GETs are in flight. While it is
-    /// non-zero a live sample from an as-yet-undelivered source BUFFERS instead
-    /// of delivering, so the (older) history delivers first; the buffers flush
-    /// when the last one's terminal Final fires ([`State::finish_history`]).
-    ///
-    /// # Why a COUNT and not the `bool` this was until R2555
-    ///
-    /// Upstream's is a count — `zenoh-ext/src/advanced_subscriber.rs` @ `global_pending_queries: u64,`
-    /// — and wz's `bool` was adequate only because wz issued exactly ONE global
-    /// GET, at declare. A `bool` cannot tell "one outstanding" from "two", so
-    /// the FIRST completion would clear it and release every buffered sample
-    /// while a second GET was still returning older ones — which the
-    /// strictly-newer and dup-drop tests would then discard. The ordering this
-    /// module exists to provide would be silently lost, with no failing test,
-    /// because nothing today issues a second one.
-    ///
-    /// R2555 WIDENS IT BEFORE THE FEATURE THAT NEEDS IT, and the widening is
-    /// provably inert at the old population: this value was written exactly
-    /// twice — once at construction (0 or 1) and once to `false` in
-    /// `finish_history` — and nothing ever set it back, so it was monotonic 1
-    /// to 0 and never exceeded 1. The whole suite passing unchanged across the
-    /// change is therefore not merely reassuring, it is the proof.
-    #[cfg(feature = "ext-pubsub-advanced-history")]
-    global_pending_queries: usize,
-    /// R2503 — the pending buffer's CEILING, from the same config the history
-    /// GET's `_max` selector uses. `usize::MAX` when the user set no bound,
-    /// which is upstream's own answer rather than a wz choice:
-    /// `zenoh-ext/src/advanced_subscriber.rs` @ `let max_history_depth = conf`
-    /// reads `.history.as_ref().and_then(|h| h.max_samples).unwrap_or(usize::MAX)`,
-    /// with the comment that an unbounded query "can receive unbounded number
-    /// of responses". So the buffer bound exists BECAUSE the selector bound
-    /// does, and one field carrying both roles is upstream's coupling, not a
-    /// second meaning invented here.
-    #[cfg(feature = "ext-pubsub-advanced-history")]
-    max_history_depth: usize,
-}
-
-impl State {
-    /// R2522 — upstream's SECOND and THIRD `handle_sample` arms: what to do
-    /// with a sample that carries no `source_info`, and therefore no sequence
-    /// number to order on.
-    ///
-    /// Upstream splits that case in two — `zenoh-ext/src/advanced_subscriber.rs` @ `} else if let Some(timestamp) = sample.timestamp() {`
-    /// is the first half and its trailing `else` the second — and so does this:
-    ///
-    /// * WITH a timestamp — order by the clock. The sample is admitted only
-    ///   when its instant is STRICTLY newer than the newest already delivered
-    ///   for the same timestamp-id, so a retransmission at an equal instant and
-    ///   a late arrival at an older one are both dropped. Upstream's
-    ///   `state.last_delivered.map(|t| t < *timestamp).unwrap_or(true)` is the
-    ///   same predicate; [`wz_session_core::sample::timestamp_strictly_newer`]
-    ///   is the uhlc `(time, 16-byte LE id)` comparison it resolves to.
-    /// * WITHOUT one — there is nothing to order by and nothing to
-    ///   de-duplicate against, so deliver unconditionally. This is the arm wz
-    ///   already had, and the reason it must stay LAST: it is the fallback, not
-    ///   the rule.
-    ///
-    /// R2554 — ONE arm table, reached by every ingest path in every build. It
-    /// used to be two (a `&dyn SampleView` copy for the live paths and an owned
-    /// `Sample` copy for the recovered one), which is the duplication
-    /// [`State::route_sample`] documents the cost of.
-    /// R2555 — and it now BUFFERS as well as orders, which is the arm's second
-    /// half and this atom's last residual. Upstream holds a timestamped sample
-    /// while a history GET is in flight so the older recovered samples deliver
-    /// ahead of it: `zenoh-ext/src/advanced_subscriber.rs` @ `if (states.global_pending_queries == 0 && state.pending_queries == 0)`
-    /// selects between delivering now and buffering, and the buffer drains
-    /// through `flush_timestamped_source`. wz's `history_pending` is that
-    /// `global_pending_queries == 0` test and [`TimestampedState::pending_queries`]
-    /// the per-source one.
-    ///
-    /// THE `max_history_depth == 1` ESCAPE IS UPSTREAM'S AND IS KEPT: a buffer
-    /// of one can hold nothing that reordering would help, so that build
-    /// delivers live rather than storing a single sample to hand straight back.
-    fn deliver_unsequenced(&mut self, sample: Sample) {
-        let Some(ts) = sample.timestamp.clone() else {
-            (self.on_sample)(sample);
-            return;
-        };
-        #[cfg(feature = "ext-pubsub-advanced-history")]
-        let history_pending = self.global_pending_queries != 0;
-        #[cfg(feature = "ext-pubsub-advanced-history")]
-        let max_history_depth = self.max_history_depth;
-        let State {
-            timestamped,
-            on_sample,
-            ..
-        } = self;
-        let on_sample: &mut dyn FnMut(Sample) = &mut **on_sample;
-        let state = timestamped.entry(ts.zid.clone()).or_default();
-        // R2621 — a sample IS being heard from, so the retention clock restarts.
-        #[cfg(feature = "ext-pubsub-advanced-recovery")]
-        state.retention.touch();
-
-        // STRICTLY newer, so a retransmission at an equal instant and a late
-        // arrival at an older one are both dropped before anything else.
-        if let Some(last) = &state.last_delivered {
-            if !wz_session_core::sample::timestamp_strictly_newer(&ts, last) {
-                return;
-            }
-        }
-
-        #[cfg(feature = "ext-pubsub-advanced-history")]
-        if (history_pending || state.pending_queries != 0) && max_history_depth != 1 {
-            // R2555 — upstream's `entry(..).or_insert(sample)`: the FIRST
-            // sample at an instant wins, so a duplicate arriving while the
-            // buffer holds one does not displace it.
-            state.pending_samples.entry(ts.time).or_insert(sample);
-            if state.pending_samples.len() >= max_history_depth {
-                flush_timestamped(&ts.zid, state, on_sample);
-            }
-            return;
-        }
-
-        state.last_delivered = Some(ts);
-        on_sample(sample);
-    }
-
-    /// R2554 — THE SHAPE FORK, and there is exactly one of it.
-    ///
-    /// Upstream's `handle_sample` is a single function with three arms, called
-    /// from nine sites; wz had the arms spread over THREE independent forks on
-    /// `source_info` — the recovery-off live path, the recovery-on live path,
-    /// and the reply path — and that is not a tidiness observation, it is the
-    /// measured generator of a shipped defect. R2522 built the timestamped arm
-    /// into TWO of the three; its commit message names the two it knew about
-    /// ("shared by handle and handle_live") and its diff never touches the
-    /// third, which sat 700 lines away over a different input type. A
-    /// timestamped publisher's whole cache was therefore unreachable through
-    /// every GET this module issues, for thirty rounds, and nothing could say
-    /// so because no single place listed the arms.
-    ///
-    /// So the fork lives here, once, and the terminal arms are taken here:
-    ///
-    /// * WITH a timestamp and no `source_info` — order by the clock
-    ///   ([`Self::deliver_unsequenced`]), STRICTLY newer per timestamp-id.
-    /// * WITH neither — nothing to order by and nothing to de-duplicate
-    ///   against, so deliver unconditionally. It must stay LAST: it is the
-    ///   fallback, not the rule.
-    /// * WITH `source_info` — the SEQUENCED arm, which is the one case this
-    ///   cannot finish itself, because what a forward gap may do differs by
-    ///   build (a recovery-off build reports a [`Miss`] and advances; a
-    ///   recovery-on build buffers and asks for a retransmission). That case is
-    ///   handed back to the caller with the source identity already read off
-    ///   the sample, so no caller re-derives it.
-    ///
-    /// Returning the identity rather than taking a `key` argument also removes
-    /// a state that could previously be constructed: the old
-    /// `ingest_sequenced(key, sn, sample, ..)` let a caller pass a key that
-    /// DISAGREED with the sample's own `source_info`. Every test did pass them
-    /// redundantly; production could not, but nothing said so.
-    ///
-    /// R2814 — the identity comes back as an [`EntityGlobalId`] plus the
-    /// sequence number, and a record whose zid is outside `1..=16` bytes takes
-    /// the unsequenced arm. That is [`wz_session_core::sample::SourceInfo`]'s
-    /// own contract ("any value outside `1..=16` should be treated by consumers
-    /// as an absence-of-source"), and it is now decided here, once, instead of
-    /// every sequenced arm keying on an empty zid.
-    fn route_sample(&mut self, sample: Sample) -> Option<(EntityGlobalId, u32, Sample)> {
-        let sequenced = sample
-            .source_info
-            .as_ref()
-            .and_then(|info| info.source_id().map(|id| (id, info.sn)));
-        match sequenced {
-            Some((source, sn)) => Some((source, sn, sample)),
-            None => {
-                self.deliver_unsequenced(sample);
-                None
-            }
-        }
-    }
-}
-
-/// R2555 — flush ONE timestamped source's reorder buffer, oldest instant
-/// first. The wz mirror of `zenoh-ext/src/advanced_subscriber.rs` @ `fn flush_timestamped_source(`,
-/// including both of its guards and its whole-buffer drain.
-///
-/// ⚠ THE `pending_queries != 0` GUARD IS UPSTREAM'S AND IS NOT A MISTAKE TO
-/// CORRECT HERE, though it reads like one: it means the depth-bound spill
-/// does NOTHING while this source's own GET is outstanding, so the buffer
-/// can exceed the bound until that GET completes. Upstream carries exactly
-/// that, and the guard is what makes the flush safe to call from all three
-/// of its sites without each re-testing it. The bound is honoured the
-/// moment the GET's terminal Final runs
-/// ([`State::finish_timestamped_recovery`]).
-///
-/// ⚠⚠ It drains the WHOLE buffer where the sequenced spill (R2503) pops
-/// only the oldest. That difference is upstream's too, and it follows from
-/// the ordering: the sequenced buffer is waiting for a specific missing
-/// sequence number to arrive and must keep the rest, while a clock defines
-/// no hole to wait for — everything held is simply older than now.
-///
-/// `zid` is the state's own map key, passed in so the comparison can go
-/// through [`wz_session_core::sample::timestamp_strictly_newer`] rather
-/// than an open-coded `u64` test.
-#[cfg(feature = "ext-pubsub-advanced-history")]
-fn flush_timestamped(zid: &[u8], state: &mut TimestampedState, on_sample: &mut dyn FnMut(Sample)) {
-    if state.pending_queries != 0 || state.pending_samples.is_empty() {
-        return;
-    }
-    for (time, sample) in std::mem::take(&mut state.pending_samples) {
-        let ts = wz_session_core::sample::TimestampHint {
-            time,
-            zid: zid.to_vec(),
-        };
-        let newer = match &state.last_delivered {
-            Some(last) => wz_session_core::sample::timestamp_strictly_newer(&ts, last),
-            None => true,
-        };
-        if newer {
-            state.last_delivered = Some(ts);
-            on_sample(sample);
-        }
-    }
-}
-
-#[cfg(not(feature = "ext-pubsub-advanced-recovery"))]
-impl State {
-    /// The zenoh `handle_sample` state machine (retransmission-off subset).
-    ///
-    /// R2554 — the shape decision is NOT made here any more; it is made once,
-    /// in [`State::route_sample`], which also takes the two terminal arms. What
-    /// is left here is the part that genuinely differs by build: a forward gap
-    /// in a build with no retransmission reports a [`Miss`] and advances past
-    /// it, where the recovery build buffers and asks.
-    fn handle(&mut self, view: &dyn SampleView) {
-        let Some((source, sn, sample)) = self.route_sample(Sample::from_view(view)) else {
-            return;
-        };
-        let key = (source.zid().to_vec(), source.eid());
-        let State {
-            sequenced,
-            on_sample,
-            miss_handlers,
-            ..
-        } = self;
-        let on_sample: &mut dyn FnMut(Sample) = &mut **on_sample;
-        let state = sequenced.entry(key).or_default();
-        // R2621 — see the timestamped twin: delivery is activity.
-        #[cfg(feature = "ext-pubsub-advanced-recovery")]
-        state.retention.touch();
-        match state.last_delivered {
-            // First sample from this source: deliver, record.
-            None => {
-                on_sample(sample);
-                state.last_delivered = Some(sn);
-            }
-            // In order: deliver, advance.
-            Some(last) if sn == last.wrapping_add(1) => {
-                on_sample(sample);
-                state.last_delivered = Some(sn);
-            }
-            // Forward gap (no retransmission): report the miss, deliver,
-            // advance past it (zenoh advanced_subscriber.rs:521-535).
-            Some(last) if sn > last => {
-                miss_handlers.fire(Miss {
-                    source,
-                    nb: sn - last - 1,
-                });
-                on_sample(sample);
-                state.last_delivered = Some(sn);
-            }
-            // `sn <= last`: duplicate / out-of-order-late — drop.
-            Some(_) => {}
-        }
-    }
-}
-
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
-impl State {
-    /// Ingest a LIVE sample (the subscriber callback path). Returns a
-    /// [`RecoveryRequest`] when a forward gap on a retransmission-enabled
-    /// source needs a `_sn`-range recovery GET; the caller issues it OUTSIDE
-    /// the state lock.
-    fn handle_live(&mut self, view: &dyn SampleView) -> Option<RecoveryRequest> {
-        self.ingest(Sample::from_view(view), true)
-    }
-
-    /// R2554 — THE ONE INGEST ENTRY of a recovery-enabled build, and upstream's
-    /// own shape: `zenoh-ext/src/advanced_subscriber.rs` @ `fn handle_sample(states: &mut State, sample: Sample) -> bool {`
-    /// is one function that every one of its nine call sites passes an owned
-    /// sample to — the live subscription and eight GET callbacks alike.
-    ///
-    /// `live` is the ONLY thing those callers differ by, and it means exactly
-    /// one thing: whether a forward gap may trigger a NEW recovery GET. A
-    /// recovered sample must not, because the GET that produced it is the one
-    /// already in flight.
-    fn ingest(&mut self, sample: Sample, live: bool) -> Option<RecoveryRequest> {
-        let (source, sn, sample) = self.route_sample(sample)?;
-        self.ingest_sequenced(source, sn, sample, live)
-    }
-
-    /// The sequenced-ordering arm (zenoh `handle_sample`
-    /// advanced_subscriber.rs:497-540), reached only through [`Self::ingest`].
-    ///
-    /// R2554 — the `key` / `sn` parameters are gone: they were always the
-    /// sample's own `source_info` read back out, and passing them separately
-    /// let a caller state an identity the sample contradicted.
-    fn ingest_sequenced(
-        &mut self,
-        source: EntityGlobalId,
-        sn: u32,
-        sample: Sample,
-        live: bool,
-    ) -> Option<RecoveryRequest> {
-        let key = (source.zid().to_vec(), source.eid());
-        let retransmission = self.retransmission;
-        #[cfg(feature = "ext-pubsub-advanced-history")]
-        let history_pending = self.global_pending_queries != 0;
-        #[cfg(feature = "ext-pubsub-advanced-history")]
-        let max_history_depth = self.max_history_depth;
-        let State {
-            sequenced,
-            on_sample,
-            miss_handlers,
-            ..
-        } = self;
-        let on_sample: &mut dyn FnMut(Sample) = &mut **on_sample;
-        let state = sequenced.entry(key.clone()).or_default();
-        // R2621 — delivery is activity, as on the two paths above.
-        #[cfg(feature = "ext-pubsub-advanced-recovery")]
-        state.retention.touch();
-
-        match state.last_delivered {
-            // First sample / in order: deliver, advance, drain contiguous buffer.
-            None => {
-                // R311y86 — while the startup history GET is in flight, BUFFER a
-                // first sample (live or recovered) so the whole history delivers
-                // in order on completion (zenoh advanced_subscriber.rs:504-516).
-                // Skip the recovery trigger — the history GET is recovering it.
-                #[cfg(feature = "ext-pubsub-advanced-history")]
-                if history_pending {
-                    state.pending_samples.insert(sn, sample);
-                    // R2503 — SPILL, and note the order: upstream inserts FIRST
-                    // and then checks, so the buffer transiently holds
-                    // depth + 1. Copying the order matters because the
-                    // alternative (check, then insert) drops the sample that
-                    // just arrived instead of the oldest one.
-                    // ⚠ The spill DELIVERS the oldest rather than dropping it
-                    // (`deliver_and_flush`, which also drains the contiguous
-                    // successors) — a "bounded" buffer that dropped would pass
-                    // a length assertion and silently lose a sample.
-                    // ⚠⚠ BEFORE the `return None` below, or it never runs.
-                    if state.pending_samples.len() >= max_history_depth {
-                        if let Some((old_sn, old)) = state.pending_samples.pop_first() {
-                            deliver_and_flush(state, old_sn, old, on_sample);
-                        }
-                    }
-                    return None;
-                }
-                deliver_and_flush(state, sn, sample, on_sample);
-            }
-            Some(last) if sn == last.wrapping_add(1) => {
-                deliver_and_flush(state, sn, sample, on_sample)
-            }
-            // Forward gap.
-            Some(last) if sn > last => {
-                if retransmission {
-                    // BUFFER; the recovery GET (below) back-fills the hole.
-                    state.pending_samples.insert(sn, sample);
-                    // R2503 — the SAME ceiling as the history arm above. The
-                    // residual clause named only that arm, and a build that
-                    // trusted it would leave this one unbounded: upstream
-                    // guards BOTH inserts and spills after each --
-                    // `zenoh-ext/src/advanced_subscriber.rs` @ `if state.pending_samples.len() >= states.max_history_depth {`,
-                    // which occurs TWICE there, once per insert. (R2509 — the
-                    // needle is on the citation's own line: a path with none is
-                    // a BARE mention, and the bare budget is a ratchet that
-                    // reds the whole of Layers C0 and Z rather than this file.)
-                    // ⚠ GATED, and that is upstream's answer rather than an
-                    // omission: `max_history_depth` is `usize::MAX` when there
-                    // is no history config, i.e. NO spill. With the history
-                    // feature off there is no `HistoryConfig` to read, and
-                    // unbounded is exactly what upstream does in that case.
-                    #[cfg(feature = "ext-pubsub-advanced-history")]
-                    if state.pending_samples.len() >= max_history_depth {
-                        if let Some((old_sn, old)) = state.pending_samples.pop_first() {
-                            deliver_and_flush(state, old_sn, old, on_sample);
-                        }
-                    }
-                } else {
-                    // No retransmission: report the miss, deliver, advance.
-                    miss_handlers.fire(Miss {
-                        source,
-                        nb: sn - last - 1,
-                    });
-                    on_sample(sample);
-                    state.last_delivered = Some(sn);
-                }
-            }
-            // `sn <= last`: duplicate / out-of-order-late — drop.
-            Some(_) => {}
-        }
-
-        // Sample-driven trigger (zenoh sub_callback advanced_subscriber.rs:
-        // 704-712): a live sample that left the buffer non-empty with no GET
-        // in flight issues one for `_sn=last_delivered+1..`.
-        if live && retransmission && state.pending_queries == 0 && !state.pending_samples.is_empty()
-        {
-            state.pending_queries += 1;
-            Some(RecoveryRequest {
-                zid: key.0,
-                eid: key.1,
-                from_sn: state.last_delivered.map(|s| s.wrapping_add(1)).unwrap_or(0),
-                to_sn: None,
-            })
-        } else {
-            None
-        }
-    }
-
-    /// A recovery GET completed (its terminal Final fired): decrement the
-    /// in-flight count and, when it reaches 0, flush the reorder buffer —
-    /// delivering recovered + buffered samples in order and reporting a
-    /// [`Miss`] for any hole the recovery did not fill (zenoh
-    /// `SequencedRepliesHandler::drop` -> `flush_sequenced_source`,
-    /// advanced_subscriber.rs:1362-1382 / 1266-1306).
-    fn finish_recovery(&mut self, key: &(Vec<u8>, u32)) {
-        // R311y87 (review C2) — do NOT flush while the startup history GET is
-        // still in flight: a per-source recovery GET (heartbeat/periodic) can
-        // complete mid-history; flushing then advances `last_delivered`, so a
-        // later (older-sn) history reply for this source hits the dup-drop arm
-        // and is silently LOST. Defer the flush to `finish_history` (zenoh gates
-        // SequencedRepliesHandler::drop on `global_pending_queries == 0`,
-        // advanced_subscriber.rs:1368).
-        #[cfg(feature = "ext-pubsub-advanced-history")]
-        let history_pending = self.global_pending_queries != 0;
-        let State {
-            sequenced,
-            on_sample,
-            miss_handlers,
-            ..
-        } = self;
-        let on_sample: &mut dyn FnMut(Sample) = &mut **on_sample;
-        if let Some(state) = sequenced.get_mut(key) {
-            state.pending_queries = state.pending_queries.saturating_sub(1);
-            let may_flush = state.pending_queries == 0;
-            #[cfg(feature = "ext-pubsub-advanced-history")]
-            let may_flush = may_flush && !history_pending;
-            if may_flush {
-                flush_sequenced(state, &key.0, key.1, on_sample, miss_handlers);
-            }
-        }
-    }
-
-    /// R311y86 — a GLOBAL history GET completed (its terminal Final fired):
-    /// close its slot and, when it was the LAST one, flush every source's
-    /// buffer in order, so the history accumulated during the query delivers
-    /// oldest-first (zenoh `InitialRepliesHandler::drop` -> per-source
-    /// `flush_sequenced_source`, advanced_subscriber.rs:1334-1352). A source
-    /// with a per-source recovery GET still in flight is left for
-    /// [`Self::finish_recovery`] to flush.
-    ///
-    /// R2555 — "when it was the LAST one" is the new half, and it is upstream's
-    /// own gate: `zenoh-ext/src/advanced_subscriber.rs` @ `if states.global_pending_queries == 0 {`
-    /// guards both of that handler's flush loops. Flushing on any completion
-    /// rather than the last would release buffered samples while another global
-    /// GET is still returning OLDER ones, which the strictly-newer and dup-drop
-    /// arms would then discard — losing history the subscriber had already
-    /// recovered. `saturating_sub` because the failed-to-issue rollback in
-    /// [`issue_recovery_get`] runs this too.
-    ///
-    /// R2555 — and the TIMESTAMPED sources too, which is the half that was
-    /// missing. Upstream's same handler drains both maps under the one
-    /// `global_pending_queries == 0` test: `zenoh-ext/src/advanced_subscriber.rs` @ `flush_timestamped_source(state, states.callback.as_ref());`
-    /// sits directly under the sequenced loop in `InitialRepliesHandler::drop`.
-    /// Without it a timestamped sample buffered during the startup GET would
-    /// never be handed back — the buffer would fill and stay full, which is
-    /// strictly worse than not buffering at all.
-    #[cfg(feature = "ext-pubsub-advanced-history")]
-    fn finish_history(&mut self) {
-        self.global_pending_queries = self.global_pending_queries.saturating_sub(1);
-        if self.global_pending_queries != 0 {
-            return;
-        }
-        let State {
-            sequenced,
-            timestamped,
-            on_sample,
-            miss_handlers,
-            ..
-        } = self;
-        let on_sample: &mut dyn FnMut(Sample) = &mut **on_sample;
-        for (key, state) in sequenced.iter_mut() {
-            if state.pending_queries == 0 {
-                flush_sequenced(state, &key.0, key.1, on_sample, miss_handlers);
-            }
-        }
-        for (zid, state) in timestamped.iter_mut() {
-            flush_timestamped(zid, state, on_sample);
-        }
-    }
-
-    /// R311y83 — the periodic trigger: collect a `_sn=last+1..` recovery
-    /// request for every sequenced source with no GET in flight. Re-asking past
-    /// `last_delivered` catches a lost LAST sample that no later live sample
-    /// would trigger sample-driven recovery for (zenoh `PeriodicQuery::run`,
-    /// advanced_subscriber.rs:587-643). wz drives ONE shared task that iterates
-    /// all sources here (vs zenoh's per-source `TimedEvent`); the GET shape is
-    /// identical. No-op when retransmission is off.
-    ///
-    /// R311y447-review — TWO reviewers independently flagged that the previous
-    /// "observable-equivalent" claim glossed a real divergence, so it is named
-    /// here rather than asserted away. The `pending_queries == 0` gate below has
-    /// NO upstream counterpart: zenoh's `PeriodicQuery::run` increments
-    /// unconditionally (`:592`), and that is deliberate — it gates its other two
-    /// triggers (sample-driven `:706`, heartbeat `:1104`) and leaves only periodic
-    /// ungated. Observable difference: when a GET round trip exceeds the period,
-    /// upstream issues overlapping GETs while wz issues at most one. wz is the
-    /// more conservative of the two and no leg in the cross-impl corpus witnesses
-    /// the difference; removing this gate reds nothing today.
-    /// R2621 — RECLAIM SOURCE STATES NOBODY HAS HEARD FROM, the sweep wz had
-    /// none of. Returns how many entries were dropped, across BOTH maps.
-    ///
-    /// This is the deterministic core; the background task is thin timer glue
-    /// over it, the same split the periodic [`AbortOnDropTask`] uses over
-    /// [`Self::periodic_requests`]. Written that way so the policy is unit
-    /// tested at an instant the test chooses rather than through a sleep.
-    ///
-    /// THE RULE IS UPSTREAM'S, CLAUSE FOR CLAUSE
-    /// (`zenoh-ext/src/advanced_subscriber.rs` @ `async fn gc_task(statesref: Weak<Mutex<State>>, retention_period: Duration) {`):
-    /// a state younger than the retention period stays; an older one whose
-    /// publisher is still ALIVE has its access refreshed instead of being
-    /// dropped; an older one that is not alive is reclaimed. The middle arm is
-    /// the one that matters — without it a live but quiet publisher loses its
-    /// `last_delivered` and its next sample reads as a gap.
-    ///
-    /// ⚠ A FULL SCAN WHERE UPSTREAM POPS AN LRU, and the cost is stated rather
-    /// than hidden: upstream holds an `LruCache` and walks from the
-    /// least-recently-accessed end, stopping at the first entry young enough,
-    /// so it touches only what it reclaims. wz holds plain `HashMap`s, so this
-    /// is O(sources) per tick. That is a deliberate trade — an LRU here would
-    /// be a second index to keep coherent with two maps that are otherwise
-    /// keyed lookups — and it is bounded by the same retention period, which is
-    /// hours by default rather than milliseconds.
-    #[cfg(feature = "ext-pubsub-advanced-recovery")]
-    fn reclaim_expired_sources(&mut self, now: Instant, retention_period: Duration) -> usize {
-        fn sweep<K, V>(
-            map: &mut HashMap<K, V>,
-            now: Instant,
-            retention_period: Duration,
-            retention_of: impl Fn(&mut V) -> &mut Retention,
-        ) -> usize
-        where
-            K: std::hash::Hash + Eq,
-        {
-            let before = map.len();
-            map.retain(|_, state| {
-                let retention = retention_of(state);
-                if now.duration_since(retention.latest_access) <= retention_period {
-                    return true;
-                }
-                if retention.alive {
-                    // Spare it AND refresh, so a live-but-quiet publisher is not
-                    // re-examined every tick for the rest of the session.
-                    retention.latest_access = now;
-                    return true;
-                }
-                false
-            });
-            before - map.len()
-        }
-
-        sweep(&mut self.sequenced, now, retention_period, |s| {
-            &mut s.retention
-        }) + sweep(&mut self.timestamped, now, retention_period, |s| {
-            &mut s.retention
-        })
-    }
-
-    /// R2621 — the liveliness token's writer for [`Retention::alive`], both
-    /// arms through one function: a Put says the publisher is live and a Delete
-    /// says it is gone, which is upstream's pair
-    /// (`zenoh-ext/src/advanced_subscriber.rs` @ `state.alive = true;` and its
-    /// Delete twin).
-    ///
-    /// Both SHAPES, because a `uhlc` publisher and a sequenced one are equally
-    /// live or gone when their token says so. The sequenced map is keyed by
-    /// `(zid, eid)` and the timestamped one by `zid` alone, which is why a token
-    /// naming only a zid reaches every sequenced entry sharing it.
-    ///
-    /// Gated with its callers: the liveliness subscriber that drives it exists
-    /// only under the history feature, and a writer compiled where nothing can
-    /// call it is the dead code this module already refuses.
-    #[cfg(all(
-        feature = "ext-pubsub-advanced-history",
-        feature = "ext-pubsub-advanced-recovery"
-    ))]
-    fn set_source_alive(&mut self, zid: &[u8], eid: Option<u32>, alive: bool) {
-        for (key, state) in self.sequenced.iter_mut() {
-            // `map_or(true, ..)` rather than `is_none_or`: the latter is stable
-            // only since 1.82 and this crate's MSRV is 1.81.
-            if key.0 == zid && eid.map_or(true, |e| e == key.1) {
-                state.retention.alive = alive;
-            }
-        }
-        if let Some(state) = self.timestamped.get_mut(zid) {
-            state.retention.alive = alive;
-        }
-    }
-
-    fn periodic_requests(&mut self) -> Vec<RecoveryRequest> {
-        if !self.retransmission {
-            return Vec::new();
-        }
-        let mut requests = Vec::new();
-        for (key, state) in self.sequenced.iter_mut() {
-            if state.pending_queries == 0 {
-                state.pending_queries += 1;
-                requests.push(RecoveryRequest {
-                    zid: key.0.clone(),
-                    eid: key.1,
-                    from_sn: state.last_delivered.map(|s| s.wrapping_add(1)).unwrap_or(0),
-                    to_sn: None,
-                });
-            }
-        }
-        requests
-    }
-
-    /// R311y84 — the heartbeat trigger: a beacon reporting the publisher's last
-    /// sn `hb_sn` for source `(zid, eid)`. When the beacon is ahead of
-    /// `last_delivered` and no GET is in flight, request a BOUNDED
-    /// `_sn=last+1..hb_sn` recovery GET (zenoh heartbeat callback,
-    /// advanced_subscriber.rs:1095-1118). No-op when retransmission is off.
-    fn handle_heartbeat(&mut self, zid: Vec<u8>, eid: u32, hb_sn: u32) -> Option<RecoveryRequest> {
-        if !self.retransmission {
-            return None;
-        }
-        let key = (zid, eid);
-        // R2617 — SKIP THE HEARTBEAT FOR A SOURCE THIS SUBSCRIBER HAS JUST MET
-        // WHILE A GLOBAL PULL IS STILL RUNNING. Upstream's guard, on the arm it
-        // takes only for a newly-inserted source:
-        // `zenoh-ext/src/advanced_subscriber.rs` @ `if states.global_pending_queries > 0 {`,
-        // whose trace calls it "publisher that is currently being pulled by
-        // global query". Without it the beacon fires a per-source
-        // `_sn=last+1..hb` GET for a publisher the startup history GET is
-        // already fetching in full, so the same samples are asked for twice and
-        // the per-source slot is occupied by a query the global one makes
-        // redundant.
-        //
-        // THE STATE IS STILL INSERTED BEFORE THE RETURN, exactly as upstream
-        // inserts through `get_or_insert_mut` and only then decides: the source
-        // has been SEEN, and forgetting it here would make the next beacon look
-        // new all over again.
-        //
-        // The `history` cfg is the honest scope: `global_pending_queries` only
-        // exists where a global pull can exist, and with history compiled out
-        // there is nothing for this guard to be about.
-        #[cfg(feature = "ext-pubsub-advanced-history")]
-        let global_pull_in_flight = self.global_pending_queries != 0;
-        #[cfg(not(feature = "ext-pubsub-advanced-history"))]
-        let global_pull_in_flight = false;
-        let newly_seen = !self.sequenced.contains_key(&key);
-        let state = self.sequenced.entry(key.clone()).or_default();
-        // R2621 — a beacon is the publisher saying it is still there, which is
-        // exactly what upstream's heartbeat arm refreshes `latest_access` for.
-        #[cfg(feature = "ext-pubsub-advanced-recovery")]
-        state.retention.touch();
-        if newly_seen && global_pull_in_flight {
-            return None;
-        }
-        let caught_up = state
-            .last_delivered
-            .map(|last| hb_sn <= last)
-            .unwrap_or(false);
-        if !caught_up && state.pending_queries == 0 {
-            state.pending_queries += 1;
-            Some(RecoveryRequest {
-                zid: key.0,
-                eid: key.1,
-                from_sn: state.last_delivered.map(|s| s.wrapping_add(1)).unwrap_or(0),
-                to_sn: Some(hb_sn),
-            })
-        } else {
-            None
-        }
-    }
-
-    /// R311y100 — the late-publisher trigger: a publisher `(zid, eid)` appeared
-    /// (its `@adv` liveliness token Put was detected). Open a recovery slot
-    /// (`pending_queries += 1`) so the per-publisher history GET's replies flush
-    /// in order, UNLESS a GET for this source is already in flight (the
-    /// `pending_queries == 0` gate avoids piling up concurrent GETs — zenoh's
-    /// own TODO at advanced_subscriber.rs:824 notes the un-deduped re-query;
-    /// gating on no-in-flight is the wz refinement). Returns whether to issue
-    /// the GET. NOT gated on `retransmission`: late-publisher detection is a
-    /// HISTORY trigger, independent of the sample-driven recovery flag (zenoh
-    /// gates it on `historyconf.liveliness`, not retransmission).
-    #[cfg(feature = "ext-pubsub-advanced-history")]
-    fn handle_late_publisher(&mut self, zid: Vec<u8>, eid: u32) -> bool {
-        let state = self.sequenced.entry((zid, eid)).or_default();
-        if state.pending_queries == 0 {
-            state.pending_queries += 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// R2553 — the same trigger for a TIMESTAMPED publisher, keyed by zid
-    /// alone. Upstream's is the `uhlc` half of the one liveliness callback:
-    /// `zenoh-ext/src/advanced_subscriber.rs` @ `.timestamped_states` reached
-    /// through `get_or_insert_mut(ID::from(zid), Default::default)` followed by
-    /// `state.pending_queries += 1`.
-    ///
-    /// THE KEY IS THE ZID AND NOT A `(zid, eid)` PAIR, which is the whole
-    /// reason this is a second method rather than the one above taking an
-    /// `Option<u32>`: a `uhlc` token names no entity, and the samples it will
-    /// recover are keyed by the TIMESTAMP's id — so the identity the GET opens
-    /// a slot for has to be the identity the replies land under, or the slot
-    /// belongs to a source no reply will ever close.
-    ///
-    /// wz's one-in-flight gate is kept here for the reason
-    /// [`Self::handle_late_publisher`] gives (upstream's own TODO notes the
-    /// un-deduped re-query); the RETURN is what says whether to issue.
-    #[cfg(feature = "ext-pubsub-advanced-history")]
-    fn handle_late_timestamped_publisher(&mut self, zid: Vec<u8>) -> bool {
-        let state = self.timestamped.entry(zid).or_default();
-        if state.pending_queries == 0 {
-            state.pending_queries += 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// R2553 — a timestamped publisher's history GET completed: close the slot
-    /// its trigger opened. The twin of [`Self::finish_recovery`], and upstream's
-    /// `zenoh-ext/src/advanced_subscriber.rs` @ `impl Drop for TimestampedRepliesHandler`.
-    /// `saturating_sub` for the same reason the sequenced side uses it: the
-    /// failed-to-issue rollback runs this too.
-    ///
-    /// R2555 — and it now FLUSHES, which R2553 recorded as the missing half:
-    /// the buffer this closes the last query on is the buffer
-    /// [`flush_timestamped`] drains, and upstream's handler does both in that
-    /// order. The `!history_pending` test is upstream's
-    /// `global_pending_queries == 0` guard — a per-source GET can complete
-    /// while the startup history GET is still running, and flushing then would
-    /// advance `last_delivered` past instants the startup GET is about to
-    /// return, dropping them on the strictly-newer test. That is the same trap
-    /// [`Self::finish_recovery`] documents on the sequenced side.
-    /// R2555 — open a GLOBAL history slot for a publisher with no readable
-    /// identity. Upstream's `states.global_pending_queries += 1` in the third
-    /// liveliness arm.
-    ///
-    /// UNCONDITIONAL, where the two keyed triggers return whether to issue:
-    /// their one-in-flight gate exists because a per-source slot can be
-    /// observed to be occupied, and here there is no source to observe. That is
-    /// upstream's behaviour too — its third arm increments without testing —
-    /// and the honest consequence is that repeated tokens from unidentifiable
-    /// publishers each cost a GET. The alternative would be de-duplicating on
-    /// the token key expression, which is a wz invention rather than a mirror,
-    /// so it is not taken here.
-    #[cfg(feature = "ext-pubsub-advanced-history")]
-    fn open_global_history_slot(&mut self) {
-        self.global_pending_queries += 1;
-    }
-
-    #[cfg(feature = "ext-pubsub-advanced-history")]
-    fn finish_timestamped_recovery(&mut self, zid: &[u8]) {
-        let history_pending = self.global_pending_queries != 0;
-        let State {
-            timestamped,
-            on_sample,
-            ..
-        } = self;
-        let on_sample: &mut dyn FnMut(Sample) = &mut **on_sample;
-        if let Some(state) = timestamped.get_mut(zid) {
-            state.pending_queries = state.pending_queries.saturating_sub(1);
-            if !history_pending {
-                flush_timestamped(zid, state, on_sample);
-            }
-        }
-    }
-}
-
-/// Deliver `sample` (sn = `sn`), advance `last_delivered`, then drain every
-/// contiguous buffered sample (`last+1`, `last+2`, ...) in order. The wz
-/// mirror of zenoh's `deliver_and_flush` (advanced_subscriber.rs:482-495).
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
-fn deliver_and_flush(
-    state: &mut SourceState,
-    sn: u32,
-    sample: Sample,
-    on_sample: &mut dyn FnMut(Sample),
-) {
-    on_sample(sample);
-    let mut delivered = sn;
-    state.last_delivered = Some(delivered);
-    while let Some(next) = state.pending_samples.remove(&delivered.wrapping_add(1)) {
-        on_sample(next);
-        delivered = delivered.wrapping_add(1);
-        state.last_delivered = Some(delivered);
-    }
-}
-
-/// Flush the reorder buffer after a recovery GET completed: drain it
-/// sn-ordered, delivering each contiguous sample and reporting a [`Miss`] for
-/// any hole the recovery did not fill (zenoh `flush_sequenced_source`,
-/// advanced_subscriber.rs:1266-1306). Caller guarantees `pending_queries == 0`.
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
-fn flush_sequenced(
-    state: &mut SourceState,
-    zid: &[u8],
-    eid: u32,
-    on_sample: &mut dyn FnMut(Sample),
-    miss_handlers: &mut MissHandlers,
-) {
-    if state.pending_samples.is_empty() {
-        return;
-    }
-    // Every key of the sequenced map is built from a valid identity — by
-    // `State::route_sample` from an `EntityGlobalId`, or from a heartbeat /
-    // liveliness token whose zid `zenoh_hex_to_zid` decoded, which yields
-    // 1..=16 bytes or nothing — so this cannot fail on a key the map holds.
-    let source = EntityGlobalId::new(zid, eid)
-        .expect("sequenced-source keys are built from valid 1..=16-byte zids");
-    let pending = core::mem::take(&mut state.pending_samples);
-    for (sn, sample) in pending {
-        match state.last_delivered {
-            None => {
-                state.last_delivered = Some(sn);
-                on_sample(sample);
-            }
-            Some(last) if sn == last.wrapping_add(1) => {
-                state.last_delivered = Some(sn);
-                on_sample(sample);
-            }
-            Some(last) if sn > last => {
-                miss_handlers.fire(Miss {
-                    source,
-                    nb: sn - last - 1,
-                });
-                state.last_delivered = Some(sn);
-                on_sample(sample);
-            }
-            // duplicate — drop.
-            Some(_) => {}
-        }
-    }
-}
-
-/// R311y89 (review C3) — convert a [`RecoveryConfig::query_timeout`] `Duration`
-/// into the `QueryOptions::with_timeout_ms` `u32` ms value, clamped to
-/// `[1, u32::MAX]`. The upper clamp keeps the cast lossless (the
-/// `with_timeout_ms` field is `u32`).
-///
-/// R311y326 — the lower clamp's original correctness bite is superseded but the
-/// clamp is kept. It said a `0` (a zero / sub-ms `Duration` truncates to `0`)
-/// was the `timeout_ms == 0` "never-expire" sentinel that would wedge a
-/// no-answerer recovery GET forever. `ext-pubsub-advanced-recovery` composes
-/// `query-timeout` (Cargo.toml), so `QueryOptions::effective_timeout_ms` now
-/// resolves a `0` to `DEFAULT_QUERY_TIMEOUT_MS` — a `0` would inherit the 10s
-/// platform default, not never-expire, so it can no longer wedge. The clamp
-/// stays because a recovery GET should carry ITS configured timeout, not fall
-/// back to the platform default; `>= 1` pins that intent (a zero-Duration config
-/// still yields a live 1 ms deadline rather than silently becoming 10s).
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
-fn recovery_query_timeout_ms(query_timeout: Duration) -> u32 {
-    query_timeout.as_millis().clamp(1, u32::MAX as u128) as u32
 }
 
 /// R311y95 (review L3) — the shared recovery / history GET scaffolding: issue the
@@ -2156,6 +301,7 @@ fn issue_recovery_get<R, T>(
     SessionLinkActions<R, T>: Send + Sync + 'static,
 {
     let reply_states = Arc::clone(statesref);
+    let reply_clock = Arc::clone(session.clock());
     let final_states = Arc::clone(statesref);
     let final_pending = Arc::clone(pending);
     let final_finish = finish.clone();
@@ -2202,7 +348,7 @@ fn issue_recovery_get<R, T>(
                 let _ = reply_states
                     .lock()
                     .expect("advanced subscriber state mutex poisoned")
-                    .ingest(sample, false);
+                    .ingest(sample, false, reply_clock.now_monotonic_ms());
             }
         },
         move |rid| {
@@ -2322,116 +468,6 @@ fn issue_recovery_query<R, T>(
         opts,
         move |state| state.finish_recovery(&key),
     );
-}
-
-/// Rebuild a recovery / history reply as a [`Sample`], field for field. `None`
-/// for an Err reply. Shared by the recovery and history GETs.
-///
-/// R2554 — it decides NOTHING about ordering, and that is the point. It used to
-/// return `Option<((Vec<u8>, u32), u32, Sample)>` and so had to open with
-/// `reply.source_info()?`, dropping every reply without one — which is exactly
-/// a timestamped publisher's whole cache. R2553 replaced the tuple with an enum
-/// that named both shapes; R2554 removes the fork from here altogether, because
-/// a reply is just a sample and [`State::route_sample`] is where a sample's
-/// shape is read. Upstream's GET callbacks do the same thing by construction:
-/// they hand the sample straight to `handle_sample`.
-///
-/// R311y561 — the DEL arm. A Del reply is now rebuilt as a Del sample rather
-/// than discarded: the `@adv` cache retains deletes since
-/// [`crate::advanced_cache::CachedSample`] carries the sample kind, so a
-/// recovering subscriber sees the retraction it missed instead of silently
-/// keeping a resurrected value. This is also why the `ReplyKind` test is now an
-/// Err-exclusion rather than a Put-only admission.
-///
-/// R311y561 also RESTORES the timestamp. The R311y95 note below said a recovered
-/// sample "arrives timestamp-less" because "the `ReplyView` exposes no
-/// reply-timestamp accessor" — that ceased to be true at R311y321, which added
-/// [`ReplyView::timestamp`], and the prose outlived the fact by rounds. The
-/// cached timestamp is re-applied here.
-///
-/// R311y562 CLOSES the last of it, and the fix was never on this side.
-/// [`crate::advanced_cache::CachedSample`] now retains the `encoding` and the
-/// `attachment` too, and the recovery reply carries both
-/// ([`wz_session_core::query_sink::ReplyMeta`]), so the two re-applications
-/// below finally receive something. They were written at R311y95 and had been
-/// dead code ever since — the reply could not carry what the ring never kept,
-/// which is why the gap survived a reader who checked only this function. A
-/// recovered sample is now field-for-field the live one, minus nothing.
-///
-/// The Del arm carries neither, and that is the WIRE's rule rather than a
-/// residual: `_z_push_body_encode` gates `has_attachment` on `_is_put` and
-/// reads the encoding only inside the `_is_put` branch
-/// (`vendor/zenoh-pico/src/protocol/codec/message.c:263,269-276`).
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
-fn recovered_sample_from_reply(reply: &dyn ReplyView) -> Option<Sample> {
-    let kind = reply.kind();
-    if kind == ReplyKind::Err {
-        return None;
-    }
-    // A recovered reply's bytes are held, not copied, when the reply holds them
-    // shareable (a reply off the wire is a range of the frame it arrived in), so
-    // the recovered sample is a second reference to that storage as a live one is.
-    let mut sample = match kind {
-        ReplyKind::Del => Sample::new_del(reply.keyexpr()),
-        _ => Sample::new_put_shared(
-            reply.keyexpr(),
-            reply
-                .payload_shared()
-                .cloned()
-                .unwrap_or_else(|| wz_session_core::link::RxBytes::from(reply.payload().to_vec())),
-        ),
-    };
-    sample.source_info = reply.source_info().cloned();
-    sample.timestamp = reply.timestamp().cloned();
-    sample.attachment = reply.attachment_shared().cloned().or_else(|| {
-        reply
-            .attachment()
-            .map(|bytes| wz_session_core::link::RxBytes::from(bytes.to_vec()))
-    });
-    if let Some((packed_id, schema)) = reply.put_encoding() {
-        sample.encoding = Some(EncodingHint {
-            packed_id,
-            schema: schema.map(String::from),
-        });
-    }
-    Some(sample)
-}
-
-/// Build the startup history GET selector from the `_max` cap (`sample_depth`)
-/// and the `_time` age bound (`max_age`). The `_time` form `[now(-{age}s)..]`
-/// is byte-identical to zenoh's `TimeRange<TimeExpr>` Display of
-/// `[Inclusive(Now{offset_secs:-age})..]` (zenoh-util time_range.rs:128-141/
-/// 327-339), so a wz cache and a zenoh cache both filter it exactly.
-///
-/// R311y442 — two changes, and both are what makes the GET legible to a real
-/// zenoh cache. The parts are `;`-joined, not `&`-joined (upstream's separator;
-/// see [`wz_session_core::selector_params`]), and the list ALWAYS carries the bare
-/// `_anyke` flag. The return is therefore no longer `Option`: even with neither
-/// knob set the GET must announce that it accepts replies keyed outside the
-/// `@adv` namespace it is addressed to, because that is how every cached sample
-/// comes back. Without it zenoh's responder refuses each reply and the
-/// subscriber recovers nothing at all — measured as 5 refusals against 5 cached
-/// samples on a `z_advanced_pub` oracle.
-#[cfg(feature = "ext-pubsub-advanced-history")]
-fn history_selector(sample_depth: Option<usize>, max_age: Option<f64>) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(max) = sample_depth {
-        parts.push(format!("_max={max}"));
-    }
-    if let Some(age) = max_age {
-        // R311y442 review (REVIEWER 1, finding 6) — upstream's `TimeExpr` Display
-        // special-cases a zero offset to `now()` rather than `now(-0s)`
-        // (zenoh-util/src/time_range.rs:333-339), and IEEE `-0.0 == 0.0` so a
-        // `max_age(0.0)` lands there. The two forms parse to the same instant, so
-        // this is byte-parity rather than a behaviour change — but the emitted
-        // selector is the thing a foreign peer logs and a future diff compares.
-        if age == 0.0 {
-            parts.push("_time=[now()..]".to_string());
-        } else {
-            parts.push(format!("_time=[now(-{age}s)..]"));
-        }
-    }
-    wz_session_core::selector_params::anyke_params(&parts)
 }
 
 /// R311y86 — issue the startup history GET over `<base>/@adv/**` (capped by
@@ -2758,7 +794,11 @@ fn on_late_publisher_detected<R, T>(
                 // R2621 — the token's PUT arm is where `alive` becomes true,
                 // upstream's `state.alive = true;`. Ordered before the late-
                 // publisher decision so the state exists to mark.
-                let issue = states.handle_late_publisher(zid.clone(), eid);
+                let issue = states.handle_late_publisher(
+                    zid.clone(),
+                    eid,
+                    session.clock().now_monotonic_ms(),
+                );
                 #[cfg(feature = "ext-pubsub-advanced-recovery")]
                 states.set_source_alive(&zid, Some(eid), true);
                 issue
@@ -2784,7 +824,10 @@ fn on_late_publisher_detected<R, T>(
                     .lock()
                     .expect("advanced subscriber state mutex poisoned");
                 // R2621 — the `uhlc` twin of the sequenced Put arm above.
-                let issue = states.handle_late_timestamped_publisher(zid.clone());
+                let issue = states.handle_late_timestamped_publisher(
+                    zid.clone(),
+                    session.clock().now_monotonic_ms(),
+                );
                 #[cfg(feature = "ext-pubsub-advanced-recovery")]
                 states.set_source_alive(&zid, None, true);
                 issue
@@ -2918,130 +961,6 @@ impl Drop for AbortOnDropTask {
     }
 }
 
-/// R311y592 — the subscriber's in-flight recovery / history GETs, and the seam
-/// a teardown cancels them through.
-///
-/// This is pico's `_ze_advanced_subscriber_state_t::_cancellation_token`: ONE
-/// per subscriber state, carried by every recovery / history GET the subscriber
-/// issues (`vendor/zenoh-pico/src/api/advanced_subscriber.c:924-928`) and
-/// cancelled in the subscriber's drop handler (`advanced_subscriber.c:1230-1231`)
-/// so that every resource is released by the time undeclare returns.
-///
-/// wz reaches the same guarantee through the registration rather than through a
-/// token object, because [`Session::cancel_pending_query`] already IS this
-/// tree's cancellation primitive and pico's own token bottoms out in the same
-/// place (`_z_cancel_pending_query` is `_z_unregister_pending_query`,
-/// `vendor/zenoh-pico/src/session/query.c:290-298`). Adding a second mechanism
-/// would leave two spellings of one idea.
-///
-/// Why this matters beyond tidiness: [`State`] owns `on_sample`, and at the C
-/// ABI that is a C function pointer plus a context the application may free the
-/// moment `ze_undeclare_advanced_subscriber` returns. An in-flight GET keeps its
-/// own `Arc<Mutex<State>>`, so without this a reply landing one instant after
-/// the undeclare called into freed memory.
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
-struct PendingGets {
-    /// `Some` while the subscriber is live, `None` once cancelled. ONE optional
-    /// rather than a set plus a `cancelled` flag, so the two can never disagree
-    /// under a concurrent cancel — the discipline `wz-capi-pico`'s `CancelFan`
-    /// applies to the C `z_get` fan, for the same reason.
-    inner: Mutex<Option<InFlight>>,
-}
-
-/// The live half of [`PendingGets`].
-///
-/// Two sets rather than one because a GET can COMPLETE BEFORE IT IS RECORDED: a
-/// `Locality::SessionLocal` / `Any` query is answered by the loopback inside
-/// [`Session::query`], so `on_final` can run before the call returns the rid
-/// there is to record. `finished_early` absorbs exactly that ordering; every
-/// entry in it is removed by the matching `record`, so it cannot accumulate.
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
-#[derive(Default)]
-struct InFlight {
-    /// Issued, not yet terminal — the set a teardown must cancel.
-    live: HashSet<u64>,
-    /// Terminal before `record` saw them (the synchronous-loopback ordering).
-    finished_early: HashSet<u64>,
-}
-
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
-impl PendingGets {
-    fn new() -> Self {
-        Self {
-            inner: Mutex::new(Some(InFlight::default())),
-        }
-    }
-
-    /// Lock, recovering from poisoning rather than propagating it.
-    ///
-    /// A panic in a reply callback poisons this mutex, and the guard below runs
-    /// in `Drop` — where a second panic would abort the process. The data behind
-    /// it is two sets of `u64` with no cross-field invariant a panic can leave
-    /// half-applied, so the poisoned guard is exactly as usable as a healthy one.
-    fn lock(&self) -> std::sync::MutexGuard<'_, Option<InFlight>> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// Record a GET that has just been issued. `false` means the subscriber was
-    /// torn down while this GET was going out, and the caller must undo the
-    /// registration it just made rather than leave a live pending query behind.
-    fn record(&self, rid: u64) -> bool {
-        match self.lock().as_mut() {
-            Some(in_flight) => {
-                // Already terminal (the loopback answered inside `query`): there
-                // is nothing left to cancel, so consume the marker instead of
-                // adding a rid that would never be removed.
-                if !in_flight.finished_early.remove(&rid) {
-                    in_flight.live.insert(rid);
-                }
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// A GET reached its terminal Final: forget it.
-    fn finish(&self, rid: u64) {
-        if let Some(in_flight) = self.lock().as_mut() {
-            if !in_flight.live.remove(&rid) {
-                in_flight.finished_early.insert(rid);
-            }
-        }
-    }
-
-    /// Take every still-outstanding rid and refuse all future ones. Idempotent:
-    /// a second call answers with an empty list.
-    fn cancel(&self) -> Vec<u64> {
-        match self.lock().take() {
-            Some(in_flight) => in_flight.live.into_iter().collect(),
-            None => Vec::new(),
-        }
-    }
-
-    /// `(live, finished_early)` sizes. Test-only: the two sets are the whole
-    /// state of this type, and a test that asserts only on `live` cannot see
-    /// `finished_early` growing without bound.
-    ///
-    /// The gate is its ONE caller's gate copied verbatim
-    /// (`a_synchronously_answered_history_get_leaves_no_registration_behind`,
-    /// `all(history, cache)`), minus the `ext-pubsub-advanced-recovery` this
-    /// `impl` block already carries and which `history` implies. A bare
-    /// `cfg(test)` here is the G7 shape: `cfg(test)` WIDENS rather than gates,
-    /// so the method stays alive on every `--lib` test build and reds
-    /// `-D dead-code` on the recovery-only lane, where the caller is gone.
-    #[cfg(all(
-        test,
-        feature = "ext-pubsub-advanced-history",
-        feature = "ext-pubsub-advanced-cache"
-    ))]
-    fn sizes(&self) -> (usize, usize) {
-        match self.lock().as_ref() {
-            Some(in_flight) => (in_flight.live.len(), in_flight.finished_early.len()),
-            None => (0, 0),
-        }
-    }
-}
-
 /// RAII teardown for the subscriber's in-flight recovery / history GETs: on
 /// drop, unregister every one that has not reached its terminal Final.
 ///
@@ -3079,104 +998,6 @@ impl<R: SessionRuntime, T: TimeSource> Drop for RecoveryCancel<R, T> {
             self.session.cancel_pending_query(rid);
         }
     }
-}
-
-/// R2552 — WHICH SHAPE of `@adv` publisher a token key expression names.
-///
-/// The `<eid|uhlc>` chunk is a discriminator, not a number: wz's own publisher
-/// writes `eid.to_string()` for `Sequencing::SequenceNumber` and the literal
-/// `uhlc` for `Sequencing::Timestamp | Sequencing::None`
-/// (`crates/wz-runtime-tokio/src/advanced_publisher.rs` @ `let discriminator = match options.sequencing {`),
-/// and upstream splits on exactly that — `zenoh-ext/src/advanced_subscriber.rs` @ `if parsed.eid() == KE_UHLC {`.
-///
-/// THIS TYPE EXISTS BECAUSE ITS ABSENCE MADE THE TIMESTAMPED SHAPE
-/// UNEXPRESSIBLE. [`parse_heartbeat_source`] returned `Option<(Vec<u8>, u32)>`,
-/// so the only way to report a `uhlc` token was `None` — indistinguishable from
-/// a malformed key expression. Two of wz's own three sequencing modes emit that
-/// token, so a wz timestamped or unsequenced advanced publisher announced
-/// itself and wz's own advanced subscriber discarded the announcement. The
-/// handling of that shape is a later part; being able to NAME it is this one,
-/// and each caller now says which shapes it serves rather than being handed a
-/// pair it cannot question.
-///
-/// R2555 — AND IT WAS STILL ONE ARM SHORT, which the paragraph above predicts
-/// without noticing: upstream branches THREE ways here and this type offered
-/// TWO, so "an `@adv/pub` token whose zid I cannot read" had no spelling but
-/// `None` — the very sentence above, one case later. Upstream's third arm,
-/// `zenoh-ext/src/advanced_subscriber.rs` @ `} else if s.kind() == SampleKind::Put {`,
-/// still queries such a publisher's cache; it simply accounts for it globally,
-/// because with no identity there is no per-source slot to open.
-///
-/// THE RULE THIS LEAVES BEHIND, since the defect has now recurred three times
-/// in as many rounds (a parser tuple that hid `uhlc`, a reply tuple that hid
-/// the timestamped shape, and this): when wz mirrors an upstream dispatch, the
-/// wz type needs ONE VARIANT PER UPSTREAM ARM, and the check is to count the
-/// arms at the upstream branch rather than to enumerate the cases wz happened
-/// to notice.
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum AdvPublisherSource {
-    /// `<eid>` — sequence-number sequencing, the only shape carrying the
-    /// per-source sequence numbers the recovery and heartbeat paths key on.
-    Sequenced {
-        /// The publisher's zid, decoded from the hex chunk.
-        zid: Vec<u8>,
-        /// The publisher's entity id.
-        eid: u32,
-    },
-    /// `uhlc` — timestamp / none sequencing, ordered by the timestamp's own id
-    /// rather than by a sequence number.
-    Timestamped {
-        /// The publisher's zid, decoded from the hex chunk.
-        zid: Vec<u8>,
-    },
-    /// R2555 — an `@adv/pub` token whose ZID CHUNK does not decode, so no
-    /// per-source state can be keyed for it. Upstream's third arm, and it is
-    /// NOT a rejection: the publisher's cache is still queried, accounted
-    /// globally instead of per source.
-    ///
-    /// Distinct from `None` on purpose, and that distinction is the whole
-    /// point of the variant. `None` means "this key expression is not an
-    /// `@adv/pub` token at all", which is unreachable in practice (the
-    /// liveliness subscriber is declared on `<base>/@adv/pub/**`, so nothing
-    /// else can arrive) and would have nothing to query if it were. Folding
-    /// the two together is what hid this case: one of them is a non-event and
-    /// the other is a publisher wz can still recover history from.
-    Unidentified,
-}
-
-/// R311y84 — parse an `@adv` publisher token keyexpr
-/// `<base>/@adv/pub/<zid_hex>/<eid|uhlc>/_` back into its source shape, the wz
-/// analogue of zenoh's `ke_liveliness::parse`. Returns `None` only on a
-/// MALFORMED key expression (bad `@adv/pub` layout, un-decodable zid hex, or a
-/// discriminator that is neither `uhlc` nor a `u32`). The trailing `_` meta
-/// chunk and any further chunks are ignored.
-///
-/// R2552 — the `uhlc` discriminator is now a VALUE rather than a parse failure.
-/// It was folded into `None` before, which conflated "this publisher orders by
-/// timestamp" with "this key expression is broken"; the two want opposite
-/// responses from a caller.
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
-fn parse_heartbeat_source(keyexpr: &str) -> Option<AdvPublisherSource> {
-    let chunks: Vec<&str> = keyexpr.split('/').collect();
-    let adv = chunks
-        .iter()
-        .position(|c| *c == crate::advanced_ke::KE_ADV_PREFIX)?;
-    if chunks.get(adv + 1) != Some(&crate::advanced_ke::KE_ADV_PUB) {
-        return None;
-    }
-    // R2555 — a zid chunk that does not decode is the UNIDENTIFIED shape, not a
-    // refusal. Upstream reaches its third arm by exactly this test failing
-    // (`ZenohId::from_str`), and still queries the publisher's cache.
-    let Some(zid) = zenoh_hex_to_zid(chunks.get(adv + 2)?) else {
-        return Some(AdvPublisherSource::Unidentified);
-    };
-    let discriminator = *chunks.get(adv + 3)?;
-    if discriminator == crate::advanced_ke::KE_ADV_UHLC {
-        return Some(AdvPublisherSource::Timestamped { zid });
-    }
-    let eid = discriminator.parse::<u32>().ok()?;
-    Some(AdvPublisherSource::Sequenced { zid, eid })
 }
 
 /// A live advanced subscriber bound to a [`Session`]: owns the wrapped
@@ -3347,7 +1168,7 @@ fn identity_of<R: SessionRuntime>(
     subscriber: &Subscriber<R>,
     forms: Option<&FormsHandle>,
 ) -> Result<EntityGlobalId, AdvancedSubscribeError> {
-    match forms.and_then(|f| f.0.entity_id()) {
+    match forms.and_then(|f| f.forms().entity_id()) {
         Some(eid) => EntityGlobalId::new(zid, eid)
             .ok_or(AdvancedSubscribeError::SessionZid { len: zid.len() }),
         None => global_id_of(zid, subscriber),
@@ -3359,7 +1180,7 @@ fn form_of(
     forms: Option<&FormsHandle>,
     ask: impl FnOnce(&dyn DeclarationForms) -> EntityForm,
 ) -> EntityForm {
-    forms.map(|f| ask(&*f.0)).unwrap_or_default()
+    forms.map(|f| ask(f.forms())).unwrap_or_default()
 }
 
 /// Declare a plain subscription on `keyexpr` in `form`: announced literally or
@@ -3378,16 +1199,11 @@ where
     <R as SessionRuntime>::LinkSink: Send + Sync,
     SessionLinkActions<R, T>: Send + Sync + 'static,
 {
-    let options = options.with_retraction_naming(form.retraction.clone());
+    let options = options.with_retraction_naming(form.retraction().cloned());
     let subscriber = if form.is_literal() {
         session.declare_subscriber(keyexpr.to_owned(), options, callback)?
     } else {
-        session.declare_subscriber_aliased(
-            form.mapping_id,
-            form.suffix.as_deref(),
-            options,
-            callback,
-        )?
+        session.declare_subscriber_aliased(form.mapping_id(), form.suffix(), options, callback)?
     };
     Ok(Held::new(subscriber, form))
 }
@@ -3471,7 +1287,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
         // the session's life, and so must its name.
         let retain = |keeps: Option<Arc<dyn Send + Sync>>| {
             if let (Some(forms), Some(keeps)) = (forms.as_ref(), keeps) {
-                forms.0.retain(keeps);
+                forms.forms().retain(keeps);
             }
         };
         // In the order the entities retract, which is the order the host will
@@ -3568,13 +1384,9 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
             .statesref
             .lock()
             .expect("advanced subscriber state mutex poisoned")
-            .miss_handlers
+            .miss_handlers()
             .register(Box::new(callback));
-        SampleMissListener {
-            id,
-            statesref: Arc::downgrade(&self.statesref),
-            undeclare_on_drop: true,
-        }
+        SampleMissListener::new(id, Arc::downgrade(&self.statesref))
     }
 
     /// Declare a sample-miss listener whose misses arrive on a channel —
@@ -3756,13 +1568,12 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
         OnSample: FnMut(Sample) + Send + 'static,
     {
         require_session_zid(session.zid())?;
-        let state = Arc::new(Mutex::new(State {
-            sequenced: HashMap::new(),
-            timestamped: HashMap::new(),
-            on_sample: Box::new(on_sample),
-            miss_handlers: MissHandlers::default(),
-        }));
+        let state = Arc::new(Mutex::new(State::new(
+            Box::new(on_sample),
+            MissHandlers::default(),
+        )));
         let cb_state = Arc::clone(&state);
+        let cb_clock = Arc::clone(session.clock());
         let keyexpr: String = keyexpr.into();
         let form = form_of(forms.as_ref(), |f| f.subscriber(&keyexpr));
         let subscriber = declare_subscription(
@@ -3774,7 +1585,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
                 cb_state
                     .lock()
                     .expect("advanced subscriber state mutex poisoned")
-                    .handle(view);
+                    .handle(view, cb_clock.now_monotonic_ms());
             },
         )?;
         let id = identity_of(session.zid(), &subscriber.entity, forms.as_ref())?;
@@ -3815,18 +1626,12 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
         OnSample: FnMut(Sample) + Send + 'static,
     {
         require_session_zid(session.zid())?;
-        let state = Arc::new(Mutex::new(State {
-            sequenced: HashMap::new(),
-            timestamped: HashMap::new(),
-            on_sample: Box::new(on_sample),
-            miss_handlers: MissHandlers::default(),
-            retransmission: false,
-            #[cfg(feature = "ext-pubsub-advanced-history")]
-            global_pending_queries: 0,
-            #[cfg(feature = "ext-pubsub-advanced-history")]
-            max_history_depth: usize::MAX,
-        }));
+        let state = Arc::new(Mutex::new(State::new(
+            Box::new(on_sample),
+            MissHandlers::default(),
+        )));
         let cb_state = Arc::clone(&state);
+        let cb_clock = Arc::clone(session.clock());
         let subscriber = session.declare_subscriber(
             keyexpr,
             SubscribeOptions::default(),
@@ -3838,7 +1643,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
                 let _ = cb_state
                     .lock()
                     .expect("advanced subscriber state mutex poisoned")
-                    .handle_live(view);
+                    .handle_live(view, cb_clock.now_monotonic_ms());
             },
         )?;
         let id = global_id_of(session.zid(), &subscriber)?;
@@ -3989,7 +1794,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
         // recovery/history GET locality; `sub_origin` = the live/heartbeat sub origin.
         let dest = options.get_locality;
         let sub_origin = options.allowed_origin;
-        let periodic = recovery.and_then(|c| c.periodic_queries);
+        let periodic = recovery.and_then(|c| c.periodic_queries());
         // R2621 — retention is configured through `RecoveryConfig` because that
         // is where upstream puts it, so a subscriber with no recovery config
         // runs no sweep: the same scope its `gc_task` has.
@@ -4005,7 +1810,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
         // from the C application thread, the refusal was swallowed by the
         // best-effort fan-out, and the subscriber was dead while the declare
         // reported success.
-        let heartbeat = recovery.map(|c| c.heartbeat).unwrap_or(false);
+        let heartbeat = recovery.map(|c| c.heartbeat()).unwrap_or(false);
         // R311y89 (review C3) — the recovery + history GET timeout (zenoh's shared
         // builder `query_timeout`), threaded to every GET so the deadline sweep can
         // release a no-answerer query.
@@ -4014,25 +1819,24 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
         let history = options.history;
         let base_keyexpr: String = keyexpr.into();
 
-        let state = Arc::new(Mutex::new(State {
-            sequenced: HashMap::new(),
-            timestamped: HashMap::new(),
-            on_sample: Box::new(on_sample),
-            miss_handlers,
-            retransmission,
-            #[cfg(feature = "ext-pubsub-advanced-history")]
-            global_pending_queries: usize::from(history.is_some()),
-            // Upstream's own derivation, field for field — see the field's doc.
-            #[cfg(feature = "ext-pubsub-advanced-history")]
-            max_history_depth: history
+        let state =
+            State::new(Box::new(on_sample), miss_handlers).with_retransmission(retransmission);
+        // The startup history get is one in flight from the start; the buffer's ceiling is
+        // upstream's own derivation, field for field — see the machine's field doc.
+        #[cfg(feature = "ext-pubsub-advanced-history")]
+        let state = state.with_history(
+            usize::from(history.is_some()),
+            history
                 .as_ref()
                 .and_then(|h| h.sample_depth)
                 .unwrap_or(usize::MAX),
-        }));
+        );
+        let state = Arc::new(Mutex::new(state));
         // R311y592 — the in-flight GET registry every issuing site below shares,
         // and that the returned subscriber cancels through on drop.
         let pending = Arc::new(PendingGets::new());
         let cb_state = Arc::clone(&state);
+        let cb_clock = Arc::clone(session.clock());
         let cb_pending = Arc::clone(&pending);
         // R2817 — every callback and task below holds its session WEAKLY,
         // upstream's `conf.session.downgrade()` at each of them. They live in
@@ -4058,7 +1862,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
                 let request = cb_state
                     .lock()
                     .expect("advanced subscriber state mutex poisoned")
-                    .handle_live(view);
+                    .handle_live(view, cb_clock.now_monotonic_ms());
                 // Issue the recovery GET OUTSIDE the state lock: Session::query
                 // re-enters the session (the loopback fan drains the cache's
                 // replies, which lock `cb_state` again). R311lh deferred-fire
@@ -4111,7 +1915,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
                         r_state
                             .lock()
                             .expect("advanced subscriber state mutex poisoned")
-                            .reclaim_expired_sources(Instant::now(), period);
+                            .reclaim_expired_sources(clock.now_monotonic_ms(), period);
                     }
                 }),
             )
@@ -4201,6 +2005,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
                         )
                     {
                         let hb_state = Arc::clone(&state);
+                        let hb_clock = Arc::clone(session.clock());
                         let hb_pending = Arc::clone(&pending);
                         let hb_session = session.downgrade();
                         let hb_base = base_keyexpr.clone();
@@ -4232,7 +2037,7 @@ impl<R: SessionRuntime, T: TimeSource> AdvancedSubscriber<R, T> {
                                 let request = hb_state
                                     .lock()
                                     .expect("advanced subscriber state mutex poisoned")
-                                    .handle_heartbeat(zid, eid, hb_sn);
+                                    .handle_heartbeat(zid, eid, hb_sn, hb_clock.now_monotonic_ms());
                                 if let Some(request) = request {
                                     if let Some(hb_session) = hb_session.upgrade() {
                                         issue_recovery_query(
@@ -4421,11 +2226,11 @@ where
     // because this is the moment the token is declared.
     let form = form_of(options.forms.as_ref(), |f| f.token(&ke));
     let token_options = crate::session::LivelinessOptions::default()
-        .with_retraction_naming_the_key(form.names_key_on_retraction);
+        .with_retraction_naming_the_key(form.names_key_on_retraction());
     let token = if form.is_literal() {
         session.declare_token(ke, token_options)?
     } else {
-        session.declare_token_aliased(form.mapping_id, form.suffix.as_deref(), token_options)?
+        session.declare_token_aliased(form.mapping_id(), form.suffix(), token_options)?
     };
     Ok(Some(Held::new(token, &form)))
 }
@@ -4450,8 +2255,8 @@ where
         session.declare_liveliness_subscriber(keyexpr.to_owned(), options, sink)?
     } else {
         session.declare_liveliness_subscriber_aliased(
-            form.mapping_id,
-            form.suffix.as_deref(),
+            form.mapping_id(),
+            form.suffix(),
             options,
             sink,
         )?
@@ -4466,15 +2271,17 @@ mod tests {
     use crate::observer::ApplicationLayerObserver;
     use crate::runtime_impl::TokioTime;
     use crate::session::{PublishOptions, TokioSession};
+    #[cfg(feature = "ext-pubsub-advanced-recovery")]
+    use std::time::Duration;
     use wz_session_core::locality::Locality;
     use wz_session_core::sample::SourceInfo;
 
     /// The [`Miss`] a source of `zid`/`eid` reports for `nb` skipped samples.
     fn miss_of(zid: &[u8], eid: u32, nb: u32) -> Miss {
-        Miss {
-            source: EntityGlobalId::new(zid, eid).expect("a 1..=16-byte test zid"),
+        Miss::for_test(
+            EntityGlobalId::new(zid, eid).expect("a 1..=16-byte test zid"),
             nb,
-        }
+        )
     }
 
     /// An inbound `DeclToken` for `ke`, as a peer's liveliness token arrives.
@@ -4547,15 +2354,6 @@ mod tests {
             vec![ours.to_owned()],
             "the detector hears this key expression's publisher and no other"
         );
-    }
-
-    /// A registry holding ONE listener that records into `sink` — the shape
-    /// the state-machine tests below drive [`State`] with directly.
-    #[cfg(feature = "ext-pubsub-advanced-recovery")]
-    fn recording_miss_handlers(sink: Arc<Mutex<Vec<Miss>>>) -> MissHandlers {
-        let mut handlers = MissHandlers::default();
-        handlers.register(Box::new(move |miss| sink.lock().unwrap().push(miss)));
-        handlers
     }
 
     /// R2814 — THE REGISTRY'S CLAIM, graded on the declared surface: two
@@ -4948,118 +2746,6 @@ mod tests {
         );
     }
 
-    /// R311y82 state-machine unit test (recovery core, no session): a live
-    /// forward gap BUFFERS instead of delivering + asks for a recovery GET;
-    /// when the recovered sample fills the hole, the buffer drains in order
-    /// with no miss. Drives [`State`] directly so the buffer / drain logic is
-    /// exercised without the query plane (the composed loopback test below
-    /// covers the genuine GET).
-    #[cfg(feature = "ext-pubsub-advanced-recovery")]
-    #[test]
-    fn recovery_buffers_forward_gap_and_drains_when_filled() {
-        let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let misses = Arc::new(Mutex::new(Vec::<Miss>::new()));
-        let d = Arc::clone(&delivered);
-        let m = Arc::clone(&misses);
-        let mut state = State {
-            sequenced: HashMap::new(),
-            timestamped: HashMap::new(),
-            on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
-            miss_handlers: recording_miss_handlers(m),
-            retransmission: true,
-            #[cfg(feature = "ext-pubsub-advanced-history")]
-            global_pending_queries: 0,
-            #[cfg(feature = "ext-pubsub-advanced-history")]
-            max_history_depth: usize::MAX,
-        };
-        let key = (vec![0x02u8], 7u32);
-        let mk = |sn: u32, v: u8| {
-            let mut s = Sample::new_put("demo/data", vec![v]);
-            s.source_info = Some(SourceInfo::new(&[0x02], 7, sn));
-            s
-        };
-
-        // Live 0,1 in order — no recovery request.
-        assert!(state.ingest(mk(0, 0xA0), true).is_none());
-        assert!(state.ingest(mk(1, 0xA1), true).is_none());
-        // Live gap at 2: sn 3 arrives. retransmission -> buffer + request GET.
-        let req = state
-            .ingest(mk(3, 0xA3), true)
-            .expect("a forward gap with retransmission requests recovery");
-        assert_eq!(
-            (req.zid.clone(), req.eid),
-            key,
-            "GET targets the gapped source"
-        );
-        assert_eq!(req.from_sn, 2, "GET starts at last_delivered+1 = 2");
-        assert_eq!(
-            *delivered.lock().unwrap(),
-            vec![0xA0, 0xA1],
-            "sn 3 buffered, not delivered while the hole is open"
-        );
-
-        // The recovery GET returns sn 2 — drains 2 then the buffered 3.
-        let _ = state.ingest(mk(2, 0xA2), false);
-        state.finish_recovery(&key);
-        assert_eq!(
-            *delivered.lock().unwrap(),
-            vec![0xA0, 0xA1, 0xA2, 0xA3],
-            "the recovered sn 2 fills the hole; the buffered sn 3 drains in order"
-        );
-        assert!(
-            misses.lock().unwrap().is_empty(),
-            "the recovery filled the hole -> no Miss"
-        );
-    }
-
-    /// R311y82 state-machine unit test: a hole the recovery GET does NOT fill
-    /// surfaces a [`Miss`] at flush, and the buffered sample past it is still
-    /// delivered (zenoh `flush_sequenced_source` miss arm).
-    #[cfg(feature = "ext-pubsub-advanced-recovery")]
-    #[test]
-    fn recovery_flush_reports_miss_for_unfilled_hole() {
-        let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let misses = Arc::new(Mutex::new(Vec::<Miss>::new()));
-        let d = Arc::clone(&delivered);
-        let m = Arc::clone(&misses);
-        let mut state = State {
-            sequenced: HashMap::new(),
-            timestamped: HashMap::new(),
-            on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
-            miss_handlers: recording_miss_handlers(m),
-            retransmission: true,
-            #[cfg(feature = "ext-pubsub-advanced-history")]
-            global_pending_queries: 0,
-            #[cfg(feature = "ext-pubsub-advanced-history")]
-            max_history_depth: usize::MAX,
-        };
-        let key = (vec![0x02u8], 7u32);
-        let mk = |sn: u32, v: u8| {
-            let mut s = Sample::new_put("demo/data", vec![v]);
-            s.source_info = Some(SourceInfo::new(&[0x02], 7, sn));
-            s
-        };
-
-        let _ = state.ingest(mk(0, 0xB0), true);
-        // Gap at 1: sn 2 buffered, GET requested for _sn=1..
-        let req = state
-            .ingest(mk(2, 0xB2), true)
-            .expect("gap requests recovery");
-        assert_eq!(req.from_sn, 1);
-        // The GET finalises with NOTHING for sn 1 (the cache never had it).
-        state.finish_recovery(&key);
-        assert_eq!(
-            *delivered.lock().unwrap(),
-            vec![0xB0, 0xB2],
-            "the unfillable hole is skipped; the buffered sn 2 still delivers"
-        );
-        assert_eq!(
-            misses.lock().unwrap().clone(),
-            vec![miss_of(&[0x02], 7, 1)],
-            "the unfilled hole surfaces one Miss(nb=1) at flush"
-        );
-    }
-
     /// R311y82 composed loopback recovery e2e — the CONSUMER half
     /// (`ext-pubsub-advanced-recovery`) co-compiled with the PRODUCER answerer
     /// (`ext-pubsub-advanced-cache`). A real [`crate::advanced_cache::AdvancedCache`]
@@ -5374,81 +3060,6 @@ mod tests {
         );
     }
 
-    /// R311y83 periodic-trigger unit (no session): `periodic_requests` re-asks
-    /// every retransmission source `_sn=last+1..` once, marking each with a GET
-    /// in flight so a second tick is a no-op until the GET finalises.
-    #[cfg(feature = "ext-pubsub-advanced-recovery")]
-    #[test]
-    fn periodic_requests_reask_each_source_once() {
-        let mut state = State {
-            sequenced: HashMap::new(),
-            timestamped: HashMap::new(),
-            on_sample: Box::new(|_| {}),
-            miss_handlers: MissHandlers::default(),
-            retransmission: true,
-            #[cfg(feature = "ext-pubsub-advanced-history")]
-            global_pending_queries: 0,
-            #[cfg(feature = "ext-pubsub-advanced-history")]
-            max_history_depth: usize::MAX,
-        };
-        state.sequenced.insert(
-            (vec![0x01u8], 1u32),
-            SourceState {
-                last_delivered: Some(4),
-                ..Default::default()
-            },
-        );
-        state.sequenced.insert(
-            (vec![0x02u8], 2u32),
-            SourceState {
-                last_delivered: Some(0),
-                ..Default::default()
-            },
-        );
-
-        let mut reqs = state.periodic_requests();
-        reqs.sort_by_key(|r| r.eid);
-        assert_eq!(reqs.len(), 2);
-        assert_eq!(
-            (reqs[0].zid.clone(), reqs[0].eid, reqs[0].from_sn),
-            (vec![0x01], 1, 5),
-            "source A re-asks from last_delivered(4)+1"
-        );
-        assert_eq!(
-            (reqs[1].zid.clone(), reqs[1].eid, reqs[1].from_sn),
-            (vec![0x02], 2, 1),
-            "source B re-asks from last_delivered(0)+1"
-        );
-        assert!(
-            state.periodic_requests().is_empty(),
-            "a GET is now in flight per source -> no re-ask until it finalises"
-        );
-
-        // Retransmission OFF -> the periodic trigger is inert.
-        let mut plain = State {
-            sequenced: HashMap::new(),
-            timestamped: HashMap::new(),
-            on_sample: Box::new(|_| {}),
-            miss_handlers: MissHandlers::default(),
-            retransmission: false,
-            #[cfg(feature = "ext-pubsub-advanced-history")]
-            global_pending_queries: 0,
-            #[cfg(feature = "ext-pubsub-advanced-history")]
-            max_history_depth: usize::MAX,
-        };
-        plain.sequenced.insert(
-            (vec![0x01u8], 1u32),
-            SourceState {
-                last_delivered: Some(0),
-                ..Default::default()
-            },
-        );
-        assert!(
-            plain.periodic_requests().is_empty(),
-            "no retransmission -> periodic_requests is a no-op"
-        );
-    }
-
     /// R311y83 composed periodic recovery e2e: a lost LAST sample (no later live
     /// sample, so the sample-driven trigger never fires) is recovered by one
     /// periodic tick. The cache holds 0..=2; live 0,1 arrive but sn 2 is lost
@@ -5557,296 +3168,6 @@ mod tests {
         );
     }
 
-    /// R311y84 heartbeat-source KE parser unit.
-    ///
-    /// R2552 — the `uhlc` case is the new one, and the assertion that matters
-    /// is that it is a VALUE and not `None`: it used to fall into the same
-    /// answer as a broken key expression, and the two want opposite responses.
-    /// A malformed discriminator (`xx`) must still be `None`, or "timestamped"
-    /// would become the catch-all that swallows real parse failures.
-    #[cfg(feature = "ext-pubsub-advanced-recovery")]
-    #[test]
-    fn parse_heartbeat_source_round_trips_and_rejects_malformed() {
-        let zid = vec![0x09u8, 0xAB];
-        let ke = format!("demo/data/@adv/pub/{}/7/_", zid_to_zenoh_hex(&zid));
-        assert_eq!(
-            parse_heartbeat_source(&ke),
-            Some(AdvPublisherSource::Sequenced {
-                zid: zid.clone(),
-                eid: 7
-            })
-        );
-        // The shape wz's own publisher emits for `Sequencing::{Timestamp,None}`.
-        let uhlc_ke = format!("demo/data/@adv/pub/{}/uhlc/_", zid_to_zenoh_hex(&zid));
-        assert_eq!(
-            parse_heartbeat_source(&uhlc_ke),
-            Some(AdvPublisherSource::Timestamped { zid })
-        );
-        // R2555 — an `@adv/pub` token whose ZID does not decode is the THIRD
-        // shape, not a rejection: upstream still queries such a publisher's
-        // cache. `zz` is not hex, so `zenoh_hex_to_zid` refuses it exactly
-        // where upstream's `ZenohId::from_str` refuses.
-        assert_eq!(
-            parse_heartbeat_source("demo/@adv/pub/zz/7/_"),
-            Some(AdvPublisherSource::Unidentified),
-            "an unreadable zid must be DISTINGUISHABLE from a non-token: one is \
-             a publisher whose history is still recoverable, the other is not"
-        );
-        // ... and the discriminator is not even reached in that case, so a
-        // `uhlc` token with an unreadable zid is the same shape.
-        assert_eq!(
-            parse_heartbeat_source("demo/@adv/pub/zz/uhlc/_"),
-            Some(AdvPublisherSource::Unidentified)
-        );
-        // Malformed: no @adv, wrong marker, discriminator neither uhlc nor u32.
-        // These are the ONLY cases left that mean "nothing to query".
-        assert_eq!(parse_heartbeat_source("demo/data"), None);
-        assert_eq!(parse_heartbeat_source("demo/@adv/sub/ff/7/_"), None);
-        assert_eq!(parse_heartbeat_source("demo/@adv/pub/ff/xx/_"), None);
-    }
-
-    /// R311y92 (review S1) — the `@adv` namespace SSOT round-trip: a KE built by the
-    /// publisher's [`crate::advanced_ke::publisher_adv_ke`] parses back through the
-    /// subscriber's `parse_heartbeat_source` to the same `(zid, eid)`. This couples
-    /// the two sides through the shared `advanced_ke` module, so a drift on either
-    /// the construct or the parse side fails here (previously the publisher consts +
-    /// the subscriber inline literals could diverge silently).
-    #[cfg(all(
-        feature = "ext-pubsub-advanced-publisher",
-        feature = "ext-pubsub-advanced-recovery"
-    ))]
-    #[test]
-    fn publisher_adv_ke_round_trips_through_parse() {
-        let zid = vec![0x09u8, 0xAB];
-        let zid_hex = zid_to_zenoh_hex(&zid);
-        let ke = crate::advanced_ke::publisher_adv_ke("demo/data", &zid_hex, "7", None);
-        assert!(
-            ke.starts_with("demo/data/@adv/pub/") && ke.ends_with("/7/_"),
-            "the publisher @adv KE has the @adv/pub/.../_ shape, got {ke}"
-        );
-        assert_eq!(
-            parse_heartbeat_source(&ke),
-            Some(AdvPublisherSource::Sequenced {
-                zid: zid.clone(),
-                eid: 7
-            }),
-            "the publisher-built KE parses back to its source via the shared @adv SSOT"
-        );
-        // R2552 — the SAME round trip for the shape the publisher emits under
-        // `Sequencing::{Timestamp, None}`. Built through `publisher_adv_ke`
-        // with the SSOT constant, so this fails if either side ever spells the
-        // discriminator itself again.
-        let uhlc_ke = crate::advanced_ke::publisher_adv_ke(
-            "demo/data",
-            &zid_hex,
-            crate::advanced_ke::KE_ADV_UHLC,
-            None,
-        );
-        assert_eq!(
-            parse_heartbeat_source(&uhlc_ke),
-            Some(AdvPublisherSource::Timestamped { zid }),
-            "a timestamped publisher's own KE parses back to the timestamped shape"
-        );
-    }
-
-    /// R311y84 heartbeat-trigger unit (no session): a beacon ahead of
-    /// `last_delivered` requests a BOUNDED `_sn=last+1..hb` GET once; a beacon
-    /// at-or-behind `last_delivered`, or one while a GET is in flight, is a
-    /// no-op; retransmission-off is inert.
-    #[cfg(feature = "ext-pubsub-advanced-recovery")]
-    #[test]
-    fn handle_heartbeat_requests_bounded_get_when_ahead() {
-        let mut state = State {
-            sequenced: HashMap::new(),
-            timestamped: HashMap::new(),
-            on_sample: Box::new(|_| {}),
-            miss_handlers: MissHandlers::default(),
-            retransmission: true,
-            #[cfg(feature = "ext-pubsub-advanced-history")]
-            global_pending_queries: 0,
-            #[cfg(feature = "ext-pubsub-advanced-history")]
-            max_history_depth: usize::MAX,
-        };
-        let key = (vec![0x09u8], 4u32);
-        state.sequenced.insert(
-            key.clone(),
-            SourceState {
-                last_delivered: Some(1),
-                ..Default::default()
-            },
-        );
-
-        // Beacon last sn = 4 > last_delivered 1 -> bounded _sn=2..4.
-        let req = state
-            .handle_heartbeat(key.0.clone(), key.1, 4)
-            .expect("a beacon ahead of last_delivered requests recovery");
-        assert_eq!((req.from_sn, req.to_sn), (2, Some(4)));
-        // A GET is now in flight -> a second beacon is a no-op.
-        assert!(state.handle_heartbeat(key.0.clone(), key.1, 5).is_none());
-        // A caught-up beacon (<= last_delivered) on a fresh source is a no-op.
-        state.sequenced.get_mut(&key).unwrap().pending_queries = 0;
-        assert!(state.handle_heartbeat(key.0.clone(), key.1, 1).is_none());
-
-        let mut plain = State {
-            sequenced: HashMap::new(),
-            timestamped: HashMap::new(),
-            on_sample: Box::new(|_| {}),
-            miss_handlers: MissHandlers::default(),
-            retransmission: false,
-            #[cfg(feature = "ext-pubsub-advanced-history")]
-            global_pending_queries: 0,
-            #[cfg(feature = "ext-pubsub-advanced-history")]
-            max_history_depth: usize::MAX,
-        };
-        assert!(
-            plain.handle_heartbeat(vec![0x01], 1, 9).is_none(),
-            "no retransmission -> heartbeat is inert"
-        );
-    }
-
-    /// R2617 — a beacon from a publisher this subscriber has NEVER SEEN is
-    /// skipped while a GLOBAL pull is in flight, and only then.
-    ///
-    /// Upstream takes that arm only for a source it just inserted
-    /// (`zenoh-ext/src/advanced_subscriber.rs` @ `if states.global_pending_queries > 0 {`),
-    /// because the startup history GET is already fetching that publisher in
-    /// full; a per-source `_sn=last+1..hb` GET on top of it asks for the same
-    /// samples twice.
-    ///
-    /// THREE ARMS, and the last two are the control. "New source + global pull
-    /// -> skipped" alone is equally consistent with a guard that skips every
-    /// heartbeat while a pull runs, or with one that skips every new source —
-    /// both of which would be worse defects than the gap being closed. So a
-    /// KNOWN source under the same in-flight pull must still recover, and a new
-    /// source with NO pull in flight must still recover.
-    /// R2621 — the retention sweep reclaims a quiet source, SPARES a live one,
-    /// and leaves a recently-heard one alone.
-    ///
-    /// wz reclaimed neither source map: they grew one entry per distinct source
-    /// ever seen, for the life of the subscriber, where upstream bounds them by
-    /// a retention period (`zenoh-ext/src/advanced_subscriber.rs`
-    /// @ `async fn gc_task(statesref: Weak<Mutex<State>>, retention_period: Duration) {`).
-    ///
-    /// THE MIDDLE ARM IS WHY THE FLAG COULD NOT SHIP SEPARATELY: a sweep without
-    /// `alive` reclaims a publisher that is still there, destroying its
-    /// `last_delivered`, and the next sample from it reads as a gap. The third
-    /// arm is the anti-vacuity control — without it "reclaims a quiet source" is
-    /// equally consistent with a sweep that empties the map unconditionally.
-    #[cfg(feature = "ext-pubsub-advanced-recovery")]
-    #[test]
-    fn the_retention_sweep_reclaims_only_quiet_sources_that_no_token_calls_live() {
-        let mut state = State {
-            sequenced: HashMap::new(),
-            timestamped: HashMap::new(),
-            on_sample: Box::new(|_| {}),
-            miss_handlers: MissHandlers::default(),
-            retransmission: true,
-            #[cfg(feature = "ext-pubsub-advanced-history")]
-            global_pending_queries: 0,
-            #[cfg(feature = "ext-pubsub-advanced-history")]
-            max_history_depth: usize::MAX,
-        };
-
-        let retention = Duration::from_secs(60);
-        let now = Instant::now();
-        let long_ago = now - Duration::from_secs(600);
-        let quiet = (vec![0xAAu8], 1u32);
-        let live = (vec![0xBBu8], 1u32);
-        let recent = (vec![0xCCu8], 1u32);
-
-        state
-            .sequenced
-            .insert(quiet.clone(), SourceState::default());
-        state.sequenced.get_mut(&quiet).unwrap().retention = Retention {
-            latest_access: long_ago,
-            alive: false,
-        };
-        state.sequenced.insert(live.clone(), SourceState::default());
-        state.sequenced.get_mut(&live).unwrap().retention = Retention {
-            latest_access: long_ago,
-            alive: true,
-        };
-        // Recently heard from: `Default` stamps `now()` at insertion.
-        state
-            .sequenced
-            .insert(recent.clone(), SourceState::default());
-
-        let reclaimed = state.reclaim_expired_sources(now, retention);
-
-        assert_eq!(
-            reclaimed, 1,
-            "exactly the quiet, token-less source is dropped"
-        );
-        assert!(
-            !state.sequenced.contains_key(&quiet),
-            "a source nothing has heard from and no token calls live is reclaimed"
-        );
-        assert!(
-            state.sequenced.contains_key(&live),
-            "a LIVE publisher must survive being quiet, or its last_delivered is \
-             lost and its next sample reads as a gap"
-        );
-        assert!(
-            state.sequenced.contains_key(&recent),
-            "a recently-heard source is not swept at all"
-        );
-        assert!(
-            state.sequenced[&live].retention.latest_access >= now,
-            "sparing a live source also REFRESHES its access, so it is not \
-             re-examined every tick for the rest of the session"
-        );
-    }
-
-    #[cfg(feature = "ext-pubsub-advanced-history")]
-    #[test]
-    fn a_beacon_from_a_new_source_is_skipped_only_while_a_global_pull_is_running() {
-        let new_state = |global: usize| State {
-            sequenced: HashMap::new(),
-            timestamped: HashMap::new(),
-            on_sample: Box::new(|_| {}),
-            miss_handlers: MissHandlers::default(),
-            retransmission: true,
-            global_pending_queries: global,
-            max_history_depth: usize::MAX,
-        };
-
-        // THE SUBJECT: never-seen source, global pull running -> skipped.
-        let mut pulling = new_state(1);
-        assert!(
-            pulling.handle_heartbeat(vec![0x0Au8], 7, 5).is_none(),
-            "a beacon from a publisher the global query is already pulling must \
-             not raise a second, redundant per-source GET"
-        );
-        // ...and the source is REMEMBERED anyway, or the next beacon would look
-        // new all over again and the skip would repeat forever.
-        assert!(
-            pulling.sequenced.contains_key(&(vec![0x0Au8], 7)),
-            "the skipped source must still be recorded, as upstream records it \
-             before deciding"
-        );
-
-        // CONTROL A: same in-flight pull, but a source already KNOWN -> recovers.
-        let mut known = new_state(1);
-        known.sequenced.insert(
-            (vec![0x0Bu8], 7),
-            SourceState {
-                last_delivered: Some(1),
-                ..Default::default()
-            },
-        );
-        let req = known
-            .handle_heartbeat(vec![0x0Bu8], 7, 5)
-            .expect("the guard is about NEW sources only; a known one still recovers");
-        assert_eq!((req.from_sn, req.to_sn), (2, Some(5)));
-
-        // CONTROL B: never-seen source, NO global pull -> recovers.
-        let mut idle = new_state(0);
-        let req = idle
-            .handle_heartbeat(vec![0x0Cu8], 7, 5)
-            .expect("with no global pull in flight a new source must recover normally");
-        assert_eq!((req.from_sn, req.to_sn), (0, Some(5)));
-    }
-
     /// R311y84 composed heartbeat recovery e2e: the publisher's last-sn beacon
     /// drives recovery of a lost LAST sample. The cache holds 0..=2; live 0,1
     /// arrive but sn 2 is lost and undetected; a heartbeat beacon
@@ -5951,113 +3272,6 @@ mod tests {
         );
     }
 
-    /// R311y86 history-gating unit (no session): while `history_pending`, a
-    /// sample BUFFERS instead of delivering; `finish_history` flushes the
-    /// buffer oldest-first so the (older) history delivers in order.
-    #[cfg(feature = "ext-pubsub-advanced-history")]
-    #[test]
-    fn history_pending_buffers_then_flushes_in_order() {
-        let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let d = Arc::clone(&delivered);
-        let mut state = State {
-            sequenced: HashMap::new(),
-            timestamped: HashMap::new(),
-            on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
-            miss_handlers: MissHandlers::default(),
-            retransmission: true,
-            global_pending_queries: 1,
-            max_history_depth: usize::MAX,
-        };
-        let mk = |sn: u32, v: u8| {
-            let mut s = Sample::new_put("demo/data", vec![v]);
-            s.source_info = Some(SourceInfo::new(&[0x02], 7, sn));
-            s
-        };
-
-        // History in flight -> the recovered history buffers, nothing delivers.
-        let _ = state.ingest(mk(0, 0xA0), false);
-        let _ = state.ingest(mk(1, 0xA1), false);
-        assert!(
-            delivered.lock().unwrap().is_empty(),
-            "samples buffer while the history GET is in flight"
-        );
-        // History completes -> flush oldest-first.
-        state.finish_history();
-        assert_eq!(
-            *delivered.lock().unwrap(),
-            vec![0xA0, 0xA1],
-            "the buffered history flushes in order on completion"
-        );
-    }
-
-    /// R2555 — the TIMESTAMPED twin of the test above, and this atom's last
-    /// residual made witnessable.
-    ///
-    /// It asserts the property that matters and that ordering alone cannot
-    /// give: a sample arriving LIVE while the startup history GET is in flight
-    /// must not overtake the OLDER samples that GET is about to return. Feed
-    /// the newer instant first, then the older two, and the delivered order is
-    /// the CLOCK's, not the arrival order — which is only possible if the live
-    /// one was held.
-    ///
-    /// ⚠ The discriminator is the delivered VECTOR, never the buffer's length:
-    /// a buffer that held the sample and then dropped it would satisfy "nothing
-    /// delivered early" exactly as well, and lose it. The R2503 sequenced pair
-    /// above records the same rule for the same reason.
-    ///
-    /// ⚠⚠ WITHOUT THE BUFFER this test does not merely fail, it fails in the
-    /// specific way the residual described: the live sample delivers first and
-    /// the two older ones are then DROPPED by the strictly-newer test, so the
-    /// subscriber loses history it successfully recovered. That is the measured
-    /// red the control probe produces.
-    #[cfg(feature = "ext-pubsub-advanced-history")]
-    #[test]
-    fn a_live_timestamped_sample_waits_for_the_history_it_would_overtake() {
-        let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let d = Arc::clone(&delivered);
-        let mut state = State {
-            sequenced: HashMap::new(),
-            timestamped: HashMap::new(),
-            on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
-            miss_handlers: MissHandlers::default(),
-            retransmission: true,
-            global_pending_queries: 1,
-            max_history_depth: usize::MAX,
-        };
-        // No source_info: the timestamped shape. One timestamp-id throughout,
-        // so the state is the same one and the order is the clock's.
-        let mk = |time: u64, v: u8| {
-            let mut s = Sample::new_put("demo/data", vec![v]);
-            s.timestamp = Some(wz_session_core::sample::TimestampHint {
-                time,
-                zid: vec![0x02u8],
-            });
-            s
-        };
-
-        // The LIVE sample arrives first and is the NEWEST.
-        let _ = state.ingest(mk(300, 0xC3), true);
-        assert!(
-            delivered.lock().unwrap().is_empty(),
-            "a timestamped sample waits while the history GET is in flight"
-        );
-        // The history GET then returns two OLDER samples, out of order.
-        let _ = state.ingest(mk(200, 0xC2), false);
-        let _ = state.ingest(mk(100, 0xC1), false);
-        assert!(
-            delivered.lock().unwrap().is_empty(),
-            "recovered timestamped samples buffer too, so the drain can order them"
-        );
-
-        state.finish_history();
-        assert_eq!(
-            *delivered.lock().unwrap(),
-            vec![0xC1, 0xC2, 0xC3],
-            "the buffer drains by CLOCK order, not arrival order: the live \
-             sample that arrived first is delivered last because it is newest"
-        );
-    }
-
     /// R2555 — the THIRD liveliness arm, end to end through the real closure:
     /// a publisher whose `@adv` token carries an UNREADABLE zid still has its
     /// cache recovered.
@@ -6142,240 +3356,6 @@ mod tests {
         );
     }
 
-    /// R2555 — TWO global history GETs outstanding at once, which is the
-    /// scenario a `bool` could not represent and the reason the flag became a
-    /// count in the commit before the third liveliness arm.
-    ///
-    /// The startup GET is in flight when an unidentified publisher's token
-    /// opens a SECOND global slot. The first completion must NOT release the
-    /// buffers, because the second GET is still returning samples that may be
-    /// older than what is held — under a flag it would have, and the
-    /// strictly-newer test would then have discarded exactly those older
-    /// samples. So the assertion between the two completions is the whole
-    /// test: nothing delivered YET.
-    ///
-    /// ⚠ It drives `State` directly rather than through a session, because the
-    /// property is about the COUNT and a loopback GET completes synchronously —
-    /// which is precisely the arrangement in which two GETs are never
-    /// concurrent, and so the arrangement that cannot grade this.
-    #[cfg(feature = "ext-pubsub-advanced-history")]
-    #[test]
-    fn a_second_global_get_holds_the_buffers_the_first_would_have_released() {
-        let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let d = Arc::clone(&delivered);
-        let mut state = State {
-            sequenced: HashMap::new(),
-            timestamped: HashMap::new(),
-            on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
-            miss_handlers: MissHandlers::default(),
-            retransmission: true,
-            // The startup GET, exactly as `declare_impl` sets it.
-            global_pending_queries: 1,
-            max_history_depth: usize::MAX,
-        };
-        let mk = |time: u64, v: u8| {
-            let mut s = Sample::new_put("demo/data", vec![v]);
-            s.timestamp = Some(wz_session_core::sample::TimestampHint {
-                time,
-                zid: vec![0x02u8],
-            });
-            s
-        };
-
-        // An unidentified publisher's token opens a SECOND global slot.
-        state.open_global_history_slot();
-        assert_eq!(state.global_pending_queries, 2);
-
-        let _ = state.ingest(mk(300, 0xC3), true);
-        assert!(
-            delivered.lock().unwrap().is_empty(),
-            "buffered, as expected"
-        );
-
-        // FIRST completion. A `bool` would be cleared here and everything held
-        // would be released while the second GET is still answering.
-        state.finish_history();
-        assert_eq!(state.global_pending_queries, 1);
-        assert!(
-            delivered.lock().unwrap().is_empty(),
-            "the first of two global GETs must NOT release the buffers"
-        );
-
-        // The second GET returns an OLDER sample -- the one a premature flush
-        // would have made undeliverable, because 300 would already be the
-        // newest delivered and 100 is not strictly newer than it.
-        let _ = state.ingest(mk(100, 0xC1), false);
-
-        // SECOND completion: now the buffers drain, in clock order.
-        state.finish_history();
-        assert_eq!(state.global_pending_queries, 0);
-        assert_eq!(
-            *delivered.lock().unwrap(),
-            vec![0xC1, 0xC3],
-            "both drain in clock order once the LAST global GET completes"
-        );
-    }
-
-    /// R2555 — the depth bound on the timestamped buffer, as a PAIR that
-    /// differs only in the bound and is fed the identical samples.
-    ///
-    /// `max_history_depth == 1` is upstream's escape hatch, not a degenerate
-    /// case to leave untested: that build must deliver LIVE rather than buffer,
-    /// because a buffer of one can hold nothing reordering would help. The
-    /// unbounded arm is the control that proves the difference is the bound and
-    /// not the samples.
-    #[cfg(feature = "ext-pubsub-advanced-history")]
-    #[test]
-    fn a_depth_of_one_delivers_live_where_an_unbounded_buffer_reorders() {
-        let feed = |depth: usize| {
-            let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
-            let d = Arc::clone(&delivered);
-            let mut state = State {
-                sequenced: HashMap::new(),
-                timestamped: HashMap::new(),
-                on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
-                miss_handlers: MissHandlers::default(),
-                retransmission: true,
-                global_pending_queries: 1,
-                max_history_depth: depth,
-            };
-            let mk = |time: u64, v: u8| {
-                let mut s = Sample::new_put("demo/data", vec![v]);
-                s.timestamp = Some(wz_session_core::sample::TimestampHint {
-                    time,
-                    zid: vec![0x02u8],
-                });
-                s
-            };
-            let _ = state.ingest(mk(300, 0xC3), true);
-            let _ = state.ingest(mk(100, 0xC1), false);
-            state.finish_history();
-            let out = delivered.lock().unwrap().clone();
-            out
-        };
-
-        assert_eq!(
-            feed(1),
-            vec![0xC3],
-            "at depth 1 the live sample delivers immediately, and the older \
-             recovered one is then correctly dropped as not strictly newer"
-        );
-        assert_eq!(
-            feed(usize::MAX),
-            vec![0xC1, 0xC3],
-            "unbounded, both are held and drain in clock order — the same two \
-             samples, so the bound is what differs"
-        );
-    }
-
-    /// R2503 clause (4), the HISTORY arm — a PAIR that differs only in the
-    /// bound, fed the identical two samples.
-    ///
-    /// ⚠ The delivered vector is the discriminator, never the buffer's length:
-    /// a bounded buffer that DROPPED the oldest would satisfy any length
-    /// assertion and lose a sample silently, which is the one outcome
-    /// upstream's delivering spill exists to prevent.
-    /// ⚠⚠ Upstream inserts FIRST and then spills, so with `depth = 2` the
-    /// spill fires on the SECOND sample, and `deliver_and_flush` then drains
-    /// the contiguous successor with it. Traced by hand before it was written
-    /// down — the first draft of this case asserted a third sample and would
-    /// have described a mechanism the code does not have.
-    #[cfg(feature = "ext-pubsub-advanced-history")]
-    #[test]
-    fn a_bounded_history_buffer_spills_the_oldest_and_delivers_it() {
-        let mk = |sn: u32, v: u8| {
-            let mut s = Sample::new_put("demo/data", vec![v]);
-            s.source_info = Some(SourceInfo::new(&[0x02], 7, sn));
-            s
-        };
-        let feed = |depth: usize| {
-            let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
-            let d = Arc::clone(&delivered);
-            let mut state = State {
-                sequenced: HashMap::new(),
-                timestamped: HashMap::new(),
-                on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
-                miss_handlers: MissHandlers::default(),
-                retransmission: true,
-                global_pending_queries: 1,
-                max_history_depth: depth,
-            };
-            let _ = state.ingest(mk(0, 0xA0), false);
-            let _ = state.ingest(mk(1, 0xA1), false);
-            let got = delivered.lock().unwrap().clone();
-            got
-        };
-
-        assert_eq!(
-            feed(2),
-            vec![0xA0, 0xA1],
-            "at the ceiling the oldest is DELIVERED (and its contiguous \
-             successor drained with it), not dropped"
-        );
-        // ANTI-VACUITY: the same two samples, no bound. Without this arm
-        // "the buffer is bounded" and "the test never filled it" look
-        // identical -- the population-of-zero shape this tree keeps meeting.
-        // `usize::MAX` is also upstream's own default when the user set no
-        // `max_samples`, so this pins the unbounded case as a BEHAVIOUR.
-        assert!(
-            feed(usize::MAX).is_empty(),
-            "with no bound the whole history waits for finish_history"
-        );
-    }
-
-    /// R2503 clause (4), the FORWARD-GAP arm — the site the residual clause
-    /// did NOT name.
-    ///
-    /// The clause spoke only of the history arm, and a build that trusted it
-    /// would have left this one unbounded; upstream guards BOTH inserts. Same
-    /// pair shape: identical samples, only the bound differs.
-    #[cfg(all(
-        feature = "ext-pubsub-advanced-history",
-        feature = "ext-pubsub-advanced-recovery"
-    ))]
-    #[test]
-    fn a_bounded_gap_buffer_spills_the_oldest_and_delivers_it() {
-        let mk = |sn: u32, v: u8| {
-            let mut s = Sample::new_put("demo/data", vec![v]);
-            s.source_info = Some(SourceInfo::new(&[0x02], 7, sn));
-            s
-        };
-        let feed = |depth: usize| {
-            let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
-            let d = Arc::clone(&delivered);
-            let mut state = State {
-                sequenced: HashMap::new(),
-                timestamped: HashMap::new(),
-                on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
-                miss_handlers: MissHandlers::default(),
-                retransmission: true,
-                // NOT the history arm: this exercises the `if retransmission`
-                // insert, which compiles with the history feature off.
-                global_pending_queries: 0,
-                max_history_depth: depth,
-            };
-            let _ = state.ingest(mk(0, 0xA0), false);
-            // Forward gaps: 2 and 3 buffer while 1 is missing.
-            let _ = state.ingest(mk(2, 0xA2), false);
-            let _ = state.ingest(mk(3, 0xA3), false);
-            let got = delivered.lock().unwrap().clone();
-            got
-        };
-
-        assert_eq!(
-            feed(2),
-            vec![0xA0, 0xA2, 0xA3],
-            "the gap buffer honours the SAME ceiling, delivering the oldest \
-             held sample rather than growing without bound"
-        );
-        assert_eq!(
-            feed(usize::MAX),
-            vec![0xA0],
-            "unbounded, the gap holds 2 and 3 for the recovery GET to \
-             back-fill -- which is what makes the bounded arm above a finding"
-        );
-    }
-
     /// R311y86 composed history e2e: a LATE JOINER recovers the publisher's
     /// cached history via the startup GET. The cache holds 0,1,2; a
     /// history-enabled subscriber's declare issues a GET over `demo/data/@adv/**`
@@ -6440,85 +3420,6 @@ mod tests {
             *delivered.lock().unwrap(),
             vec![0, 1, 2],
             "the late joiner recovered the publisher's cached history (0,1,2) on declare"
-        );
-    }
-
-    /// R311y87 (review C2) regression: a per-source recovery GET that completes
-    /// WHILE the startup history GET is still in flight must NOT flush — flushing
-    /// advances `last_delivered`, after which an older-sn history reply is
-    /// silently dropped. The flush is deferred to `finish_history`. Without the
-    /// `!history_pending` gate, delivered would be `[0xA1]` (sn 0 LOST); with it,
-    /// `[0xA0, 0xA1]`.
-    #[cfg(feature = "ext-pubsub-advanced-history")]
-    #[test]
-    fn recovery_completing_mid_history_defers_flush() {
-        let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let d = Arc::clone(&delivered);
-        let mut state = State {
-            sequenced: HashMap::new(),
-            timestamped: HashMap::new(),
-            on_sample: Box::new(move |s: Sample| d.lock().unwrap().push(s.payload[0])),
-            miss_handlers: MissHandlers::default(),
-            retransmission: true,
-            global_pending_queries: 1,
-            max_history_depth: usize::MAX,
-        };
-        let key = (vec![0x02u8], 7u32);
-        let mk = |sn: u32, v: u8| {
-            let mut s = Sample::new_put("demo/data", vec![v]);
-            s.source_info = Some(SourceInfo::new(&[0x02], 7, sn));
-            s
-        };
-        // A per-source recovery GET is in flight (pending_queries=1) and has
-        // buffered sn 1, while the startup history GET is also in flight.
-        let mut buffered = BTreeMap::new();
-        buffered.insert(1u32, mk(1, 0xA1));
-        state.sequenced.insert(
-            key.clone(),
-            SourceState {
-                last_delivered: None,
-                pending_samples: buffered,
-                pending_queries: 1,
-                ..SourceState::default()
-            },
-        );
-
-        // The recovery GET completes mid-history -> must NOT flush.
-        state.finish_recovery(&key);
-        assert!(
-            delivered.lock().unwrap().is_empty(),
-            "no flush while history is pending (a flush would lose later history)"
-        );
-        // An older history reply (sn 0) arrives -> buffered (history-gated).
-        let _ = state.ingest(mk(0, 0xA0), false);
-        // History completes -> flush 0,1 in order; sn 0 was NOT lost.
-        state.finish_history();
-        assert_eq!(
-            *delivered.lock().unwrap(),
-            vec![0xA0, 0xA1],
-            "the deferred flush delivers 0,1 in order; the mid-history recovery did not lose sn 0"
-        );
-    }
-
-    /// R311y89 (review C3) — the pure timeout-ms conversion. The lower clamp keeps
-    /// a recovery GET on its own configured timeout. R311y326 — pre-y326 the clamp's
-    /// bite was that a `0`/sub-ms `Duration` would pass through as the never-expire
-    /// sentinel and wedge a no-answerer GET; now `effective_timeout_ms` resolves a
-    /// `0` to the platform default, so the clamp pins intent (a live 1 ms deadline)
-    /// rather than the platform fallback, not never-expire-avoidance.
-    #[cfg(feature = "ext-pubsub-advanced-recovery")]
-    #[test]
-    fn recovery_query_timeout_ms_clamps_to_a_live_deadline() {
-        // The zenoh default (10s) maps to 10000 ms.
-        assert_eq!(recovery_query_timeout_ms(Duration::from_secs(10)), 10_000);
-        // A zero / sub-ms timeout clamps UP to 1 ms — a live deadline, not the
-        // platform default it would otherwise resolve to.
-        assert_eq!(recovery_query_timeout_ms(Duration::ZERO), 1);
-        assert_eq!(recovery_query_timeout_ms(Duration::from_micros(500)), 1);
-        // A timeout past u32::MAX ms caps at u32::MAX (the with_timeout_ms field is u32).
-        assert_eq!(
-            recovery_query_timeout_ms(Duration::from_millis(u64::from(u32::MAX) + 1)),
-            u32::MAX
         );
     }
 
@@ -6766,37 +3667,6 @@ mod tests {
         );
     }
 
-    /// R311y98 — the history GET selector: `_max` (sample_depth) + `_time`
-    /// (max_age) ride one selector; the `_time` form is byte-identical to
-    /// zenoh's `[now(-{age}s)..]` Display.
-    ///
-    /// R311y442 REWROTE the expectations, and what they used to say is the
-    /// point. This test PINNED `_max=2&_time=[now(-30s)..]` and a `None` for the
-    /// no-knobs case — that is, it certified the two defects as the contract. A
-    /// wz cache reads the `&` form back (it split on `&` too), so the assertion
-    /// held on both sides of a wz<->wz round trip while being unreadable to
-    /// every real zenoh and zenoh-pico peer, and the absent `_anyke` meant a
-    /// conformant responder would refuse every reply. Neither is observable
-    /// without a foreign counterparty, which is why the leg in
-    /// `wz_advanced_pubsub_zenoh_ext_interop.rs` is what closes this, not a
-    /// stricter unit test.
-    #[cfg(feature = "ext-pubsub-advanced-history")]
-    #[test]
-    fn history_selector_emits_max_and_time() {
-        // No knobs is no longer "no parameters": `_anyke` is not optional, it is
-        // what makes an `@adv` reply legal at all.
-        assert_eq!(history_selector(None, None), "_anyke".to_string());
-        assert_eq!(history_selector(Some(2), None), "_max=2;_anyke".to_string());
-        assert_eq!(
-            history_selector(None, Some(30.0)),
-            "_time=[now(-30s)..];_anyke".to_string()
-        );
-        assert_eq!(
-            history_selector(Some(2), Some(30.0)),
-            "_max=2;_time=[now(-30s)..];_anyke".to_string()
-        );
-    }
-
     /// R311y98 composed `_time` age filter: a `max_age(3600s)` history
     /// subscriber recovers a publisher's cache, but the cache drops the sample
     /// older than the age bound. The samples carry REAL wall-clock NTP64
@@ -6867,80 +3737,6 @@ mod tests {
             vec![1, 2],
             "max_age=3600s dropped the 2h-old sample, kept the two recent ones"
         );
-    }
-
-    /// R311y100 — handle_late_publisher opens exactly one recovery slot per
-    /// source and no-ops while a GET is in flight (avoids piling up concurrent
-    /// per-publisher GETs); independent of `retransmission` (a history trigger).
-    #[cfg(feature = "ext-pubsub-advanced-history")]
-    #[test]
-    fn handle_late_publisher_opens_one_slot_per_source() {
-        let mut state = State {
-            sequenced: HashMap::new(),
-            timestamped: HashMap::new(),
-            on_sample: Box::new(|_| {}),
-            miss_handlers: MissHandlers::default(),
-            retransmission: false, // late-pub detection is NOT a retransmission concern
-            global_pending_queries: 0,
-            #[cfg(feature = "ext-pubsub-advanced-history")]
-            max_history_depth: usize::MAX,
-        };
-        let zid = vec![0x09u8];
-        // First detection opens a slot.
-        assert!(state.handle_late_publisher(zid.clone(), 4));
-        assert_eq!(state.sequenced[&(zid.clone(), 4)].pending_queries, 1);
-        // A second detection while the GET is in flight is a no-op.
-        assert!(!state.handle_late_publisher(zid.clone(), 4));
-        assert_eq!(state.sequenced[&(zid.clone(), 4)].pending_queries, 1);
-        // A distinct publisher gets its own slot.
-        assert!(state.handle_late_publisher(zid.clone(), 5));
-        assert_eq!(state.sequenced[&(zid, 5)].pending_queries, 1);
-    }
-
-    /// R2553 — the TIMESTAMPED trigger's own slot arithmetic, and the property
-    /// the sequenced test above cannot state: the two maps are INDEPENDENT.
-    ///
-    /// A `uhlc` token and a numeric-entity token from the same zid are two
-    /// different publishers, and their slots must not alias — otherwise a
-    /// sequenced GET in flight would suppress the timestamped one for the same
-    /// node, which is a delivery loss with no symptom. The third assertion is
-    /// therefore the load-bearing one.
-    #[cfg(feature = "ext-pubsub-advanced-history")]
-    #[test]
-    fn handle_late_timestamped_publisher_opens_one_slot_per_zid() {
-        let mut state = State {
-            sequenced: HashMap::new(),
-            timestamped: HashMap::new(),
-            on_sample: Box::new(|_| {}),
-            miss_handlers: MissHandlers::default(),
-            retransmission: false,
-            global_pending_queries: 0,
-            max_history_depth: usize::MAX,
-        };
-        let zid = vec![0x09u8];
-        let other = vec![0x0Au8];
-
-        // First detection opens a slot; a second while it is in flight does not.
-        assert!(state.handle_late_timestamped_publisher(zid.clone()));
-        assert_eq!(state.timestamped[&zid].pending_queries, 1);
-        assert!(!state.handle_late_timestamped_publisher(zid.clone()));
-        assert_eq!(state.timestamped[&zid].pending_queries, 1);
-
-        // A SEQUENCED publisher on the SAME zid is a different source: its slot
-        // is opened independently and leaves the timestamped one untouched.
-        assert!(state.handle_late_publisher(zid.clone(), 4));
-        assert_eq!(state.sequenced[&(zid.clone(), 4)].pending_queries, 1);
-        assert_eq!(state.timestamped[&zid].pending_queries, 1);
-
-        // A distinct zid gets its own slot.
-        assert!(state.handle_late_timestamped_publisher(other.clone()));
-        assert_eq!(state.timestamped[&other].pending_queries, 1);
-
-        // The GET's terminal Final closes the slot, re-opening the gate.
-        state.finish_timestamped_recovery(&zid);
-        assert_eq!(state.timestamped[&zid].pending_queries, 0);
-        assert!(state.handle_late_timestamped_publisher(zid.clone()));
-        assert_eq!(state.timestamped[&zid].pending_queries, 1);
     }
 
     /// R311y100/y101 composed late-publisher recovery, driving the REAL
@@ -8440,49 +5236,6 @@ mod tests {
             released,
             vec!["subscriber", "late_publishers", "heartbeat", "token"],
             "the host lets them go when it chooses"
-        );
-    }
-
-    /// A sample recovered from a reply is built from the reply's bytes as they
-    /// are held: a reply off the wire holds ranges of the frame it arrived in, so
-    /// the recovered sample holds the very same bytes (payload and attachment),
-    /// not copies, as a live sample does. The reply here is a Put over one lent
-    /// buffer, and the pointers say whether the sample took ranges of it.
-    #[cfg(feature = "ext-pubsub-advanced-recovery")]
-    #[test]
-    fn a_recovered_sample_holds_the_storage_its_reply_holds() {
-        use wz_session_core::link::RxBytes;
-        use wz_session_core::reply::{InboundReply, InboundReplyBody};
-
-        let frame = RxBytes::lend(b"PAYLOADATTACH".to_vec());
-        let payload = frame.subslice(0..7).expect("a range of the frame");
-        let attachment = frame.subslice(7..13).expect("a range of the frame");
-        let reply = InboundReply {
-            rid: 1,
-            keyexpr_literal: "demo/recovered".into(),
-            body: InboundReplyBody::Put {
-                payload: payload.clone(),
-                attachment: Some(attachment.clone()),
-                encoding: None,
-                source_info: None,
-                timestamp: None,
-            },
-        };
-
-        let sample = recovered_sample_from_reply(&reply).expect("a Put reply recovers");
-
-        assert_eq!(sample.payload.as_slice(), b"PAYLOAD");
-        assert_eq!(
-            sample.payload.as_ptr(),
-            payload.as_ptr(),
-            "the recovered payload is the reply's own bytes, not a copy of them"
-        );
-        let kept = sample.attachment.as_ref().expect("the attachment recovers");
-        assert_eq!(kept.as_slice(), b"ATTACH");
-        assert_eq!(
-            kept.as_ptr(),
-            attachment.as_ptr(),
-            "and so is the attachment"
         );
     }
 }

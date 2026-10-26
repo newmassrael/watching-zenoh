@@ -345,9 +345,11 @@ transport-link-unixpipe,transport-link-ws|"
     # sample hold a buffer of shared memory and a recovery reply send its descriptor again, and
     # the publisher's composite, its knobs and its beacon are compiled only with
     # `advanced-publisher` and the features the tokio runtime forwards (QoS, encoding, attachment,
-    # miss detection); the leg is the crate's, with no filter. MEASURED: 31 passed with all of them.
-    "wz-ext-pubsub|hook|transport-shm,advanced-publisher,pubsub-qos,pubsub-encoding,\
-pubsub-attachment,ext-pubsub-sample-miss-detection|"
+    # miss detection). The subscriber's ordering machine, its plans and their tests are compiled
+    # only with `advanced-subscriber`, `advanced-recovery` and `advanced-history`; the leg is the
+    # crate's, with no filter. MEASURED: 51 passed with all of them.
+    "wz-ext-pubsub|hook|transport-shm,advanced-publisher,advanced-history,pubsub-qos,\
+pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # The node's time (the wall clock, the node HLC with its per-role switch, the stamper). The HLC,
     # the Push stamp and its tests are compiled only with the three features, which the tokio
     # runtime forwards; the leg is the crate's, with no filter. MEASURED: 6 passed with default

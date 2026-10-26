@@ -18,4 +18,6 @@ pub mod advanced_cache;
 pub mod advanced_ke;
 #[cfg(feature = "advanced-publisher")]
 pub mod advanced_publisher;
+#[cfg(feature = "advanced-subscriber")]
+pub mod advanced_subscriber;
 pub mod time_range;
