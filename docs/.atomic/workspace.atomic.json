@@ -290540,6 +290540,42 @@
         "Read the stack-chain rows of the Zephyr images in hosted CI; the pc2 checkout slot submodule failure; node adoption of the closed key set; pool-monitor and multi-route-atomic-tx."
       ]
     },
+    "Round 3709": {
+      "decision_summary": "The target-build entry bundles a library the SDK provides and a device may lack (docs/target-build-contract.md T5, owed by 5a). A platform row states bundle_from_sdk beside system_assumed by one test: assumed when every device of the kind has it, bundled when the SDK ships it for applications to carry. Such a NEEDED is provided_by bundled and names lib/<SONAME>; the entry takes the file from the linker driver's own search directories, copies its bytes, measures it, holds its SONAME to the name and bundles what it needs in turn, so the closure is closed or refused. The manifest gains bundled within schema 1; --verify re-measures each file and holds the set to the closure. --sdk-bundle-check, run by Layer C1sp, read all four cross rows from their SDKs with the owner's approval; the QNX read found that qcc answers no -print-file-name and that libc++.so.1 needs libcatalog.so.1. No wz artifact needs a bundled library today.",
+      "changes_bullets": [
+        "scripts/lib/wz_package.py: classify_needed answers system, bundled (with the file) or a refusal; bundled_entry, bundle (the closure, SONAME order, bytes only), linker_search_dirs (-print-search-dirs, or the -L and -Y of qcc -v's link line), sdk_library, sdk_bundle_check and --sdk-bundle-check; the manifest's bundled key, its shape and its verification; selftest arms on a stand-in SDK and on both drivers' texts.",
+        "scripts/lib/elf_facts.py: linkage_facts (any ELF, no wz notes), which describe builds on; scripts/lib/wz_config.py: the bundle_from_sdk key and its findings, six selftest arms.",
+        "deploy/wz-config.toml: bundle_from_sdk on the four cross rows; scripts/run-ci.sh: Layer C1sp runs --sdk-bundle-check per ready platform; docs/target-build-contract.md: T5's test, section 4, steps 3 and 6, 5a."
+      ],
+      "verification_bullets": [
+        "wz_package.py --selftest OK with the bundling arms (a changed byte, a removed or replaced file, another SONAME, an unassumed NEEDED of the bundled file, entries removed, unneeded or out of order, a path leaving the directory, no SDK named, a row that stopped bundling, a library the SDK lacks, a name clash, a driver that states no directory) beside a clean package that verifies and bundles the same twice; wz_config.py --selftest and --check pass; elf_facts.py --selftest OK.",
+        "--sdk-bundle-check with the owner's approval: android-arm64 on NDK 30, linux-aarch64-glibc on the glibc 2.35 SDK, both QNX rows on the QNX 7.1 SDP, each rc 0, each file also found by name in the SDK as a control. The first QNX read refused twice (qcc, libcatalog.so.1); both causes were fixed, not skipped."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "No lane package carries a bundled library until an artifact needs one; the first such build is the first end-to-end read of bundling on real files.",
+        "Making a bundled file reachable by a device's loader is the placing path's (the entry sets no RUNPATH); the SDP's libc++.so.1 carries its own RPATH, measured into the manifest."
+      ],
+      "publishable_decision_summary": "The target-build entry bundles a library the SDK provides and a device may lack (docs/target-build-contract.md T5, owed by 5a). A platform row states bundle_from_sdk beside system_assumed by one test: assumed when every device of the kind has it, bundled when the SDK ships it for applications to carry. Such a NEEDED is provided_by bundled and names lib/<SONAME>; the entry takes the file from the linker driver's own search directories, copies its bytes, measures it, holds its SONAME to the name and bundles what it needs in turn, so the closure is closed or refused. The manifest gains bundled within schema 1; --verify re-measures each file and holds the set to the closure. --sdk-bundle-check, run by Layer C1sp, read all four cross rows from their SDKs with the owner's approval; the QNX read found that qcc answers no -print-file-name and that libc++.so.1 needs libcatalog.so.1. No wz artifact needs a bundled library today.",
+      "publishable_changes_bullets": [
+        "scripts/lib/wz_package.py: classify_needed answers system, bundled (with the file) or a refusal; bundled_entry, bundle (the closure, SONAME order, bytes only), linker_search_dirs (-print-search-dirs, or the -L and -Y of qcc -v's link line), sdk_library, sdk_bundle_check and --sdk-bundle-check; the manifest's bundled key, its shape and its verification; selftest arms on a stand-in SDK and on both drivers' texts.",
+        "scripts/lib/elf_facts.py: linkage_facts (any ELF, no wz notes), which describe builds on; scripts/lib/wz_config.py: the bundle_from_sdk key and its findings, six selftest arms.",
+        "deploy/wz-config.toml: bundle_from_sdk on the four cross rows; scripts/run-ci.sh: Layer C1sp runs --sdk-bundle-check per ready platform; docs/target-build-contract.md: T5's test, section 4, steps 3 and 6, 5a."
+      ],
+      "publishable_verification_bullets": [
+        "wz_package.py --selftest OK with the bundling arms (a changed byte, a removed or replaced file, another SONAME, an unassumed NEEDED of the bundled file, entries removed, unneeded or out of order, a path leaving the directory, no SDK named, a row that stopped bundling, a library the SDK lacks, a name clash, a driver that states no directory) beside a clean package that verifies and bundles the same twice; wz_config.py --selftest and --check pass; elf_facts.py --selftest OK.",
+        "--sdk-bundle-check with the owner's approval: android-arm64 on NDK 30, linux-aarch64-glibc on the glibc 2.35 SDK, both QNX rows on the QNX 7.1 SDP, each rc 0, each file also found by name in the SDK as a control. The first QNX read refused twice (qcc, libcatalog.so.1); both causes were fixed, not skipped."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "No lane package carries a bundled library until an artifact needs one; the first such build is the first end-to-end read of bundling on real files.",
+        "Making a bundled file reachable by a device's loader is the placing path's (the entry sets no RUNPATH); the SDP's libc++.so.1 carries its own RPATH, measured into the manifest."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
