@@ -1113,6 +1113,19 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     "zenoh-keyexpr|hook|\
         internal,\
         unstable|"
+    # ── the top crate `zenoh`, which carries upstream's feature names (docs/zenoh-api-on-the-engine.md) ──
+    #
+    # `unstable` gates the cancellation token, the priority conversions and the selector accessors
+    # of the unstable arm, and `internal` the doc-hidden items the builders use; both are
+    # non-default, so the changed-crate gate at default features compiles the tests behind them to
+    # nothing. The hosted census said so: five tests, among them `api::cancellation::test::
+    # concurrent_cancel`, claimed by no leg. The tests of the crate open sessions on the loopback
+    # and run in a few seconds, so the leg is `hook` and its filter is empty: a test added under
+    # either feature is covered without touching this row. `shared-memory` is not named: it changes
+    # the types of the protocol and is held in its own package (`conformance/differential-shm`).
+    "zenoh|hook|\
+        internal,\
+        unstable|"
 )
 
 # package|test-path|reason
