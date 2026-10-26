@@ -7,8 +7,10 @@
 //!
 //! The transports differ only in what feeds the function here: a query the node serves
 //! (in-band), a line an agent writes to the node's control channel (out-of-band), or, for the
-//! open verb, nothing at run time because the build declared the peers. [`lifecycle_verdict`] is
-//! the one place that turns a [`Command`] into a verdict and a document, so no transport owns a
+//! open verb, nothing at run time because the build declared the peers.
+//! [`lifecycle_verdict`](crate::lifecycle_node::lifecycle_verdict) is
+//! the one place that turns a [`Command`](crate::lifecycle_node::Command) into a verdict and a
+//! document, so no transport owns a
 //! copy of the semantics: the order of checks, the spelling of the peer and the words are the
 //! same on every one.
 //!
@@ -18,7 +20,8 @@
 //! verb says so whatever else is wrong with the request.
 //!
 //! The function writes through any text sink and holds nothing, so a node with no allocator calls
-//! it as the heap profile does. What a node holds is behind one port, [`LifecycleNode`], and
+//! it as the heap profile does. What a node holds is behind one port,
+//! [`LifecycleNode`](crate::lifecycle_node::LifecycleNode), and
 //! what it costs a node to hold it is that node's own.
 
 use crate::credential_identity::{zid_from_key_text, CREDENTIAL_ZID_BYTES};
