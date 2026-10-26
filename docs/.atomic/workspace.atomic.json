@@ -290466,6 +290466,48 @@
         "Still red on the last hosted runs and not of this family: wz-runtime-tokio without transport multicast alone (a match on MulticastTxItem), two tests of wz-runtime-tokio with the codec push off and the timestamp off, the repository-captures test of wz-capture, Layer C1cs for the size of the C ABI builds, and wz-ext-pubsub in the audit of Layer C1bf. Hosted runs of this family's pushes were cancelled by the next push each time, so their per-job result is still to be read."
       ]
     },
+    "Round 3707": {
+      "decision_summary": "The zenoh verdict's corpus gains the real implementations of three protocols that run beside zenoh: MQTT (eclipse-mosquitto 2.0.18, a broker, a held subscriber and publisher and forty one-shot publishers), RTPS (ROS 2 Jazzy, a publisher at 5 Hz and a subscriber, with DDS discovery) and CoAP (libcoap 4.3.1, plain reads, an observation and a block-wise write and read), each run in containers on a docker network of its own and captured on its bridge. No flow of the three reads yes in either build. The anonymiser's own scope, renamed from loopback because it covers the capturer's containers as well, now replaces every address the headers carry wherever its bytes stand in the payload, because an RTPS participant announces its locators: the leak check refused the RTPS capture until it did. Forty short MQTT connections read undecided, since a TCP flow whose bytes never frame a unit carries nothing model 1 weighs; that framing evidence is a check for step 3.",
+      "changes_bullets": [
+        "`captures/corpus/`: `stack-mqtt.pcap`, `stack-rtps.pcap` and `stack-coap.pcap`, listed in `corpus.json5` with their source, capture and what the anonymiser dropped (ARP, IPv6 hop-by-hop, IGMP with options, two IPv4 fragments of RTPS); the README table and the pending list follow.",
+        "`scripts/lib/capture_anonymise.py`: the scope `own` replaces `loopback`; a pre-pass maps every header address first, and an own payload gets the mapped bytes wherever an original address stands, TCP and UDP alike; the selftest holds a locator carrying its sender's address.",
+        "`zenoh_corpus_tests.rs`: the three files' tallies pinned for both builds. `docs/flow-zenoh-verdict.md` 6.1 says what the corpus holds and that a framing that never takes is not yet weighed."
+      ],
+      "verification_bullets": [
+        "Measured, both builds: MQTT 44 flows (0 yes, 4 no, 40 undecided), RTPS 12 (0, 9, 3), CoAP 25 (0, 5, 20); the zenoh files and the LAN files keep their tallies.",
+        "`cargo test -p wz-capture --features dissect` 1604 passed, 6 ignored; the corpus test passes with lz4; clippy with -D warnings on wz-capture with dissect, all targets.",
+        "`capture_anonymise.py --selftest` 21 checks and `--verify-corpus` over 12 files pass; the leak check refused the RTPS capture, naming two container addresses in its payload, before the own-payload mapping existed. The pre-push static gate array passed after the append."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "A TCP flow whose bytes never frame a unit (desynchronisations with no recovery) is evidence model 1 does not weigh; step 3 can add it as a check with weights measured on this corpus, and the forty MQTT flows are its first H0 population.",
+        "Still to come for step 2: SOME/IP (vsomeip has no ready image), QUIC (a parser first, since its Initial carries the server name under keys anyone can derive), LLMNR, WS-Discovery, NTP and DHCP from a busier network, other zenoh versions and zenoh-pico.",
+        "The anonymiser drops IPv4 fragments, because the UDP checksum covers the whole datagram; an RTPS message larger than the MTU is lost from the corpus, and the count is in the manifest's notes."
+      ],
+      "publishable_decision_summary": "The zenoh verdict's corpus gains the real implementations of three protocols that run beside zenoh: MQTT (eclipse-mosquitto 2.0.18, a broker, a held subscriber and publisher and forty one-shot publishers), RTPS (ROS 2 Jazzy, a publisher at 5 Hz and a subscriber, with DDS discovery) and CoAP (libcoap 4.3.1, plain reads, an observation and a block-wise write and read), each run in containers on a docker network of its own and captured on its bridge. No flow of the three reads yes in either build. The anonymiser's own scope, renamed from loopback because it covers the capturer's containers as well, now replaces every address the headers carry wherever its bytes stand in the payload, because an RTPS participant announces its locators: the leak check refused the RTPS capture until it did. Forty short MQTT connections read undecided, since a TCP flow whose bytes never frame a unit carries nothing model 1 weighs; that framing evidence is a check for step 3.",
+      "publishable_changes_bullets": [
+        "`captures/corpus/`: `stack-mqtt.pcap`, `stack-rtps.pcap` and `stack-coap.pcap`, listed in `corpus.json5` with their source, capture and what the anonymiser dropped (ARP, IPv6 hop-by-hop, IGMP with options, two IPv4 fragments of RTPS); the README table and the pending list follow.",
+        "`scripts/lib/capture_anonymise.py`: the scope `own` replaces `loopback`; a pre-pass maps every header address first, and an own payload gets the mapped bytes wherever an original address stands, TCP and UDP alike; the selftest holds a locator carrying its sender's address.",
+        "`zenoh_corpus_tests.rs`: the three files' tallies pinned for both builds. `docs/flow-zenoh-verdict.md` 6.1 says what the corpus holds and that a framing that never takes is not yet weighed."
+      ],
+      "publishable_verification_bullets": [
+        "Measured, both builds: MQTT 44 flows (0 yes, 4 no, 40 undecided), RTPS 12 (0, 9, 3), CoAP 25 (0, 5, 20); the zenoh files and the LAN files keep their tallies.",
+        "`cargo test -p wz-capture --features dissect` 1604 passed, 6 ignored; the corpus test passes with lz4; clippy with -D warnings on wz-capture with dissect, all targets.",
+        "`capture_anonymise.py --selftest` 21 checks and `--verify-corpus` over 12 files pass; the leak check refused the RTPS capture, naming two container addresses in its payload, before the own-payload mapping existed. The pre-push static gate array passed after the append."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A TCP flow whose bytes never frame a unit (desynchronisations with no recovery) is evidence model 1 does not weigh; step 3 can add it as a check with weights measured on this corpus, and the forty MQTT flows are its first H0 population.",
+        "Still to come for step 2: SOME/IP (vsomeip has no ready image), QUIC (a parser first, since its Initial carries the server name under keys anyone can derive), LLMNR, WS-Discovery, NTP and DHCP from a busier network, other zenoh versions and zenoh-pico.",
+        "The anonymiser drops IPv4 fragments, because the UDP checksum covers the whole datagram; an RTPS message larger than the MTU is lost from the corpus, and the count is in the manifest's notes."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
