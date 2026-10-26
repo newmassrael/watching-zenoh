@@ -178,7 +178,11 @@ authority admits locator targets.
    agent's own control channel and maps each command onto the contract. The
    agent's protocol must keep the contract's idempotency: a repeated open of
    an open session is success, not an error, or a retransmission reads as a
-   failure.
+   failure. The agent writes the session's intent and nothing else: the
+   application calls (declare, put, get) it makes through the node's own
+   client interface, so the control boundary is one and not two. What 7d
+   built of this is the `open` command alone, on the fixed-memory profile
+   (see Open, the out-of-band remainder).
 3. **Build-time declaration only:** the verbs are off, the intent is the
    declared peer set, and the machines only reconnect.
 
@@ -1079,6 +1083,24 @@ Each step lands with its own done-when; sizes are not estimated here.
 
 ## 5. Open
 
+- The out-of-band remainder. D7 says the transport maps each command onto
+  the contract, and step 7d built one command, `open <peer>`, because the
+  port it maps onto, `NodeOpening`, is open-only on the fixed-memory profile
+  (6.2b-3 left close, reset and status on the heap profile). Three things of
+  D6 and D7 are therefore not reachable out of band, and none is scheduled:
+  `close` and `reset <generation>` (the generation is what keeps a
+  retransmitted reset once); reading a peer's state (the status document of
+  D6) and the node's own zid, which an agent needs to know which node it
+  drives; and a locator target with no expected zid, which D7 admits "when
+  the authority admits locator targets" and which the fixed profile has no
+  path for (a plain stream is refused `Unverifiable`, D4). A control channel
+  whose owner holds the pipe is such an authority, so the third needs a
+  decision on who the authority is there. Close, reset and status need a
+  port beyond `NodeOpening` on the fixed profile, which is a design step
+  before it is a command.
+- Whether a node may be told to open a session as the accepting side (a
+  listen intent). The contract of D5 and D6 has the dialling side only; adding
+  the other changes the contract, so it is the owner's ruling.
 - Whether the feature catalog records this scope as a regrade of
   `session-close-ingress` or as a new atom. Round 2697 regraded that atom when
   item 761 widened it; this is the owner's ruling either way.
