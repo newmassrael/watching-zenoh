@@ -290660,6 +290660,44 @@
         "Still to come for step 2: QUIC (a parser first, since its Initial carries the server name under keys anyone can derive), LLMNR, WS-Discovery, NTP and DHCP from a busier network, other zenoh versions and zenoh-pico."
       ]
     },
+    "Round 3712": {
+      "decision_summary": "The entry takes a node declaration as a file as well as by registered name (owner, 2026-10-26: cost ignored, the textbook one; docs/target-build-contract.md 5b). A node is correct by its vocabulary, not by the registry: each word is a behaviour with its generator rule, const assertions, link-gate proof and witness, so a consumer that makes one node per graph gives the file (--node-file), validated by the same code and generated into the build's own directory, and the registry stays what the lanes build. A node is identified by the SHA-256 of the declaration's bytes; the package carries the declaration (node/<id>.toml, the manifest's inputs, within schema 1), and --verify resolves it from that copy with no tree consulted. A declaration states schema = 1. One table of word shapes feeds the validator and wz_node.py --vocabulary (JSON of what a target builds), and --validate checks a file without building it.",
+      "changes_bullets": [
+        "scripts/lib/wz_node.py: DECLARATION_SCHEMA and the top-level schema key; ENDPOINT_SHAPES and ENTITY_SHAPES (keys, values, the target's bounds, counts) read by validate for each word's keys and integer ranges; read_file, resolve_file, view_of and source bytes in the view; vocabulary, --validate and --vocabulary; the generated header names the declaration and not its directory; selftest arms holding the vocabulary to the validator at every bound and a registered declaration to its copy given as a file.",
+        "scripts/lib/wz_package.py: --node-file; node_input takes a name or a file; node_of_file finds the declaration by digest among those held; the manifest's inputs and its shape and verification; selftest arms on a package of a declaration nobody registered and on each damage. scripts/run-ci.sh: C1st packages slot-answerer both ways and compares.",
+        "deploy/nodes/*.toml: schema = 1 (seven), generated files regenerated; docs/target-build-contract.md: section 4 and 5b."
+      ],
+      "verification_bullets": [
+        "wz_node.py --selftest and --check pass (seven declarations valid and current); wz_package.py --selftest passes; --validate accepts a registered declaration copied out and refuses a misnamed copy.",
+        "Two mutation checks: a vocabulary that states each bound one higher fails the selftest at the first bound, and a verify that skips re-measuring a carried declaration fails it at the edited-declaration arm; both restored.",
+        "Layer C1st on pc2 through bx: pass (245 s); the registered slot-answerer and the same declaration given as a file from outside the tree package to the same manifest bytes, and each verifies."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "The declared-node build warns of generated constants a node's features do not use (eight for slot-answerer, the same for the registered and the file build): present before this round, measured in this C1st log; the generator or the node should make an unused constant impossible rather than allowed.",
+        "Next of the same directive: the fixture corpus of step 7 (golden manifests per green platform, a synthetic corpus with expected verdicts that wz and a consumer both read), then the workload schema apart from the node declaration."
+      ],
+      "publishable_decision_summary": "The entry takes a node declaration as a file as well as by registered name (owner, 2026-10-26: cost ignored, the textbook one; docs/target-build-contract.md 5b). A node is correct by its vocabulary, not by the registry: each word is a behaviour with its generator rule, const assertions, link-gate proof and witness, so a consumer that makes one node per graph gives the file (--node-file), validated by the same code and generated into the build's own directory, and the registry stays what the lanes build. A node is identified by the SHA-256 of the declaration's bytes; the package carries the declaration (node/<id>.toml, the manifest's inputs, within schema 1), and --verify resolves it from that copy with no tree consulted. A declaration states schema = 1. One table of word shapes feeds the validator and wz_node.py --vocabulary (JSON of what a target builds), and --validate checks a file without building it.",
+      "publishable_changes_bullets": [
+        "scripts/lib/wz_node.py: DECLARATION_SCHEMA and the top-level schema key; ENDPOINT_SHAPES and ENTITY_SHAPES (keys, values, the target's bounds, counts) read by validate for each word's keys and integer ranges; read_file, resolve_file, view_of and source bytes in the view; vocabulary, --validate and --vocabulary; the generated header names the declaration and not its directory; selftest arms holding the vocabulary to the validator at every bound and a registered declaration to its copy given as a file.",
+        "scripts/lib/wz_package.py: --node-file; node_input takes a name or a file; node_of_file finds the declaration by digest among those held; the manifest's inputs and its shape and verification; selftest arms on a package of a declaration nobody registered and on each damage. scripts/run-ci.sh: C1st packages slot-answerer both ways and compares.",
+        "deploy/nodes/*.toml: schema = 1 (seven), generated files regenerated; docs/target-build-contract.md: section 4 and 5b."
+      ],
+      "publishable_verification_bullets": [
+        "wz_node.py --selftest and --check pass (seven declarations valid and current); wz_package.py --selftest passes; --validate accepts a registered declaration copied out and refuses a misnamed copy.",
+        "Two mutation checks: a vocabulary that states each bound one higher fails the selftest at the first bound, and a verify that skips re-measuring a carried declaration fails it at the edited-declaration arm; both restored.",
+        "Layer C1st on pc2 through bx: pass (245 s); the registered slot-answerer and the same declaration given as a file from outside the tree package to the same manifest bytes, and each verifies."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The declared-node build warns of generated constants a node's features do not use (eight for slot-answerer, the same for the registered and the file build): present before this round, measured in this C1st log; the generator or the node should make an unused constant impossible rather than allowed.",
+        "Next of the same directive: the fixture corpus of step 7 (golden manifests per green platform, a synthetic corpus with expected verdicts that wz and a consumer both read), then the workload schema apart from the node declaration."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
