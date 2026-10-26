@@ -1810,8 +1810,9 @@ pub mod observer;
 /// out into the session slot ([`peer_tables`]) and the requester-side registries
 /// beside the session ([`slot_observer::Requesters`]). Its dispatch and drain take
 /// the session's tables as arguments, in the AP observer's order and by its rules.
-/// Only on the fixed backing (`bounded-heapless`, which `session-slot` implies).
-#[cfg(all(feature = "storage-profile", feature = "bounded-heapless"))]
+/// On either backing: the fixed one for a node with no allocator, and the heap's for an engine
+/// that holds several peers in one session (`tests/slot_observer_heap.rs`).
+#[cfg(feature = "storage-profile")]
 pub mod slot_observer;
 
 /// SCE-generated reassembly slot state machine. The emit comes from
