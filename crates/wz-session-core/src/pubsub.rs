@@ -104,8 +104,11 @@ use crate::caps;
 use crate::id_map::key_text_as;
 #[cfg(feature = "storage-profile")]
 use crate::id_map::{IdMap, PeerAliases};
-use crate::key_gate::{KeyGate, Refused};
-use crate::keyexpr_match::{keyexpr_intersects_target, MAX_KEYEXPR_CHUNKS};
+use crate::key_catalogue::{EntityId, EntityKind, KeyCatalogue, KeyId};
+use crate::key_gate::{Admitted, KeyGate, Refused};
+use crate::keyexpr_match::{
+    keyexpr_intersects_target, keyexpr_intersects_text, MAX_KEYEXPR_CHUNKS,
+};
 use crate::registry_error::RegisterError;
 
 // R311gb (Track 2) — `resolve_wireexpr` lives in the `alloc`-gated
@@ -246,6 +249,12 @@ struct Subscriber<C: SampleSink, P: Storage = Profile> {
     /// dispatch invariant (every inbound Push is treated as remote
     /// until self-publish loopback lands in a future round).
     allowed_origin: crate::locality::Locality,
+    /// The subscriber entity the image declares on this pattern, when the table has a closed key
+    /// set: a message is then delivered by the selection of its key and this number, with no
+    /// text compared. `None` for an open table, and for a row made before the table was given
+    /// its key set that the set does not declare; such a row is matched by its pattern as
+    /// before (`fire_by_selection`).
+    entity: Option<EntityId>,
     /// R311gb-2b — the delivery sink (DIP seam). `C = BoxedSink` on AP
     /// (heap closure), a consumer-supplied closed `enum` on MCU.
     sink: C,
@@ -743,8 +752,16 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// Replace the gate that decides which keys a message from a peer may be on, which starts as
     /// what the build's `key-set` policy states. A closed image hands it the gate over its
     /// generated table. The counts of the gate it replaces are not carried over.
+    ///
+    /// A subscription made before the gate was set is numbered by it now when the image declares
+    /// its pattern as a subscriber, and is otherwise kept and matched by its pattern, so that a
+    /// subscription the application declared is never silently left without its messages. An
+    /// image that gives its table first has none of the second kind.
     pub fn set_key_gate(&mut self, gate: KeyGate<'static>) {
         self.key_gate = gate;
+        for subscriber in self.subscribers.iter_mut() {
+            subscriber.entity = gate.entity_of(&subscriber.pattern, EntityKind::Subscriber);
+        }
     }
 
     /// How many messages from a peer the key gate dropped, by reason: all zero for an open gate.
@@ -752,11 +769,18 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         self.key_gate.refused()
     }
 
-    /// Whether a message may be delivered, by the key it arrived on. A message that is not from a
+    /// What the key gate says of a message, by the key it arrived on. A message that is not from a
     /// peer (a local publish) is the application's own and is not gated.
     #[inline]
-    fn admits(&mut self, keyexpr: &str, is_remote: bool) -> bool {
-        !is_remote || self.key_gate.admit_key(keyexpr).is_ok()
+    fn admission(&mut self, keyexpr: &str, is_remote: bool) -> Admission {
+        if !is_remote {
+            return Admission::Matched;
+        }
+        match self.key_gate.admit_key(keyexpr) {
+            Ok(Admitted::Key(key)) => Admission::Numbered(key),
+            Ok(Admitted::Unchecked) => Admission::Matched,
+            Err(_) => Admission::Refused,
+        }
     }
 
     /// What the in-place receive path's Puts cost in owned fallbacks since this
@@ -923,6 +947,12 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
                     raw
                 }
             };
+        // A closed key set admits a subscription only on a pattern the image declares as one, and
+        // numbers it: the entity it is delivered by. An open table has none.
+        let entity = self
+            .key_gate
+            .admit_entity(&pattern, EntityKind::Subscriber)
+            .map_err(|_| RegisterError::KeyNotInSet)?;
         let id = SubscriptionId(self.next_id);
         // Push first; only consume the id counter on success so a
         // rejected (table-full) registration leaves no id gap.
@@ -931,6 +961,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
                 id,
                 pattern,
                 allowed_origin,
+                entity,
                 sink,
             })
             .map_err(|_| RegisterError::TableFull)?;
@@ -2020,8 +2051,20 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     }
 
     fn fire_to_subscribers(&mut self, view: &dyn SampleView, is_remote: bool) -> usize {
-        if !self.admits(view.keyexpr(), is_remote) {
-            return 0;
+        match self.admission(view.keyexpr(), is_remote) {
+            Admission::Refused => return 0,
+            Admission::Numbered(key) => {
+                if let Some(catalogue) = self.key_gate.catalogue() {
+                    return fire_by_selection(
+                        &mut self.subscribers,
+                        catalogue,
+                        key,
+                        view.keyexpr(),
+                        |sink| sink.deliver(view),
+                    );
+                }
+            }
+            Admission::Matched => {}
         }
         #[cfg(feature = "alloc")]
         {
@@ -2052,8 +2095,20 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         sample: &crate::sink::PlainSample<'_>,
         is_remote: bool,
     ) -> usize {
-        if !self.admits(sample.keyexpr(), is_remote) {
-            return 0;
+        match self.admission(sample.keyexpr(), is_remote) {
+            Admission::Refused => return 0,
+            Admission::Numbered(key) => {
+                if let Some(catalogue) = self.key_gate.catalogue() {
+                    return fire_by_selection(
+                        &mut self.subscribers,
+                        catalogue,
+                        key,
+                        sample.keyexpr(),
+                        |sink| sink.deliver_plain(sample),
+                    );
+                }
+            }
+            Admission::Matched => {}
         }
         fire_into_memoized(
             &mut self.subscribers,
@@ -2065,6 +2120,48 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
             |sink| sink.deliver_plain(sample),
         )
     }
+}
+
+/// What the key gate said of a message.
+enum Admission {
+    /// Dropped: the key is outside the closed key set.
+    Refused,
+    /// Not looked up: an open table, or a message of the application's own. Delivered by matching.
+    Matched,
+    /// A key of the closed key set, by number. Delivered by the selection of that key.
+    Numbered(KeyId),
+}
+
+/// Deliver a peer's message on a key of the closed key set to the subscribers its selection
+/// names: for each row in registration order, whether the row's entity is in the selection, an
+/// integer search, and no pattern is matched. Registration order is what every delivery
+/// promises, which is why the rows are walked and the selection is asked, and not the other way.
+///
+/// A row that has no entity (made before the table was given, and not declared by it) is matched
+/// by its pattern, as `scan_subscribers` matches it, so no subscription is left without messages.
+fn fire_by_selection<C: SampleSink, P: Storage>(
+    subscribers: &mut BoundedVec<Subscriber<C, P>, { caps::MAX_SUBSCRIPTIONS }, P>,
+    catalogue: &KeyCatalogue<'_>,
+    key: KeyId,
+    text: &str,
+    mut deliver: impl FnMut(&mut C),
+) -> usize {
+    let selection = catalogue.selection(key, EntityKind::Subscriber);
+    let mut fired = 0usize;
+    for subscriber in subscribers.iter_mut() {
+        if !subscriber.allowed_origin.allows_remote() {
+            continue;
+        }
+        let reached = match subscriber.entity {
+            Some(entity) => selection.contains(entity),
+            None => keyexpr_intersects_text(&subscriber.pattern, text),
+        };
+        if reached {
+            deliver(&mut subscriber.sink);
+            fired = fired.saturating_add(1);
+        }
+    }
+    fired
 }
 
 /// How many distinct keys `MatchMemo` remembers at once: the limit `MATCH_MEMO_SLOTS`. Zero

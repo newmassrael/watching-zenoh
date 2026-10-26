@@ -33,7 +33,7 @@
 //! (a query's, an interest's) are patterns and not data keys: they are not looked up here, and
 //! nothing refuses them.
 
-use crate::key_catalogue::{EntityKind, KeyCatalogue, KeyId};
+use crate::key_catalogue::{EntityId, EntityKind, KeyCatalogue, KeyId};
 
 /// Why a closed gate did not admit a key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +74,9 @@ const NO_KEYS: KeyCatalogue<'static> = KeyCatalogue::new("", &[], &[0], &[], &[]
 pub struct KeyGate<'a> {
     catalogue: Option<&'a KeyCatalogue<'a>>,
     refused: Refused,
+    /// The key of the last message admitted: a stream's next message is on the same key, and one
+    /// comparison with its text answers it where the search of the table would take several.
+    last: Option<KeyId>,
 }
 
 impl<'a> KeyGate<'a> {
@@ -86,6 +89,7 @@ impl<'a> KeyGate<'a> {
                 outside_set: 0,
                 role_not_declared: 0,
             },
+            last: None,
         }
     }
 
@@ -117,8 +121,16 @@ impl<'a> KeyGate<'a> {
         let Some(catalogue) = self.catalogue else {
             return Ok(Admitted::Unchecked);
         };
+        if let Some(last) = self.last {
+            if catalogue.text(last) == text {
+                return Ok(Admitted::Key(last));
+            }
+        }
         match catalogue.find_exact(text) {
-            Some(key) => Ok(Admitted::Key(key)),
+            Some(key) => {
+                self.last = Some(key);
+                Ok(Admitted::Key(key))
+            }
             None => Err(self.refuse(Refusal::OutsideSet)),
         }
     }
@@ -136,6 +148,36 @@ impl<'a> KeyGate<'a> {
             Some(_) => Ok(Admitted::Key(key)),
             None => Err(self.refuse(Refusal::RoleNotDeclared(kind))),
         }
+    }
+
+    /// Admit a local declaration of an entity of `kind` on `text`, and answer with the entity the
+    /// image declares there. `Ok(None)` for an open gate, which looks at nothing and has no
+    /// entities. The refusals are those of [`Self::admit_declared`].
+    pub fn admit_entity(
+        &mut self,
+        text: &str,
+        kind: EntityKind,
+    ) -> Result<Option<EntityId>, Refusal> {
+        let Some(catalogue) = self.catalogue else {
+            return Ok(None);
+        };
+        match self.admit_declared(text, kind)? {
+            Admitted::Key(key) => Ok(catalogue.find_entity(kind, key)),
+            Admitted::Unchecked => Ok(None),
+        }
+    }
+
+    /// The entity of `kind` the image declares on `text`, without counting anything: a closed
+    /// gate's table lookup, for a caller re-reading what it already holds. `None` for an open
+    /// gate and for a text the image does not declare as that kind.
+    pub fn entity_of(&self, text: &str, kind: EntityKind) -> Option<EntityId> {
+        let catalogue = self.catalogue?;
+        catalogue.find_entity(kind, catalogue.find_exact(text)?)
+    }
+
+    /// The table a closed gate holds, `None` for an open one.
+    pub const fn catalogue(&self) -> Option<&'a KeyCatalogue<'a>> {
+        self.catalogue
     }
 
     /// How many keys the gate refused, by reason.
@@ -236,6 +278,22 @@ mod tests {
                 role_not_declared: 2
             }
         );
+    }
+
+    #[test]
+    fn the_key_just_admitted_is_answered_the_same_and_a_refusal_does_not_forget_it() {
+        let mut gate = KeyGate::closed(&TABLE);
+        for _ in 0..3 {
+            assert_eq!(gate.admit_key("a/b"), Ok(Admitted::Key(KeyId::new(2))));
+        }
+        // Another key moves the memory; a refused one leaves it where it was.
+        assert_eq!(gate.admit_key("a"), Ok(Admitted::Key(KeyId::new(0))));
+        assert_eq!(gate.admit_key("a/c"), Err(Refusal::OutsideSet));
+        assert_eq!(gate.admit_key("a"), Ok(Admitted::Key(KeyId::new(0))));
+        // A text that only starts like the remembered key is not it.
+        assert_eq!(gate.admit_key("a/"), Err(Refusal::OutsideSet));
+        assert_eq!(gate.admit_key("a/b"), Ok(Admitted::Key(KeyId::new(2))));
+        assert_eq!(gate.refused().total, 2);
     }
 
     #[test]

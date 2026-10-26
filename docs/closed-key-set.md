@@ -1,7 +1,8 @@
 # Closed key set
 
-Status: design; phases 1 and 2 (the pure table, the generator, the model test and the gate) are built
-and no host reads them yet. Written 2026-10-26 so that what a deployment asks of "every key is known at build time" is
+Status: design; phases 1 to 3b (the pure table, the generator, the model test, the gate, the policy, the
+refusal of a peer's data key and delivery by the selection of a key) are built in the subscriber table;
+no image supplies a table yet. Written 2026-10-26 so that what a deployment asks of "every key is known at build time" is
 decided once, against what the host session already does, and not rebuilt beside it.
 
 ## What it is
@@ -122,7 +123,7 @@ publishes it receives) is the per-peer allowance, phase 4.
    - **3a. The policy and the refusal of a peer's data key.** `key-set` (`open` is the default) lands
      with the subscriber table acting on it: a message from a peer on a key outside the set is dropped
      before a subscriber is looked up and counted. Open keeps today's path unchanged, tested.
-   - **3b. Receive through the id.** The key a message arrives on is looked up once and the message
+   - **3b. Receive through the id (built).** The key a message arrives on is looked up once and the message
      reaches its subscribers by the selection of that key, by number; the subscriber rows hold the
      entity they were declared as. Measured against open with the memo on one machine and condition:
      allocations and time per sample, alias row bytes, ROM and RAM of the table.
@@ -207,6 +208,55 @@ publishes it receives) is the per-peer allowance, phase 4.
   node does not carry one. The selector side is as it was. A reply's key is not gated. No time or
   allocation is measured: the added work on an open build is one flag test and one `Option` test per
   message from a peer.
+
+## Phase 3b, as built
+
+- **The row holds its entity.** A subscriber row of a table with a closed gate holds the entity the
+  image declares on its pattern. `register_sink` asks the gate: a pattern the image does not declare
+  as a subscriber is refused with `RegisterError::KeyNotInSet` (and counted by the gate), and an open
+  table registers as before.
+- **Delivery is by the selection.** A peer's message on a key of the set reaches the subscribers its
+  key's selection names: the rows are walked in registration order, which every delivery promises, and
+  each is asked whether its entity is in the selection, an integer search. No pattern is matched. A row
+  made before the table was given, and not declared by it, is matched by its pattern, so a
+  subscription the application declared is never left without its messages; `set_key_gate` numbers the
+  rows it can.
+- **The gate remembers the key it just admitted.** A first measurement showed the table alone losing to
+  the match memory on one repeated key (below), because every message searched the table. One
+  comparison with the last key's text answers a stream's next message.
+- **Tested.** Over the fixture, for every key of the set, the closed table fires exactly the
+  subscribers, in exactly the order, that an open table's scan fires; a subscription on an undeclared
+  pattern is refused and one on a key declared only as a publisher is refused; a subscription made
+  before the gate is set is still delivered to.
+- **Measured** (`tests/key_set_cost.rs`, release build, the shared build machine with one free core
+  and two or three other jobs, six runs; times swing by up to a factor of two between runs there, so
+  they are ranges, and the allocations are exact). The fixture has 18 keys and 8 subscribers; the
+  memory has 8 slots.
+
+  | traffic, gate | ns a message | allocations a message |
+  |---|---|---|
+  | rotate over every key, open, memory on | 229 to 384 | 3.06 |
+  | rotate over every key, closed | 25 to 45 | 0 |
+  | one key repeated, open, memory on | 13 to 29 | 0 |
+  | one key repeated, closed | 18 to 39 (before the last-key check, 41 to 45) | 0 |
+  | rotate over every key, open, memory left out | 229 to 232 | 1 |
+  | one key repeated, open, memory left out | 237 to 240 | 1 |
+  | rotate or repeat, closed (the memory is not read) | 19 to 25 | 0 |
+
+  What it says: where the open table's memory misses, which is every message of a node that hears many
+  keys and the first of each key, the closed table is about five to eleven times faster and allocates
+  nothing, where the open one allocates one to three times a message (the memory's writes, and the key
+  split). On one repeated key the memory is at least as fast as the closed table, and the closed table
+  is between level with it and about one and a half times slower; it is not faster there. The claim of
+  D7, that the table replaces the memory, holds for the first case and not the second, on the figures
+  above. Not measured: more subscribers than 8, a real link under the drive loop, ROM and RAM of a
+  table, an image on a target.
+- **Not done.** The alias row is still text and not a number (D5): resolution at the edge is what a
+  peer's declared resource needs, and a resource is a prefix that a selector may be built on, so it is
+  not simply a key id. A declared key must be written in the canonical form the table stores a
+  pattern in, which the generator does not check yet (a pattern with a `$*` chunk the canonical form
+  would rewrite is registered in its canonical form and then is not the declared text). A reply's key
+  is not gated. No image supplies a table, and the match memory is still built in a closed image.
 
 ## What is not decided
 

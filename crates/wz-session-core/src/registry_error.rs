@@ -42,6 +42,9 @@ pub enum RegisterError {
     /// guarantee landed. The declaration-observer registry still never
     /// produces it.
     KeyexprTooLong,
+    /// The image is built with a closed key set and does not declare this entity on this key
+    /// (`docs/closed-key-set.md`). Produced only by the subscriber table of a closed build.
+    KeyNotInSet,
 }
 
 impl core::fmt::Display for RegisterError {
@@ -49,6 +52,7 @@ impl core::fmt::Display for RegisterError {
         match self {
             Self::TableFull => f.write_str("registry backing table at declared capacity"),
             Self::KeyexprTooLong => f.write_str("registry keyexpr exceeds declared capacity"),
+            Self::KeyNotInSet => f.write_str("keyexpr is not declared in the image's key set"),
         }
     }
 }

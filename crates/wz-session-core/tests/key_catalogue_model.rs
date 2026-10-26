@@ -128,6 +128,30 @@ fn a_selection_is_the_subscriber_tables_own_answer() {
     }
 }
 
+/// Register the fixture's subscribers in `table`, each a counting sink that records its entity
+/// number in `fired`.
+#[cfg(feature = "alloc")]
+fn register_the_fixtures_subscribers(
+    table: &mut wz_session_core::pubsub::SubscriberTable<Counted>,
+    fired: &std::rc::Rc<std::cell::RefCell<Vec<usize>>>,
+) {
+    use std::rc::Rc;
+    use wz_session_core::locality::Locality;
+
+    for (number, (kind, pattern)) in DECLARED.iter().enumerate() {
+        if *kind != EntityKind::Subscriber {
+            continue;
+        }
+        let sink = Counted {
+            tag: number,
+            fired: Rc::clone(fired),
+        };
+        table
+            .register_sink(pattern, Locality::Any, sink)
+            .expect("the subscriber table holds the fixture's subscribers");
+    }
+}
+
 /// A subscriber table with the fixture's subscribers registered, each a counting sink.
 #[cfg(feature = "alloc")]
 fn table_of_the_fixtures_subscribers() -> (
@@ -136,23 +160,11 @@ fn table_of_the_fixtures_subscribers() -> (
 ) {
     use std::cell::RefCell;
     use std::rc::Rc;
-    use wz_session_core::locality::Locality;
     use wz_session_core::pubsub::SubscriberTable;
 
     let fired = Rc::new(RefCell::new(Vec::new()));
     let mut table: SubscriberTable<Counted> = SubscriberTable::with_sink_backing();
-    for (number, (kind, pattern)) in DECLARED.iter().enumerate() {
-        if *kind != EntityKind::Subscriber {
-            continue;
-        }
-        let sink = Counted {
-            tag: number,
-            fired: Rc::clone(&fired),
-        };
-        table
-            .register_sink(pattern, Locality::Any, sink)
-            .expect("the subscriber table holds the fixture's subscribers");
-    }
+    register_the_fixtures_subscribers(&mut table, &fired);
     (table, fired)
 }
 
@@ -204,6 +216,118 @@ fn a_closed_table_drops_a_peers_key_outside_the_set_and_an_open_one_does_not() {
     fired.borrow_mut().clear();
     assert!(closed.dispatch_borrowed(&undeclared, false) > 0);
     assert_eq!(closed.key_gate_refused().total, 1);
+}
+
+/// What every delivery of a peer's message on `text` fired, in the order it fired.
+#[cfg(feature = "alloc")]
+fn fired_on(
+    table: &mut wz_session_core::pubsub::SubscriberTable<Counted>,
+    fired: &std::rc::Rc<std::cell::RefCell<Vec<usize>>>,
+    text: &str,
+) -> Vec<usize> {
+    fired.borrow_mut().clear();
+    let sample = wz_session_core::sample::Sample::new_put(text, Vec::new());
+    let count = table.dispatch_borrowed(&sample, true);
+    let seen = fired.borrow().clone();
+    assert_eq!(count, seen.len(), "the count is what fired, on `{text}`");
+    seen
+}
+
+#[cfg(feature = "alloc")]
+#[test]
+fn delivery_by_selection_is_what_the_scan_delivers_in_the_order_it_delivers() {
+    use wz_session_core::key_gate::KeyGate;
+
+    let (mut scanned, scanned_fired) = table_of_the_fixtures_subscribers();
+
+    // The gate is given first, so every subscription is made under it and numbered by it.
+    let fired = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut numbered: wz_session_core::pubsub::SubscriberTable<Counted> =
+        wz_session_core::pubsub::SubscriberTable::with_sink_backing();
+    numbered.set_key_gate(KeyGate::closed(&CATALOGUE));
+    register_the_fixtures_subscribers(&mut numbered, &fired);
+
+    let mut compared = 0usize;
+    let mut delivered = 0usize;
+    for key in key_ids() {
+        let text = CATALOGUE.text(key);
+        let want = fired_on(&mut scanned, &scanned_fired, text);
+        let got = fired_on(&mut numbered, &fired, text);
+        assert_eq!(got, want, "subscribers of `{text}`, in registration order");
+        compared += 1;
+        delivered += got.len();
+    }
+    assert_eq!(compared, CATALOGUE.key_count());
+    assert!(
+        delivered > compared,
+        "the keys reach several subscribers each, {delivered}"
+    );
+    assert_eq!(numbered.key_gate_refused().total, 0);
+}
+
+#[cfg(feature = "alloc")]
+#[test]
+fn a_subscription_is_made_only_on_a_pattern_the_closed_image_declares() {
+    use wz_session_core::key_gate::KeyGate;
+    use wz_session_core::locality::Locality;
+    use wz_session_core::registry_error::RegisterError;
+
+    let fired = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut table: wz_session_core::pubsub::SubscriberTable<Counted> =
+        wz_session_core::pubsub::SubscriberTable::with_sink_backing();
+    table.set_key_gate(KeyGate::closed(&CATALOGUE));
+    let sink = |tag| Counted {
+        tag,
+        fired: std::rc::Rc::clone(&fired),
+    };
+    // Declared as a subscriber.
+    assert!(table
+        .register_sink("lab/sensor/*", Locality::Any, sink(0))
+        .is_ok());
+    // In the set, but declared as a publisher and not as a subscriber.
+    assert_eq!(
+        table
+            .register_sink("lab/ctl/get", Locality::Any, sink(1))
+            .err(),
+        Some(RegisterError::KeyNotInSet)
+    );
+    // Not in the set at all.
+    assert_eq!(
+        table
+            .register_sink("lab/other/**", Locality::Any, sink(2))
+            .err(),
+        Some(RegisterError::KeyNotInSet)
+    );
+    assert_eq!(table.len(), 1);
+    assert_eq!(table.key_gate_refused().total, 2);
+}
+
+#[cfg(feature = "alloc")]
+#[test]
+fn a_subscription_made_before_the_table_was_given_still_gets_its_messages() {
+    use wz_session_core::key_gate::KeyGate;
+    use wz_session_core::locality::Locality;
+
+    let fired = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut table: wz_session_core::pubsub::SubscriberTable<Counted> =
+        wz_session_core::pubsub::SubscriberTable::with_sink_backing();
+    let sink = |tag| Counted {
+        tag,
+        fired: std::rc::Rc::clone(&fired),
+    };
+    // One the image declares, and one it does not: both exist before the gate is set.
+    table
+        .register_sink("lab/sensor/*", Locality::Any, sink(10))
+        .expect("room");
+    table
+        .register_sink("lab/ctl/**", Locality::Any, sink(11))
+        .expect("room");
+    table.set_key_gate(KeyGate::closed(&CATALOGUE));
+    // `lab/ctl/set` is in the set: the declared row is reached by number, the other by its pattern.
+    assert_eq!(fired_on(&mut table, &fired, "lab/ctl/set"), vec![11]);
+    assert_eq!(fired_on(&mut table, &fired, "lab/sensor/temp"), vec![10]);
+    // A key outside the set is dropped for both.
+    assert!(fired_on(&mut table, &fired, "lab/sensor/pressure").is_empty());
 }
 
 #[test]
