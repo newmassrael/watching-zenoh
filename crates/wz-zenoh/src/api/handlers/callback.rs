@@ -96,7 +96,7 @@ impl<T> Clone for Callback<T> {
 }
 
 impl<T> Callback<T> {
-    // TODO deprecate
+    // upstream note: deprecate
     /// Instantiate a `Callback` from a callback function.
     pub fn new(cb: Arc<dyn Fn(T) + Send + Sync>) -> Self
     where
