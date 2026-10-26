@@ -112,6 +112,10 @@ pub struct SessionInitParams {
     /// wire compacted to seconds under T=1, exactly like zenoh-pico's
     /// `_z_t_msg_make_open_syn/_ack` (definitions/transport.c:196-214).
     pub lease_ms: u64,
+    /// How often the session's keepalive speaks for it on an idle link: a
+    /// share of a lease, upstream's `transport/link/tx/keep_alive` and
+    /// zenoh-pico's `Z_TRANSPORT_LEASE_EXPIRE_FACTOR`. See [`KeepAliveConf`].
+    pub keep_alive: KeepAliveConf,
     /// Initial sequence number for the reliable channel (VLE-encoded
     /// inside the open body).
     pub initial_sn: u64,
@@ -182,6 +186,102 @@ impl Default for LinkRxConf {
     fn default() -> Self {
         Self {
             max_message_size: RX_MAX_MESSAGE_SIZE,
+        }
+    }
+}
+
+/// Upstream's default `transport/link/tx/keep_alive`, keepalives in one lease
+/// (`commons/zenoh-config/src/defaults.rs` @ `keep_alive: 4,`).
+pub const KEEP_ALIVE_PER_LEASE: u32 = 4;
+
+/// zenoh-pico's default `Z_TRANSPORT_LEASE_EXPIRE_FACTOR`
+/// (`vendor/zenoh-pico/CMakeLists.txt` @
+/// `set(Z_TRANSPORT_LEASE_EXPIRE_FACTOR 3 CACHE STRING "Default session lease expire factor.")`).
+pub const PICO_LEASE_EXPIRE_FACTOR: u32 = 3;
+
+/// Which lease a keepalive interval is a share of.
+///
+/// The two originals divide different leases. zenoh divides the lease the
+/// session itself was configured with, whatever the peer advertised
+/// (`io/zenoh-transport/src/unicast/universal/transport.rs` @
+/// `let keep_alive = self.manager.config.unicast.lease`). zenoh-pico divides
+/// the lease the session adopted at its handshake, the smaller of its own and
+/// the peer's (`vendor/zenoh-pico/src/transport/unicast/transport.c` @
+/// `param->_lease = (oam._body._open._lease < Z_TRANSPORT_LEASE) ? oam._body._open._lease : Z_TRANSPORT_LEASE;`),
+/// which every task of the transport then reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaseBasis {
+    /// The lease this session advertises: zenoh's.
+    Own,
+    /// The lease the session adopted, the smaller of the two advertised:
+    /// zenoh-pico's.
+    Adopted,
+}
+
+/// How often a session's keepalive speaks on an idle link: every lease of
+/// `basis`, divided by `per_lease`.
+///
+/// It is the transmit side of liveness. The peer closes a session it has heard
+/// nothing from for its lease, so a session that sends nothing else sends a
+/// keepalive whenever it has been silent for one interval, and the peer hears
+/// about `per_lease` of them in each lease. Upstream configures it as
+/// `transport/link/tx/keep_alive` (4 by default) and zenoh-pico builds it in as
+/// `Z_TRANSPORT_LEASE_EXPIRE_FACTOR` (3 by default); the two also divide
+/// different leases ([`LeaseBasis`]), so each interface states both halves.
+/// `Default` is zenoh's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeepAliveConf {
+    /// Keepalives in one lease; at least 1 (a config stating 0 is refused
+    /// before it reaches a session, as upstream's division by it would fail).
+    pub per_lease: u32,
+    /// Which lease is divided.
+    pub basis: LeaseBasis,
+}
+
+impl Default for KeepAliveConf {
+    fn default() -> Self {
+        Self::zenoh(KEEP_ALIVE_PER_LEASE)
+    }
+}
+
+impl KeepAliveConf {
+    /// zenoh-pico's keepalive at its default factor.
+    pub const PICO: Self = Self::pico(PICO_LEASE_EXPIRE_FACTOR);
+
+    /// zenoh's keepalive: `per_lease` of them in the session's own lease.
+    pub const fn zenoh(per_lease: u32) -> Self {
+        Self {
+            per_lease,
+            basis: LeaseBasis::Own,
+        }
+    }
+
+    /// zenoh-pico's keepalive: the adopted lease divided by `factor`.
+    pub const fn pico(factor: u32) -> Self {
+        Self {
+            per_lease: factor,
+            basis: LeaseBasis::Adopted,
+        }
+    }
+
+    /// The interval, in milliseconds, for a session whose own lease is
+    /// `own_ms` and whose adopted lease is `adopted_ms`. Never 0, so a
+    /// degenerate lease does not spin the emitter; a `per_lease` of 0 reads as 1.
+    pub const fn interval_ms(&self, own_ms: u64, adopted_ms: u64) -> u64 {
+        let lease = match self.basis {
+            LeaseBasis::Own => own_ms,
+            LeaseBasis::Adopted => adopted_ms,
+        };
+        let per_lease = if self.per_lease == 0 {
+            1
+        } else {
+            self.per_lease as u64
+        };
+        let interval = lease / per_lease;
+        if interval == 0 {
+            1
+        } else {
+            interval
         }
     }
 }
