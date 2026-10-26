@@ -290736,6 +290736,38 @@
         "The workload plan apart from the node declaration (arrivals, payloads, stop, replay, mutation) is drafted from the consumer's vocabulary and goes to the owner before any schema is written."
       ]
     },
+    "Round 3714": {
+      "decision_summary": "Four hosted reds of the closed key set and match cache rounds are paid. The match cache tests compared with the heap slot count where the build's profile reads its own, so they now ask the slot count of the profile's storage policy. The in-place receive of a heap table no longer goes through the cache: a cache slot allocates the key text and the hit list for a key it has not seen, which that path's contract (the heap pays the matcher's scratch only) does not allow; a fixed table still uses it. The session slot record of the two admin node images moves up 8 bytes, which the per-peer allowance added, found by measuring the commits one by one. The four pico client text budgets move to what hosted CI measured, with the series that led there in the notes. Reds owned by other changes were left to their owners.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/pubsub.rs: fire_lent matches afresh on a heap table; cache tests use memo_slots for the profile.",
+        "deploy/session_slot_bytes.json: mcu-admin-node 36808, zephyr-admin-node 36800.",
+        "scripts/lib/capability_cost_gate.py: budgets of pico-client, pico-client-small, pico-client-udp, pico-client-coop."
+      ],
+      "verification_bullets": [
+        "The hosted command cargo test -p wz-session-core --all-features passes locally with 2726 tests, the same total as the hosted run. The wz-session-lwip leg that failed passes with its 8 allocation tests, on both backings. session_slot_bytes.py --check was run on detached commits: equal to the record before the per-peer allowance, 8 bytes over at it. The capability cost selftest passes; the hosted sizes were read from the job logs of four runs. Runs were local because the pc2 checkout slot failed its submodule step."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "Reds owned by other work: zenoh-config toml test, pico SessionEngine import under engine-coop with connectivity, advanced_ test count in the tokio runtime, zenohd aggregation lane, test-discipline and lane-reach, home-path-range in the hosted checkout, routing job time budget. Read the hosted run of this push per job."
+      ],
+      "publishable_decision_summary": "Four hosted reds of the closed key set and match cache rounds are paid. The match cache tests compared with the heap slot count where the build's profile reads its own, so they now ask the slot count of the profile's storage policy. The in-place receive of a heap table no longer goes through the cache: a cache slot allocates the key text and the hit list for a key it has not seen, which that path's contract (the heap pays the matcher's scratch only) does not allow; a fixed table still uses it. The session slot record of the two admin node images moves up 8 bytes, which the per-peer allowance added, found by measuring the commits one by one. The four pico client text budgets move to what hosted CI measured, with the series that led there in the notes. Reds owned by other changes were left to their owners.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/pubsub.rs: fire_lent matches afresh on a heap table; cache tests use memo_slots for the profile.",
+        "deploy/session_slot_bytes.json: mcu-admin-node 36808, zephyr-admin-node 36800.",
+        "scripts/lib/capability_cost_gate.py: budgets of pico-client, pico-client-small, pico-client-udp, pico-client-coop."
+      ],
+      "publishable_verification_bullets": [
+        "The hosted command cargo test -p wz-session-core --all-features passes locally with 2726 tests, the same total as the hosted run. The wz-session-lwip leg that failed passes with its 8 allocation tests, on both backings. session_slot_bytes.py --check was run on detached commits: equal to the record before the per-peer allowance, 8 bytes over at it. The capability cost selftest passes; the hosted sizes were read from the job logs of four runs. Runs were local because the pc2 checkout slot failed its submodule step."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Reds owned by other work: zenoh-config toml test, pico SessionEngine import under engine-coop with connectivity, advanced_ test count in the tokio runtime, zenohd aggregation lane, test-discipline and lane-reach, home-path-range in the hosted checkout, routing job time budget. Read the hosted run of this push per job."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
