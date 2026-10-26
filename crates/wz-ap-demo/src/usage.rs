@@ -82,6 +82,7 @@ pub(crate) fn print_usage() {
     eprintln!("               [--sweep-cadence-ms <ms>]");
     eprintln!("    wz-ap-demo --sessions <file>");
     eprintln!("    wz-ap-demo --check-sessions <file>");
+    eprintln!("    wz-ap-demo --driver-vocabulary");
     eprintln!();
     eprintln!("OPTIONS:");
     eprintln!("    --sessions <file>        start SEVERAL local sessions in this one process, one");
@@ -103,7 +104,15 @@ pub(crate) fn print_usage() {
     eprintln!("                             `transport-multicast` build feature.");
     eprintln!("                             A unicast session may carry `driver: [..]`, the");
     eprintln!("                             traffic it generates once it serves. Roles and their");
-    eprintln!("                             keys: publish (key, payload, period_ms, count), put");
+    eprintln!("                             keys: publish (key; payload, payload_hex or");
+    eprintln!("                             payload_bytes with fill zero|counter|seeded and seed;");
+    eprintln!("                             period_ms or rate_per_s, a decimal; count,");
+    eprintln!("                             duration_ms), replay (samples [{{ key, text or hex,");
+    eprintln!(
+        "                             captured_at_ms, mutation }}], timing declared|capture,"
+    );
+    eprintln!("                             gap_ms, speed, max_gap_ms, max_total_ms,");
+    eprintln!("                             max_extend_bytes, max_extend_total_bytes), put");
     eprintln!("                             (key, payload), delete (key), subscribe (key), get");
     eprintln!("                             (key, timeout_ms), answer (key, reply), query (key,");
     eprintln!("                             period_ms, count, timeout_ms: a declared querier),");
@@ -138,7 +147,11 @@ pub(crate) fn print_usage() {
     eprintln!("                             by its key path, as --sessions prints them), 3 the");
     eprintln!("                             file cannot be read. The verdict is for THIS binary's");
     eprintln!("                             build features. Takes no other flag.");
-    eprintln!("    --listen <addr>          acceptor mode (e.g. 127.0.0.1:7447); announces the");
+    eprintln!("    --driver-vocabulary      print, as JSON on stdout, every driver role of this");
+    eprintln!("                             build with its keys (kind, required, default) and the");
+    eprintln!("                             feature it needs; made from the table --sessions and");
+    eprintln!("                             --check-sessions judge with. Takes no other flag.");
+    eprintln!("    --listen <addr>         acceptor mode (e.g. 127.0.0.1:7447); announces the");
     eprintln!("                             zenoh peer role on the wire");
     eprintln!("    --connect <a[,b..]>      initiator mode (HOST:PORT or tcp/|ws/HOST:PORT);");
     eprintln!("                             this is the zenoh client role — there is no");

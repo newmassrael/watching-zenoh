@@ -169,6 +169,13 @@ fn demo_main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    // `--driver-vocabulary`: what a `--sessions` driver of THIS build plays, as JSON a harness
+    // reads before it writes a document; made from the role table the reader judges with.
+    if rest.len() == 1 && rest[0] == "--driver-vocabulary" {
+        print!("{}", crate::sessions_driver::vocabulary());
+        return ExitCode::SUCCESS;
+    }
+
     // Open-debt item 900 — `--sessions <file>`: several local sessions in this
     // one process, each from its entry in the document. Ahead of every other
     // reader because it takes no other flag (`sessions::sessions_flag` says

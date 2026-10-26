@@ -6722,7 +6722,10 @@ layer_c1ay_cargo_test_router_hat() {
     # Its own test target, with the count pinned for the reason above.
     # A fourth case: a question to a suspended peer ends at its own deadline, which
     # is the sweep a session of this process runs beside its drive loop.
-    _runci_guarded_test "C1AY sessions_driver_binary 4" 4 \
+    # Two more (docs/target-build-contract.md 5c): the workload a driver plays reaches the
+    # listener (a stream at a decimal rate with a made payload, a replay of hex and text samples
+    # with mutations, each counted at the length sent), and `--driver-vocabulary` is the role table.
+    _runci_guarded_test "C1AY sessions_driver_binary 6" 6 \
         cargo test -p wz-ap-demo --test sessions_driver_binary --quiet || return 1
     # The other driver roles, one target per family, each over real `--sessions`
     # processes and each with its count pinned: liveliness (a token seen to appear

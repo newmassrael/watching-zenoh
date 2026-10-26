@@ -222,6 +222,90 @@ fn the_roles_of_two_sessions_meet_over_a_real_link() {
     assert_eq!(ticks, 3, "{}", listener.seen.join("\n"));
 }
 
+/// The workload a driver plays (`wz-workload`) reaches a peer: a stream at a rate written as a
+/// decimal with a made payload, and a replay of hex and text samples with a mutation, each counted
+/// on the listener at the length it was sent with.
+#[test]
+fn a_rate_stream_and_a_replay_reach_the_listener() {
+    let dir = Dir::new("workload");
+    let listener_doc = dir.write(
+        "listener.json5",
+        r#"{ sessions: [
+            { name: "inbound", mode: "peer", transport: "unicast", zid: "dd11",
+              listen: { endpoints: ["tcp/127.0.0.1:0"] },
+              driver: [ { role: "subscribe", key: "demo/w/**" } ] } ] }"#,
+    );
+    let mut listener = Node::spawn(&["--sessions", &listener_doc]);
+    let ready = listener.expect_line("READY peer unicast listening on");
+    let addr = listening_on(&ready);
+    let client_doc = dir.write(
+        "client.json5",
+        &format!(
+            r#"{{ sessions: [
+                {{ name: "out", mode: "client", transport: "unicast", zid: "dd12",
+                  connect: {{ endpoints: ["{addr}"] }},
+                  driver: [
+                    {{ role: "publish", key: "demo/w/tick", rate_per_s: 50, payload_bytes: 16,
+                      fill: "counter", count: 4, after_ms: 1000 }},
+                    {{ role: "replay", gap_ms: 50, after_ms: 1000, samples: [
+                        {{ key: "demo/w/a", hex: "00ff10" }},
+                        {{ key: "demo/w/b", text: "beta", mutation: {{ kind: "flip_bit", at_bit: 0 }} }},
+                        {{ key: "demo/w/c", text: "gamma", mutation: {{ kind: "truncate", keep: 2 }} }},
+                    ] }},
+                  ] }} ] }}"#
+        ),
+    );
+    let mut client = Node::spawn(&["--sessions", &client_doc]);
+    client.expect_line("DRIVER publish done key=demo/w/tick count=4 skipped=");
+    assert_eq!(
+        client.count("DRIVER publish sent key=demo/w/tick bytes=16"),
+        4
+    );
+    client.expect_line("DRIVER replay plan emissions=3 total_ms=100");
+    client.expect_line("DRIVER replay emission 1 delay_ms=50 source=declared mutated=true");
+    client.expect_line("DRIVER replay done emissions=3");
+    listener.expect_line("DRIVER subscribe sample key=demo/w/a kind=Put bytes=3");
+    listener.expect_line("DRIVER subscribe sample key=demo/w/b kind=Put bytes=4");
+    listener.expect_line("DRIVER subscribe sample key=demo/w/c kind=Put bytes=2");
+    let ticks = {
+        let mut n = 0;
+        let until = Instant::now() + DEADLINE;
+        while n < 4 && Instant::now() < until {
+            listener.expect_line("DRIVER subscribe sample key=demo/w/tick kind=Put bytes=16");
+            n = listener.count("DRIVER subscribe sample key=demo/w/tick kind=Put bytes=16");
+            std::thread::sleep(Duration::from_millis(50));
+            while let Ok(line) = listener.lines.try_recv() {
+                listener.seen.push(line);
+            }
+        }
+        n
+    };
+    assert_eq!(ticks, 4, "{}", listener.seen.join("\n"));
+}
+
+/// `--driver-vocabulary` prints the role table as JSON: every role, with the keys the reader
+/// judges, and exits 0 without starting anything.
+#[test]
+fn the_driver_vocabulary_is_the_role_table() {
+    let out = Command::new(env!("CARGO_BIN_EXE_wz-ap-demo"))
+        .arg("--driver-vocabulary")
+        .output()
+        .expect("the demo binary runs");
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).expect("utf-8");
+    for needle in [
+        "\"schema\":1",
+        "\"role\":\"publish\"",
+        "\"name\":\"rate_per_s\",\"kind\":\"decimal\"",
+        "\"name\":\"fill\",\"kind\":{\"word\":[\"zero\",\"counter\",\"seeded\"]}",
+        "\"role\":\"replay\"",
+        "\"name\":\"max_gap_ms\",\"kind\":\"integer-or-null\",\"required\":false,\"default\":10000",
+        "\"every_role\":[{\"name\":\"after_ms\"",
+    ] {
+        assert!(text.contains(needle), "{needle} is not in\n{text}");
+    }
+}
+
 /// A driver the rules refuse starts nothing: every refusal names its key path
 /// and the exit is 2, and a deploy document, which has no `driver`, is judged as
 /// it always was.
@@ -245,8 +329,8 @@ fn a_refused_driver_starts_nothing_and_names_its_key() {
     for key in [
         "sessions[0].driver[0].role: required: publish, put, delete, subscribe, get, answer, \
          query, scout, advanced_publish, advanced_subscribe, liveliness_token, \
-         liveliness_subscribe, liveliness_get, pull, group_member, group_view or forward",
-        "sessions[0].driver[1].period_ms: required, a positive integer of milliseconds",
+         liveliness_subscribe, liveliness_get, pull, group_member, group_view, forward or replay",
+        "sessions[0].driver[1].period_ms: give exactly one of period_ms and rate_per_s",
         "sessions[0].driver[2].payload: not a key of the `delete` role",
     ] {
         assert!(

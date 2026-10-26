@@ -19,13 +19,24 @@
 //!       { role: "subscribe", key: "demo/in/**" },
 //!       { role: "answer",    key: "demo/q",   reply: "pong" },
 //!       { role: "publish",   key: "demo/out", payload: "tick", period_ms: 1000, count: 5 },
+//!       { role: "publish",   key: "demo/load", rate_per_s: 0.5, payload_bytes: 64,
+//!         fill: "counter", duration_ms: 60000 },
 //!       { role: "put",       key: "demo/one", payload: "x" },
 //!       { role: "delete",    key: "demo/one" },
 //!       { role: "get",       key: "demo/q",   timeout_ms: 2000, after_ms: 500 },
+//!       { role: "replay",    timing: "capture", speed: 2.0, samples: [
+//!           { key: "demo/r", hex: "00ff10", captured_at_ms: 1000 },
+//!           { key: "demo/r", text: "beta", captured_at_ms: 1400,
+//!             mutation: { kind: "flip_bit", at_bit: 0 } } ] },
 //!       // `after_ms`, on any role: hold it that long once the session is up.
 //!     ] },
 //! ]
 //! ```
+//!
+//! What a stream sends and when, and how a replay is paced and mutated, are the workload's
+//! (`wz-workload`, `docs/target-build-contract.md` 5c): this driver reads its keys into that model
+//! and plays it. `--driver-vocabulary` prints the role table below as JSON, and `--check-sessions`
+//! judges a document by it without starting anything.
 //!
 //! The roles are the words of [`roles::ROLES`], one module each under `roles/`.
 //! A role that needs a build feature the binary was built without is refused by
@@ -61,16 +72,20 @@
 //! driver publishes reaches another session only through whatever the links carry.
 
 pub(crate) mod roles;
+pub(crate) mod stream;
 
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
-use wz::runtime_tokio::json5::Json5Value;
+use wz::runtime_tokio::json5::{number_as_u64, Json5Value};
 use wz::runtime_tokio::sample::SampleKind;
 use wz::runtime_tokio::session::{PublishOptions, TokioSession};
 use wz::runtime_tokio::Reliability;
+
+use wz_workload::arrivals::Decimal;
+use wz_workload::payload::parse_hex;
 
 use crate::sessions::{as_str, field, has, key_set, positive_int, Refusal};
 
@@ -105,6 +120,42 @@ pub(crate) enum KeyKind {
     Flag,
     /// One of these words.
     Word(&'static [&'static str]),
+    /// A positive decimal read from the digits written (`wz_workload::arrivals::Decimal`): a
+    /// number, never a float, so `0.1` is the rate written.
+    Decimal,
+    /// Bytes written as hex, two digits a byte.
+    Hex,
+    /// An integer from 0.
+    Integer,
+    /// An integer from 0, or `null`.
+    IntegerOrNull,
+    /// A structure, which its own judge reads and refuses by the path inside it.
+    Structured(&'static Structure),
+}
+
+/// A key whose value is a structure (a list of samples, say): what a value of another shape is
+/// told, and the judge that names every refusal by its path under the key (`[2].payload_hex`). The
+/// key rules stay written once; only the role that owns the structure knows its shape.
+pub(crate) struct Structure {
+    /// The sentence a value of another shape earns.
+    pub(crate) expect: &'static str,
+    /// Every refusal the value earns, as (path under the key, why); none is a value that reads.
+    pub(crate) judge: fn(&Json5Value) -> Vec<(String, String)>,
+}
+
+impl PartialEq for Structure {
+    /// One structure is one static: two keys of one structure share it.
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
+
+impl Eq for Structure {}
+
+impl std::fmt::Debug for Structure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Structure({})", self.expect)
+    }
 }
 
 /// One key a role takes.
@@ -162,6 +213,20 @@ impl KeyDef {
             (false, KeyKind::Flag) => "must be true or false".to_string(),
             (true, KeyKind::Word(words)) => format!("required: {}", join_or(words)),
             (false, KeyKind::Word(words)) => format!("must be one of: {}", words.join(", ")),
+            (true, KeyKind::Decimal) => {
+                "required, a positive decimal: digits, and a point and digits if any".to_string()
+            }
+            (false, KeyKind::Decimal) => {
+                "must be a positive decimal: digits, and a point and digits if any".to_string()
+            }
+            (true, KeyKind::Hex) => "required, hex: two digits a byte".to_string(),
+            (false, KeyKind::Hex) => "must be hex: two digits a byte".to_string(),
+            (true, KeyKind::Integer) => "required, an integer from 0".to_string(),
+            (false, KeyKind::Integer) => "must be an integer from 0".to_string(),
+            (true, KeyKind::IntegerOrNull) => "required, an integer from 0 or null".to_string(),
+            (false, KeyKind::IntegerOrNull) => "must be an integer from 0 or null".to_string(),
+            (true, KeyKind::Structured(s)) => format!("required, {}", s.expect),
+            (false, KeyKind::Structured(s)) => format!("must be {}", s.expect),
         }
     }
 }
@@ -181,6 +246,15 @@ pub(crate) enum Value {
     Text(String),
     Int(u64),
     Flag(bool),
+    /// A positive decimal, as its digits.
+    Decimal(Decimal),
+    /// Bytes written as hex.
+    Bytes(Vec<u8>),
+    /// An explicit `null`.
+    Null,
+    /// A structure its judge read without a refusal, as written: the role that owns its shape
+    /// reads it into its own types.
+    Raw(Json5Value),
 }
 
 /// The keys of one driver entry that read well, in the order the role's key table
@@ -216,6 +290,40 @@ impl Args {
             Some(Value::Flag(b)) => Some(*b),
             _ => None,
         }
+    }
+
+    /// A decimal key.
+    pub(crate) fn decimal(&self, name: &str) -> Option<Decimal> {
+        match self.get(name) {
+            Some(Value::Decimal(d)) => Some(*d),
+            _ => None,
+        }
+    }
+
+    /// A hex key's bytes.
+    pub(crate) fn bytes(&self, name: &str) -> Option<&[u8]> {
+        match self.get(name) {
+            Some(Value::Bytes(b)) => Some(b),
+            _ => None,
+        }
+    }
+
+    /// Whether the document wrote `null` for this key.
+    pub(crate) fn is_null(&self, name: &str) -> bool {
+        matches!(self.get(name), Some(Value::Null))
+    }
+
+    /// A structured key, as written (its judge passed it).
+    pub(crate) fn raw(&self, name: &str) -> Option<&Json5Value> {
+        match self.get(name) {
+            Some(Value::Raw(v)) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Whether the document named this key (or the table gave it a default).
+    pub(crate) fn has(&self, name: &str) -> bool {
+        self.get(name).is_some()
     }
 
     /// A key's value as written back for a refusal of a cross-key rule or a test.
@@ -293,6 +401,77 @@ impl RoleDef {
         self.check = check;
         self
     }
+}
+
+/// What a driver plays, as JSON a harness reads before it writes a document
+/// (`--driver-vocabulary`): every role's word, the feature it needs and whether THIS build plays
+/// it, and its keys with their kind, whether each is required and its default; `after_ms` is every
+/// role's. Made from [`ROLES`] itself, so it cannot list a key the reader refuses or leave out one
+/// it reads.
+pub(crate) fn vocabulary() -> String {
+    let roles: Vec<String> = ROLES
+        .iter()
+        .map(|role| {
+            let keys: Vec<String> = role.keys.iter().map(key_json).collect();
+            format!(
+                "{{\"role\":{},\"feature\":{},\"available\":{},\"keys\":[{}]}}",
+                json_string(role.word),
+                role.feature.map_or("null".to_string(), json_string),
+                role.available,
+                keys.join(",")
+            )
+        })
+        .collect();
+    let common = key_json(&KeyDef::optional(AFTER_MS, KeyKind::Millis));
+    format!(
+        "{{\"schema\":1,\"every_role\":[{common}],\"roles\":[{}]}}\n",
+        roles.join(",")
+    )
+}
+
+fn key_json(key: &KeyDef) -> String {
+    let kind = match key.kind {
+        KeyKind::Keyexpr => json_string("keyexpr"),
+        KeyKind::Text => json_string("text"),
+        KeyKind::Millis => json_string("millis"),
+        KeyKind::Count => json_string("count"),
+        KeyKind::Flag => json_string("flag"),
+        KeyKind::Decimal => json_string("decimal"),
+        KeyKind::Hex => json_string("hex"),
+        KeyKind::Integer => json_string("integer"),
+        KeyKind::IntegerOrNull => json_string("integer-or-null"),
+        KeyKind::Word(words) => format!(
+            "{{\"word\":[{}]}}",
+            words
+                .iter()
+                .map(|w| json_string(w))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        KeyKind::Structured(s) => format!("{{\"structure\":{}}}", json_string(s.expect)),
+    };
+    format!(
+        "{{\"name\":{},\"kind\":{kind},\"required\":{},\"default\":{}}}",
+        json_string(key.name),
+        key.required,
+        key.default.map_or("null".to_string(), |d| d.to_string())
+    )
+}
+
+/// A JSON string of `text`.
+fn json_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// The role a document word names.
@@ -424,6 +603,29 @@ fn read_value(entry: &[(String, Json5Value)], def: &KeyDef) -> Option<Value> {
         KeyKind::Word(words) => as_str(value)
             .filter(|w| words.contains(w))
             .map(|w| Value::Text(w.to_string())),
+        KeyKind::Decimal => match value {
+            Json5Value::Number(text) => Decimal::parse(text).ok().map(Value::Decimal),
+            _ => None,
+        },
+        KeyKind::Hex => as_str(value)
+            .and_then(|t| parse_hex(t).ok())
+            .map(Value::Bytes),
+        KeyKind::Integer => integer(value).map(Value::Int),
+        KeyKind::IntegerOrNull => match value {
+            Json5Value::Null => Some(Value::Null),
+            other => integer(other).map(Value::Int),
+        },
+        KeyKind::Structured(s) => (s.judge)(value)
+            .is_empty()
+            .then(|| Value::Raw(value.clone())),
+    }
+}
+
+/// An integer from 0, read from the digits written (never a bool, a string or a fraction).
+pub(crate) fn integer(value: &Json5Value) -> Option<u64> {
+    match value {
+        Json5Value::Number(text) => number_as_u64(text),
+        _ => None,
     }
 }
 
@@ -474,6 +676,13 @@ fn role_refusals(path: &str, role: &Json5Value, out: &mut Vec<Refusal>) {
     }
     for key in def.keys {
         let named = has(entry, key.name);
+        // A structure's judge names each refusal by the path inside it, under the key.
+        if let (KeyKind::Structured(s), Some(value)) = (key.kind, field(entry, key.name)) {
+            for (inner, why) in (s.judge)(value) {
+                out.push(Refusal::new(format!("{path}.{}{inner}", key.name), why));
+            }
+            continue;
+        }
         if (named || key.required) && read_value(entry, key).is_none() {
             out.push(Refusal::new(format!("{path}.{}", key.name), key.refusal()));
         }
@@ -564,10 +773,8 @@ pub(crate) struct Ctx {
 }
 
 impl Ctx {
-    /// The keys as read, for a role that builds one value out of several. Only the
-    /// group roles do, and they sit behind a feature, so a build without it never
-    /// calls this.
-    #[cfg_attr(not(feature = "group"), allow(dead_code))]
+    /// The keys as read, for a role that builds one value out of several (a
+    /// publisher's arrivals and payload, a replay's plan, a group's member).
     pub(crate) fn args(&self) -> &Args {
         &self.args
     }
@@ -753,7 +960,7 @@ mod tests {
             refused(&with_role(
                 r#"{ role: "publish", key: "d/p", payload: "x" }"#
             )),
-            vec!["sessions[0].driver[0].period_ms: required, a positive integer of milliseconds"]
+            vec!["sessions[0].driver[0].period_ms: give exactly one of period_ms and rate_per_s"]
         );
         assert_eq!(
             refused(&with_role(
@@ -849,7 +1056,14 @@ mod tests {
             );
             for key in role.keys {
                 assert!(
-                    key.default.is_none() || matches!(key.kind, KeyKind::Millis | KeyKind::Count),
+                    key.default.is_none()
+                        || matches!(
+                            key.kind,
+                            KeyKind::Millis
+                                | KeyKind::Count
+                                | KeyKind::Integer
+                                | KeyKind::IntegerOrNull
+                        ),
                     "{}.{} has a default but is not an integer",
                     role.word,
                     key.name
@@ -863,7 +1077,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(seen.len(), 17, "the document language has 17 roles");
+        assert_eq!(seen.len(), 18, "the document language has 18 roles");
         for word in available_words() {
             assert!(find(word).is_some_and(|r| r.available));
         }

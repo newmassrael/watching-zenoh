@@ -29,6 +29,7 @@ pub(crate) mod publish;
 pub(crate) mod pull;
 pub(crate) mod put_once;
 pub(crate) mod query;
+pub(crate) mod replay;
 pub(crate) mod scout;
 pub(crate) mod subscribe;
 
@@ -53,6 +54,7 @@ pub(crate) static ROLES: &[&RoleDef] = &[
     &group_member::ROLE,
     &group_view::ROLE,
     &forward::ROLE,
+    &replay::ROLE,
 ];
 
 /// How many roles THIS build plays: those whose `available` is on.

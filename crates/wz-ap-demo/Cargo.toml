@@ -75,6 +75,9 @@ path = "src/main.rs"
 [dependencies]
 # The ABI stamp this executable carries as an ELF note (`src/surface.rs`).
 wz-abi-stamp = { path = "../wz-abi-stamp" }
+# The workload the traffic driver plays (`src/sessions_driver`): a stream's arrivals and payload,
+# and a replay's pacing and mutation, with the same definitions the replay tool plays.
+wz-workload = { path = "../wz-workload" }
 # `default-features = false` here gives the R311a4 binary-size delta
 # measurement script (scripts/measure-codec-footprint.sh) a clean
 # `--no-default-features --features wz/foo,wz/bar,...` invocation that

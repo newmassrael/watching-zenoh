@@ -3812,6 +3812,7 @@ dependencies = [
  "wz-abi-stamp",
  "wz-ap-demo-app",
  "wz-runtime-tokio-test-support",
+ "wz-workload",
 ]
 
 [[package]]
