@@ -7,11 +7,11 @@
 //!
 //! A [`KeyGate`] stands in front of the keys a host handles. An open gate admits every key and
 //! looks at none, which is upstream's behaviour. A closed gate holds a
-//! [`KeyCatalogue`](crate::key_catalogue::KeyCatalogue) and admits only what the catalogue has:
+//! [`KeyCatalogue`] and admits only what the catalogue has:
 //! [`KeyGate::admit_key`] a key that is one of the set (a message's key, a peer's resource), and
 //! [`KeyGate::admit_declared`] a key the image declares in the role being asked (a local
 //! declaration of a subscriber, a publisher, a queryable). Both answer with the key's
-//! [`KeyId`](crate::key_catalogue::KeyId), so what is admitted is already numbered.
+//! [`KeyId`], so what is admitted is already numbered.
 //!
 //! # The rules it states once
 //!

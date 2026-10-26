@@ -10,7 +10,7 @@
 //! A closed image knows its peers when it is built, by their zids, and says for each what it may do on
 //! which keys. The build derives from that a [`PeerAllowance`]: [`PeerAllowance::class_of`] finds the
 //! row of a peer from its zid, once, when the peer is known, and [`PeerAllowance::allows`] answers for
-//! that row, an operation and a [`KeyId`](crate::key_catalogue::KeyId) with one bit test. It reads no
+//! that row, an operation and a [`KeyId`] with one bit test. It reads no
 //! clock, allocates nothing and owns no memory: the arrays are `static` and written by
 //! `scripts/lib/wz_key_set.py`.
 //!
