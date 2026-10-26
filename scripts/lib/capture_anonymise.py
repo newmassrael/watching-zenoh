@@ -38,7 +38,17 @@ bytes READ and that depends on the layout and not on the names.
   the addresses in A and AAAA records, keep TXT keys and replace their values,
   and zero the data of record types this parser does not read; SSDP (1900)
   keeps the start line and the values of the standard headers and replaces the
-  other values character for character; NTP (123) zeroes the reference id.
+  other values character for character; NTP (123) zeroes the reference id;
+  DHCPv4 (67, 68) maps the addresses of the BOOTP header and of the address
+  options, maps the client's MAC (`chaddr`, an Ethernet client id), scrubs
+  host, domain and FQDN names as DNS labels and the vendor and user class as
+  values, keeps the options that are numbers or protocol vocabulary, and
+  zeroes the data of every other option (vendor-specific, relay agent, DUID,
+  routes); WS-Discovery (3702) keeps the XML markup, the namespace
+  declarations and the URIs of the protocol's own vocabulary (actions, the
+  well-known `To`), and replaces every other element text and attribute value
+  character for character, which takes endpoint UUIDs, scopes, types and the
+  addresses in `XAddrs`.
   A capture of the capturer's own traffic (`--scope own`: loopback, or
   containers the capturer started on a network of its own) also admits TCP
   and UDP on any port with the payload as it is, because every payload is
@@ -109,6 +119,32 @@ PROTO_UDP = 17
 DNS_PORTS = {53, 5353, 5355}
 SSDP_PORT = 1900
 NTP_PORT = 123
+DHCP_PORTS = {67, 68}
+WSD_PORT = 3702
+
+# DHCP: where the options start, after the fixed BOOTP header and the magic
+# cookie (RFC 2131 §3).
+DHCP_OPTIONS = 240
+DHCP_COOKIE = b"\x63\x82\x53\x63"
+# Options whose data is a list of IPv4 addresses (RFC 2132): router, time
+# server, name server, DNS server, log server, broadcast address, NIS and NTP
+# servers, NetBIOS name server, requested address, server identifier.
+DHCP_ADDRESS_OPTIONS = {3, 4, 5, 6, 7, 28, 41, 42, 44, 45, 50, 54}
+# Options whose data is protocol vocabulary or a number: subnet mask, MTU,
+# lease and renewal times, message type, the parameter request list, the
+# maximum message size, overload, auto-configure, rapid commit and the
+# IPv6-only preference.
+DHCP_KEEP_OPTIONS = {1, 26, 51, 52, 53, 55, 57, 58, 59, 80, 108, 116}
+
+# WS-Discovery: the URI prefixes of its own vocabulary (actions, the
+# well-known `To`, the SOAP envelope), kept wherever they stand as a value.
+WSD_KEEP_URIS = (
+    b"http://schemas.xmlsoap.org/",
+    b"http://docs.oasis-open.org/",
+    b"http://www.w3.org/",
+    b"urn:docs-oasis-open-org:",
+    b"urn:schemas-xmlsoap-org:",
+)
 
 # The shortest replaced value the leak check searches for. A shorter string
 # turns up by chance in any binary file, and a check that always fires is one
@@ -475,6 +511,142 @@ def scrub_ntp(payload, maps):
     return bytes(out)
 
 
+def scrub_text(text, maps):
+    """A free-text field: same length, none of the characters, and the
+    original held for the leak check."""
+    if len(text) >= LEAK_MIN:
+        maps.originals.add(text.lower())
+    return scrub_value(text)
+
+
+def scrub_dns_names(data, maps):
+    """A run of DNS names in wire form, compressed against the run itself
+    (DHCP's domain search list, RFC 3397). A run this cannot walk is zeroed."""
+    out = bytearray(data)
+    pos = 0
+    try:
+        while pos < len(data):
+            pos = scrub_name(data, pos, maps, out)
+    except Refused:
+        return b"\0" * len(data)
+    return bytes(out)
+
+
+def scrub_dhcp_option(code, data, maps):
+    if code in DHCP_ADDRESS_OPTIONS and len(data) % 4 == 0:
+        return b"".join(maps.v4_of(data[i : i + 4]) for i in range(0, len(data), 4))
+    if code in DHCP_KEEP_OPTIONS:
+        return data
+    if code in (12, 15):  # host name, domain name
+        return scrub_hostname(data.rstrip(b"\0"), maps).ljust(len(data), b"\0")
+    if code == 61 and len(data) == 7 and data[0] == 1:  # client id: an Ethernet MAC
+        return data[:1] + maps.mac_of(data[1:])
+    if code == 81 and len(data) >= 3:  # client FQDN: flags, two rcodes, name
+        name = data[3:]
+        if data[0] & 0x04:  # the name is in DNS wire form
+            return data[:3] + scrub_dns_names(name, maps)
+        return data[:3] + scrub_hostname(name, maps)
+    if code == 119:  # domain search list
+        return scrub_dns_names(data, maps)
+    if code in (60, 77):  # vendor class, user class: text that names a model
+        return scrub_text(data, maps)
+    # Vendor-specific information, relay agent information, a DUID, static
+    # routes and every option this parser does not read: zeroed, as DNS zeroes
+    # the data of a record type it does not read.
+    return b"\0" * len(data)
+
+
+def scrub_dhcp(payload, maps):
+    """DHCPv4 (RFC 2131): the fixed BOOTP header, then the options after the
+    magic cookie, each kept at its length."""
+    if len(payload) < DHCP_OPTIONS or payload[DHCP_OPTIONS - 4 : DHCP_OPTIONS] != DHCP_COOKIE:
+        raise Refused("dhcp_not_bootp")
+    out = bytearray(payload)
+    for at in (12, 16, 20, 24):  # ciaddr, yiaddr, siaddr, giaddr
+        out[at : at + 4] = maps.v4_of(payload[at : at + 4])
+    htype, hlen = payload[1], payload[2]
+    if htype == 1 and hlen == 6:
+        out[28:34] = maps.mac_of(payload[28:34])
+        out[34:44] = b"\0" * 10
+    else:
+        out[28:44] = b"\0" * 16
+    for start, end in ((44, 108), (108, 236)):  # sname, file
+        field = payload[start:end]
+        text = field.split(b"\0", 1)[0]
+        out[start:end] = scrub_text(text, maps) + b"\0" * (end - start - len(text))
+    pos = DHCP_OPTIONS
+    while pos < len(payload):
+        code = payload[pos]
+        if code == 0:
+            pos += 1
+            continue
+        if code == 255:
+            out[pos + 1 :] = b"\0" * (len(payload) - pos - 1)
+            break
+        if pos + 2 > len(payload) or pos + 2 + payload[pos + 1] > len(payload):
+            raise Refused("dhcp_option_truncated")
+        n = payload[pos + 1]
+        out[pos + 2 : pos + 2 + n] = scrub_dhcp_option(code, payload[pos + 2 : pos + 2 + n], maps)
+        pos += 2 + n
+    return bytes(out)
+
+
+def scrub_wsd(payload, maps):
+    """WS-Discovery (SOAP over UDP): the markup is kept, the text of every
+    element and the value of every attribute are scrubbed, except namespace
+    declarations and the standard URIs of the protocol's own vocabulary."""
+    body = payload.lstrip(b"\xef\xbb\xbf \t\r\n")
+    if not body.startswith(b"<"):
+        raise Refused("wsd_not_xml")
+    out = bytearray(payload)
+    pos = len(payload) - len(body)
+    while pos < len(payload):
+        if payload[pos] != 0x3C:  # text up to the next tag
+            end = payload.find(b"<", pos)
+            end = len(payload) if end < 0 else end
+            text = payload[pos:end]
+            if text.strip() and not text.strip().startswith(WSD_KEEP_URIS):
+                out[pos:end] = scrub_text(text, maps)
+            pos = end
+            continue
+        if payload.startswith(b"<!--", pos):
+            end = payload.find(b"-->", pos)
+            if end < 0:
+                raise Refused("wsd_comment_open")
+            out[pos + 4 : end] = scrub_text(payload[pos + 4 : end], maps)
+            pos = end + 3
+            continue
+        if payload.startswith(b"<![CDATA[", pos) or payload.startswith(b"<!", pos):
+            raise Refused("wsd_markup_declaration")
+        end = payload.find(b">", pos)
+        if end < 0:
+            raise Refused("wsd_tag_open")
+        if not payload.startswith(b"<?xml", pos):
+            scrub_wsd_attributes(payload, pos, end, maps, out)
+        pos = end + 1
+    return bytes(out)
+
+
+def scrub_wsd_attributes(payload, start, end, maps, out):
+    """Scrub the quoted attribute values of the tag at payload[start:end]."""
+    pos = start
+    while True:
+        eq = payload.find(b"=", pos, end)
+        if eq < 0:
+            return
+        quote = payload[eq + 1 : eq + 2]
+        if quote not in (b'"', b"'"):
+            raise Refused("wsd_attribute_unquoted")
+        close = payload.find(quote, eq + 2, end)
+        if close < 0:
+            raise Refused("wsd_attribute_open")
+        name = payload[pos:eq].split()[-1] if payload[pos:eq].split() else b""
+        value = payload[eq + 2 : close]
+        if not (name == b"xmlns" or name.startswith(b"xmlns:") or value.startswith(WSD_KEEP_URIS)):
+            out[eq + 2 : close] = scrub_text(value, maps)
+        pos = close + 1
+
+
 def scrub_udp_payload(flow, sport, dport, payload, maps, scope):
     ports = {sport, dport}
     if ports & DNS_PORTS:
@@ -483,6 +655,10 @@ def scrub_udp_payload(flow, sport, dport, payload, maps, scope):
         return scrub_ssdp(payload, maps)
     if NTP_PORT in ports:
         return scrub_ntp(payload, maps)
+    if ports & DHCP_PORTS:
+        return scrub_dhcp(payload, maps)
+    if WSD_PORT in ports:
+        return scrub_wsd(payload, maps)
     if scope == "own":
         quic = maps.quic.rewrite(flow, payload)
         return quic if quic is not None else own_payload(payload, maps)
@@ -825,6 +1001,72 @@ def _quic_client(stream_frames):
     return q.seal(keys, header, 4, 2, stream_frames.ljust(1162, b"\0"))
 
 
+def _dhcp_request(mac, options):
+    header = struct.pack("!BBBBIHH", 1, 1, 6, 0, 0x3903F326, 0, 0x8000)
+    header += b"\0" * 16 + mac + b"\0" * 10 + b"\0" * 192
+    return header + DHCP_COOKIE + options + b"\xff" + b"\0" * 7
+
+
+def _selftest_dhcp(check, host):
+    mac = b"\x10\x22\x33\x44\x55\x66"
+    options = (
+        b"\x35\x01\x03"  # message type: request
+        + b"\x3d\x07\x01" + mac  # client id: the MAC
+        + b"\x32\x04" + host  # requested address
+        + b"\x0c\x0bCoinsLaptop"  # host name
+        + b"\x51\x12\x00\x00\x00CoinsLaptop.lan"  # FQDN, as text
+        + b"\x3c\x08MSFT 5.0"  # vendor class
+        + b"\x2b\x04\xde\xad\xbe\xef"  # vendor-specific
+        + b"\x37\x03\x01\x03\x06"  # parameter request list
+    )
+    raw_payload = _dhcp_request(mac, options)
+    frame = _udp4(b"\0\0\0\0", b"\xff\xff\xff\xff", 68, 67, raw_payload, src_mac=mac)
+    raw = write_pcap([(1700000000, 0, frame)], False)
+    out, maps, report = anonymise(raw, "lan")
+    check(report["packets_kept"] == 1, "a DHCP request is read: %r" % report)
+    check(not leaks(out, maps, ["coins", "msft"]), "no DHCP identity survives: %r" % leaks(out, maps, ["coins"]))
+    check(mac not in out and host not in out, "the client's MAC and requested address are gone")
+    check(b"\xde\xad\xbe\xef" not in out, "a vendor-specific option is zeroed")
+    check(b"\x35\x01\x03" in out and b"\x37\x03\x01\x03\x06" in out, "message type and request list are kept")
+    check(b".lan" in out, "the FQDN keeps its top-level label")
+    check(len(out) == len(raw), "the DHCP datagram keeps its length")
+    check(anonymise(out, "lan")[0] == out, "a DHCP capture is a fixed point")
+    short = write_pcap([(1700000000, 0, _udp4(host, b"\xff\xff\xff\xff", 68, 67, b"\x01" * 100))], False)
+    check(anonymise(short, "lan")[2]["dropped"] == {"dhcp_not_bootp": 1}, "a datagram that is not BOOTP is dropped")
+
+
+def _selftest_wsd(check, host):
+    hello = (
+        b'<?xml version="1.0" encoding="utf-8"?>'
+        b'<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"'
+        b' xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing"'
+        b' xmlns:wsd="http://schemas.xmlsoap.org/ws/2005/04/discovery">'
+        b"<soap:Header><wsa:To>urn:schemas-xmlsoap-org:ws:2005:04:discovery</wsa:To>"
+        b"<wsa:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/Hello</wsa:Action>"
+        b"<wsa:MessageID>urn:uuid:9b1c4e52-7f3a-4c11-8d2e-0a1b2c3d4e5f</wsa:MessageID>"
+        b'<wsd:AppSequence InstanceId="1761530000" MessageNumber="3"/></soap:Header>'
+        b"<soap:Body><wsd:Hello><wsa:EndpointReference><wsa:Address>"
+        b"urn:uuid:6a5b4c3d-2e1f-4a0b-9c8d-7e6f5a4b3c2d</wsa:Address></wsa:EndpointReference>"
+        b"<wsd:Types>wsdp:Device pub:Computer</wsd:Types>"
+        b"<wsd:Scopes>onvif://www.onvif.org/name/OfficeCam</wsd:Scopes>"
+        b"<wsd:XAddrs>http://192.168.130.7:5357/6a5b4c3d</wsd:XAddrs>"
+        b"</wsd:Hello></soap:Body></soap:Envelope>"
+    )
+    raw = write_pcap([(1700000000, 0, _udp4(host, b"\xef\xff\xff\xfa", 3702, 3702, hello))], False)
+    out, maps, report = anonymise(raw, "lan")
+    check(report["packets_kept"] == 1, "a WS-Discovery Hello is read: %r" % report)
+    check(not leaks(out, maps, ["officecam"]), "no WS-Discovery identity survives")
+    check(b"9b1c4e52" not in out and b"6a5b4c3d" not in out, "the message and endpoint UUIDs are gone")
+    check(b"192.168.130.7" not in out, "the address in XAddrs is gone")
+    check(b"discovery/Hello</wsa:Action>" in out, "the action is kept")
+    check(b'xmlns:wsd="http://schemas.xmlsoap.org/ws/2005/04/discovery"' in out, "namespace declarations are kept")
+    check(b"<wsd:XAddrs>" in out and b"</soap:Envelope>" in out, "the markup is kept")
+    check(len(out) == len(raw), "the WS-Discovery datagram keeps its length")
+    check(anonymise(out, "lan")[0] == out, "a WS-Discovery capture is a fixed point")
+    junk = write_pcap([(1700000000, 0, _udp4(host, b"\xef\xff\xff\xfa", 3702, 3702, b"binary"))], False)
+    check(anonymise(junk, "lan")[2]["dropped"] == {"wsd_not_xml": 1}, "a datagram that is not XML is dropped")
+
+
 def _selftest_quic(check, client, server):
     q = quic_initial
     q.selftest(check)
@@ -934,6 +1176,8 @@ def selftest():
     llmnr = struct.pack("!6H", 7, 0, 1, 0, 0, 0) + _dns_name(b"printer") + struct.pack("!HH", 1, 1)
     l_out, _, _ = anonymise(write_pcap([(1700000000, 0, _udp4(host, b"\xe0\x00\x00\xfc", 5355, 5355, llmnr))], False), "lan")
     check(b"printer" not in l_out, "a single-label DNS name is replaced, not kept as a top-level domain")
+    _selftest_dhcp(check, host)
+    _selftest_wsd(check, host)
     _selftest_quic(check, host, peer)
     if failures:
         print("capture-anonymise selftest FAIL:")
