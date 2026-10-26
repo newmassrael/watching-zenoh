@@ -2127,8 +2127,8 @@ fn an_echoed_cookie_decides_and_a_different_one_is_a_violation() {
     let cookie = [0x5Au8, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99];
     let init_ack = |cookie: &[u8]| {
         let mut wire = init(&ZID_B, true);
-        wire.pop();
-        wire.push(cookie.len() as u8);
+        // `init` writes an empty cookie, so its length is the last byte.
+        *wire.last_mut().expect("the cookie length") = cookie.len() as u8;
         wire.extend_from_slice(cookie);
         wire
     };
