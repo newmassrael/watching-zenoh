@@ -289718,6 +289718,46 @@
         "If the key set's author knows a register item that the generator closes, the citation names it in a later round; the entry for round 3685 names none."
       ]
     },
+    "Round 3692": {
+      "decision_summary": "The red of Layer C0 that the last hosted run showed in both of its jobs is paid. The unhonoured-kind evidence gate swept every tracked Rust file as wz's source, so once the configuration crate of the zenoh family landed, its data model (QosOverwriteItemConf, LinkTxConf and seven more types) made nine groups' claims that wz has no such thing false, and the differential tests that name keys to compare how upstream's crate and wz's read them asked for verdicts about keys they only name. Neither says anything about what the engine honours. The gate now sets aside, with a count printed, the files that carry the family's notice of being upstream's and the packages of conformance that drive upstream's crate beside wz's; a file of the family that wz wrote stays in the sweep. The population is again the 15 keys and 15 verdicts it was before the family.",
+      "changes_bullets": [
+        "scripts/lib/unhonoured_kind_evidence_gate.py gains set_aside: a file whose first forty lines carry \"Derived from zenoh<crate> <version>\", the notice the family notice gate requires of every file of the family (206 files), and every file under a package of conformance whose manifest names a zenoh package from the registry (45 files) are removed from the sweep before the audit, with their count and the two reasons printed; main reads the manifests through git. The audit is unchanged and stays pure over its two inputs, so its fixtures drive it as before.",
+        "One arm is added to the selftest, 21 in all: a file with the notice and a test that drives upstream's crate are set aside, while a file of the same crate without the notice, a notice that stands after the first forty lines, and a test of a package that depends on no upstream crate are not.",
+        "Nothing about the keys or the groups changed: no verdict was added, no key was reclassified and no anchor moved, because every claim of the table held once the family's own data model was not counted as wz's engine."
+      ],
+      "verification_bullets": [
+        "The gate reports 33 unhonoured keys, 15 named by wz's source and 15 verdicts, over 2,272 files swept and 251 set aside, and exits 0; its selftest passes 21 of 21 arms. Before the change it failed with 14 findings on the tree of the last push (three keys named with no verdict, two kinds whose every citing file was said to drive a node and one did not, and nine groups whose anchor was found in the family's crate).",
+        "The review-pin gate, the store-reason citation gate, the gate-test pin lint and the python floor lint pass. Layer C0 on a build host runs through the gate and stops later, at the gate-provenance lint, on a file that is not of this family (the key catalogue's generator, added by another session, which has no provenance citation); that is recorded in the carry and was told to the session that reported the reds.",
+        "Not run here: the hosted run, which a later push settles."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Layer C0's gate-provenance lint fails on scripts/lib/wz_key_set.py, which has no provenance citation in its first sixty lines; it came with the key catalogue and its generator (a commit of another session), is not of this family, and is not repaired here.",
+        "Still red on the last hosted run and not of this family: wz-runtime-tokio without transport multicast alone (a match on MulticastTxItem), two tests of wz-runtime-tokio with the codec push off and the timestamp off, the repository-captures test of wz-capture, Layer C1cs for the size of the C ABI builds, and wz-ext-pubsub in the audit of Layer C1bf.",
+        "Next, in order: the later parts of Z0c of docs/zenoh-api-on-the-engine.md, each landing when its closure exists: handlers with the channels, then key_expr and selector, then sample and the quality-of-service types; then Z1, where the table that maps the keys of a Config onto the engine is written and is a file of the family that wz wrote, which this gate sweeps. The top crate has not been run on the Windows host."
+      ],
+      "publishable_decision_summary": "The red of Layer C0 that the last hosted run showed in both of its jobs is paid. The unhonoured-kind evidence gate swept every tracked Rust file as wz's source, so once the configuration crate of the zenoh family landed, its data model (QosOverwriteItemConf, LinkTxConf and seven more types) made nine groups' claims that wz has no such thing false, and the differential tests that name keys to compare how upstream's crate and wz's read them asked for verdicts about keys they only name. Neither says anything about what the engine honours. The gate now sets aside, with a count printed, the files that carry the family's notice of being upstream's and the packages of conformance that drive upstream's crate beside wz's; a file of the family that wz wrote stays in the sweep. The population is again the 15 keys and 15 verdicts it was before the family.",
+      "publishable_changes_bullets": [
+        "scripts/lib/unhonoured_kind_evidence_gate.py gains set_aside: a file whose first forty lines carry \"Derived from zenoh<crate> <version>\", the notice the family notice gate requires of every file of the family (206 files), and every file under a package of conformance whose manifest names a zenoh package from the registry (45 files) are removed from the sweep before the audit, with their count and the two reasons printed; main reads the manifests through git. The audit is unchanged and stays pure over its two inputs, so its fixtures drive it as before.",
+        "One arm is added to the selftest, 21 in all: a file with the notice and a test that drives upstream's crate are set aside, while a file of the same crate without the notice, a notice that stands after the first forty lines, and a test of a package that depends on no upstream crate are not.",
+        "Nothing about the keys or the groups changed: no verdict was added, no key was reclassified and no anchor moved, because every claim of the table held once the family's own data model was not counted as wz's engine."
+      ],
+      "publishable_verification_bullets": [
+        "The gate reports 33 unhonoured keys, 15 named by wz's source and 15 verdicts, over 2,272 files swept and 251 set aside, and exits 0; its selftest passes 21 of 21 arms. Before the change it failed with 14 findings on the tree of the last push (three keys named with no verdict, two kinds whose every citing file was said to drive a node and one did not, and nine groups whose anchor was found in the family's crate).",
+        "The review-pin gate, the store-reason citation gate, the gate-test pin lint and the python floor lint pass. Layer C0 on a build host runs through the gate and stops later, at the gate-provenance lint, on a file that is not of this family (the key catalogue's generator, added by another session, which has no provenance citation); that is recorded in the carry and was told to the session that reported the reds.",
+        "Not run here: the hosted run, which a later push settles."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Layer C0's gate-provenance lint fails on scripts/lib/wz_key_set.py, which has no provenance citation in its first sixty lines; it came with the key catalogue and its generator (a commit of another session), is not of this family, and is not repaired here.",
+        "Still red on the last hosted run and not of this family: wz-runtime-tokio without transport multicast alone (a match on MulticastTxItem), two tests of wz-runtime-tokio with the codec push off and the timestamp off, the repository-captures test of wz-capture, Layer C1cs for the size of the C ABI builds, and wz-ext-pubsub in the audit of Layer C1bf.",
+        "Next, in order: the later parts of Z0c of docs/zenoh-api-on-the-engine.md, each landing when its closure exists: handlers with the channels, then key_expr and selector, then sample and the quality-of-service types; then Z1, where the table that maps the keys of a Config onto the engine is written and is a file of the family that wz wrote, which this gate sweeps. The top crate has not been run on the Windows host."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
