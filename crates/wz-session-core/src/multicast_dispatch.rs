@@ -10,8 +10,8 @@
 //! This is the handshake-free multicast sibling of
 //! [`reassembly_dispatch`](crate::reassembly_dispatch): the two engine-free
 //! statecharts own the protocol lifecycles, and this Rust Router owns
-//! everything a native FSM guard cannot reference — the per-peer last_seen
-//! + lease arithmetic, the inbound Join validation / classification, and
+//! everything a native FSM guard cannot reference — the per-peer last_seen +
+//! lease arithmetic, the inbound Join validation / classification, and
 //! the lease-sweep clock.
 //!
 //! ## Division of labour (`docs/session-fsm.md` §3.1 / §3.2)

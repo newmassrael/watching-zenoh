@@ -32,8 +32,8 @@
 //!
 //! The synthesized locators feed the same downstream consumer as the
 //! active mode's discovered locator (the session FSM `Init -> LinkOpening`
-//! path, docs/scouting-fsm.md §2.4.3 "Interaction with links.udp_session"
-//! + §307-308): only the *trigger* differs between modes, not the
+//! path, docs/scouting-fsm.md §2.4.3 "Interaction with links.udp_session" +
+//! §307-308): only the *trigger* differs between modes, not the
 //! locator handoff. Synthesized locators carry no peer `zid` — the
 //! scouting-time zid is advisory and the session handshake derives the
 //! authoritative identity itself (§2 "Why zid=NULL is OK on synthesized
