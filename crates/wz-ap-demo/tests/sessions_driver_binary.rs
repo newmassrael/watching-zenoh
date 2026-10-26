@@ -256,7 +256,7 @@ fn a_rate_stream_and_a_replay_reach_the_listener() {
         ),
     );
     let mut client = Node::spawn(&["--sessions", &client_doc]);
-    client.expect_line("DRIVER publish done key=demo/w/tick count=4 skipped=");
+    client.expect_line("DRIVER publish done key=demo/w/tick count=4 late_max_us=");
     assert_eq!(
         client.count("DRIVER publish sent key=demo/w/tick bytes=16"),
         4
@@ -281,6 +281,53 @@ fn a_rate_stream_and_a_replay_reach_the_listener() {
         n
     };
     assert_eq!(ticks, 4, "{}", listener.seen.join("\n"));
+}
+
+/// The arrival processes of a stream reach the listener in full: a Poisson stream from a seed and a
+/// stream of bursts, each its count of sends at its length: a short Poisson gap the timer cannot
+/// hit is sent late, never dropped, so the count is the plan's.
+#[test]
+fn a_poisson_and_a_burst_stream_reach_the_listener() {
+    let dir = Dir::new("arrivals");
+    let listener_doc = dir.write(
+        "listener.json5",
+        r#"{ sessions: [
+            { name: "inbound", mode: "peer", transport: "unicast", zid: "dd31",
+              listen: { endpoints: ["tcp/127.0.0.1:0"] },
+              driver: [ { role: "subscribe", key: "demo/a/**" } ] } ] }"#,
+    );
+    let mut listener = Node::spawn(&["--sessions", &listener_doc]);
+    let ready = listener.expect_line("READY peer unicast listening on");
+    let addr = listening_on(&ready);
+    let client_doc = dir.write(
+        "client.json5",
+        &format!(
+            r#"{{ sessions: [
+                {{ name: "out", mode: "client", transport: "unicast", zid: "dd32",
+                  connect: {{ endpoints: ["{addr}"] }},
+                  driver: [
+                    {{ role: "publish", key: "demo/a/poisson", rate_per_s: 50, arrivals: "poisson",
+                      arrival_seed: 7, payload_bytes: 8, count: 5, after_ms: 1000 }},
+                    {{ role: "publish", key: "demo/a/burst", period_ms: 100, arrivals: "burst",
+                      burst: 3, payload: "b", count: 6, after_ms: 1000 }},
+                  ] }} ] }}"#
+        ),
+    );
+    let mut client = Node::spawn(&["--sessions", &client_doc]);
+    client.expect_line("DRIVER publish done key=demo/a/poisson count=5 late_max_us=");
+    client.expect_line("DRIVER publish done key=demo/a/burst count=6 late_max_us=");
+    for (key, bytes, n) in [("demo/a/poisson", 8, 5), ("demo/a/burst", 1, 6)] {
+        let needle = format!("DRIVER subscribe sample key={key} kind=Put bytes={bytes}");
+        let until = Instant::now() + DEADLINE;
+        while listener.count(&needle) < n && Instant::now() < until {
+            listener.expect_line(&needle);
+            std::thread::sleep(Duration::from_millis(50));
+            while let Ok(line) = listener.lines.try_recv() {
+                listener.seen.push(line);
+            }
+        }
+        assert_eq!(listener.count(&needle), n, "{}", listener.seen.join("\n"));
+    }
 }
 
 /// `--driver-vocabulary` prints the role table as JSON: every role, with the keys the reader

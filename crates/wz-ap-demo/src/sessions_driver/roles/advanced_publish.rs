@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `advanced_publish`: declare an advanced publisher on `key` and put `payload`
-//! every `period_ms`, `count` times (until the process stops when `count` is
-//! absent), keeping the last `cache` samples for a subscriber that joins late.
+//! `advanced_publish`: declare an advanced publisher on `key` and put a stream
+//! through it (`super::super::stream`: the same keys and the same schedule as
+//! `publish`), keeping the last `cache` samples for a subscriber that joins late.
 //!
 //! The publisher is held after the last put, finite run or not: the cache is the
 //! thing a late subscriber asks, so dropping it when the puts end would retract
@@ -21,6 +21,7 @@ use wz::runtime_tokio::advanced_publisher::{
     AdvancedPublisher, AdvancedPublisherOptions, MissDetectionConfig,
 };
 
+use crate::sessions_driver::stream::{self, stream_keys};
 use crate::sessions_driver::{Ctx, KeyDef, KeyKind, Play, RoleDef};
 
 /// How many samples the publisher keeps when the document names none: the
@@ -29,18 +30,15 @@ pub(crate) const DEFAULT_CACHE: u64 = 1;
 
 pub(crate) static ROLE: RoleDef = RoleDef::gated(
     "advanced_publish",
-    &[
-        KeyDef::required("key", KeyKind::Keyexpr),
-        KeyDef::required("payload", KeyKind::Text),
-        KeyDef::required("period_ms", KeyKind::Millis),
-        KeyDef::optional("count", KeyKind::Count),
+    stream_keys!(
         KeyDef::defaulted("cache", KeyKind::Count, DEFAULT_CACHE),
         KeyDef::optional("heartbeat_ms", KeyKind::Millis),
-    ],
+    ),
     "advanced",
     cfg!(feature = "advanced"),
     play,
-);
+)
+.checked(stream::check);
 
 #[cfg(feature = "advanced")]
 fn play(ctx: Ctx) -> Play {
@@ -72,9 +70,6 @@ fn options_of(cache: u64, heartbeat_ms: Option<u64>) -> AdvancedPublisherOptions
 #[cfg(feature = "advanced")]
 async fn run(ctx: Ctx) {
     let key = ctx.text("key");
-    let payload = ctx.text("payload");
-    let period = Duration::from_millis(ctx.int("period_ms").unwrap_or(1));
-    let count = ctx.int("count");
     let cache = ctx.int("cache").unwrap_or(DEFAULT_CACHE);
     let heartbeat_ms = ctx.int("heartbeat_ms");
     let publisher = match AdvancedPublisher::declare(
@@ -93,18 +88,13 @@ async fn run(ctx: Ctx) {
         "declared key={key} cache={cache} heartbeat_ms={}",
         heartbeat_ms.map_or_else(|| "none".to_string(), |ms| ms.to_string())
     ));
-    let mut sent = 0u64;
-    while count.map_or(true, |n| sent < n) {
-        match publisher.put(payload.as_bytes()) {
-            Ok(_) => ctx
-                .say
-                .line(&format!("sent key={key} bytes={}", payload.len())),
-            Err(e) => ctx.say.line(&format!("refused key={key}: {e}")),
-        }
-        sent += 1;
-        tokio::time::sleep(period).await;
-    }
-    ctx.say.line(&format!("done key={key} count={sent}"));
+    stream::run(&ctx, &key, |bytes| match publisher.put(bytes) {
+        Ok(_) => ctx
+            .say
+            .line(&format!("sent key={key} bytes={}", bytes.len())),
+        Err(e) => ctx.say.line(&format!("refused key={key}: {e}")),
+    })
+    .await;
     ctx.hold().await;
 }
 
@@ -182,7 +172,9 @@ mod tests {
         let at = "sessions[0].driver[0]";
         assert_eq!(
             read(r#"{ role: "advanced_publish", key: "d/a", period_ms: 20 }"#).map(|_| ()),
-            Err(vec![format!("{at}.payload: required, a string")])
+            Err(vec![format!(
+                "{at}.payload: give exactly one of payload, payload_hex and payload_bytes"
+            )])
         );
         assert_eq!(
             read(r#"{ role: "advanced_publish", payload: "x", period_ms: 20 }"#).map(|_| ()),
@@ -193,7 +185,7 @@ mod tests {
         assert_eq!(
             read(r#"{ role: "advanced_publish", key: "d/a", payload: "x" }"#).map(|_| ()),
             Err(vec![format!(
-                "{at}.period_ms: required, a positive integer of milliseconds"
+                "{at}.period_ms: give exactly one of period_ms and rate_per_s"
             )])
         );
         assert_eq!(

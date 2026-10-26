@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `query`: declare a querier on `key` and ask through it every `period_ms`,
-//! `count` times (until the process stops when `count` is absent).
+//! `query`: declare a querier on `key` and ask through it, `count` times (until
+//! the process stops when `count` is absent): every `period_ms` (open loop, the
+//! next question whatever the last one's answer), or, with `think_ms`, the next
+//! question `think_ms` after the last one's final (closed loop, the asker that
+//! waits for its answer: what one client does, and what a fixed period cannot
+//! model when the answers are slower than the period).
 //!
 //! `get` asks once through `Session::query`; this role is the declared handle,
 //! which is what a long-lived asker holds: the options (the timeout here) are
@@ -11,23 +15,43 @@
 //! A question the session refuses ends the role: the refusal is a property of the
 //! key or of the build, so the next question would be refused the same way.
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::Notify;
 use wz::runtime_tokio::session::QueryOptions;
 
 use super::get::DEFAULT_TIMEOUT_MS;
-use crate::sessions_driver::{Ctx, KeyDef, KeyKind, Play, RoleDef};
+use crate::sessions_driver::{Args, Ctx, KeyDef, KeyKind, Play, RoleDef};
+
+/// How much longer than its timeout a closed loop waits for a question's final
+/// before it says the final was lost and asks again: the session ends a question
+/// at its timeout with a final of its own, so reaching this is a defect to see.
+const FINAL_MARGIN_MS: u64 = 1_000;
 
 pub(crate) static ROLE: RoleDef = RoleDef::played(
     "query",
     &[
         KeyDef::required("key", KeyKind::Keyexpr),
-        KeyDef::required("period_ms", KeyKind::Millis),
+        KeyDef::optional("period_ms", KeyKind::Millis),
+        KeyDef::optional("think_ms", KeyKind::Integer),
         KeyDef::optional("count", KeyKind::Count),
         KeyDef::defaulted("timeout_ms", KeyKind::Millis, DEFAULT_TIMEOUT_MS),
     ],
     play,
-);
+)
+.checked(check);
+
+/// One loop: a period (open) or a think time after each final (closed).
+fn check(args: &Args) -> Vec<(&'static str, String)> {
+    if args.has("period_ms") == args.has("think_ms") {
+        return vec![(
+            "period_ms",
+            "give exactly one of period_ms (open loop) and think_ms (closed loop)".to_string(),
+        )];
+    }
+    Vec::new()
+}
 
 fn play(ctx: Ctx) -> Play {
     Box::pin(run(ctx))
@@ -35,10 +59,11 @@ fn play(ctx: Ctx) -> Play {
 
 async fn run(ctx: Ctx) {
     let key = ctx.text("key");
-    let period = Duration::from_millis(ctx.int("period_ms").unwrap_or(1));
+    let period = ctx.int("period_ms").map(Duration::from_millis);
+    let think = Duration::from_millis(ctx.int("think_ms").unwrap_or(0));
     let count = ctx.int("count");
-    let timeout =
-        u32::try_from(ctx.int("timeout_ms").unwrap_or(DEFAULT_TIMEOUT_MS)).unwrap_or(u32::MAX);
+    let timeout_ms = ctx.int("timeout_ms").unwrap_or(DEFAULT_TIMEOUT_MS);
+    let timeout = u32::try_from(timeout_ms).unwrap_or(u32::MAX);
     let querier = ctx.session.declare_querier(
         key.clone(),
         QueryOptions::default().with_timeout_ms(timeout),
@@ -48,6 +73,8 @@ async fn run(ctx: Ctx) {
     while count.map_or(true, |n| asked < n) {
         let n = asked + 1;
         let (replies, finals) = (ctx.say.clone(), ctx.say.clone());
+        let answered = Arc::new(Notify::new());
+        let notify = Arc::clone(&answered);
         let sent = querier.get(
             move |reply| {
                 replies.line(&format!(
@@ -57,7 +84,10 @@ async fn run(ctx: Ctx) {
                     reply.payload().len()
                 ));
             },
-            move |_rid| finals.line(&format!("final n={n}")),
+            move |_rid| {
+                finals.line(&format!("final n={n}"));
+                notify.notify_one();
+            },
         );
         match sent {
             Ok(_) => ctx.say.line(&format!("asked key={key} n={n}")),
@@ -67,7 +97,19 @@ async fn run(ctx: Ctx) {
             }
         }
         asked = n;
-        tokio::time::sleep(period).await;
+        match period {
+            Some(period) => tokio::time::sleep(period).await,
+            None => {
+                let wait = Duration::from_millis(timeout_ms.saturating_add(FINAL_MARGIN_MS));
+                if tokio::time::timeout(wait, answered.notified())
+                    .await
+                    .is_err()
+                {
+                    ctx.say.line(&format!("lost final n={n}"));
+                }
+                tokio::time::sleep(think).await;
+            }
+        }
     }
     ctx.say.line(&format!("done key={key} count={asked}"));
 }
@@ -134,8 +176,19 @@ mod tests {
         );
         assert_eq!(
             refused(r#"{ role: "query", key: "d/q" }"#),
-            vec!["sessions[0].driver[0].period_ms: required, a positive integer of milliseconds"]
+            vec![
+                "sessions[0].driver[0].period_ms: give exactly one of period_ms (open loop) and \
+                 think_ms (closed loop)"
+            ]
         );
+        assert_eq!(
+            refused(r#"{ role: "query", key: "d/q", period_ms: 40, think_ms: 0 }"#),
+            vec![
+                "sessions[0].driver[0].period_ms: give exactly one of period_ms (open loop) and \
+                 think_ms (closed loop)"
+            ]
+        );
+        assert!(plan(r#"{ role: "query", key: "d/q", think_ms: 0 }"#).is_ok());
         assert_eq!(
             refused(r#"{ role: "query", key: "d/q", period_ms: 40, reply: "x" }"#),
             vec!["sessions[0].driver[0].reply: not a key of the `query` role"]

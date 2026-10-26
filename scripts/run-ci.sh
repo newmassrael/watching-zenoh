@@ -6725,7 +6725,8 @@ layer_c1ay_cargo_test_router_hat() {
     # Two more (docs/target-build-contract.md 5c): the workload a driver plays reaches the
     # listener (a stream at a decimal rate with a made payload, a replay of hex and text samples
     # with mutations, each counted at the length sent), and `--driver-vocabulary` is the role table.
-    _runci_guarded_test "C1AY sessions_driver_binary 6" 6 \
+    # A seventh: a Poisson stream and a stream of bursts reach the listener in full.
+    _runci_guarded_test "C1AY sessions_driver_binary 7" 7 \
         cargo test -p wz-ap-demo --test sessions_driver_binary --quiet || return 1
     # The other driver roles, one target per family, each over real `--sessions`
     # processes and each with its count pinned: liveliness (a token seen to appear
@@ -6733,7 +6734,9 @@ layer_c1ay_cargo_test_router_hat() {
     # forwarder and the pulled subscriber. Both are in the default build.
     _runci_guarded_test "C1AY sessions_driver_liveliness_binary 3" 3 \
         cargo test -p wz-ap-demo --test sessions_driver_liveliness_binary --quiet || return 1
-    _runci_guarded_test "C1AY sessions_driver_query_binary 3" 3 \
+    # The querier's fourth case is the closed loop (`think_ms`): each question after the last
+    # one's final.
+    _runci_guarded_test "C1AY sessions_driver_query_binary 4" 4 \
         cargo test -p wz-ap-demo --test sessions_driver_query_binary --quiet || return 1
     # The roles behind a build feature: the advanced publisher and subscriber
     # (`advanced`) and the group member and viewer (`group`). Each target is
@@ -12909,6 +12912,8 @@ layer_c1by_replay_engine() {
         arrivals::tests::a_decimal_is_its_digits \
         arrivals::tests::a_rate_gives_its_gap_exactly \
         arrivals::tests::the_schedule_keeps_absolute_deadlines \
+        arrivals::tests::a_burst_is_sent_back_to_back \
+        arrivals::tests::a_poisson_process_draws_its_gaps_from_the_seed \
         payload::tests::the_fills_are_these_bytes \
         payload::tests::hex_is_two_digits_a_byte
     do

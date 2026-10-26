@@ -198,6 +198,59 @@ fn a_declared_querier_asks_through_its_handle_and_the_peer_answers() {
     listener.expect_line("DRIVER answer replied key=demo/q bytes=4");
 }
 
+/// A closed loop (`think_ms`): each question is asked after the final of the one before it,
+/// which is what an asker that waits for its answer does, and every final is seen.
+#[test]
+fn a_closed_loop_asks_each_question_after_the_last_ones_final() {
+    let dir = Dir::new("query-closed");
+    let (_listener, addr) = listen(
+        &dir,
+        "dd21",
+        r#"{ role: "answer", key: "demo/c", reply: "pong" }"#,
+    );
+    let mut client = dial(
+        &dir,
+        "dd22",
+        &addr,
+        r#"{ role: "query", key: "demo/c", think_ms: 0, count: 3, timeout_ms: 5000,
+             after_ms: 1500 }"#,
+    );
+    client.expect_line("DRIVER query done key=demo/c count=3");
+    assert_eq!(
+        client.count("DRIVER query lost final"),
+        0,
+        "{}",
+        client.seen.join("\n")
+    );
+    let order: Vec<&String> = client
+        .seen
+        .iter()
+        .filter(|l| l.contains("DRIVER query asked key=demo/c") || l.contains("DRIVER query final"))
+        .collect();
+    let shape: Vec<String> = order
+        .iter()
+        .map(|l| {
+            l.rsplit("DRIVER query ")
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        [
+            "asked key=demo/c n=1",
+            "final n=1",
+            "asked key=demo/c n=2",
+            "final n=2",
+            "asked key=demo/c n=3",
+            "final n=3",
+        ],
+        "{}",
+        client.seen.join("\n")
+    );
+}
+
 /// A forwarder on one node republishes what the other node puts and deletes, and
 /// the other node's subscriber on the `to` key receives them: a put arrives as a
 /// put and a delete as a delete. The samples that feed the forwarder come from the

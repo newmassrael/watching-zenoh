@@ -4541,6 +4541,9 @@ dependencies = [
 [[package]]
 name = "wz-workload"
 version = "0.1.0"
+dependencies = [
+ "libm",
+]
 
 [[package]]
 name = "x509-parser"

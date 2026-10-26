@@ -31,6 +31,9 @@ path = "src/lib.rs"
 crate-type = ["rlib"]
 
 [dependencies]
+# The natural logarithm of a Poisson process's exponential gaps, which `core` does not have: the
+# Rust project's own port of the C library's mathematics, `no_std`, already in this workspace's lock.
+libm = { version = "0.2", default-features = false }
 
 [lints]
 workspace = true
