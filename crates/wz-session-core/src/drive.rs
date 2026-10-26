@@ -294,7 +294,14 @@ fn dispatch_unit<R: SessionRuntime, T: TimeSource>(
 /// (the length of the unit on entry, shortened to where the message ended), and the
 /// caller reads the rest of the datagram where it lies, as upstream's batch walk
 /// does.
+///
+/// Out of line so its frame, which holds the decoded message, is gone before the
+/// caller hands the outcome to `on_event`, which drains the session's replies:
+/// inlined into `dispatch_copied`, the message and its decode were part of a
+/// 2,432-byte frame that stayed live under the reply's encode (see
+/// [`dispatch_unit_in`] for how the decode itself is split).
 #[cfg(all(feature = "codec-frame", feature = "session-slot"))]
+#[inline(never)]
 fn dispatch_unit_borrowed<R: SessionRuntime, T: TimeSource>(
     bytes: &[u8],
     #[cfg(not(feature = "alloc"))] consumed: &mut usize,
@@ -314,6 +321,15 @@ fn dispatch_unit_borrowed<R: SessionRuntime, T: TimeSource>(
 /// The body of [`dispatch_unit`] and `dispatch_unit_borrowed`: `bytes` is the
 /// unit, and `shared` is the same unit as a shareable value when the caller has
 /// one.
+///
+/// It is three steps, and each one's frame is only as deep as its own work: the
+/// decode ([`decode_unit_in`]), the checks over the decoded message
+/// ([`decide_unit_in`]), and the engine taking the event of an admitted handshake
+/// message, here. Only the decoded message (720 bytes on the fixed profile) is
+/// held across them. In one function, the decode's own copies of it (the parse's
+/// result, the frame destructured out of it, a 702-byte value) were slots of the
+/// frame under the engine's answer to a handshake and under the parser's walk,
+/// the deepest paths a session's stack reaches on the fixed-memory client.
 fn dispatch_unit_in<R: SessionRuntime, T: TimeSource>(
     bytes: &[u8],
     #[cfg(feature = "alloc")] shared: Option<&crate::link::RxBytes>,
@@ -321,13 +337,36 @@ fn dispatch_unit_in<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
     engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
 ) -> DriverLoopOutcome {
-    use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
-    // The unit is read two ways below: as bytes, for the leading id and the
-    // lengths, and (when there is one) as a shareable value, for every decode and
-    // for the remainder it parks. The decodes run over `shared` itself and never
-    // over a copy of it, because a range is recognisable as part of `shared` only
-    // if it is.
+    #[cfg(all(feature = "alloc", feature = "transport-lowlatency"))]
+    if let Some(outcome) = dispatch_lean_unit(bytes, shared, actions, engine) {
+        return outcome;
+    }
+    #[cfg(feature = "alloc")]
+    let parsed = decode_unit_in(bytes, shared, actions);
+    #[cfg(not(feature = "alloc"))]
+    let parsed = decode_unit_in(bytes, consumed_out, actions);
+    let mut admitted = None;
+    let outcome = decide_unit_in(parsed, &mut admitted, actions, engine);
+    if let Some(event) = admitted {
+        engine.process_event(event);
+    }
+    outcome
+}
 
+/// One transport message decoded off the front of a unit, and where it ended.
+type DecodedUnit = Result<(InboundFrame, usize), crate::parse_error::InboundParseError>;
+
+/// transport-lowlatency — the unit of an established lowlatency session that is
+/// a bare network message batch, dispatched as one; `None` for every other unit,
+/// which [`dispatch_unit_in`] decodes as a transport message.
+#[cfg(all(feature = "alloc", feature = "transport-lowlatency"))]
+fn dispatch_lean_unit<R: SessionRuntime, T: TimeSource>(
+    bytes: &[u8],
+    shared: Option<&crate::link::RxBytes>,
+    actions: &SessionLinkActions<R, T>,
+    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+) -> Option<DriverLoopOutcome> {
+    use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
     // transport-lowlatency — lean rx: once this session negotiated
     // lowlatency AND is established, a datagram whose leading message id
     // is neither Close nor KeepAlive is a BARE NetworkMessage with NO
@@ -344,7 +383,6 @@ fn dispatch_unit_in<R: SessionRuntime, T: TimeSource>(
     // handshake Init / Open frames (which still ride the universal path —
     // lowlatency only selects the transport post-establishment, zenoh
     // manager.rs:611) off this branch.
-    #[cfg(all(feature = "alloc", feature = "transport-lowlatency"))]
     if actions.is_lowlatency() && actions.is_established() {
         // Dispatch the leading message id ([`is_lean_network_unit`]).
         if is_lean_network_unit(bytes) {
@@ -359,7 +397,7 @@ fn dispatch_unit_in<R: SessionRuntime, T: TimeSource>(
                     &owned
                 }
             };
-            return match parse_frame_payload_out_of_line(unit) {
+            return Some(match parse_frame_payload_out_of_line(unit) {
                 Ok(messages) => {
                     // R2825 — a lean datagram is ONE transport message whatever
                     // it carries, which is how upstream's lowlatency rx counts it.
@@ -382,9 +420,28 @@ fn dispatch_unit_in<R: SessionRuntime, T: TimeSource>(
                     engine.process_event(E::FramingError);
                     DriverLoopOutcome::ParseError(parse_err)
                 }
-            };
+            });
         }
     }
+    None
+}
+
+/// [`dispatch_unit_in`]'s decode of the transport message at the front of a unit,
+/// with what the link records about it, and the residue: parked for the next turn,
+/// or (with no allocator) reported through `consumed_out`. Out of line, so the
+/// parser's working copies are gone before the message is judged.
+///
+/// The unit is read two ways: as bytes, for the leading id and the lengths, and
+/// (when there is one) as a shareable value, for every decode and for the
+/// remainder it parks. The decodes run over `shared` itself and never over a copy
+/// of it, because a range is recognisable as part of `shared` only if it is.
+#[inline(never)]
+fn decode_unit_in<R: SessionRuntime, T: TimeSource>(
+    bytes: &[u8],
+    #[cfg(feature = "alloc")] shared: Option<&crate::link::RxBytes>,
+    #[cfg(not(feature = "alloc"))] consumed_out: &mut usize,
+    actions: &SessionLinkActions<R, T>,
+) -> DecodedUnit {
     // R311y632 (§17) — THE UNIT IS A BATCH. Take the message at the front and
     // park whatever follows it, so the next drive-loop turn dispatches that
     // instead of the peer's next datagram. `consumed == 0` means the extent is
@@ -426,6 +483,22 @@ fn dispatch_unit_in<R: SessionRuntime, T: TimeSource>(
             }
         }
     }
+    parsed
+}
+
+/// [`dispatch_unit_in`]'s judgement of one decoded transport message: every check
+/// a handshake message must pass, and the dispatch of whatever is not a handshake
+/// event. A message the checks admit is handed back in `admitted` with
+/// [`DriverLoopOutcome::AdvancedFsm`], for the caller to give the engine once this
+/// frame is gone.
+#[inline(never)]
+fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
+    parsed: DecodedUnit,
+    admitted: &mut Option<crate::session_fsm_unicast::SessionFsmUnicastEvent>,
+    actions: &SessionLinkActions<R, T>,
+    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+) -> DriverLoopOutcome {
+    use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
     // Destructured where it lies: `Result::map` would take the 720-byte result by value
     // and hand the frame on through a closure, a slot of the frame each time.
     match parsed {
@@ -906,7 +979,7 @@ fn dispatch_unit_in<R: SessionRuntime, T: TimeSource>(
                         }
                     }
                 }
-                engine.process_event(event);
+                *admitted = Some(event);
                 DriverLoopOutcome::AdvancedFsm
             }
             None => match frame {

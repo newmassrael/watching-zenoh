@@ -8604,9 +8604,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         &self,
         bytes: &[u8],
     ) -> Result<(InboundFrame, usize), InboundParseError> {
-        let parsed = parse_inbound_consuming(bytes)?;
-        self.observe_inbound(&parsed.0);
-        Ok(parsed)
+        // Returned where it lies: `?` and an `Ok` around it would be two more copies of
+        // the 712-byte frame in the frame of whatever inlines this.
+        let parsed = parse_inbound_consuming(bytes);
+        if let Ok((frame, _)) = &parsed {
+            self.observe_inbound(frame);
+        }
+        parsed
     }
 
     /// [`Self::handle_inbound_consuming`] over a unit that can be shared: the
@@ -8618,9 +8622,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         &self,
         unit: &crate::link::RxBytes,
     ) -> Result<(InboundFrame, usize), InboundParseError> {
-        let parsed = crate::inbound::parse_inbound_consuming_in(unit)?;
-        self.observe_inbound(&parsed.0);
-        Ok(parsed)
+        let parsed = crate::inbound::parse_inbound_consuming_in(unit);
+        if let Ok((frame, _)) = &parsed {
+            self.observe_inbound(frame);
+        }
+        parsed
     }
 
     /// What the link records about one decoded transport message: the
