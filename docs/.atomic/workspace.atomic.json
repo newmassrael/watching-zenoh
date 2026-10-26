@@ -290288,6 +290288,56 @@
         "Still red on the last hosted runs and not of this family: wz-runtime-tokio without transport multicast alone (a match on MulticastTxItem), two tests of wz-runtime-tokio with the codec push off and the timestamp off, the repository-captures test of wz-capture, Layer C1cs for the size of the C ABI builds, and wz-ext-pubsub in the audit of Layer C1bf. Hosted runs of this family's pushes were cancelled by the next push each time, so their per-job result is still to be read."
       ]
     },
+    "Round 3703": {
+      "decision_summary": "Step 2 of the zenoh verdict's calibration: a corpus of real captures and the test that holds both error rates to it. Six zenoh 1.10.1 captures (TCP and UDP, from the handshake and joined mid-session, with and without lz4) and three of an office Wi-Fi (DNS, mDNS, SSDP) are committed under captures/corpus after anonymisation, which keeps every length and replaces addresses, MACs, names and header values; a capture the anonymiser would still change is refused. No zenoh flow may read no, no other flow may read yes, and every file's tally is pinned for both builds. The corpus's first finding was a false no: a compressed session joined mid-session read every unit undecodable, because with no Init the reader took each batch's header byte for a message. The reader now infers the header from the bytes where no Init was seen, unit by unit and both ways for a datagram, and on a chain of boundaries all of one reading for a stream; the halves say which.",
+      "changes_bullets": [
+        "`captures/corpus/`: six zenoh 1.10.1 captures of a zenohd router and two clients on loopback and three of an office Wi-Fi, each listed in `corpus.json5` with its hypothesis, scope, source and packet count, and a README of how they were taken and kept anonymous.",
+        "`scripts/lib/capture_anonymise.py`: MACs and addresses to locally administered and documentation ranges, DNS, mDNS and LLMNR names, TXT values, SSDP header values and NTP reference ids replaced at their own length, any other payload dropped and counted, a leak check that refuses an output holding an original value, and `--verify-corpus`, which holds every listed file to being a fixed point; both run in the pre-push static gate array.",
+        "`zenoh_corpus_tests.rs`: no flow of an `other` file reads yes, no flow of a `zenoh` file reads no, and every file's tally is pinned for the builds with and without lz4.",
+        "wz-session-core `passive.rs`: where no Init was seen a datagram direction follows whichever reading reads a unit whole, and a stream resumes on a chain of boundaries all of one reading, which also lets a negotiated headed stream resume; `BatchHeader` says which. Field document 44 carries it on every half."
+      ],
+      "verification_bullets": [
+        "After the rebase onto the tip, on a build host: wz-session-core passive tests 82 passed; `cargo test -p wz-capture --features dissect` 1604 passed, 6 ignored; the corpus test passes with lz4 as well; wz-capi-dissect 227 passed; `cargo check -p wz-analyze --all-targets`.",
+        "Layers C1bo, C1bn and C1bt passed on a build host; C1bz passed for wz-capture and wz-capi-dissect; clippy with -D warnings on the three crates with and without features; the guarded-count gate judged 1 of 1; the pre-push static gate array passed.",
+        "Measured on the corpus, both builds: every one of the twelve zenoh flows reads yes; of the other flows none reads yes, 4 read no and 204 undecided (DNS flows are one query and its answer). Before the inference both flows of the compressed UDP session joined mid-session read no.",
+        "The anonymiser's selftest fails when name scrubbing or address mapping is switched off; the resync-across-noise test keeps 55, 42 and 32 percent of the real frames, above its floor of 30, where a sticky inference had made it run without end."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing",
+        "wire-spec-subset--watching-zenoh-mvp/4-4-transport-extensions"
+      ],
+      "carry_forward_bullets": [
+        "The corpus still lacks RTPS, SOME/IP, CoAP, MQTT, QUIC, LLMNR, WS-Discovery, NTP and DHCP, a busier LAN, several zenoh versions and zenoh-pico. RTPS and MQTT need container images; QUIC needs a parser in the anonymiser before a real capture can be kept, since its Initial carries the server name under keys anyone can derive.",
+        "Step 3, measured weights and a new model number, waits for a corpus large enough to measure the weights it would replace.",
+        "Layer C1bz reads 515 broken doc links in wz-session-core against a budget of 494 on the tip itself, from files other rounds changed; passive.rs carries 3, all older than this round.",
+        "A stream joined mid-session on a compressed session desynchronises once at its first header byte before the scan finds the headed chain; the units in that first stretch are skipped and counted under resync accounting."
+      ],
+      "publishable_decision_summary": "Step 2 of the zenoh verdict's calibration: a corpus of real captures and the test that holds both error rates to it. Six zenoh 1.10.1 captures (TCP and UDP, from the handshake and joined mid-session, with and without lz4) and three of an office Wi-Fi (DNS, mDNS, SSDP) are committed under captures/corpus after anonymisation, which keeps every length and replaces addresses, MACs, names and header values; a capture the anonymiser would still change is refused. No zenoh flow may read no, no other flow may read yes, and every file's tally is pinned for both builds. The corpus's first finding was a false no: a compressed session joined mid-session read every unit undecodable, because with no Init the reader took each batch's header byte for a message. The reader now infers the header from the bytes where no Init was seen, unit by unit and both ways for a datagram, and on a chain of boundaries all of one reading for a stream; the halves say which.",
+      "publishable_changes_bullets": [
+        "`captures/corpus/`: six zenoh 1.10.1 captures of a zenohd router and two clients on loopback and three of an office Wi-Fi, each listed in `corpus.json5` with its hypothesis, scope, source and packet count, and a README of how they were taken and kept anonymous.",
+        "`scripts/lib/capture_anonymise.py`: MACs and addresses to locally administered and documentation ranges, DNS, mDNS and LLMNR names, TXT values, SSDP header values and NTP reference ids replaced at their own length, any other payload dropped and counted, a leak check that refuses an output holding an original value, and `--verify-corpus`, which holds every listed file to being a fixed point; both run in the pre-push static gate array.",
+        "`zenoh_corpus_tests.rs`: no flow of an `other` file reads yes, no flow of a `zenoh` file reads no, and every file's tally is pinned for the builds with and without lz4.",
+        "wz-session-core `passive.rs`: where no Init was seen a datagram direction follows whichever reading reads a unit whole, and a stream resumes on a chain of boundaries all of one reading, which also lets a negotiated headed stream resume; `BatchHeader` says which. Field document 44 carries it on every half."
+      ],
+      "publishable_verification_bullets": [
+        "After the rebase onto the tip, on a build host: wz-session-core passive tests 82 passed; `cargo test -p wz-capture --features dissect` 1604 passed, 6 ignored; the corpus test passes with lz4 as well; wz-capi-dissect 227 passed; `cargo check -p wz-analyze --all-targets`.",
+        "Layers C1bo, C1bn and C1bt passed on a build host; C1bz passed for wz-capture and wz-capi-dissect; clippy with -D warnings on the three crates with and without features; the guarded-count gate judged 1 of 1; the pre-push static gate array passed.",
+        "Measured on the corpus, both builds: every one of the twelve zenoh flows reads yes; of the other flows none reads yes, 4 read no and 204 undecided (DNS flows are one query and its answer). Before the inference both flows of the compressed UDP session joined mid-session read no.",
+        "The anonymiser's selftest fails when name scrubbing or address mapping is switched off; the resync-across-noise test keeps 55, 42 and 32 percent of the real frames, above its floor of 30, where a sticky inference had made it run without end."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing",
+        "wire-spec-subset--watching-zenoh-mvp/4-4-transport-extensions"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The corpus still lacks RTPS, SOME/IP, CoAP, MQTT, QUIC, LLMNR, WS-Discovery, NTP and DHCP, a busier LAN, several zenoh versions and zenoh-pico. RTPS and MQTT need container images; QUIC needs a parser in the anonymiser before a real capture can be kept, since its Initial carries the server name under keys anyone can derive.",
+        "Step 3, measured weights and a new model number, waits for a corpus large enough to measure the weights it would replace.",
+        "Layer C1bz reads 515 broken doc links in wz-session-core against a budget of 494 on the tip itself, from files other rounds changed; passive.rs carries 3, all older than this round.",
+        "A stream joined mid-session on a compressed session desynchronises once at its first header byte before the scan finds the headed chain; the units in that first stretch are skipped and counted under resync accounting."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
