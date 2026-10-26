@@ -117,7 +117,7 @@ pub fn key_state(path: &str) -> Option<KeyState> {
 }
 
 /// The five keys that give a certificate or a key of the `tls/` and `quic/` links inline, base64
-/// encoded, where the keys [`tls_of`] reads name a file.
+/// encoded, where the keys `tls_of` reads name a file.
 ///
 /// Upstream declares them as options with no default, so a running zenohd's resolved configuration
 /// does not carry them and the lists of the runtime's reader, which are adjudicated against that
