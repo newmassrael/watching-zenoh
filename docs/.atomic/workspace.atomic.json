@@ -289512,6 +289512,46 @@
         "D7 is landed in its four steps. Read the first finished hosted run that holds rounds 3674, 3678, 3679 and this one: the C1m legs (the five moved counts and the two new ones), Qzb and the no-allocator rows. Open: an out-of-band open and a declared peer that succeed over a real secure channel (two nodes with a key each, and a lane step the lane owner agrees), the text the declared value saves (not measured), the Hello hint source, the image witness, the heap UDP dialer verifying nodes, the Qzb chain fall and the C1cn shard 1 time budget."
       ]
     },
+    "Round 3687": {
+      "decision_summary": "The router did not build with zenoh-config (or the routing tables) and none of the three access features: the interceptor compile error is an enum whose every variant sits behind an access feature, so with none on it has no value, and a match on a reference to it was refused (a reference is taken to hold one), and the config constructor's mut went unused. The Display now has the empty-type arm that exists only in that build, and the constructor allows the unused mut by the same condition. Building the same subsets with the access features on found a second latent lint, the test sink's rule-count method in the config tests, which is read only under config-mutate-runtime; it is built only there. Layer C1y already clippys the router with each access feature and zenoh-config; it now also clippys it with zenoh-config and no access feature, the subset that was built nowhere.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/interceptor/document.rs: the Display of InterceptorCompileError has an empty-type arm in the build with no access feature, and from_node_config allows the unused mut in that build.",
+        "crates/wz-runtime-tokio/src/config.rs: the test sink's last_rule_count is built under config-mutate-runtime, where its two readers are.",
+        "scripts/run-ci.sh: Layer C1y clippys wz-runtime-tokio with routing-router-hat and zenoh-config, all targets, deny warnings."
+      ],
+      "verification_bullets": [
+        "On a build host, before the change, wz-runtime-tokio with routing-router-hat and zenoh-config, and with routing-router-hat and the routing tables features, stopped at the empty-type match and the unused mut.",
+        "After the change clippy with deny warnings and all targets passed for: router hat with zenoh-config; router hat with routes, token tables and gossip; zenoh-config alone; router hat, zenoh-config and the three access features, with and without config-mutate-runtime.",
+        "Not run: the hosted run of this push, or Layer C1y as a whole; only the new clippy line's command was run."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted run that holds this push per job against its head sha; Layer C1y is the job that gained a line.",
+        "Subsets of wz-runtime-tokio built by no lane are found by running them: this round found two by building the router with the features of the wide leg in groups; the wide leg itself builds only the union."
+      ],
+      "publishable_decision_summary": "The router did not build with zenoh-config (or the routing tables) and none of the three access features: the interceptor compile error is an enum whose every variant sits behind an access feature, so with none on it has no value, and a match on a reference to it was refused (a reference is taken to hold one), and the config constructor's mut went unused. The Display now has the empty-type arm that exists only in that build, and the constructor allows the unused mut by the same condition. Building the same subsets with the access features on found a second latent lint, the test sink's rule-count method in the config tests, which is read only under config-mutate-runtime; it is built only there. Layer C1y already clippys the router with each access feature and zenoh-config; it now also clippys it with zenoh-config and no access feature, the subset that was built nowhere.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/interceptor/document.rs: the Display of InterceptorCompileError has an empty-type arm in the build with no access feature, and from_node_config allows the unused mut in that build.",
+        "crates/wz-runtime-tokio/src/config.rs: the test sink's last_rule_count is built under config-mutate-runtime, where its two readers are.",
+        "scripts/run-ci.sh: Layer C1y clippys wz-runtime-tokio with routing-router-hat and zenoh-config, all targets, deny warnings."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host, before the change, wz-runtime-tokio with routing-router-hat and zenoh-config, and with routing-router-hat and the routing tables features, stopped at the empty-type match and the unused mut.",
+        "After the change clippy with deny warnings and all targets passed for: router hat with zenoh-config; router hat with routes, token tables and gossip; zenoh-config alone; router hat, zenoh-config and the three access features, with and without config-mutate-runtime.",
+        "Not run: the hosted run of this push, or Layer C1y as a whole; only the new clippy line's command was run."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted run that holds this push per job against its head sha; Layer C1y is the job that gained a line.",
+        "Subsets of wz-runtime-tokio built by no lane are found by running them: this round found two by building the router with the features of the wide leg in groups; the wide leg itself builds only the union."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
