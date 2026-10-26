@@ -134,5 +134,16 @@
       packets: 168,
       notes: "ARP, IPv6 hop-by-hop and ICMP dropped by the anonymiser; the host's own mDNS on the bridge is kept, its names scrubbed",
     },
+    {
+      file: "stack-someip.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "someip/udp+tcp, someip-sd",
+      source: "upstream COVESA vsomeip 3.7.6 built in an ubuntu:24.04 container; one service that answers a method and notifies a field every 300 ms, one client that subscribes and calls the method every 250 ms, alternating UDP and TCP",
+      capture: "the bridge of a docker network of its own, from before either application started; each container was given a route to 224.0.0.0/4, without which vsomeip never starts service discovery",
+      taken: "2026-10-26",
+      packets: 488,
+      notes: "ARP, IGMP (IPv4 options) and IPv6 hop-by-hop dropped by the anonymiser; the host's own mDNS on the bridge is kept, its names scrubbed",
+    },
   ],
 }

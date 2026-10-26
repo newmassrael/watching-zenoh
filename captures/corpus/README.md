@@ -48,10 +48,11 @@ The original captures are not kept anywhere.
 | `stack-mqtt.pcap` | other | MQTT | eclipse-mosquitto 2.0.18, containers |
 | `stack-rtps.pcap` | other | RTPS | ROS 2 Jazzy publisher and subscriber, containers |
 | `stack-coap.pcap` | other | CoAP | libcoap 4.3.1 server and client, containers |
+| `stack-someip.pcap` | other | SOME/IP, SOME/IP-SD | upstream vsomeip 3.7.6 service and client, containers |
 
 ## What it does not hold yet
 
-SOME/IP and QUIC, LLMNR, WS-Discovery, NTP and DHCP from a busier network,
+QUIC, LLMNR, WS-Discovery, NTP and DHCP from a busier network,
 structured TCP such as HTTP and TLS, and on the zenoh side other zenoh versions
 and zenoh-pico. Each is added the same way: captured from the real
 implementation, a parser in the anonymiser where a payload of other devices can

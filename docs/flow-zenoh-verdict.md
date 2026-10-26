@@ -165,7 +165,7 @@ selftest and `--verify-corpus` run in the pre-push static gate array.
 It holds six zenoh 1.10.1 captures (TCP and UDP, from before the handshake and
 joined mid-session, with and without lz4), three of an office Wi-Fi (DNS,
 mDNS, SSDP), and the real implementations of MQTT (mosquitto), RTPS (ROS 2
-Jazzy) and CoAP (libcoap) run in containers. Every zenoh flow reads `yes`; no
+Jazzy), CoAP (libcoap) and SOME/IP (vsomeip) run in containers. Every zenoh flow reads `yes`; no
 flow of the others reads `yes`.
 
 A TCP flow of another protocol whose bytes never frame a unit carries nothing

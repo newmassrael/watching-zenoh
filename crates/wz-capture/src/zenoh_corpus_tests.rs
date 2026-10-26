@@ -126,6 +126,9 @@ const EXPECTED: &[(&str, Tally, Tally)] = &[
     ("stack-mqtt.pcap", (0, 4, 40), (0, 4, 40)),
     ("stack-rtps.pcap", (0, 9, 3), (0, 9, 3)),
     ("stack-coap.pcap", (0, 5, 20), (0, 5, 20)),
+    // Upstream vsomeip between two containers: service discovery, a method
+    // over UDP and TCP, and a field's notifications.
+    ("stack-someip.pcap", (0, 5, 2), (0, 5, 2)),
 ];
 
 #[test]
