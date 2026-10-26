@@ -12546,6 +12546,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
     }
 
+    /// The keepalive interval in milliseconds: the session's
+    /// [`KeepAliveConf`](crate::session_init_params::KeepAliveConf) applied to
+    /// its own lease or to [`Self::adopted_lease_ms`], as the interface it
+    /// stands for divides one or the other. The one definition the keepalive
+    /// wake (`drive::keepalive_wake_deadline`, a build with
+    /// `transport-keepalive`) and every pacer read.
+    pub fn keepalive_interval_ms(&self) -> u64 {
+        self.params
+            .keep_alive
+            .interval_ms(self.params.lease_ms, self.adopted_lease_ms())
+    }
+
     /// R300 — reconstruct the full literal keyexpr that the peer
     /// will canonize on the receive side from the wire's
     /// `(mapping_id, suffix)` carrier shape. The reconstruction

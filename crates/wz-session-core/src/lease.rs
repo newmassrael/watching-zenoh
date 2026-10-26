@@ -108,8 +108,9 @@ pub enum KeepAliveCheckOutcome {
     /// transport (spawned after `_z_open`, suspended on RECONNECTING,
     /// retired on CLOSED).
     Inactive,
-    /// The line spoke within the last `adopted_lease / LEASE_EXPIRE_FACTOR`
-    /// milliseconds (the `last_outbound_at` stamp is fresh) — no emit, the
+    /// The line spoke within the session's keepalive interval
+    /// (`SessionLinkActions::keepalive_interval_ms`; the `last_outbound_at`
+    /// stamp is fresh) — no emit, the
     /// pico `_transmitted == true` suppression arm.
     WithinInterval,
     /// The idle window elapsed: a KeepAlive was emitted through

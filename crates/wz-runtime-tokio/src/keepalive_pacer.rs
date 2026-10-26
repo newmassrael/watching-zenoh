@@ -62,7 +62,7 @@ use std::time::Duration;
 use wz_runtime_core::{Runtime, TimeSource};
 use wz_session_core::capacity::LatenessWindows;
 use wz_session_core::drive::keepalive_wake_deadline;
-use wz_session_core::lease::{KeepAliveCheckOutcome, LEASE_EXPIRE_FACTOR};
+use wz_session_core::lease::KeepAliveCheckOutcome;
 
 use crate::emission_cost::check_keepalive_timed;
 use crate::runtime_impl::{TokioRuntime, TokioTime};
@@ -103,7 +103,7 @@ fn step(weak: &Weak<SessionLinkActions>, clock: &TokioTime, generation: u64) -> 
         let now = clock.now_monotonic_ms();
         // `None` once the FSM's exit from Established stopped the worker.
         let due = keepalive_wake_deadline(&actions)?;
-        let slack = (actions.adopted_lease_ms() / LEASE_EXPIRE_FACTOR / SLACK_DIVISOR).max(1);
+        let slack = (actions.keepalive_interval_ms() / SLACK_DIVISOR).max(1);
         let backstop = due.saturating_add(slack);
         if now < backstop {
             return Some(backstop - now);

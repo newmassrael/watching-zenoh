@@ -2790,15 +2790,18 @@ pub fn lease_wake_deadline<R: SessionRuntime, T: TimeSource>(
 }
 
 /// R311kx — absolute next keepalive TX deadline (ms):
-/// `max(established_at, last_outbound_at) + adopted_lease_ms /
-/// LEASE_EXPIRE_FACTOR`, or `None` pre-Established. The TX-side wake twin
-/// of [`lease_wake_deadline`]: the lease deadline watches the PEER's
-/// silence, this one watches OURS — zenoh-pico's keep-alive task wakes
-/// every `_lease / Z_TRANSPORT_LEASE_EXPIRE_FACTOR` and emits when
-/// nothing was transmitted in the window (unicast/lease.c:191).
+/// `max(established_at, last_outbound_at) + keepalive_interval_ms`, or `None`
+/// pre-Established. The TX-side wake twin of [`lease_wake_deadline`]: the
+/// lease deadline watches the PEER's silence, this one watches OURS —
+/// zenoh-pico's keep-alive task wakes every
+/// `_lease / Z_TRANSPORT_LEASE_EXPIRE_FACTOR` and emits when nothing was
+/// transmitted in the window (unicast/lease.c:191), and zenoh's link writer
+/// sends one when its tracker of `lease / keep_alive` runs out. The interval
+/// is the session's own ([`SessionLinkActions::keepalive_interval_ms`]),
+/// because the two divide different leases by different numbers.
 ///
-/// `.max(1)` keeps a degenerate 0 ms lease from hot-spinning the emitter;
-/// the lease comparator expires such a session on its first check
+/// The interval is never 0, so a degenerate 0 ms lease does not hot-spin the
+/// emitter; the lease comparator expires such a session on its first check
 /// regardless.
 ///
 /// `None` whenever the link's keepalive worker is not running: the session
@@ -2826,13 +2829,13 @@ pub fn keepalive_wake_deadline<R: SessionRuntime, T: TimeSource>(
     } else {
         None
     };
-    let interval = (actions.adopted_lease_ms() / crate::lease::LEASE_EXPIRE_FACTOR).max(1);
+    let interval = actions.keepalive_interval_ms();
     max_stamp(max_stamp(established, outbound), written).map(|b| b.saturating_add(interval))
 }
 
 /// R311kx — run one keepalive TX deadline check: when the link's keepalive
 /// worker is running, the transport is live, and the line has been idle for
-/// `adopted_lease_ms / LEASE_EXPIRE_FACTOR` (no wire emit since the
+/// the session's keepalive interval (no wire emit since the
 /// [`keepalive_wake_deadline`] baseline), emit one KeepAlive through
 /// [`SessionLinkActions::send_keep_alive`] — which re-stamps
 /// `last_outbound_at`, opening the next idle window. The TX-emitter
