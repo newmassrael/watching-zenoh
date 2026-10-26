@@ -124,28 +124,39 @@ class Case:
 
 # Budgets are the measured text plus about two percent. See the module doc.
 CASES: tuple[Case, ...] = (
-    Case("pico-client", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_830_000,
+    Case("pico-client", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_839_000,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
                  CONNECTIVITY, MULTICAST, COOP_ENGINE),
          require=(SINGLE_THREADED, TOKIO_ENGINE),
          note="a single-threaded pub/sub client that dials TCP: no listener, no scouting, "
               "no UDP, no clock, no unstable API. 1,794,085 measured, down from 1,868,267 "
-              "with the unstable API and the connectivity plane"),
-    Case("pico-client-small", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_498_000,
+              "with the unstable API and the connectivity plane. Hosted reads run higher than "
+              "the first figure, and read 1,828,525 on 2026-10-26 before the key set's data-key "
+              "gate; 1,831,017 after it (`5c5f3f77c`, `e43c55563`, `9e1856fb1`: the gate, the "
+              "delivery by selection and the canonical form, which every build links whether "
+              "its key set is open or closed, +2,492); 1,831,845 with the per-peer allowance "
+              "(`c76528c00`, +828); 1,833,173 on the head that followed, which also holds the "
+              "reply key gate (`169bd005b`) and the engine port's advanced plane. The budget "
+              "moves to that reading with its margin"),
+    Case("pico-client-small", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_503_000,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
                  CONNECTIVITY, MULTICAST),
          require=(SINGLE_THREADED,), profile="capi-small",
          note="the pico-client build with panics aborting: the like-for-like of zenoh-pico's C. "
-              "1,468,134 measured against pico-client's 1,790,361 (-18.0%)"),
-    Case("pico-client-udp", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",link-udp", 1_892_000,
+              "1,468,134 measured against pico-client's 1,790,361 (-18.0%). Read 1,498,558 on "
+              "hosted CI on 2026-10-26 with the key set's gate and the engine port's advanced "
+              "plane, which pico-client's note above attributes"),
+    Case("pico-client-udp", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",link-udp", 1_900_000,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST),
-         require=(UDP, SINGLE_THREADED)),
+         require=(UDP, SINGLE_THREADED),
+         note="1,894,361 on hosted CI on 2026-10-26, 1,889,713 before the key set's gate: the "
+              "same growth as pico-client's, whose note attributes it"),
     # The same client on the cooperative engine: the program steps its session, and no runtime
     # thread or tokio is linked. Its links dial UDP in every build, so it is compared with the
     # pico that pico-client-udp is (`link-udp` names that here; it adds nothing to this build).
     Case("pico-client-coop", "wz-capi-pico", "libwz_capi_pico.so", "engine-coop,link-udp",
-         905_000,
+         908_000,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -161,7 +172,9 @@ CASES: tuple[Case, ...] = (
               "(`944fad43c`), 895,491 with a Push's frame sized from its message "
               "(`77df225a7`, the commit that crossed the old budget); the 2,340 bytes between "
               "that and the head are one commit: 895,531 before and 897,795 with the "
-              "per-link replay cursor over the six declaration lists (`5024d4e0f`, +2,264). Its "
+              "per-link replay cursor over the six declaration lists (`5024d4e0f`, +2,264); "
+              "905,204 on hosted CI on 2026-10-26, +204 over the old budget of 905,000, with the "
+              "key set's gate and the engine port's advanced plane (pico-client's note above). Its "
               "exports are pico-client's 441: the runtime's critical "
               "sections are a lock of the process (`host-lock`), so no `critical-section` "
               "implementation is linked, whose two symbols a cdylib exported beside the C ABI "
