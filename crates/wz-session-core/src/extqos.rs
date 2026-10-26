@@ -78,7 +78,7 @@ pub const QOS_EXT_ID: u8 = crate::ext_header::establishment_ext_id::QOS;
 /// Build the Z_EXT_QOS `ExtEntry`: the presence-only UNIT marker wz advertises
 /// (the [`crate::unit_ext`] mechanism at the QoS id). zenoh
 /// `State::QoS { priorities: None, reliability: None } -> Some(QoS::new())` =
-/// `zextunit!(0x1)`; the surrounding [`crate::ext_chain::encode_ext_chain`]
+/// `zextunit!(0x1)`; the surrounding `crate::ext_chain::encode_ext_chain`
 /// applies the chain-continuation `Z` bit.
 ///
 /// This is the UNIT half only. Which of the two forms a session actually puts on

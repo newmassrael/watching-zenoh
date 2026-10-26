@@ -34,7 +34,7 @@
 //! - The query-match set = `get_matching_keys` (service.rs:628-658):
 //!   iterate `get_all_entries()` and keep every stored key whose keyexpr
 //!   `intersects` the query keyexpr (service.rs:646). wz reuses
-//!   [`keyexpr_intersects_target`](crate::keyexpr_match::keyexpr_intersects_target)
+//!   [`keyexpr_intersects_target`]
 //!   — the SAME matcher the pub/sub route and the local subscriber
 //!   registry consult, so a storage's query-reply set cannot diverge from
 //!   what a subscriber on the same keyexpr would have received.
@@ -44,7 +44,7 @@
 //! [`crate::sample::timestamp_strictly_newer`] mirrors uhlc's `Timestamp`
 //! `Ord` (`uhlc-0.8.1/src/timestamp.rs:33-38`: derived `Ord` over
 //! `(time: NTP64, id: ID)`) — `time` first, then the id. The id tiebreak
-//! is uhlc-faithful: [`crate::sample::timestamp_order_key`] zero-pads the
+//! is uhlc-faithful: `crate::sample::timestamp_order_key` zero-pads the
 //! trimmed `zid` to the full 16-byte LE array uhlc's `ID` (`[u8; 16]`)
 //! compares, NOT a raw trimmed-`Vec` lexicographic compare (which diverges
 //! for a non-canonically-encoded zid). See it for the why.
@@ -83,13 +83,13 @@
 //!        divergence D-slice3-1).**
 //!        [`process_alignment_reply`](StorageState::process_alignment_reply) now
 //!        APPLIES a wildcard received from a peer — register + materialize via the
-//!        shared [`materialize_wildcard`](StorageState::materialize_wildcard) (a
+//!        shared `materialize_wildcard` (a
 //!        WildcardDelete needs no payload and materializes in the metadata round;
 //!        a WildcardPut defers to the retrieval round for its value), closing the
 //!        common-case offline-replica DATA residual (a peer's wildcard now
 //!        overrides wz-local keys the origin lacked). A received CONCRETE Put or
 //!        Delete ALSO consults the registries
-//!        ([`apply_aligned_concrete`](StorageState::apply_aligned_concrete)),
+//!        (`apply_aligned_concrete`),
 //!        mirroring zenoh's `needs_further_processing`
 //!        (aligner_reply.rs:255/337/431), so a wildcard registered on this replica
 //!        shadows a later concrete key aligned from a peer that never saw it (a
@@ -656,7 +656,7 @@ impl<B: StorageBackend> StorageState<B> {
     /// the capture continues, which is both upstream's answer
     /// (`storages_mgt/service.rs:361-365`: log the error, move to the next
     /// sample, never abort the loop) and the answer wz's other receive path
-    /// already gives ([`note_aligned_apply`](Self::note_aligned_apply)) — one
+    /// already gives (`note_aligned_apply`) — one
     /// question should not have two shapes. Nothing is swallowed by that: the
     /// load-bearing consequence is that no version record is written, which is
     /// [`process_put`](Self::process_put)'s contract and is what keeps the
@@ -1135,7 +1135,7 @@ impl<B: StorageBackend> StorageState<B> {
     /// each entry with `timestamp.get_time() < time_limit`.
     ///
     /// `now_ntp64` is INJECTED (the kernel has no clock — the driver passes
-    /// [`crate::…wall_clock_ntp64`]), mirroring the `now: u64` seam of
+    /// `crate::…wall_clock_ntp64`), mirroring the `now: u64` seam of
     /// [`answer_alignment_query`](Self::answer_alignment_query). The comparison
     /// is on the raw NTP64 `time` WORD only (age; the zid tiebreak is irrelevant
     /// — zenoh compares `get_time()` likewise), so an entry exactly AT the limit
@@ -1292,7 +1292,7 @@ impl<B: StorageBackend> StorageState<B> {
     /// Replication assumes a `History::Latest` backend, mirroring zenoh
     /// (replication only runs on Latest storages). The digest is built from
     /// [`latest`](StorageState), which is populated **only** in
-    /// [`latest_mode`](StorageState::latest_mode) (the newer-wins gate). On a
+    /// `latest_mode` (the newer-wins gate). On a
     /// `History::All` backend `latest` stays empty, so this would return an
     /// EMPTY digest regardless of stored data — a replica would silently
     /// advertise "I have nothing". That is a misconfiguration (the
@@ -1411,7 +1411,7 @@ impl<B: StorageBackend> StorageState<B> {
     }
 
     /// This storage's events as [`EventMetadata`], the snapshot the aligner
-    /// answers ([`EventBuckets`](crate::storage_aligner::EventBuckets)) are
+    /// answers ([`EventBuckets`]) are
     /// computed from. One entry per key in [`latest`](StorageState),
     /// **including tombstones**, each with the kind the record carries: an
     /// accepted Delete is a `Delete` event, an accepted Put a `Put`. zenoh's
@@ -1429,7 +1429,7 @@ impl<B: StorageBackend> StorageState<B> {
     ///
     /// Like [`replication_digest`](Self::replication_digest), the aligner
     /// assumes a `History::Latest` backend: `latest` is populated only by the
-    /// newer-wins gate ([`latest_mode`](StorageState::latest_mode)), so a
+    /// newer-wins gate (`latest_mode`), so a
     /// `History::All` backend yields no events. The `debug_assert` catches the
     /// misconfiguration loudly in debug builds.
     #[cfg(feature = "storage-aligner")]
@@ -1510,7 +1510,7 @@ impl<B: StorageBackend> StorageState<B> {
     ///
     /// The drill-down levels map one-to-one to [`EventBuckets`] answers; a
     /// `Retrieval` for a Put pairs its [`EventMetadata`] with the stored value
-    /// via [`retrieval_response`](Self::retrieval_response).
+    /// via `retrieval_response`.
     #[cfg(feature = "storage-aligner")]
     pub fn answer_alignment_query(
         &self,

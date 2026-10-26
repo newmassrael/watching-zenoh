@@ -184,7 +184,7 @@ impl<R: Runtime> DeferredFireQueue<R> {
     /// in one window) always land in one batch, run on one drainer, in
     /// order (Reply-before-Final) — even when an auxiliary drainer (a
     /// query/publish tail, the sweep task) races the drive loop. R311lm —
-    /// because [`take_batch`](Self::take_batch) is `pub(crate)`, this
+    /// because `take_batch` is `pub(crate)`, this
     /// serialized form is the ONLY way to empty the queue, so the
     /// Finding-A split (R311li) is structurally impossible rather than
     /// convention-enforced. The serializer type `G` is opaque: the queue

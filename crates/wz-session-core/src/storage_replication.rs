@@ -60,11 +60,11 @@
 //!   bytes (`timestamp.get_time().0.to_le_bytes()`, log.rs:240), and the zid
 //!   as the **full 16-byte zero-padded LE array** uhlc's `ID::to_le_bytes`
 //!   produces (id.rs:84) — the same array
-//!   [`crate::storage_state::timestamp_strictly_newer`] orders on (shared via
+//!   `crate::storage_state::timestamp_strictly_newer` orders on (shared via
 //!   `storage_state::zid_to_le_array`), so "newer" agrees across the two
 //!   subsystems;
 //! - the classification reproduces uhlc's `NTP64 -> Duration -> millis`
-//!   conversion bit-for-bit (see [`ntp64_to_ms`]), so an event lands in the
+//!   conversion bit-for-bit (see `ntp64_to_ms`), so an event lands in the
 //!   same bucket on both replicas.
 //!
 //! ## Deliberate divergences (each documented)
@@ -72,7 +72,7 @@
 //! - **`strip_prefix` and the mount-root `None` key (R311y64).** With a
 //!   configured `strip_prefix` the stored key is the *stripped* key, and the
 //!   exact-prefix mount-root value is stored under the backend `None` key —
-//!   mirroring zenoh's `Option<OwnedKeyExpr>` stripped key. [`event_fingerprint`]
+//!   mirroring zenoh's `Option<OwnedKeyExpr>` stripped key. `event_fingerprint`
 //!   takes `Option<&str>` and hashes the key bytes ONLY when `Some`, omitting
 //!   them entirely for a `None` mount-root key (zenoh `compute_fingerprint`,
 //!   log.rs:237: `if let Some(key_expr) = maybe_stripped_key { ... }`). So a
@@ -157,7 +157,7 @@ impl From<u64> for IntervalIdx {
     }
 }
 
-/// The index of a `SubInterval` within its [`Interval`] — the fine time
+/// The index of a `SubInterval` within its `Interval` — the fine time
 /// bucket. zenoh `classification::SubIntervalIdx` (classification.rs:280-282).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 #[repr(transparent)]

@@ -12,7 +12,7 @@
 //! | Side    | Outbound                    | Inbound dispatch         |
 //! |---------|-----------------------------|--------------------------|
 //! | z_get   | `Request(Query)`            | [`ReplyRegistry`]        |
-//! | qable   | `Response(Reply\|Err)` + Final | [`QueryableRegistry`] |
+//! | qable   | `Response(Reply\|Err)` + Final | `QueryableRegistry`   |
 //!
 //! Both registries follow the same scoping rule (literal keyexpr
 //! match in zenoh-pico's "many Reply + exactly one Final per Query"
@@ -68,7 +68,7 @@
 //!
 //! ## Threading
 //!
-//! `!Sync` by construction (mirror of [`QueryableRegistry`]). Cross-
+//! `!Sync` by construction (mirror of `QueryableRegistry`). Cross-
 //! task sharing wraps in `Arc<Mutex<…>>` /
 //! `Arc<tokio::sync::Mutex<…>>` — the integration site (wz-ap-demo)
 //! drives the registry from a single observer closure so no Mutex is
@@ -177,7 +177,7 @@ use crate::reply_sink::{BoxedReplySink, ConsolidatingSink, ReplyKind};
 use crate::reply_sink::{ReplySink, ReplyView};
 
 /// Body arm of an inbound reply record. Mirrors the producer-side
-/// [`QueryReply`](crate::query::QueryReply) enum but inverted for
+/// [`QueryReply`] enum but inverted for
 /// the consumer perspective: the application registered an
 /// `on_reply` callback and now reads the decoded body, instead of
 /// pushing one into an outbound buffer.
@@ -692,7 +692,7 @@ fn put_reply_encoding(put: &crate::wire::parts::MsgPutOwned) -> Option<(u32, Opt
 /// consumer-side [`InboundReply`] shape the z_get caller's
 /// `on_reply` callback expects.
 ///
-/// This is the loopback counterpart of [`Self::dispatch_response`]:
+/// This is the loopback counterpart of `Self::dispatch_response`:
 /// the wire path decodes a peer-sent `Response` into `InboundReply`;
 /// the loopback path projects a locally-fired `QueryReply` into the
 /// same shape so the same callback runs against both origins. The
@@ -1097,7 +1097,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
         self.pending.is_empty()
     }
 
-    /// Route an inbound [`Response`] through the pending table.
+    /// Route an inbound `Response` through the pending table.
     ///
     /// - The Response's keyexpr is resolved through
     ///   `peer_keyexpr_table` (the shared mapping populated by the
@@ -1268,7 +1268,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
         }
     }
 
-    /// Route an inbound [`ResponseFinal`] through the pending table.
+    /// Route an inbound `ResponseFinal` through the pending table.
     /// Every pending entry whose `rid == response_final.request_id`
     /// fires its `on_final` callback exactly once and is then removed
     /// from the table. Duplicate-rid registrations all fire (in
@@ -1280,7 +1280,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     }
 
     /// R239 — loopback delivery of an in-process [`InboundReply`].
-    /// Used by [`crate::session::Session::query`]'s loopback branch to
+    /// Used by `crate::session::Session::query`'s loopback branch to
     /// fan a [`QueryReply`] (produced by a local queryable through
     /// [`crate::query::QueryableRegistry::local_query`]) into every
     /// pending registration whose `rid` matches, mirroring exactly
@@ -1288,7 +1288,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// wire-decode + keyexpr-resolution prefix (the loopback caller
     /// already knows the literal). Single dispatch path — wire and
     /// loopback origins fire through the same
-    /// [`Self::fire_replies_for`] helper so the per-entry behaviour
+    /// `Self::fire_replies_for` helper so the per-entry behaviour
     /// (multiple registrations on the same rid, entry retained until
     /// Final) is identical across origins.
     #[cfg(feature = "alloc")]
@@ -1303,7 +1303,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// reply path; the `alloc` loopback ([`deliver_local_reply`](Self::deliver_local_reply))
     /// and the wire path ([`dispatch_response`](Self::dispatch_response))
     /// funnel their owned `InboundReply` (which impls `ReplyView`) through
-    /// the same [`fire_replies_for`](Self::fire_replies_for) matcher (one
+    /// the same `fire_replies_for` matcher (one
     /// SSOT). The terminal `on_final` no-heap entry is
     /// [`deliver_local_final`](Self::deliver_local_final) (a `Copy` rid
     /// scalar). Returns the count of sinks fired.
@@ -1312,13 +1312,13 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     }
 
     /// R239 — loopback delivery of an in-process `ResponseFinal`-
-    /// equivalent. Used by [`crate::session::Session::query`]'s
+    /// equivalent. Used by `crate::session::Session::query`'s
     /// loopback branch after the queryable callbacks have emitted all
     /// their replies through [`Self::deliver_local_reply`]; this call
     /// fires the matching `on_final` callbacks and removes the pending
     /// entries from the table, matching the wire-arrival behaviour in
     /// [`Self::dispatch_response_final`] exactly (single dispatch path
-    /// via [`Self::fire_final_for`]).
+    /// via `Self::fire_final_for`).
     pub fn deliver_local_final(&mut self, rid: u64) {
         self.fire_final_for(rid);
     }
@@ -1430,7 +1430,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// keepalive wake — `adopted_lease_ms / 3`, i.e. ~3333 ms for a
     /// 10 s lease. Without this the loop would honour a caller's
     /// `timeout_ms = 100` up to 33x late. `deadline_ms` is private to
-    /// [`Pending`], so no accessor could be composed from outside.
+    /// `Pending`, so no accessor could be composed from outside.
     ///
     /// Entries with `deadline_ms == None` (the never-expire path; see the
     /// `deadline_ms` field doc for its R311y326 producer set) are skipped,
@@ -1535,7 +1535,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
 
     /// Drain a `Vec<NetworkMessage>` (typically the
     /// `FramePayload.messages` field surfaced by
-    /// [`crate::session_glue::drive_session_until_terminal`]) through
+    /// `crate::session_glue::drive_session_until_terminal`) through
     /// the pending table. Each `NetworkMessage::Response` routes via
     /// [`Self::dispatch_response`]; each `NetworkMessage::ResponseFinal`
     /// routes via [`Self::dispatch_response_final`]. Other variants
@@ -1577,7 +1577,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     }
 
     /// Convenience adapter that pulls the `FramePayload.messages` out
-    /// of an [`IterationEvent::Poll(DriverLoopOutcome::FramePayload)`]
+    /// of an `IterationEvent::Poll(DriverLoopOutcome::FramePayload)`
     /// surface and forwards to [`Self::dispatch_messages`]. Mirror
     /// of [`crate::query::QueryableRegistry::dispatch_iteration_event`]
     /// for the z_get-side. Other `IterationEvent` variants
@@ -1672,7 +1672,7 @@ impl ReplyRegistry<ConsolidatingSink<BoxedReplySink>> {
     /// The `on_reply` closure receives `&dyn ReplyView` (resolved
     /// keyexpr / kind / payload / err-encoding) — the R311gb-3c seam
     /// contract replaces the prior owned `&InboundReply`; this is the
-    /// [`feedback_signature_stability`] wire-data principled exemption,
+    /// `feedback_signature_stability` wire-data principled exemption,
     /// taken so one registry backs both heap and no-heap profiles. The
     /// `on_final` closure receives the bare `rid`. Both are heap-boxed
     /// via [`BoxedReplySink`].

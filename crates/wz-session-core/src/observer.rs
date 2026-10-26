@@ -82,7 +82,7 @@
 //! tests can exercise the fan without an actions stand-in (the
 //! actions-side drain is covered by integration tests against a real
 //! TCP loopback). Production code calls the combined
-//! [`Self::dispatch`] form.
+//! `ApplicationLayerObserver::dispatch` form.
 //!
 //! ## R311dz — migrated to wz-session-core
 //!
@@ -248,7 +248,7 @@ pub struct ApplicationLayerObserver {
     /// emptied by `LivelinessToken::Drop`. Consulted only when an inbound
     /// non-final liveliness Interest arrives, to stage the
     /// interest-response (`Declare(DeclToken)` per matching held token +
-    /// a terminating `Declare(DeclFinal)`) into [`Self::pending_declares`]
+    /// a terminating `Declare(DeclFinal)`) into `Self::pending_declares`
     /// during the fan phase; the drain phase flushes it through the sink.
     /// The declarer-side mirror of [`Self::liveliness`] (which tracks the
     /// PEER's tokens).
@@ -277,7 +277,7 @@ pub struct ApplicationLayerObserver {
     pub liveliness_subscribers:
         LivelinessSubscriberRegistry<crate::declare::liveliness_sample::BoxedLivelinessSampleSink>,
     /// Requester-side pending liveliness GET (snapshot) queries declared
-    /// by [`crate::session::Session::liveliness_get`]. Each inbound
+    /// by `crate::session::Session::liveliness_get`. Each inbound
     /// solicited `Declare(DeclToken)` (interest_id-tagged) fans to the
     /// matching pending get's `on_reply`; the terminating
     /// `Declare(DeclFinal)` fires `on_final` + removes the entry. A
@@ -827,8 +827,8 @@ impl ApplicationLayerObserver {
     /// MCU consumers keep the combined [`Self::flush_pending`].
     ///
     /// R311lq — a pure composition of the per-concern drains (the
-    /// segregated [`Self::drain_query_replies`] /
-    /// [`Self::drain_declare_replies`] / [`Self::drain_get_prunes`]),
+    /// segregated `Self::drain_query_replies` /
+    /// `Self::drain_declare_replies` / `Self::drain_get_prunes`),
     /// in the same stage order as before. The `actions` bound is the
     /// three-concern union because this aggregate touches all three
     /// staged buffers; a single-concern consumer drains its concern
@@ -874,7 +874,7 @@ impl ApplicationLayerObserver {
     /// connectionless multicast transport (no reconnect cache to prune).
     /// Stage order (each interest-response batch's `Token`s precede its
     /// terminating `Final`) is owned by the underlying
-    /// [`Self::drain_declare_replies`]. Exposed demand-driven: the per-concern
+    /// `Self::drain_declare_replies`. Exposed demand-driven: the per-concern
     /// drains stay private until a single-concern consumer needs one (the
     /// get-prune concern has no such consumer yet, so it stays bundled in
     /// [`Self::flush_pending`]).
@@ -1051,7 +1051,7 @@ impl ApplicationLayerObserver {
     /// in every subset and only the POPULATE side is gated. Without
     /// `query-queryable` nothing ever stages a rid, so this honestly returns an
     /// empty `Vec` — the same OFF projection its sibling drains
-    /// ([`Self::drain_query_replies`] / [`Self::drain_query_finals`]) already
+    /// (`Self::drain_query_replies` / `Self::drain_query_finals`) already
     /// document, and the shape a `pub` accessor owes its callers.
     pub fn take_pending_final_rids(&mut self) -> FinalStage {
         core::mem::take(&mut self.pending_final_rids)

@@ -9,7 +9,7 @@
 //! TimedOut), codegen'd engine-free from
 //! `sources/network/reassembly_slot.scxml`. This module is the Rust
 //! *Router* the scxml header describes: it holds the N slot
-//! [`Engine`](sce_rust_runtime::Engine) instances and owns everything the
+//! [`Engine`] instances and owns everything the
 //! engine-free FSM cannot — the stateful SN-consecutiveness arithmetic,
 //! the per-peer quota, the staging arena, and the deadline clock.
 //!

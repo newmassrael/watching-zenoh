@@ -3,7 +3,7 @@
 
 //! Typed reject surface for the outbound payload / keyexpr-carrying
 //! wire-emit actions that are NOT the DECLARE family —
-//! [`SessionLinkActions::send_push_literal`] / `_aliased` /
+//! `SessionLinkActions::send_push_literal` / `_aliased` /
 //! `send_push_del_*` / `send_push_with_meta_*` (publish),
 //! `send_request_query` / `_with_meta` (query), and
 //! `send_interest_liveliness_subscriber` (interest).

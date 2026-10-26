@@ -62,7 +62,7 @@
 //!   leaves the transport wire-up as an R226+ carry.
 //!
 //! The dispatcher (`pubsub::SubscriberRegistry::dispatch_push`) calls
-//! [`extract_qos`], [`extract_attachment`], and [`extract_source_info`]
+//! [`extract_qos`], `extract_attachment`, and [`extract_source_info`]
 //! to project the relevant extension entries into the typed fields.
 
 #[cfg(feature = "alloc")]
@@ -133,7 +133,7 @@ impl TimestampHint {
         }
     }
 
-    /// R233 — inverse of [`from_codec`]: produce a fresh codec
+    /// R233 — inverse of `from_codec`: produce a fresh codec
     /// [`wz_codecs::timestamp::Timestamp`] from a wz-side hint so
     /// the publish wire branch can attach a caller-set timestamp to
     /// an outbound `MsgPut`/`MsgDel`. Mirrors the same byte-level
@@ -178,7 +178,7 @@ pub(crate) fn timestamp_order_key(ts: &TimestampHint) -> (u64, [u8; 16]) {
 
 /// Whether timestamp `a` is *strictly newer* than `b`, by the uhlc
 /// `Timestamp` `Ord` semantic — `(time, 16-byte LE id)` lexicographic (see
-/// [`timestamp_order_key`]). The single comparison the storage newer-wins
+/// `timestamp_order_key`). The single comparison the storage newer-wins
 /// gate keys off.
 #[cfg(feature = "alloc")]
 pub fn timestamp_strictly_newer(a: &TimestampHint, b: &TimestampHint) -> bool {
@@ -235,7 +235,7 @@ impl EncodingHint {
         }
     }
 
-    /// R233 — inverse of [`from_codec`]: produce a fresh codec
+    /// R233 — inverse of `from_codec`: produce a fresh codec
     /// [`wz_codecs::encoding::Encoding`] from a wz-side hint so the
     /// publish wire branch can attach a caller-set encoding to an
     /// outbound `MsgPut`. The codec `Encoding` decides whether to

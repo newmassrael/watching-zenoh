@@ -243,7 +243,7 @@ pub fn build_push_del_literal(keyexpr_suffix: &str) -> Result<PushOwned, CodecEr
 
 /// R311qd — re-key a `Push` for forwarding to a peer that has no expr-id
 /// mapping for the source's keyexpr (the router data-plane re-literalization,
-/// [`crate::routing`]). If the Push already carries a literal (`id == 0`)
+/// `crate::routing`). If the Push already carries a literal (`id == 0`)
 /// keyexpr it is decodable by any peer as-is and returned verbatim (body +
 /// metadata preserved, exact bytes); otherwise it is cloned and re-keyed to
 /// `keyexpr` as a literal (`id == 0`), preserving the Put/Del body and setting
@@ -565,7 +565,7 @@ pub fn read_push_timestamp(push: &PushOwned) -> Option<crate::sample::TimestampH
 /// Field-and-header sync is the same contract [`set_push_keyexpr_literal`]
 /// carries for the `N` bit: a set field with its flag bit clear drops the peer's
 /// decoder into an offset-shifted read of the rest of the body. Routing through
-/// [`gated_timestamp_field`] — the `pubsub-timestamp` send-side SSOT — is what
+/// `gated_timestamp_field` — the `pubsub-timestamp` send-side SSOT — is what
 /// keeps a forward stamp from appearing on a build whose own builders would
 /// refuse to emit one.
 pub fn set_push_timestamp(

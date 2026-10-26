@@ -56,7 +56,7 @@ impl core::fmt::Display for StripError {
 /// The match is at a CHUNK boundary (`<prefix>/`), not a bare string prefix:
 /// `home2/x` is NOT under `home`.
 ///
-/// R311y105 — a thin adapter over the shared [`keyexpr_prefix`] SSOT
+/// R311y105 — a thin adapter over the shared `keyexpr_prefix` SSOT
 /// ([`crate::keyexpr_prefix`]): the non-wild validation and the chunk-boundary
 /// strip both come from there (a concrete stored key is the wildcard-free
 /// special case of the namespace wild-target strip). This module keeps only the

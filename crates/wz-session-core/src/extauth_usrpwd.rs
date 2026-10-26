@@ -21,7 +21,7 @@
 //! # Scope
 //!
 //! This is the method KERNEL: the credential logic + the wire codec + the HMAC,
-//! unit-tested through [`AuthDispatch`]. The challenge nonce is INJECTED at
+//! unit-tested through [`AuthDispatch`](crate::auth_dispatch::AuthDispatch). The challenge nonce is INJECTED at
 //! construction (the no_std core carries no RNG — `getrandom` has no bare-metal
 //! backend; the live handshake wiring supplies a per-handshake random nonce).
 //! Wiring `AuthDispatch` into the live Init/Open exchange + a wz<->zenohd

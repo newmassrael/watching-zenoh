@@ -40,7 +40,7 @@
 //! alongside its data, where the real `libzenohc.so` on the identical wire was
 //! handed the data alone. A user subscription receiving the router's internal
 //! namespace is not a stylistic difference, so
-//! [`crate::keyexpr_match::is_verbatim_chunk`] landed there and both of zenoh's
+//! `crate::keyexpr_match::is_verbatim_chunk` landed there and both of zenoh's
 //! guards landed here: `is_chunk_matching`'s verbatim-only-matches-verbatim rule
 //! (`borrowed.rs:297-300`) and the `**`-must-not-cross-`@` stop-loop
 //! (`borrowed.rs:350-384`).

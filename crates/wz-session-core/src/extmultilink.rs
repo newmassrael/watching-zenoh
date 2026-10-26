@@ -327,7 +327,7 @@ impl MultiLinkDispatch {
 /// Project the 0x4 multilink sub-ext out of a decoded establishment ext chain —
 /// the parallel of [`decode_auth_ext`](crate::extauth::decode_auth_ext), but for
 /// the UN-wrapped 0x4 ext: the body maps straight to an [`AuthSubExt`] (via the
-/// shared [`AuthSubExt::from_body`] projection), NO inner method chain to demux.
+/// shared `AuthSubExt::from_body` projection), NO inner method chain to demux.
 /// `None` when the peer carried no 0x4 ext (it did not negotiate multilink).
 ///
 /// `eid` is the identity of the extension the STAGE reads, because upstream

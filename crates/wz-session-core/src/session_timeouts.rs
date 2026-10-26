@@ -27,7 +27,7 @@ use crate::session_fsm_unicast::{SessionFsmUnicastEvent, SessionFsmUnicastState}
 
 /// Host-owned handshake deadline values (docs/session-fsm.md §2.5).
 ///
-/// NOT wire-encoded — unlike [`crate::session_init_params::SessionInitParams::lease`]
+/// NOT wire-encoded — unlike `crate::session_init_params::SessionInitParams::lease`
 /// (the Established lease, which travels VLE-encoded in the OPEN body),
 /// these are local timing config the host drive loop consults to raise
 /// the FSM's handshake-timeout transitions. Carried host-side so SSOT is

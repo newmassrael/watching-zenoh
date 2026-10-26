@@ -37,7 +37,7 @@
 //!   the registry. They land in a future round once a use case
 //!   surfaces — pub/sub demo is sufficient for the AP MVP.
 //! - R227 — self-publish loopback. An in-process publisher can hand
-//!   a [`Sample`] to [`SubscriberRegistry::local_publish`]; the
+//!   a [`Sample`] to `SubscriberRegistry::local_publish`; the
 //!   registry walks the same locality + pattern-match dispatch that
 //!   wire-arrived Pushes go through, just with `is_remote = false`
 //!   so the locality predicate selects `allows_local()`. Subscribers
@@ -1360,7 +1360,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     ///   `demo/a` decodes fine and matches NOTHING. Non-aggregate gets one
     ///   reply per matching subscription, with the subscription's own keyexpr.
     /// - **FUTURE** registers the interest so a subscription declared LATER is
-    ///   pushed to that publisher ([`Self::stage_future_subscriber_pushes`]).
+    ///   pushed to that publisher (`Self::stage_future_subscriber_pushes`).
     ///
     /// The terminating `Final` is staged even with zero replies: a peer whose
     /// CURRENT interest is never terminated keeps the solicitation open, and
@@ -2072,7 +2072,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// verify delivery (the wire-path caller discards the count).
     ///
     /// R227 — the single source of truth for subscriber filtering.
-    /// Both [`dispatch_push`](Self::dispatch_push) (wire path) and
+    /// Both `dispatch_push` (wire path) and
     /// [`local_publish`](Self::local_publish) (self-publish loopback)
     /// converge here so the locality + pattern-match invariants are
     /// enforced exactly once. Mirrors zenoh-pico's
@@ -2096,7 +2096,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// [`SampleView`] to each matching sink, applying the locality
     /// filter. Borrow-driven (no owned `Sample` materialization), so it
     /// is the MCU no-heap delivery path; the AP wire path
-    /// ([`dispatch_push`](Self::dispatch_push)) funnels its owned
+    /// (`dispatch_push`) funnels its owned
     /// `Sample` through the same matcher via the `Sample: SampleView`
     /// coercion (one matching SSOT). Returns the count of sinks fired.
     pub fn dispatch_borrowed(&mut self, view: &dyn SampleView, is_remote: bool) -> usize {
@@ -3435,7 +3435,7 @@ impl SubscriberRegistry<BoxedSink> {
     /// closure receives `&dyn SampleView` — the resolved keyexpr,
     /// SampleKind, payload bytes, and reliability (R311gb-2b: the seam
     /// accessor contract replaces the prior owned `&Sample`; this is
-    /// the [`feedback_signature_stability`] wire-data principled
+    /// the `feedback_signature_stability` wire-data principled
     /// exemption, taken so one registry backs both heap and no-heap
     /// profiles). The closure is heap-boxed via [`BoxedSink`].
     ///

@@ -35,14 +35,14 @@ use crate::ext_nodeid::{self, EXT_ENC_Z64};
 /// Read the routing-context source `node_id` from a Push's `ext_nodeid`
 /// extension. Returns `0` when absent — zenoh's self-originated DEFAULT, so a
 /// forwarder treats `0` as "the inbound neighbour is the source". Delegates to
-/// the shared [`ext_nodeid::read_source`](crate::ext_nodeid::read_source).
+/// the shared [`ext_nodeid::read_source`].
 pub fn read_push_source(push: &PushOwned) -> u16 {
     ext_nodeid::read_source(push.extensions.as_ref())
 }
 
 /// Set the routing-context source `node_id` on a Push's `ext_nodeid` extension
 /// (`node_id == 0` removes it — zenoh's omit-on-DEFAULT). The shared
-/// [`ext_nodeid::set_source`](crate::ext_nodeid::set_source) owns the chain
+/// [`ext_nodeid::set_source`] owns the chain
 /// edit (replace / remove / per-entry `Z` normalisation); this only syncs the
 /// Push-level header `Z` flag to the resulting chain.
 pub fn set_push_source(push: &mut PushOwned, node_id: u16) {

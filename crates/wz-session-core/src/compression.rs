@@ -15,7 +15,7 @@
 //! `lz4_flex::block::decompress_into`s into an mtu-bounded buffer
 //! (`batch.rs:457-500`).
 //!
-//! wz applies this at the [`crate::session_actions::SessionLinkActions::send_wire`]
+//! wz applies this at the `crate::session_actions::SessionLinkActions::send_wire`
 //! seam (the single pre-link emit point — the wz analogue of zenoh's "finalize
 //! the batch then write to the link"): `compress_batch` produces the
 //! `[BatchHeader][payload]` the link layer then length-frames (the

@@ -10,7 +10,7 @@
 //!
 //! The replication Digest track ([`crate::storage_replication`]) lets a
 //! replica detect *which time buckets* diverge from a peer — a
-//! [`DigestDiff`](crate::storage_replication::DigestDiff). Alignment is the
+//! [`DigestDiff`]. Alignment is the
 //! follow-up: the diverging replica queries the peer's *Aligner* to pull the
 //! exact entries it is missing. The unit exchanged is the [`EventMetadata`] —
 //! the `(key, timestamp, action)` of one stored event, enough for the
@@ -28,7 +28,7 @@
 //!   replica needs to assess whether it is missing an event.
 //! - [`EventMetadata::fingerprint`] = `Event::compute_fingerprint`
 //!   (log.rs:232-244) — reused verbatim via the
-//!   [`event_fingerprint`](crate::storage_replication::event_fingerprint) SSOT
+//!   `event_fingerprint` SSOT
 //!   the Digest is also assembled from, so "is this the same event" agrees
 //!   between the digest and the aligner.
 //!
@@ -205,7 +205,7 @@ impl EventMetadata {
 
     /// The [`Fingerprint`] identifying this event — the xxh3 of its
     /// `(key, timestamp)`, shared with the Digest via the
-    /// [`event_fingerprint`](crate::storage_replication::event_fingerprint)
+    /// `event_fingerprint`
     /// SSOT.
     ///
     /// The action is deliberately NOT hashed: zenoh omits it too

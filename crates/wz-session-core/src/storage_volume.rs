@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! §5.24 storage Volume layer — the FACTORY above the §5.11 per-store
-//! [`StorageBackend`](crate::storage_backend::StorageBackend). The wz mirror of
+//! [`StorageBackend`]. The wz mirror of
 //! zenoh `zenoh-backend-traits` `Volume`
 //! (`plugins/zenoh-backend-traits/src/lib.rs:184`): a [`Volume`] advertises its
 //! [`Capability`] and CREATES per-storage `StorageBackend` instances — the seam a
@@ -15,9 +15,9 @@
 //! strip-prefix, GC, wildcard-updates) compose ON this once `storage-mgr-config`
 //! lands.
 //!
-//! R311y57 — [`Volume::create_storage`](crate::storage_volume::Volume::create_storage)
+//! R311y57 — [`Volume::create_storage`]
 //! takes the declarative
-//! [`StorageConfig`](crate::storage_config::StorageConfig)
+//! [`StorageConfig`]
 //! (the storage-mgr-config data model). Divergences from zenoh: wz's
 //! `create_storage` is SYNC (zenoh's is `async`); it returns
 //! `Result<Box<dyn StorageBackend + Send>, VolumeError>` (R311y60 — fallible like

@@ -12,7 +12,7 @@
 //! [`GroupNetEvent::KeepAlive`] beacons, and serves its own [`Member`]
 //! record from a per-member queryable (`zenoh/ext/net/group/<gid>/<mid>`)
 //! so a peer that hears a beacon from an unknown member can `get` its
-//! details. The live [`Group`] + the four handlers (join announce,
+//! details. The live `Group` + the four handlers (join announce,
 //! keep-alive, watchdog lease-sweep, query answer) are the AP-only tokio
 //! half in `wz-runtime-tokio`; this crate owns the portable data + wire so
 //! the wire contract is unit-testable without a runtime.
@@ -39,7 +39,7 @@
 //! - **`f32`** (the refresh ratio): 4 IEEE-754 little-endian bytes.
 //!
 //! The codec reuses the shared multi-consumer bincode-1.3 widths
-//! ([`crate::wire_bincode`]) and layers its group-only shapes (`f32`, the std
+//! (`crate::wire_bincode`) and layers its group-only shapes (`f32`, the std
 //! `Duration` struct) on them; it is pinned to the real `bincode` 1.3 by the
 //! `#[cfg(test)]` oracle below (a serde mirror of zenoh-ext's structs
 //! serialized with the exact default config, asserted byte-for-byte).

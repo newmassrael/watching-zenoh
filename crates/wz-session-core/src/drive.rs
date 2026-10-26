@@ -2153,7 +2153,7 @@ fn in_place_unit<R: SessionRuntime, T: TimeSource>(
 /// FSM mutation).
 ///
 /// `now_ms` is parameterised for test determinism; production callers pass
-/// `clock.now_monotonic_ms()` (the same epoch [`SessionLinkActions::clock`]
+/// `clock.now_monotonic_ms()` (the same epoch `SessionLinkActions::clock`
 /// carries). `params.lease_ms` is milliseconds by contract (R311ku —
 /// the wire unit is an encode/decode boundary concern, `crate::lease`),
 /// matching the `u64` ms scale of the stamps (R294).

@@ -87,50 +87,50 @@ pub use wz_codecs::wire_const;
 // callers of those param bundles name the role from this crate's surface.
 pub use wz_codecs::whatami::WhatAmI;
 
-/// R221 — zenoh keyexpr structural canonicalization mirror.
-///
-/// R311gb (Track 2 no-alloc gating) — un-gated from `alloc`: the
-/// canon core ([`canonize_keyexpr`](keyexpr_canon::canonize_keyexpr) +
-/// the per-chunk state machine) now backs its two output buffers onto
-/// [`bounded::BoundedString`] / [`bounded::BoundedVec`], so registry
-/// pattern canonicalization exists on the MCU no-heap profile. The
-/// outbound zenoh-pico-safety gate
-/// ([`check_outbound_keyexpr_pico_safe`](keyexpr_canon::check_outbound_keyexpr_pico_safe)
-/// + [`OutboundKeyexprError`](keyexpr_canon::OutboundKeyexprError))
-/// stays `alloc`-gated: it guards the outbound DECLARE *wire emit*
-/// path, which is AP-retention per the Track 2 borrow boundary.
+// R221 — zenoh keyexpr structural canonicalization mirror.
+//
+// R311gb (Track 2 no-alloc gating) — un-gated from `alloc`: the
+// canon core (`canonize_keyexpr` +
+// the per-chunk state machine) now backs its two output buffers onto
+// `bounded::BoundedString` / `bounded::BoundedVec`, so registry
+// pattern canonicalization exists on the MCU no-heap profile. The
+// outbound zenoh-pico-safety gate
+// (`check_outbound_keyexpr_pico_safe`
+// + `OutboundKeyexprError`)
+// stays `alloc`-gated: it guards the outbound DECLARE *wire emit*
+// path, which is AP-retention per the Track 2 borrow boundary.
 pub mod keyexpr_canon;
 
-/// R311dn / di-15-pre — keyexpr glob + intersection matchers
-/// (zenoh `**` / `*` / `$*` DSL) lifted from
-/// `wz-runtime-tokio::pubsub`. The two `pub fn` entry points
-/// (`keyexpr_pattern_matches`, `keyexpr_intersect_patterns`) back
-/// the future inherent `has_matching` methods on
-/// `Remote{Subscriber,Queryable}Registry` (R311do / R311dp) once
-/// those registries migrate into wz-session-core.
-///
-/// R311fz — un-gated from `alloc`: the matcher now backs its one
-/// indexed buffer onto `bounded::BoundedVec<&str, MAX_KEYEXPR_CHUNKS>`
-/// (the `$*`-split paths became allocation-free peekable / head-tail
-/// walks), so keyexpr matching exists on the MCU no-heap profile. The
-/// alloc-gated callers (`pubsub` / `query` / `declare`) are unaffected.
+// R311dn / di-15-pre — keyexpr glob + intersection matchers
+// (zenoh `**` / `*` / `$*` DSL) lifted from
+// `wz-runtime-tokio::pubsub`. The two `pub fn` entry points
+// (`keyexpr_pattern_matches`, `keyexpr_intersect_patterns`) back
+// the future inherent `has_matching` methods on
+// `Remote{Subscriber,Queryable}Registry` (R311do / R311dp) once
+// those registries migrate into wz-session-core.
+//
+// R311fz — un-gated from `alloc`: the matcher now backs its one
+// indexed buffer onto `bounded::BoundedVec<&str, MAX_KEYEXPR_CHUNKS>`
+// (the `$*`-split paths became allocation-free peekable / head-tail
+// walks), so keyexpr matching exists on the MCU no-heap profile. The
+// alloc-gated callers (`pubsub` / `query` / `declare`) are unaffected.
 pub mod keyexpr_match;
 
-/// Ungated keyexpr non-wild-prefix SSOT (the `NonWildKeyExpr` newtype +
-/// [`strip_nonwild_prefix`](keyexpr_prefix::strip_nonwild_prefix), the wz port
-/// of zenoh `keyexpr::strip_nonwild_prefix`). The shared chunk-walk core behind
-/// §5.24 storage strip-prefix ([`storage_strip_prefix`]) and §5.21
-/// routing-namespace ([`namespace`]); both consumer features select
-/// `keyexpr-prefix` so the core compiles exactly where a consumer needs it.
-/// The borrowed core (`NonWildKeyExpr` + `strip_nonwild_prefix`) is no-alloc;
-/// the owned `OwnedNonWildKeyExpr` namespace value is `alloc`-gated.
+// Ungated keyexpr non-wild-prefix SSOT (the `NonWildKeyExpr` newtype +
+// `strip_nonwild_prefix`, the wz port
+// of zenoh `keyexpr::strip_nonwild_prefix`). The shared chunk-walk core behind
+// §5.24 storage strip-prefix (`storage_strip_prefix`) and §5.21
+// routing-namespace (`namespace`); both consumer features select
+// `keyexpr-prefix` so the core compiles exactly where a consumer needs it.
+// The borrowed core (`NonWildKeyExpr` + `strip_nonwild_prefix`) is no-alloc;
+// the owned `OwnedNonWildKeyExpr` namespace value is `alloc`-gated.
 #[cfg(feature = "keyexpr-prefix")]
 pub mod keyexpr_prefix;
 
-/// §5.21 routing-namespace — the per-participant keyexpr namespace prefix/strip
-/// decorator ([`namespace::apply_egress`] + the stateful
-/// [`namespace::NamespaceIngress`]), the wz mirror of zenoh's
-/// `net/routing/namespace.rs` `Namespace` / `ENamespace` `Primitives` pair.
+// §5.21 routing-namespace — the per-participant keyexpr namespace prefix/strip
+// decorator (`namespace::apply_egress` + the stateful
+// `namespace::NamespaceIngress`), the wz mirror of zenoh's
+// `net/routing/namespace.rs` `Namespace` / `ENamespace` `Primitives` pair.
 #[cfg(feature = "routing-namespace")]
 pub mod namespace;
 
@@ -233,10 +233,10 @@ pub mod id_map;
 /// bound/error mapping.
 pub mod codec_owned;
 
-/// R311gb (Track 2) — shared `RegisterError` taxonomy for the bounded
-/// application-layer registries (the SSOT for "a registration was
-/// rejected at declared capacity"); replaces the per-registry error
-/// enums the R311hd..hg fan-out minted.
+// R311gb (Track 2) — shared `RegisterError` taxonomy for the bounded
+// application-layer registries (the SSOT for "a registration was
+// rejected at declared capacity"); replaces the per-registry error
+// enums the R311hd..hg fan-out minted.
 pub mod registry_error;
 
 /// A state machine built under a session id that is a constant of this tree. Gated on
@@ -250,81 +250,81 @@ pub mod registry_error;
 ))]
 pub mod constant_session_id;
 
-/// R311gb — sample-delivery seam (`SampleView` accessor contract +
-/// `SampleSink` DIP trait + the `alloc`-only `BoxedSink` closure
-/// adapter). Unconditional — the traits exist in every profile so
-/// the subscriber registry dispatches through one backing-agnostic seam
-/// (model B: AP stores `BoxedSink` heap closures, MCU stores a
-/// consumer-supplied closed `enum` of codegen'd Worker/statechart sinks,
-/// §2.4 static-first dynamic-opt-in). The registry generic-over-`C:
-/// SampleSink` rewrite landed (R311gb-2b); statechart injection is NOT a
-/// `SampleSink` but a port-threading inbound adapter (see [`switchboard`],
-/// R311gh).
+// R311gb — sample-delivery seam (`SampleView` accessor contract +
+// `SampleSink` DIP trait + the `alloc`-only `BoxedSink` closure
+// adapter). Unconditional — the traits exist in every profile so
+// the subscriber registry dispatches through one backing-agnostic seam
+// (model B: AP stores `BoxedSink` heap closures, MCU stores a
+// consumer-supplied closed `enum` of codegen'd Worker/statechart sinks,
+// §2.4 static-first dynamic-opt-in). The registry generic-over-`C:
+// SampleSink` rewrite landed (R311gb-2b); statechart injection is NOT a
+// `SampleSink` but a port-threading inbound adapter (see `switchboard`,
+// R311gh).
 pub mod sink;
 
-/// R311gh — the switchboard: a zenoh-keyexpr -> SCXML-domain-event inbound
-/// adapter (`EventInjector` DIP port over the SCE engine's
-/// `raise_external_by_name` ingress + the AP dynamic `SwitchboardRegistry`).
-/// The Anti-Corruption-Layer translation point: wz owns zenoh keyexpr
-/// demux, then injects a *domain* event into the statechart so the SCXML
-/// core stays decoupled from the vendor wire naming. Unlike a
-/// [`sink::SampleSink`] the registry *threads* the [`switchboard::EventInjector`]
-/// port through `dispatch` rather than storing an engine handle, so the
-/// AP dynamic table and the MCU generated static `match` share one ingress
-/// shape (R311gh gc-2 structure ratify, ledger Round 311gh; supersedes the
-/// gc-1 `StatechartSink`-as-`SampleSink` adapter). The `EventInjector`
-/// trait is unconditional + no-`alloc`; `SwitchboardRegistry` is
-/// `alloc`-gated (AP dynamic). The engine-bridge `EventInjector` impl
-/// (`wz-statechart-bridge`) and the build-time `external_ingress_events`
-/// cross-check land in later sub-rounds (gc-2b / gc-3).
+// R311gh — the switchboard: a zenoh-keyexpr -> SCXML-domain-event inbound
+// adapter (`EventInjector` DIP port over the SCE engine's
+// `raise_external_by_name` ingress + the AP dynamic `SwitchboardRegistry`).
+// The Anti-Corruption-Layer translation point: wz owns zenoh keyexpr
+// demux, then injects a *domain* event into the statechart so the SCXML
+// core stays decoupled from the vendor wire naming. Unlike a
+// `sink::SampleSink` the registry *threads* the `switchboard::EventInjector`
+// port through `dispatch` rather than storing an engine handle, so the
+// AP dynamic table and the MCU generated static `match` share one ingress
+// shape (R311gh gc-2 structure ratify, ledger Round 311gh; supersedes the
+// gc-1 `StatechartSink`-as-`SampleSink` adapter). The `EventInjector`
+// trait is unconditional + no-`alloc`; `SwitchboardRegistry` is
+// `alloc`-gated (AP dynamic). The engine-bridge `EventInjector` impl
+// (`wz-statechart-bridge`) and the build-time `external_ingress_events`
+// cross-check land in later sub-rounds (gc-2b / gc-3).
 pub mod switchboard;
 
-/// R311gb-3 — query-dispatch seam (`QueryView` inbound accessor contract
-/// + `ReplyOut` outbound emit contract + `QuerySink` DIP trait + the
-/// `alloc`-only `BoxedQuerySink` closure adapter). The request/response
-/// sibling of [`sink`]: unconditional so the queryable registry can
-/// dispatch a matched inbound query through one backing-agnostic seam
-/// (model B: AP stores `BoxedQuerySink` heap closures, MCU stores a
-/// consumer-supplied closed `enum`, §2.4 static-first dynamic-opt-in).
-/// The queryable model-B seam: the registry is generic-over-`C: QuerySink`
-/// (R311gb-3b), the reply accumulator `query::QueryResponder` impls
-/// `ReplyOut` directly, and the dispatch builds a `BorrowedQuery` for the
-/// inbound `QueryView` (R311gb-3b-cleanup retired the prior
-/// `QueryEvent`/`ReplyEmitter` wrapper module).
+// R311gb-3 — query-dispatch seam (`QueryView` inbound accessor contract
+// + `ReplyOut` outbound emit contract + `QuerySink` DIP trait + the
+// `alloc`-only `BoxedQuerySink` closure adapter). The request/response
+// sibling of `sink`: unconditional so the queryable registry can
+// dispatch a matched inbound query through one backing-agnostic seam
+// (model B: AP stores `BoxedQuerySink` heap closures, MCU stores a
+// consumer-supplied closed `enum`, §2.4 static-first dynamic-opt-in).
+// The queryable model-B seam: the registry is generic-over-`C: QuerySink`
+// (R311gb-3b), the reply accumulator `query::QueryResponder` impls
+// `ReplyOut` directly, and the dispatch builds a `BorrowedQuery` for the
+// inbound `QueryView` (R311gb-3b-cleanup retired the prior
+// `QueryEvent`/`ReplyEmitter` wrapper module).
 pub mod query_sink;
 
-/// R311gb-3c — reply-delivery seam (`ReplyKind` discriminant + `ReplyView`
-/// accessor contract + `ReplySink` DIP trait with `on_reply` / `on_final`
-/// + the `alloc`-only `BoxedReplySink` closure adapter). The response-plane
-/// sibling of [`sink`]: unconditional so the reply registry can route a
-/// pending z_get's inbound replies through one backing-agnostic seam
-/// (model B: AP stores `BoxedReplySink` heap closures, MCU stores a
-/// consumer-supplied closed `enum`, §2.4 static-first dynamic-opt-in).
-/// First step of the reply model-B migration; the registry
-/// generic-over-`C: ReplySink` rewrite + `impl ReplyView for InboundReply`
-/// land in the apply sub-round.
+// R311gb-3c — reply-delivery seam (`ReplyKind` discriminant + `ReplyView`
+// accessor contract + `ReplySink` DIP trait with `on_reply` / `on_final`
+// + the `alloc`-only `BoxedReplySink` closure adapter). The response-plane
+// sibling of `sink`: unconditional so the reply registry can route a
+// pending z_get's inbound replies through one backing-agnostic seam
+// (model B: AP stores `BoxedReplySink` heap closures, MCU stores a
+// consumer-supplied closed `enum`, §2.4 static-first dynamic-opt-in).
+// First step of the reply model-B migration; the registry
+// generic-over-`C: ReplySink` rewrite + `impl ReplyView for InboundReply`
+// land in the apply sub-round.
 pub mod reply_sink;
 
-/// R311gb-3d — declare-event delivery seam (`DeclView` accessor contract
-/// + `DeclSink` / `UndeclSink` DIP traits + the `alloc`-only
-/// `BoxedDeclSink` / `BoxedUndeclSink` closure adapters). The
-/// control-plane sibling of [`sink`]: unconditional so the peer-
-/// declaration observer registries (subscriber / queryable /
-/// liveliness-token) fan inbound `Declare(DeclX|UndeclX)` records through
-/// one backing-agnostic seam (model B: AP stores `BoxedDeclSink` heap
-/// closures, MCU stores consumer-supplied closed `enum`s). One shared
-/// `DeclView` since the three peer-declaration wire records are field-
-/// identical `(id, keyexpr)`; the matching undeclaration is a bare `u64`
-/// scalar. First step of the declare model-B migration; the registry
-/// generic-over-sink rewrites land in the apply sub-rounds.
+// R311gb-3d — declare-event delivery seam (`DeclView` accessor contract
+// + `DeclSink` / `UndeclSink` DIP traits + the `alloc`-only
+// `BoxedDeclSink` / `BoxedUndeclSink` closure adapters). The
+// control-plane sibling of `sink`: unconditional so the peer-
+// declaration observer registries (subscriber / queryable /
+// liveliness-token) fan inbound `Declare(DeclX|UndeclX)` records through
+// one backing-agnostic seam (model B: AP stores `BoxedDeclSink` heap
+// closures, MCU stores consumer-supplied closed `enum`s). One shared
+// `DeclView` since the three peer-declaration wire records are field-
+// identical `(id, keyexpr)`; the matching undeclaration is a bare `u64`
+// scalar. First step of the declare model-B migration; the registry
+// generic-over-sink rewrites land in the apply sub-rounds.
 pub mod decl_sink;
 
-/// R311y442 — the zenoh SELECTOR-PARAMETER dialect (`;` list separator, `=`
-/// field separator, the bare `_anyke` reply-keyexpr flag) as ONE definition for
-/// every wz crate that reads or writes a selector. It lives here rather than
-/// beside a consumer because a per-consumer copy is what let the `@adv` cache and
-/// the `@adv` subscriber drift to `&` together while agreeing with each other,
-/// and what left the same bug live in the REST bridge one crate away.
+// R311y442 — the zenoh SELECTOR-PARAMETER dialect (`;` list separator, `=`
+// field separator, the bare `_anyke` reply-keyexpr flag) as ONE definition for
+// every wz crate that reads or writes a selector. It lives here rather than
+// beside a consumer because a per-consumer copy is what let the `@adv` cache and
+// the `@adv` subscriber drift to `&` together while agreeing with each other,
+// and what left the same bug live in the REST bridge one crate away.
 pub mod selector_params;
 
 /// R311y833 — the requester-side reply-keyexpr contract
@@ -337,9 +337,9 @@ pub mod selector_params;
 /// the responder and by the requester's own gate.
 pub mod reply_acceptance;
 
-/// R223 — zenoh-style locality filter (no_std + no_alloc; pure enum + helpers).
-/// Mirrors zenoh-pico's `z_locality_t` and `_z_locality_allows_{local,remote}`.
-/// Available unconditionally because the type carries no allocations.
+// R223 — zenoh-style locality filter (no_std + no_alloc; pure enum + helpers).
+// Mirrors zenoh-pico's `z_locality_t` and `_z_locality_allows_{local,remote}`.
+// Available unconditionally because the type carries no allocations.
 pub mod locality;
 
 /// Reliability hint shared by LinkDriver outbound + Sample inbound.
@@ -381,13 +381,13 @@ pub mod sample_kind;
 /// Session/actions split.
 pub mod qos;
 
-/// R311y435 — the handshake-negotiated capability SET (`SessionOffer`) plus the
-/// EXCLUSIVE `TransportMode` choice. zenoh keeps qos and lowlatency as two
-/// independent bools and bails at manager build when both are set
-/// (`unicast/manager.rs:264`); wz encodes the same rule as one three-state field
-/// so the conflict is unrepresentable rather than merely rejected. Pure no_std +
-/// no_alloc value types; unconditional (the per-mode cargo features gate what
-/// `SessionLinkActions::apply_offer` can STAGE, not what the caller can NAME).
+// R311y435 — the handshake-negotiated capability SET (`SessionOffer`) plus the
+// EXCLUSIVE `TransportMode` choice. zenoh keeps qos and lowlatency as two
+// independent bools and bails at manager build when both are set
+// (`unicast/manager.rs:264`); wz encodes the same rule as one three-state field
+// so the conflict is unrepresentable rather than merely rejected. Pure no_std +
+// no_alloc value types; unconditional (the per-mode cargo features gate what
+// `SessionLinkActions::apply_offer` can STAGE, not what the caller can NAME).
 pub mod transport_mode;
 
 /// R311ed — session `CloseReason` discriminator (byte-valued enum whose
@@ -406,17 +406,17 @@ pub mod close_reason;
 /// `R::Mutex`).
 pub mod ext_chain_role;
 
-/// R311ef — script-action dispatch trace counters (`ActionTrace`, a bag
-/// of `u32` counters + a `CloseReason` field, all `Copy`). Pure no_std +
-/// no_alloc; unconditional. DP3 leaf lifted from
-/// `wz-runtime-tokio::session_glue`; the live `R::Mutex<ActionTrace>`
-/// slot + the `trace_snapshot` accessor stay in the tokio crate.
+// R311ef — script-action dispatch trace counters (`ActionTrace`, a bag
+// of `u32` counters + a `CloseReason` field, all `Copy`). Pure no_std +
+// no_alloc; unconditional. DP3 leaf lifted from
+// `wz-runtime-tokio::session_glue`; the live `R::Mutex<ActionTrace>`
+// slot + the `trace_snapshot` accessor stay in the tokio crate.
 pub mod action_trace;
 
-/// R311ep — scouting script-action dispatch trace counters (`ScoutTrace`,
-/// four `u32` counters). Pure no_std + no_alloc; unconditional. The
-/// scouting-side sibling of [`action_trace`]; the live
-/// `R::Mutex<ScoutTrace>` slot stays in `wz-runtime-tokio::scouting_glue`.
+// R311ep — scouting script-action dispatch trace counters (`ScoutTrace`,
+// four `u32` counters). Pure no_std + no_alloc; unconditional. The
+// scouting-side sibling of `action_trace`; the live
+// `R::Mutex<ScoutTrace>` slot stays in `wz-runtime-tokio::scouting_glue`.
 pub mod scout_trace;
 
 /// R311ep — per-deploy active-scouting parameters (`ScoutParams`:
@@ -437,48 +437,48 @@ pub mod scout_params;
 #[cfg(feature = "storage-profile")]
 pub mod multicast_params;
 
-/// R311eq — static scouting mode: `ScoutingMode` discriminator +
-/// `synth_static_locators` (host-side locator synthesis from
-/// `deploy.connect[]`, docs/scouting-fsm.md §2.4.3). Pure alloc value
-/// transform, NOT gated on `scouting-active` — static mode is the FSM
-/// bypass path used when the active FSM is compiled out.
-///
-/// R311if — gated on `scouting-static` so a deploy that does not use
-/// `scouting.mode: static` elides the module entirely (§2.4.3 reason #2
-/// codegen-elision). The two scouting modes are independent toggles:
-/// `scouting-active` (the multicast FSM in wz-runtime-tokio) and
-/// `scouting-static` (this host synthesis).
-///
-/// R311ih — no longer requires `alloc`: the synth builds onto the bounded
-/// seam ([`scout_static::StaticLocators`]) so it composes on the no-alloc
-/// MCU profile. The `alloc`-only surface (the `ScoutingMode` deploy-string
-/// parser) is gated per-item inside the module.
+// R311eq — static scouting mode: `ScoutingMode` discriminator +
+// `synth_static_locators` (host-side locator synthesis from
+// `deploy.connect[]`, docs/scouting-fsm.md §2.4.3). Pure alloc value
+// transform, NOT gated on `scouting-active` — static mode is the FSM
+// bypass path used when the active FSM is compiled out.
+//
+// R311if — gated on `scouting-static` so a deploy that does not use
+// `scouting.mode: static` elides the module entirely (§2.4.3 reason #2
+// codegen-elision). The two scouting modes are independent toggles:
+// `scouting-active` (the multicast FSM in wz-runtime-tokio) and
+// `scouting-static` (this host synthesis).
+//
+// R311ih — no longer requires `alloc`: the synth builds onto the bounded
+// seam (`scout_static::StaticLocators`) so it composes on the no-alloc
+// MCU profile. The `alloc`-only surface (the `ScoutingMode` deploy-string
+// parser) is gated per-item inside the module.
 #[cfg(feature = "scouting-static")]
 pub mod scout_static;
 
-/// R311er — mode-agnostic locator parsing (`proto/addr:port` ->
-/// `ParsedLocator{Proto, SocketAddr}`, docs/scouting-fsm.md §1.2). The
-/// single seam both scouting modes' locator strings (active discovered +
-/// static synth) flow through before a link dial. Pure core::net + alloc;
-/// distinct from wz-codecs::locator (the wire codec).
+// R311er — mode-agnostic locator parsing (`proto/addr:port` ->
+// `ParsedLocator{Proto, SocketAddr}`, docs/scouting-fsm.md §1.2). The
+// single seam both scouting modes' locator strings (active discovered +
+// static synth) flow through before a link dial. Pure core::net + alloc;
+// distinct from wz-codecs::locator (the wire codec).
 #[cfg(feature = "alloc")]
 pub mod locator;
 
-/// R311nt — transport-agnostic SERIAL-link framing, handshake, and
-/// locator logic (the `Z_FEATURE_LINK_SERIAL` upper protocol). Mirrors
-/// zenoh-pico serial_protocol.c + protocol/codec/serial.c, holding NO
-/// I/O so it compiles on both the AP (tty) and MCU (UART HAL) profiles.
-/// Consumes the R311ns serial framing codecs (serial_envelope / cobs /
-/// crc32). Gated on `transport-link-serial` (forwards `codec-serial`).
+// R311nt — transport-agnostic SERIAL-link framing, handshake, and
+// locator logic (the `Z_FEATURE_LINK_SERIAL` upper protocol). Mirrors
+// zenoh-pico serial_protocol.c + protocol/codec/serial.c, holding NO
+// I/O so it compiles on both the AP (tty) and MCU (UART HAL) profiles.
+// Consumes the R311ns serial framing codecs (serial_envelope / cobs /
+// crc32). Gated on `transport-link-serial` (forwards `codec-serial`).
 #[cfg(feature = "transport-link-serial")]
 pub mod serial_link;
 
-/// R311y579 (G9) — the raweth (L2) link's FRAMING SSOT: the 16 / 20-byte
-/// Ethernet header zenoh-pico's raweth transport puts a batch inside, its
-/// source-MAC allow-list, and the `reth/` locator. Pure data, `no_std` +
-/// alloc; the AF_PACKET socket that carries it lives in `wz-packet-socket`
-/// (Round 1998 moved it out of wz-runtime-tokio, which never drove it and
-/// charged every consumer a mandatory `tokio` to reach it).
+// R311y579 (G9) — the raweth (L2) link's FRAMING SSOT: the 16 / 20-byte
+// Ethernet header zenoh-pico's raweth transport puts a batch inside, its
+// source-MAC allow-list, and the `reth/` locator. Pure data, `no_std` +
+// alloc; the AF_PACKET socket that carries it lives in `wz-packet-socket`
+// (Round 1998 moved it out of wz-runtime-tokio, which never drove it and
+// charged every consumer a mandatory `tokio` to reach it).
 #[cfg(feature = "transport-link-raweth")]
 pub mod raweth_link;
 
@@ -491,14 +491,14 @@ pub mod raweth_link;
 /// `R::Mutex<Option<PeerInitCaps>>` slot stays in the tokio crate).
 pub mod peer_init_caps;
 
-/// R311ei — anti-amplification cookie signing key (`SigningKey` +
-/// `SigningKeyTooShort`) + the HMAC-SHA256 cookie primitive
-/// (`generate_cookie_hmac_sha256`). Pure crypto/value construction over
-/// the RustCrypto hmac + sha2 stack; alloc-gated (the key is
-/// `Zeroizing<Vec<u8>>`). DP3 leaf lifted from
-/// `wz-runtime-tokio::session_glue`; the OS-entropy constructor stays
-/// AP-only as a free fn in the tokio crate (getrandom has no MCU
-/// backend, and the orphan rule forbids a cross-crate inherent method).
+// R311ei — anti-amplification cookie signing key (`SigningKey` +
+// `SigningKeyTooShort`) + the HMAC-SHA256 cookie primitive
+// (`generate_cookie_hmac_sha256`). Pure crypto/value construction over
+// the RustCrypto hmac + sha2 stack; alloc-gated (the key is
+// `Zeroizing<Vec<u8>>`). DP3 leaf lifted from
+// `wz-runtime-tokio::session_glue`; the OS-entropy constructor stays
+// AP-only as a free fn in the tokio crate (getrandom has no MCU
+// backend, and the orphan rule forbids a cross-crate inherent method).
 #[cfg(feature = "storage-profile")]
 pub mod signing_key;
 
@@ -540,10 +540,10 @@ pub mod locator_directory;
 #[cfg(feature = "storage-profile")]
 pub mod session_init_params;
 
-/// Link-layer value types (TxFrame / RxFrame / LinkEvent / LostCause).
-/// RxFrame carries Vec<u8> so the module is alloc-gated. The
-/// LinkDriver trait + concrete TcpDriver/UdpDriver impls remain in
-/// wz-runtime-tokio because they are tokio-specific.
+// Link-layer value types (TxFrame / RxFrame / LinkEvent / LostCause).
+// RxFrame carries `Vec<u8>` so the module is alloc-gated. The
+// LinkDriver trait + concrete TcpDriver/UdpDriver impls remain in
+// wz-runtime-tokio because they are tokio-specific.
 #[cfg(feature = "storage-profile")]
 pub mod link;
 
@@ -642,43 +642,43 @@ pub mod lease;
 #[cfg(feature = "codec-join")]
 pub mod join_decode;
 
-/// R311y607 — the SCOUTING message namespace, which is NOT the transport one.
-///
-/// `S_MID_SCOUT` and `T_MID_INIT` are both `0x01`; `S_MID_HELLO` and
-/// `T_MID_OPEN` are both `0x02`. Only the link that carried the bytes settles
-/// which namespace applies, so a decoder handed the wrong one MISREADS rather
-/// than failing — the observer read every multicast SCOUT as a confident
-/// `InboundFrame::Init`. This module is the other dispatch, kept unreachable
-/// from [`inbound`]'s so neither can silently absorb the other's MIDs.
-///
-/// `alloc`-gated for the owned bodies + ext chain, like [`inbound`]; the two
-/// body codecs are gated individually so a HELLO-only reader carries one.
-///
-/// R311y608 — named `scouting_message` and not `scouting`, after pico's own
-/// `_z_scouting_message_t` / `_z_scouting_message_decode`. `scouting` was
-/// already taken by the SCE-generated active-scouting STATE MACHINE below, and
-/// the two are different things one word apart: this is the wire decode, that
-/// is the FSM that drives a scout. R311y607 took the shorter name and the
-/// collision was invisible to every build it ran — the two modules sit behind
-/// disjoint features (`codec-scout`/`codec-hello` vs `scouting-active`), so
-/// only a build enabling BOTH sees them at once, and hosted Layer C1bf
-/// (`wz-runtime-tokio --all-features`) was the first that did.
+// R311y607 — the SCOUTING message namespace, which is NOT the transport one.
+//
+// `S_MID_SCOUT` and `T_MID_INIT` are both `0x01`; `S_MID_HELLO` and
+// `T_MID_OPEN` are both `0x02`. Only the link that carried the bytes settles
+// which namespace applies, so a decoder handed the wrong one MISREADS rather
+// than failing — the observer read every multicast SCOUT as a confident
+// `InboundFrame::Init`. This module is the other dispatch, kept unreachable
+// from `inbound`'s so neither can silently absorb the other's MIDs.
+//
+// `alloc`-gated for the owned bodies + ext chain, like `inbound`; the two
+// body codecs are gated individually so a HELLO-only reader carries one.
+//
+// R311y608 — named `scouting_message` and not `scouting`, after pico's own
+// `_z_scouting_message_t` / `_z_scouting_message_decode`. `scouting` was
+// already taken by the SCE-generated active-scouting STATE MACHINE below, and
+// the two are different things one word apart: this is the wire decode, that
+// is the FSM that drives a scout. R311y607 took the shorter name and the
+// collision was invisible to every build it ran — the two modules sit behind
+// disjoint features (`codec-scout`/`codec-hello` vs `scouting-active`), so
+// only a build enabling BOTH sees them at once, and hosted Layer C1bf
+// (`wz-runtime-tokio --all-features`) was the first that did.
 #[cfg(all(
     feature = "alloc",
     any(feature = "codec-scout", feature = "codec-hello")
 ))]
 pub mod scouting_message;
 
-/// R311y846 — the scouting RESPONDER decision: one datagram in, at most one
-/// Hello out. The half of multicast scouting that makes wz DISCOVERABLE, which
-/// no wz mode carried — active / passive / static (§1.4) are all initiator
-/// paths, so a stock zenoh peer running its default
-/// `scouting/multicast/listen: true` had to be told wz's endpoint instead of
-/// finding it.
-///
-/// Needs BOTH codecs, unlike [`scouting_message`], which decodes whichever it
-/// has: the responder reads a Scout and writes a Hello, so a build with one
-/// half has no responder to offer rather than a partial one.
+// R311y846 — the scouting RESPONDER decision: one datagram in, at most one
+// Hello out. The half of multicast scouting that makes wz DISCOVERABLE, which
+// no wz mode carried — active / passive / static (§1.4) are all initiator
+// paths, so a stock zenoh peer running its default
+// `scouting/multicast/listen: true` had to be told wz's endpoint instead of
+// finding it.
+//
+// Needs BOTH codecs, unlike `scouting_message`, which decodes whichever it
+// has: the responder reads a Scout and writes a Hello, so a build with one
+// half has no responder to offer rather than a partial one.
 #[cfg(all(feature = "alloc", feature = "codec-scout", feature = "codec-hello"))]
 pub mod scout_responder;
 
@@ -704,61 +704,61 @@ pub mod scout_initiator;
 ))]
 pub mod scouting_host;
 
-/// R311ky — deferred callback firing (the F-6 structural fix): the
-/// staging queue + per-listener take-call-restore cell that let
-/// decl/matching/data callbacks run OUTSIDE the session observer mutex.
-/// Pure Session-tier infra — its only consumer is wz-runtime-tokio (the
-/// AP runtime), which enables `deferred-fire` unconditionally on its
-/// wz-session-core dependency.
-///
-/// R311me — gated on `deferred-fire` ALONE. `alloc::sync::Arc` needs
-/// `target_has_atomic = "ptr"` (absent on ARMv6-M), and `deferred-fire`
-/// implies `alloc`, so making it the sole gate keeps the module off
-/// every profile that does not run the AP deferral machinery. Before
-/// R311me the gate also fired on the decl-sink / data-plane features
-/// (`session-matching` / `declare-subscriber` / `declare-queryable` /
-/// `liveliness-token` / `liveliness-subscriber` / `query-reply`), a
-/// pre-R311lh artifact: those arms were how the AP Session-tier deferred
-/// listeners (R311lb/lc/lg) reached the module before R311lh introduced
-/// the explicit `deferred-fire` consumer feature. No wz-session-core
-/// code instantiates a deferred type under those arms (only doc-links),
-/// so post-R311lh they were dead weight — and one of them,
-/// `liveliness-token`, dragged `alloc::sync::Arc` into the Arc-free MCU
-/// multicast profile (the single-task loop drives registries inline and
-/// stages its liveliness / queryable replies through the Rc-backed
-/// `MulticastReplyQueue`, never the deferred seam), breaking the
-/// thumbv6m M0 liveliness cross-build. Collapsing the gate restores that
-/// M0 inline-fire reach with no AP change (wz-runtime-tokio still
-/// enables `deferred-fire`).
+// R311ky — deferred callback firing (the F-6 structural fix): the
+// staging queue + per-listener take-call-restore cell that let
+// decl/matching/data callbacks run OUTSIDE the session observer mutex.
+// Pure Session-tier infra — its only consumer is wz-runtime-tokio (the
+// AP runtime), which enables `deferred-fire` unconditionally on its
+// wz-session-core dependency.
+//
+// R311me — gated on `deferred-fire` ALONE. `alloc::sync::Arc` needs
+// `target_has_atomic = "ptr"` (absent on ARMv6-M), and `deferred-fire`
+// implies `alloc`, so making it the sole gate keeps the module off
+// every profile that does not run the AP deferral machinery. Before
+// R311me the gate also fired on the decl-sink / data-plane features
+// (`session-matching` / `declare-subscriber` / `declare-queryable` /
+// `liveliness-token` / `liveliness-subscriber` / `query-reply`), a
+// pre-R311lh artifact: those arms were how the AP Session-tier deferred
+// listeners (R311lb/lc/lg) reached the module before R311lh introduced
+// the explicit `deferred-fire` consumer feature. No wz-session-core
+// code instantiates a deferred type under those arms (only doc-links),
+// so post-R311lh they were dead weight — and one of them,
+// `liveliness-token`, dragged `alloc::sync::Arc` into the Arc-free MCU
+// multicast profile (the single-task loop drives registries inline and
+// stages its liveliness / queryable replies through the Rc-backed
+// `MulticastReplyQueue`, never the deferred seam), breaking the
+// thumbv6m M0 liveliness cross-build. Collapsing the gate restores that
+// M0 inline-fire reach with no AP change (wz-runtime-tokio still
+// enables `deferred-fire`).
 #[cfg(feature = "deferred-fire")]
 pub mod deferred_fire;
 
-/// Query-side enums (ConsolidationMode + QueryTarget) shared by the
-/// Request(Query) builder and the application-layer query API.
-/// no_std + no_alloc clean (pure value types with wire_byte helpers).
+// Query-side enums (ConsolidationMode + QueryTarget) shared by the
+// Request(Query) builder and the application-layer query API.
+// no_std + no_alloc clean (pure value types with wire_byte helpers).
 pub mod query_mode;
 
-/// Wire-encode-time metadata bundles (PushMetadata + QueryMetadata)
-/// routed from session API through the codec layer. Uses Sample +
-/// query_mode types; alloc-gated due to Vec<u8> attachment slots.
+// Wire-encode-time metadata bundles (PushMetadata + QueryMetadata)
+// routed from session API through the codec layer. Uses Sample +
+// query_mode types; alloc-gated due to `Vec<u8>` attachment slots.
 #[cfg(feature = "alloc")]
 pub mod metadata;
 
-/// Typed reject for the outbound DECLARE-side gate (R300). Uses
-/// OutboundKeyexprError (alloc-bound) so the module is alloc-gated.
+// Typed reject for the outbound DECLARE-side gate (R300). Uses
+// OutboundKeyexprError (alloc-bound) so the module is alloc-gated.
 #[cfg(feature = "storage-profile")]
 pub mod send_declare_error;
 
-/// W3 — typed reject for the non-DECLARE outbound wire-emit actions
-/// (push / request / interest). Alloc-free (only wraps `CodecError`),
-/// so ungated — usable from the no-alloc MCU surface too.
+// W3 — typed reject for the non-DECLARE outbound wire-emit actions
+// (push / request / interest). Alloc-free (only wraps `CodecError`),
+// so ungated — usable from the no-alloc MCU surface too.
 pub mod send_wire_error;
 
-/// R222 / R225 — application-layer `Sample` type for subscriber callbacks.
-/// Mirrors zenoh-pico's `_z_sample_t` projection. Carries alloc-bound
-/// fields (Vec<u8> payload, String keyexpr) so gated on the `alloc`
-/// feature. Re-exported from wz-runtime-tokio for `crate::sample::*`
-/// callsite compatibility.
+// R222 / R225 — application-layer `Sample` type for subscriber callbacks.
+// Mirrors zenoh-pico's `_z_sample_t` projection. Carries alloc-bound
+// fields (`Vec<u8>` payload, `String` keyexpr) so gated on the `alloc`
+// feature. Re-exported from wz-runtime-tokio for `crate::sample::*`
+// callsite compatibility.
 #[cfg(feature = "storage-profile")]
 pub mod sample;
 
@@ -787,12 +787,12 @@ pub mod query_options;
 #[cfg(feature = "alloc")]
 pub mod declare_form;
 
-/// §5.19 — predefined Encoding constants + the MIME id<->str table, the wz mirror
-/// of zenoh's high-level Encoding API (the convenience layer the encoding-* atoms
-/// name, on top of the active `pubsub-encoding` wire field). FOUNDATIONAL
-/// (always-on, no cfg toggle — encoding identity is a data value, not a
-/// composable code path). Gated on `alloc` (it builds the `String`-bearing
-/// [`sample::EncodingHint`]).
+// §5.19 — predefined Encoding constants + the MIME id<->str table, the wz mirror
+// of zenoh's high-level Encoding API (the convenience layer the encoding-* atoms
+// name, on top of the active `pubsub-encoding` wire field). FOUNDATIONAL
+// (always-on, no cfg toggle — encoding identity is a data value, not a
+// composable code path). Gated on `alloc` (it builds the `String`-bearing
+// `sample::EncodingHint`).
 #[cfg(feature = "storage-profile")]
 pub mod encoding;
 
@@ -927,15 +927,15 @@ pub mod multicast_peer_lost;
 /// Layer C1bz measures.)
 pub mod multicast_peer_arrived;
 
-/// Inbound transport-frame decode SSOT (`parse_inbound` + `InboundFrame`
-/// + `decode_ext_chain`) and the FSM-event projection
-/// (`inbound_to_fsm_event`). Hoisted from `wz-runtime-tokio::session_glue`
-/// so both runtime profiles (tokio AP + lwIP MCU) decode through one
-/// source — the MCU `#![no_std]` profile cannot depend on the tokio crate.
-/// `InboundFrame` carries owned `Vec` buffers, so alloc-gated like
-/// `network_message` / `driver_loop`; the no-alloc borrowed-decode variant
-/// is a deferred follow-up. `inbound_to_fsm_event` is additionally gated on
-/// `session-unicast` (it names the generated FSM event enum).
+// Inbound transport-frame decode SSOT (`parse_inbound` + `InboundFrame`
+// + `decode_ext_chain`) and the FSM-event projection
+// (`inbound_to_fsm_event`). Hoisted from `wz-runtime-tokio::session_glue`
+// so both runtime profiles (tokio AP + lwIP MCU) decode through one
+// source — the MCU `#![no_std]` profile cannot depend on the tokio crate.
+// `InboundFrame` carries owned `Vec` buffers, so alloc-gated like
+// `network_message` / `driver_loop`; the no-alloc borrowed-decode variant
+// is a deferred follow-up. `inbound_to_fsm_event` is additionally gated on
+// `session-unicast` (it names the generated FSM event enum).
 #[cfg(feature = "storage-profile")]
 pub mod inbound;
 
@@ -1041,11 +1041,11 @@ pub mod plain_push;
 ))]
 pub mod put_payload;
 
-/// Shared codec-agnostic `Wireexpr` constructors (`literal_wireexpr`) — the
-/// SSOT a forwarder normalizes an aliased keyexpr through before it crosses a
-/// link without the inbound alias table (c3c-3 B1). Relocated out of
-/// `push_build` so the Request forward path reuses it without the Push codec;
-/// `alloc`-gated only (owned-string output).
+// Shared codec-agnostic `Wireexpr` constructors (`literal_wireexpr`) — the
+// SSOT a forwarder normalizes an aliased keyexpr through before it crosses a
+// link without the inbound alias table (c3c-3 B1). Relocated out of
+// `push_build` so the Request forward path reuses it without the Push codec;
+// `alloc`-gated only (owned-string output).
 #[cfg(feature = "storage-profile")]
 pub mod wireexpr_build;
 
@@ -1077,19 +1077,19 @@ pub mod ext_nodeid;
 #[cfg(all(feature = "storage-profile", feature = "codec-declare"))]
 pub mod queryable_info;
 
-/// Push routing-context source `node_id` (P4 routing, linkstate port step
-/// c3c-1): `read_push_source` / `set_push_source` over the Push `ext_nodeid`
-/// extension — the data-plane forward seam naming the spanning-tree root a
-/// linkstate-peer floods a message along. `codec-push` gated (the data plane
-/// the routing context rides) and owned `Vec` output (alloc-gated).
+// Push routing-context source `node_id` (P4 routing, linkstate port step
+// c3c-1): `read_push_source` / `set_push_source` over the Push `ext_nodeid`
+// extension — the data-plane forward seam naming the spanning-tree root a
+// linkstate-peer floods a message along. `codec-push` gated (the data plane
+// the routing context rides) and owned `Vec` output (alloc-gated).
 #[cfg(all(feature = "alloc", feature = "codec-push"))]
 pub mod push_routing_context;
 
-/// OAM carrier for the linkstate-peer topology exchange (P4 routing,
-/// linkstate port step c1): `build_linkstate_oam` wraps a `LinkStateList`
-/// as an `OAM_LINKSTATE` network message, `try_parse_linkstate_oam`
-/// extracts one back. `codec-linkstate` gated (AP/full-node routing,
-/// absent from the MCU footprint); owned `Vec` output (alloc-gated).
+// OAM carrier for the linkstate-peer topology exchange (P4 routing,
+// linkstate port step c1): `build_linkstate_oam` wraps a `LinkStateList`
+// as an `OAM_LINKSTATE` network message, `try_parse_linkstate_oam`
+// extracts one back. `codec-linkstate` gated (AP/full-node routing,
+// absent from the MCU footprint); owned `Vec` output (alloc-gated).
 #[cfg(all(feature = "alloc", feature = "codec-linkstate"))]
 pub mod linkstate_oam;
 
@@ -1183,49 +1183,49 @@ pub mod lent_request;
 #[cfg(feature = "storage-profile")]
 pub mod wireexpr_resolve;
 
-/// R311di-14+ — application-layer remote-declaration registries
-/// (liveliness / subscriber / queryable / liveliness_subscriber).
-///
-/// R311gb (Track 2 no-alloc gating) — un-gated from `alloc`: each
-/// registry's control plane (the `BoundedVec` observer lists +
-/// `on_*_declared_sink` installers + the no-heap fire entries
-/// `dispatch_declared_borrowed` / `dispatch_undeclared`) compiles on the
-/// MCU no-heap profile. The wire-dispatch entry points
-/// (`dispatch_declare` / `dispatch_messages` consuming owned
-/// `DeclareOwnedVariant` / `NetworkMessage`) and the peer-`declared`
-/// membership table (`HashMap` + `has_matching`) stay
-/// `all(codec-declare, alloc)` / `alloc`-gated per sub-module. The
-/// `local_token` declarer-side responder + `liveliness_sample` /
-/// `liveliness_subscriber` keep their `alloc` gates pending their own
-/// Track 2 sub-round.
+// R311di-14+ — application-layer remote-declaration registries
+// (liveliness / subscriber / queryable / liveliness_subscriber).
+//
+// R311gb (Track 2 no-alloc gating) — un-gated from `alloc`: each
+// registry's control plane (the `BoundedVec` observer lists +
+// `on_*_declared_sink` installers + the no-heap fire entries
+// `dispatch_declared_borrowed` / `dispatch_undeclared`) compiles on the
+// MCU no-heap profile. The wire-dispatch entry points
+// (`dispatch_declare` / `dispatch_messages` consuming owned
+// `DeclareOwnedVariant` / `NetworkMessage`) and the peer-`declared`
+// membership table (`HashMap` + `has_matching`) stay
+// `all(codec-declare, alloc)` / `alloc`-gated per sub-module. The
+// `local_token` declarer-side responder + `liveliness_sample` /
+// `liveliness_subscriber` keep their `alloc` gates pending their own
+// Track 2 sub-round.
 pub mod declare;
 
-/// R311du — application-layer local subscriber registry
-/// (`SubscriberRegistry` + `SubscriptionId`): the keyexpr callbacks the
-/// application registers so an inbound `Push` fires them. The dispatch
-/// arms gate on `codec-push` (they consume wz-codecs `Push` records).
-/// Runtime-agnostic (`FnMut + Send`, no async), so the same registry
-/// serves the tokio (AP) and lwIP (MCU) runtimes.
-///
-/// R311gb (Track 2 no-alloc gating) — un-gated from `alloc`: the
-/// control plane (the `BoundedVec` subscriber table + `BoundedString`
-/// patterns + `register` / `unregister` / matching) compiles on the
-/// MCU no-heap profile. The wire-dispatch surface (`dispatch_push` /
-/// `dispatch` / `local_publish` / `absorb_declare` consuming owned
-/// `PushOwned` / `NetworkMessage` / `Sample`, plus the
-/// `peer_keyexpr_table` / `own_zid` wire-state fields) stays
-/// `alloc`-gated per the Track 2 borrow boundary — the no-heap fire
-/// path (borrowed `SampleView` dispatch) lands in a later sub-round.
+// R311du — application-layer local subscriber registry
+// (`SubscriberRegistry` + `SubscriptionId`): the keyexpr callbacks the
+// application registers so an inbound `Push` fires them. The dispatch
+// arms gate on `codec-push` (they consume wz-codecs `Push` records).
+// Runtime-agnostic (`FnMut + Send`, no async), so the same registry
+// serves the tokio (AP) and lwIP (MCU) runtimes.
+//
+// R311gb (Track 2 no-alloc gating) — un-gated from `alloc`: the
+// control plane (the `BoundedVec` subscriber table + `BoundedString`
+// patterns + `register` / `unregister` / matching) compiles on the
+// MCU no-heap profile. The wire-dispatch surface (`dispatch_push` /
+// `dispatch` / `local_publish` / `absorb_declare` consuming owned
+// `PushOwned` / `NetworkMessage` / `Sample`, plus the
+// `peer_keyexpr_table` / `own_zid` wire-state fields) stays
+// `alloc`-gated per the Track 2 borrow boundary — the no-heap fire
+// path (borrowed `SampleView` dispatch) lands in a later sub-round.
 pub mod pubsub;
 
-/// R311ek — shared `source_info` extension-body encoder
-/// (`encode_source_info_ext_body` + the `pub(crate)` VLE primitive it
-/// shares with `response_build`'s responder encoder). Alloc-only, no
-/// codec-feature gate: the encoder is consumed by both the `codec-push`
-/// body-extension path and the `codec-response` responder path, so it
-/// must be reachable in a `codec-push`-only subset. Relocated out of the
-/// `codec-response`-gated `response_build` module to close the
-/// arbitrary-composition gap (north-star mechanism ①).
+// R311ek — shared `source_info` extension-body encoder
+// (`encode_source_info_ext_body` + the `pub(crate)` VLE primitive it
+// shares with `response_build`'s responder encoder). Alloc-only, no
+// codec-feature gate: the encoder is consumed by both the `codec-push`
+// body-extension path and the `codec-response` responder path, so it
+// must be reachable in a `codec-push`-only subset. Relocated out of the
+// `codec-response`-gated `response_build` module to close the
+// arbitrary-composition gap (north-star mechanism ①).
 #[cfg(feature = "alloc")]
 pub mod source_info_ext;
 
@@ -1237,13 +1237,13 @@ pub mod source_info_ext;
 #[cfg(all(feature = "alloc", feature = "attachment-bytes"))]
 pub mod attachment;
 
-/// SSOT for the Query body VALUE extension wire shape (the querier's attached
-/// `payload` + `encoding`, the "Q_B / Q_E" wire codec slots). Gated on the
-/// `query-value` catalog primitive that the querier `RequestQueryBuilder::
-/// query_value` (encode) and the queryable `query::extract_query_value`
-/// (decode) select; owns the one encode / decode pair for the
-/// `(0x3, ENC_ZBUF, ExtZbuf body = encoding || payload)` value ext. Sibling of
-/// `source_info_ext` (0x01) and `attachment` (0x05) — the three Query body exts.
+// SSOT for the Query body VALUE extension wire shape (the querier's attached
+// `payload` + `encoding`, the "Q_B / Q_E" wire codec slots). Gated on the
+// `query-value` catalog primitive that the querier `RequestQueryBuilder::
+// query_value` (encode) and the queryable `query::extract_query_value`
+// (decode) select; owns the one encode / decode pair for the
+// `(0x3, ENC_ZBUF, ExtZbuf body = encoding || payload)` value ext. Sibling of
+// `source_info_ext` (0x01) and `attachment` (0x05) — the three Query body exts.
 #[cfg(all(feature = "alloc", feature = "query-value"))]
 pub mod query_value_ext;
 
@@ -1289,12 +1289,12 @@ pub mod unit_ext;
 #[cfg(any(feature = "reassembly", feature = "transport-fragmentation"))]
 pub mod extfragment;
 
-/// R311y578 (G2) — the PASSIVE session-context tracker: the observer-side
-/// counterpart to `session_actions`'s participant state. Folds BOTH sides'
-/// Init offers (a participant computes only its own half), tracks the phase
-/// that decides when the stream reframes to the lowlatency 4-byte prefix, and
-/// de-frames each direction's byte stream into decoded transport messages.
-/// No I/O: capture ingest is a layer above.
+// R311y578 (G2) — the PASSIVE session-context tracker: the observer-side
+// counterpart to `session_actions`'s participant state. Folds BOTH sides'
+// Init offers (a participant computes only its own half), tracks the phase
+// that decides when the stream reframes to the lowlatency 4-byte prefix, and
+// de-frames each direction's byte stream into decoded transport messages.
+// No I/O: capture ingest is a layer above.
 #[cfg(all(
     feature = "alloc",
     feature = "codec-init-body",
@@ -1356,11 +1356,11 @@ pub mod heap_account;
 ))]
 pub mod byte_log;
 
-/// R311y579 (G3 + G6-serde) — the LEAF-SCALAR field walker: a dissection that
-/// reports, per scalar, the byte span it was decoded from, in a wz-owned view
-/// model that can carry `serde` derives the codegen'd mirrors cannot. Gated on
-/// `dissect`, which selects the whole codec-* MID space on purpose: an observer
-/// reads every message it sees and encodes none.
+// R311y579 (G3 + G6-serde) — the LEAF-SCALAR field walker: a dissection that
+// reports, per scalar, the byte span it was decoded from, in a wz-owned view
+// model that can carry `serde` derives the codegen'd mirrors cannot. Gated on
+// `dissect`, which selects the whole codec-* MID space on purpose: an observer
+// reads every message it sees and encodes none.
 #[cfg(feature = "dissect")]
 pub mod dissect;
 
@@ -1369,22 +1369,22 @@ pub mod dissect;
 #[cfg(feature = "dissect")]
 pub mod dissect_schema;
 
-/// R311y585 (A4) — the OBSERVER's per-direction key-expression tables.
-///
-/// A participant keeps one table per link (the peer's ids) because the other
-/// number space is its own. An observer has neither and must rebuild both,
-/// then pick between them with the wire expression's `M` bit. Gated with the
-/// dissect surface, whose consumers are the ones that need a path rather than
-/// a number.
+// R311y585 (A4) — the OBSERVER's per-direction key-expression tables.
+//
+// A participant keeps one table per link (the peer's ids) because the other
+// number space is its own. An observer has neither and must rebuild both,
+// then pick between them with the wire expression's `M` bit. Gated with the
+// dissect surface, whose consumers are the ones that need a path rather than
+// a number.
 #[cfg(all(feature = "dissect", feature = "codec-declare"))]
 pub mod passive_keyexpr;
 
-/// R311y578 — SSOT for the `0x7` PATCH establishment ext: the protocol patch
-/// LEVEL wz announces (R121f1) and, newly, the peer's half plus the `min()`
-/// negotiation over it. The negotiated level is the sole gate on the
-/// [`extfragment`] chain-boundary rules (zenoh
-/// `PatchType::has_fragmentation_markers`), so reading it is a precondition
-/// for honouring the markers without refusing every patch-0 peer's chains.
+// R311y578 — SSOT for the `0x7` PATCH establishment ext: the protocol patch
+// LEVEL wz announces (R121f1) and, newly, the peer's half plus the `min()`
+// negotiation over it. The negotiated level is the sole gate on the
+// `extfragment` chain-boundary rules (zenoh
+// `PatchType::has_fragmentation_markers`), so reading it is a precondition
+// for honouring the markers without refusing every patch-0 peer's chains.
 pub mod extpatch;
 
 /// What an Init ext chain OFFERS for QoS, read the way upstream reads it: the
@@ -1416,23 +1416,23 @@ pub mod region_partition;
 #[cfg(feature = "transport-lowlatency")]
 pub mod extlowlatency;
 
-/// SSOT for the Z_EXT_QOS establishment ext (`transport-qos`) — the wz mirror
-/// of zenoh `init::ext::QoS` (`zextunit!(0x1,false)`). The codec layer (the 0x1
-/// unit ext + the peer-offer projector that also tolerates the z64 `QoSLink`
-/// form a priority-configured zenohd sends); the per-session `is_qos` state, the
-/// `&=` negotiation, the per-priority SN conduits, and the Frame ext_qos wire
-/// live in `session_actions` / `drive` / `inbound` / `frame_encode`.
-///
-/// Under `session-extqos` (R311y506) the module also owns the z64 `QoSLink`
-/// half — the packed priority-range + reliability body and the DIRECTIONAL
-/// containment that negotiates it (acceptor: subset; initiator: superset).
+// SSOT for the Z_EXT_QOS establishment ext (`transport-qos`) — the wz mirror
+// of zenoh `init::ext::QoS` (`zextunit!(0x1,false)`). The codec layer (the 0x1
+// unit ext + the peer-offer projector that also tolerates the z64 `QoSLink`
+// form a priority-configured zenohd sends); the per-session `is_qos` state, the
+// `&=` negotiation, the per-priority SN conduits, and the Frame ext_qos wire
+// live in `session_actions` / `drive` / `inbound` / `frame_encode`.
+//
+// Under `session-extqos` (R311y506) the module also owns the z64 `QoSLink`
+// half — the packed priority-range + reliability body and the DIRECTIONAL
+// containment that negotiates it (acceptor: subset; initiator: superset).
 #[cfg(feature = "transport-qos")]
 pub mod extqos;
 
-/// SSOT for the transport-level batch COMPRESSION wrap (`transport-compression`)
-/// — the wz mirror of zenoh's per-batch lz4 codec (batch.rs). `compress_batch` /
-/// `decompress_batch` wrap the `[BatchHeader][payload]` the link layer length-
-/// frames, applied at the `send_wire` / `dispatch_link_event` seams.
+// SSOT for the transport-level batch COMPRESSION wrap (`transport-compression`)
+// — the wz mirror of zenoh's per-batch lz4 codec (batch.rs). `compress_batch` /
+// `decompress_batch` wrap the `[BatchHeader][payload]` the link layer length-
+// frames, applied at the `send_wire` / `dispatch_link_event` seams.
 #[cfg(feature = "transport-compression")]
 pub mod compression;
 
@@ -1483,55 +1483,55 @@ pub mod extshm;
 /// messages read either (R3044).
 pub mod ext_view;
 
-/// The method-agnostic Z_EXT_AUTH dispatch kernel — the wz mirror of zenoh
-/// `establishment/ext/auth/mod.rs` (`AuthFsm`'s OpenFsm + AcceptFsm). Mux/demux
-/// of per-method sub-exts (keyed by method id) into / out of the auth ext
-/// across the four establishment stages, consuming the `extauth` outer codec +
-/// the `ext_chain` inner chain. Method state rides `&mut self` on the existing
-/// messages (no new FSM state, OQ-W10/W2). Concrete methods (usrpwd / pubkey) +
-/// the live handshake wiring are follow-on atoms.
+// The method-agnostic Z_EXT_AUTH dispatch kernel — the wz mirror of zenoh
+// `establishment/ext/auth/mod.rs` (`AuthFsm`'s OpenFsm + AcceptFsm). Mux/demux
+// of per-method sub-exts (keyed by method id) into / out of the auth ext
+// across the four establishment stages, consuming the `extauth` outer codec +
+// the `ext_chain` inner chain. Method state rides `&mut self` on the existing
+// messages (no new FSM state, OQ-W10/W2). Concrete methods (usrpwd / pubkey) +
+// the live handshake wiring are follow-on atoms.
 #[cfg(feature = "session-extauth")]
 pub mod auth_dispatch;
 
-/// SSOT for the Z_EXT_MULTILINK establishment ext (`transport-multilink`) — the
-/// wz mirror of zenoh `establishment/ext/multilink.rs`. The 0x4 ext is UN-wrapped
-/// (NOT muxed through [`auth_dispatch`]): the single-method
-/// [`extmultilink::MultiLinkDispatch`] drives ONE `AuthMethod` (the ephemeral
-/// pubkey handshake, injected rsa-free from wz-runtime-tokio) across the four
-/// establishment stages and maps each `AuthSubExt` DIRECTLY to a 0x4
-/// `ExtEntryOwned` via the shared [`auth_dispatch::AuthSubExt::into_ext_entry`]
-/// SSOT (zenoh's `.transmute()`, id 0x1 -> 0x4, NO inner method-id frame). Gated
-/// on `transport-multilink` (which forwards `session-extauth`); the aggregation
-/// core (`MultiLinkSink` + the add-link decision) is a follow-on atom.
+// SSOT for the Z_EXT_MULTILINK establishment ext (`transport-multilink`) — the
+// wz mirror of zenoh `establishment/ext/multilink.rs`. The 0x4 ext is UN-wrapped
+// (NOT muxed through `auth_dispatch`): the single-method
+// `extmultilink::MultiLinkDispatch` drives ONE `AuthMethod` (the ephemeral
+// pubkey handshake, injected rsa-free from wz-runtime-tokio) across the four
+// establishment stages and maps each `AuthSubExt` DIRECTLY to a 0x4
+// `ExtEntryOwned` via the shared `auth_dispatch::AuthSubExt::into_ext_entry`
+// SSOT (zenoh's `.transmute()`, id 0x1 -> 0x4, NO inner method-id frame). Gated
+// on `transport-multilink` (which forwards `session-extauth`); the aggregation
+// core (`MultiLinkSink` + the add-link decision) is a follow-on atom.
 #[cfg(feature = "transport-multilink")]
 pub mod extmultilink;
 
-/// The usrpwd auth method — the wz mirror of zenoh `establishment/ext/auth/
-/// usrpwd.rs`. A username/password challenge-response [`auth_dispatch::AuthMethod`]
-/// (HMAC-SHA3-256 over an InitAck nonce). Gated on `access-extauth-usrpwd` (the
-/// first concrete §5.16 auth method; pulls `sha3`).
+// The usrpwd auth method — the wz mirror of zenoh `establishment/ext/auth/
+// usrpwd.rs`. A username/password challenge-response `auth_dispatch::AuthMethod`
+// (HMAC-SHA3-256 over an InitAck nonce). Gated on `access-extauth-usrpwd` (the
+// first concrete §5.16 auth method; pulls `sha3`).
 #[cfg(feature = "access-extauth-usrpwd")]
 pub mod extauth_usrpwd;
 
-/// R311dv — Response-builder cluster (`build_response_{reply,err}_*`
-/// + `ResponseReplyBuilder` / `ResponseErrBuilder`): pure value
-/// construction of a `Response(Reply|Err)` wire record from a
-/// request_id + keyexpr + payload. Lifted from
-/// `wz-runtime-tokio::session_glue`; gated on `codec-response` because
-/// without the Response codec there is no wire frame to build. The
-/// precursor that lets `query.rs` (with its `codec-response`-gated
-/// `QueryReply::into_response`) migrate into wz-session-core.
+// R311dv — Response-builder cluster (`build_response_{reply,err}_*`
+// + `ResponseReplyBuilder` / `ResponseErrBuilder`): pure value
+// construction of a `Response(Reply|Err)` wire record from a
+// request_id + keyexpr + payload. Lifted from
+// `wz-runtime-tokio::session_glue`; gated on `codec-response` because
+// without the Response codec there is no wire frame to build. The
+// precursor that lets `query.rs` (with its `codec-response`-gated
+// `QueryReply::into_response`) migrate into wz-session-core.
 #[cfg(all(feature = "alloc", feature = "codec-response"))]
 pub mod response_build;
 
-/// R311eh — Request-builder cluster (`build_request_query` + the five
-/// `build_request_query_with_*` layered variants + `RequestQueryBuilder`
-/// + the two size-bound consts): pure value construction of a
-/// `Request(Query)` wire record from a request_id + keyexpr + Query/
-/// Request-layer settings. Lifted from `wz-runtime-tokio::session_glue`;
-/// the mirror of the `response_build` move. Gated on
-/// `all(alloc, codec-request)` — the builders allocate owned codec
-/// buffers and there is no Request frame to build without the codec.
+// R311eh — Request-builder cluster (`build_request_query` + the five
+// `build_request_query_with_*` layered variants + `RequestQueryBuilder`
+// + the two size-bound consts): pure value construction of a
+// `Request(Query)` wire record from a request_id + keyexpr + Query/
+// Request-layer settings. Lifted from `wz-runtime-tokio::session_glue`;
+// the mirror of the `response_build` move. Gated on
+// `all(alloc, codec-request)` — the builders allocate owned codec
+// buffers and there is no Request frame to build without the codec.
 #[cfg(all(feature = "alloc", feature = "codec-request"))]
 pub mod request_build;
 
@@ -1546,27 +1546,27 @@ pub mod request_build;
 #[cfg(all(feature = "storage-profile", feature = "codec-request"))]
 pub mod request_routing_context;
 
-/// R311dx — application-layer queryable registry (`QueryableRegistry`
-/// + `QueryReply` / `ReplyBody` / `QueryResponder` / `QueryableId`):
-/// routes inbound `Request(Query)` records to user-registered on_query
-/// sinks (R311gb-3b: the `QuerySink` seam), accumulating Reply / Err
-/// records into a caller-owned `Vec<QueryReply>`. Lifted from
-/// `wz-runtime-tokio::query`.
-///
-/// R311gb (Track 2 no-alloc gating) — un-gated from `alloc`: the
-/// control plane (the `BoundedVec` queryable table + `BoundedString`
-/// patterns + `register_sink` / `unregister` / matching) compiles on
-/// the MCU no-heap profile, with the borrowed no-heap fire entry
-/// (`dispatch_borrowed` via the `QueryView` / `ReplyOut` seam). The
-/// reply-accumulator surface (`QueryReply` / `ReplyBody` /
-/// `QueryResponder`, all holding owned `String` / `Vec<u8>`) is
-/// `alloc`-gated, and the wire-dispatch entry points (`dispatch_request`
-/// / `local_query` / `fire_matching_queryables` / `dispatch_messages` /
-/// `extract_query_attachment`) gate on `all(codec-request, alloc)` (the
-/// `Request` / `Query` codec_group consumes owned records into the
-/// `alloc` accumulator), with `QueryReply::into_response` /
-/// `response_final_for` further behind `codec-response` /
-/// `codec-response-final`. Runtime-agnostic (`FnMut + Send`, no async).
+// R311dx — application-layer queryable registry (`QueryableRegistry`
+// + `QueryReply` / `ReplyBody` / `QueryResponder` / `QueryableId`):
+// routes inbound `Request(Query)` records to user-registered on_query
+// sinks (R311gb-3b: the `QuerySink` seam), accumulating Reply / Err
+// records into a caller-owned `Vec<QueryReply>`. Lifted from
+// `wz-runtime-tokio::query`.
+//
+// R311gb (Track 2 no-alloc gating) — un-gated from `alloc`: the
+// control plane (the `BoundedVec` queryable table + `BoundedString`
+// patterns + `register_sink` / `unregister` / matching) compiles on
+// the MCU no-heap profile, with the borrowed no-heap fire entry
+// (`dispatch_borrowed` via the `QueryView` / `ReplyOut` seam). The
+// reply-accumulator surface (`QueryReply` / `ReplyBody` /
+// `QueryResponder`, all holding owned `String` / `Vec<u8>`) is
+// `alloc`-gated, and the wire-dispatch entry points (`dispatch_request`
+// / `local_query` / `fire_matching_queryables` / `dispatch_messages` /
+// `extract_query_attachment`) gate on `all(codec-request, alloc)` (the
+// `Request` / `Query` codec_group consumes owned records into the
+// `alloc` accumulator), with `QueryReply::into_response` /
+// `response_final_for` further behind `codec-response` /
+// `codec-response-final`. Runtime-agnostic (`FnMut + Send`, no async).
 pub mod query;
 
 /// Fixed-memory step S9a — what a peer's queries make the session OWE it: the
@@ -1584,43 +1584,43 @@ pub mod reply_stage;
 #[cfg(feature = "storage-profile")]
 pub mod peer_tables;
 
-/// R311uw — the `storage-backend` atom (§5.11 storage, 1/4): the pluggable
-/// [`storage_backend::StorageBackend`] seam + an in-memory backend
-/// ([`storage_backend::MemoryStorage`]). A faithful mirror of zenoh's
-/// `zenoh-backend-traits` `Storage` trait + the bundled `memory_backend`.
-/// Gated on `storage-backend` (which implies `alloc`: the BTreeMap /
-/// String / Vec backing + the `crate::sample` TimestampHint / EncodingHint
-/// the `StoredData` embeds). Runtime-agnostic backend layer; the newer-wins
-/// service decision + the wz-runtime-tokio StorageService driver are the
-/// follow-up atoms.
+// R311uw — the `storage-backend` atom (§5.11 storage, 1/4): the pluggable
+// `storage_backend::StorageBackend` seam + an in-memory backend
+// (`storage_backend::MemoryStorage`). A faithful mirror of zenoh's
+// `zenoh-backend-traits` `Storage` trait + the bundled `memory_backend`.
+// Gated on `storage-backend` (which implies `alloc`: the BTreeMap /
+// String / Vec backing + the `crate::sample` TimestampHint / EncodingHint
+// the `StoredData` embeds). Runtime-agnostic backend layer; the newer-wins
+// service decision + the wz-runtime-tokio StorageService driver are the
+// follow-up atoms.
 #[cfg(feature = "storage-backend")]
 pub mod storage_backend;
 
-/// R311ux — the storage *service gate* (§5.11 storage, atom 2/4): the
-/// newer-wins versioning decision + the query-match set
-/// ([`storage_state::StorageState`]). The runtime-agnostic half of a
-/// storage service — pure no_std, no Subscriber / Queryable / async — that
-/// turns the dumb [`storage_backend::StorageBackend`] into a storage by
-/// applying zenoh's `guard_cache_if_latest` newer-wins gate (older
-/// Put/Delete -> Outdated; Delete leaves a tombstone timestamp) and
-/// resolving a (wildcard) query into the matching stored entries via the
-/// shared [`keyexpr_match::keyexpr_intersects_target`] scan. Same
-/// `storage-backend` gate; the wz-runtime-tokio StorageService driver
-/// (Subscriber + complete Queryable + select loop) wraps a `StorageState`
-/// (atom 3).
+// R311ux — the storage *service gate* (§5.11 storage, atom 2/4): the
+// newer-wins versioning decision + the query-match set
+// (`storage_state::StorageState`). The runtime-agnostic half of a
+// storage service — pure no_std, no Subscriber / Queryable / async — that
+// turns the dumb `storage_backend::StorageBackend` into a storage by
+// applying zenoh's `guard_cache_if_latest` newer-wins gate (older
+// Put/Delete -> Outdated; Delete leaves a tombstone timestamp) and
+// resolving a (wildcard) query into the matching stored entries via the
+// shared `keyexpr_match::keyexpr_intersects_target` scan. Same
+// `storage-backend` gate; the wz-runtime-tokio StorageService driver
+// (Subscriber + complete Queryable + select loop) wraps a `StorageState`
+// (atom 3).
 #[cfg(feature = "storage-backend")]
 pub mod storage_state;
 
-/// R311y55 — the §5.24 storage *Volume* layer: the FACTORY
-/// ([`storage_volume::Volume`]) above the §5.11 per-store
-/// [`storage_backend::StorageBackend`], plus the [`storage_volume::Capability`] /
-/// [`storage_volume::Persistence`] guarantees and the base in-memory
-/// [`storage_volume::MemoryVolume`]. The wz mirror of zenoh
-/// `zenoh-backend-traits` `Volume` + `MemoryBackend` — the keystone a storage
-/// MANAGER drives to host N named storages. FOUNDATIONAL: always compiled under
-/// `storage-backend` (no own cfg toggle); the toggleable manager atoms
-/// (multi-storage-host / strip-prefix / GC) compose ON it once
-/// `storage-mgr-config` lands.
+// R311y55 — the §5.24 storage *Volume* layer: the FACTORY
+// (`storage_volume::Volume`) above the §5.11 per-store
+// `storage_backend::StorageBackend`, plus the `storage_volume::Capability` /
+// `storage_volume::Persistence` guarantees and the base in-memory
+// `storage_volume::MemoryVolume`. The wz mirror of zenoh
+// `zenoh-backend-traits` `Volume` + `MemoryBackend` — the keystone a storage
+// MANAGER drives to host N named storages. FOUNDATIONAL: always compiled under
+// `storage-backend` (no own cfg toggle); the toggleable manager atoms
+// (multi-storage-host / strip-prefix / GC) compose ON it once
+// `storage-mgr-config` lands.
 #[cfg(feature = "storage-backend")]
 pub mod storage_volume;
 
@@ -1653,45 +1653,45 @@ pub mod storage_plugin_config;
 #[cfg(feature = "storage-mgr-multi-storage-host")]
 pub mod storage_manager;
 
-/// R311y58 — the §5.24 `storage-mgr-strip-prefix` atom: the
-/// [`storage_strip_prefix::strip_prefix`] / [`storage_strip_prefix::restore_prefix`]
-/// key transforms a storage manager applies so a storage holds keys RELATIVE to a
-/// mount point (the wz mirror of zenoh's `strip_prefix` / `prefix`). Closes the
-/// R311wt aligner strip_prefix gap at the LOGIC level; the live manager/backend
-/// application (which needs a §5.11 backend Option-key change for the exact-match
-/// none-key) is a documented follow-up.
+// R311y58 — the §5.24 `storage-mgr-strip-prefix` atom: the
+// `storage_strip_prefix::strip_prefix` / `storage_strip_prefix::restore_prefix`
+// key transforms a storage manager applies so a storage holds keys RELATIVE to a
+// mount point (the wz mirror of zenoh's `strip_prefix` / `prefix`). Closes the
+// R311wt aligner strip_prefix gap at the LOGIC level; the live manager/backend
+// application (which needs a §5.11 backend Option-key change for the exact-match
+// none-key) is a documented follow-up.
 #[cfg(feature = "storage-mgr-strip-prefix")]
 pub mod storage_strip_prefix;
 
-/// R311uz — the `storage-history` atom (§5.11 storage, 2/4): an in-memory
-/// `History::All` backend ([`storage_history::HistoryStorage`]) that keeps
-/// every version per key, the multi-version counterpart of
-/// [`storage_backend::MemoryStorage`]. The newer-wins gate skips an `All`
-/// backend (every version retained); a query replies all versions. Gated
-/// on `storage-history` (which implies `storage-backend`).
+// R311uz — the `storage-history` atom (§5.11 storage, 2/4): an in-memory
+// `History::All` backend (`storage_history::HistoryStorage`) that keeps
+// every version per key, the multi-version counterpart of
+// `storage_backend::MemoryStorage`. The newer-wins gate skips an `All`
+// backend (every version retained); a query replies all versions. Gated
+// on `storage-history` (which implies `storage-backend`).
 #[cfg(feature = "storage-history")]
 pub mod storage_history;
 
-/// R311y104 — the NTP64 timestamp-word SSOT ([`ntp64::Ntp64`]): the
-/// `(unix_secs << 32) | fraction` layout uhlc / zenoh `Timestamp` carry, with
-/// the `2^32` fraction-per-second magnitude defined once. A pure-core helper
-/// (always compiled) the storage-replication classification, the AP wall-clock
-/// source, and the advanced-cache `_time` resolver all build on, so the
-/// magnitude is no longer stated four ways.
+// R311y104 — the NTP64 timestamp-word SSOT (`ntp64::Ntp64`): the
+// `(unix_secs << 32) | fraction` layout uhlc / zenoh `Timestamp` carry, with
+// the `2^32` fraction-per-second magnitude defined once. A pure-core helper
+// (always compiled) the storage-replication classification, the AP wall-clock
+// source, and the advanced-cache `_time` resolver all build on, so the
+// magnitude is no longer stated four ways.
 pub mod ntp64;
 
-/// Round 311vh — the storage-replication *primitives* atom (§5.11 storage,
-/// replication 1/N): the [`storage_replication::Fingerprint`], the
-/// time-bucket classification ([`storage_replication::IntervalIdx`] /
-/// [`storage_replication::SubIntervalIdx`]), the
-/// [`storage_replication::ReplicationConfig`] + its compatibility
-/// fingerprint, and the [`storage_replication::event_fingerprint`] a
-/// replica's Digest is assembled from. Pure no_std xxh3 logic — a faithful,
-/// byte-exact mirror of zenoh's `zenoh-plugin-storage-manager`
-/// `replication::{digest,classification,configuration,log}`. The Digest
-/// assembly + diff + wire codec + the publish/subscribe driver are the
-/// follow-up atoms. Gated on `storage-replication` (implies
-/// `storage-backend`).
+// Round 311vh — the storage-replication *primitives* atom (§5.11 storage,
+// replication 1/N): the `storage_replication::Fingerprint`, the
+// time-bucket classification (`storage_replication::IntervalIdx` /
+// `storage_replication::SubIntervalIdx`), the
+// `storage_replication::ReplicationConfig` + its compatibility
+// fingerprint, and the `storage_replication::event_fingerprint` a
+// replica's Digest is assembled from. Pure no_std xxh3 logic — a faithful,
+// byte-exact mirror of zenoh's `zenoh-plugin-storage-manager`
+// `replication::{digest,classification,configuration,log}`. The Digest
+// assembly + diff + wire codec + the publish/subscribe driver are the
+// follow-up atoms. Gated on `storage-replication` (implies
+// `storage-backend`).
 #[cfg(feature = "storage-replication")]
 pub mod storage_replication;
 
@@ -1708,86 +1708,86 @@ pub mod storage_replication;
 ))]
 pub(crate) mod wire_bincode;
 
-/// R311y97 — `ext-pubsub-group-membership` (§5.25): the no_std data model
-/// ([`group_membership::Member`] / [`group_membership::MemberLiveliness`] /
-/// [`group_membership::GroupNetEvent`]) + the bincode-1.3 wire codec for
-/// zenoh-ext's group-membership protocol. A faithful, byte-exact mirror of
-/// zenoh-ext `group.rs`'s `bincode::serialize` wire (the group event +
-/// per-member reply messages), hand-rolled on the shared
-/// [`wire_bincode`] cursor and pinned to the real `bincode` 1.3 by a
-/// `#[cfg(test)]` oracle. The live [`Group`](../wz_runtime_tokio/group) +
-/// its background tasks are the AP-only tokio half. INDEPENDENT of the
-/// advanced-pubsub `@adv` family (its own wire + KE namespace).
+// R311y97 — `ext-pubsub-group-membership` (§5.25): the no_std data model
+// (`group_membership::Member` / `group_membership::MemberLiveliness` /
+// `group_membership::GroupNetEvent`) + the bincode-1.3 wire codec for
+// zenoh-ext's group-membership protocol. A faithful, byte-exact mirror of
+// zenoh-ext `group.rs`'s `bincode::serialize` wire (the group event +
+// per-member reply messages), hand-rolled on the shared
+// `wire_bincode` cursor and pinned to the real `bincode` 1.3 by a
+// `#[cfg(test)]` oracle. The live `Group` (`../wz_runtime_tokio/group`) +
+// its background tasks are the AP-only tokio half. INDEPENDENT of the
+// advanced-pubsub `@adv` family (its own wire + KE namespace).
 #[cfg(feature = "ext-pubsub-group-membership")]
 pub mod group_membership;
 
-/// Round 311vr — the storage-aligner *event metadata* atom (§5.11 storage,
-/// aligner 1/N): the [`storage_aligner::Action`] + [`storage_aligner::EventMetadata`]
-/// a replica exchanges to pull the entries a
-/// [`storage_replication::DigestDiff`] localised. The metadata's
-/// [`fingerprint`](storage_aligner::EventMetadata::fingerprint) reuses the
-/// [`storage_replication::event_fingerprint`] SSOT, so an event's identity
-/// agrees between the digest and the aligner. Pure no_std logic — a faithful
-/// mirror of zenoh's `zenoh-plugin-storage-manager` `replication::log`
-/// metadata (all four `Action` variants round-trip on the wire as of R311wt
-/// slice-1; wz does not yet PRODUCE or APPLY a wildcard event — slices 2/3). The
-/// AlignmentQuery / AlignmentReply protocol + the answer / pull engines + the
-/// aligner driver are the follow-up atoms. Gated on `storage-aligner`
-/// (implies `storage-replication`).
+// Round 311vr — the storage-aligner *event metadata* atom (§5.11 storage,
+// aligner 1/N): the `storage_aligner::Action` + `storage_aligner::EventMetadata`
+// a replica exchanges to pull the entries a
+// `storage_replication::DigestDiff` localised. The metadata's
+// `fingerprint` (`storage_aligner::EventMetadata::fingerprint`) reuses the
+// `storage_replication::event_fingerprint` SSOT, so an event's identity
+// agrees between the digest and the aligner. Pure no_std logic — a faithful
+// mirror of zenoh's `zenoh-plugin-storage-manager` `replication::log`
+// metadata (all four `Action` variants round-trip on the wire as of R311wt
+// slice-1; wz does not yet PRODUCE or APPLY a wildcard event — slices 2/3). The
+// AlignmentQuery / AlignmentReply protocol + the answer / pull engines + the
+// aligner driver are the follow-up atoms. Gated on `storage-aligner`
+// (implies `storage-replication`).
 #[cfg(feature = "storage-aligner")]
 pub mod storage_aligner;
 
-/// R311dy — application-layer reply registry (`ReplyRegistry` +
-/// `InboundReply` / `InboundReplyBody` / `ReplyHandle`): the z_get-side
-/// mirror of `query`, routing inbound `Response(Reply|Err)` +
-/// `ResponseFinal` records to per-rid sinks (R311gb-3c: the `ReplySink`
-/// seam). Lifted from `wz-runtime-tokio::reply`.
-///
-/// R311gb (Track 2 no-alloc gating) — un-gated from `alloc`: the control
-/// plane (the `BoundedVec` pending table + `register_sink` / `unregister`
-/// + rid correlation + the no-heap fire entries `dispatch_borrowed`
-/// (on_reply via `ReplyView`) / `deliver_local_final` + the
-/// `fire_final_for` / `sweep_timed_out` remove-then-fire) compiles on the
-/// MCU no-heap profile. The owned retention form (`InboundReply` /
-/// `InboundReplyBody`, holding `String` / `Vec<u8>`) + the `From<QueryReply>`
-/// loopback bridge + `deliver_local_reply` are `alloc`-gated, and the wire
-/// dispatch (`dispatch_response` / `dispatch_messages`) gates on
-/// `all(codec-response, alloc)` (`dispatch_response_final` on
-/// `all(codec-response-final, alloc)`). Mirrors the `SubscriberRegistry`
-/// shape.
+// R311dy — application-layer reply registry (`ReplyRegistry` +
+// `InboundReply` / `InboundReplyBody` / `ReplyHandle`): the z_get-side
+// mirror of `query`, routing inbound `Response(Reply|Err)` +
+// `ResponseFinal` records to per-rid sinks (R311gb-3c: the `ReplySink`
+// seam). Lifted from `wz-runtime-tokio::reply`.
+//
+// R311gb (Track 2 no-alloc gating) — un-gated from `alloc`: the control
+// plane (the `BoundedVec` pending table + `register_sink` / `unregister`
+// + rid correlation + the no-heap fire entries `dispatch_borrowed`
+// (on_reply via `ReplyView`) / `deliver_local_final` + the
+// `fire_final_for` / `sweep_timed_out` remove-then-fire) compiles on the
+// MCU no-heap profile. The owned retention form (`InboundReply` /
+// `InboundReplyBody`, holding `String` / `Vec<u8>`) + the `From<QueryReply>`
+// loopback bridge + `deliver_local_reply` are `alloc`-gated, and the wire
+// dispatch (`dispatch_response` / `dispatch_messages`) gates on
+// `all(codec-response, alloc)` (`dispatch_response_final` on
+// `all(codec-response-final, alloc)`). Mirrors the `SubscriberRegistry`
+// shape.
 pub mod reply;
 
-/// R311dz-pre — `ResponseSink` IoC trait: the outbound-reply drain
-/// abstraction the application-layer observer's `flush_pending` /
-/// `dispatch` depend on, inverting their dependency on the concrete
-/// tokio `SessionLinkActions<R, T>` so the observer can migrate here
-/// without the tokio actions layer. `SessionLinkActions` impls it in
-/// wz-runtime-tokio. Alloc-gated (the `send_response` method takes a
-/// `wz_codecs::response::ResponseOwned`); the method set is empty in a
-/// build with neither response codec so the trait is always-nameable.
+// R311dz-pre — `ResponseSink` IoC trait: the outbound-reply drain
+// abstraction the application-layer observer's `flush_pending` /
+// `dispatch` depend on, inverting their dependency on the concrete
+// tokio `SessionLinkActions<R, T>` so the observer can migrate here
+// without the tokio actions layer. `SessionLinkActions` impls it in
+// wz-runtime-tokio. Alloc-gated (the `send_response` method takes a
+// `wz_codecs::response::ResponseOwned`); the method set is empty in a
+// build with neither response codec so the trait is always-nameable.
 #[cfg(feature = "storage-profile")]
 pub mod response_sink;
 
-/// R311dz — application-layer observer bundle (`ApplicationLayerObserver`):
-/// combines the six per-domain registries (subscribers, queryables,
-/// remote_subscribers, remote_queryables, liveliness,
-/// liveliness_subscribers, replies) plus the queryable side's
-/// pending-reply / pending-final staging buffers into one cohesive
-/// struct so a production caller drives the whole dispatch graph with a
-/// single [`observer::ApplicationLayerObserver::dispatch`] call per
-/// `IterationEvent`. Migrated from `wz-runtime-tokio::observer`; the move
-/// was unblocked by R311dz-pre's `ResponseSink` IoC trait (the drain's
-/// only dependency on the tokio actions layer). R311ek — gated on
-/// `alloc` alone (was `all(alloc, codec-declare)`): the bundle holds the
-/// always-compiled `subscribers` (pub/sub) + `replies` registries, so a
-/// `codec-push`-only subset needs the observer to route Push samples —
-/// gating the whole bundle on `codec-declare` made pub/sub-only
-/// composition impossible. Every codec-coupled field
-/// (`queryables`/`remote_*`/`liveliness`/`liveliness_subscribers`) is now
-/// individually feature-gated, so the struct composes down to just the
-/// always-compiled registries when no declare/query codec is selected.
-/// Runtime-agnostic so the same bundle serves the tokio (AP) and lwIP
-/// (MCU) profiles.
+// R311dz — application-layer observer bundle (`ApplicationLayerObserver`):
+// combines the six per-domain registries (subscribers, queryables,
+// remote_subscribers, remote_queryables, liveliness,
+// liveliness_subscribers, replies) plus the queryable side's
+// pending-reply / pending-final staging buffers into one cohesive
+// struct so a production caller drives the whole dispatch graph with a
+// single `observer::ApplicationLayerObserver::dispatch` call per
+// `IterationEvent`. Migrated from `wz-runtime-tokio::observer`; the move
+// was unblocked by R311dz-pre's `ResponseSink` IoC trait (the drain's
+// only dependency on the tokio actions layer). R311ek — gated on
+// `alloc` alone (was `all(alloc, codec-declare)`): the bundle holds the
+// always-compiled `subscribers` (pub/sub) + `replies` registries, so a
+// `codec-push`-only subset needs the observer to route Push samples —
+// gating the whole bundle on `codec-declare` made pub/sub-only
+// composition impossible. Every codec-coupled field
+// (`queryables`/`remote_*`/`liveliness`/`liveliness_subscribers`) is now
+// individually feature-gated, so the struct composes down to just the
+// always-compiled registries when no declare/query codec is selected.
+// Runtime-agnostic so the same bundle serves the tokio (AP) and lwIP
+// (MCU) profiles.
 #[cfg(feature = "alloc")]
 pub mod observer;
 
@@ -1832,15 +1832,15 @@ pub mod reassembly_slot {
     ));
 }
 
-/// R311im — the reassembly Router (dispatcher) that drives N
-/// [`reassembly_slot`] FSM instances: the stateful SN-consecutiveness
-/// classification, per-peer quota, staging buffers, and deadline sweep
-/// that the engine-free slot FSM cannot own. See the module docs for the
-/// division of labour with the slot FSM.
-/// R311y589 — the seam between the reassembly Router and the STORAGE its
-/// chains accumulate into ([`chain_staging::ChainStaging`]), plus the default
-/// on-demand-heap arena. Gated with the Router it serves: a build without
-/// `reassembly` has no chains to stage.
+// R311im — the reassembly Router (dispatcher) that drives N
+// `reassembly_slot` FSM instances: the stateful SN-consecutiveness
+// classification, per-peer quota, staging buffers, and deadline sweep
+// that the engine-free slot FSM cannot own. See the module docs for the
+// division of labour with the slot FSM.
+// R311y589 — the seam between the reassembly Router and the STORAGE its
+// chains accumulate into (`chain_staging::ChainStaging`), plus the default
+// on-demand-heap arena. Gated with the Router it serves: a build without
+// `reassembly` has no chains to stage.
 #[cfg(feature = "reassembly")]
 pub mod chain_staging;
 
@@ -1920,14 +1920,14 @@ pub mod session_fsm_unicast {
     ));
 }
 
-/// R311il — host-owned handshake deadline config ([`SessionTimeouts`]) +
-/// the runtime-agnostic state -> deadline comparator
-/// ([`session_timeouts::handshake_deadline_for`]) for the engine-free
-/// unicast session FSM. The engine-free FSM arms no `<send delay>`
-/// (NoOpHal); the host drive loop owns the clock and raises each timeout
-/// transition when its spec-sourced (§2.5) deadline elapses. Sibling of
-/// [`lease`] (the Established lease deadline); gated with
-/// `session_fsm_unicast` since the comparator names its state/event enums.
+// R311il — host-owned handshake deadline config (`SessionTimeouts`) +
+// the runtime-agnostic state -> deadline comparator
+// (`session_timeouts::handshake_deadline_for`) for the engine-free
+// unicast session FSM. The engine-free FSM arms no `<send delay>`
+// (NoOpHal); the host drive loop owns the clock and raises each timeout
+// transition when its spec-sourced (§2.5) deadline elapses. Sibling of
+// `lease` (the Established lease deadline); gated with
+// `session_fsm_unicast` since the comparator names its state/event enums.
 #[cfg(feature = "session-unicast")]
 pub mod session_timeouts;
 
@@ -1950,17 +1950,17 @@ pub mod session_actions;
 #[cfg(all(feature = "session-unicast", feature = "session-slot"))]
 pub mod session_slot;
 
-/// A4 (session-reconnect) — re-dial + re-handshake support types: the
-/// [`reconnect::CachedDeclaration`] declaration-cache entry (zenoh-pico
-/// `_z_session_t._declaration_cache` parity), the
-/// [`reconnect::ReplayDeclarationsError`] typed reject, and the
-/// [`reconnect::SwappableLink`] transport-replacement seam. Gated like
-/// [`session_actions`] (the cache types name `SendDeclareError` /
-/// `SendWireError` and the swap seam names `SessionRuntime`'s link sink);
-/// the cache STORAGE on the actions bundle additionally gates on the
-/// `session-reconnect` feature — these types stay compiled so the
-/// signature-stable `replay_declarations` / `declaration_cache_snapshot`
-/// surface keeps its types across feature states (R311g1).
+// A4 (session-reconnect) — re-dial + re-handshake support types: the
+// `reconnect::CachedDeclaration` declaration-cache entry (zenoh-pico
+// `_z_session_t._declaration_cache` parity), the
+// `reconnect::ReplayDeclarationsError` typed reject, and the
+// `reconnect::SwappableLink` transport-replacement seam. Gated like
+// `session_actions` (the cache types name `SendDeclareError` /
+// `SendWireError` and the swap seam names `SessionRuntime`'s link sink);
+// the cache STORAGE on the actions bundle additionally gates on the
+// `session-reconnect` feature — these types stay compiled so the
+// signature-stable `replay_declarations` / `declaration_cache_snapshot`
+// surface keeps its types across feature states (R311g1).
 #[cfg(all(feature = "alloc", feature = "session-unicast"))]
 pub mod reconnect;
 
@@ -2141,16 +2141,16 @@ pub mod session_slot_pool_mcu {
     ));
 }
 
-/// Round A — the multicast Router (dispatcher) that drives the one
-/// [`session_fsm_multicast`] session-level Engine plus a fixed bounded pool
-/// of [`multicast_peer`] per-peer Engines (the §3.2 `multicast_peer_table`).
-/// The handshake-free multicast sibling of [`reassembly_dispatch`]: it owns
-/// everything the engine-free FSMs cannot — the per-peer last_seen + lease
-/// arithmetic, the Join validation / classification, and the lease-sweep
-/// clock — and exposes a no-I/O `ingest_*` / `sweep` surface. The transport
-/// link socket + the host drive loop (the §3.1 JoinEmit / RxDispatch I/O)
-/// land in later rounds. Gated on `session-multicast` (it names the two
-/// generated FSM engines).
+// Round A — the multicast Router (dispatcher) that drives the one
+// `session_fsm_multicast` session-level Engine plus a fixed bounded pool
+// of `multicast_peer` per-peer Engines (the §3.2 `multicast_peer_table`).
+// The handshake-free multicast sibling of `reassembly_dispatch`: it owns
+// everything the engine-free FSMs cannot — the per-peer last_seen + lease
+// arithmetic, the Join validation / classification, and the lease-sweep
+// clock — and exposes a no-I/O `ingest_*` / `sweep` surface. The transport
+// link socket + the host drive loop (the §3.1 JoinEmit / RxDispatch I/O)
+// land in later rounds. Gated on `session-multicast` (it names the two
+// generated FSM engines).
 #[cfg(feature = "session-multicast")]
 pub mod multicast_dispatch;
 
@@ -2165,12 +2165,12 @@ pub mod multicast_dispatch;
 ))]
 mod multicast_member_scope;
 
-/// R311kt — the multicast JOIN datagram surface (encode the periodic TX
-/// beacon, decode the RX classify view, validate the §3.2 rejection
-/// rules), hoisted from `wz-runtime-tokio::multicast_glue` so both
-/// runtime profiles share one JOIN wire SSOT (the multicast sibling of
-/// [`handshake_encode`]). Pure functions: codecs + [`multicast_params`] +
-/// [`sn`] only — the host drive loops own the socket + the clock.
+// R311kt — the multicast JOIN datagram surface (encode the periodic TX
+// beacon, decode the RX classify view, validate the §3.2 rejection
+// rules), hoisted from `wz-runtime-tokio::multicast_glue` so both
+// runtime profiles share one JOIN wire SSOT (the multicast sibling of
+// `handshake_encode`). Pure functions: codecs + `multicast_params` +
+// `sn` only — the host drive loops own the socket + the clock.
 #[cfg(all(
     feature = "session-multicast",
     feature = "codec-join",
@@ -2178,14 +2178,14 @@ mod multicast_member_scope;
 ))]
 pub mod multicast_join;
 
-/// R311lv — the shared multicast RX classify + dispatch SSOT consumed by both
-/// the AP (`wz-runtime-tokio::multicast_glue`) and MCU
-/// (`wz-session-lwip::multicast_drive`) drive loops, so the §3.1 RxDispatch
-/// decision (transport MID -> [`multicast_dispatch`] method) has ONE home
-/// rather than a copy per loop. Pure orchestration over [`multicast_dispatch`]
-/// + [`multicast_join`] + the inbound / frame codecs; the loops own only the IO
-/// + clock + their reassembly Router (the divergent tail
-/// [`multicast_rx::MulticastRxNext`] hands back).
+// R311lv — the shared multicast RX classify + dispatch SSOT consumed by both
+// the AP (`wz-runtime-tokio::multicast_glue`) and MCU
+// (`wz-session-lwip::multicast_drive`) drive loops, so the §3.1 RxDispatch
+// decision (transport MID -> `multicast_dispatch` method) has ONE home
+// rather than a copy per loop. Pure orchestration over `multicast_dispatch`
+// + `multicast_join` + the inbound / frame codecs; the loops own only the IO
+// + clock + their reassembly Router (the divergent tail
+// `multicast_rx::MulticastRxNext` hands back).
 #[cfg(all(
     feature = "session-multicast",
     feature = "codec-join",
@@ -2208,16 +2208,16 @@ pub mod multicast_rx;
 ))]
 pub mod multicast_stats;
 
-/// R311lx — the shared multicast TX emit SSOT consumed by both the AP
-/// (`wz-runtime-tokio::multicast_glue`) and MCU
-/// (`wz-session-lwip::multicast_drive`) drive loops, so the §3.1 TxData
-/// decision ([`MulticastTxItem`](multicast_tx::MulticastTxItem) -> mint ->
-/// `encode_frame_with_*` -> [`multicast_frame_or_fragments`](frame_encode::multicast_frame_or_fragments))
-/// has ONE home rather than a copy per loop. The TX twin of [`multicast_rx`];
-/// the loops own only the IO (how the next item is obtained, how each returned
-/// datagram is sent). Needs codec-frame + alloc; the per-variant body codecs
-/// (codec-push / codec-response / codec-response-final / liveliness-token) gate
-/// the enum variants and the matching emit arms.
+// R311lx — the shared multicast TX emit SSOT consumed by both the AP
+// (`wz-runtime-tokio::multicast_glue`) and MCU
+// (`wz-session-lwip::multicast_drive`) drive loops, so the §3.1 TxData
+// decision (`multicast_tx::MulticastTxItem` -> mint ->
+// `encode_frame_with_*` -> `frame_encode::multicast_frame_or_fragments`)
+// has ONE home rather than a copy per loop. The TX twin of `multicast_rx`;
+// the loops own only the IO (how the next item is obtained, how each returned
+// datagram is sent). Needs codec-frame + alloc; the per-variant body codecs
+// (codec-push / codec-response / codec-response-final / liveliness-token) gate
+// the enum variants and the matching emit arms.
 #[cfg(all(
     feature = "session-multicast",
     feature = "codec-frame",
@@ -2225,14 +2225,14 @@ pub mod multicast_stats;
 ))]
 pub mod multicast_tx;
 
-/// R311md — the shared observer-drain reply sink SSOT
-/// ([`MulticastReplySink<Q>`](multicast_reply_sink::MulticastReplySink) +
-/// [`MulticastReplyEnqueue`](multicast_reply_sink::MulticastReplyEnqueue)). The
-/// "staged reply -> [`MulticastTxItem`](multicast_tx::MulticastTxItem)"
-/// construction has ONE home, generic over the enqueue backing, so the AP and
-/// MCU multicast loops contribute only a backing rather than a duplicated
-/// `ResponseSink` / `DeclareReplySink` impl. The TX-staging sibling of
-/// [`multicast_rx`] / [`multicast_tx`]. Same gate as `multicast_tx`.
+// R311md — the shared observer-drain reply sink SSOT
+// (`multicast_reply_sink::MulticastReplySink<Q>` +
+// `multicast_reply_sink::MulticastReplyEnqueue`). The
+// "staged reply -> `multicast_tx::MulticastTxItem`"
+// construction has ONE home, generic over the enqueue backing, so the AP and
+// MCU multicast loops contribute only a backing rather than a duplicated
+// `ResponseSink` / `DeclareReplySink` impl. The TX-staging sibling of
+// `multicast_rx` / `multicast_tx`. Same gate as `multicast_tx`.
 #[cfg(all(
     feature = "session-multicast",
     feature = "codec-frame",

@@ -28,7 +28,7 @@
 //! data type** — the same shape as [`crate::sink::SampleView`]. The owned
 //! [`crate::reply::InboundReply`] (AP retention form) `impl`s `ReplyView`,
 //! so the registry trait depends on one read contract (DIP + ISP) rather
-//! than re-projecting into a third reply struct. [`on_reply`] takes
+//! than re-projecting into a third reply struct. `on_reply` takes
 //! `&dyn ReplyView` — a borrowed fat pointer, no heap and no copy — so
 //! the dispatch site passes its native reply directly. The reply seam
 //! carries no output contract (unlike the queryable [`crate::query_sink`]
@@ -433,7 +433,7 @@ fn reply_ts_at_least(
 ///   per keyexpr and flush the whole cache on the terminal final. zenoh and pico
 ///   agree on the shape (`api/session.rs:3025-3029` flushes at `nb_final == 0`;
 ///   `query.c:239-246` flushes at finalize); they differ only in the tie-break,
-///   see [`reply_ts_at_least`].
+///   see `reply_ts_at_least`.
 ///
 /// The cache holds owned [`crate::reply::InboundReply`] values for BOTH caching
 /// modes, matching zenoh (`query.replies` is allocated for every mode but None,

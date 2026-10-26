@@ -44,14 +44,14 @@ use crate::ext_nodeid;
 /// Read the routing-context source `node_id` from a Declare's `ext_nodeid`
 /// extension. Returns `0` when absent — zenoh's self-originated DEFAULT, so a
 /// forwarder treats `0` as "the inbound neighbour is the source". Delegates to
-/// the shared [`ext_nodeid::read_source`](crate::ext_nodeid::read_source).
+/// the shared [`ext_nodeid::read_source`].
 pub fn read_declare_source(declare: &DeclareOwned) -> u16 {
     ext_nodeid::read_source(declare.extensions.as_ref())
 }
 
 /// Set the routing-context source `node_id` on a Declare's `ext_nodeid`
 /// extension (`node_id == 0` removes it — zenoh's omit-on-DEFAULT). The shared
-/// [`ext_nodeid::set_source`](crate::ext_nodeid::set_source) owns the chain
+/// [`ext_nodeid::set_source`] owns the chain
 /// edit (replace / remove / per-entry `Z` normalisation); this only syncs the
 /// Declare-level header `Z` flag to the resulting chain.
 pub fn set_declare_source(declare: &mut DeclareOwned, node_id: u16) {

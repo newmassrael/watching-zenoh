@@ -36,7 +36,7 @@ pub fn encode_unit_ext(ext_id: u8) -> ExtEntryOwned {
 /// `expected_header` — the presence test the capability `&=` merges and the SHM
 /// body-marker detect share.
 ///
-/// Matches on the extension IDENTITY ([`ext_eid`]: the header minus only the
+/// Matches on the extension IDENTITY (`ext_eid`: the header minus only the
 /// chain flag), NOT on the 4-bit id field. R311y505 replaced an id-only match
 /// here, and the difference is a measured cross-impl defect rather than a
 /// tidiness point: zenoh's id field is four bits wide and two DIFFERENT

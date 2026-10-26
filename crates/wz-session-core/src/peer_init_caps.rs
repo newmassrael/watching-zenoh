@@ -76,7 +76,7 @@ fn decode_wire_caps(sn_res_byte: Option<u8>, batch_size: Option<u16>) -> (u8, u8
 /// but silently tolerated a non-conforming acceptor (F-b carry).
 ///
 /// Compares the RAW wire advertisement (S-bit-clear defaults applied via
-/// [`decode_wire_caps`]), not the projection `PeerInitCaps::
+/// `decode_wire_caps`), not the projection `PeerInitCaps::
 /// from_init_body` stores: its defensive 0-normalization turns a wire 0
 /// into the 65535 ceiling, which would falsify exactly the comparison
 /// this predicate exists to make (a non-conforming peer's literal 0

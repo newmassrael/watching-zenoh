@@ -1146,7 +1146,7 @@ pub struct PassiveFrame {
     /// nothing consumed it and a second coordinate with no consumer is the
     /// defect R311y639 closed elsewhere.
     ///
-    /// What made it worth keeping is [`Self::batch_base`]: without this, a
+    /// What made it worth keeping is `Self::batch_base`: without this, a
     /// record's offset can only be stated against the payload it happened to
     /// sit in, and "at the front of the payload" was being read as "at the
     /// front of the unit".
@@ -2725,7 +2725,7 @@ impl PassiveSession {
     /// R311y631 (§1.2b) — bytes of a framing unit no decoded message accounts
     /// for, cumulative, in `direction`.
     ///
-    /// See [`PassiveSession::decode_framing_unit`] for when it moves. Zero is
+    /// See `PassiveSession::decode_framing_unit` for when it moves. Zero is
     /// the ordinary reading: every message of every batch was decoded and its
     /// length was known.
     pub fn unaccounted_batch_bytes(&self, direction: Direction) -> u64 {
@@ -2937,7 +2937,7 @@ impl PassiveSession {
     /// R311y631 (§1.2b) — it returns the messages the datagram held, which is
     /// not always one. The `Vec` is the point: a caller cannot read the first
     /// element and be silently correct, which is what the previous signature
-    /// let every caller do. See [`Self::decode_framing_unit`] for the upstream
+    /// let every caller do. See `Self::decode_framing_unit` for the upstream
     /// evidence that a datagram batches.
     ///
     /// `offset` is whatever coordinate the caller wants the frames reported

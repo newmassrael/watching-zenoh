@@ -43,7 +43,7 @@ pub const AUTH_EXT_EID: u8 = crate::ext_header::ext_identity(AUTH_EXT_ID, false,
 
 /// Build the Z_EXT_AUTH `ExtEntry` carrying `payload` (the negotiated method's
 /// challenge / response bytes). The header is the auth id with the ENC_ZBUF
-/// marker ([`EXT_ENC_ZBUF`](crate::ext_header::EXT_ENC_ZBUF), the iext SSOT) and
+/// marker ([`EXT_ENC_ZBUF`], the iext SSOT) and
 /// no mandatory bit. The surrounding codec applies the chain-continuation `Z`
 /// bit; this helper emits the entry with `Z` clear (terminator), so a caller
 /// appending it as the sole / last establishment ext needs no fix-up. Fallible

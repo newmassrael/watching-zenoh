@@ -54,7 +54,7 @@ pub const LOWLATENCY_EXT_ID: u8 = crate::ext_header::establishment_ext_id::LOWLA
 /// Build the Z_EXT_LOWLATENCY `ExtEntry`: the unit (zero-length) marker that
 /// advertises lowlatency capability (the [`crate::unit_ext`] mechanism at the
 /// lowlatency id). zenoh `zextunit!(0x5, false)`; the surrounding
-/// [`crate::ext_chain::encode_ext_chain`] applies the chain-continuation `Z` bit.
+/// `crate::ext_chain::encode_ext_chain` applies the chain-continuation `Z` bit.
 pub fn encode_lowlatency_ext() -> ExtEntryOwned {
     encode_unit_ext(LOWLATENCY_EXT_ID)
 }

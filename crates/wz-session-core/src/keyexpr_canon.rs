@@ -19,7 +19,7 @@
 //! The grammar it enforces is byte-level:
 //!
 //! 1. **Singleify**: runs of `$*$*$*...` collapse to one `$*`
-//!    ([`collapse_dsl_runs`]).
+//!    (`collapse_dsl_runs`).
 //! 2. **Chunk-level canon**: per-chunk validation + rewriting:
 //!    - lone `$*` chunk → `*` chunk
 //!    - a wild RUN is reordered: every `*` first, then at most one
@@ -30,7 +30,7 @@
 //!      the old rule and agree with this one; measured, not read.
 //!    - `**` after `**` → collapse into the run's single `**`
 //!    - `**$*` and similar mixed shapes are rejected by the per-
-//!      char state machine ([`analyze_chunk`])
+//!      char state machine (`analyze_chunk`)
 //! 3. **Per-char validation** rejects `#`, `?`, unbound `$`, bare
 //!    `*` mid-chunk, `$$`, `$**`, and similar grammar violations.
 //!
@@ -776,7 +776,7 @@ fn diagnostic_text(text: &str) -> DiagnosticText {
 /// (`** chunk` + literal chunk(s) + `*`-shape chunk) is rejected.
 /// The wire-interop-drift shapes (R299 bug #1 / bug #2 — wrong
 /// output but no crash) remain allowed; rejecting those is the
-/// architectural carry [R299 #3] that requires a separate decision
+/// architectural carry \[R299 #3\] that requires a separate decision
 /// round.
 ///
 /// ## Where the SIGABRT comes from

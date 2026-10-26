@@ -514,7 +514,7 @@ fn token_matches(token_keyexpr: &str, pattern: Option<&str>) -> bool {
 /// This is the **single source** of the interest-response wire shape (the
 /// MID/flag bits + the inline-keyexpr `WireexprLocal` form). Both emit
 /// profiles funnel through it: the AP sink derives its owned form via
-/// [`Declare::into_owned`]; an MCU sink encodes this borrowed value
+/// `Declare::into_owned`; an MCU sink encodes this borrowed value
 /// directly through a `SliceSink` (`encode<S: SceSink>`, no heap). The
 /// returned `Declare` borrows `keyexpr` for its lifetime.
 pub fn build_token_reply(token_id: u64, keyexpr: &str, interest_id: u64) -> Declare<'_> {

@@ -222,7 +222,7 @@ fn target_chunks_well_formed(target_chunks: &[&str]) -> bool {
 ///   of the target chunk, the trailing sub-part (if non-empty) must
 ///   be a suffix, and each middle sub-part must appear in order in
 ///   the remaining slice without overlap. See
-///   [`chunk_matches_with_dsl`] for the full algorithm.
+///   `chunk_matches_with_dsl` for the full algorithm.
 /// * any other chunk — must compare byte-for-byte against the
 ///   corresponding target chunk (`keyexpr-literal`, foundational).
 ///
@@ -473,7 +473,7 @@ fn chunk_matches_with_dsl(pattern: &str, target: &str) -> bool {
 ///   the other side's `*` / `**`).
 ///
 /// Two-side `$*` semantics: when both chunks contain `$*`,
-/// [`chunk_intersects`] returns the conjunction of two
+/// `chunk_intersects` returns the conjunction of two
 /// char-by-char anchor checks — leading-prefix compatibility plus
 /// trailing-suffix compatibility — which is mechanically
 /// equivalent (under canonical wire input) to zenoh-pico's
@@ -825,7 +825,7 @@ fn chunk_intersects(a: &str, b: &str) -> bool {
 /// * a b-side `*` with a non-`*`/`**` a-chunk ⇒ NO: only `*`/`**`
 ///   cover every single-chunk value `*` can take.
 /// * a-DSL vs b (literal or DSL): a's `$*` set must contain b's set,
-///   computed by [`chunk_matches_with_dsl`] over b's raw chunk
+///   computed by `chunk_matches_with_dsl` over b's raw chunk
 ///   string as the haystack (anchored prefix/suffix + ordered
 ///   middle search — exactly the inclusion predicate, verified
 ///   against the zenoh-pico template's includes branch).

@@ -212,7 +212,7 @@ impl StaticConfig {
 
 impl core::fmt::Debug for StaticConfig {
     /// Hand-written because [`StaticLocators`] is a
-    /// [`BoundedVec`](crate::bounded::BoundedVec), which derives nothing on
+    /// [`BoundedVec`], which derives nothing on
     /// either backing; it derefs to a slice of
     /// [`BoundedString`], which does implement `Debug`.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

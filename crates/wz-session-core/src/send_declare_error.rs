@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! Typed reject surface for the outbound DECLARE-side gate
-//! ([`SessionLinkActions::send_declare_keyexpr`] /
+//! (`SessionLinkActions::send_declare_keyexpr` /
 //! `_subscriber` / `_queryable` / `_token`).
 //!
 //! R300 — guards against (a) malformed keyexprs (structural canon

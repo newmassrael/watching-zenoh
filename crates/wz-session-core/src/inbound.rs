@@ -334,7 +334,7 @@ pub enum InboundFrame {
 
 impl InboundFrame {
     /// R311y630 (§14.1) — what a conforming PARTICIPANT must do with this
-    /// frame's extension chain: [`ExtAdmission::UnknownMandatory`] means the
+    /// frame's extension chain: `ExtAdmission::UnknownMandatory` means the
     /// peer marked an extension mandatory that this message's space does not
     /// define, and the whole message must be refused.
     ///
@@ -347,7 +347,7 @@ impl InboundFrame {
     /// session already use: wz decodes whatever the peer sent, and whether the
     /// message is ADMISSIBLE is decided one layer up.
     ///
-    /// `Unknown { mid }` answers [`ExtAdmission::Unjudged`]: this build cannot
+    /// `Unknown { mid }` answers `ExtAdmission::Unjudged`: this build cannot
     /// name the message, so it has no extension space to judge the chain
     /// against, and a reach limit reported as admission is exactly how an
     /// observer's blind spot becomes a participant's accepted message.

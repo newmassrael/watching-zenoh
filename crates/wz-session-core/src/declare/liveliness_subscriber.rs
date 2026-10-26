@@ -11,12 +11,12 @@
 //!
 //! ## Position in the dispatch stack
 //!
-//! This registry sits alongside [`crate::declare::LivelinessRegistry`]
+//! This registry sits alongside [`crate::declare::liveliness::LivelinessRegistry`]
 //! but plays a distinct role:
 //!
 //! | Registry                         | What it observes                | Lifetime model              |
 //! |----------------------------------|---------------------------------|-----------------------------|
-//! | [`LivelinessRegistry`]           | EVERY peer `Decl*Token` record  | callback-only (no slot id)  |
+//! | `LivelinessRegistry`             | EVERY peer `Decl*Token` record  | callback-only (no slot id)  |
 //! | [`LivelinessSubscriberRegistry`] | peer `Decl*Token` matching MY   | per-subscriber slot + RAII  |
 //! |                                  | declared keyexpr pattern        |                             |
 //!
@@ -24,17 +24,17 @@
 //! [`crate::observer::ApplicationLayerObserver::dispatch_event`] call
 //! fans the `IterationEvent` into each). They are not chained —
 //! installing a subscriber here does NOT install an
-//! `on_token_declared` on the sibling [`LivelinessRegistry`].
+//! `on_token_declared` on the sibling `LivelinessRegistry`.
 //! Applications that want "every peer's liveliness signal regardless
-//! of keyexpr" register on [`LivelinessRegistry`]; applications that
+//! of keyexpr" register on `LivelinessRegistry`; applications that
 //! want "the peer's tokens that match keyexpr X" register here.
 //!
 //! ## Lifetime: keyexpr → callback per subscriber
 //!
-//! Unlike [`LivelinessRegistry`] (callback-only, no per-callback
+//! Unlike `LivelinessRegistry` (callback-only, no per-callback
 //! state), each subscriber here owns a slot keyed by the
 //! `interest_id` allocated through
-//! [`crate::session_glue::SessionLinkActions::alloc_next_interest_id`].
+//! `crate::session_glue::SessionLinkActions::alloc_next_interest_id`.
 //! The slot carries:
 //!
 //! * the subscriber's keyexpr `pattern` (R311gb Track 2 — one
@@ -47,12 +47,12 @@
 //!   responder's inbound `Declare(DeclFinal)` (carrying our
 //!   `interest_id`) flips `history_complete` to `true` (R311xx);
 //! * `history_complete` — observable via
-//!   [`Self::history_complete`] so an integration test can await
+//!   [`LivelinessSubscriberTable::history_complete`] so an integration test can await
 //!   replay completion.
 //!
-//! The RAII handle (R280 [`crate::session::LivelinessSubscriber`])
+//! The RAII handle (R280 `crate::session::LivelinessSubscriber`)
 //! holds the `interest_id` and on `Drop` triggers
-//! [`Self::unregister`] + an outbound `InterestFinal`.
+//! [`LivelinessSubscriberTable::unregister`] + an outbound `InterestFinal`.
 //!
 //! ## peer_token_table — UndeclToken keyexpr resolution
 //!
@@ -69,7 +69,7 @@
 //!
 //! This table is registry-local because the peer's declaration set
 //! is not held anywhere else in wz (the existing
-//! [`LivelinessRegistry`] is callback-only with no state); maintaining
+//! `LivelinessRegistry` is callback-only with no state); maintaining
 //! it here keeps the cross-registry coupling at zero and matches
 //! zenoh-pico's `_z_session_t._remote_tokens` table sized per session.
 
@@ -514,7 +514,7 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
     /// Register a subscriber slot keyed by `interest_id`. Returns
     /// `false` if `interest_id` is already registered — callers
     /// allocate fresh ids through
-    /// [`crate::session_glue::SessionLinkActions::alloc_next_interest_id`]
+    /// `crate::session_glue::SessionLinkActions::alloc_next_interest_id`
     /// so collision is a programming error, not a runtime condition.
     ///
     /// `keyexpr` is the subscriber's pattern (zenoh-pico semantics:
@@ -667,7 +667,7 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
     /// [`crate::pubsub::SubscriberRegistry`] from inbound
     /// `Declare(DeclKexpr)` records. A `DeclToken` whose keyexpr
     /// references an undeclared peer mapping silently drops (mirror
-    /// of [`crate::declare::LivelinessRegistry::dispatch_declare`]'s
+    /// of `crate::declare::liveliness::LivelinessRegistry::dispatch_declare`'s
     /// "no resolved keyexpr → no fire" contract — recording the slot
     /// match without the resolved keyexpr would surface a half-truth
     /// to the callback).

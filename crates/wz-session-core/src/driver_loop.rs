@@ -409,7 +409,7 @@ pub enum IterationEvent<'a> {
     KeepAlive(KeepAliveCheckOutcome),
     /// The per-iteration reassembly deadline sweep evicted one or more
     /// chains whose continuation never arrived (the carried `usize` is the
-    /// count). Emitted by [`crate::drive::sweep_reporting`] from both the AP
+    /// count). Emitted by `crate::drive::sweep_reporting` from both the AP
     /// and MCU drive loops so the application layer can observe a peer that
     /// began a fragmented message and abandoned it — the silent-eviction
     /// counterpart of the `Poll(FramePayload)` chain-completion event.

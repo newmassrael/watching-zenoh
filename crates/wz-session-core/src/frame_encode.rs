@@ -743,8 +743,8 @@ pub fn encode_frame_with_push(sn: u64, push: PushOwned, reliable: bool) -> Vec<u
 }
 
 /// R311y227 — the QoS-carrying twin of [`encode_frame_with_push`]: writes the
-/// Frame `ext_qos` (id 0x1, header 0x31, low-3-bit priority — [`begin_frame`] /
-/// [`write_qos_ext`]) when `ext_qos` is `Some(non-DEFAULT priority)`, else
+/// Frame `ext_qos` (id 0x1, header 0x31, low-3-bit priority — `begin_frame` /
+/// `write_qos_ext`) when `ext_qos` is `Some(non-DEFAULT priority)`, else
 /// byte-identical to the anchor. The multicast per-priority TX emit
 /// ([`crate::multicast_tx::multicast_tx_emit`]) passes the clamped conduit
 /// priority; `None` (DEFAULT / non-qos group) carries no ext, so a pico /

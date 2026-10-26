@@ -97,7 +97,7 @@ impl FragmentMarkers {
 
 /// Build the `0x2 First` marker entry (the [`crate::unit_ext`] mechanism
 /// at the fragment-first id). zenoh `zextunit!(0x2, false)`; the
-/// surrounding [`crate::ext_chain::encode_ext_chain`] applies the
+/// surrounding `crate::ext_chain::encode_ext_chain` applies the
 /// chain-continuation `Z` bit.
 pub fn encode_fragment_first_ext() -> ExtEntryOwned {
     encode_unit_ext(FRAGMENT_FIRST_EXT_ID)

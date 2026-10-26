@@ -9,7 +9,7 @@
 //!
 //! | Inbound message            | Routes via                |
 //! |----------------------------|---------------------------|
-//! | `NetworkMessage::Push`     | [`SubscriberRegistry`]    |
+//! | `NetworkMessage::Push`     | `SubscriberRegistry`      |
 //! | `NetworkMessage::Request`  | [`QueryableRegistry`]     |
 //!
 //! Both follow the same keyexpr-wildcard matching contract
@@ -29,14 +29,13 @@
 //! - Callbacks accumulate Replies / Errs via a [`QueryResponder`]
 //!   into a caller-owned `Vec<QueryReply>`. Actual outbound frame
 //!   encode + send is the caller's concern (R121j-5c wires the
-//!   accumulated Vec through [`encode_frame_with_response`] +
-//!   [`encode_frame_with_response_final`](
-//!   crate::session_glue::encode_frame_with_response_final) so a
+//!   accumulated Vec through `encode_frame_with_response` +
+//!   `encode_frame_with_response_final` so a
 //!   queryable response round-trip closes on the wire).
 //! - Peer-alias resolution is delegated to a `&HashMap<u64, String>`
 //!   parameter on `dispatch_request` rather than owning a private
 //!   copy. The integration site (R121j-5c) holds the
-//!   [`SubscriberRegistry`]'s table and lends it on every dispatch,
+//!   `SubscriberRegistry`'s table and lends it on every dispatch,
 //!   so DeclKexpr / UndeclKexpr absorbed by the subscriber path
 //!   automatically informs queryable resolution too — no dual-write
 //!   bookkeeping, no Arc-shared state.
@@ -67,7 +66,7 @@
 //!
 //! ## Threading
 //!
-//! `!Sync` by construction (mirror of [`SubscriberRegistry`]).
+//! `!Sync` by construction (mirror of `SubscriberRegistry`).
 //! Callers that need cross-task sharing wrap in `Arc<Mutex<…>>` or
 //! `Arc<tokio::sync::Mutex<…>>`.
 
@@ -545,7 +544,7 @@ pub enum ReplyBody {
 /// [`QueryResponder::with_responder`] before any send_*/send_err call —
 /// propagates onto the wire as the Response-envelope-level responder
 /// extension (zenoh-pico ext_id 0x03 ZBUF; see
-/// [`crate::session_glue::ResponseReplyBuilder::responder`]). Same shape
+/// `crate::session_glue::ResponseReplyBuilder::responder`). Same shape
 /// for Reply and Err paths since the ext lives on the outer Response,
 /// not the inner Reply / Err body.
 // R311gb (Track 2) — owned reply accumulator record (`String` keyexpr +
@@ -583,7 +582,7 @@ pub enum QueryReply {
         /// Optional `(zid bytes, eid)` carried as the envelope-level
         /// responder ext on the emitted Response. `None` skips the ext;
         /// `Some` packs the bytes via
-        /// [`crate::session_glue::ResponseReplyBuilder::responder`].
+        /// `crate::session_glue::ResponseReplyBuilder::responder`.
         responder: Option<(Vec<u8>, u32)>,
         /// Optional opaque attachment carried on the inner `MsgPut` body
         /// extension chain (the push-body attachment ext, id 0x03 — the
@@ -718,7 +717,7 @@ impl QueryReply {
         }
     }
 
-    /// Compose the wire-form [`Response`] for this Reply / Err using
+    /// Compose the wire-form `Response` for this Reply / Err using
     /// the existing layered builders. Consumes `self` so the
     /// allocated payload bytes flow directly into the builder
     /// (callers can `take_pending_replies()` and `.into_iter().map(
@@ -898,7 +897,7 @@ impl QueryReply {
 /// dispatch loop advances to the next matched queryable, so user
 /// closures cannot retain the borrow.
 ///
-/// R311dx — `codec-request`-gated: only [`QueryableRegistry::fire_matching_queryables`]
+/// R311dx — `codec-request`-gated: only `QueryableRegistry::fire_matching_queryables`
 /// constructs a `QueryResponder`, so it shares the registry's gate.
 #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 pub struct QueryResponder<'a> {
@@ -1484,7 +1483,7 @@ impl<'a> QueryResponder<'a> {
     /// _is_put && ..` gate quoted here (`message.c:263`) is pico's EMIT
     /// behaviour; zenoh's `ReplyBody` is a `PushBody` whose `Del` declares
     /// `ext_attachment` outright (`zenoh-protocol/src/zenoh/del.rs:47,60`), and
-    /// [`ResponseReplyBuilder`](crate::response_build::ResponseReplyBuilder)
+    /// [`ResponseReplyBuilder`]
     /// now emits it under the Del arm's own ext id. The drop here was the LAST
     /// link in a chain that was otherwise already complete: `wz-capi-c`'s
     /// `z_query_reply_del_options_t.attachment` is taken and carried, its
@@ -1550,7 +1549,7 @@ impl<'a> QueryResponder<'a> {
     /// `send_reply` / `send_reply_del` / `send_err` call stamps onto
     /// the pushed [`QueryReply`]. The stamp propagates through
     /// [`QueryReply::into_response`] into
-    /// [`crate::session_glue::ResponseReplyBuilder::responder`] /
+    /// `crate::session_glue::ResponseReplyBuilder::responder` /
     /// [`crate::response_build::ResponseErrBuilder::responder`], which
     /// emits the envelope-level responder ext (zenoh-pico ext_id 0x03
     /// ZBUF) per `_z_response_encode` at
@@ -2198,9 +2197,9 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
     /// queryables). Borrow-driven (no owned `Query` materialization,
     /// no per-match `QueryResponder` accumulator), so it is the MCU
     /// no-heap dispatch path; the AP wire path
-    /// ([`fire_matching_queryables`](Self::fire_matching_queryables))
+    /// (`fire_matching_queryables`)
     /// shares the same per-queryable match SSOT
-    /// ([`Queryable::matches`]) but builds a fresh `QueryResponder`
+    /// (`Queryable::matches`) but builds a fresh `QueryResponder`
     /// per match to stage owned `QueryReply` records for the wire.
     /// Returns the count of sinks fired.
     ///
@@ -2340,7 +2339,7 @@ impl DispatchOutcome {
 // `dispatch_borrowed`) stays un-gated.
 #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
-    /// Route an inbound [`Request`] through the queryable table.
+    /// Route an inbound `Request` through the queryable table.
     ///
     /// - Requests whose body is not `RequestVariant::CodecZenohQuery`
     ///   (i.e. MsgPut / MsgDel / Default arms) are no-ops here. The
@@ -2353,8 +2352,8 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
     ///   `absorb_declare` from inbound `Declare(DeclKexpr)`). The
     ///   composition rule mirrors `dispatch_push`:
     ///   * `id == 0`                    → keyexpr = suffix or empty
-    ///   * `id != 0`, suffix = None     → keyexpr = table[id]
-    ///   * `id != 0`, suffix = Some(s)  → keyexpr = table[id] + s
+    ///   * `id != 0`, suffix = None     → keyexpr = `table[id]`
+    ///   * `id != 0`, suffix = Some(s)  → keyexpr = `table[id]` + s
     ///
     ///   Un-resolvable mapping ids (peer hasn't declared the id yet,
     ///   or the declaration arrived through a path the table has not
@@ -2835,7 +2834,7 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
 
     /// R121j-5c — drain a `Vec<NetworkMessage>` (typically the
     /// `FramePayload.messages` field surfaced by
-    /// [`crate::session_glue::drive_session_until_terminal`]) through
+    /// `crate::session_glue::drive_session_until_terminal`) through
     /// the queryable table. Each `NetworkMessage::Request` triggers
     /// at most one `dispatch_request` and, when that Request carried a
     /// RESOLVABLE Query body, also enqueues a `pending_final_rids`
@@ -2940,7 +2939,7 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
 
     /// R121j-5c — convenience adapter that pulls the
     /// `FramePayload.messages` out of an
-    /// [`IterationEvent::Poll(DriverLoopOutcome::FramePayload)`]
+    /// `IterationEvent::Poll(DriverLoopOutcome::FramePayload)`
     /// surface and forwards to [`Self::dispatch_messages`]. Mirror
     /// of [`crate::pubsub::SubscriberRegistry::dispatch_iteration_event`]
     /// for the queryable side. A Request the in-place receive path lends
@@ -3011,7 +3010,7 @@ impl QueryableRegistry<BoxedQuerySink> {
     /// attachment / rid) and `&mut dyn ReplyOut` (the reply-emit
     /// surface) — the R311gb-3b seam contracts replace the prior owned
     /// `&QueryEvent` + `&mut ReplyEmitter`; this is the
-    /// [`feedback_signature_stability`] wire-data principled exemption,
+    /// `feedback_signature_stability` wire-data principled exemption,
     /// taken so one registry backs both heap and no-heap profiles. The
     /// closure is heap-boxed via [`BoxedQuerySink`].
     ///

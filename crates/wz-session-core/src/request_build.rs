@@ -196,7 +196,7 @@ pub fn reliteralize_request(
 /// the action bundle). Extracted so the `z_get` initiator path can route
 /// the Query through the transport send seam
 /// (`Session::send_network_message`) as a `NetworkMessage::Request` value
-/// — the same build/dispatch split [`build_push_aliased_with_meta`] &
+/// — the same build/dispatch split `build_push_aliased_with_meta` &
 /// kin already give the publish path. Threads each set
 /// [`QueryMetadata`](crate::metadata::QueryMetadata) slot onto the fluent
 /// [`RequestQueryBuilder`]; `build()` emits the Query exts in zenoh-pico

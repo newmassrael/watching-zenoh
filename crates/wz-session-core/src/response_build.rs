@@ -1362,7 +1362,7 @@ impl ResponseErrBuilder {
 ///   [byte 1..1+zid_len] raw zid bytes.
 ///   [VLE u64]            `eid`.
 ///
-/// Distinct from [`encode_source_info_ext_body`] in that no `sn`
+/// Distinct from `encode_source_info_ext_body` in that no `sn`
 /// trailer is emitted — responder identifies the entity, source_info
 /// identifies the entity + per-source sequence position.
 ///

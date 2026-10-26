@@ -59,9 +59,9 @@
 //! no_std-compatible parse (the dial seam resolves a `Named` tcp endpoint).
 //!
 //! R311y236 — the `#`-delimited config tail IS parsed on the IP leaf:
-//! [`parse_locator`] / [`classify_named_ip`] split it off before the addr parse
+//! [`parse_locator`] / `classify_named_ip` split it off before the addr parse
 //! and extract `iface=<name>` (zenoh `BIND_INTERFACE`) into
-//! [`ParsedLocator::iface`] / [`AnyLocator::Named`], so
+//! `ParsedLocator::iface` / [`AnyLocator::Named`], so
 //! `udp/1.2.3.4:7447#iface=eth0` parses (the runtime dial/listen seam binds
 //! the socket to the NIC via `SO_BINDTODEVICE` under the `locator-iface`
 //! feature). Config keys OTHER than `iface` are accepted-then-ignored
@@ -69,7 +69,7 @@
 //!
 //! R311y469 — the full canon `<proto>/<address>[?<metadata>][#<config>]`
 //! (`zenoh-protocol/src/core/endpoint.rs:460`) is now honoured on EVERY leaf
-//! through the one shared [`split_locator_parts`] seam. Before it the leaves
+//! through the one shared `split_locator_parts` seam. Before it the leaves
 //! split only `#` — and unixsock / unixpipe split nothing at all — so a canon
 //! locator carrying metadata pushed it into the ADDRESS: R311y467 measured pico
 //! opening `<dev>` from `serial/<dev>?meta=x#baudrate=115200` while wz built the
@@ -80,7 +80,7 @@
 //! link, because zenoh gives both QUIC links the same `"quic"` scheme string and
 //! separates them by that key alone (`io/zenoh-link/src/lib.rs:165-171`); on the
 //! `udp` scheme `rel=1` selects the RELIABLE UDP link for the same reason (R2810).
-//! See [`reliability_adjusted_proto`]. `prio` (priority-range link selection) and
+//! See `reliability_adjusted_proto`. `prio` (priority-range link selection) and
 //! `rel` on the other schemes are parsed and NOT honoured — they belong to the
 //! `transport-multilink` and reliability axes, and are not claimed here.
 //!
@@ -243,7 +243,7 @@ pub struct ParsedLocator {
 /// never looked at on a node that does not offer QoS. Parsing here would
 /// refuse, at config time, a locator upstream dials. The one parse that does
 /// happen at locator time is `rel` choosing a link kind on `quic` / `udp`
-/// ([`reliability_adjusted_proto`]), which upstream's link manager also does
+/// (`reliability_adjusted_proto`), which upstream's link manager also does
 /// with `?` before choosing.
 ///
 /// Before R2944 these two keys were parsed and dropped (the

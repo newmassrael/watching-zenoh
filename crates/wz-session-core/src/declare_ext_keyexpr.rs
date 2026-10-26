@@ -58,7 +58,7 @@ use crate::wireexpr_resolve::MappingSpaces;
 pub const KEYEXPR_EXT_ID: u8 = 0x0f;
 /// The `ext_keyexpr` header with no further extension following:
 /// `id (0x0f) | M (0x10) | ZBuf (0x40)` = `0x5f`. The chain-continuation
-/// `FLAG_Z` (0x80) is layered on by [`ext_nodeid::apply_chain_z_bits`] when the
+/// `FLAG_Z` (0x80) is layered on by [`apply_chain_z_bits`](crate::ext_nodeid::apply_chain_z_bits) when the
 /// entry is not the last in a chain — the shared per-entry `Z` SSOT.
 pub const KEYEXPR_EXT_HEADER: u8 = KEYEXPR_EXT_ID | EXT_FLAG_M | EXT_ENC_ZBUF;
 

@@ -848,7 +848,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage> RemoteSubscriberTable<D, U, P> {
     /// [`Self::dispatch_declare`] delegates here with a `false` local
     /// half, which is the honest answer for a caller that has no local
     /// subscriber table in reach. The production fan
-    /// ([`crate::observer::SessionObserver`]) passes the real one.
+    /// (`crate::observer::SessionObserver`) passes the real one.
     ///
     /// S9a — a `DeclSubscriber` whose id the peer's table has no room for, or whose
     /// keyexpr is longer than the table's text, is REFUSED: counted
@@ -1134,7 +1134,7 @@ impl RemoteSubscriberRegistry<BoxedDeclSink, BoxedUndeclSink> {
     /// receives `&dyn DeclView` (the peer-declared `id` + resolved
     /// keyexpr) — the R311gb-3d seam contract replaces the prior
     /// `(&DeclSubscriberOwned, &str)`; this is the
-    /// [`feedback_signature_stability`] wire-data principled exemption.
+    /// `feedback_signature_stability` wire-data principled exemption.
     /// Duplicate callbacks are allowed; dispatch fires them in
     /// registration order. The closure is heap-boxed via [`BoxedDeclSink`].
     /// R311lb — returns the registry-local observer id (see

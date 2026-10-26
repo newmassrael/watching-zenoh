@@ -13,7 +13,7 @@
 //! ext's ZBuf payload, and the peer demultiplexes by id (`ztake!`). wz mirrors
 //! this exactly: an [`AuthMethod`] contributes / consumes a per-method
 //! [`AuthSubExt`] at each of the four handshake stages, and [`AuthDispatch`]
-//! mux/demuxes them through the [`crate::ext_chain`] inner chain wrapped by the
+//! mux/demuxes them through the `crate::ext_chain` inner chain wrapped by the
 //! [`crate::extauth`] outer auth ext (id `0x3`). The multi-step state lives
 //! INSIDE each method (`&mut self`), riding the existing four establishment
 //! messages — no new session FSM state (the OQ-W10/W2 resolution).
@@ -259,7 +259,7 @@ pub trait AuthMethod: Send {
     /// `prng.gen()` per method per handshake. It used to be handed one value
     /// fanned out to every method, which is open-debt item 803. Default no-op
     /// (a method without a challenge — e.g. an initiator-only or nonce-free
-    /// method — ignores it). See the [`UsrPwdMethod::responder`] security
+    /// method — ignores it). See the `UsrPwdMethod::responder` security
     /// contract: a fixed / reused nonce is a replay hole.
     fn set_challenge_nonce(&mut self, _nonce: u64) {}
 

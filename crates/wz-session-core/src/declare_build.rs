@@ -1011,7 +1011,7 @@ pub fn build_declare_kexpr_reply(
 /// stamped with the soliciting `interest_id` — the CURRENT dump a router sends back
 /// per matching held liveliness token (zenoh `declare_token_interest`). The token
 /// twin of [`build_declare_subscriber_reply`], routed through the SAME
-/// [`stamp_interest_reply`] I-flag + interest_id SSOT. Kept in this (ungated)
+/// `stamp_interest_reply` I-flag + interest_id SSOT. Kept in this (ungated)
 /// `declare_build` module — NOT `declare::local_token::build_token_reply`, which is
 /// gated behind the `liveliness-token` feature — so the router `routing-token-tables`
 /// plane pulls no liveliness-token dependency. The token `id` is 0 (a current-dump
@@ -1041,7 +1041,7 @@ pub fn build_declare_token_reply_with_id(
 
 /// R311y141 — the interest-response `Declare(DeclQueryable)` reply: the
 /// query-plane twin of [`build_declare_subscriber_reply`]. Additionally folds
-/// the matched queryables' [`QueryableInfo`] onto the body ext chain (via
+/// the matched queryables' `QueryableInfo` onto the body ext chain (via
 /// [`set_declare_queryable_info`]): a `Z_QUERY_TARGET_ALL_COMPLETE` querier's
 /// write-filter deactivates ONLY on a reply carrying `complete = true`
 /// (zenoh-pico `net/filtering.c`), so an aggregate reply must carry the MERGED
@@ -1067,7 +1067,7 @@ pub fn build_declare_queryable_reply(
 /// later value-aware FUTURE push of the same keyexpr (a completeness flip
 /// `false -> true` re-declares the SAME `(decl_id, peer)` target pico keys its
 /// write-filter on, `net/filtering.c:202`). Same `I`-flag + `interest_id` coupling
-/// and same folded-[`QueryableInfo`] contract as [`build_declare_queryable_reply`].
+/// and same folded-`QueryableInfo` contract as [`build_declare_queryable_reply`].
 pub fn build_declare_queryable_reply_with_id(
     interest_id: u64,
     queryable_id: u64,
@@ -1082,7 +1082,7 @@ pub fn build_declare_queryable_reply_with_id(
 
 /// R311y150 — the UNSOLICITED FUTURE `Declare(DeclQueryable)` push: a
 /// `DeclareQueryable` carrying a NON-ZERO queryable id + the folded
-/// [`QueryableInfo`], with `interest_id: None` and NO `I` flag (an unsolicited
+/// `QueryableInfo`, with `interest_id: None` and NO `I` flag (an unsolicited
 /// declare, NOT an interest reply — the query-plane twin of the subscriber future
 /// push's plain `build_declare_subscriber(id, 0, Some(ke))`). Distinct from
 /// [`build_declare_queryable_with_info`](crate::declare_build) callers that force

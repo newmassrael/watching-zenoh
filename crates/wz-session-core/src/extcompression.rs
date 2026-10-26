@@ -37,7 +37,7 @@ pub const COMPRESSION_EXT_ID: u8 = crate::ext_header::establishment_ext_id::COMP
 /// Build the Z_EXT_COMPRESSION `ExtEntry`: the unit (zero-length) marker that
 /// advertises compression capability (the [`crate::unit_ext`] mechanism at the
 /// compression id). zenoh `zextunit!(0x6, false)`; the surrounding
-/// [`crate::ext_chain::encode_ext_chain`] applies the chain-continuation `Z` bit.
+/// `crate::ext_chain::encode_ext_chain` applies the chain-continuation `Z` bit.
 pub fn encode_compression_ext() -> ExtEntryOwned {
     encode_unit_ext(COMPRESSION_EXT_ID)
 }

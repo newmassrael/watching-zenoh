@@ -560,7 +560,7 @@ fn push_plugins_object<W: TextOut + ?Sized>(plugins: &[AdminPlugin], out: &mut W
 /// plugins}`. `metadata` is the node config's own value, as the host rendered
 /// it ([`Self::metadata_json`]). `plugins` is `null` WITHOUT
 /// `adminspace-plugins-handlers` (the original byte-behavior) and, WITH the
-/// feature, the started-plugins object [`push_plugins_object`] builds from
+/// feature, the started-plugins object `push_plugins_object` builds from
 /// [`Self::plugins`] (surface A); the key set is preserved so a zenoh admin
 /// client parses the same shape either way.
 ///

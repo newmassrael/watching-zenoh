@@ -13604,6 +13604,16 @@ layer_c1bz_docs_resolve() {
     # `ScoutedHello`, which that file does not import, and names the scouted hello in plain words
     # now that the window is the session's and not the tokio engine's (the cooperative scouting
     # step of docs/capi-pico-on-coop-engine.md). The lane's own finding line named it.
+    # wz-session-core 494 -> 0, COUNTED on this lane's command (`cargo doc -p wz-session-core
+    # --no-deps --all-features`, read from cargo's JSON messages so each finding had its place).
+    # The crate holds no budget line now, and a missing line reads as 0. 283 of the findings
+    # were the doc blocks of `lib.rs`: a module's outer `///` and its own `//!` are one text that
+    # rustdoc resolves from the crate root, so 70 modules' links to their own items did not
+    # resolve; those outer blocks are plain `//` comments now and each module is documented from
+    # inside, as `passive_messages` and its neighbours already were. The rest were links to
+    # private items or to items of other crates and feature states (code spans), explicit
+    # targets made redundant by a name already in scope (dropped), and a few paths that named
+    # the wrong module.
     budget="
         wz:4
         wz-ap-demo:25
@@ -13615,7 +13625,6 @@ layer_c1bz_docs_resolve() {
         wz-routing-graph:5
         wz-runtime-coop:7
         wz-runtime-tokio:427
-        wz-session-core:494
         wz-switchboard-codegen:8
         zenoh-pico-sys:3
     "

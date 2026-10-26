@@ -14,7 +14,7 @@
 //! SCXML 6.4.6). The switchboard is the inbound adapter that turns a
 //! keyexpr-matched inbound sample into a port call: wz owns the zenoh
 //! keyexpr demux — chunk wildcards (`*` / `**` / `$*`) and the peer
-//! DECLARE alias table, already resolved into [`SampleView::keyexpr`] by
+//! DECLARE alias table, already resolved into `SampleView::keyexpr` by
 //! the time a sample reaches here — then injects a *domain* event
 //! (`"temp_update"`, not the keyexpr literal) so the SCXML core never
 //! learns the vendor wire naming (Ports-and-Adapters / ACL boundary).
@@ -414,7 +414,7 @@ mod alloc_impl {
 
         /// Fan an [`IterationEvent`] into the switchboard: for each inbound
         /// `FramePayload` Push, resolve its keyexpr against `peer_table`
-        /// (the shared [`resolve_wireexpr`] SSOT — the same resolver the
+        /// (the shared `resolve_wireexpr` SSOT — the same resolver the
         /// data-callback / declare consumer registries use), then
         /// [`dispatch`](Self::dispatch) the resulting sample through
         /// `injector`. Returns the number of events injected.

@@ -21,7 +21,7 @@
 //!   `dispatch_network_message` chokepoint (R311jq) — replaying stored wire
 //!   bytes would replay a stale SN.
 //! - [`SwappableLink`] is the transport-replacement seam: the
-//!   [`SessionLinkActions::driver`](crate::session_actions::SessionLinkActions::driver)
+//!   `SessionLinkActions::driver`
 //!   slot is a plain per-profile `R::LinkSink` captured at construction, so
 //!   a reconnect supervisor that re-dials cannot re-point an existing
 //!   actions bundle (and every `Session` / handle clone holding it) at the
@@ -54,7 +54,7 @@ use crate::send_wire_error::SendWireError;
 /// ([`NotReconnectable`]) where the dial input is first classified.
 ///
 /// Both arms re-dial through the same [`AnyLocator`] seam
-/// ([`From<ReconnectLocator>`] → [`dial_locator`]), so a re-dial re-resolves a
+/// ([`From<ReconnectLocator>`] → `dial_locator`), so a re-dial re-resolves a
 /// [`Named`](Self::Named) host EVERY attempt (DNS failover — the reason to
 /// configure a name rather than a fixed IP) and re-connects a numeric
 /// [`Ip`](Self::Ip) address. The [`Named`](Self::Named) arm is what closes the
@@ -63,7 +63,7 @@ use crate::send_wire_error::SendWireError;
 /// [`ParsedLocator`], so a hostname `--connect` could be dialed once yet never
 /// reconnect-supervised.
 ///
-/// [`dial_locator`]: the runtime dial seam (`wz-runtime-tokio::session_open`).
+/// `dial_locator`: the runtime dial seam (`wz-runtime-tokio::session_open`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReconnectLocator {
     /// A numeric IP endpoint (`tcp/1.2.3.4:7447`) — see [`AnyLocator::Ip`].

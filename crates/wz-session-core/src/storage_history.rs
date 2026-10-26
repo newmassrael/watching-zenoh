@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! R311uz — the `storage-history` atom (§5.11 storage domain, 2/4): an
-//! in-memory [`History::All`](crate::storage_backend::History::All)
+//! in-memory [`History::All`]
 //! backend that keeps EVERY version per key, not just the latest.
 //!
 //! [`crate::storage_backend::MemoryStorage`] is `History::Latest` — one
@@ -10,7 +10,7 @@
 //! [`HistoryStorage`] here is the `History::All` counterpart: every Put is
 //! retained as a distinct version (ordered by timestamp), and a query
 //! replies all of them. The service gate reads
-//! [`StorageBackend::history`](crate::storage_backend::StorageBackend::history)
+//! [`StorageBackend::history`]
 //! and skips the newer-wins drop for an `All` backend
 //! (`crate::storage_state` — zenoh `storages_mgt/service.rs:319`).
 //!
@@ -72,7 +72,7 @@
 //! tombstone through `get` even if one existed. There is therefore no
 //! upstream `All`-delete behaviour to be faithful TO; this shape is
 //! answerable to wz's own
-//! [`History::All`](crate::storage_backend::History::All) declaration, and
+//! [`History::All`] declaration, and
 //! that is the ground it is justified on.
 //!
 //! ## Deliberate divergences (each layer/profile-driven)

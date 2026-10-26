@@ -15,7 +15,7 @@
 //! frame buffers + a growable reader accumulator) — the AP staging,
 //! matching `transport-fragmentation` / `session-reconnect`. R3239 — the
 //! ENCODE side no longer needs it:
-//! [`encode_frame_into`](crate::serial_link::encode_frame_into) writes a frame
+//! [`encode_frame_into`] writes a frame
 //! into a buffer the caller owns (the codec's `encode` over a slice sink, which
 //! this paragraph used to say the codec did not expose; it does), and
 //! `encode_frame` is that over a vector. The decode side and the reader

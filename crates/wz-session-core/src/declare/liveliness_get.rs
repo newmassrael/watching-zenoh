@@ -16,7 +16,7 @@
 //!
 //! The application *surface* of a liveliness get looks like a query —
 //! it delivers a stream of replies terminated by a final, so it reuses
-//! the response-plane [`crate::reply_sink::ReplySink`] / [`ReplyView`]
+//! the response-plane [`crate::reply_sink::ReplySink`] / [`crate::reply_sink::ReplyView`]
 //! delivery seam (one SSOT for "get → replies → final"). But the *wire*
 //! is the **Interest / declaration** plane, not the Request / Query
 //! plane: the request leg is a CURRENT liveliness `Interest`, and the
@@ -37,7 +37,7 @@
 //!
 //! | Registry                         | Role                                    | Correlation        |
 //! |----------------------------------|-----------------------------------------|--------------------|
-//! | [`crate::declare::LivelinessRegistry`]            | observe EVERY peer `Decl*Token`         | none (callback)    |
+//! | [`crate::declare::liveliness::LivelinessRegistry`] | observe EVERY peer `Decl*Token`         | none (callback)    |
 //! | [`crate::declare::liveliness_subscriber::LivelinessSubscriberRegistry`] | subscribe to peer tokens matching my keyexpr | per-subscriber slot |
 //! | [`crate::declare::local_token::LocalTokenRegistry`] | DECLARER side + inbound-Interest responder | local token table  |
 //! | [`LivelinessGetRegistry`]                          | one-shot CURRENT snapshot of peer tokens | per-get `interest_id` |
@@ -52,7 +52,7 @@
 //! ## no-heap split (mirror of the sibling registries)
 //!
 //! 1. **Storage + fire (no-heap)** — the pending table is a
-//!    [`crate::bounded::BoundedVec`] of [`PendingGet`] rows; the
+//!    [`crate::bounded::BoundedVec`] of `PendingGet` rows; the
 //!    [`LivelinessGetRegistry::dispatch_reply_borrowed`] /
 //!    [`LivelinessGetRegistry::dispatch_final`] /
 //!    [`LivelinessGetRegistry::sweep_timed_out`] fire entries take only
@@ -199,7 +199,7 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
 
     /// Register a pending get keyed by `interest_id`. Fresh ids come
     /// from
-    /// [`crate::session_glue::SessionLinkActions::alloc_next_interest_id`],
+    /// `crate::session_glue::SessionLinkActions::alloc_next_interest_id`,
     /// so a collision is a programming error rather than a runtime
     /// condition; a duplicate `interest_id` is rejected with `Ok(false)`
     /// (no-op). `deadline_ms` is the absolute monotonic-ms timeout

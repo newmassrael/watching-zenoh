@@ -1197,9 +1197,9 @@ impl TxLimitsCache {
 /// a known MCU zero-cost debt, faithfulness-over-cost).
 pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// R311y9 — per-session wire byte/message counters (`transport-stats`).
-    /// Interior-mutable atomics, incremented at the [`Self::send_wire`] (TX)
+    /// Interior-mutable atomics, incremented at the `Self::send_wire` (TX)
     /// and [`crate::drive::dispatch_link_event`] (RX) seams; read via
-    /// [`Self::stats_report`]. Off by default (the adminspace consumer is P4).
+    /// `Self::stats_report`. Off by default (the adminspace consumer is P4).
     #[cfg(feature = "transport-stats")]
     pub stats: crate::stats::TransportStats,
     /// R2825 (`transport-stats`) — this session's partition of the node's
@@ -1258,7 +1258,7 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// The largest message this profile can REASSEMBLE, in bytes — the TX
     /// twin of the RX reassembly slot `CAP`. A fragment chain longer than
     /// this is refused at
-    /// [`emit_frame_or_fragments`](SessionLinkActions::emit_frame_or_fragments)
+    /// `emit_frame_or_fragments`
     /// with [`SendWireError::ExceedsReassemblyCap`] instead of being emitted
     /// into a receiver that will drop it mid-stage.
     ///
@@ -1440,7 +1440,7 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// mismatch as "Unknown cookie").
     ///
     /// Both the mint (`SessionActionsBinding::send_init_ack_with_cookie`)
-    /// and the verify ([`Self::cookie_valid`]) read THIS slot, so the acceptor
+    /// and the verify (`Self::cookie_valid`) read THIS slot, so the acceptor
     /// admits exactly the cookie it minted for the handshake it is in. Before
     /// this slot existed the two sides agreed on a value derived from
     /// `(deploy key, peer zid)` alone, which is constant for the life of the
@@ -1448,17 +1448,17 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     ///
     /// `None` is FAIL-CLOSED and is the only default: the no_std core draws no
     /// entropy (`getrandom` has no bare-metal backend), so the nonce is
-    /// installed from outside via [`Self::refresh_cookie_nonce`] — by
+    /// installed from outside via `Self::refresh_cookie_nonce` — by
     /// `new_session_actions` on the AP profile. An acceptor that never
     /// received one mints no HMAC cookie and its `cookie_valid` denies every
     /// OpenSyn; it does NOT fall back to the un-bound derivation, because a
     /// fallback is indistinguishable from the defect this slot removes.
     ///
-    /// Survives [`Self::reset_for_reopen`] alongside the ext-chain staging
+    /// Survives `Self::reset_for_reopen` alongside the ext-chain staging
     /// slots and the auth challenge nonce, for the same reason: it is
     /// locally-sourced configuration rather than captured peer state, and the
     /// host that supplied it is the one positioned to refresh it. See
-    /// [`Self::refresh_cookie_nonce`] for what an acceptor-role re-handshake
+    /// `Self::refresh_cookie_nonce` for what an acceptor-role re-handshake
     /// owes.
     ///
     /// R2782 — and it is SPENT by the OpenSyn it admits
@@ -1520,7 +1520,7 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// auth methods (usrpwd, ...) and mux/demuxes their per-stage sub-exts into
     /// the four handshake ext chains above. Default empty (no auth ext, admits
     /// every stage = zenoh `Auth::default()`); the AP layer installs a
-    /// configured dispatch via [`Self::install_auth_dispatch`]. Behind its own
+    /// configured dispatch via `Self::install_auth_dispatch`. Behind its own
     /// mutex so a send stage advances a method's state without blocking the role
     /// ext slots (the "mid-handshake auth-step rotation" the slot comment above
     /// anticipated).
@@ -1574,9 +1574,9 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     pub offer: R::Mutex<crate::transport_mode::SessionOffer>,
     /// transport-lowlatency — the negotiated lowlatency capability for THIS
     /// session (zenoh `TransportConfigUnicast::is_lowlatency`). Seeded with the
-    /// local offer ([`Self::set_lowlatency_offer`]) at bring-up, then ANDed
+    /// local offer (`Self::set_lowlatency_offer`) at bring-up, then ANDed
     /// against the peer's InitSyn / InitAck offer
-    /// ([`Self::negotiate_lowlatency_against_peer`], zenoh
+    /// (`Self::negotiate_lowlatency_against_peer`, zenoh
     /// `is_lowlatency &= other_ext.is_some()`). When true post-establishment,
     /// the lean tx / rx data path drops the Frame(sn) wrapper + fragmentation
     /// (the wz mirror of zenoh `TransportUnicastLowlatency`). Behind its own
@@ -1587,7 +1587,7 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// (zenoh `TransportConfigUnicast::patch`). Seeded at
     /// [`crate::extpatch::CURRENT_PATCH`] (wz's own announcement, R121f1)
     /// and `min()`-capped against the peer's Init announcement by
-    /// [`Self::negotiate_patch_against_peer`], which is zenoh-pico's
+    /// `Self::negotiate_patch_against_peer`, which is zenoh-pico's
     /// `if (iam._patch > tmsg._patch) iam._patch = tmsg._patch`
     /// (`transport.c:237-241`) on both sides.
     ///
@@ -1602,7 +1602,7 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// would refuse, rather than refusing chains a real peer is sending.
     ///
     /// Its one consumer today is
-    /// [`Self::fragmentation_markers_negotiated`], the gate on the Fragment
+    /// `Self::fragmentation_markers_negotiated`, the gate on the Fragment
     /// `0x2 First` / `0x3 Drop` chain-boundary rules. Ungated by feature:
     /// the level is core establishment state that wz already puts on the
     /// wire in every build, and a session that cannot read it back would
@@ -1644,12 +1644,12 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     pub local_remote_bound: R::Mutex<Option<crate::extbound::Bound>>,
     /// transport-qos (R311y215) — the negotiated QoS-transport capability for
     /// THIS session (zenoh `TransportConfigUnicast::is_qos`). Seeded with the
-    /// local offer ([`Self::set_qos_offer`]) at bring-up, then ANDed with the
-    /// peer's Init `ext_qos` offer ([`Self::negotiate_qos_against_peer`], zenoh
+    /// local offer (`Self::set_qos_offer`) at bring-up, then ANDed with the
+    /// peer's Init `ext_qos` offer (`Self::negotiate_qos_against_peer`, zenoh
     /// "both sides QoS or NoQoS"). When true it selects `Priority::NUM`
     /// per-priority SN conduits (else 1) and lets a non-DEFAULT Frame carry the
     /// `ext_qos` priority. Mutually exclusive with `is_lowlatency` (guarded at
-    /// [`Self::set_qos_offer`]).
+    /// `Self::set_qos_offer`).
     #[cfg(feature = "transport-qos")]
     pub is_qos: R::Mutex<bool>,
     /// session-extqos (R311y506) — the per-link QoS METADATA half of the
@@ -1666,11 +1666,11 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     pub qos_link: R::Mutex<crate::extqos::QosLinkState>,
     /// transport-compression — the negotiated compression capability for THIS
     /// session (zenoh `TransportConfigUnicast::is_compression`). Seeded with the
-    /// local offer ([`Self::set_compression_offer`]) at bring-up, then ANDed
+    /// local offer (`Self::set_compression_offer`) at bring-up, then ANDed
     /// against the peer's InitSyn / InitAck offer
-    /// ([`Self::negotiate_compression_against_peer`], zenoh
+    /// (`Self::negotiate_compression_against_peer`, zenoh
     /// `is_compression &= other_ext.is_some()`). When true post-establishment,
-    /// every outbound batch is lz4-wrapped at [`Self::send_wire`] and every
+    /// every outbound batch is lz4-wrapped at `Self::send_wire` and every
     /// inbound batch is un-wrapped at [`crate::drive::dispatch_link_event`]
     /// (the wz mirror of zenoh's per-batch compression). Behind its own mutex.
     #[cfg(feature = "transport-compression")]
@@ -1715,7 +1715,7 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// the `u64` wrap is ring-transparent, `(n + 1) & mask` is
     /// the ring successor of `n & mask` across the `u64`
     /// boundary too — and the wire-visible value is masked at
-    /// the mint ([`Self::next_outbound_frame_sn`]) and at the
+    /// the mint (`Self::next_outbound_frame_sn`) and at the
     /// fragment walk (`frame_encode::fragment_body`). R311kb
     /// realized the R121e explicit-modulo carry via zenoh-pico
     /// `_z_sn_increment` parity (the F-5 consolidation). R311y214 —
@@ -1727,19 +1727,19 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// R311ke — per-channel inbound Frame/Fragment SN gate state
     /// ([`crate::sn::RxSn`]), the zenoh-pico
     /// `_z_transport_peer_unicast_t._sn_rx_reliable` /
-    /// `_sn_rx_best_effort` pair. Seeded by [`Self::handle_inbound`]
+    /// `_sn_rx_best_effort` pair. Seeded by `Self::handle_inbound`
     /// from the peer's OpenSyn/OpenAck `initial_sn` (one before, so the
     /// first frame at exactly `initial_sn` passes — peer.c:212-214);
     /// consulted by the drive dispatcher's
-    /// [`Self::admit_rx_frame_sn`] before a Frame payload or Fragment
+    /// `Self::admit_rx_frame_sn` before a Frame payload or Fragment
     /// reaches the application layer. Handshake-scoped: reset by
     /// `reset_for_reopen` and re-seeded by the reopen handshake.
     pub rx_sn: R::Mutex<crate::sn::RxConduits>,
     /// R311jp — TX batching accumulator (zenoh-pico
     /// `_z_transport_common_t::{_batch_state,_batch_count}` + the shared
     /// TX `_wbuf` parity, `Z_FEATURE_BATCHING`). Inactive by default —
-    /// every [`Self::dispatch_network_message`] call flushes
-    /// immediately, the pre-A3 behavior. [`Self::batch_start`] activates
+    /// every `Self::dispatch_network_message` call flushes
+    /// immediately, the pre-A3 behavior. `Self::batch_start` activates
     /// accumulation; see [`BatchTx`] for the buffer shape — the
     /// absorb/overflow state machine lives in the chokepoint itself
     /// (R311jq, all emits under the lock).
@@ -1754,15 +1754,15 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     pub tx_conduits: TxConduits<R>,
     /// R234 — outbound keyexpr mapping table. Mirrors zenoh-pico's
     /// `_z_session_t._local_resources` slot: every time
-    /// [`Self::send_declare_keyexpr`] emits a `Declare(DeclKexpr)`
+    /// `Self::send_declare_keyexpr` emits a `Declare(DeclKexpr)`
     /// the (mapping_id, suffix) pair is recorded here so a later
     /// `crate::session::Session::publish_aliased_auto` (or the
     /// loopback branch of a metadata-rich aliased publish) can
     /// resolve the literal form without the caller asserting it
-    /// out-of-band. [`Self::send_undeclare_kexpr`] removes the
+    /// out-of-band. `Self::send_undeclare_kexpr` removes the
     /// entry so the resolver returns `None` for retracted ids.
     ///
-    /// Mutex<HashMap> chosen over RwLock because table writes
+    /// `Mutex<HashMap>` chosen over RwLock because table writes
     /// happen on the session-setup path (rare) and reads happen on
     /// the publish hot path (frequent but short-lived under a
     /// single-key lookup); the contended-write penalty of RwLock
@@ -1821,7 +1821,7 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     declaration_sync: R::Mutex<DeclarationSync>,
     /// §5.21 routing-namespace — the per-participant EGRESS prefix (the wz
     /// mirror of zenoh's `Namespace` decorator value). `None` until the AP
-    /// layer installs it at session bring-up via [`Self::set_namespace`] (the
+    /// layer installs it at session bring-up via `Self::set_namespace` (the
     /// `is_lowlatency` config-set-at-bringup pattern). A non-`None` value makes
     /// every LOCAL-ORIGIN send under this link relative to the namespace.
     /// Applied at the THREE local-origin emit paths: the unicast
@@ -1829,7 +1829,7 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// `send_response` reply seam — both ABOVE the shared `send_network_message`
     /// forwarder floor, so a router relay (which calls the floor directly) is
     /// never re-namespaced — plus the reconnect declaration replay
-    /// ([`Self::replay_one`]), which re-decorates explicitly because it
+    /// (`Self::replay_one`), which re-decorates explicitly because it
     /// dispatches BELOW the floor (it cannot share the floor's decoration without
     /// also re-namespacing relays). Set once, but behind the runtime mutex
     /// because the bundle is shared `Arc` by install time.
@@ -1841,8 +1841,8 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// against the declares it dropped. Its blocked-id / incomplete-alias state
     /// persists ACROSS frames for the session lifetime, so it lives in this
     /// per-unicast-link bundle (not a per-iteration local). `None` until
-    /// [`Self::set_namespace`] installs it; driven by
-    /// [`Self::apply_namespace_ingress`] from both owned-outcome mint points of
+    /// `Self::set_namespace` installs it; driven by
+    /// `Self::apply_namespace_ingress` from both owned-outcome mint points of
     /// the drive loop.
     #[cfg(feature = "routing-namespace")]
     pub namespace_ingress: R::Mutex<Option<NamespaceIngress>>,
@@ -1863,7 +1863,7 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// Each `crate::session::Session::query` call (and any future
     /// caller emitting an outbound `Request(Query)` that registers
     /// a pending entry with [`crate::reply::ReplyRegistry`])
-    /// reserves the next id through [`Self::alloc_next_request_id`]
+    /// reserves the next id through `Self::alloc_next_request_id`
     /// so wire and loopback branches see the same id without the
     /// caller threading an explicit counter.
     ///
@@ -1886,7 +1886,7 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// counter consumed by `_z_declare_liveliness_token`). Each
     /// `crate::session::Session::declare_token` /
     /// `crate::session::Session::declare_token_aliased` call reserves
-    /// the next id through [`Self::alloc_next_token_id`] so the
+    /// the next id through `Self::alloc_next_token_id` so the
     /// `crate::session::LivelinessToken` RAII handle holds the same
     /// id used in the outbound `Declare(DeclToken)` wire frame and
     /// later matches it on the `Declare(UndeclToken)` retraction emit
@@ -1908,8 +1908,8 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// R279 — outbound liveliness-subscriber `interest_id` generator.
     /// Returns the next interest id and advances the internal counter
     /// by one. Consumed by
-    /// [`Self::send_interest_liveliness_subscriber`] /
-    /// [`Self::send_interest_final`] as the inner `Interest::interest_id`
+    /// `Self::send_interest_liveliness_subscriber` /
+    /// `Self::send_interest_final` as the inner `Interest::interest_id`
     /// field, and kept on the
     /// `crate::session::LivelinessSubscriber` RAII handle so the
     /// `Drop` impl can emit the matching `InterestFinal` without the
@@ -1949,7 +1949,7 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// holds as `self.link`, so a per-link F2 / lease write through the binding is
     /// seen here, and vice-versa. EMPTY for a non-aggregating session (feature-off
     /// builds omit the field; feature-on single-link sessions never push into it)
-    /// — [`Self::select_link`] then returns `None` and `send_wire` keeps its
+    /// — `Self::select_link` then returns `None` and `send_wire` keeps its
     /// single-link `self.link` path. The reliability-routed send selects a target
     /// from this set; the session-send gate is the OR over these links'
     /// `transport_available`, so the session survives until the set empties.
@@ -2002,7 +2002,7 @@ pub struct LinkState<R: SessionRuntime> {
     /// R::LinkSink — the per-profile owning handle to the link write
     /// seam (tokio `Arc<dyn BoxedLinkDriver + Send + Sync>`, lwIP MCU
     /// `Rc<dyn BoxedLinkDriver>`). The generic action methods reach the
-    /// pure `&dyn BoxedLinkDriver` through [`SessionLinkActions::link_driver`].
+    /// pure `&dyn BoxedLinkDriver` through `SessionLinkActions::link_driver`.
     pub driver: R::LinkSink,
     /// R311la — monotonic timestamp in milliseconds of the most recent
     /// successfully parsed inbound transport message of ANY kind
@@ -2075,7 +2075,7 @@ pub struct LinkState<R: SessionRuntime> {
     pub established_at: R::Mutex<Option<u64>>,
     /// R311kw — monotonic timestamp in milliseconds of the most recent
     /// outbound wire emit on this link. Stamped by the
-    /// [`SessionLinkActions::send_wire`] seam every TX path funnels through
+    /// `SessionLinkActions::send_wire` seam every TX path funnels through
     /// (handshake t_msg, CLOSE, Frame / Fragment, batch flush), the
     /// deadline-model equivalent of zenoh-pico's
     /// `_z_transport_common_t._transmitted` flag (transport.h:176; set on
@@ -2095,7 +2095,7 @@ pub struct LinkState<R: SessionRuntime> {
     /// or the reconnect supervisor tears the transport down for re-dial
     /// ([`SessionLinkActions::reset_for_reopen`]), `true` again when Established
     /// (re-)enters (`record_established_at`). The
-    /// [`SessionLinkActions::dispatch_network_message`] chokepoint gates on it
+    /// `SessionLinkActions::dispatch_network_message` chokepoint gates on it
     /// so a data send inside the RECONNECTING window rejects typed
     /// ([`SendWireError::TransportUnavailable`]) instead of silently
     /// vanishing into a dead writer channel — zenoh-pico's tx path fails
@@ -2132,7 +2132,7 @@ pub struct LinkState<R: SessionRuntime> {
     /// R2943 (transport-multilink) — the reliability class this link DECLARED
     /// and negotiated, zenoh's `link.config.reliability`: `None` until a
     /// negotiation settles one. It is the first of the two inputs
-    /// [`Self::reliability`] reads; the second is the link's intrinsic class,
+    /// `Self::reliability` reads; the second is the link's intrinsic class,
     /// so an undeclared link still has a class, as upstream's does
     /// (`io/zenoh-transport/src/unicast/universal/tx.rs`
     /// @ `.unwrap_or(Reliability::from(tl.link.link.is_reliable())),`).
@@ -2144,7 +2144,7 @@ pub struct LinkState<R: SessionRuntime> {
     #[cfg(feature = "transport-multilink")]
     pub declared_reliability: R::Mutex<Option<Reliability>>,
     /// R311y217 (transport-multilink + transport-qos) — the QoS-priority band this
-    /// link carries, so [`SessionCore::select_link`] pins each `(priority,
+    /// link carries, so `SessionCore::select_link` pins each `(priority,
     /// reliability)` conduit to ONE link (the priority tier of zenoh's per-channel
     /// `select`). `None` (the default until set) = no priority preference: the
     /// link is a reliability-only PARTIAL-tier candidate (still the primary route
@@ -2215,10 +2215,10 @@ impl<R: SessionRuntime> Drop for LinkState<R> {
 }
 
 /// R311y217 (transport-multilink + transport-qos) — the inclusive QoS-priority
-/// band a physical link carries, so [`SessionCore::select_link`] can pin one
+/// band a physical link carries, so `SessionCore::select_link` can pin one
 /// `(priority, reliability)` conduit to one link (the wz mirror of zenoh's
 /// per-link `PriorityRange`, `commons/zenoh-protocol/src/core/mod.rs:315`).
-/// Inclusive on both ends over the wire-order [`Priority`](crate::qos::Priority)
+/// Inclusive on both ends over the wire-order [`Priority`]
 /// scale (0 = Control = highest ... 7 = Background = lowest); a link with band
 /// `[start..=end]` covers priority `p` iff `start <= p <= end`. [`Self::width`]
 /// (band size) is the selection tie-break — the SMALLEST covering band wins (the
@@ -2258,7 +2258,7 @@ impl LinkPriorityRange {
     }
 
     /// Whether this band covers `priority` (inclusive both ends; the compare is
-    /// [`Priority`](crate::qos::Priority)'s `Ord` = the 0..=7 wire order).
+    /// [`Priority`]'s `Ord` = the 0..=7 wire order).
     pub fn contains(&self, priority: crate::qos::Priority) -> bool {
         self.start <= priority && priority <= self.end
     }
@@ -3442,7 +3442,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// protocol it speaks and the NICs it sits on, resolved by the driver at open.
     ///
     /// A narrow public window onto the driver rather than making
-    /// [`link_driver`](Self::link_driver) itself public: the routing forwarders'
+    /// `link_driver` itself public: the routing forwarders'
     /// `InterceptorContext` impls need exactly this one datum, and publishing the
     /// whole write seam so they could reach it would hand every consumer
     /// `send_blocking` as well. Borrows `self`, so the read costs no allocation.
@@ -5126,7 +5126,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// will emit on the outbound InitAck. Caps `seq_num_res`,
     /// `req_id_res`, and `batch_size` to `min(self.params.x,
     /// peer.x)` when an InitSyn has been parsed (slot populated
-    /// by [`handle_inbound`]); falls back to `self.params`
+    /// by `handle_inbound`); falls back to `self.params`
     /// unmodified when no peer caps are known yet. The result is
     /// a fresh `SessionInitParams` so the caller can pass it to
     /// the codec without consuming the canonical params slot.
@@ -5347,7 +5347,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// InitSyn on the Accepting side, or the inbound InitAck on the Initiating
     /// side), or `None` before the INIT exchange has populated it. The routing
     /// layer's per-face peer identity — the key a peer-mesh graph keys faces on.
-    /// Reads [`remote_peer_zid`](Self::remote_peer_zid); see that field for why
+    /// Reads `remote_peer_zid`; see that field for why
     /// it is distinct from the R86 cookie-HMAC slot.
     ///
     /// Heap profile only: it copies the zid out into a `Vec`.
@@ -5373,7 +5373,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// R311td — the remote peer's WhatAmI role as the 2-bit INIT wire form
     /// (0 Router, 1 Peer, 2 Client), or `None` before the INIT exchange populated
-    /// it. The raw wire datum (see [`peer_whatami`](Self::peer_whatami)); the
+    /// it. The raw wire datum (see `peer_whatami`); the
     /// routing boundary maps it to the graph's API-form role. Mirrors
     /// [`peer_zid`](Self::peer_zid) — raw wire identity here, routing-form derived
     /// at the driver — keeping session-core routing-agnostic.
@@ -5478,7 +5478,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// The configured reassembly cap, or `usize::MAX` when the host declared
     /// none. Resolved BEFORE the conduit lock is taken by
-    /// [`Self::dispatch_network_message`], for the same disjoint-mutex
+    /// `Self::dispatch_network_message`, for the same disjoint-mutex
     /// discipline `negotiated_batch_mtu` / `negotiated_sn_mask` follow.
     #[cfg(feature = "transport-fragmentation")]
     pub fn max_reassembly_bytes(&self) -> usize {
@@ -6463,7 +6463,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// R2943 — write this link's DECLARED reliability class, the egress twin of
     /// [`Self::set_link_priority_range`]: the negotiation's outcome is what
     /// writes it (`settle_qos_link`), and `None` returns the link to its
-    /// intrinsic class. [`SessionCore::select_link`] reads the pair through
+    /// intrinsic class. `SessionCore::select_link` reads the pair through
     /// `LinkState::reliability`.
     #[cfg(feature = "transport-multilink")]
     pub fn set_link_reliability(&self, declared: Option<Reliability>) {
@@ -6473,7 +6473,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// R311y217 — set this binding's link QoS-priority band at bring-up (before
     /// the drive loop spins), through the shared `R::Shared<LinkState>` handle —
     /// the [`Self::set_link_reliability`] slot discipline. Read by
-    /// [`Self::select_link`] to pin each `(priority, reliability)` conduit to one
+    /// `Self::select_link` to pin each `(priority, reliability)` conduit to one
     /// link. `None` clears the band (reliability-only, partial-tier candidate).
     #[cfg(all(feature = "transport-multilink", feature = "transport-qos"))]
     pub fn set_link_priority_range(&self, range: Option<LinkPriorityRange>) {
@@ -6611,7 +6611,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// Register the FIRST physical link of a session that is about to aggregate —
     /// idempotent: pushes `link` into the (previously empty) shared set so
-    /// [`Self::select_link`] can route across it once a second link joins. Called
+    /// `Self::select_link` can route across it once a second link joins. Called
     /// at the multilink JOIN when link 2 arrives (link 1 was driving single-link
     /// with an empty set until then). A no-op if the set already holds links.
     #[cfg(feature = "transport-multilink")]
@@ -6768,7 +6768,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// establishment ext chains — the byte-level "did this handshake negotiate
     /// multilink?" probe. `0` for a non-multilink (max_links=1) open, whose
     /// handshake is byte-identical to today (no dispatch installed ⇒
-    /// [`Self::stage_multilink_send`] stages nothing); `> 0` once a multilink send
+    /// `Self::stage_multilink_send` stages nothing); `> 0` once a multilink send
     /// stage has run. Reads only the staged chains, no wire capture.
     #[cfg(feature = "transport-multilink")]
     pub fn staged_multilink_ext_count(&self) -> usize {
@@ -6799,7 +6799,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// this doc drew was with a hard-coded `S=1`; that literal is gone.)
     ///
     /// The reject reasons are zenoh's close-reason wire
-    /// codes ([`CLOSE_REASON_MAX_LINKS`] / [`CLOSE_REASON_INVALID`]), which are
+    /// codes (`CLOSE_REASON_MAX_LINKS` / `CLOSE_REASON_INVALID`), which are
     /// the [`CloseReason`] discriminants, so the frame is cross-impl faithful.
     /// Emitted on the REJECTED link's own (throwaway) actions before it is
     /// dropped.
@@ -7458,7 +7458,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// transport-lowlatency — the negotiated lowlatency capability for this
-    /// session. Read by the lean tx seam ([`Self::dispatch_network_message`])
+    /// session. Read by the lean tx seam (`Self::dispatch_network_message`)
     /// and the lean rx seam ([`crate::drive::dispatch_link_event`]); true only
     /// when BOTH peers offered the ext.
     #[cfg(feature = "transport-lowlatency")]
@@ -7767,7 +7767,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let _ = merged;
     }
 
-    /// R311y435 — stage a whole [`SessionOffer`] on FRESH actions: the single
+    /// R311y435 — stage a whole `SessionOffer` on FRESH actions: the single
     /// composition seam every deploy-facing open routes through.
     ///
     /// This exists because the granular `set_*_offer` setters compose only by
@@ -8053,7 +8053,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// transport-compression — the negotiated compression capability for this
-    /// session. Read by the lz4 tx wrap ([`Self::send_wire`]) and the rx un-wrap
+    /// session. Read by the lz4 tx wrap (`Self::send_wire`) and the rx un-wrap
     /// ([`crate::drive::dispatch_link_event`]); true only when BOTH peers offered
     /// the ext. The getter lives under `transport-compression` (the wrap reads
     /// it) while the setters live under `session-extcompression` (the handshake
@@ -8066,7 +8066,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// transport-compression (R311y434) — SSOT for "is the lz4 batch wrap ACTIVE
     /// on this session right now?". The single predicate BOTH the TX wrap
-    /// ([`Self::emit_on_link`]) and the RX un-wrap
+    /// (`Self::emit_on_link`) and the RX un-wrap
     /// ([`crate::drive::dispatch_link_event`]) consult, so the two cannot drift
     /// apart and leave one side wrapping what the other does not un-wrap — a
     /// hand-maintained pair of conditions is exactly how that breaks.
@@ -10607,7 +10607,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ///
     /// B5b-2 inhabits the Push arm (the publish data plane): `dispatch_push`
     /// mints the SN, frames, and batch-absorbs; then `express` drains the open
-    /// batch window (the [`Self::flush_batch_if_express`] parity, lifted here
+    /// batch window (the `Self::flush_batch_if_express` parity, lifted here
     /// so a publish that routes through the seam stays transport-agnostic — it
     /// no longer reaches into the unicast action bundle for the flush). R311mu
     /// (B5b-2b-2) added the Request arm (the z_get initiator path; a Query
@@ -11416,7 +11416,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ///     invariant and the peer drops the bytes — zenoh-pico
     ///     `unicast/transport.c::_z_unicast_recv_frame_t` guards
     ///     the non-Established state explicitly. Callers
-    ///     typically poll [`trace_snapshot`] for
+    ///     typically poll `trace_snapshot` for
     ///     `send_open_ack > 0` (acceptor) or
     ///     `record_established_at > 0` (both sides) before the
     ///     first invocation.
@@ -11565,7 +11565,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// (zenoh-pico's `_z_session_recv_declaration` populates the
     /// table), the publisher may emit aliased Pushes carrying only
     /// `mapping_id` (and optionally a per-Push suffix) via
-    /// [`send_push_aliased`].
+    /// `send_push_aliased`.
     ///
     /// DECLARE outbound is hard-coded to the reliable channel — the
     /// session-FSM SN window enforces ordering between this frame
@@ -11575,7 +11575,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// aliased Push and the peer's resolver would reject the id;
     /// best-effort DECLARE has no production semantics in zenoh-pico.
     ///
-    /// Preconditions match [`send_push_literal`] (the session FSM
+    /// Preconditions match `send_push_literal` (the session FSM
     /// must have reached `Established`; the driver must be
     /// non-blocking or the channel-decoupling pattern must be in
     /// place to avoid `block_on`-in-runtime panic).
@@ -11696,9 +11696,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// R121g — encode + dispatch a DECLARE-aliased `Push` (id != 0).
-    /// Mirror of [`send_push_literal`] for the
+    /// Mirror of `send_push_literal` for the
     /// after-DECLARE-registration path. The caller MUST have
-    /// invoked [`send_declare_keyexpr`] earlier on the same session
+    /// invoked `send_declare_keyexpr` earlier on the same session
     /// (or relied on a prior in-band DECLARE) so the peer's keyexpr
     /// table contains a `mapping_id` entry; otherwise the peer
     /// drops the Push with an "unknown wireexpr id" error.
@@ -11820,7 +11820,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
     }
 
-    /// R233 — metadata-bearing counterpart of [`send_push_literal`].
+    /// R233 — metadata-bearing counterpart of `send_push_literal`.
     /// Threads every caller-set [`PushMetadata`] field onto the
     /// outbound `MsgPut`/Push so the wire receiver projects the same
     /// `Sample` shape the loopback path produces from
@@ -11849,7 +11849,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
     }
 
-    /// R233 — metadata-bearing counterpart of [`send_push_aliased`].
+    /// R233 — metadata-bearing counterpart of `send_push_aliased`.
     #[cfg(feature = "alloc")]
     pub fn send_push_with_meta_aliased(
         &self,
@@ -11874,7 +11874,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// R233 — metadata-bearing counterpart of
-    /// [`send_push_del_literal`]. `meta.encoding` is silently dropped
+    /// `send_push_del_literal`. `meta.encoding` is silently dropped
     /// because `_z_msg_del_t` carries no encoding slot; the loopback
     /// branch enforces the same projection so neither side surfaces
     /// an `encoding` on a Del Sample.
@@ -11900,7 +11900,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// R233 — metadata-bearing counterpart of
-    /// [`send_push_del_aliased`].
+    /// `send_push_del_aliased`.
     #[cfg(feature = "alloc")]
     pub fn send_push_del_with_meta_aliased(
         &self,
@@ -11941,7 +11941,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `Some(s)` adds a per-subscription tail suffix to that alias.
     ///
     /// Same reliable-channel preconditions as
-    /// [`send_declare_keyexpr`]: the SN-window ordering guarantees
+    /// `send_declare_keyexpr`: the SN-window ordering guarantees
     /// the peer's subscriber table is populated before any matching
     /// Push arrives.
     ///
@@ -12015,7 +12015,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// future split path for `complete = true` / non-zero `distance`.
     ///
     /// Same reliable-channel preconditions as
-    /// [`send_declare_keyexpr`]: the SN-window ordering guarantees
+    /// `send_declare_keyexpr`: the SN-window ordering guarantees
     /// the peer's queryable table is populated before any matching
     /// `Request(Query)` arrives.
     ///
@@ -12093,7 +12093,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// every `(id, mapping, suffix)` triple.
     ///
     /// Same reliable-channel preconditions as
-    /// [`send_declare_keyexpr`] / [`send_declare_subscriber`].
+    /// `send_declare_keyexpr` / `send_declare_subscriber`.
     ///
     /// R311g1 — signature-stability: body cfg, signature stable.
     /// `Err(FeatureDisabled)` when `declare-token` off.
@@ -13121,7 +13121,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// The emit SSOT the two wrappers above share — one dispatch, one cache
     /// append, so the subscriber and queryable planes cannot drift into two
     /// slightly different send paths. Public because an arbitrary
-    /// [`InterestKinds`](crate::interest_build::InterestKinds) union is a
+    /// [`InterestKinds`] union is a
     /// legitimate thing to send (see
     /// [`crate::interest_build::build_interest_kinds`]): a caller wanting
     /// both planes should spend ONE interest id and ONE Final, not two.
@@ -13507,9 +13507,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// R121j-5c-e2e — encode + dispatch an already-constructed
-    /// [`Response`] on the outbound link. The Response is typically
-    /// built upstream by [`ResponseReplyBuilder`] /
-    /// [`ResponseErrBuilder`] (or composed from a
+    /// `Response` on the outbound link. The Response is typically
+    /// built upstream by `ResponseReplyBuilder` /
+    /// `ResponseErrBuilder` (or composed from a
     /// `crate::query::QueryReply::into_response` call drained out of
     /// `crate::query::QueryableRegistry::dispatch_messages`).
     ///
@@ -13517,8 +13517,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// requesting peer's `z_get` future waiting for a reply that never
     /// arrives, and then for the matching `ResponseFinal` that the
     /// queryable never re-emits (because from its perspective the
-    /// reply was sent). Mirrors the [`send_response_final`] reliability
-    /// choice. The lower-level [`encode_frame_with_response`] helper
+    /// reply was sent). Mirrors the `send_response_final` reliability
+    /// choice. The lower-level `encode_frame_with_response` helper
     /// still accepts a `reliable` flag for fuzz / negative-test paths,
     /// but the production action layer pins it.
     ///
@@ -13735,7 +13735,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// header, zenoh-pico `_zp_unicast_send_keep_alive` /
     /// `_z_t_msg_make_keep_alive`). The wire primitive behind the
     /// keepalive TX cadence ([`crate::drive::check_keepalive_deadline`]);
-    /// routing through [`Self::send_wire`] re-stamps `last_outbound_at`,
+    /// routing through `Self::send_wire` re-stamps `last_outbound_at`,
     /// so each emit opens the next idle window by construction.
     ///
     /// R311jp — transport-message order parity (zenoh-pico tx.c
@@ -14646,7 +14646,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionActionsBinding<R, T> {
 /// Generic over `R: SessionRuntime` (Stage 2b-②): the actions reach the
 /// runtime-owned `R::Mutex` staging slots through `R::with_mutex_mut` and
 /// the link write seam through the inherent
-/// [`SessionLinkActions::link_driver`] accessor — no profile-specific
+/// `SessionLinkActions::link_driver` accessor — no profile-specific
 /// `.lock()` or `R::LinkSink` access leaks into the method bodies.
 /// `transport-unicast` is AP-hosted today, so `TokioRuntime` is the only
 /// live `R`; the generic form is the move-enabling shape for the pending

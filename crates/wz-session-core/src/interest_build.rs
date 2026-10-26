@@ -127,7 +127,7 @@ pub fn build_interest_liveliness_subscriber(
 /// `vendor/zenoh-pico/src/net/liveliness.c:350-352`). Shares the
 /// body-header flag composition with
 /// [`build_interest_liveliness_subscriber`] via
-/// [`build_liveliness_token_interest`] (one SSOT; the two differ only in
+/// `build_liveliness_token_interest` (one SSOT; the two differ only in
 /// the outer C / F bits).
 #[cfg(feature = "alloc")]
 pub fn build_interest_liveliness_get(

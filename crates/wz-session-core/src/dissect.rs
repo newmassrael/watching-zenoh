@@ -362,7 +362,7 @@ impl FieldValue {
 /// * `linkstate_entry` — one `Linkstate` record, held apart from the
 ///   `link_states` aggregate by the same shadowing rule as `locator_entry`
 /// * `source_info` / `responder_id` / `query_body` / `wire_expr` / `qos` /
-///   `shm` — the `ExtZbuf` bodies [`walk_ext_zbuf_body`] reads. On `linkstate`'s
+///   `shm` — the `ExtZbuf` bodies `walk_ext_zbuf_body` reads. On `linkstate`'s
 ///   rule: the codec models an extension body as `value`, and only the carrier
 ///   plus the eid says which structure those bytes hold
 /// * `eid` — the entity id inside `source_info` / `responder_id`. No generated
@@ -866,7 +866,7 @@ fn payload_or_shm_descriptor(
 ///   job is to say "the payload slot holds an ADDRESS, not the data" is `0x12`
 ///   on the wire. The SHM check compared the mis-masked id against a bare
 ///   `0x02` and therefore never matched real traffic, so
-///   [`payload_or_shm_descriptor`] called the descriptor a `payload` — exactly
+///   `payload_or_shm_descriptor` called the descriptor a `payload` — exactly
 ///   the misreading R311y597 closed, reopened by the layer below it. Both
 ///   existing witnesses built the marker as `0x02`, a byte stock zenoh never
 ///   sends, so the fixtures agreed with the mistake.
@@ -1586,7 +1586,7 @@ fn read_budget_z64(value: u64, span: Span) -> Option<Vec<Field>> {
 /// # Driven BY the dispatch, never beside it
 ///
 /// The rows come from `crate::ext_name` and the decision from
-/// [`zbuf_body_walker`] / [`z64_body_walker`], so this cannot drift from what
+/// `zbuf_body_walker` / `z64_body_walker`, so this cannot drift from what
 /// the walker does: a body that gains a reading appears here on the same
 /// commit, and one that loses it disappears. A hand-kept list would be the
 /// third copy of a fact this module has already had go stale twice

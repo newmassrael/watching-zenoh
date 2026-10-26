@@ -6,7 +6,7 @@
 //!
 //! R311kt — hoisted from `wz-runtime-tokio::multicast_glue` so both
 //! runtime profiles share one JOIN wire SSOT: the three functions are
-//! pure (codecs + [`MulticastParams`] + [`TxSn`] only — no socket, no
+//! pure (codecs + [`MulticastParams`] + `TxSn` only — no socket, no
 //! clock, no tokio), and the MCU `#![no_std]` multicast loop cannot
 //! depend on the tokio crate. The exact multicast sibling of
 //! [`crate::handshake_encode`] (the unicast INIT / OPEN / CLOSE encoders,
@@ -363,7 +363,7 @@ pub fn decode_join_patch(bytes: &[u8]) -> u8 {
 
 /// R311y227 — decode the JOIN QoS-SN extension into the announcer's per-priority
 /// next-SN pairs, or `None` when the JOIN is non-qos (no `Z` header flag, or the
-/// first ext is not [`JOIN_QOS_EXT_HEADER`]). The base body is re-decoded to
+/// first ext is not `JOIN_QOS_EXT_HEADER`). The base body is re-decoded to
 /// position the cursor at the ext chain (cheap; the SCXML `Join` codec has no ext
 /// awareness, so the trailer is hand-parsed here — the multicast twin of the
 /// frame/fragment `ext_qos` hand-roll in `frame_encode`, mesh-path-B: no new

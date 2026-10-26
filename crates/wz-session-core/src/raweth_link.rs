@@ -35,7 +35,7 @@
 //! those three fields NATIVE-endian and `data_length` big-endian. On a
 //! big-endian host wz and pico would agree with each other and both differ
 //! from a little-endian pico — which is pico's own property, is asserted
-//! rather than hidden by [`tests::the_wire_order_is_picos_not_a_tidied_one`],
+//! rather than hidden by `tests::the_wire_order_is_picos_not_a_tidied_one`,
 //! and is why this module documents it instead of normalising it away.
 
 use alloc::string::String;

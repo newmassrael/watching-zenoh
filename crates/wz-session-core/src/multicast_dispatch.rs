@@ -17,7 +17,7 @@
 //! ## Division of labour (`docs/session-fsm.md` §3.1 / §3.2)
 //!
 //! - **Session lifecycle — the session FSM.** Idle -> LinkOpening ->
-//!   Running -> Stopped is the [`session_fsm_multicast`] statechart; the
+//!   Running -> Stopped is the [`crate::session_fsm_multicast`] statechart; the
 //!   Router drives its four lifecycle events ([`MulticastDispatcher::create`]
 //!   / [`notify_link_ready`](MulticastDispatcher::notify_link_ready) /
 //!   [`notify_link_lost`](MulticastDispatcher::notify_link_lost) /
@@ -32,7 +32,7 @@
 //!   surface; the periodic JoinEmit cadence + the real socket are the
 //!   `wz-runtime-tokio` drive loop.
 //! - **Per-peer membership — the per-peer FSM.** Free -> Discovered ->
-//!   Active -> Expired is the [`multicast_peer`] statechart, one Engine per
+//!   Active -> Expired is the [`crate::multicast_peer`] statechart, one Engine per
 //!   pool slot. A peer is keyed by its transport SOURCE ADDRESS (the
 //!   zenoh-pico multicast model — Frame / KeepAlive / Close carry no zid on
 //!   the wire, so they are attributed by `_z_find_peer_entry(addr)`); the
@@ -73,7 +73,7 @@
 //!   admitted peer's RX SN conduits and lease from its JOIN.
 //! - `emit_peer_lost` (a peer entering Expired) — the Router hands the
 //!   departure
-//!   ([`MulticastPeerLost`](crate::multicast_peer_lost::MulticastPeerLost))
+//!   ([`MulticastPeerLost`])
 //!   to the eviction's observer.
 //! - `enter_running` (the session entering Running) — the Router admits
 //!   peers, frames and fragments and sweeps leases from then on
@@ -88,7 +88,7 @@
 //!
 //! The two link duties are the host's because the link is: each lifecycle
 //! call returns them as
-//! [`MulticastLinkDuties`](crate::multicast_dispatch::MulticastLinkDuties),
+//! [`MulticastLinkDuties`],
 //! which the drive loops of both runtimes perform before they do anything
 //! else.
 
@@ -1021,7 +1021,7 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
     /// identical to I1). Declarations stay in the batch (the ingress fold ignores
     /// non-`Push` messages); only the `Push` keyexprs are rewritten.
     ///
-    /// Feature-gated end to end (this method, the [`PeerSlot`] table field, and
+    /// Feature-gated end to end (this method, the `PeerSlot` table field, and
     /// both call sites in `multicast_rx`) so a non-declarations build — INCLUDING
     /// the no-alloc MCU multicast loop, which never enables the feature —
     /// compiles neither the table nor this method: no per-peer alias state, no
@@ -1155,7 +1155,7 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
 
     /// §5.21 router-multicast-faces (sub plane, S1) — ingest this peer's
     /// `DeclareSubscriber` / `UndeclareSubscriber` declarations from the batch into
-    /// its per-peer `sub-id -> literal keyexpr` [`remote_subs`](PeerSlot::remote_subs)
+    /// its per-peer `sub-id -> literal keyexpr` `remote_subs`
     /// table, per peer via `src`. The subscription twin of
     /// [`apply_declared_aliases`](Self::apply_declared_aliases): the inbound batch
     /// came from ONE peer, so a `DeclSubscriber` records THAT peer's interest and an
@@ -1315,7 +1315,7 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
 
     /// §5.21 router-multicast-faces (sub plane, S1) — the DEDUPED union of every
     /// live peer's declared-subscription keyexprs
-    /// ([`remote_subs`](PeerSlot::remote_subs)): the group's aggregate subscriber
+    /// (`remote_subs`): the group's aggregate subscriber
     /// interest the router-hat relays to its `RouterForwarder` to advertise into the
     /// unicast mesh (S2), so a mesh-side publisher routes a matching Put toward this
     /// router and it reaches the on-group subscriber (resolving the cross-router

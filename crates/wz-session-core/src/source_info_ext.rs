@@ -18,7 +18,7 @@
 //!
 //! The base-128 VLE u64 primitive this encoder + the sibling
 //! `encode_responder_ext_body` (in `response_build`) share is
-//! [`crate::vle::encode_vle_u64_into`] — the VLE codec SSOT (read + write).
+//! `crate::vle::encode_vle_u64_into` — the VLE codec SSOT (read + write).
 
 use alloc::vec::Vec;
 

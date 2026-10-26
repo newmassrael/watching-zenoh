@@ -1222,7 +1222,7 @@ impl RemoteQueryableRegistry<BoxedDeclSink, BoxedUndeclSink> {
     /// whose keyexpr resolves. The closure receives `&dyn DeclView` (the
     /// peer-declared `id` + resolved keyexpr) — the R311gb-3d seam
     /// contract replaces the prior `(&DeclQueryableOwned, &str)`
-    /// ([`feedback_signature_stability`] wire-data exemption). Heap-boxed
+    /// (`feedback_signature_stability` wire-data exemption). Heap-boxed
     /// via [`BoxedDeclSink`]. R311lb — returns the registry-local
     /// observer id (see [`RemoteQueryableTable::remove_queryable_declared_sink`]).
     ///

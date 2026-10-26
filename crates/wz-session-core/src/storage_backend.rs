@@ -11,7 +11,7 @@
 //! / influxdb). This module lands the **backend layer** — the trait every
 //! backend implements and the in-memory implementation — runtime-agnostic
 //! and `no_std`, so the same kernel composes on AP and (heap-permitting)
-//! MCU profiles, mirroring the [`crate::routing`] data-plane kernel split.
+//! MCU profiles, mirroring the `crate::routing` data-plane kernel split.
 //!
 //! ## zenoh anchor
 //!

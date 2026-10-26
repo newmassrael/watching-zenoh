@@ -73,8 +73,8 @@ impl PushMetadata {
     /// The single source for the "is this Push express" derivation the
     /// publish paths feed to the send seam's `express` arm (the
     /// `flush_batch_if_express` batch-window drain). R311mv (session
-    /// review) — both [`Session::publish`] and
-    /// [`Session::publish_aliased`] consulted an inline copy of this
+    /// review) — both `Session::publish` and
+    /// `Session::publish_aliased` consulted an inline copy of this
     /// derivation (introduced at R311ms / R311mt); centralised here so
     /// the projection has one home. The `transport-batching` gate stays
     /// at the seam (the flag is always computable; only its *effect* is
@@ -108,7 +108,7 @@ impl PushMetadata {
 /// now collapse into the [`Self::value`] slot (an `(encoding, payload)`
 /// unit — the wire `_z_value_t` shape), which
 /// `build_request_query_with_meta` threads onto
-/// [`RequestQueryBuilder::query_value`] behind the `query-value` gate. The
+/// `RequestQueryBuilder::query_value` behind the `query-value` gate. The
 /// codec extension itself landed R311y248 (the value ext `0x03`, via
 /// [`crate::query_value_ext`]), correcting the R241+ carry that presumed an
 /// inline slot was needed — the value rides the generic Query ext chain.
