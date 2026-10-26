@@ -101,8 +101,12 @@ fn zenoh::sample::SampleBuilder::priority(Self, zenoh::qos::Priority) -> Self ; 
 fn zenoh::sample::SampleBuilder::put<IntoKeyExpr, IntoZBytes>(IntoKeyExpr, IntoZBytes) -> zenoh::sample::SampleBuilder<zenoh::sample::SampleBuilderPut> where IntoKeyExpr: core::convert::Into<zenoh::key_expr::KeyExpr<'static>>, IntoZBytes: core::convert::Into<zenoh::bytes::ZBytes> ; in impl zenoh::sample::SampleBuilder<zenoh::sample::SampleBuilderPut>
 fn zenoh::sample::SampleBuilder::timestamp<U: core::convert::Into<core::option::Option<zenoh::time::Timestamp>>>(Self, U) -> Self ; in impl<T> zenoh::sample::SampleBuilder<T>
 fn zenoh::session::Session::close(&Self) -> zenoh::session::CloseBuilder<Self> ; in impl zenoh::session::Session
+fn zenoh::session::Session::info(&Self) -> zenoh::session::SessionInfo ; in impl zenoh::session::Session
 fn zenoh::session::Session::is_closed(&Self) -> bool ; in impl zenoh::session::Session
 fn zenoh::session::Session::zid(&Self) -> zenoh::session::ZenohId ; in impl zenoh::session::Session
+fn zenoh::session::SessionInfo::peers_zid(&Self) -> zenoh::session::PeersZenohIdBuilder<'_> ; in impl zenoh::session::SessionInfo
+fn zenoh::session::SessionInfo::routers_zid(&Self) -> zenoh::session::RoutersZenohIdBuilder<'_> ; in impl zenoh::session::SessionInfo
+fn zenoh::session::SessionInfo::zid(&Self) -> zenoh::session::ZenohIdBuilder<'_> ; in impl zenoh::session::SessionInfo
 fn zenoh::session::open<TryIntoConfig>(TryIntoConfig) -> zenoh::session::OpenBuilder<TryIntoConfig> where <TryIntoConfig as core::convert::TryInto<zenoh::config::Config>>::Error: core::fmt::Debug, TryIntoConfig: 'static + core::convert::TryInto<zenoh::config::Config> + core::marker::Send
 impl core::clone::Clone for zenoh::bytes::Encoding
 impl core::clone::Clone for zenoh::bytes::OptionZBytes
@@ -213,8 +217,12 @@ impl core::fmt::Debug for zenoh::sample::SampleFields
 impl core::fmt::Debug for zenoh::sample::SampleKind
 impl core::fmt::Debug for zenoh::session::CloseBuilder
 impl core::fmt::Debug for zenoh::session::OpenBuilder
+impl core::fmt::Debug for zenoh::session::PeersZenohIdBuilder
+impl core::fmt::Debug for zenoh::session::RoutersZenohIdBuilder
 impl core::fmt::Debug for zenoh::session::Session
 impl core::fmt::Debug for zenoh::session::SessionClosedError
+impl core::fmt::Debug for zenoh::session::SessionInfo
+impl core::fmt::Debug for zenoh::session::ZenohIdBuilder
 impl core::fmt::Display for zenoh::bytes::Encoding
 impl core::fmt::Display for zenoh::config::Config
 impl core::fmt::Display for zenoh::key_expr::KeyExpr
@@ -225,6 +233,9 @@ impl core::future::future::Future for zenoh::handlers::fifo::RecvFut
 impl core::future::into_future::IntoFuture for zenoh::key_expr::KeyExprUndeclaration
 impl core::future::into_future::IntoFuture for zenoh::session::CloseBuilder
 impl core::future::into_future::IntoFuture for zenoh::session::OpenBuilder
+impl core::future::into_future::IntoFuture for zenoh::session::PeersZenohIdBuilder
+impl core::future::into_future::IntoFuture for zenoh::session::RoutersZenohIdBuilder
+impl core::future::into_future::IntoFuture for zenoh::session::ZenohIdBuilder
 impl core::hash::Hash for zenoh::bytes::Encoding
 impl core::hash::Hash for zenoh::key_expr::KeyExpr
 impl core::hash::Hash for zenoh::qos::Priority
@@ -274,9 +285,15 @@ impl std::io::Write for zenoh::bytes::ZBytesWriter
 impl zenoh::Resolvable for zenoh::key_expr::KeyExprUndeclaration
 impl zenoh::Resolvable for zenoh::session::CloseBuilder
 impl zenoh::Resolvable for zenoh::session::OpenBuilder
+impl zenoh::Resolvable for zenoh::session::PeersZenohIdBuilder
+impl zenoh::Resolvable for zenoh::session::RoutersZenohIdBuilder
+impl zenoh::Resolvable for zenoh::session::ZenohIdBuilder
 impl zenoh::Wait for zenoh::key_expr::KeyExprUndeclaration
 impl zenoh::Wait for zenoh::session::CloseBuilder
 impl zenoh::Wait for zenoh::session::OpenBuilder
+impl zenoh::Wait for zenoh::session::PeersZenohIdBuilder
+impl zenoh::Wait for zenoh::session::RoutersZenohIdBuilder
+impl zenoh::Wait for zenoh::session::ZenohIdBuilder
 impl zenoh::handlers::IntoHandler for zenoh::handlers::Callback
 impl zenoh::handlers::IntoHandler for zenoh::handlers::CallbackDrop
 impl zenoh::handlers::IntoHandler for zenoh::handlers::DefaultHandler
@@ -351,6 +368,10 @@ struct zenoh::sample::SampleBuilderPut
 struct zenoh::sample::SampleFields
 struct zenoh::session::CloseBuilder
 struct zenoh::session::OpenBuilder
+struct zenoh::session::PeersZenohIdBuilder
+struct zenoh::session::RoutersZenohIdBuilder
 struct zenoh::session::Session
 struct zenoh::session::SessionClosedError
+struct zenoh::session::SessionInfo
+struct zenoh::session::ZenohIdBuilder
 trait zenoh::handlers::IntoHandler

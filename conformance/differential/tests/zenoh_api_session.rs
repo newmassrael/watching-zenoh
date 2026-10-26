@@ -181,8 +181,31 @@ macro_rules! session_cases {
                 ))
             }
 
+            /// What this crate's session sees of the nodes it is connected to (its own `info`), once
+            /// it sees `expected` of them or after five seconds.
+            fn sees(session: &$z::Session, expected: usize) -> String {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                loop {
+                    let info = session.info();
+                    let sorted = |mut list: Vec<String>| {
+                        list.sort();
+                        list
+                    };
+                    let routers = sorted(info.routers_zid().wait().map(|z| z.to_string()).collect());
+                    let peers = sorted(info.peers_zid().wait().map(|z| z.to_string()).collect());
+                    if routers.len() + peers.len() >= expected || std::time::Instant::now() > deadline {
+                        return format!(
+                            "the session is {} and sees routers {routers:?} peers {peers:?}",
+                            info.zid().wait()
+                        );
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+
             /// The role this crate's node plays, as upstream's nodes on the other side of a link
-            /// read it: each line is what an upstream node sees of the one opened here.
+            /// read it: each line is what an upstream node sees of the one opened here, and what
+            /// the node sees of that node in return.
             pub fn roles() -> Vec<String> {
                 let mut out = vec![];
                 // A node of this crate that listens, seen by an upstream node that dials it.
@@ -194,8 +217,13 @@ macro_rules! session_cases {
                     let subject = $z::open(node(id, mode, Some(port), None)).wait();
                     let line = match &subject {
                         Err(error) => format!("the {mode} did not open: {}", plain(&error.to_string())),
-                        Ok(_) => match observer::open(observer_id, observer_mode, None, Some(port)) {
-                            Ok(observer) => observer::seen(&observer),
+                        Ok(session) => match observer::open(observer_id, observer_mode, None, Some(port)) {
+                            Ok(observer) => {
+                                // A node that listens sees a peer that dials it, and a client is
+                                // neither a router nor a peer, so it sees one only of the first.
+                                let expected = usize::from(observer_mode == "peer");
+                                format!("{}; {}", observer::seen(&observer), sees(session, expected))
+                            }
                             Err(error) => format!("the observer did not open: {}", plain(&error)),
                         },
                     };
@@ -214,7 +242,9 @@ macro_rules! session_cases {
                     let subject = $z::open(node(id, mode, None, Some(port))).wait();
                     let line = match &subject {
                         Err(error) => format!("the {mode} did not open: {}", plain(&error.to_string())),
-                        Ok(_) => observer::seen_with(&upstream, 1),
+                        Ok(session) => {
+                            format!("{}; {}", observer::seen_with(&upstream, 1), sees(session, 1))
+                        }
                     };
                     out.push(format!("{mode} dials an upstream router: {line}"));
                 }
@@ -250,6 +280,12 @@ macro_rules! session_cases {
                 let session = $z::open(peer("a1b2c5", port)).wait().expect("opens");
                 let clone = session.clone();
                 out.push(format!("listening: {}", answers(port)));
+                out.push(format!(
+                    "info: {} {:?} {:?}",
+                    session.info().zid().wait(),
+                    session.info().routers_zid().wait().count(),
+                    session.info().peers_zid().wait().count()
+                ));
                 out.push(format!("close: {}", text(session.close().wait())));
                 out.push(format!(
                     "closed: {} and its clone: {}",
@@ -480,6 +516,19 @@ fn upstream_nodes_see_each_other_in_the_roles_they_play() {
     );
     assert!(
         u.iter().any(|l| l.starts_with("router dials") && l.contains("5a0005 Router")),
+        "{u:#?}"
+    );
+    // And what each of them sees of the other through its own `info`.
+    assert!(
+        u.iter().any(|l| l.starts_with("peer listening") && l.contains("sees routers [] peers [\"b00002\"]")),
+        "{u:#?}"
+    );
+    assert!(
+        u.iter().any(|l| l.starts_with("client dials") && l.contains("sees routers [\"a00001\"] peers []")),
+        "{u:#?}"
+    );
+    assert!(
+        u.iter().any(|l| l.starts_with("peer dials") && l.contains("sees routers [\"a00001\"] peers []")),
         "{u:#?}"
     );
 }

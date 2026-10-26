@@ -17,5 +17,6 @@
 // the slices that have landed are declared here.
 
 pub(crate) mod close;
+pub(crate) mod info;
 pub(crate) mod sample;
 pub(crate) mod session;

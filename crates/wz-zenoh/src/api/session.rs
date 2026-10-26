@@ -20,7 +20,7 @@
 // read. The session of upstream is a table of declarations over a runtime of its own; this one is
 // a handle over an engine (docs/zenoh-api-on-the-engine.md, decisions D1 and D3), so the tables are
 // not copied, and the entities that read them (publishers, subscribers, queries, liveliness,
-// matching, the information of a session and its undeclaration) arrive with slices Z2 to Z6, and
+// matching and the undeclaration) arrive with slices Z2 to Z6, and
 // the three other channel sizes with Z3.
 
 use std::{
@@ -46,6 +46,7 @@ use crate::api::{
         session::OpenBuilder,
     },
     config::Config,
+    info::SessionInfo,
     key_expr::{SessionAnchor, WireAnchor},
 };
 
@@ -155,6 +156,14 @@ impl Engine {
             Engine::Tokio(state) => state.shared.as_engine().next_entity_id(),
         }
     }
+
+    /// The id and the announced role of every established peer, the role in its 2-bit wire form
+    /// (0 router, 1 peer, 2 client).
+    fn peer_identities(&self) -> Vec<(Vec<u8>, u8)> {
+        match self {
+            Engine::Tokio(state) => state.shared.as_engine().peer_identities(),
+        }
+    }
 }
 
 #[cfg(not(feature = "engine-tokio"))]
@@ -180,6 +189,10 @@ impl Engine {
     }
 
     fn next_entity_id(&self) -> u64 {
+        match *self {}
+    }
+
+    fn peer_identities(&self) -> Vec<(Vec<u8>, u8)> {
         match *self {}
     }
 }
@@ -442,6 +455,38 @@ impl Drop for Session {
 #[derive(Debug, Clone)]
 pub(crate) struct WeakSession(Arc<SessionInner>);
 
+impl WeakSession {
+    /// The id the session stands on.
+    pub(crate) fn zid(&self) -> ZenohId {
+        self.0.zid
+    }
+
+    /// The ids of the nodes this session is connected to that play the role `whatami`.
+    ///
+    /// The registry lists the established peers and what each announced; a link whose handshake has
+    /// not completed is not listed, and a closed session has none, as upstream's has no transport
+    /// left.
+    pub(crate) fn zids(
+        &self,
+        whatami: zenoh_protocol::core::WhatAmI,
+    ) -> Box<dyn Iterator<Item = ZenohId> + Send + Sync> {
+        // The wire form of a role: 0 router, 1 peer, 2 client.
+        let wire = match whatami {
+            zenoh_protocol::core::WhatAmI::Router => 0u8,
+            zenoh_protocol::core::WhatAmI::Peer => 1,
+            zenoh_protocol::core::WhatAmI::Client => 2,
+        };
+        Box::new(
+            self.0
+                .engine
+                .peer_identities()
+                .into_iter()
+                .filter(move |(_, role)| *role == wire)
+                .filter_map(|(zid, _)| ZenohId::try_from(zid.as_slice()).ok()),
+        )
+    }
+}
+
 impl PartialEq for Session {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
@@ -519,6 +564,23 @@ impl Session {
     /// ```
     pub fn close(&self) -> CloseBuilder<Self> {
         CloseBuilder::new(self)
+    }
+
+    /// Get information about the zenoh [`Session`](Session).
+    ///
+    /// # Examples
+    /// ```
+    /// # #[tokio::main]
+    /// # async fn main() {
+    ///
+    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// let info = session.info();
+    /// # }
+    /// ```
+    pub fn info(&self) -> SessionInfo {
+        SessionInfo {
+            session: self.downgrade(),
+        }
     }
 
     /// Check if the session has been closed.
@@ -821,6 +883,66 @@ mod tests {
         open(peer_with("transport/auth/pubkey/key_size", "4096"))
             .wait()
             .expect("an inert key");
+    }
+
+    /// The ids a session sees as routers and as peers, once it sees `expected` of them or after
+    /// five seconds.
+    fn connected(session: &Session, expected: usize) -> (Vec<String>, Vec<String>) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let info = session.info();
+            let mut routers: Vec<String> = info
+                .routers_zid()
+                .wait()
+                .map(|zid| zid.to_string())
+                .collect();
+            let mut peers: Vec<String> =
+                info.peers_zid().wait().map(|zid| zid.to_string()).collect();
+            routers.sort();
+            peers.sort();
+            if routers.len() + peers.len() >= expected || std::time::Instant::now() > deadline {
+                return (routers, peers);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn the_info_of_a_session_says_its_id_and_the_peers_it_is_connected_to() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("a port")
+            .local_addr()
+            .expect("its address")
+            .port();
+        let listener = open(
+            Config::from_json5(&format!(
+                r#"{{ id: "a1b2d1", mode: "peer", listen: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                      scouting: {{ multicast: {{ enabled: false }} }} }}"#
+            ))
+            .expect("a configuration zenoh reads"),
+        )
+        .wait()
+        .expect("opens");
+        // A session alone is connected to no one, and its id by `info` is its id.
+        assert_eq!(listener.info().zid().wait(), listener.zid());
+        assert_eq!(listener.info().routers_zid().wait().count(), 0);
+        assert_eq!(listener.info().peers_zid().wait().count(), 0);
+        let dialler = open(
+            Config::from_json5(&format!(
+                r#"{{ id: "a1b2d2", mode: "peer", listen: {{ endpoints: [] }},
+                      connect: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                      scouting: {{ multicast: {{ enabled: false }} }} }}"#
+            ))
+            .expect("a configuration zenoh reads"),
+        )
+        .wait()
+        .expect("opens");
+        // Each sees the other as a peer, and neither as a router.
+        assert_eq!(connected(&dialler, 1), (vec![], vec!["a1b2d1".to_owned()]));
+        assert_eq!(connected(&listener, 1), (vec![], vec!["a1b2d2".to_owned()]));
+        // A closed session is connected to no one.
+        dialler.close().wait().expect("closes");
+        assert_eq!(dialler.info().peers_zid().wait().count(), 0);
     }
 
     #[test]
