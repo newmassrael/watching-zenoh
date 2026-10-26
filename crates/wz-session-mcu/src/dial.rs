@@ -129,6 +129,7 @@ mod heap {
 
     use super::{dial_failed, parse_locator, DialRefused, McuActions};
     use crate::connect_manager::{DialFailed, Dialer, Ended};
+    use wz_session_core::locator_directory::DirectoryZid;
 
     /// What a dialled session reports its iterations to — typically
     /// `crate::app_layer::dispatch_to` over the node's observer.
@@ -253,22 +254,14 @@ mod heap {
             self.max_iters = Some(max_iters);
             self
         }
-    }
 
-    impl<'a, L, C, P, E> Dialer for UdpDialer<'a, L, C, P, E>
-    where
-        L: SessionLinks,
-        C: ClockSource + 'static,
-        P: FnMut() -> SessionInitParams,
-        E: FnMut(&Rc<McuActions<C>>) -> EventSink,
-    {
-        type Session = UdpSession<C>;
-
-        fn classify(endpoint: &str) -> Result<(), DialRefused> {
-            parse_locator(endpoint).map(|_| ())
-        }
-
-        fn dial(&mut self, endpoint: &str) -> Result<Self::Session, DialFailed> {
+        /// One dial, made for the node `expected_zid` or for no node. The expectation is set
+        /// before the session is spawned, so the handshake reads it at the InitAck.
+        fn dial_expecting(
+            &mut self,
+            endpoint: &str,
+            expected_zid: Option<DirectoryZid>,
+        ) -> Result<UdpSession<C>, DialFailed> {
             let to = parse_locator(endpoint).map_err(DialFailed::Refused)?;
             // The stack picks the local port, one per session, and may have none
             // left to give: that is a failed attempt of this outage, not a refusal.
@@ -276,6 +269,9 @@ mod heap {
             let runtime = self.local.runtime();
             let actions =
                 McuActions::<C>::new_generic(sink, (self.params)(), CoopTime::new(runtime));
+            if let Some(zid) = expected_zid {
+                actions.expect_peer_zid(zid);
+            }
             let on_event = (self.on_event)(&actions);
             let handle = spawn_session(
                 self.local,
@@ -294,6 +290,38 @@ mod heap {
                 actions,
                 established: false,
             })
+        }
+    }
+
+    impl<'a, L, C, P, E> Dialer for UdpDialer<'a, L, C, P, E>
+    where
+        L: SessionLinks,
+        C: ClockSource + 'static,
+        P: FnMut() -> SessionInitParams,
+        E: FnMut(&Rc<McuActions<C>>) -> EventSink,
+    {
+        type Session = UdpSession<C>;
+
+        fn classify(endpoint: &str) -> Result<(), DialRefused> {
+            parse_locator(endpoint).map(|_| ())
+        }
+
+        /// The session's handshake holds a dial made for a node to that node: the InitAck must
+        /// carry its zid, or the session closes before the OpenSyn (decision D4), so a node may
+        /// be opened by its zid over this dialer.
+        const VERIFIES_NODES: bool = true;
+
+        fn dial(&mut self, endpoint: &str) -> Result<Self::Session, DialFailed> {
+            // A configured endpoint names no node, as upstream's `connect/endpoints` does not.
+            self.dial_expecting(endpoint, None)
+        }
+
+        fn dial_for(
+            &mut self,
+            endpoint: &str,
+            node: &DirectoryZid,
+        ) -> Result<Self::Session, DialFailed> {
+            self.dial_expecting(endpoint, Some(*node))
         }
 
         fn established(&mut self, session: &mut Self::Session) -> bool {
@@ -557,6 +585,107 @@ mod tests {
             unanswered.dial("tcp/127.0.0.1:7447"),
             Err(DialFailed::Refused(DialRefused::Unsupported))
         ));
+    }
+
+    /// Decision D4 on the heap dialer: a dial made FOR a node holds the session to that node.
+    /// The acceptor on the net is node `0xa1`; a dial for it establishes, a dial for another
+    /// zid closes at the InitAck and ends before establishing, and a dial that names no node
+    /// (a configured endpoint) admits whichever node answers, as it did before.
+    #[test]
+    fn a_dial_for_a_node_holds_the_session_to_that_node() {
+        use wz_session_core::close_reason::CloseReason;
+        use wz_session_core::credential_identity::zid_from_wire;
+
+        fn verifies_nodes<D: Dialer>(_: &D) -> bool {
+            D::VERIFIES_NODES
+        }
+
+        let net = MemoryNetwork::new();
+        let far = Rc::new(MemoryLinks::new(net.clone(), FAR));
+        let near = Rc::new(MemoryLinks::new(net.clone(), NODE));
+        let runtime = CoopRuntime::new(FrozenClock);
+        let local = CoopLocalSet::new(&runtime);
+
+        // Three acceptors, all node 0xa1, one per dial below.
+        let mut acceptors = vec![];
+        for port in [7494u16, 7495, 7496] {
+            let OpenedLink { sink, pump } = far.open_acceptor(port).expect("bind acceptor");
+            let actions = wz_runtime_coop::session_runtime::new_session_actions(
+                sink,
+                params(0xa1),
+                CoopTime::new(&runtime),
+                Counting(1),
+            );
+            let task = spawn_session(
+                &local,
+                pump,
+                actions.clone(),
+                CoopTime::new(&runtime),
+                SessionDriveConfig {
+                    timeouts: SessionTimeouts::spec_defaults(),
+                    role: SessionRole::Acceptor,
+                    max_iters: None,
+                },
+                |_| {},
+            );
+            acceptors.push((actions, task));
+        }
+
+        let mut dialer = UdpDialer::new(
+            &local,
+            near.clone(),
+            SessionTimeouts::spec_defaults(),
+            || params(0xb1),
+            quiet,
+        );
+        std::assert!(
+            verifies_nodes(&dialer),
+            "the heap dialer holds a dial to its node, so a node may be opened over it"
+        );
+        let node_a1 = zid_from_wire(&[0xa1; 4]).expect("a zid");
+        let node_other = zid_from_wire(&[0xa2; 4]).expect("a zid");
+
+        let mut right = dialer
+            .dial_for("udp/10.0.0.1:7494", &node_a1)
+            .expect("dialable");
+        let wrong = dialer
+            .dial_for("udp/10.0.0.1:7495", &node_other)
+            .expect("dialable");
+        let unnamed = dialer.dial("udp/10.0.0.1:7496").expect("dialable");
+        for _ in 0..64 {
+            local.run_until_idle();
+        }
+
+        std::assert!(right.actions().is_established(), "the node it was made for");
+        std::assert_eq!(dialer.ended(&mut right), None, "and stays up");
+        std::assert!(
+            !wrong.actions().is_established(),
+            "a session to another node than the one asked for is not a session to the zid"
+        );
+        // Closed at the InitAck, before any OpenSyn, with upstream's reason for it. The task is
+        // not asked whether it has ended: it sleeps to its next deadline, which a clock that
+        // never moves does not bring, so it ends on a clock that does.
+        std::assert_eq!(
+            wrong.actions().close_reason(),
+            Some(CloseReason::Invalid),
+            "{:?}",
+            wrong.actions().trace_snapshot()
+        );
+        std::assert_eq!(
+            wrong.actions().trace_snapshot().send_open_syn,
+            0,
+            "no OpenSyn goes to a node that was not asked for"
+        );
+        std::assert!(
+            right.actions().close_reason().is_none() && unnamed.actions().close_reason().is_none(),
+            "the others were not closed"
+        );
+        std::assert!(
+            unnamed.actions().is_established(),
+            "a configured endpoint names no node and admits the one that answers"
+        );
+        right.abort();
+        unnamed.abort();
     }
 
     /// A stack with no link left to give is a failed attempt of the outage, not

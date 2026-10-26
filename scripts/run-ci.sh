@@ -11446,14 +11446,16 @@ layer_c1m_session_lwip() {
     # Decision D7 step 7d adds TEN to every leg below that runs the crate's own tests, in two
     # modules no feature gates: `node_opening` (the one verdict a request to hold a peer gets, five)
     # and `control_port` (the out-of-band line protocol over it, five). 4 -> 14, 5 -> 15,
-    # 31 -> 41, 8 -> 18, 41 -> 51, the numbers each command PRINTED.
+    # 31 -> 41, 8 -> 18, 41 -> 51, the numbers each command PRINTED. The heap dialer then holds a
+    # dial made for a node to that node (`a_dial_for_a_node_holds_the_session_to_that_node`, in
+    # `dial`, which only the two legs that select `dial` compile): 41 -> 42 and 51 -> 52.
     _runci_guarded_test "C1m mcu default" 14 \
         cargo test -p wz-session-mcu --quiet || return 1
     _runci_guarded_test "C1m mcu unicast app layer" 15 \
         cargo test -p wz-session-mcu \
         --features query-queryable,codec-response,codec-response-final,pubsub-put \
         --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace-write" 41 \
+    _runci_guarded_test "C1m mcu adminspace-write" 42 \
         cargo test -p wz-session-mcu --features adminspace-write --quiet || return 1
     _runci_guarded_test "C1m mcu peer nodes" 22 \
         env WZ_LIMIT_MAX_PEER_NODES=2 \
@@ -11461,7 +11463,7 @@ layer_c1m_session_lwip() {
         --quiet || return 1
     _runci_guarded_test "C1m mcu adminspace-core" 18 \
         cargo test -p wz-session-mcu --features adminspace-core --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace read+write" 51 \
+    _runci_guarded_test "C1m mcu adminspace read+write" 52 \
         cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
     # The fixed-memory client node's shared mechanism (`slot_node`, compiled only on the slot profile
     # with the client core): no leg above selects both, so its tests ran in none until this one. 28 =

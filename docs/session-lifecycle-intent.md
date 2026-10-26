@@ -859,7 +859,11 @@ Each step lands with its own done-when; sizes are not estimated here.
      that does not say so opens no node, because a session to whichever node
      answers a stale hint is not a session to the zid. The slot dialer says
      so, since the slot host already took the expected zid; the heap UDP
-     dialer does not yet.
+     dialer says so too since the round after 7d (`dial_for` sets
+     `expect_peer_zid` on the session's actions before the session is
+     spawned, the same call the slot host makes, so the InitAck of another
+     node closes it `Invalid` before any OpenSyn; its test dials three
+     acceptors, all node `a1`, for `a1`, for another zid and for no node).
      A peer's name is an identity and not a copy of what it names: seventeen
      bytes, an endpoint's row slot or a node's zid, where the endpoint's text
      is sixty-four and more. Round 3613 keyed the machines by that text, and
