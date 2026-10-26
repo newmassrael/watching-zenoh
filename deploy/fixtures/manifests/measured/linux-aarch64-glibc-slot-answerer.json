@@ -1,0 +1,108 @@
+{
+  "schema": 1,
+  "catalog_version": 2,
+  "built_from": {
+    "commit": "79b900170f77f7e155e59508fe4f0cf7faaf3b21",
+    "tree_clean": true
+  },
+  "platform": {
+    "id": "linux-aarch64-glibc",
+    "triple": "aarch64-unknown-linux-gnu",
+    "os": "linux",
+    "libc": "glibc",
+    "network_stack": null,
+    "support": "verified",
+    "strongest_green_lane": "build"
+  },
+  "profile": null,
+  "toolchain": {
+    "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+    "cc": "aarch64-poky-linux-gcc (GCC) 11.5.0",
+    "sdk": {
+      "kind": "yocto",
+      "revision": "4.0.35",
+      "target_arch": "aarch64",
+      "target_os": "linux"
+    }
+  },
+  "system_assumed": [
+    "libgcc_s.so.1",
+    "libm.so.6",
+    "libc.so.6",
+    "ld-linux-aarch64.so.1"
+  ],
+  "bundled": [],
+  "inputs": [
+    {
+      "kind": "node-declaration",
+      "id": "slot-answerer",
+      "path": "node/slot-answerer.toml",
+      "sha256": "6a86de67ad6ef0cfc2581f662cc275996be88969082586c0f0484c724e2b079e",
+      "size": 733
+    }
+  ],
+  "artifacts": [
+    {
+      "id": "declared-node",
+      "name": "declared-node",
+      "kind": "executable",
+      "path": "bin/declared-node",
+      "sha256": "9d5f3b200b3d821b60597642b925362f01143720d10602e8d699e75ac307221b",
+      "size": 236976,
+      "elf": {
+        "class": 64,
+        "machine": "aarch64",
+        "linking": "dynamic",
+        "interpreter": "/lib/ld-linux-aarch64.so.1",
+        "soname": null,
+        "runpath": null,
+        "rpath": null,
+        "needed": [
+          {
+            "soname": "libc.so.6",
+            "provided_by": "system"
+          }
+        ],
+        "os_floor": {
+          "glibc": "GLIBC_2.34",
+          "android_api_note": null,
+          "symbol_version_tags": [
+            "GLIBC_2.17",
+            "GLIBC_2.25",
+            "GLIBC_2.34"
+          ]
+        }
+      },
+      "abi": {
+        "family": "declared-node",
+        "revision": 1,
+        "layout": {}
+      },
+      "provides": [
+        {
+          "role": "declared-node",
+          "node_id": [
+            "slot-answerer"
+          ],
+          "declaration_sha256": [
+            "6a86de67ad6ef0cfc2581f662cc275996be88969082586c0f0484c724e2b079e"
+          ]
+        }
+      ],
+      "features": [
+        "declared",
+        "default"
+      ],
+      "resolved_features": {
+        "wz-runtime-tokio": []
+      },
+      "device_requires": [
+        "entropy",
+        "interface-list",
+        "sockets-tcp",
+        "threads"
+      ],
+      "unassessed_features": []
+    }
+  ]
+}

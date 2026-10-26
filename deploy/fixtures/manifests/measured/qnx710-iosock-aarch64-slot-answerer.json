@@ -1,0 +1,108 @@
+{
+  "schema": 1,
+  "catalog_version": 2,
+  "built_from": {
+    "commit": "79b900170f77f7e155e59508fe4f0cf7faaf3b21",
+    "tree_clean": true
+  },
+  "platform": {
+    "id": "qnx710-iosock-aarch64",
+    "triple": "aarch64-unknown-nto-qnx710_iosock",
+    "os": "nto",
+    "libc": "nto",
+    "network_stack": "io-sock",
+    "support": "verified",
+    "strongest_green_lane": "build"
+  },
+  "profile": null,
+  "toolchain": {
+    "rustc": "rustc 1.98.0-nightly (61d7280f3 2026-06-06)",
+    "cc": "qcc (GCC 8.3.0 20190222 (stable) [qnx710 1568#58], variant gcc_ntoaarch64le_cxx)",
+    "sdk": {
+      "kind": "qnx-sdp",
+      "revision": "7.1.0.00472T202006132107S"
+    }
+  },
+  "system_assumed": [
+    "libsocket.so.4",
+    "libgcc_s.so.1",
+    "libc.so.5",
+    "libm.so.3"
+  ],
+  "bundled": [],
+  "inputs": [
+    {
+      "kind": "node-declaration",
+      "id": "slot-answerer",
+      "path": "node/slot-answerer.toml",
+      "sha256": "6a86de67ad6ef0cfc2581f662cc275996be88969082586c0f0484c724e2b079e",
+      "size": 733
+    }
+  ],
+  "artifacts": [
+    {
+      "id": "declared-node",
+      "name": "declared-node",
+      "kind": "executable",
+      "path": "bin/declared-node",
+      "sha256": "90047d85a570f3d2bc9502173915423ae1ef7e60c7983af2397435d7fec8c71b",
+      "size": 232792,
+      "elf": {
+        "class": 64,
+        "machine": "aarch64",
+        "linking": "dynamic",
+        "interpreter": "/usr/lib/ldqnx-64.so.2",
+        "soname": null,
+        "runpath": null,
+        "rpath": null,
+        "needed": [
+          {
+            "soname": "libc.so.5",
+            "provided_by": "system"
+          },
+          {
+            "soname": "libsocket.so.4",
+            "provided_by": "system"
+          }
+        ],
+        "os_floor": {
+          "glibc": null,
+          "android_api_note": null,
+          "symbol_version_tags": [
+            "libsocket.so.4"
+          ]
+        }
+      },
+      "abi": {
+        "family": "declared-node",
+        "revision": 1,
+        "layout": {}
+      },
+      "provides": [
+        {
+          "role": "declared-node",
+          "node_id": [
+            "slot-answerer"
+          ],
+          "declaration_sha256": [
+            "6a86de67ad6ef0cfc2581f662cc275996be88969082586c0f0484c724e2b079e"
+          ]
+        }
+      ],
+      "features": [
+        "declared",
+        "default"
+      ],
+      "resolved_features": {
+        "wz-runtime-tokio": []
+      },
+      "device_requires": [
+        "entropy",
+        "interface-list",
+        "sockets-tcp",
+        "threads"
+      ],
+      "unassessed_features": []
+    }
+  ]
+}

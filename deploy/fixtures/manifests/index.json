@@ -161,6 +161,24 @@
       }
     },
     {
+      "path": "measured/linux-aarch64-glibc-slot-answerer.json",
+      "origin": "measured",
+      "platform": "linux-aarch64-glibc",
+      "expect": {
+        "verdict": "valid",
+        "files": false
+      }
+    },
+    {
+      "path": "measured/linux-aarch64-glibc.json",
+      "origin": "measured",
+      "platform": "linux-aarch64-glibc",
+      "expect": {
+        "verdict": "valid",
+        "files": false
+      }
+    },
+    {
       "path": "measured/linux-x86_64-glibc-slot-answerer.json",
       "origin": "measured",
       "platform": "linux-x86_64-glibc",
@@ -173,6 +191,33 @@
       "path": "measured/linux-x86_64-glibc.json",
       "origin": "measured",
       "platform": "linux-x86_64-glibc",
+      "expect": {
+        "verdict": "valid",
+        "files": false
+      }
+    },
+    {
+      "path": "measured/qnx710-iopkt-aarch64.json",
+      "origin": "measured",
+      "platform": "qnx710-iopkt-aarch64",
+      "expect": {
+        "verdict": "valid",
+        "files": false
+      }
+    },
+    {
+      "path": "measured/qnx710-iosock-aarch64-slot-answerer.json",
+      "origin": "measured",
+      "platform": "qnx710-iosock-aarch64",
+      "expect": {
+        "verdict": "valid",
+        "files": false
+      }
+    },
+    {
+      "path": "measured/qnx710-iosock-aarch64.json",
+      "origin": "measured",
+      "platform": "qnx710-iosock-aarch64",
       "expect": {
         "verdict": "valid",
         "files": false
