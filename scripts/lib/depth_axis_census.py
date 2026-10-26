@@ -2853,7 +2853,7 @@ PIN_NO_SYMBOL = 0
 # R3688 -- 54 -> 55, one atom. `api-compat-rust`'s reason gains the `config` part of `zenoh` and
 # cites the test that holds it to upstream's. READ off the census's own FAIL line, `wz citations:
 # 55 against a pin of 54`.
-# R3694 -- 55 -> 56, one atom. `api-compat-rust`'s reason gains the `handlers` part of `zenoh` and
+# R3699 -- 55 -> 56, one atom. `api-compat-rust`'s reason gains the `handlers` part of `zenoh` and
 # cites the test that holds it to upstream's. READ off the census's own FAIL line, `wz citations:
 # 56 against a pin of 55`.
 PIN_WZ_CITATIONS = 56

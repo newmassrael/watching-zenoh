@@ -178,7 +178,7 @@ DERIVED_FROM_UPSTREAM = re.compile(r"Derived from zenoh[\w-]* \d")
 def family_derived(paths: list[str]) -> set[str]:
     """The tracked files that are upstream's own files, carried under the family's names.
 
-    R3694. A citation that names the end of a path of the family is, in every reason of this store, upstream's
+    R3699. A citation that names the end of a path of the family is, in every reason of this store, upstream's
     file of that name: reasons cite upstream by the end of its path. The family keeps a file of the
     same name under `crates/wz-zenoh*/src/`, and before it was indexed under every suffix, so the
     day a family file took a name upstream also has, every citation of upstream's file turned into
@@ -389,7 +389,7 @@ SELFTEST: tuple[tuple[str, list[dict], int, str | None], ...] = (
         1,
         "no longer has",
     ),
-    # R3694: the family keeps files under names upstream also has. A citation by the END of upstream's
+    # R3699: the family keeps files under names upstream also has. A citation by the END of upstream's
     # path is upstream's, whatever the family file of that name holds; one by the family file's
     # own path is still about it.
     (

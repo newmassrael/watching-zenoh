@@ -26,7 +26,7 @@ pub(crate) mod cancellation;
 #[allow(dead_code)]
 pub(crate) mod config;
 pub(crate) mod encoding;
-// R3694: the handlers' users, the builders of `declare_subscriber` and `get`, are slices Z2 and Z3 of
+// R3699: the handlers' users, the builders of `declare_subscriber` and `get`, are slices Z2 and Z3 of
 // docs/zenoh-api-on-the-engine.md; until they land the helpers upstream calls from there
 // (`set_on_drop`, `call_with_message`, and `locked` and `CallbackParameter` outside `internal`) are
 // unused.
