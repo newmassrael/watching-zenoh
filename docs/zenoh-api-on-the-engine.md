@@ -198,6 +198,84 @@ consolidation by the caller), and the third form of D1 stays the fallback. The d
 again at the end of Z3, from the list of port additions the slices produced and what each cost,
 and D1 is dropped if that list has grown to the size of `Primitives` and the session tables.
 
+### 5.2 What Z1 meets first: the open (read, 2026-10-26)
+
+Z0 is landed, so the next thing the crate needs is a session, and the read of what an open takes
+found that the port is not where it starts. The port has no `open` (section 3); the open that a
+program of upstream's API means, `open(Config)`, is made today in one place only, and that place
+belongs to the zenoh-c ABI:
+
+- `z_open` (`wz-capi-c/src/session.rs`, 300 lines from `open_session`) reads a stock zenoh
+  config through `ZenohNodeConfig::from_json5` (`wz-runtime-tokio/src/zenoh_config.rs`, which is
+  already the table of D6: it names the keys it honours and keeps the lists of those it does not
+  as `UNHONOURED_BEYOND_WZ` and `UNHONOURED_READER_GAP`, graded by a gate), decides the role,
+  the endpoints to dial and to listen on, the groups, the scouting plan, the gossip policy, the
+  authentication and the traffic policy, the TLS material, the offer of the handshake and the
+  clock, and calls `wz_capi_core::drive::open_blocking` with an `OpenStance` of fifteen fields.
+  What it returns is a `SessionState`, which the port reaches as a `SessionDrive`
+  (`wz-capi-core/src/engine_port.rs`) and whose `shared` registry implements `SessionEngine`.
+- Of those 300 lines, the ones that belong to the C ABI are the reading of a `ConfigState` (the
+  C program's inserts), the error codes (`Z_EINVAL`, `Z_ENETWORK`, `Z_ENULL`) and the shared-memory
+  provider hung on the session as its extension. The rest, about 230 lines, takes a document and
+  answers a stance or a refusal, and names nothing of C.
+- The crate's feature set already forwards upstream's names (`transport_tls`, `auth_pubkey`,
+  `transport_compression`, `interceptors`, `scout`, `peer`, `gossip`, ...) down to `wz-capi-core`
+  and `wz-runtime-tokio`, each on by default exactly when it is in zenoh-c's default set.
+
+- The open already takes `mode: router`: the role is read from the document (`WhatAmI::Router`),
+  a router's default listener is `tcp/[::]:7447`, its open is held for `scouting/delay` in full
+  (R3125) and its clock stamps by default. So the decision Z1 was to take about router mode, carry
+  it or record that half of Z8's gate does not apply, is taken by the existing open: it is carried,
+  and Z1b has to test it, not build it.
+
+So D5 is answered for the tokio engine by what exists, and D6's table is not to be written: it is
+the reader above, and `zenoh::open` must be a second client of it. Two ways to be one:
+
+1. **Copy the 230 lines into the top crate.** Fast, and it is two copies that disagree on the
+   first config key anyone adds; it is what C13a refuses.
+2. **Lift them out** into a function that takes the document, the dialled endpoints and the role,
+   and answers `Result<OpenedSession, OpenRefusal>` with the refusal's class (the config is
+   invalid, or the network could not be reached), beside the reader that `wz-capi-c` and the top
+   crate both name; `z_open` shrinks to its C half and maps the refusal to a code. This changes a
+   landed ABI crate, so its comparison lanes against zenoh-c are what show that nothing moved.
+
+The second is chosen, and its form is the textbook one, three layers with one direction of
+dependence, not a function moved:
+
+1. **A plan, as a value.** `OpenPlan` is what a document means: the role, the endpoints to dial
+   and to listen on, the groups, the scouting and gossip policies, the authentication and traffic
+   policy, the offer of the handshake, the clock, and the capabilities the document REQUIRES
+   (a listener, a group, access control, a namespace). It is made by a pure function of the
+   document (no socket, no thread, no clock), and its refusal is typed: each variant names the key
+   path that caused it. A pure plan can be tested on every role and every refusal without a
+   network, compared against upstream's own validation of the same document, and printed.
+2. **An engine factory.** `open(plan)` is an operation of an engine, not of a client: each engine
+   declares the capabilities it can honour and answers a plan that requires more with the typed
+   refusal naming the key (the cooperative engine has no namespace, which is how D6's table comes
+   out per engine). The tokio engine's factory is `open_blocking` with the stance made from the
+   plan; the cooperative engine's is `wz_capi_coop::open`. The trait joins the port when the
+   second engine implements it, as the port's own rule says; until then the tokio factory is a
+   function beside the plan.
+3. **Clients that map.** `z_open` maps a refusal to `Z_EINVAL` or `Z_ENETWORK`, `zenoh::open` maps
+   it to upstream's error text, and neither holds a line of config logic.
+
+The lift is proved by a characterisation first: the outcomes of the current `z_open` on a corpus
+of documents (every role, every refusal named in the 300 lines, the build's missing features) are
+recorded before the move, and the same corpus must give the same outcomes after it, beside the
+lanes that run `z_open` against zenoh-c.
+
+Z1-pre is the first layer and the tokio factory, with `z_open` calling both. The top crate then
+takes the engine by a feature of the build (D5) and reaches the session by the port, as the pico
+ABI does, for everything but the open itself.
+
+Z1 is therefore cut in four, each landing whole: **Z1-pre** the lift; **Z1a** `Session`, `open`,
+`close`, `is_closed`, `zid`, `id`, `config` over it, with the anchor of the key expression
+implemented and the default handlers' size read from `Config`; **Z1b** the router mode and the
+refusal of every key that has an effect and is unmapped (the test of D6 over the default
+configuration); **Z1c** `info` and the rule of D4 with its test on this engine. The cooperative
+engine is selected by a feature in Z1a as a refusal that names the feature, and gets its own open
+when the port gains one (its `open` is `wz_capi_coop::open`, with its own arguments).
+
 ## 6. The slices, in order (after the spike)
 
 Each lands whole with its surface lines, tests and faults in one round.
@@ -273,6 +351,7 @@ Each lands whole with its surface lines, tests and faults in one round.
   tests open one, so a refused `mode: router` means the Z8 gate cannot be met, and the decision
   is either to carry router mode in the top crate through the engine's router data plane
   (`docs/router-data-plane-scaling.md`) or to record that half of the gate does not apply.
+  Cut in four after the read of section 5.2: Z1-pre (lift the open out of `z_open`), Z1a, Z1b, Z1c.
 - **Z2. Publish and subscribe.** `put`, `delete`, `declare_publisher`, `declare_subscriber` with
   the handlers the surface has (callback, callback with a drop, the default handler, fifo, ring),
   QoS, attachments, encodings, localities, express, congestion control, `new_timestamp`, the
