@@ -69,6 +69,9 @@ pub mod group;
 pub mod listeners;
 pub mod node_auth;
 pub mod node_policy;
+// What a zenoh config document means for an open: needs the runtime's zenoh config reader.
+#[cfg(feature = "open-plan")]
+pub mod open_plan;
 #[cfg(feature = "scout")]
 pub mod scouting;
 #[cfg(feature = "scout")]

@@ -54,6 +54,7 @@ path = "src/lib.rs"
 # is compiled into neither the ABI nor this model.
 default = [
     "rx-busy-poll",
+    "open-plan",
     "link-udp",
     "timestamping",
     "peer",
@@ -108,6 +109,12 @@ scout = [
     "wz-runtime-tokio/locator-iface",
     "wz-runtime-tokio/zenoh-config",
 ]
+# What a zenoh configuration document means for an open, as one value (`open_plan::OpenPlan`):
+# the role, the endpoints, the phases, the security and every refusal, read from the document
+# and not from a socket. It reads the document with the runtime's zenoh config reader, so it
+# needs `zenoh-config`; an ABI that reads no zenoh config (the pico ABI) leaves it off and
+# compiles none of it. The zenoh-c ABI names it.
+open-plan = ["wz-runtime-tokio/zenoh-config"]
 # The UDP unicast link: dialled by a `udp/` endpoint, and the transport the scouting group
 # rides, which is why `scout` implies it. A build without it dials TCP (and what its own link
 # features add) alone.

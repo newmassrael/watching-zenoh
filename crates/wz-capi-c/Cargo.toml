@@ -384,7 +384,7 @@ wz-abi-stamp = { path = "../wz-abi-stamp" }
 # `access-extauth-usrpwd` and `interceptors`: the credentials and the traffic policy (`access_control`,
 # `low_pass_filter`, `downsampling`) a zenoh-c node's config states are enforced, not accepted and
 # dropped.
-wz-capi-core = { path = "../wz-capi-core", default-features = false, features = ["rx-busy-poll", "transport-qos"] }
+wz-capi-core = { path = "../wz-capi-core", default-features = false, features = ["rx-busy-poll", "transport-qos", "open-plan"] }
 # `query-reply-err` is DECLARED rather than inherited from the default set, and
 # R311y568 is why: `z_query_reply_err` routes through
 # `ReplyOut::reply_err`, whose body is `#[cfg(feature = "query-reply-err")]` and

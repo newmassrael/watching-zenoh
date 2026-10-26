@@ -1,33 +1,24 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `z_open`, the session ownership family, and the config -> role mapping.
+//! `z_open`, the session ownership family, and the mapping of an open's refusals onto zenoh-c's
+//! codes.
 //!
-//! The drive machinery is NOT here: it is
-//! [`wz_capi_core::drive`](wz_capi_core::drive), shared with the zenoh-pico ABI.
-//! This module is only the shim — read the config, pick a role, hand it to the
-//! core, and map the core's neutral error onto zenoh-c's codes.
+//! Neither the drive machinery nor the reading of the config is here. The drive is
+//! [`wz_capi_core::drive`](wz_capi_core::drive), shared with the zenoh-pico ABI, and what a config
+//! document means for an open (the role, the endpoints, the phases, the security, and every
+//! refusal) is [`wz_capi_core::open_plan::OpenPlan`], one value for every client of the engine.
+//! This module is only the shim: hand the core the keys this ABI's flat config store holds, add
+//! the choices that are zenoh-c's (how it transmits, who runs a local delivery's callbacks, how its
+//! faces are driven), and map the core's neutral refusals and failures onto zenoh-c's codes.
 
 use std::ffi::c_void;
 
-use wz_capi_core::drive::{
-    names_a_group, open_blocking, CapiTlsConfig, ConfiguredZid, DialPhase, FaceDrive,
-    GroupDeclarations, GroupJoin, GroupProfile, ListenPhase, OpenError, OpenStance, SessionState,
-    DEFAULT_BATCH_SIZE,
-};
+use wz_capi_core::drive::{FaceDrive, OpenError, SessionState};
 use wz_capi_core::faces::{no_shm_clients, OpenShmClients};
-use wz_capi_core::gossip::GossipPolicy;
-use wz_capi_core::node_auth::NodeAuth;
-use wz_capi_core::node_policy::NodePolicy;
-#[cfg(feature = "scout")]
-use wz_capi_core::scouting_node::ScoutingPlan;
-use wz_runtime_tokio::node_clock::TimestampingEnabled;
-use wz_runtime_tokio::retry_period::RetryPolicy;
+use wz_capi_core::open_plan::{dial_role, AbiChoices, OpenPlan, OpenRefusal, StatedEndpoints};
 use wz_runtime_tokio::session::LocalDeliveryDrain;
-use wz_runtime_tokio::session_glue::{TxQueueConf, WhatAmI};
-use wz_runtime_tokio::session_open::{SessionOffer, TransportMode};
-use wz_runtime_tokio::startup_phase::PhasePolicy;
-use wz_runtime_tokio::zenoh_config::{default_listen_endpoint, ZenohConfigIngest, ZenohNodeConfig};
+use wz_runtime_tokio::session_glue::TxQueueConf;
 
 use crate::abi::{
     z_loaned_session_t, z_moved_config_t, z_moved_session_t, z_owned_session_t, Handle,
@@ -54,223 +45,6 @@ pub(crate) unsafe fn session_state<'a>(zs: *const z_loaned_session_t) -> Option<
     Some(unsafe { &*(handle as *const SessionState) })
 }
 
-/// zenoh-c's `mode` values map onto wz roles.
-///
-/// Default PEER, which is zenoh's own default when the key is absent
-/// (`commons/zenoh-config/src/defaults.rs` @ `pub const mode: WhatAmI = WhatAmI::Peer;`).
-/// It said CLIENT until R2948 while claiming to match zenoh, and a config that
-/// named no mode dialled with a client's one-attempt budget where zenoh-c's
-/// peer keeps trying behind the open.
-///
-/// A build without the `peer` feature has no peer role to default to, so a config that names no
-/// mode is the client's there; one that names `peer` or `router` is still read as such, and is
-/// refused by [`open_session`] as a role the build does not have.
-fn dial_whatami(cfg: &ConfigState) -> WhatAmI {
-    match cfg.first(MODE_KEY) {
-        Some("client") => WhatAmI::Client,
-        Some("router") => WhatAmI::Router,
-        Some("peer") => WhatAmI::Peer,
-        _ if cfg!(feature = "peer") => WhatAmI::Peer,
-        _ => WhatAmI::Client,
-    }
-}
-
-/// How the dial keeps trying, read from the config the way a zenoh node reads
-/// it.
-///
-/// `connect/timeout_ms` and `connect/exit_on_failure` are mode-dependent
-/// upstream, and so are their defaults: a client makes ONE attempt, a peer or
-/// router retries without bound. Both are resolved for the role this session
-/// DIALS as, which is why the document is read with that role stated — see
-/// [`ConfigState::with_default_mode`]. `connect/retry` paces the attempts and
-/// falls back to upstream's 1s / 2s / 4s.
-///
-/// Read from the document [`read_node`] parsed.
-fn dial_phase(node: &ZenohNodeConfig, whatami: WhatAmI) -> DialPhase {
-    let default = PhasePolicy::connect_default_for(whatami);
-    let schedule = node.connect_retry.unwrap_or(RetryPolicy::ZENOH_DEFAULT);
-    DialPhase {
-        policy: PhasePolicy {
-            budget: node.connect_timeout_ms.unwrap_or(default.budget),
-            exit_on_failure: node
-                .connect_exit_on_failure
-                .unwrap_or(default.exit_on_failure),
-        },
-        schedule,
-        // R2948 — zenoh re-dials a lost session's endpoints on the same
-        // `connect/retry` block, with no budget.
-        redial: Some(schedule),
-        // R2950 — a peer's open waits `scouting/delay` for its background
-        // endpoints unless `open/return_conditions/connect_scouted` is false;
-        // upstream's defaults are 500 ms and true.
-        start_window: node
-            .open_connect_scouted
-            .unwrap_or(true)
-            .then(|| std::time::Duration::from_millis(node.scouting_delay_ms.unwrap_or(500))),
-        // R3125 -- and a router's open is held for the same delay in full, unconditionally
-        // (`start_router` sleeps it), where a peer's ends when its start conditions are met.
-        router_hold: std::time::Duration::from_millis(node.scouting_delay_ms.unwrap_or(500)),
-    }
-}
-
-/// How a session's bind phase treats an endpoint it cannot bind: `listen/timeout_ms` and
-/// `listen/exit_on_failure` over upstream's listen defaults, which are the same for every role
-/// (no retry, and a failure fails the open), paced by `listen/retry`.
-///
-/// R3089 -- the bind twin of [`dial_phase`], read from the same document. R3076 read only the
-/// exit value; the budget and the schedule were read by the node config and used by no C session.
-fn listen_phase_of(node: &ZenohNodeConfig) -> ListenPhase {
-    let default = PhasePolicy::LISTEN_DEFAULT;
-    ListenPhase {
-        policy: PhasePolicy {
-            budget: node.listen_timeout_ms.unwrap_or(default.budget),
-            exit_on_failure: node
-                .listen_exit_on_failure
-                .unwrap_or(default.exit_on_failure),
-        },
-        schedule: node.listen_retry.unwrap_or(RetryPolicy::ZENOH_DEFAULT),
-    }
-}
-
-/// Why a config cannot be offered: it enables both halves of the one exclusive
-/// transport choice.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct QosWithLowlatency;
-
-/// What this session's links offer at their handshake, read from its config
-/// the way zenoh's transport manager reads it.
-///
-/// Upstream builds the unicast half from three keys
-/// (`io/zenoh-transport/src/unicast/manager.rs` @
-/// `self = self.qos(*config.transport().unicast().qos().enabled());`, the
-/// lowlatency line after it, and the compression line behind
-/// `transport_compression`, which zenoh-c's default build carries). Both the
-/// dialling and the accepting side read the same manager config, so one value
-/// serves both.
-///
-/// The defaults are upstream's, and QoS is ON: an unconfigured zenoh-c session
-/// offers it. A session that offered nothing — what this ABI did until R2970 —
-/// agreed on no QoS with another zenoh-c session, where two real ones do.
-///
-/// QoS and lowlatency together are refused, as upstream's manager refuses them
-/// when it is built (`bail!("'qos' and 'lowlatency' options are incompatible");`),
-/// which is inside `zenoh::open` and so reaches a C caller as an open failure.
-///
-/// ## Shared memory is offered on the shared-memory arm (R3052)
-///
-/// Upstream's shared-memory build also offers SHM, from
-/// `transport/shared_memory/enabled`
-/// (`io/zenoh-transport/src/common/shm/shm_context.rs` @ `if !*cfg.enabled() {`),
-/// default on, and so does this session on the arm that carries the axis
-/// (`zenoh-c-shared-memory` without `zenoh-c-no-unstable-api`, the condition the
-/// `shm` module itself has): the offer is `node.shared_memory`. Until R3052 it did
-/// not, on any arm, because a Put carrying a shared-memory buffer is laid out as
-/// slices on the wire, which wz's generated Put codec could not read (open-debt
-/// item 823), so a session that agreed on SHM would have lost every such sample.
-/// The codec reads the layout now, and a payload a peer sends as shared memory is
-/// delivered as the page it lies on, so `z_bytes_as_loaned_shm` answers for it.
-/// Without the axis there is no shared memory to offer.
-fn session_offer(node: &ZenohNodeConfig) -> Result<SessionOffer, QosWithLowlatency> {
-    let mode = match (node.qos, node.lowlatency) {
-        (true, true) => return Err(QosWithLowlatency),
-        (true, false) => TransportMode::Qos,
-        (false, true) => TransportMode::LowLatency,
-        (false, false) => TransportMode::Universal,
-    };
-    #[allow(unused_mut)]
-    let mut offer = SessionOffer::universal()
-        .with_mode(mode)
-        .with_compression(node.compression);
-    #[cfg(all(
-        feature = "zenoh-c-shared-memory",
-        not(feature = "zenoh-c-no-unstable-api")
-    ))]
-    {
-        offer = offer.with_shm(node.shared_memory);
-    }
-    Ok(offer)
-}
-
-/// The session's configuration, read ONCE, the way a zenoh node reads it.
-///
-/// The document goes through [`ZenohNodeConfig::from_json5`], wz's one reader
-/// of a stock config, rather than a second reading of a few keys here — the
-/// dial phase and (R2957) the shared-memory provider both read the result. It
-/// is read for the role this session DIALS as, because several keys are
-/// mode-dependent upstream ([`ConfigState::with_default_mode`]). A config that
-/// reader refuses (a key zenoh does not have, two keys that cannot both be
-/// nested, a value out of range) is refused by the open too, which is where
-/// upstream stands: its insert refuses the same keys before an open is reached.
-fn read_node(cfg: &ConfigState, whatami: WhatAmI) -> Option<ZenohConfigIngest> {
-    let document = cfg
-        .with_default_mode(whatami.to_str())
-        .render_nested()
-        .ok()?;
-    ZenohNodeConfig::from_json5(&document).ok()
-}
-
-/// The endpoint this session listens on: the one its config states, or, when the config says
-/// nothing about `listen/endpoints`, the one a zenoh node of its role binds on its own.
-///
-/// R3071 -- before this a session with no stated listener bound nothing, though a real peer binds
-/// `tcp/[::]:0` and a real router `tcp/[::]:7447` (`default_listen_endpoint`, MEASURED against a
-/// running zenohd at R2091b), so a node that scouts could answer and be found and still hand its
-/// finder nothing to dial. A key the config NAMES suppresses the default, as an explicitly empty
-/// list does on the real library, and so does a mode table that names no row for this role. A
-/// client has no default, and its absence is the instruction.
-///
-/// R3076 -- EVERY endpoint the config states, in its order, and not the first of them: the real
-/// library binds each (MEASURED with two tcp endpoints, a client connected to either is accepted,
-/// and wz bound only the first). A key stated as a mode table is the row for this node's role,
-/// which the reader resolved; a table with no row for it states nothing for it.
-fn listen_endpoints(
-    cfg: &ConfigState,
-    ingest: Option<&ZenohConfigIngest>,
-    whatami: WhatAmI,
-) -> Vec<String> {
-    let stated: Vec<String> = cfg.all(LISTEN_KEY).into_iter().map(str::to_owned).collect();
-    if !stated.is_empty() {
-        return stated;
-    }
-    if let Some(ingest) = ingest {
-        if ingest.named.contains(&LISTEN_KEY) {
-            return ingest.config.listen.clone();
-        }
-        if ingest.stated_for_other_modes.contains(&LISTEN_KEY) {
-            return Vec::new();
-        }
-    }
-    default_listen_endpoint(whatami)
-        .map(str::to_owned)
-        .into_iter()
-        .collect()
-}
-
-/// The largest batch zenoh puts on a multicast link, whatever its config states
-/// (`commons/zenoh-protocol/src/transport/mod.rs` @ `pub const MULTICAST: BatchSize = 8_192;`).
-const ZENOH_MULTICAST_BATCH: u16 = 8_192;
-
-/// Open-debt item 913 — what a zenoh-c session's JOIN advertises on a group, as zenoh's
-/// multicast transport fills it (`io/zenoh-transport/src/multicast/transport.rs` @
-/// `join_interval: self.manager.config.multicast.join_interval,`, beside the batch capped at
-/// `batch_size::MULTICAST`): the link lease of `transport/link/tx/lease`, the beacon
-/// interval of `transport/multicast/join_interval`, the default resolution of both sequence
-/// numbers and request ids (32 bits), the session's batch size held to the multicast cap (the
-/// UDP link's own MTU is above it on every target zenoh names), and per-priority conduits when
-/// `transport/multicast/qos/enabled` asks for them.
-fn zenoh_group_profile(node: &ZenohNodeConfig, batch_size: u16) -> GroupProfile {
-    // The 2-bit code of a 32-bit resolution, zenoh's default for both fields.
-    const BITS_32: u8 = 0x02;
-    GroupProfile {
-        lease_ms: node.lease_ms,
-        join_interval_ms: node.multicast_join_interval_ms,
-        seq_num_res: BITS_32,
-        req_id_res: BITS_32,
-        batch_size: batch_size.min(ZENOH_MULTICAST_BATCH),
-        is_qos: node.multicast_qos,
-    }
-}
-
 /// Construct and open a session, consuming the moved config (zenoh-c `z_open`).
 ///
 /// # Safety
@@ -287,139 +61,76 @@ pub unsafe extern "C" fn z_open(
     guarded(|| unsafe { open_session(this_, config, no_shm_clients()) })
 }
 
-/// The authentication and the traffic policy a config asks the node to hold, or `Err(())` for a
-/// config that names a security mechanism (authentication or access control) this surface cannot
-/// hold.
+/// What a refusal of the open is, in zenoh-c's two codes.
 ///
-/// A config that names a security mechanism is never opened as if it did not: a node told to
-/// demand credentials that starts and admits everyone is worse than one that does not start,
-/// because its operator believes it protected.
-///
-///   * `transport/auth/usrpwd/dictionary_file` makes the node a responder over that dictionary;
-///     a file that cannot be read, or that holds no user, fails the open.
-///   * `transport/auth/usrpwd/user` and `password` make the node an initiator that presents
-///     them when it dials; one stated without the other fails the open. A build without
-///     `auth_usrpwd` cannot hold either, so there a config that states any of the three keys
-///     fails the open.
-///   * `transport/auth/pubkey/*` names the node's RSA identity, presented to the peers it dials
-///     and asked of the peers it accepts (`NodeAuth::with_pubkey_config`); an identity that
-///     cannot be loaded fails the open. A build without `auth_pubkey` cannot hold one, so there
-///     a config that states any of the four keys fails the open.
-///   * `access_control`, `low_pass_filter` and `downsampling` are compiled into the node's
-///     traffic policy and enforced on every face in both directions; a subtree the compiler
-///     refuses (a policy naming a rule that does not exist) fails the open, as zenoh's start
-///     does. A disabled `access_control` and an absent filter state no policy at all. A build
-///     without `interceptors` cannot hold a policy, so there a config that enables
-///     `access_control` or states a filter or a downsampling rule fails the open.
-fn node_security_of(node: &ZenohNodeConfig) -> Result<(Option<NodeAuth>, NodePolicy), ()> {
-    #[cfg(not(feature = "auth_pubkey"))]
-    if node.pubkey_public_key_pem.is_some()
-        || node.pubkey_private_key_pem.is_some()
-        || node.pubkey_public_key_file.is_some()
-        || node.pubkey_private_key_file.is_some()
-    {
-        return Err(());
-    }
-    #[cfg(not(feature = "auth_usrpwd"))]
-    if node.usrpwd_dictionary_file.is_some()
-        || node.usrpwd_user.is_some()
-        || node.usrpwd_password.is_some()
-    {
-        return Err(());
-    }
-    #[cfg(feature = "auth_usrpwd")]
-    let auth = NodeAuth::from_usrpwd_config(
-        node.usrpwd_dictionary_file.as_deref(),
-        node.usrpwd_user.as_deref(),
-        node.usrpwd_password.as_ref(),
-    )
-    .map_err(|_| ())?;
-    #[cfg(not(feature = "auth_usrpwd"))]
-    let auth: Option<NodeAuth> = None;
-    #[cfg(feature = "auth_pubkey")]
-    let auth = NodeAuth::with_pubkey_config(auth, node.pubkey_pem_config()).map_err(|_| ())?;
-    #[cfg(feature = "interceptors")]
-    let policy = NodePolicy::from_node_config(node).map_err(|_| ())?;
-    #[cfg(not(feature = "interceptors"))]
-    let policy = {
-        // A build without the interceptors cannot hold a traffic policy, and a node told to
-        // enforce one that starts and enforces nothing is worse than one that does not start.
-        if !node.low_pass_filter.is_empty()
-            || !node.downsampling.is_empty()
-            || node.access_control.enabled
-        {
-            return Err(());
-        }
-        NodePolicy::default()
-    };
-    Ok((auth, policy))
-}
-
-/// A build without the interceptors holds no traffic policy, so a config that states one does not
-/// open (see [`node_security_of`]); one that states none does. Run by the lane that builds without
-/// the feature, and by nothing else: the default build has the feature.
-#[cfg(all(test, not(feature = "interceptors")))]
-mod without_interceptors {
-    use super::*;
-
-    fn node(document: &str) -> ZenohNodeConfig {
-        ZenohNodeConfig::from_json5(document)
-            .expect("a document a real zenohd starts on")
-            .config
-    }
-
-    #[test]
-    fn a_config_that_states_a_traffic_policy_fails_the_open() {
-        for document in [
-            r#"{ low_pass_filter: [ { messages: ["put"], key_exprs: ["a/**"], size_limit: 4 } ] }"#,
-            r#"{ access_control: { enabled: true, default_permission: "deny" } }"#,
-        ] {
-            assert!(node_security_of(&node(document)).is_err(), "{document}");
-        }
-    }
-
-    #[test]
-    fn a_config_that_states_no_policy_opens() {
-        assert!(node_security_of(&node(r#"{ mode: "client" }"#)).is_ok());
-        // CONTROL: a disabled access control is no policy, as it is in the default build.
-        assert!(node_security_of(&node(
-            r#"{ access_control: { enabled: false, default_permission: "deny" } }"#
-        ))
-        .is_ok());
+/// A configuration the open refuses for what it STATES (a key it cannot hold, a file it cannot
+/// read, a role the build does not have) is `Z_EINVAL`, and one that reaches an open which cannot
+/// be established (nothing to dial, a group where a link is needed, a transport that refuses its
+/// own offer, a gossip target upstream refuses at open) is `Z_ENETWORK`, as the same configs are
+/// on the real library. The match is exhaustive: a new refusal must choose.
+fn refusal_code(refusal: OpenRefusal) -> ZResult {
+    match refusal {
+        OpenRefusal::DocumentUnreadable
+        | OpenRefusal::Security
+        | OpenRefusal::TlsMaterial
+        | OpenRefusal::ZenohId
+        | OpenRefusal::Scouting
+        | OpenRefusal::RoleNotInBuild
+        | OpenRefusal::TimestampingNotInBuild => Z_EINVAL,
+        OpenRefusal::QosWithLowlatency
+        | OpenRefusal::GossipTarget
+        | OpenRefusal::NothingToDial
+        | OpenRefusal::GroupInConnect
+        | OpenRefusal::NoDialableEndpoint => Z_ENETWORK,
     }
 }
 
-/// The certificate material a config's `transport/link/tls` keys name, read for the `tls/` and
-/// `quic/` links of the session.
+/// What this ABI decides about an open, beyond what the config says.
 ///
-/// `root_ca_certificate` is what a dial verifies its peer against (with none, the public roots),
-/// and `listen_certificate` with `listen_private_key` is what a listener presents. Each is a path,
-/// read here, at the open: upstream reads the files when it first makes a link of that kind, so a
-/// path that cannot be read fails this open where upstream's would fail only once such a link
-/// was made, which is the direction a security setting fails in on this surface. A dial checks
-/// the name it dials against the peer's certificate, which is upstream's behaviour when
-/// `verify_name_on_connect` is left unstated; the reader does not read that key, nor the mutual
-/// TLS ones, so a session never presents a client certificate.
-#[cfg(any(feature = "transport_tls", feature = "transport_quic"))]
-fn tls_of(node: &ZenohNodeConfig) -> std::io::Result<CapiTlsConfig> {
-    use wz_runtime_tokio::tls_config::read_pem_file;
-    let read = |path: Option<&String>| path.map(read_pem_file).transpose();
-    Ok(CapiTlsConfig {
-        root_ca_pem: read(node.tls_root_ca.as_ref())?,
-        verify_name_on_connect: true,
-        connect_cert_pem: None,
-        connect_key_pem: None,
-        listen_cert_pem: read(node.tls_listen_certificate.as_ref())?,
-        listen_key_pem: read(node.tls_listen_private_key.as_ref())?,
-        require_client_auth: false,
-    })
+/// zenoh's own bounded queue and waits: this ABI stands for zenoh-c.
+fn abi_choices(shm_clients: OpenShmClients) -> AbiChoices {
+    AbiChoices {
+        tx_queue: TxQueueConf::default(),
+        // zenoh-c has no switch for a session's read task: its runtime drives the session from
+        // the open.
+        start_read_task: true,
+        // R3069 -- zenoh-c runs the callbacks of a delivery a session makes to itself INSIDE the
+        // call that causes it, on the calling thread (measured: a put's subscriber, a get's
+        // queryable and its reply, and a put made from inside a callback, all complete before the
+        // call returns). A callback may therefore run on the thread that called, as well as on
+        // the drive thread for what arrives from a peer; a C program written for zenoh-c already
+        // tolerates both, and one that puts and then reads what its callback set relies on the
+        // first.
+        local_delivery: LocalDeliveryDrain::Caller,
+        // R3073 -- zenoh-c's peer ends what it sends a new peer with the initial interest's
+        // Final, and the open of a zenoh peer that dials this one waits for it.
+        initial_interest: true,
+        // zenoh-c's callbacks are concurrent across links (`CClosure` is `Sync`): its receive
+        // runtime serves each link on its own, and a callback that blocks holds up its link and
+        // no other. A face of this session has a thread of its own.
+        face_drive: FaceDrive::PerFace,
+        shm_clients,
+        // R3052 -- shared memory is offered at the handshake on the shared-memory arm (the
+        // condition the `shm` module itself has), and a node's multicast transports are reported
+        // as shared-memory ones wherever the build carries the axis (MEASURED: the real library's
+        // `z_info` printed `is_shm: true` for a zenohd member).
+        offer_shm: cfg!(all(
+            feature = "zenoh-c-shared-memory",
+            not(feature = "zenoh-c-no-unstable-api")
+        )),
+        groups_report_shm: cfg!(feature = "zenoh-c-shared-memory"),
+    }
 }
 
-/// A build with neither certificate-bearing link has nothing to read the material for: a `tls/`
-/// or `quic/` endpoint is refused by the runtime as a scheme it does not have.
-#[cfg(not(any(feature = "transport_tls", feature = "transport_quic")))]
-fn tls_of(_node: &ZenohNodeConfig) -> std::io::Result<CapiTlsConfig> {
-    Ok(CapiTlsConfig::default())
+/// The endpoints the flat config store states for this open: `connect/endpoints` is the whole
+/// list (R2948: each endpoint is dialled on its own schedule) and `listen/endpoints` is what the
+/// store holds, empty when it holds none (the plan then asks the document).
+fn stated_endpoints(cfg: &ConfigState) -> StatedEndpoints {
+    let all = |key| cfg.all(key).into_iter().map(str::to_owned).collect();
+    StatedEndpoints {
+        connect: all(CONNECT_KEY),
+        listen: all(LISTEN_KEY),
+    }
 }
 
 /// The open `z_open` and `z_open_with_custom_shm_clients` both are: the same config, the same
@@ -433,306 +144,76 @@ pub(crate) unsafe fn open_session(
     config: *mut z_moved_config_t,
     shm_clients: OpenShmClients,
 ) -> ZResult {
-    {
-        if this_.is_null() || config.is_null() {
-            return Z_ENULL;
+    if this_.is_null() || config.is_null() {
+        return Z_ENULL;
+    }
+    // The gravestone contract, and zenoh-c states it explicitly: on failure
+    // "the session will be in its gravestone state". Written BEFORE any
+    // fallible work so it holds on every error path.
+    unsafe { *this_ = z_owned_session_t::null_value() };
+
+    // z_open CONSUMES the config: reclaim it and null the source, so a
+    // defensive later `z_config_drop` is a safe no-op.
+    let loaned = unsafe { &raw mut (*config)._this } as *mut crate::abi::z_loaned_config_t;
+    let Some(cfg) = (unsafe { config_state(loaned) }) else {
+        return Z_ENULL;
+    };
+    // The document is read for the role this session DIALS as, because several keys are
+    // mode-dependent upstream ([`ConfigState::with_default_mode`]). It goes through wz's one
+    // reader of a stock config, in the plan.
+    let role = dial_role(cfg.first(MODE_KEY));
+    let stated = stated_endpoints(cfg);
+    let document = cfg.with_default_mode(role.to_str()).render_nested().ok();
+    let handle = unsafe { (*config)._this.handle };
+    // SAFETY: a live `Box<ConfigState>` this crate leaked; consumed here.
+    drop(unsafe { Box::from_raw(handle as *mut ConfigState) });
+    unsafe { (*config)._this = crate::abi::z_owned_config_t::null_value() };
+
+    // Everything the document decides, and every refusal, before anything is bound or dialled.
+    let plan = match OpenPlan::resolve(role, stated, document.as_deref()) {
+        Ok(plan) => plan,
+        Err(refusal) => return refusal_code(refusal),
+    };
+    #[cfg(all(
+        feature = "zenoh-c-shared-memory",
+        not(feature = "zenoh-c-no-unstable-api")
+    ))]
+    let shm_keys = plan.shm;
+    #[allow(unused_mut)]
+    let mut arguments = plan.into_arguments(abi_choices(shm_clients));
+    // R3065 -- a session opened over a client storage advertises the protocols of THAT
+    // reader: the stance takes both from the one set, so the list a peer's sender reads is
+    // never wider than what the session resolves.
+    #[cfg(feature = "zenoh-c-shared-memory")]
+    if let Some(set) = arguments.stance.shm_clients.clone() {
+        arguments.stance = match arguments.stance.with_shm_clients(set) {
+            Ok(stance) => stance,
+            // More protocols than an auth segment has slots for: upstream's
+            // `AuthUnicast::new` refuses it, which fails the open.
+            Err(_) => return Z_ENETWORK,
+        };
+    }
+    match arguments.run() {
+        Ok(state) => {
+            // R2957 — the session's own shared-memory provider, as its
+            // config states it; built on first ask, as upstream's is.
+            #[cfg(all(
+                feature = "zenoh-c-shared-memory",
+                not(feature = "zenoh-c-no-unstable-api")
+            ))]
+            let _ = state.set_abi_extension(crate::shm::SessionShm::from_config(
+                shm_keys.enabled,
+                shm_keys.transport_optimization,
+                shm_keys.pool_size,
+            ));
+            let h = Box::into_raw(Box::new(state)) as Handle;
+            unsafe { *this_ = z_owned_session_t::from_handle(h) };
+            Z_OK
         }
-        // The gravestone contract, and zenoh-c states it explicitly: on failure
-        // "the session will be in its gravestone state". Written BEFORE any
-        // fallible work so it holds on every error path.
-        unsafe { *this_ = z_owned_session_t::null_value() };
-
-        // z_open CONSUMES the config: reclaim it and null the source, so a
-        // defensive later `z_config_drop` is a safe no-op.
-        let loaned = unsafe { &raw mut (*config)._this } as *mut crate::abi::z_loaned_config_t;
-        let Some(cfg) = (unsafe { config_state(loaned) }) else {
-            return Z_ENULL;
-        };
-        // R2948 — the whole list; each endpoint is dialled on its own schedule.
-        let connect: Vec<String> = cfg
-            .all(CONNECT_KEY)
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
-        let whatami = dial_whatami(cfg);
-        let ingest = read_node(cfg, whatami);
-        let listen = listen_endpoints(cfg, ingest.as_ref(), whatami);
-        // R3064 -- the clock map the document means. Read off the ingest and not the node
-        // config, because only the ingest knows whether the key was NAMED: the field reads
-        // `false` for a document that never mentioned it, and a router's own default is on.
-        let timestamping = ingest.as_ref().map_or_else(
-            TimestampingEnabled::default,
-            ZenohConfigIngest::timestamping_enabled,
-        );
-        let node = ingest.map(|ingest| ingest.config);
-        // The batch size the session ADVERTISES: `transport/link/tx/batch_size`, which the
-        // peer's own is negotiated down against (the smaller wins) and a frame past which is
-        // sent as fragments. A config that states none is zenoh's default.
-        let batch_size = node
-            .as_ref()
-            .map_or(DEFAULT_BATCH_SIZE, |node| node.batch_size);
-        let phase = node.as_ref().map(|node| dial_phase(node, whatami));
-        // R3076 -- what an endpoint that cannot be bound does to the open (`listen/exit_on_failure`
-        // for this node's role, true when the document says nothing, as upstream's default is),
-        // and R3089 -- how long and how often it is tried (`listen/timeout_ms`, `listen/retry`).
-        let listen_phase = node.as_ref().map_or(ListenPhase::SHIPPED, listen_phase_of);
-        let handle = unsafe { (*config)._this.handle };
-        // SAFETY: a live `Box<ConfigState>` this crate leaked; consumed here.
-        drop(unsafe { Box::from_raw(handle as *mut ConfigState) });
-        unsafe { (*config)._this = crate::abi::z_owned_config_t::null_value() };
-
-        // The authentication and the traffic policy the config asks the node to hold. Decided
-        // before anything is bound or dialled: a config that names a security mechanism this open
-        // cannot hold must not become a node that runs without it.
-        let (auth, policy) = match node.as_ref().map(node_security_of).transpose() {
-            Ok(Some((auth, policy))) => (auth, policy),
-            Ok(None) => (None, NodePolicy::default()),
-            Err(()) => return Z_EINVAL,
-        };
-        // The certificate material the config names for the `tls/` and `quic/` links, refused
-        // like a credential file when it cannot be read.
-        let tls = match node.as_ref().map(tls_of).transpose() {
-            Ok(tls) => tls.unwrap_or_default(),
-            Err(_) => return Z_EINVAL,
-        };
-
-        // The id this config STATES for its session, if it states one. Read off
-        // the node the reader already parsed, so a config's `id` is one value
-        // whether it arrived by an insert, by a document or from a file, and the
-        // session stands on it: `z_info_zid` reports it and the INIT carries it,
-        // which is what upstream's runtime does with the same key.
-        //
-        // The insert doors refuse text zenoh refuses, as upstream's do, so an
-        // unparsable `id` cannot be in a config those built. It is refused here
-        // as well, rather than met with a fresh random id, because a config that
-        // named an identity and got another would be the silent fallback this
-        // crate refuses everywhere else.
-        let zid = match node.as_ref().and_then(|node| node.id.as_deref()) {
-            None => None,
-            Some(text) => match ConfiguredZid::from_zenoh_text(text) {
-                Some(zid) => Some(zid),
-                None => return Z_EINVAL,
-            },
-        };
-
-        // Decided before anything else about the open, as upstream decides it
-        // when the transport manager is built — before a single endpoint is
-        // looked at. A config the reader refused has no offer to derive; the
-        // `phase` check below refuses that open.
-        let offer = match node.as_ref().map(session_offer).transpose() {
-            Ok(offer) => offer.unwrap_or_else(SessionOffer::universal),
-            Err(QosWithLowlatency) => return Z_ENETWORK,
-        };
-
-        // What the session does with multicast scouting: look for the nodes it should connect to
-        // when its config says to. A group the config names that this host cannot scout on is
-        // refused here, as zenoh refuses an address it cannot parse.
-        //
-        // R3070 -- before this a config that left scouting on and stated no endpoint was refused,
-        // which is every config a program writes without `-e`.
-        #[cfg(feature = "scout")]
-        let scouting = match node
-            .as_ref()
-            .map(|node| ScoutingPlan::resolve(node, whatami))
-            .transpose()
-        {
-            Ok(plan) => plan.flatten(),
-            Err(_) => return Z_EINVAL,
-        };
-        // Whether the session looks for a node to connect to. A build without `scout` does not.
-        #[cfg(feature = "scout")]
-        let scouts = scouting.as_ref().is_some_and(ScoutingPlan::scouts);
-        #[cfg(not(feature = "scout"))]
-        let scouts = false;
-        // A build without the `peer` feature is the client's: it dials the endpoints it is told
-        // of (or finds its router, with `scout`), and a listener or a role other than the
-        // client's is refused here and not run as a client it was not asked to be.
-        #[cfg(not(feature = "peer"))]
-        if !listen.is_empty() || whatami != WhatAmI::Client {
-            return Z_EINVAL;
-        }
-        // A build without `timestamping` holds no clock, so a config that enables one for this
-        // role is refused here and not run with the stamping it asked for silently dropped.
-        #[cfg(not(feature = "timestamping"))]
-        if timestamping.get(whatami) {
-            return Z_EINVAL;
-        }
-
-        // How the session gossips, from the four `scouting/gossip` keys a C session reads, or
-        // nothing when its config turns gossip off. A client has no gossip to configure (it is
-        // no peer hat), so its rows are not read. A config whose target for this node's role
-        // names `client` fails the OPEN, as the real library's does with `-4`
-        // (`"client" is not allowed as gossip target`); it is not a config the reader refuses.
-        //
-        // R3075 -- before this the session gossiped under the shipped policy whatever the
-        // config said.
-        #[cfg(feature = "gossip")]
-        let gossip = if whatami == WhatAmI::Client {
-            None
-        } else {
-            match node.as_ref().map_or_else(
-                || Ok(Some(GossipPolicy::shipped(whatami))),
-                |node| GossipPolicy::resolve(node, whatami),
-            ) {
-                Ok(policy) => policy,
-                Err(_) => return Z_ENETWORK,
-            }
-        };
-        // Without the `gossip` feature a session has no policy to hold.
-        #[cfg(not(feature = "gossip"))]
-        let gossip: Option<GossipPolicy> = None;
-
-        // A config that states no endpoint to DIAL. Measured on the real library: a client with
-        // nothing to dial and nothing to scout for fails its open whether or not it states a
-        // listener (zenoh's `start_client` bails "No peer specified and multicast scouting
-        // deactivated!"), and a peer or router opens, ALONE when it has nothing to listen on
-        // either, delivering to its own subscribers. A client that does scout looks for the first
-        // node it can open to and fails after `scouting/timeout` if there is none.
-        //
-        // R3067 -- a config stating both a listener and a dial is a peer that does both, and is
-        // opened as one: the roles are a set (see `open_blocking`).
-        if connect.is_empty() && whatami == WhatAmI::Client && !scouts {
-            return Z_ENETWORK;
-        }
-        // Checked after the refusals above so a config that states no endpoint
-        // keeps answering what it always did.
-        let Some(phase) = phase else {
-            return Z_EINVAL;
-        };
-
-        // Open-debt item 913 — the multicast groups among the endpoints, as zenoh's runtime
-        // sorts them. A listened group is a multicast transport, in every role
-        // (`io/zenoh-transport/src/manager.rs` @ `self.add_listener_multicast(endpoint).await`).
-        // A group to dial is refused by a peer or a router, which fails the open
-        // (`zenoh/src/net/runtime/orchestrator.rs` @
-        // `bail!("Forbidden multicast endpoint in connect list!")`), and a client tries it as a
-        // unicast link it never establishes, so it opens only when another endpoint does: a
-        // client with nothing else to dial fails the open, and one with something else dials that.
-        let (listen, group_endpoints): (Vec<String>, Vec<String>) = listen
-            .into_iter()
-            .partition(|endpoint| !names_a_group(endpoint));
-        let connect = if connect.iter().any(|endpoint| names_a_group(endpoint)) {
-            if whatami != WhatAmI::Client {
-                return Z_ENETWORK;
-            }
-            let dialable: Vec<String> = connect
-                .into_iter()
-                .filter(|endpoint| !names_a_group(endpoint))
-                .collect();
-            if dialable.is_empty() {
-                return Z_ENETWORK;
-            }
-            dialable
-        } else {
-            connect
-        };
-        // A build without `multicast-transport` is handed the groups all the same, and its open
-        // refuses them (`OpenStance::groups`), rather than binding a group as a unicast port.
-        let groups = node.as_ref().map_or_else(Vec::new, |node| {
-            let profile = zenoh_group_profile(node, batch_size);
-            // zenoh reports its multicast transports as shared-memory ones when the session
-            // holds a shared-memory context, which `transport/shared_memory/enabled` gives it on
-            // the shared-memory build and nothing gives it on the other (MEASURED: the real
-            // library's `z_info` printed `is_shm: true` for a zenohd member).
-            #[cfg(feature = "zenoh-c-shared-memory")]
-            let is_shm = node.shared_memory;
-            #[cfg(not(feature = "zenoh-c-shared-memory"))]
-            let is_shm = false;
-            // zenoh announces each subscriber on the groups it holds, on every target but
-            // Windows, where the announcement is compiled out (`#[cfg(not(windows))]` above
-            // `zenoh/src/net/routing/hat/peer/pubsub.rs` @
-            // `if we have a multicast group, we use it to propagate subscribers to upstream gateways.`).
-            let declarations = if cfg!(windows) {
-                GroupDeclarations::None
-            } else {
-                GroupDeclarations::Subscribers
-            };
-            group_endpoints
-                .into_iter()
-                .map(|endpoint| GroupJoin {
-                    endpoint,
-                    profile,
-                    is_shm,
-                    declarations,
-                })
-                .collect()
-        });
-
-        // zenoh's own bounded queue and waits: this ABI stands for zenoh-c.
-        let stance = OpenStance {
-            tx_queue: TxQueueConf::default(),
-            batch_size,
-            offer,
-            zid,
-            // zenoh-c has no switch for a session's read task: its runtime
-            // drives the session from the open.
-            start_read_task: true,
-            timestamping,
-            shm_clients,
-            // R3069 -- zenoh-c runs the callbacks of a delivery a session makes to itself
-            // INSIDE the call that causes it, on the calling thread (measured: a put's
-            // subscriber, a get's queryable and its reply, and a put made from inside a
-            // callback, all complete before the call returns). A callback may therefore run on
-            // the thread that called, as well as on the drive thread for what arrives from a
-            // peer; a C program written for zenoh-c already tolerates both, and one that puts and
-            // then reads what its callback set relies on the first.
-            local_delivery: LocalDeliveryDrain::Caller,
-            #[cfg(feature = "scout")]
-            scouting,
-            // R3073 -- zenoh-c's peer ends what it sends a new peer with the initial interest's
-            // Final, and the open of a zenoh peer that dials this one waits for it.
-            initial_interest: true,
-            // R3074 -- and zenoh-c's peer gossips by default, its config's gossip switch being on
-            // unless it says otherwise: it tells a node it meets which nodes it knows and where
-            // they are, and dials the nodes it is told of, which is how two peers that each
-            // reached a third meet. R3075 -- under the policy its config states.
-            gossip,
-            listen_phase,
-            // zenoh-c's callbacks are concurrent across links (`CClosure` is `Sync`): its
-            // receive runtime serves each link on its own, and a callback that blocks holds
-            // up its link and no other. A face of this session has a thread of its own.
-            face_drive: FaceDrive::PerFace,
-            auth,
-            policy,
-            groups,
-        };
-        // R3065 -- a session opened over a client storage advertises the protocols of THAT
-        // reader: the stance takes both from the one set, so the list a peer's sender reads is
-        // never wider than what the session resolves.
-        #[cfg(feature = "zenoh-c-shared-memory")]
-        let stance = match stance.shm_clients.clone() {
-            Some(set) => match stance.with_shm_clients(set) {
-                Ok(stance) => stance,
-                // More protocols than an auth segment has slots for: upstream's
-                // `AuthUnicast::new` refuses it, which fails the open.
-                Err(_) => return Z_ENETWORK,
-            },
-            None => stance,
-        };
-        match open_blocking(connect, listen, tls, whatami, phase, stance) {
-            Ok(state) => {
-                // R2957 — the session's own shared-memory provider, as its
-                // config states it; built on first ask, as upstream's is.
-                #[cfg(all(
-                    feature = "zenoh-c-shared-memory",
-                    not(feature = "zenoh-c-no-unstable-api")
-                ))]
-                if let Some(node) = node.as_ref() {
-                    let _ = state.set_abi_extension(crate::shm::SessionShm::from_config(
-                        node.shared_memory,
-                        node.shm_transport_optimization,
-                        node.shm_pool_size,
-                    ));
-                }
-                let h = Box::into_raw(Box::new(state)) as Handle;
-                unsafe { *this_ = z_owned_session_t::from_handle(h) };
-                Z_OK
-            }
-            // The core reports a NEUTRAL failure; zenoh-c's vocabulary for "the
-            // session could not be established" is Z_ENETWORK, whichever the cause.
-            Err(OpenError::DriveFailed | OpenError::LinkFailed | OpenError::SchemeUnknown) => {
-                Z_ENETWORK
-            }
+        // The core reports a NEUTRAL failure; zenoh-c's vocabulary for "the
+        // session could not be established" is Z_ENETWORK, whichever the cause.
+        Err(OpenError::DriveFailed | OpenError::LinkFailed | OpenError::SchemeUnknown) => {
+            Z_ENETWORK
         }
     }
 }
@@ -1057,234 +538,4 @@ pub unsafe extern "C" fn z_session_is_closed(session: *const z_loaned_session_t)
         // SAFETY: the caller's contract, delegated.
         unsafe { session_state(session) }.map_or(true, SessionState::is_closed)
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The offer for a config document, read by the one reader `z_open` uses.
-    fn offer_for(document: &str) -> Result<SessionOffer, QosWithLowlatency> {
-        let node = ZenohNodeConfig::from_json5(document)
-            .expect("the document is one the reader accepts")
-            .config;
-        session_offer(&node)
-    }
-
-    /// What an offer holds beside the unicast keys under test: shared memory on the
-    /// arm that carries that axis, because upstream's key defaults on and this
-    /// session reads the key (R3052), and nothing on an arm that does not.
-    fn with_the_arms_default(offer: SessionOffer) -> SessionOffer {
-        #[cfg(all(
-            feature = "zenoh-c-shared-memory",
-            not(feature = "zenoh-c-no-unstable-api")
-        ))]
-        let offer = offer.with_shm(true);
-        offer
-    }
-
-    /// R2970 — an unconfigured session offers QoS, upstream's default, and no
-    /// other capability but the one its arm's defaults add (R3052: shared memory,
-    /// on the arm that carries that axis).
-    #[test]
-    fn an_unconfigured_session_offers_qos_and_nothing_else() {
-        assert_eq!(
-            offer_for("{}"),
-            Ok(with_the_arms_default(
-                SessionOffer::universal().with_mode(TransportMode::Qos)
-            ))
-        );
-    }
-
-    /// Each unicast key reaches the offer on its own. Compression is the one
-    /// half the C-level differential cannot see — no zenoh-c accessor reports
-    /// it — so its staging is held here.
-    #[test]
-    fn each_unicast_key_reaches_the_offer() {
-        assert_eq!(
-            offer_for(r#"{ transport: { unicast: { qos: { enabled: false } } } }"#),
-            Ok(with_the_arms_default(SessionOffer::universal()))
-        );
-        assert_eq!(
-            offer_for(
-                r#"{ transport: { unicast: { qos: { enabled: false }, lowlatency: true } } }"#
-            ),
-            Ok(with_the_arms_default(
-                SessionOffer::universal().with_mode(TransportMode::LowLatency)
-            ))
-        );
-        assert_eq!(
-            offer_for(r#"{ transport: { unicast: { compression: { enabled: true } } } }"#),
-            Ok(with_the_arms_default(
-                SessionOffer::universal()
-                    .with_mode(TransportMode::Qos)
-                    .with_compression(true)
-            ))
-        );
-    }
-
-    /// QoS stays on by default, so lowlatency alone is the refused pair — the
-    /// configuration upstream's manager refuses when it is built.
-    #[test]
-    fn lowlatency_with_the_default_qos_is_refused() {
-        assert_eq!(
-            offer_for(r#"{ transport: { unicast: { lowlatency: true } } }"#),
-            Err(QosWithLowlatency)
-        );
-    }
-
-    /// R3052 -- shared memory is offered from the node's key on the arm that carries
-    /// the axis, and is never offered on one that does not: the offer was staged by
-    /// no arm until the Put codec read the sliced layout, and this is the test that
-    /// moved with that.
-    #[test]
-    fn shared_memory_is_offered_from_the_key_on_the_arm_that_carries_it() {
-        let node = |enabled: bool| {
-            ZenohNodeConfig::from_json5(&format!(
-                r#"{{ transport: {{ shared_memory: {{ enabled: {enabled} }} }} }}"#
-            ))
-            .expect("the document is one the reader accepts")
-            .config
-        };
-        assert!(node(true).shared_memory, "the reader carries the key");
-        assert!(!node(false).shared_memory, "and carries it off");
-        #[cfg(all(
-            feature = "zenoh-c-shared-memory",
-            not(feature = "zenoh-c-no-unstable-api")
-        ))]
-        {
-            assert!(session_offer(&node(true)).expect("no mode conflict").shm);
-            assert!(!session_offer(&node(false)).expect("no mode conflict").shm);
-        }
-        #[cfg(not(all(
-            feature = "zenoh-c-shared-memory",
-            not(feature = "zenoh-c-no-unstable-api")
-        )))]
-        assert!(!session_offer(&node(true)).expect("no mode conflict").shm);
-    }
-
-    /// The node a config document reads as, through the one reader `z_open` uses.
-    fn node_of(document: &str) -> ZenohNodeConfig {
-        ZenohNodeConfig::from_json5(document)
-            .expect("the document is one the reader accepts")
-            .config
-    }
-
-    /// A document stating `transport/link/tls/<key>` as `path`.
-    #[cfg(any(feature = "transport_tls", feature = "transport_quic"))]
-    fn tls_document(key: &str, path: &std::path::Path) -> String {
-        format!(
-            "{{ transport: {{ link: {{ tls: {{ {key}: {:?} }} }} }} }}",
-            path.to_str().expect("a utf-8 path")
-        )
-    }
-
-    /// A temp file holding `text`.
-    #[cfg(any(feature = "transport_tls", feature = "transport_quic"))]
-    fn file_of(text: &str) -> tempfile::NamedTempFile {
-        use std::io::Write as _;
-        let mut file = tempfile::NamedTempFile::new().expect("a temp file");
-        file.write_all(text.as_bytes()).expect("write");
-        file
-    }
-
-    /// A config that names no certificate gives the cert-free material, with the name check on.
-    #[cfg(any(feature = "transport_tls", feature = "transport_quic"))]
-    #[test]
-    fn a_config_that_names_no_certificate_reads_none() {
-        let tls = tls_of(&node_of("{}")).expect("nothing to read");
-        assert!(tls.root_ca_pem.is_none());
-        assert!(tls.listen_cert_pem.is_none());
-        assert!(tls.listen_key_pem.is_none());
-        assert!(
-            tls.verify_name_on_connect,
-            "upstream checks the name by default"
-        );
-        assert!(tls.connect_cert_pem.is_none() && tls.connect_key_pem.is_none());
-        assert!(!tls.require_client_auth);
-    }
-
-    /// Each of the three keys reaches its own slot, read from the file it names.
-    #[cfg(any(feature = "transport_tls", feature = "transport_quic"))]
-    #[test]
-    fn each_tls_key_is_read_from_the_file_it_names() {
-        let file = file_of("PEM TEXT");
-        for key in [
-            "root_ca_certificate",
-            "listen_certificate",
-            "listen_private_key",
-        ] {
-            let tls = tls_of(&node_of(&tls_document(key, file.path()))).expect("a readable file");
-            let slots = [
-                ("root_ca_certificate", tls.root_ca_pem),
-                ("listen_certificate", tls.listen_cert_pem),
-                ("listen_private_key", tls.listen_key_pem),
-            ];
-            for (slot, value) in slots {
-                if slot == key {
-                    assert_eq!(value.as_deref(), Some(&b"PEM TEXT"[..]), "{key}");
-                } else {
-                    assert!(value.is_none(), "{key} filled the {slot} slot too");
-                }
-            }
-        }
-    }
-
-    /// A path that cannot be read is an error, which fails the open.
-    #[cfg(any(feature = "transport_tls", feature = "transport_quic"))]
-    #[test]
-    fn a_certificate_path_that_cannot_be_read_is_refused() {
-        let missing = std::path::Path::new("/nonexistent/wz-tls-ca.pem");
-        assert!(tls_of(&node_of(&tls_document("root_ca_certificate", missing))).is_err());
-        let empty = file_of("");
-        assert!(tls_of(&node_of(&tls_document("listen_certificate", empty.path()))).is_err());
-    }
-
-    /// A config naming a pubkey file pair that cannot be loaded is refused: by the loader in a
-    /// build that holds the identity, and by the key alone in one that cannot.
-    #[test]
-    fn a_pubkey_identity_that_cannot_be_held_is_refused() {
-        let node = node_of(
-            r#"{ transport: { auth: { pubkey: {
-                public_key_file: "/nonexistent/wz-pub.pem",
-                private_key_file: "/nonexistent/wz-priv.pem" } } } }"#,
-        );
-        assert!(node_security_of(&node).is_err());
-    }
-
-    /// A config that names no pubkey key builds no authentication from it.
-    #[test]
-    fn a_config_without_pubkey_keys_builds_no_authentication() {
-        let (auth, _policy) = node_security_of(&node_of("{}")).expect("nothing to refuse");
-        assert!(auth.is_none());
-    }
-
-    /// A loadable identity is held, in a build that has the method.
-    #[cfg(feature = "auth_pubkey")]
-    #[test]
-    fn a_loadable_pubkey_identity_is_held() {
-        use wz_runtime_tokio::extauth_pubkey::generate_keypair;
-        use wz_runtime_tokio::rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey, LineEnding};
-        use wz_runtime_tokio::rsa::RsaPublicKey;
-
-        let private = generate_keypair(512).expect("a 512-bit test key");
-        let public = RsaPublicKey::from(&private)
-            .to_pkcs1_pem(LineEnding::LF)
-            .expect("public PEM");
-        let private = private
-            .to_pkcs1_pem(LineEnding::LF)
-            .expect("private PEM")
-            .to_string();
-        let node = node_of(&format!(
-            "{{ transport: {{ auth: {{ pubkey: {{ public_key_pem: {public:?}, \
-             private_key_pem: {private:?} }} }} }} }}"
-        ));
-        let (auth, _policy) = node_security_of(&node).expect("a loadable identity");
-        let auth = auth.expect("the identity is held");
-        assert!(auth.dial_dispatch().is_some(), "the node presents its key");
-        assert!(
-            auth.accept_dispatch().is_some(),
-            "and asks one of its peers"
-        );
-    }
 }
