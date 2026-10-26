@@ -264,7 +264,17 @@ of documents (every role, every refusal named in the 300 lines, the build's miss
 recorded before the move, and the same corpus must give the same outcomes after it, beside the
 lanes that run `z_open` against zenoh-c.
 
-Z1-pre is the first layer and the tokio factory, with `z_open` calling both. The top crate then
+Z1-pre is the first layer and the tokio factory, with `z_open` calling both. It landed as
+`wz_capi_core::open_plan` (feature `open-plan`, on in the core's default set and named by the
+zenoh-c ABI; the pico ABI leaves it off and compiles none of it): `OpenPlan::resolve(role,
+stated endpoints, document)` is the pure reading with twelve typed refusals that each name their
+key (`OpenRefusal::key`), `AbiChoices` carries what is an ABI's and not the document's, and
+`OpenArguments::run` is the tokio factory. The corpus of the characterisation is
+`wz-capi-c/tests/open_refusals.rs` (nine refusals, recorded on the code before the move and held
+after it) and the plan's own golden descriptions, which hold no secret. Two readings are still the
+caller's: the C ABI reads `connect` and `listen` from its flat key store, and Z1a will read them
+from the document's own resolution; a difference between the two for a table-form endpoint is a
+behaviour question to record when Z1a meets it, not one to change silently. The top crate then
 takes the engine by a feature of the build (D5) and reaches the session by the port, as the pico
 ABI does, for everything but the open itself.
 
