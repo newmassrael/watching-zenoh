@@ -292198,6 +292198,34 @@
         "Read the hosted C1bz of this push per crate (the full lane checks stale budget lines, which the local subset did not). Then wz alone remains in the doc budget; its lane needs a command that does not select the compile_error."
       ]
     },
+    "Round 3751": {
+      "decision_summary": "The session layer's module doc linked the querier and its reply sink, which exist only under query-get, so a build without that feature could not document wz-session-mcu. They are now named as code with the feature that owns them, which reads the same in every build; the all-features documentation C1bz measures is unchanged and still clean. This pays the carry round 3736 left for this file.",
+      "changes_bullets": [
+        "crates/wz-session-mcu/src/slot_active.rs: slot_querier::Query and slot_querier::ReplyLatest are named as code, with query-get, instead of linked."
+      ],
+      "verification_bullets": [
+        "On the build machine cargo doc of wz-session-mcu passes with all features, and with client-slot alone it no longer reports the two links of slot_active.rs."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "With client-slot alone, wz-session-mcu's documentation still fails on two links to the group plane (slot_plane.rs line 8 and slot_node.rs line 903), which exist only under the group features; those are the group plane's to name the same way."
+      ],
+      "publishable_decision_summary": "The session layer's module doc linked the querier and its reply sink, which exist only under query-get, so a build without that feature could not document wz-session-mcu. They are now named as code with the feature that owns them, which reads the same in every build; the all-features documentation C1bz measures is unchanged and still clean. This pays the carry round 3736 left for this file.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-mcu/src/slot_active.rs: slot_querier::Query and slot_querier::ReplyLatest are named as code, with query-get, instead of linked."
+      ],
+      "publishable_verification_bullets": [
+        "On the build machine cargo doc of wz-session-mcu passes with all features, and with client-slot alone it no longer reports the two links of slot_active.rs."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "With client-slot alone, wz-session-mcu's documentation still fails on two links to the group plane (slot_plane.rs line 8 and slot_node.rs line 903), which exist only under the group features; those are the group plane's to name the same way."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
