@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-// GENERATED from deploy/nodes/slot-beacon.toml by scripts/lib/wz_node.py --emit slot-beacon.
-// Do not edit: a change is made in the declaration and generated again.
+// GENERATED from the node declaration slot-beacon.toml (DECLARATION_SHA256 below) by
+// scripts/lib/wz_node.py. Do not edit: a change is made in the declaration and generated again.
 
 pub const NODE_ID: &str = "slot-beacon";
 /// The digest of the declaration file this was generated from; the node's facts note carries it.
-pub const DECLARATION_SHA256: &str = "ed2b38f2ca26544ab12ad611e26d198e55d19c927e93056114cd7a5af2f79d8e";
+pub const DECLARATION_SHA256: &str = "3fb23c3cc2a010c74202e2b2398c8ce36c936d68a90553c958702ba1bc0f2525";
 /// The routers the node dials, as locators.
 pub const DIALS: usize = 1;
 pub const DIALED: [&str; 1] = ["tcp/127.0.0.1:17474"];

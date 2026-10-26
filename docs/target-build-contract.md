@@ -339,6 +339,7 @@ keys, their order and their values are the entry's own output.
                  "cc": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0", "sdk": null },
   "system_assumed": ["libgcc_s.so.1", "libm.so.6", "libc.so.6", "ld-linux-x86-64.so.2"],
   "bundled": [],
+  "inputs": [],
   "artifacts": [
     {
       "id": "capi-pico", "name": "libwz_capi_pico.so", "kind": "shared-library",
@@ -408,7 +409,10 @@ entry reads `{ "soname": "libc++_shared.so", "provided_by": "bundled", "artifact
 
 `bundled` was added within schema 1 (T7: an added key changes the meaning of none). The size
 is the NDK 30 file's, read by `--sdk-bundle-check`; no wz artifact needs it today, so no
-manifest of the lanes bundles it. Nothing here was run on a device.
+manifest of the lanes bundles it. `inputs`, added the same way, lists what the package was
+made from and carries beside it: for a node, its declaration (`{ "kind": "node-declaration",
+"id": "<node id>", "path": "node/<id>.toml", "sha256": "...", "size": N }`, see 5b); it is
+empty for a package with no node. Nothing here was run on a device.
 
 ## 5. Steps
 
@@ -617,9 +621,10 @@ the baseline of what the declaration may say, so the generator and the build can
 the size of a table. The binary carries the ABI stamp (family `declared-node`) and a facts note
 with the node's id and the SHA-256 of the declaration file. The manifest's `provides` repeats both
 from the file (role `declared-node`), and what the node asks of a device is the base plus the
-sockets its endpoint's scheme uses. `--verify` resolves the declaration again, so a declaration
-edited after the build, a file built from another declaration, or a file built with other features
-is a finding. The artifact row lists the operating systems its port exists for (`os`): the posix
+sockets its endpoint's scheme uses. `--verify` resolves the declaration again from the copy the
+package carries (the paragraph on a declaration given as a file, below), so a declaration edited
+after the build, a file built from another declaration, or a file built with other features is a
+finding. The artifact row lists the operating systems its port exists for (`os`): the posix
 port exists for Linux and for QNX Neutrino (both stacks, io-pkt and io-sock; `wz-runtime-posix` is
 empty on any other OS), so an Android platform row is refused by name, with the reason, before
 anything is built. The Neutrino port differs in what the C library lacks: `errno` is read through
@@ -649,6 +654,33 @@ on the interface routing picks failed, and the join now falls back to the first 
 and can multicast. What is still not run: the group against a stock multicast peer on a board (the
 Orin board has about a dozen interfaces, and the node joins on the one the stack picks), and the
 paced replay's timing on a board.
+
+**A declaration given as a file (landed; owner, 2026-10-26: cost ignored, the textbook one).** A
+consumer that makes one node per graph cannot register each declaration in this tree, and need not:
+what makes a node correct is the vocabulary, not the registry. Each word is a behaviour with its
+generator rule, its `const` assertions, its link-gate proof and its witness, and a declaration is a
+combination of them that the validator and the node's own assertions hold. So the entry takes a
+declaration two ways: a registered one (`--node ID`, `deploy/nodes/<id>.toml`, whose tracked
+generated file must be current) or a file (`--node-file PATH`, named `<id>.toml` after its
+`[node] id`), validated by the same code and generated into the build's own directory. The registry
+stays what the lanes and the image gates build on every round. Either way the node is identified by
+the SHA-256 of the declaration's bytes, which the built file's facts note carries, and the package
+carries the declaration itself (`node/<id>.toml`, listed in the manifest's `inputs` with its digest
+and size). `--verify` resolves the node from that copy and holds the built file to it with no tree
+consulted: a file built from another declaration, a carried declaration edited, removed or no longer
+valid, and one nothing was built from are each a finding. Layer C1st packages `slot-answerer` both
+ways and requires the two manifests to be the same bytes.
+
+A declaration states `schema = 1` at its top, the number of this contract: a reader refuses a number
+it does not know, a key never changes meaning within one number, and a change a declaration written
+for the previous number cannot survive moves it. `wz_node.py --validate FILE` checks a declaration
+without building it, and `wz_node.py --vocabulary slot` prints, as JSON, what the target builds: each
+endpoint role and entity kind with its keys and their bounds resolved to the target's numbers (a word
+it does not build carries the reason instead), what a group carries, and the budgets and policies a
+declaration may state with the values a node gets when it states none. The vocabulary and the
+validator read one table of shapes (`ENDPOINT_SHAPES`, and `ENTITY_SHAPES` with the target's
+bounds), and the selftest holds them to each other: every integer of every word is accepted at the
+bound the vocabulary states and refused, by its name, one past it.
 
 **The structure of an entity (owner, 2026-10-25: cost ignored, the textbook one).** An entity is a
 kind, a key and a BEHAVIOUR, and the behaviours are a closed vocabulary stated as data: a

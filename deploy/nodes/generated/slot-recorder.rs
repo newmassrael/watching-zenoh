@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-// GENERATED from deploy/nodes/slot-recorder.toml by scripts/lib/wz_node.py --emit slot-recorder.
-// Do not edit: a change is made in the declaration and generated again.
+// GENERATED from the node declaration slot-recorder.toml (DECLARATION_SHA256 below) by
+// scripts/lib/wz_node.py. Do not edit: a change is made in the declaration and generated again.
 
 pub const NODE_ID: &str = "slot-recorder";
 /// The digest of the declaration file this was generated from; the node's facts note carries it.
-pub const DECLARATION_SHA256: &str = "45e4cb1ebd02eb33fa65a290536518f8e4bde270e085cec4bcf45b734342fb70";
+pub const DECLARATION_SHA256: &str = "2217c8caecdb3cd184ef41080828cd5e17e3b8eba635b2480f356da8375a2db7";
 /// The routers the node dials, as locators.
 pub const DIALS: usize = 1;
 pub const DIALED: [&str; 1] = ["tcp/127.0.0.1:17471"];

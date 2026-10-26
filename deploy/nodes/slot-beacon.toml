@@ -11,6 +11,8 @@
 # (crates/wz-integration-tests/tests/wz_declared_token_zenohd_interop.rs): the locator is part of
 # what the node IS, so the router it is tested against listens there.
 
+schema = 1
+
 [node]
 id = "slot-beacon"
 help = "A fixed-memory client that dials a router over TCP and declares four liveliness tokens on every session."

@@ -14179,6 +14179,15 @@ layer_c1st_abi_stamp() {
     [ "$rc" -eq 0 ] && { cmp "$work/na/wz-target-manifest.json" "$work/nb/wz-target-manifest.json" \
         || { echo "  C1st FAIL: two packagings of one node wrote different manifests"; rc=1; }; }
     [ "$rc" -eq 0 ] && { python3 scripts/lib/wz_package.py --verify "$work/na" || rc=1; }
+    # The same declaration given as a file from outside the registry (a consumer's way in) is the same
+    # node: the package carries the same declaration bytes, so the two manifests are the same bytes.
+    if [ "$rc" -eq 0 ]; then
+        mkdir -p "$work/decl" && cp deploy/nodes/slot-answerer.toml "$work/decl/" || rc=1
+    fi
+    [ "$rc" -eq 0 ] && { python3 scripts/lib/wz_package.py --platform linux-x86_64-glibc \
+        --artifact declared-node --node-file "$work/decl/slot-answerer.toml" --out "$work/nf" || rc=1; }
+    [ "$rc" -eq 0 ] && { cmp "$work/na/wz-target-manifest.json" "$work/nf/wz-target-manifest.json" \
+        || { echo "  C1st FAIL: a registered node and the same declaration given as a file differ"; rc=1; }; }
     # A registered profile as the input (T13): the two libraries built from a profile's capabilities,
     # twice, the same manifest bytes, then verified, which resolves the profile again and holds each
     # library to what it turns on and leaves off. The interpreter is provisioned here (the script is

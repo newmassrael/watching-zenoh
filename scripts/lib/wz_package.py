@@ -6,7 +6,7 @@
 describe what was built.
 
     wz_package.py --platform ID --artifact ID... --out DIR [--cargo-profile release|debug]
-                  [--profile ID] [--node ID]
+                  [--profile ID] [--node ID | --node-file PATH]
     wz_package.py --verify DIR
     wz_package.py --sdk-bundle-check ID
     wz_package.py --selftest
@@ -39,12 +39,15 @@ stamp whose family is not the artifact's.
 
 ## A node declaration as an input
 
-An artifact whose row says `input = "node"` is built from a registered node declaration
-(`deploy/nodes/ID.toml`, `docs/target-build-contract.md` 5b): `--node ID` names it, and it is
-validated with its generated constants current before anything is built. The build takes the
-declaration's features and budgets, and the file's facts note carries the node's id and the digest of
-the declaration. The manifest's `provides` repeats both from the file, and `--verify` resolves the
-declaration again, so a declaration edited after the build is a finding. The artifact row states the
+An artifact whose row says `input = "node"` is built from a node declaration
+(`docs/target-build-contract.md` 5b): a registered one (`deploy/nodes/ID.toml`) named with `--node
+ID`, whose tracked generated constants must be current, or a file a consumer wrote, given with
+`--node-file PATH` and generated into the build's own directory. Both are validated the same way
+before anything is built. The build takes the declaration's features and budgets, and the file's
+facts note carries the node's id and the digest of the declaration. The package carries the
+declaration itself (`node/<id>.toml`, the manifest's `inputs`), and `--verify` resolves it from those
+bytes and holds the node file to it with no tree consulted: a node is identified by the digest of what
+it was built from, so a file built from another declaration is a finding. The artifact row states the
 operating systems its port exists for (`os`), and a platform outside them is refused by name.
 
 ## What it does not do
@@ -82,8 +85,11 @@ MANIFEST_NAME = "wz-target-manifest.json"
 MANIFEST_SCHEMA = 1
 
 TOP_KEYS = ["schema", "catalog_version", "built_from", "platform", "profile", "toolchain", "system_assumed",
-            "bundled", "artifacts"]
+            "bundled", "inputs", "artifacts"]
 BUNDLED_KEYS = ["soname", "path", "sha256", "size", "elf"]
+# An input the package carries beside what was built from it: a node declaration, under `node/`, so
+# the package says what it was made from in bytes a reader can hold the built file to with no tree.
+INPUT_KEYS = ["kind", "id", "path", "sha256", "size"]
 PROFILE_KEYS = ["id", "base", "capabilities", "limits"]
 PROFILES_DIR = ROOT / "configs" / "profiles"
 BUILT_FROM_KEYS = ["commit", "tree_clean"]
@@ -102,6 +108,18 @@ class Refusal(Exception):
 # ---------------------------------------------------------------------------
 # What a built file is, from its bytes and the declaration
 # ---------------------------------------------------------------------------
+
+
+def declaration_path(node_id: str) -> str:
+    """Where a node declaration lies in the package: under `node`, by the node's id, which is the
+    name the declaration's own `[node] id` must match."""
+    return f"node/{node_id}.toml"
+
+
+def input_entry(view: dict) -> dict:
+    """The manifest's entry for the declaration a node was built from, from the bytes the build read."""
+    return {"kind": "node-declaration", "id": view["id"], "path": declaration_path(view["id"]),
+            "sha256": view["declaration_sha256"], "size": len(view["source"])}
 
 
 def bundled_path(soname: str) -> str:
@@ -204,14 +222,14 @@ def device_requires(decl: dict, platform: dict, row: dict, features: list[str]) 
     return sorted(wz_config.os_needs_of(decl, on))
 
 
-def node_of_file(decl: dict, row: dict, measured: dict, features: list[str]) -> dict:
-    """The declaration a node-built executable says it was built from, resolved again NOW.
+def node_of_file(row: dict, measured: dict, features: list[str], declarations: dict[str, dict]) -> dict:
+    """The declaration a node-built executable says it was built from, among those the caller holds.
 
     The file's facts note carries the node's id and the digest of the declaration it was generated
-    from. The id names a registered declaration, which must still validate with its generated file
-    current, and its digest must be the one in the file: a declaration edited after the build, or a
-    file built from another one, describes a node that is no longer the declared one. The features
-    the build used must be the ones the declaration asks for.
+    from. A declaration is identified by that digest, not by a name: `declarations` maps a digest to
+    the resolved declaration (the build's own input when packaging, the copy the package carries when
+    verifying), so a file built from any other declaration describes a node the package does not
+    declare. The id must be that declaration's, and the features the build used the ones it asks for.
     """
     lists = measured["facts"] or {}
     for name in ("node_id", "declaration_sha256"):
@@ -219,13 +237,13 @@ def node_of_file(decl: dict, row: dict, measured: dict, features: list[str]) -> 
             raise Refusal(f"{row['id']} is built from a node declaration and its facts note has no single "
                           f"`{name}`: it was not built by this entry")
     node_id, built = lists["node_id"][0], lists["declaration_sha256"][0]
-    try:
-        view = wz_node.resolve(node_id, decl)
-    except (ValueError, OSError) as err:
-        raise Refusal(f"{row['id']} says it is the node `{node_id}`, which does not resolve: {err}") from err
-    if view["declaration_sha256"] != built:
-        raise Refusal(f"{row['id']} was built from declaration {built[:12]} of `{node_id}`, which is "
-                      f"{view['declaration_sha256'][:12]} now: the file describes a node nobody declares")
+    view = declarations.get(built)
+    if view is None:
+        raise Refusal(f"{row['id']} was built from declaration {built[:12]} of `{node_id}`, and the package "
+                      "carries no declaration with that digest: the file describes a node nobody declares")
+    if view["id"] != node_id:
+        raise Refusal(f"{row['id']} says it is the node `{node_id}`, and declaration {built[:12]} is the "
+                      f"node `{view['id']}`")
     # Cargo lists the package's `default` feature among those it enabled, whatever it contains.
     chosen = sorted(set(features) - {"default"})
     if chosen != sorted(view["features"]):
@@ -246,12 +264,14 @@ def node_requires(decl: dict, platform: dict, row: dict, node: dict) -> list[str
 
 
 def artifact_entry(decl: dict, platform: dict, row: dict, relpath: str, blob: bytes, features: list[str],
-                   resolved: dict[str, list[str]] | None = None) -> dict:
+                   resolved: dict[str, list[str]] | None = None,
+                   declarations: dict[str, dict] | None = None) -> dict:
     """The manifest's entry for one built file, from its bytes: the same call serves `package`
     (which writes it) and `--verify` (which compares it).
 
     `resolved` is the features cargo enabled in each package of the build (a build fact, recorded
     in the manifest for the assessed packages only, so a re-measurement can recompute from it).
+    `declarations` are the node declarations the package carries, by digest (`node_of_file`).
     """
     measured = elf_facts.describe(blob)
     stamp = measured["abi_stamp"]
@@ -260,7 +280,8 @@ def artifact_entry(decl: dict, platform: dict, row: dict, relpath: str, blob: by
     features = sorted(features)
     kept = {p: sorted(set((resolved or {}).get(p, []))) for p in wz_config.ASSESSED_PACKAGES}
     if row.get("input") == "node":
-        requires, unassessed = node_requires(decl, platform, row, node_of_file(decl, row, measured, features)), []
+        node = node_of_file(row, measured, features, declarations or {})
+        requires, unassessed = node_requires(decl, platform, row, node), []
     elif row["kind"] == "executable":
         requires, unassessed = runtime_requires(decl, platform, row, kept)
     else:
@@ -448,7 +469,8 @@ def profile_findings(decl: dict, view: dict, entries: list[dict]) -> list[str]:
 
 
 def assemble(decl: dict, platform: dict, built_from: dict, toolchain: dict, entries: list[dict],
-             profile: dict | None = None, bundled: list[dict] | None = None) -> dict:
+             profile: dict | None = None, bundled: list[dict] | None = None,
+             inputs: list[dict] | None = None) -> dict:
     return {
         "schema": MANIFEST_SCHEMA,
         "catalog_version": decl["catalog_version"],
@@ -466,6 +488,7 @@ def assemble(decl: dict, platform: dict, built_from: dict, toolchain: dict, entr
         "toolchain": toolchain,
         "system_assumed": list(platform["system_assumed"]),
         "bundled": list(bundled or []),
+        "inputs": sorted(inputs or [], key=lambda item: item["path"]),
         "artifacts": entries,
     }
 
@@ -508,6 +531,11 @@ def shape_findings(manifest: object) -> list[str]:
         if keys(f"bundled[{i}]", lib, BUNDLED_KEYS):
             if keys(f"bundled[{i}].elf", lib["elf"], ELF_KEYS):
                 keys(f"bundled[{i}].elf.os_floor", lib["elf"]["os_floor"], FLOOR_KEYS)
+    if not isinstance(manifest["inputs"], list):
+        out.append("inputs is not a list")
+        return out
+    for i, item in enumerate(manifest["inputs"]):
+        keys(f"inputs[{i}]", item, INPUT_KEYS)
     if not isinstance(manifest["artifacts"], list) or not manifest["artifacts"]:
         out.append("artifacts is not a non-empty list")
         return out
@@ -573,6 +601,44 @@ def verify_dir(out: pathlib.Path, decl: dict, resolver=None) -> list[str]:
     if "os_provides" not in row or "system_assumed" not in row:
         return findings + [f"platform {row['id']} is unassessed in the declaration"]
     listed = set()
+    # The declarations the package carries, each re-measured and resolved from its own bytes (no tree
+    # is consulted: a node is identified by the digest of what it was built from), so a node file is
+    # held to the declaration beside it and a declaration nothing was built from is a finding.
+    declarations: dict[str, dict] = {}
+    paths = [item["path"] for item in manifest["inputs"]]
+    if paths != sorted(set(paths)):
+        findings.append(f"inputs is {paths}, not one entry per path in path order")
+    with tempfile.TemporaryDirectory(prefix="wz-verify-node-") as work:
+        for item in manifest["inputs"]:
+            who = f"input {item['id']!r}"
+            if item["kind"] != "node-declaration":
+                findings.append(f"{who}: kind {item['kind']!r} is not an input this entry carries")
+                continue
+            if "/" in item["id"] or not safe_relpath(item["path"]) or item["path"] != declaration_path(item["id"]):
+                findings.append(f"{who}: path {item['path']!r} is not node/ and the id, inside the directory")
+                continue
+            listed.add(item["path"])
+            file = out / item["path"]
+            if not file.is_file():
+                findings.append(f"{who}: {item['path']} is missing")
+                continue
+            blob = file.read_bytes()
+            measured = {"sha256": hashlib.sha256(blob).hexdigest(), "size": len(blob)}
+            for key, value in measured.items():
+                if item[key] != value:
+                    findings.append(f"{who}: {key} is {item[key]!r} in the manifest and {value!r} read from "
+                                    f"{item['path']} now")
+            try:
+                view = wz_node.resolve_file(file, decl, pathlib.Path(work))
+            except (ValueError, OSError) as err:
+                findings.append(f"{who}: {item['path']} does not resolve: {err}")
+                continue
+            declarations[view["declaration_sha256"]] = view
+    built_from = {sha for art in manifest["artifacts"] for role in art.get("provides", [])
+                  if isinstance(role, dict) for sha in role.get("declaration_sha256", [])}
+    for item in manifest["inputs"]:
+        if item.get("sha256") not in built_from:
+            findings.append(f"input {item.get('id')!r}: the package carries it and nothing in it was built from it")
     for art in manifest["artifacts"]:
         who = f"artifact {art['id']!r}"
         arow = next((a for a in decl["artifacts"] if a["id"] == art["id"]), None)
@@ -589,7 +655,8 @@ def verify_dir(out: pathlib.Path, decl: dict, resolver=None) -> list[str]:
             continue
         blob = file.read_bytes()
         try:
-            again = artifact_entry(decl, row, arow, art["path"], blob, art["features"], art["resolved_features"])
+            again = artifact_entry(decl, row, arow, art["path"], blob, art["features"], art["resolved_features"],
+                                   declarations)
         except (Refusal, elf_facts.ElfError) as err:
             findings.append(f"{who}: re-measuring {art['path']}: {err}")
             continue
@@ -971,27 +1038,44 @@ def cargo_build(platform: dict, cross: bool, row: dict, cargo_profile: str,
     return found[0], found[1], {p: sorted(f) for p, f in resolved.items()}
 
 
-def node_input(decl: dict, rows: list[dict], node_id: str | None) -> dict | None:
-    """The registered node declaration the build takes, when an artifact is built from one.
+def node_input(decl: dict, rows: list[dict], node_id: str | None, node_file: pathlib.Path | None = None,
+               work: pathlib.Path | None = None) -> dict | None:
+    """The node declaration the build takes, when an artifact is built from one.
 
-    A node is an input like a profile: a registered name, resolved (validated, its generated file
-    current) before anything is built. An artifact built from a declaration with none named, and a
-    declaration named when no artifact takes one, are each refused: the one would build nothing the
-    caller chose, the other would drop a word the caller meant.
+    A node is an input like a profile, resolved (validated, its constants generated) before anything
+    is built. It is given one of two ways: a registered name (`--node ID`, a declaration of
+    `deploy/nodes/`, whose tracked generated file must be current) or a file (`--node-file PATH`,
+    a declaration a consumer wrote, validated the same way and generated into `work`, the build's own
+    directory). Either way the node is identified by the digest of the declaration's bytes, which the
+    built file carries and the package holds the file to. An artifact built from a declaration with
+    none given, a declaration given when no artifact takes one, and both ways at once are each
+    refused: the first would build nothing the caller chose, the others would drop a word the caller
+    meant.
     """
     wanting = [r["id"] for r in rows if r.get("input") == "node"]
+    given = "--node-file" if node_file is not None else "--node" if node_id is not None else None
+    if node_id is not None and node_file is not None:
+        raise Refusal("--node and --node-file each name the node declaration; give one")
     if not wanting:
-        if node_id is not None:
-            raise Refusal(f"--node {node_id} names a node declaration, and none of the artifacts is built "
-                          "from one")
+        if given is not None:
+            raise Refusal(f"{given} names a node declaration, and none of the artifacts is built from one")
         return None
     known = sorted(p.stem for p in wz_node.NODES.glob("*.toml"))
-    if node_id is None:
-        raise Refusal(f"{', '.join(wanting)} is built from a node declaration: name one with --node "
-                      f"(known: {', '.join(known)})")
+    if given is None:
+        raise Refusal(f"{', '.join(wanting)} is built from a node declaration: give a file with --node-file "
+                      f"or name a registered one with --node (known: {', '.join(known)})")
+    if node_file is not None:
+        if work is None:
+            raise RuntimeError("a node declaration given as a file needs the build's own directory")
+        if not node_file.is_file():
+            raise Refusal(f"--node-file {node_file}: no such file")
+        try:
+            return wz_node.resolve_file(node_file, decl, work)
+        except (ValueError, OSError) as err:
+            raise Refusal(f"--node-file {node_file.name}: {err}") from err
     if node_id not in known:
-        raise Refusal(f"no registered node `{node_id}` (known: {', '.join(known)}); the entry takes a name, "
-                      "not a path, so a node is a registered declaration and not a file anyone wrote")
+        raise Refusal(f"no registered node `{node_id}` (known: {', '.join(known)}); a declaration that is not "
+                      "registered is given as a file with --node-file")
     try:
         return wz_node.resolve(node_id, decl)
     except (ValueError, OSError) as err:
@@ -999,9 +1083,21 @@ def node_input(decl: dict, rows: list[dict], node_id: str | None) -> dict | None
 
 
 def package(decl: dict, platform_id: str, artifact_ids: list[str], out: pathlib.Path, cargo_profile: str,
-            profile_id: str | None = None, node_id: str | None = None) -> int:
+            profile_id: str | None = None, node_id: str | None = None,
+            node_file: pathlib.Path | None = None) -> int:
+    """Build, describe and verify; a declaration given as a file is generated into a directory of
+    the build's own, which is gone when the build is."""
+    with tempfile.TemporaryDirectory(prefix="wz-package-node-") as work:
+        return _package(decl, platform_id, artifact_ids, out, cargo_profile, profile_id, node_id, node_file,
+                        pathlib.Path(work))
+
+
+def _package(decl: dict, platform_id: str, artifact_ids: list[str], out: pathlib.Path, cargo_profile: str,
+             profile_id: str | None, node_id: str | None, node_file: pathlib.Path | None,
+             work: pathlib.Path) -> int:
     platform, rows = preflight(decl, platform_id, artifact_ids)
-    node = node_input(decl, rows, node_id)
+    node = node_input(decl, rows, node_id, node_file, work)
+    declarations = {node["declaration_sha256"]: node} if node else {}
     view = None
     if profile_id is not None:
         # Resolved and applied-or-refused before anything is built or created.
@@ -1034,9 +1130,16 @@ def package(decl: dict, platform_id: str, artifact_ids: list[str], out: pathlib.
             # copied without its execute bit is a package that cannot be started.
             shutil.copymode(built, out / sub / want)
             blob = (out / sub / want).read_bytes()
-            entries.append(artifact_entry(decl, platform, row, f"{sub}/{want}", blob, features, resolved))
+            entries.append(artifact_entry(decl, platform, row, f"{sub}/{want}", blob, features, resolved,
+                                          declarations))
         bundled = bundle(platform, entries, out)
-        manifest = assemble(decl, platform, git_state(), toolchain, entries, view, bundled)
+        inputs = []
+        if node is not None:
+            # The declaration travels with what was built from it: the bytes the build read.
+            (out / "node").mkdir(exist_ok=True)
+            (out / declaration_path(node["id"])).write_bytes(node["source"])
+            inputs.append(input_entry(node))
+        manifest = assemble(decl, platform, git_state(), toolchain, entries, view, bundled, inputs)
         (out / MANIFEST_NAME).write_text(render(manifest), encoding="utf-8")
         findings = verify_dir(out, decl)
         if findings:
@@ -1239,6 +1342,7 @@ def _selftest() -> int:
     # it is and which declaration it was built from, and the entry holds both to the declaration now.
     node_row = next(a for a in decl["artifacts"] if a["id"] == "declared-node")
     view = wz_node.resolve("slot-answerer", decl)
+    held = {view["declaration_sha256"]: view}
     node_lists = {"node_id": ["slot-answerer"], "declaration_sha256": [view["declaration_sha256"]]}
 
     def node_file(**changed) -> bytes:
@@ -1247,7 +1351,7 @@ def _selftest() -> int:
     def node_entry(blob: bytes, features: list[str] | None = None, plat: dict | None = None,
                    dec: dict | None = None) -> dict:
         return artifact_entry(dec or decl, plat or platform, node_row, "bin/declared-node", blob,
-                              view["features"] if features is None else features)
+                              view["features"] if features is None else features, None, held)
 
     described = node_entry(node_file())
     expect("a node's role carries its id and the declaration's digest, read from the file",
@@ -1255,22 +1359,92 @@ def _selftest() -> int:
     expect("a node asks for the base and the sockets its endpoint uses, and nothing is unassessed",
            described["device_requires"] == sorted(set(decl["os_base"]) | {"sockets-tcp"})
            and described["unassessed_features"] == [])
+
+    def node_package(where: pathlib.Path, resolved: dict, blob: bytes) -> pathlib.Path:
+        """A package of one node file and the declaration it was built from, as `package` writes it."""
+        (where / "bin").mkdir(parents=True)
+        (where / "bin" / "declared-node").write_bytes(blob)
+        (where / "node").mkdir()
+        (where / declaration_path(resolved["id"])).write_bytes(resolved["source"])
+        entry = artifact_entry(decl, platform, node_row, "bin/declared-node", blob, resolved["features"], None,
+                               {resolved["declaration_sha256"]: resolved})
+        manifest = assemble(decl, platform, {"commit": "0" * 40, "tree_clean": True},
+                            {"rustc": "rustc 0", "cc": None, "sdk": None}, [entry], None, None,
+                            [input_entry(resolved)])
+        expect("the shape of a node manifest is clean", shape_findings(manifest) == [])
+        (where / MANIFEST_NAME).write_text(render(manifest), encoding="utf-8")
+        return where
+
     with tempfile.TemporaryDirectory(prefix="wz-package-node-") as node_work:
-        node_out = pathlib.Path(node_work) / "out"
-        (node_out / "bin").mkdir(parents=True)
-        (node_out / "bin" / "declared-node").write_bytes(node_file())
-        node_manifest = assemble(decl, platform, {"commit": "0" * 40, "tree_clean": True},
-                                 {"rustc": "rustc 0", "cc": None, "sdk": None}, [described])
-        expect("the shape of a node manifest is clean", shape_findings(node_manifest) == [])
-        (node_out / MANIFEST_NAME).write_text(render(node_manifest), encoding="utf-8")
-        expect("a clean node directory verifies", verify_dir(node_out, decl) == [])
-        (node_out / "bin" / "declared-node").write_bytes(node_file(declaration_sha256=["0" * 64]))
-        found = verify_dir(node_out, decl)
-        expect(f"a node file built from another declaration is reported when verified ({found})",
-               any("nobody declares" in f for f in found))
-    refuses("a node file whose declaration has moved since it was built", "nobody declares",
+        root = pathlib.Path(node_work)
+        node_out = node_package(root / "out", view, node_file())
+        expect(f"a clean node directory verifies ({verify_dir(node_out, decl)})", verify_dir(node_out, decl) == [])
+        expect("the package carries the declaration's bytes, named by the node's id",
+               (node_out / "node" / "slot-answerer.toml").read_bytes() == (wz_node.NODES / "slot-answerer.toml").read_bytes())
+        # A declaration nobody registered: a consumer's file, which the package carries and verify
+        # resolves from those bytes alone.
+        (root / "mine").mkdir()
+        mine = root / "mine" / "slot-answerer.toml"
+        mine.write_text(view["source"].decode().replace('help = "', 'help = "A copy outside the registry. ', 1))
+        (root / "gen").mkdir()
+        outside = wz_node.resolve_file(mine, decl, root / "gen")
+        expect("a declaration outside the registry has a digest of its own",
+               outside["declaration_sha256"] != view["declaration_sha256"])
+        foreign = node_package(root / "foreign", outside,
+                               node_file(declaration_sha256=[outside["declaration_sha256"]]))
+        expect(f"a package built from a declaration nobody registered verifies from what it carries "
+               f"({verify_dir(foreign, decl)})", verify_dir(foreign, decl) == [])
+
+        def node_found(label: str, damage, words: str) -> None:
+            """Damage a copy of the clean node package, and the gate must say `words`."""
+            copy_dir = root / "copy"
+            if copy_dir.exists():
+                shutil.rmtree(copy_dir)
+            shutil.copytree(node_out, copy_dir)
+            damage(copy_dir)
+            found = verify_dir(copy_dir, decl)
+            expect(f"{label}: not reported ({found})", any(words in f for f in found))
+
+        def edit_node_manifest(fn):
+            def damage(dir_: pathlib.Path) -> None:
+                data = json.loads((dir_ / MANIFEST_NAME).read_text())
+                fn(data)
+                (dir_ / MANIFEST_NAME).write_text(json.dumps(data, indent=2) + "\n")
+            return damage
+
+        def flip_declaration(dir_: pathlib.Path) -> None:
+            file = dir_ / "node" / "slot-answerer.toml"
+            file.write_bytes(file.read_bytes() + b"# edited after the build\n")
+
+        node_found("a node file built from another declaration",
+                   lambda d: (d / "bin" / "declared-node").write_bytes(node_file(declaration_sha256=["0" * 64])),
+                   "nobody declares")
+        node_found("the carried declaration edited after the build", flip_declaration, "sha256")
+        node_found("the carried declaration edited after the build, seen from the node", flip_declaration,
+                   "nobody declares")
+        node_found("the carried declaration removed", lambda d: (d / "node" / "slot-answerer.toml").unlink(),
+                   "is missing")
+        node_found("the declaration's entry removed from the manifest, its file left",
+                   edit_node_manifest(lambda m: m["inputs"].pop()), "does not describe")
+        node_found("a declaration path that leaves the directory",
+                   edit_node_manifest(lambda m: m["inputs"][0].__setitem__("path", "../slot-answerer.toml")),
+                   "inside the directory")
+        node_found("a carried declaration nothing was built from",
+                   edit_node_manifest(lambda m: m["artifacts"][0]["provides"][0].__setitem__(
+                       "declaration_sha256", ["0" * 64])), "nothing in it was built from it")
+
+        def invalid_declaration(dir_: pathlib.Path) -> None:
+            file = dir_ / "node" / "slot-answerer.toml"
+            file.write_bytes(file.read_bytes().replace(b"schema = 1\n", b""))
+            data = json.loads((dir_ / MANIFEST_NAME).read_text())
+            data["inputs"][0]["sha256"] = hashlib.sha256(file.read_bytes()).hexdigest()
+            data["inputs"][0]["size"] = len(file.read_bytes())
+            (dir_ / MANIFEST_NAME).write_text(json.dumps(data, indent=2) + "\n")
+
+        node_found("a carried declaration that does not validate", invalid_declaration, "does not resolve")
+    refuses("a node file whose declaration the package does not carry", "nobody declares",
             lambda: node_entry(node_file(declaration_sha256=["0" * 64])))
-    refuses("a node file that names a node nobody registered", "does not resolve",
+    refuses("a node file that names another node than its declaration", "says it is the node `nope`",
             lambda: node_entry(node_file(node_id=["nope"])))
     refuses("a node file with no facts note", "has no single",
             lambda: node_entry(_synthetic(node_row, needs)))
@@ -1313,10 +1487,30 @@ def _selftest() -> int:
             lambda: lane_plan(decl, "nope"))
     expect("a node is accepted for a Linux platform", preflight(decl, host, ["declared-node"])[1] == [node_row])
     node_rows = preflight(decl, host, ["declared-node"])[1]
-    refuses("a node artifact with no declaration named", "name one with --node",
+    refuses("a node artifact with no declaration given", "give a file with --node-file",
             lambda: node_input(decl, node_rows, None))
-    refuses("a node declaration nobody registered", "no registered node `nope`",
+    refuses("a node declaration nobody registered, named", "no registered node `nope`",
             lambda: node_input(decl, node_rows, "nope"))
+    with tempfile.TemporaryDirectory(prefix="wz-package-input-") as input_work:
+        work = pathlib.Path(input_work)
+        given = work / "slot-answerer.toml"
+        given.write_bytes((wz_node.NODES / "slot-answerer.toml").read_bytes())
+        refuses("a declaration both named and given as a file", "give one",
+                lambda: node_input(decl, node_rows, "slot-answerer", given, work))
+        refuses("a declaration file when no artifact takes one", "--node-file names a node declaration",
+                lambda: node_input(decl, preflight(decl, host, ["capi-pico"])[1], None, given, work))
+        refuses("a declaration file that is not there", "no such file",
+                lambda: node_input(decl, node_rows, None, work / "absent.toml", work))
+        broken = work / "broken" / "slot-answerer.toml"
+        broken.parent.mkdir()
+        broken.write_bytes(given.read_bytes().replace(b"schema = 1\n", b""))
+        refuses("a declaration file that does not validate", "schema is None",
+                lambda: node_input(decl, node_rows, None, broken, work))
+        from_file = node_input(decl, node_rows, None, given, work)
+        expect("a declaration given as a file is the input, identified by the digest of its bytes",
+               from_file["id"] == "slot-answerer"
+               and from_file["declaration_sha256"] == hashlib.sha256(given.read_bytes()).hexdigest()
+               and from_file["generated"].parent == work)
     refuses("a node declaration named when no artifact takes one", "none of the artifacts",
             lambda: node_input(decl, preflight(decl, host, ["capi-pico"])[1], "slot-answerer"))
     expect("no declaration is no input when no artifact takes one",
@@ -1801,6 +1995,7 @@ def main(argv: list[str]) -> int:
             print(f"  wz-package: {argv[1]} verifies")
         return 1 if findings else 0
     platform_id = out = profile_id = node_id = None
+    node_file: pathlib.Path | None = None
     artifact_ids: list[str] = []
     cargo_profile = "release"
     it = iter(argv)
@@ -1817,6 +2012,8 @@ def main(argv: list[str]) -> int:
             profile_id = next(it, None)
         elif arg == "--node":
             node_id = next(it, None)
+        elif arg == "--node-file":
+            node_file = pathlib.Path(next(it, ""))
         else:
             print(f"wz-package: unknown argument {arg}", file=sys.stderr)
             return 2
@@ -1824,7 +2021,8 @@ def main(argv: list[str]) -> int:
         print(__doc__.split("\n\n")[0], file=sys.stderr)
         return 2
     try:
-        return package(decl, platform_id, artifact_ids, pathlib.Path(out), cargo_profile, profile_id, node_id)
+        return package(decl, platform_id, artifact_ids, pathlib.Path(out), cargo_profile, profile_id, node_id,
+                       node_file)
     except Refusal as err:
         print(f"wz-package: REFUSED -- {err}", file=sys.stderr)
         return 2

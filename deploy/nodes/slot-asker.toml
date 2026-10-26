@@ -11,6 +11,8 @@
 # (crates/wz-integration-tests/tests/wz_declared_querier_zenohd_interop.rs): the locator is part of
 # what the node IS, so the router it is tested against listens there.
 
+schema = 1
+
 [node]
 id = "slot-asker"
 help = "A fixed-memory client that dials a router over TCP, asks one key every period, keeps the latest reply and answers queries from it."

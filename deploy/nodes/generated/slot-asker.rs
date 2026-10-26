@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-// GENERATED from deploy/nodes/slot-asker.toml by scripts/lib/wz_node.py --emit slot-asker.
-// Do not edit: a change is made in the declaration and generated again.
+// GENERATED from the node declaration slot-asker.toml (DECLARATION_SHA256 below) by
+// scripts/lib/wz_node.py. Do not edit: a change is made in the declaration and generated again.
 
 pub const NODE_ID: &str = "slot-asker";
 /// The digest of the declaration file this was generated from; the node's facts note carries it.
-pub const DECLARATION_SHA256: &str = "46b6b79350dc8e8f796790d6e1b5a14f896d9e315b476290d604d51cda15e08a";
+pub const DECLARATION_SHA256: &str = "3d9ee24fae81fc53d2cf615d055187440126f3f494b6217d29943842e176add7";
 /// The routers the node dials, as locators.
 pub const DIALS: usize = 1;
 pub const DIALED: [&str; 1] = ["tcp/127.0.0.1:17473"];

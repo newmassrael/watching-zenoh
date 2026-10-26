@@ -9,6 +9,8 @@
 # (crates/wz-integration-tests/tests/wz_declared_server_zenohd_interop.rs): the locator is part of
 # what the node IS, so the clients are told to connect there.
 
+schema = 1
+
 [node]
 id = "slot-server"
 help = "A fixed-memory node that listens on a TCP port, holds two client sessions and answers their queries under two keys."

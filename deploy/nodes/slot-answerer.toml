@@ -4,6 +4,8 @@
 # queries with documents, on the per-session slot profile (no allocator). The endpoint is the lab's
 # router; a deployment states its own.
 
+schema = 1
+
 [node]
 id = "slot-answerer"
 help = "A fixed-memory client that dials one router over TCP and answers queries under two keys."

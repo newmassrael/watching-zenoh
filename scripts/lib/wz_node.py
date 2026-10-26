@@ -12,6 +12,9 @@ it runs on, held to what the target profile can build.
     wz_node.py --emit ID                print the generated `declared.rs` of the node ID
     wz_node.py --env ID                 print `WZ_LIMIT_<NAME>=<value>` for the budgets the node states
                                         and `WZ_POLICY_<NAME>=<value>` for the policies it states
+    wz_node.py --validate FILE          validate a declaration that is not in the registry (`<id>.toml`)
+    wz_node.py --vocabulary TARGET      print, as JSON, what the target builds: the declaration schema,
+                                        each word's keys and bounds, the budgets and the policies
     wz_node.py --selftest
 
 A node is a declaration and not an argument vector. This module is the first half of turning one
@@ -65,9 +68,21 @@ vocabulary is refused as a typo. A budget the target cannot give, a key longer t
 more queryables than the registry holds and a document longer than the node's storage are refused
 by name.
 
+## The registry and a declaration given as a file
+
+A declaration states `schema = 1` at its top: the number of this contract, which a reader refuses
+when it does not know it. `deploy/nodes/` is the registry: the declarations this tree builds on every
+round (the image gates, the lanes), each with its generated file tracked and held current. A
+declaration need not be registered to be built: a consumer that makes one node per graph gives the
+file (`wz_package.py --node-file`), which is validated exactly as a registered one and generated into
+the build's own directory (`resolve_file`). What makes either correct is the vocabulary, not the
+registry: each word is a behaviour with its generator rule, its `const` assertions, its link-gate
+proof and its witness, and a declaration is a combination the validator and the node's assertions
+hold. `--vocabulary` prints what a target builds from the same tables `validate` reads.
+
 ## What it does not do
 
-It does not build the node: `wz_package.py --node ID` does (section 5b), through `resolve`, which
+It does not build the node: `wz_package.py --node ID` (or `--node-file`) does (section 5b), through `resolve`, which
 hands it the validated declaration, the generated file that is current, the features and budgets
 the build takes and what the endpoints ask of a device. A declaration is held to the budgets of the
 image the node is built in (`image_limits`: the `WZ_LIMIT_*` of that package's cargo config), and
@@ -81,6 +96,7 @@ from documents; the heap runtime is not a target here.
 from __future__ import annotations
 
 import hashlib
+import json
 import pathlib
 import re
 import sys
@@ -97,14 +113,87 @@ from wz_keyexpr import ZID_RE, key_problem, rust_string  # noqa: E402,F401
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 NODES = ROOT / "deploy" / "nodes"
 
+# The schema of a declaration: the number a declaration states as its top-level `schema`. A reader
+# refuses a number it does not know; a key is never given another meaning within one number, and a
+# change a declaration written for the previous number cannot survive moves it.
+DECLARATION_SCHEMA = 1
+
+# The shape of each word of the vocabulary: the keys it takes and the value of each. An integer's
+# bounds are numbers or the name of the target's field that holds the number, so the shape is stated
+# once and each target states its own numbers. `validate` reads this table for which keys a word may
+# have and the range of each integer, and `vocabulary` prints it resolved against a target, so what a
+# consumer is told a target builds and what the target accepts are one statement.
+#   value: `locator` (<scheme>/<a.b.c.d>:<port>), `zid` (lowercase hex), `key-expression` (a key or a
+#   pattern, held to MAX_KEYEXPR_BYTES), `key` (a literal key: no `*`, no `$`), `cell-key` (the key
+#   of a subscriber or a querier of the same node), `integer` (from `min` to `max`).
+def _key(value: str, required: bool = True) -> dict:
+    return {"value": value, "required": required}
+
+
+def _int(low: int, high: int | str, required: bool = True, default: int | None = None) -> dict:
+    spec = {"value": "integer", "required": required, "min": low, "max": high}
+    if default is not None:
+        spec["default"] = default
+    return spec
+
+
+ENDPOINT_SHAPES = {
+    "dial": {"keys": {"locator": _key("locator")}},
+    "listen": {"keys": {"locator": _key("locator"), "accepts": _int(1, "max_accepts")}},
+    "multicast": {"keys": {"locator": _key("locator"), "members": _int(1, "max_members"),
+                           "ttl": _int(1, 255, required=False, default=1)}},
+    "peer": {"keys": {"locator": _key("locator"), "zid": _key("zid")}},
+}
+# `count` is how many of a kind one node holds: a target's field, or the budget (`limit`) a declaration
+# may raise.
+ENTITY_SHAPES = {
+    "publisher": {"is": "puts a document of its own", "count": {"max": "max_publishers"},
+                  "keys": {"key": _key("key"), "period_ms": _int(1, "period_max"),
+                           "document_bytes": _int(0, "publish_max")}},
+    "subscriber": {"is": "keeps what it receives", "count": {"limit": "MAX_SUBSCRIPTIONS"},
+                   "keys": {"key": _key("key-expression"), "sample_bytes": _int(1, "sample_max")}},
+    "queryable": {"is": "answers from a document or from what a subscriber or querier keeps",
+                  "count": {"limit": "MAX_QUERYABLES"},
+                  "keys": {"key": _key("key-expression"), "document_bytes": _int(0, "document_max", required=False),
+                           "from": _key("cell-key", required=False)},
+                  "one_of": ["document_bytes", "from"]},
+    "querier": {"is": "asks and keeps what comes back", "count": {"max": "max_queriers"},
+                "keys": {"key": _key("key-expression"), "period_ms": _int(1, "period_max"),
+                         "timeout_ms": _int(1, "timeout_max"), "reply_bytes": _int(1, "sample_max")}},
+    "liveliness-token": {"is": "is only its key", "count": {"max": "max_tokens"}, "keys": {"key": _key("key")}},
+}
+
 # The words a declaration may use. A word outside these is a typo; one inside them that a target does
 # not build is a refusal with the target's own reason.
-ENDPOINT_ROLES = ("dial", "listen", "multicast", "peer")
-ENTITY_KINDS = ("publisher", "subscriber", "queryable", "querier", "liveliness-token")
+ENDPOINT_ROLES = tuple(ENDPOINT_SHAPES)
+ENTITY_KINDS = tuple(ENTITY_SHAPES)
 NODE_KEYS = {"id", "help", "target"}
-ENDPOINT_KEYS = {"role", "locator", "accepts", "members", "ttl", "zid"}
-ENTITY_KEYS = {"kind", "key", "document_bytes", "sample_bytes", "from", "period_ms", "timeout_ms", "reply_bytes"}
-TOP_KEYS = {"node", "endpoint", "entity", "limits", "policy", "allow"}
+ENDPOINT_KEYS = {"role"} | {k for shape in ENDPOINT_SHAPES.values() for k in shape["keys"]}
+ENTITY_KEYS = {"kind"} | {k for shape in ENTITY_SHAPES.values() for k in shape["keys"]}
+TOP_KEYS = {"schema", "node", "endpoint", "entity", "limits", "policy", "allow"}
+
+
+def bound(target: dict, value: int | str) -> int:
+    """A bound of the shape table: a number, or the target's field that holds it."""
+    return target[value] if isinstance(value, str) else value
+
+
+def owners(shapes: dict, key: str) -> list[str]:
+    """The words whose shape has `key`, in the table's order."""
+    return [word for word, shape in shapes.items() if key in shape["keys"]]
+
+
+def integer_problems(who: str, item: dict, keys: dict, target: dict) -> list[str]:
+    """Each integer key of a word's shape that is missing (when required) or outside its bounds."""
+    out = []
+    for key, spec in keys.items():
+        if spec["value"] != "integer" or (key not in item and not spec["required"]):
+            continue
+        value = item.get(key)
+        low, high = bound(target, spec["min"]), bound(target, spec["max"])
+        if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+            out.append(f"{who}: {key} is {value!r}, not an integer from {low} to {high}")
+    return out
 
 # What each target builds. `slot` is the per-session fixed-memory profile of the cooperative runtime:
 # one dialled session, no allocator, queries answered from documents that are prefixes of one static.
@@ -139,6 +228,9 @@ TARGETS = {
         # A listener is a stream's: a `tcp/` connection is a link the moment it is accepted, with no
         # handshake of the transport's own to read first.
         "listen_schemes": ("tcp",),
+        # A peer held by its zid is dialled over a secure channel: only that proves the node that
+        # answered is the one the zid names (decision D4 of docs/session-lifecycle-intent.md).
+        "peer_schemes": ("tls",),
         # The sessions a peer opened that the node holds at once; each is a session slot, a pump
         # cell and a task cell of the node's tables, and a pair of link buffers.
         "max_accepts": 4,
@@ -224,6 +316,9 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
     out = []
     for extra in sorted(set(data) - TOP_KEYS):
         out.append(f"`{extra}` is not a table a node declaration has")
+    if data.get("schema") != DECLARATION_SCHEMA:
+        return out + [f"schema is {data.get('schema')!r}; this reader reads node declarations of schema "
+                      f"{DECLARATION_SCHEMA} (state `schema = {DECLARATION_SCHEMA}` at the top)"]
     node = data.get("node")
     if not isinstance(node, dict):
         return out + ["there is no [node] table"]
@@ -264,12 +359,12 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
             if held[role] == target["endpoint_limits"][role] + 1:
                 out.append(f"{who}: more than {target['endpoint_limits'][role]} `{role}` endpoint(s); the "
                            f"{node['target']} target holds {target['endpoint_limits'][role]}")
-        accepts = ep.get("accepts")
-        if role == "listen":
-            if isinstance(accepts, bool) or not isinstance(accepts, int) or not 1 <= accepts <= target["max_accepts"]:
-                out.append(f"{who}: accepts is {accepts!r}, not an integer from 1 to {target['max_accepts']}")
-        elif "accepts" in ep:
-            out.append(f"{who}: only a `listen` endpoint has `accepts`")
+        if role in ENDPOINT_SHAPES:
+            keys = ENDPOINT_SHAPES[role]["keys"]
+            for extra in sorted((set(ep) & ENDPOINT_KEYS) - set(keys) - {"role"}):
+                out.append(f"{who}: only a {' or a '.join(f'`{r}`' for r in owners(ENDPOINT_SHAPES, extra))} "
+                           f"endpoint has `{extra}`")
+            out += integer_problems(who, ep, keys, target)
         zid = ep.get("zid")
         if role == "peer":
             if not isinstance(zid, str) or ZID_RE.fullmatch(zid) is None:
@@ -279,19 +374,6 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
                 out.append(f"{who}: zid {zid} is declared twice")
             else:
                 peer_zids.add(zid)
-        elif "zid" in ep:
-            out.append(f"{who}: only a `peer` endpoint has `zid`")
-        members = ep.get("members")
-        if role == "multicast":
-            if isinstance(members, bool) or not isinstance(members, int) or not 1 <= members <= target["max_members"]:
-                out.append(f"{who}: members is {members!r}, not an integer from 1 to {target['max_members']}")
-            ttl = ep.get("ttl", 1)
-            if isinstance(ttl, bool) or not isinstance(ttl, int) or not 1 <= ttl <= 255:
-                out.append(f"{who}: ttl is {ttl!r}, not an integer from 1 to 255")
-        else:
-            for extra in ("members", "ttl"):
-                if extra in ep:
-                    out.append(f"{who}: only a `multicast` endpoint has `{extra}`")
         match = LOCATOR_RE.fullmatch(ep.get("locator", "")) if isinstance(ep.get("locator"), str) else None
         if match is None:
             out.append(f"{who}: locator {ep.get('locator')!r} is not <scheme>/<a.b.c.d>:<port>")
@@ -303,8 +385,9 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
                            f"{target['listen_refused'][match['scheme']]}")
             elif role == "multicast" and match["scheme"] not in target["multicast_schemes"]:
                 out.append(f"{who}: a group is `{'`, `'.join(target['multicast_schemes'])}`, not `{match['scheme']}`")
-            elif role == "peer" and match["scheme"] != "tls":
-                out.append(f"{who}: a peer held by its zid is dialled over `tls`, not `{match['scheme']}`: only "
+            elif role == "peer" and match["scheme"] not in target["peer_schemes"]:
+                out.append(f"{who}: a peer held by its zid is dialled over "
+                           f"`{'`, `'.join(target['peer_schemes'])}`, not `{match['scheme']}`: only "
                            "a secure channel proves the node that answered is the one the zid names "
                            "(decision D4 of docs/session-lifecycle-intent.md)")
             if any(int(match[o]) > 255 for o in "abcd") or not 1 <= int(match["port"]) <= 65535:
@@ -343,11 +426,16 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
         subscribers += kind == "subscriber"
         publishers += kind == "publisher"
         queriers += kind == "querier"
-        if kind not in ("publisher", "querier") and "period_ms" in ent:
-            out.append(f"{who}: only a publisher or a querier has a `period_ms`")
-        for extra in ("timeout_ms", "reply_bytes"):
-            if kind != "querier" and extra in ent:
-                out.append(f"{who}: only a querier has `{extra}`")
+        shape = ENTITY_SHAPES[kind]
+        for extra in sorted((set(ent) & ENTITY_KEYS) - set(shape["keys"]) - {"kind"}):
+            out.append(f"{who}: a {kind} {shape['is']} and has no `{extra}` (only "
+                       f"{' or '.join(f'a {k}' for k in owners(ENTITY_SHAPES, extra))} has `{extra}`)")
+        one_of = shape.get("one_of", [])
+        stated = [k for k in one_of if k in ent]
+        if one_of and len(stated) != 1:
+            out.append(f"{who}: a {kind} {shape['is']}: state exactly one of "
+                       f"{', '.join(f'`{k}`' for k in one_of)}" + (", not both" if stated else ""))
+        out += integer_problems(who, ent, shape["keys"], target)
         key = ent.get("key")
         why = key_problem(key, values["MAX_KEYEXPR_BYTES"]) if isinstance(key, str) else "is missing"
         # A subscription and a querier each keep their latest in a cell named by the key.
@@ -360,60 +448,15 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
             out.append(f"{who}: key {key!r} names the cell of a {cell_twin} too, and a cell is named by one")
         else:
             seen[kind].add(key)
-        if kind == "subscriber":
-            for extra in ("document_bytes", "from"):
-                if extra in ent:
-                    out.append(f"{who}: a subscriber keeps what it receives and has no `{extra}`")
-            size = ent.get("sample_bytes")
-            if isinstance(size, bool) or not isinstance(size, int) or not 1 <= size <= target["sample_max"]:
-                out.append(f"{who}: sample_bytes is {size!r}, not an integer from 1 to {target['sample_max']}")
-            elif isinstance(key, str):
-                sample_sizes[key] = size
-            continue
-        if kind == "liveliness-token":
-            for extra in ("document_bytes", "sample_bytes", "from"):
-                if extra in ent:
-                    out.append(f"{who}: a liveliness token is only its key and has no `{extra}`")
-            if isinstance(key, str) and ("*" in key or "$" in key):
-                out.append(f"{who}: a token is the liveliness of one key, and {key!r} is a pattern (`*` or `$`)")
-            continue
-        if kind == "publisher":
-            for extra in ("sample_bytes", "from"):
-                if extra in ent:
-                    out.append(f"{who}: a publisher puts a document of its own and has no `{extra}`")
-            if isinstance(key, str) and ("*" in key or "$" in key):
-                out.append(f"{who}: a publisher puts on one key, and {key!r} is a pattern (`*` or `$`)")
-            period = ent.get("period_ms")
-            if isinstance(period, bool) or not isinstance(period, int) or not 1 <= period <= target["period_max"]:
-                out.append(f"{who}: period_ms is {period!r}, not an integer from 1 to {target['period_max']}")
-            size = ent.get("document_bytes")
-            if isinstance(size, bool) or not isinstance(size, int) or not 0 <= size <= target["publish_max"]:
-                out.append(f"{who}: document_bytes is {size!r}, not an integer from 0 to {target['publish_max']}")
-            continue
-        if kind == "querier":
-            for extra in ("document_bytes", "sample_bytes", "from"):
-                if extra in ent:
-                    out.append(f"{who}: a querier asks and keeps what comes back and has no `{extra}`")
-            for name, low, high in (("period_ms", 1, target["period_max"]),
-                                    ("timeout_ms", 1, target["timeout_max"]),
-                                    ("reply_bytes", 1, target["sample_max"])):
-                value = ent.get(name)
-                if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
-                    out.append(f"{who}: {name} is {value!r}, not an integer from {low} to {high}")
-                elif name == "reply_bytes" and isinstance(key, str):
-                    sample_sizes[key] = value
-            continue
-        if "sample_bytes" in ent:
-            out.append(f"{who}: a queryable has no `sample_bytes`; the subscription it answers from has")
-        if "from" in ent:
-            if "document_bytes" in ent:
-                out.append(f"{who}: a queryable answers from a subscription (`from`) or from a document "
-                           "(`document_bytes`), not both")
+        if shape["keys"]["key"]["value"] == "key" and isinstance(key, str) and ("*" in key or "$" in key):
+            out.append(f"{who}: a {kind} is on one key, and {key!r} is a pattern (`*` or `$`)")
+        # What a cell keeps, by the key that names it, for the queryables that answer from it.
+        kept = {"subscriber": "sample_bytes", "querier": "reply_bytes"}.get(kind)
+        size = ent.get(kept) if kept else None
+        if kept and isinstance(key, str) and isinstance(size, int) and not isinstance(size, bool):
+            sample_sizes[key] = size
+        if "from" in shape["keys"] and "from" in ent:
             mirrors.append((who, ent["from"]))
-            continue
-        size = ent.get("document_bytes")
-        if isinstance(size, bool) or not isinstance(size, int) or not 0 <= size <= target["document_max"]:
-            out.append(f"{who}: document_bytes is {size!r}, not an integer from 0 to {target['document_max']}")
     for who, source in mirrors:
         if not isinstance(source, str) or source not in seen["subscriber"] | seen["querier"]:
             out.append(f"{who}: `from` is {source!r}, which is not the key of a subscription or a querier "
@@ -571,8 +614,8 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
             f"// {wz_config.SPDX}",
             f"// {wz_config.COPYRIGHT}",
             "",
-            f"// GENERATED from deploy/nodes/{name}.toml by scripts/lib/wz_node.py --emit {name}.",
-            "// Do not edit: a change is made in the declaration and generated again.",
+            f"// GENERATED from the node declaration {name}.toml (DECLARATION_SHA256 below) by",
+            "// scripts/lib/wz_node.py. Do not edit: a change is made in the declaration and generated again.",
             "",
             f"pub const NODE_ID: &str = {rust_string(name)};",
             "/// The digest of the declaration file this was generated from; the node's facts note carries it.",
@@ -693,6 +736,43 @@ def resolve(name: str, decl: dict, directory: pathlib.Path = NODES) -> dict:
     generated = generated_path(name, directory)
     if not generated.is_file() or generated.read_text(encoding="utf-8") != emit(name, data, sha):
         raise ValueError(f"{name}: {generated.name} is missing or stale: regenerate it with --write")
+    source = (directory / f"{name}.toml").read_bytes()
+    if hashlib.sha256(source).hexdigest() != sha:
+        raise ValueError(f"{name}: the declaration changed while it was read")
+    return {**view_of(name, data, sha, generated, decl), "source": source}
+
+
+def read_file(path: pathlib.Path, decl: dict) -> tuple[str, dict, bytes]:
+    """A declaration that is not in the registry: its bytes, read once, and what they say, validated
+    exactly as a registered one is. Its name is the file's (`<id>.toml`, which `[node] id` must
+    match), so a node is named by what it declares and not by where it was put."""
+    blob = path.read_bytes()
+    name = path.stem
+    try:
+        data = wz_config.read_decl_toml(blob.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as err:
+        raise ValueError(f"{name}: not a TOML declaration: {err}") from err
+    problems = validate(name, data, decl)
+    if problems:
+        raise ValueError(f"{name}: " + "; ".join(problems))
+    return name, data, blob
+
+
+def resolve_file(path: pathlib.Path, decl: dict, work: pathlib.Path) -> dict:
+    """What the entry needs of a declaration given as a file, the registry's twin: the same
+    validation, and the generated constants written into `work` (a directory the caller owns for
+    the build) instead of being held to a tracked copy. The node is identified by the SHA-256 of
+    the bytes read, which is what the built file carries and the package holds the declaration to.
+    `source` is those bytes, which the package carries beside the node."""
+    name, data, blob = read_file(path, decl)
+    sha = hashlib.sha256(blob).hexdigest()
+    generated = work / f"{name}.rs"
+    generated.write_text(emit(name, data, sha), encoding="utf-8")
+    return {**view_of(name, data, sha, generated, decl), "source": blob}
+
+
+def view_of(name: str, data: dict, sha: str, generated: pathlib.Path, decl: dict) -> dict:
+    """The build's view of a validated declaration, however it was given."""
     schemes = [LOCATOR_RE.fullmatch(ep["locator"])["scheme"] for ep in data["endpoint"]]
     facilities = {SCHEME_FACILITIES[s] for s in schemes}
     if any(ep["role"] == "multicast" for ep in data["endpoint"]):
@@ -712,6 +792,58 @@ def resolve(name: str, decl: dict, directory: pathlib.Path = NODES) -> dict:
         "limits": dict(line.split("=", 1) for line in env_lines(data, decl)),
         "policies": dict(line.split("=", 1) for line in policy_lines(data, decl)),
         "facilities": facilities,
+    }
+
+
+def vocabulary(target_id: str, decl: dict) -> dict:
+    """What a target builds, as data a consumer reads before it writes a declaration: the schema
+    number, each endpoint role and entity kind with its keys and their bounds resolved to this
+    target's numbers (a word the target does not build carries the reason instead), what a group
+    carries, and the budgets and policies a declaration may state with the values a node gets when it
+    states none. Made from the tables `validate` reads, so it cannot say a target builds what the
+    target refuses."""
+    target = TARGETS[target_id]
+
+    def resolved(keys: dict) -> dict:
+        return {key: {**spec, **({"min": bound(target, spec["min"]), "max": bound(target, spec["max"])}
+                                 if spec["value"] == "integer" else {})}
+                for key, spec in keys.items()}
+
+    schemes = {"dial": target["schemes"], "listen": target["listen_schemes"],
+               "multicast": target["multicast_schemes"], "peer": target["peer_schemes"]}
+    endpoints = {}
+    for role, shape in ENDPOINT_SHAPES.items():
+        if role not in target["endpoint_limits"]:
+            endpoints[role] = {"built": False, "reason": target["refused"][role]}
+            continue
+        entry = {"built": True, "max": target["endpoint_limits"][role], "schemes": list(schemes[role]),
+                 "keys": resolved(shape["keys"])}
+        if role == "listen":
+            entry["refused_schemes"] = dict(target["listen_refused"])
+        endpoints[role] = entry
+    limits, _ = limit_values(decl, {}, image_limits(target))
+    entities = {}
+    for kind, shape in ENTITY_SHAPES.items():
+        if kind not in target["entity_kinds"]:
+            entities[kind] = {"built": False,
+                              "reason": target["refused"].get(kind, "the target has no behaviour for it yet")}
+            continue
+        count = ({"max": target[shape["count"]["max"]]} if "max" in shape["count"]
+                 else {"limit": shape["count"]["limit"], "default": limits[shape["count"]["limit"]]})
+        entry = {"built": True, "is": shape["is"], "count": count, "keys": resolved(shape["keys"])}
+        if "one_of" in shape:
+            entry["one_of"] = list(shape["one_of"])
+        entities[kind] = entry
+    policies = {pol["id"]: ["on", "off"] if pol["kind"] == "bool" else list(pol["choices"])
+                for pol in decl["policies"]}
+    return {
+        "schema": DECLARATION_SCHEMA,
+        "target": target_id,
+        "endpoints": endpoints,
+        "entities": entities,
+        "group": {"carries": sorted(target["group_kinds"]), "refused": dict(sorted(target["group_refused"].items()))},
+        "limits": dict(sorted(limits.items())),
+        "policies": policies,
     }
 
 
@@ -764,7 +896,9 @@ def write(decl: dict, directory: pathlib.Path = NODES) -> int:
 # Selftest
 # ---------------------------------------------------------------------------
 
-SAMPLE = """[node]
+SAMPLE = """schema = 1
+
+[node]
 id = "n"
 help = "A node."
 target = "slot"
@@ -809,7 +943,8 @@ def _selftest() -> int:
     expect("the documents are the queryables", 'pub const DOCUMENTS: [(&str, usize); 1] = [("lab/doc/a", 512)];' in rs)
     expect("a tls endpoint sets the flag", "pub const TLS: bool = true;" in emit(
         "n", wz_config.read_decl_toml(SAMPLE.replace("tcp/", "tls/")), sha))
-    expect("the file names its source and says it is generated", "GENERATED from deploy/nodes/n.toml" in rs)
+    expect("the file names its source and says it is generated",
+           "GENERATED from the node declaration n.toml" in rs and "deploy/nodes" not in rs)
     expect("the budgets become the limit environment",
            env_lines(data, decl) == ["WZ_LIMIT_MAX_QUERYABLES=2"])
     expect("a node with no subscription declares none and holds cells of one byte nowhere",
@@ -886,7 +1021,9 @@ def _selftest() -> int:
     refuses("a secure listener is refused with the target's reason",
             listening.replace("tcp/0.0.0.0", "tls/0.0.0.0"), "a `tls` listener is not built on slot")
     # A multicast group: a member of it publishes and subscribes, and the rest is refused by name.
-    group_node = """[node]
+    group_node = """schema = 1
+
+[node]
 id = "n"
 help = "A node."
 target = "slot"
@@ -985,7 +1122,7 @@ document_bytes = 8
     refuses("a token with a document", SAMPLE + tok + "document_bytes = 4\n", "has no `document_bytes`")
     refuses("a token with a sample size", SAMPLE + tok + "sample_bytes = 4\n", "has no `sample_bytes`")
     refuses("a token with a source", SAMPLE + tok + 'from = "x"\n', "has no `from`")
-    refuses("a token with a period", SAMPLE + tok + "period_ms = 4\n", "only a publisher or a querier has a `period_ms`")
+    refuses("a token with a period", SAMPLE + tok + "period_ms = 4\n", "only a publisher or a querier has `period_ms`")
     refuses("two tokens of one key", SAMPLE + tok + tok, "declared twice")
     expect("a token and a publisher of one key are not a duplicate",
            problems(SAMPLE + tok + '\n[[entity]]\nkind = "publisher"\nkey = "lab/alive/a"\nperiod_ms = 5\n'
@@ -1068,9 +1205,9 @@ document_bytes = 8
     refuses("a publisher with a source", SAMPLE + pub + 'from = "lab/in/a"\n', "has no `from`")
     refuses("a publisher with a sample size", SAMPLE + pub + "sample_bytes = 4\n", "has no `sample_bytes`")
     refuses("a period on a queryable", SAMPLE.replace("512", "512\nperiod_ms = 5"),
-            "only a publisher or a querier has a `period_ms`")
+            "only a publisher or a querier has `period_ms`")
     refuses("a period on a subscriber", SAMPLE + sub + "period_ms = 5\n",
-            "only a publisher or a querier has a `period_ms`")
+            "only a publisher or a querier has `period_ms`")
     refuses("two publishers of one key", SAMPLE + pub + pub, "declared twice")
     refuses("more publishers than the task cell keeps",
             SAMPLE + "".join(pub.replace("lab/out/beat", f"lab/out/{i}") for i in range(5)), "5 publishers")
@@ -1191,7 +1328,10 @@ document_bytes = 8
     refuses("an allowance of a key nothing concrete meets",
             closed + peer + allow.replace("lab/doc/a", "zzz/**"), "allows nothing")
     refuses("no help", SAMPLE.replace('help = "A node."\n', ""), "help is missing")
-    refuses("no node table", "[limits]\nMAX_QUERYABLES = 2\n", "no [node] table")
+    refuses("no node table", "schema = 1\n[limits]\nMAX_QUERYABLES = 2\n", "no [node] table")
+    refuses("a declaration that states no schema", SAMPLE.replace("schema = 1\n", ""), "schema is None")
+    refuses("a declaration of a schema this reader does not know", SAMPLE.replace("schema = 1", "schema = 2"),
+            "schema is 2")
 
     # The generated copy is held to the declaration: missing, stale and stray are each a finding.
     with tempfile.TemporaryDirectory(prefix="wz-node-") as tmp:
@@ -1245,6 +1385,104 @@ document_bytes = 8
 
     # Every registered declaration validates and its tracked file is current.
     expect("every registered declaration validates and is current", check(decl) == 0)
+
+    # The vocabulary a consumer reads is what the validator holds: every integer of every word the
+    # target builds is accepted at the bound the vocabulary states and refused, by its name, one past.
+    vocab = vocabulary("slot", decl)
+    expect("the vocabulary states this reader's schema and its target",
+           vocab["schema"] == DECLARATION_SCHEMA and vocab["target"] == "slot")
+    head = 'schema = 1\n\n[node]\nid = "n"\nhelp = "A node."\ntarget = "slot"\n'
+    dial = '\n[[endpoint]]\nrole = "dial"\nlocator = "tcp/10.0.0.1:7447"\n'
+
+    def toml_item(table: str, values: dict) -> str:
+        return f"\n[[{table}]]\n" + "".join(
+            f"{k} = {v!r}\n".replace("'", '"') if isinstance(v, str) else f"{k} = {v}\n" for k, v in values.items())
+
+    def at_least(spec: dict, kind: str) -> object:
+        return {"integer": spec.get("min"), "key": f"lab/v/{kind}", "key-expression": f"lab/v/{kind}"}[spec["value"]]
+
+    for kind, entry in vocab["entities"].items():
+        expect(f"the slot target builds a {kind}", entry["built"])
+        base = {"kind": kind, **{k: at_least(s, kind) for k, s in entry["keys"].items() if s["required"]}}
+        if "one_of" in entry:
+            first = entry["one_of"][0]
+            base[first] = at_least(entry["keys"][first], kind)
+        expect(f"a {kind} with the keys the vocabulary requires, at their least, is valid",
+               problems(head + dial + toml_item("entity", base)) == [])
+        for key, spec in entry["keys"].items():
+            if spec["value"] != "integer":
+                continue
+            at_max = problems(head + dial + toml_item("entity", {**base, key: spec["max"]}))
+            past = problems(head + dial + toml_item("entity", {**base, key: spec["max"] + 1}))
+            expect(f"a {kind}'s {key} at the vocabulary's bound {spec['max']} is valid ({at_max})",
+                   not any(f"{key} is" in p for p in at_max))
+            expect(f"a {kind}'s {key} one past the vocabulary's bound is refused by name ({past})",
+                   any(f"{key} is {spec['max'] + 1}" in p for p in past))
+        foreign = sorted(ENTITY_KEYS - set(entry["keys"]) - {"kind"})
+        if foreign:
+            expect(f"a key the vocabulary does not give a {kind} is refused",
+                   any(f"has no `{foreign[0]}`" in p for p in problems(
+                       head + dial + toml_item("entity", {**base, foreign[0]: 1}))))
+    endpoint_base = {"listen": {"role": "listen", "locator": "tcp/127.0.0.1:7500"},
+                     "multicast": {"role": "multicast", "locator": "udp/224.0.0.224:7490"}}
+    for role, base in endpoint_base.items():
+        entry = vocab["endpoints"][role]
+        base = {**base, **{k: s["min"] for k, s in entry["keys"].items() if s["value"] == "integer" and s["required"]}}
+        expect(f"a {role} endpoint with the integers the vocabulary requires, at their least, is valid",
+               problems(head + toml_item("endpoint", base)) == [])
+        for key, spec in entry["keys"].items():
+            if spec["value"] != "integer":
+                continue
+            at_max = problems(head + toml_item("endpoint", {**base, key: spec["max"]}))
+            past = problems(head + toml_item("endpoint", {**base, key: spec["max"] + 1}))
+            expect(f"a {role} endpoint's {key} at the vocabulary's bound is valid ({at_max})",
+                   not any(f"{key} is" in p for p in at_max))
+            expect(f"a {role} endpoint's {key} one past the bound is refused by name ({past})",
+                   any(f"{key} is {spec['max'] + 1}" in p for p in past))
+    expect("the vocabulary's listener schemes are the ones a listener is accepted over",
+           vocab["endpoints"]["listen"]["schemes"] == ["tcp"]
+           and any("listener is not built" in p for p in problems(
+               head + toml_item("endpoint", {"role": "listen", "locator": "udp/127.0.0.1:7500", "accepts": 1}))))
+    expect("the vocabulary names the budgets and their values when a node states none",
+           vocab["entities"]["queryable"]["count"]["limit"] == "MAX_QUERYABLES"
+           and vocab["limits"]["MAX_QUERYABLES"] == vocab["entities"]["queryable"]["count"]["default"])
+
+    # A declaration given as a file is the registry's twin: the same declaration copied out of the
+    # registry resolves to the same node, its generated constants are the tracked file's bytes, and
+    # it is identified by the digest of what was read.
+    with tempfile.TemporaryDirectory(prefix="wz-node-file-") as work:
+        outside = pathlib.Path(work) / "decl"
+        build = pathlib.Path(work) / "build"
+        outside.mkdir()
+        build.mkdir()
+        registered = resolve("slot-answerer", decl)
+        copy = outside / "slot-answerer.toml"
+        copy.write_bytes((NODES / "slot-answerer.toml").read_bytes())
+        given = resolve_file(copy, decl, build)
+        expect("a registered declaration given as a file resolves to the same node",
+               {k: v for k, v in given.items() if k != "generated"}
+               == {k: v for k, v in registered.items() if k != "generated"})
+        expect("and generates the tracked file's bytes into the build's directory",
+               given["generated"].parent == build
+               and given["generated"].read_bytes() == registered["generated"].read_bytes())
+        expect("the digest is of the bytes the package carries",
+               given["declaration_sha256"] == hashlib.sha256(given["source"]).hexdigest())
+        misnamed = outside / "other.toml"
+        misnamed.write_bytes(copy.read_bytes())
+        try:
+            resolve_file(misnamed, decl, build)
+        except ValueError as err:
+            expect(f"a file whose name is not its node's id is refused ({err})", "the file is named" in str(err))
+        else:
+            expect("a file whose name is not its node's id is refused", False)
+        broken = outside / "n.toml"
+        broken.write_text("schema = 1\n[node\n")
+        try:
+            read_file(broken, decl)
+        except ValueError as err:
+            expect(f"a file that is not TOML is refused as such ({err})", "not a TOML declaration" in str(err))
+        else:
+            expect("a file that is not TOML is refused", False)
     print("wz-node: selftest OK")
     return 0
 
@@ -1261,6 +1499,21 @@ def main(argv: list[str]) -> int:
         return check(decl)
     if argv == ["--write"]:
         return write(decl)
+    if len(argv) == 2 and argv[0] == "--validate":
+        try:
+            name, data, blob = read_file(pathlib.Path(argv[1]), decl)
+        except (ValueError, OSError) as err:
+            print(f"wz-node: REFUSED -- {err}", file=sys.stderr)
+            return 1
+        print(f"wz-node: {name} is a valid {data['node']['target']} node (declaration "
+              f"{hashlib.sha256(blob).hexdigest()})")
+        return 0
+    if len(argv) == 2 and argv[0] == "--vocabulary":
+        if argv[1] not in TARGETS:
+            print(f"wz-node: no target `{argv[1]}` (known: {', '.join(sorted(TARGETS))})", file=sys.stderr)
+            return 2
+        print(json.dumps(vocabulary(argv[1], decl), indent=2))
+        return 0
     if len(argv) == 2 and argv[0] in ("--emit", "--env"):
         try:
             data = load(argv[1], decl)

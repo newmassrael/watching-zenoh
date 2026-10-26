@@ -14,6 +14,8 @@
 # (crates/wz-integration-tests/tests/wz_declared_group_pico_interop.rs): the locator is part of what
 # the node IS, so the peers are told to join there.
 
+schema = 1
+
 [node]
 id = "slot-group"
 help = "A fixed-memory node that is a member of a multicast group, publishes on it and keeps what its members put."
