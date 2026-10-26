@@ -107,6 +107,13 @@ fn render_line(args: core::fmt::Arguments<'_>) -> LineBuf {
 /// Print a formatted line on the board's console without allocating: `log_line` for a
 /// firmware that has no heap to build the `String` in, as
 /// `log_args(format_args!("a {}", 1))`. A line longer than [`LOG_LINE_BYTES`] is cut.
+///
+/// Never inlined: the line's buffer is wanted for the length of the one call, and inlined
+/// into a caller it becomes part of the caller's frame for the whole of the caller, under
+/// every call the caller makes. Measured on the T2G fixed client (docs/upstream-parity.md,
+/// step L): inlined into `wz_app_main`, eight copies of the buffer (388 bytes each) were among
+/// its slots, and that frame sits under the node's deepest chain.
+#[inline(never)]
 pub fn log_args(args: core::fmt::Arguments<'_>) {
     let line = render_line(args);
     // SAFETY: the buffer is zero-filled past `len` and `len` leaves one byte, so it is
