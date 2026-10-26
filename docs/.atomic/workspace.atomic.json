@@ -290338,6 +290338,38 @@
         "A stream joined mid-session on a compressed session desynchronises once at its first header byte before the scan finds the headed chain; the units in that first stretch are skipped and counted under resync accounting."
       ]
     },
+    "Round 3704": {
+      "decision_summary": "A peer's reply carrying a key outside a closed key set is now dropped before it reaches a pending query. The reply registry holds a key gate (default: the build's key-set policy, replaceable with set_key_gate) applied at the one seam every reply delivery shares, including the lent and borrowed receive paths. Error replies carry no key and the application's own loopback reply is local, so neither is gated; the peer allowance table is not consulted because a reply answers a query this node asked. Refusals are counted as outside_set and the pending query stays open until its final. Open sets behave as before. Node code still has to pass the same gate to the subscriber table and the reply registry; that adoption is left to the owners of the node images.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/reply.rs: key_gate field, set_key_gate, key_gate_refused, fire_replies_for takes from_peer.",
+        "crates/wz-session-core/src/reply/in_place.rs: the lent path passes from_peer.",
+        "docs/closed-key-set.md: section \"A reply's key, as built\"."
+      ],
+      "verification_bullets": [
+        "New unit test passes with codec-response, codec-response-final, storage-profile, pubsub-put, pubsub-delete, query-reply on; it fails with the gate disabled. Crate unit tests pass in the default and reply feature builds. Clippy -D warnings passes for wz-session-core (default, no-default-features, reply features), wz-session-mcu, wz-capi-coop, wz-runtime-tokio."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "Node adoption of the closed key set (subscriber table, reply registry, peer class); selectors and alias rows; second allowance source; owner decisions on undeclared keys under declared wildcards."
+      ],
+      "publishable_decision_summary": "A peer's reply carrying a key outside a closed key set is now dropped before it reaches a pending query. The reply registry holds a key gate (default: the build's key-set policy, replaceable with set_key_gate) applied at the one seam every reply delivery shares, including the lent and borrowed receive paths. Error replies carry no key and the application's own loopback reply is local, so neither is gated; the peer allowance table is not consulted because a reply answers a query this node asked. Refusals are counted as outside_set and the pending query stays open until its final. Open sets behave as before. Node code still has to pass the same gate to the subscriber table and the reply registry; that adoption is left to the owners of the node images.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/reply.rs: key_gate field, set_key_gate, key_gate_refused, fire_replies_for takes from_peer.",
+        "crates/wz-session-core/src/reply/in_place.rs: the lent path passes from_peer.",
+        "docs/closed-key-set.md: section \"A reply's key, as built\"."
+      ],
+      "publishable_verification_bullets": [
+        "New unit test passes with codec-response, codec-response-final, storage-profile, pubsub-put, pubsub-delete, query-reply on; it fails with the gate disabled. Crate unit tests pass in the default and reply feature builds. Clippy -D warnings passes for wz-session-core (default, no-default-features, reply features), wz-session-mcu, wz-capi-coop, wz-runtime-tokio."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Node adoption of the closed key set (subscriber table, reply registry, peer class); selectors and alias rows; second allowance source; owner decisions on undeclared keys under declared wildcards."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
