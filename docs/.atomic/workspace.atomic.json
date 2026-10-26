@@ -292042,6 +292042,62 @@
         "core.hooksPath names the main checkout's .githooks, so gate 0p binds every push once that checkout reaches this commit; until then land.sh serialises the sessions that use it."
       ]
     },
+    "Round 3747": {
+      "decision_summary": "Half of open-debt item 926 is paid: zenoh-pico's value switch FRAG_MAX_SIZE, the largest message a session rejoins from fragments, is the limit PICO_FRAG_MAX_BYTES (default 4096, pico's), and the C7 row maps to it. The pico interface's sessions on both engines and in every multicast group receive it through LinkRxConf, which wz-capi-core's init_params used to set to the default whatever the interface passed. LinkConf now carries both link halves, as upstream's transport/link block holds them. The same seam made the zenoh-c interface act on transport/link/tx/lease and rx/max_message_size, which it read and dropped. Pico's own behaviour is the test: chains within the ceiling are rejoined, one past it is dropped while the session goes on and z_put still returns Z_OK, as pico's sender cannot know its peer's ceiling. The other half, Z_TRANSPORT_LEASE_EXPIRE_FACTOR, stays open: it is upstream's transport/link/tx/keep_alive too, so it is a session parameter and not one build limit.",
+      "changes_bullets": [
+        "deploy/wz-config.toml: limit PICO_FRAG_MAX_BYTES (4096); the FRAG_MAX_SIZE row of the C7 table is maps, anchored to it; caps_generated.rs and Kconfig.limits regenerated; wz-session-core caps.rs binds it.",
+        "wz-capi-core drive.rs: LinkConf { tx: LinkTx, rx: LinkRxConf } replaces the bare LinkTx every role and group is handed; init_params reads both halves; OpenStance gains link_rx; the groups' MulticastParams take it too.",
+        "wz-capi-core open_plan.rs: the zenoh-c plan reads transport/link/tx/lease and rx/max_message_size into the stance (the lease was a constant); describe() names both, golden updated.",
+        "wz-capi-pico session.rs: PICO_LINK_RX from the limit, given to the tokio stance and to the cooperative engine's CoopConfig, which gains link_rx.",
+        "wz-capi-pico tests: fragmentation_roundtrip asserts pico's two behaviours around the ceiling; teardown_drain queues six MiB as fragmented messages each within the ceiling.",
+        "wz-capi-c tests: the chains of 131072, 262144 and 1044480 bytes (the boundary of the send refusal's unit) move here, where the receiver rejoins up to the slot."
+      ],
+      "verification_bullets": [
+        "On a build host: cargo test of wz-capi-pico (every target), wz-capi-core lib (106), wz-capi-coop (13), wz-capi-c lib (185) and its fragmentation_roundtrip (3), wz-session-core caps; clippy -D warnings of each of the five crates separately: all pass.",
+        "Before the test edits, the crate run showed exactly two red targets, fragmentation_roundtrip and teardown_drain, both sending a pico-interface receiver more than pico rejoins: the measured blast radius of the 4096 default.",
+        "New unit tests with controls: init_params carries a stated receive half (control: it differs from the default); the zenoh-c stance carries a stated lease and ceiling (control: a silent document gives zenoh's defaults).",
+        "Mutation control on teardown_drain: replacing the dial role's drain with a plain drop left the new fixture green 3 of 3, and the ORIGINAL fixture, built with the ceiling raised to 2 MiB, green 3 of 3 as well: the mutation does not reproduce the defect, so the edit did not change what the fixture separates. Whether it still separates anything is carried.",
+        "Static: wz_config --check, upstream_switch_map, prose_named_identifier_gate --check, store_reason_citation_gate, prose_feature_gate --check, count_guard_lint, build_evidence_lint, hook_default_region_gate: pass. Layer C1bz for the five crates: pass.",
+        "reason_review_pin_gate FAILS on origin/main before this change, on four session-core files moved by another session's commit; reported to the sessions, not repaired here."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "reassembly-fsm--prose-sketch/4-timer-quota-pool-config"
+      ],
+      "carry_forward_bullets": [
+        "Open-debt item 926, second half: Z_TRANSPORT_LEASE_EXPIRE_FACTOR (pico 3) is upstream's transport/link/tx/keep_alive (zenoh 4), which wz lists as unhonoured while every session uses the constant 3. Build it as a session parameter beside the lease, honoured from the key and from a pico limit; the capacity model reads the constant, so agree that part with its owner first.",
+        "teardown_drain: a dial role that drops its session without draining passes both the old and the new fixture here; establish whether the pico interface's z_put still queues behind a writer, and if not, what the fixture now guards.",
+        "reason_review_pin_gate: four rows of session-close-ingress are stale on main since the wz-session-core doc round; its owner is being asked, else re-pin them.",
+        "Open-debt item 925 and the sequence-number resolution policy remain the next items of this track."
+      ],
+      "publishable_decision_summary": "Half of open-debt item 926 is paid: zenoh-pico's value switch FRAG_MAX_SIZE, the largest message a session rejoins from fragments, is the limit PICO_FRAG_MAX_BYTES (default 4096, pico's), and the C7 row maps to it. The pico interface's sessions on both engines and in every multicast group receive it through LinkRxConf, which wz-capi-core's init_params used to set to the default whatever the interface passed. LinkConf now carries both link halves, as upstream's transport/link block holds them. The same seam made the zenoh-c interface act on transport/link/tx/lease and rx/max_message_size, which it read and dropped. Pico's own behaviour is the test: chains within the ceiling are rejoined, one past it is dropped while the session goes on and z_put still returns Z_OK, as pico's sender cannot know its peer's ceiling. The other half, Z_TRANSPORT_LEASE_EXPIRE_FACTOR, stays open: it is upstream's transport/link/tx/keep_alive too, so it is a session parameter and not one build limit.",
+      "publishable_changes_bullets": [
+        "deploy/wz-config.toml: limit PICO_FRAG_MAX_BYTES (4096); the FRAG_MAX_SIZE row of the C7 table is maps, anchored to it; caps_generated.rs and Kconfig.limits regenerated; wz-session-core caps.rs binds it.",
+        "wz-capi-core drive.rs: LinkConf { tx: LinkTx, rx: LinkRxConf } replaces the bare LinkTx every role and group is handed; init_params reads both halves; OpenStance gains link_rx; the groups' MulticastParams take it too.",
+        "wz-capi-core open_plan.rs: the zenoh-c plan reads transport/link/tx/lease and rx/max_message_size into the stance (the lease was a constant); describe() names both, golden updated.",
+        "wz-capi-pico session.rs: PICO_LINK_RX from the limit, given to the tokio stance and to the cooperative engine's CoopConfig, which gains link_rx.",
+        "wz-capi-pico tests: fragmentation_roundtrip asserts pico's two behaviours around the ceiling; teardown_drain queues six MiB as fragmented messages each within the ceiling.",
+        "wz-capi-c tests: the chains of 131072, 262144 and 1044480 bytes (the boundary of the send refusal's unit) move here, where the receiver rejoins up to the slot."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: cargo test of wz-capi-pico (every target), wz-capi-core lib (106), wz-capi-coop (13), wz-capi-c lib (185) and its fragmentation_roundtrip (3), wz-session-core caps; clippy -D warnings of each of the five crates separately: all pass.",
+        "Before the test edits, the crate run showed exactly two red targets, fragmentation_roundtrip and teardown_drain, both sending a pico-interface receiver more than pico rejoins: the measured blast radius of the 4096 default.",
+        "New unit tests with controls: init_params carries a stated receive half (control: it differs from the default); the zenoh-c stance carries a stated lease and ceiling (control: a silent document gives zenoh's defaults).",
+        "Mutation control on teardown_drain: replacing the dial role's drain with a plain drop left the new fixture green 3 of 3, and the ORIGINAL fixture, built with the ceiling raised to 2 MiB, green 3 of 3 as well: the mutation does not reproduce the defect, so the edit did not change what the fixture separates. Whether it still separates anything is carried.",
+        "Static: wz_config --check, upstream_switch_map, prose_named_identifier_gate --check, store_reason_citation_gate, prose_feature_gate --check, count_guard_lint, build_evidence_lint, hook_default_region_gate: pass. Layer C1bz for the five crates: pass.",
+        "reason_review_pin_gate FAILS on origin/main before this change, on four session-core files moved by another session's commit; reported to the sessions, not repaired here."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "reassembly-fsm--prose-sketch/4-timer-quota-pool-config"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open-debt item 926, second half: Z_TRANSPORT_LEASE_EXPIRE_FACTOR (pico 3) is upstream's transport/link/tx/keep_alive (zenoh 4), which wz lists as unhonoured while every session uses the constant 3. Build it as a session parameter beside the lease, honoured from the key and from a pico limit; the capacity model reads the constant, so agree that part with its owner first.",
+        "teardown_drain: a dial role that drops its session without draining passes both the old and the new fixture here; establish whether the pico interface's z_put still queues behind a writer, and if not, what the fixture now guards.",
+        "reason_review_pin_gate: four rows of session-close-ingress are stale on main since the wz-session-core doc round; its owner is being asked, else re-pin them.",
+        "Open-debt item 925 and the sequence-number resolution policy remain the next items of this track."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
