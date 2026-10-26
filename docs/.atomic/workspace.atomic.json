@@ -291002,6 +291002,42 @@
         "Still open: wait_declarations_stable and a synced query on the cooperative engine; the listening role."
       ]
     },
+    "Round 3721": {
+      "decision_summary": "A caller's batching window (zp_batch_start .. zp_batch_stop) is the caller's to drain, as in zenoh-pico, where a frame leaves on an overflow, an express message, a transport message such as a keepalive, or the caller's flush or stop, and never because the writer fell idle (vendor/zenoh-pico/src/transport/common/tx.c). A session on a stream link keeps the link's own window open for good and its writer flushes what is staged when it has nothing to write; that idle flush also drained the caller's window, so each message of a window left as its own frame as soon as the writer was idle. Measured from outside: an external program on the pico C API, linked once to zenoh-pico and once to the wz drop-in, had its peer receive two messages where pico let one through (an express put, then a plain one held in the window), and five where pico let four through (a put that overflowed the batch). The idle flush now stands aside while the caller's window is open.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/session_actions.rs: TxConduits::caller_window_open (the caller's flag alone, without the link's auto window); SessionLinkActions::flush_staged sends nothing while it is open.",
+        "crates/wz-runtime-tokio/tests/lent_slot_send.rs: the_writer_at_idle_leaves_a_callers_window_alone, with its control (the link's window alone: the idle flush sends the staged frame)."
+      ],
+      "verification_bullets": [
+        "Negative control: with the guard forced off the new test fails with two frames sent before the stop, the measured symptom; with it on, lent_slot_send 25 of 25.",
+        "Through bx: wz-session-core 787 passed, wz-runtime-tokio 897 passed, wz-capi-pico session_check 2 passed; clippy of wz-session-core and wz-runtime-tokio with --all-targets -D warnings.",
+        "The external measurement is a scratch harness outside this tree; nothing of it is committed."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "The same comparison found the pico ABI advertising zenoh's batch size (65535) in its InitSyn where zenoh-pico 1.10.1 advertises Z_BATCH_UNICAST_SIZE (2048), and fixing the multicast Join's lease and batch: zenoh-pico's value build switches (config.h.in @VAR@) are outside the C7 map. That is the next round."
+      ],
+      "publishable_decision_summary": "A caller's batching window (zp_batch_start .. zp_batch_stop) is the caller's to drain, as in zenoh-pico, where a frame leaves on an overflow, an express message, a transport message such as a keepalive, or the caller's flush or stop, and never because the writer fell idle (vendor/zenoh-pico/src/transport/common/tx.c). A session on a stream link keeps the link's own window open for good and its writer flushes what is staged when it has nothing to write; that idle flush also drained the caller's window, so each message of a window left as its own frame as soon as the writer was idle. Measured from outside: an external program on the pico C API, linked once to zenoh-pico and once to the wz drop-in, had its peer receive two messages where pico let one through (an express put, then a plain one held in the window), and five where pico let four through (a put that overflowed the batch). The idle flush now stands aside while the caller's window is open.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/session_actions.rs: TxConduits::caller_window_open (the caller's flag alone, without the link's auto window); SessionLinkActions::flush_staged sends nothing while it is open.",
+        "crates/wz-runtime-tokio/tests/lent_slot_send.rs: the_writer_at_idle_leaves_a_callers_window_alone, with its control (the link's window alone: the idle flush sends the staged frame)."
+      ],
+      "publishable_verification_bullets": [
+        "Negative control: with the guard forced off the new test fails with two frames sent before the stop, the measured symptom; with it on, lent_slot_send 25 of 25.",
+        "Through bx: wz-session-core 787 passed, wz-runtime-tokio 897 passed, wz-capi-pico session_check 2 passed; clippy of wz-session-core and wz-runtime-tokio with --all-targets -D warnings.",
+        "The external measurement is a scratch harness outside this tree; nothing of it is committed."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The same comparison found the pico ABI advertising zenoh's batch size (65535) in its InitSyn where zenoh-pico 1.10.1 advertises Z_BATCH_UNICAST_SIZE (2048), and fixing the multicast Join's lease and batch: zenoh-pico's value build switches (config.h.in @VAR@) are outside the C7 map. That is the next round."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
