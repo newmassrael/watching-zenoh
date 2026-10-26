@@ -289640,6 +289640,54 @@
         "Read the hosted run of this push per job, compared by head sha; the run of the previous push was cancelled by the next push and graded nothing."
       ]
     },
+    "Round 3690": {
+      "decision_summary": "Repayment of the hosted red of round 3680 and 3675, which were mine. The port's periodic jobs (round 3680) were linked into every client build, unused: pico-client grew from 1,828,385 to 1,853,277 bytes of text against a budget of 1,830,000, measured per commit (3675 itself 1,827,417), and the cooperative scout and admin-space builds grew by 4 and 3 KB. They are now a ticker feature of the cooperative engine and of the tokio engine's advanced plane (wz-capi-core advanced), so a build that starts none carries none. Round 3675 had made wz-session-core's pubsub-put and the node clock unconditional for every user of wz-ext-pubsub, which turned codec-push on in tokio builds that left it off (the loopback gates, the multicast build, the feature census). The publisher's composite is now the advanced-publisher feature of wz-ext-pubsub, which the tokio runtime's ext-pubsub-advanced-publisher turns on.",
+      "changes_bullets": [
+        "crates/wz-capi-coop: feature ticker (the job table, the cut to a read's wait, the run after a step, the two trait methods and tests::ticker); pico's advanced forwards wz-capi-coop?/ticker.",
+        "crates/wz-capi-core: SharedSession.tickers, start_ticker, stop_ticker, the port impl and its test sit behind advanced.",
+        "crates/wz-ext-pubsub: feature advanced-publisher gates the composite module and owns the session-core setters and the optional wz-node-time; wz-session-core is alloc only by default. wz-runtime-tokio's ext-pubsub-advanced-publisher forwards it.",
+        "Gates: census row names advanced-publisher; the non-default test legs of wz-ext-pubsub (31 tests) and wz-capi-coop (51 with ticker) list their features; C1bf covers wz-ext-pubsub; seven deploy locks drop the wz-node-time edge."
+      ],
+      "verification_bullets": [
+        "Size, measured on pc2 with the gate's --measure after the split: pico-client 1,827,901 of 1,830,000; small 1,493,622 of 1,498,000; udp 1,889,017 of 1,892,000; coop-admin-space 1,112,993 of 1,115,000; coop-scout 980,002 of 981,000. The peer's baselines before round 3680 were 1,827,441, 1,112,865 and 979,874, so the residue is 460, 128 and 128 bytes.",
+        "Layers run on pc2 and green: C1bj, C1j, C4e, C1bf (after the rebase), C1cn shard 0; the multicast build the hosted C4e and C1cn shard 1 failed on builds; clippy with -D warnings of wz-ext-pubsub, wz-capi-coop, wz-capi-core in default and all-feature shapes; wz-capi-coop tests with all features, wz-ext-pubsub tests with all features. The hook's static gates: 115 run, 0 failed.",
+        "C1bnl ran its legs for wz-ext-pubsub, wz-capi-coop and wz-capi-core and they passed; the layer is still red for three legs that are not these: the wz-capture tally, router_hot_path_cost, and wz-tls-mbedtls (its vendor submodule is empty on the build host, which is also why C1cn shard 1 reports that crate).",
+        "Not done: C1cn shard 1 is red only for wz-tls-mbedtls on the build host; the hosted run decides it."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "carry_forward_bullets": [
+        "Step 3b, the rest: the cooperative plane needs no new declaration on the port (the pico plane already declares through it); what is left is the pico advanced module over the port without the tokio engine, which needs the subscriber's state machine moved (step 4) because advanced.rs mixes both. Count the 60 subscriber tests and read the host wiring in full first.",
+        "Read the hosted run of this push: C1cs of the five cases, C1bj, C1j, C1bf, C4e, C1cn and C1bnl; the wz-capture, router_hot_path_cost and C0 reds belong to the sessions that took them.",
+        "Read the hosted interop legs of the advanced plane (zenoh-ext and pico) of rounds 3675, 3680 and this one.",
+        "A test feeding wz-ext-pubsub's time_range and the zenoh-util family's the same strings.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine."
+      ],
+      "publishable_decision_summary": "Repayment of the hosted red of round 3680 and 3675, which were mine. The port's periodic jobs (round 3680) were linked into every client build, unused: pico-client grew from 1,828,385 to 1,853,277 bytes of text against a budget of 1,830,000, measured per commit (3675 itself 1,827,417), and the cooperative scout and admin-space builds grew by 4 and 3 KB. They are now a ticker feature of the cooperative engine and of the tokio engine's advanced plane (wz-capi-core advanced), so a build that starts none carries none. Round 3675 had made wz-session-core's pubsub-put and the node clock unconditional for every user of wz-ext-pubsub, which turned codec-push on in tokio builds that left it off (the loopback gates, the multicast build, the feature census). The publisher's composite is now the advanced-publisher feature of wz-ext-pubsub, which the tokio runtime's ext-pubsub-advanced-publisher turns on.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-coop: feature ticker (the job table, the cut to a read's wait, the run after a step, the two trait methods and tests::ticker); pico's advanced forwards wz-capi-coop?/ticker.",
+        "crates/wz-capi-core: SharedSession.tickers, start_ticker, stop_ticker, the port impl and its test sit behind advanced.",
+        "crates/wz-ext-pubsub: feature advanced-publisher gates the composite module and owns the session-core setters and the optional wz-node-time; wz-session-core is alloc only by default. wz-runtime-tokio's ext-pubsub-advanced-publisher forwards it.",
+        "Gates: census row names advanced-publisher; the non-default test legs of wz-ext-pubsub (31 tests) and wz-capi-coop (51 with ticker) list their features; C1bf covers wz-ext-pubsub; seven deploy locks drop the wz-node-time edge."
+      ],
+      "publishable_verification_bullets": [
+        "Size, measured on pc2 with the gate's --measure after the split: pico-client 1,827,901 of 1,830,000; small 1,493,622 of 1,498,000; udp 1,889,017 of 1,892,000; coop-admin-space 1,112,993 of 1,115,000; coop-scout 980,002 of 981,000. The peer's baselines before round 3680 were 1,827,441, 1,112,865 and 979,874, so the residue is 460, 128 and 128 bytes.",
+        "Layers run on pc2 and green: C1bj, C1j, C4e, C1bf (after the rebase), C1cn shard 0; the multicast build the hosted C4e and C1cn shard 1 failed on builds; clippy with -D warnings of wz-ext-pubsub, wz-capi-coop, wz-capi-core in default and all-feature shapes; wz-capi-coop tests with all features, wz-ext-pubsub tests with all features. The hook's static gates: 115 run, 0 failed.",
+        "C1bnl ran its legs for wz-ext-pubsub, wz-capi-coop and wz-capi-core and they passed; the layer is still red for three legs that are not these: the wz-capture tally, router_hot_path_cost, and wz-tls-mbedtls (its vendor submodule is empty on the build host, which is also why C1cn shard 1 reports that crate).",
+        "Not done: C1cn shard 1 is red only for wz-tls-mbedtls on the build host; the hosted run decides it."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 3b, the rest: the cooperative plane needs no new declaration on the port (the pico plane already declares through it); what is left is the pico advanced module over the port without the tokio engine, which needs the subscriber's state machine moved (step 4) because advanced.rs mixes both. Count the 60 subscriber tests and read the host wiring in full first.",
+        "Read the hosted run of this push: C1cs of the five cases, C1bj, C1j, C1bf, C4e, C1cn and C1bnl; the wz-capture, router_hot_path_cost and C0 reds belong to the sessions that took them.",
+        "Read the hosted interop legs of the advanced plane (zenoh-ext and pico) of rounds 3675, 3680 and this one.",
+        "A test feeding wz-ext-pubsub's time_range and the zenoh-util family's the same strings.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
