@@ -291848,6 +291848,50 @@
         "None from this round."
       ]
     },
+    "Round 3742": {
+      "decision_summary": "Two repairs in the cooperative engine's crate, and the reading of the hosted run that refused the push. The anyke reader gate named crates/wz-capi-coop/src/tests/advanced.rs: the recovery get's options spelled the selector parameter as a literal in a file the gate does not take for a test file (its name is not tests.rs and it holds no mod tests), so the test now takes the parameter from selector_params::ANYKE_PARAM, which the zenoh reader owns. Layer C1cf named the crate too: the no_std engine build (the commit that made the lib no_std without std) left `#[cfg(test)] mod tests;` ungated, and its tests run a router stand-in on std threads, so `--no-default-features --all-targets` did not compile (53 errors, reproduced). The module is now `#[cfg(all(test, feature = \"std\"))]`. The previous push's hosted run was red in eleven jobs, and the run before step L1 landed was red in the same ten, so L1 caused none of them.",
+      "changes_bullets": [
+        "crates/wz-capi-coop/src/tests/advanced.rs: the recovery get's parameter is selector_params::ANYKE_PARAM. crates/wz-capi-coop/src/lib.rs: the tests module is compiled only with std.",
+        "docs/hosted-red-acks.md: the row of this push's acknowledgement of the previous run."
+      ],
+      "verification_bullets": [
+        "wz-capi-coop with every plane on: 56 passed after the anyke change. `cargo clippy -p wz-capi-coop --no-default-features --all-targets` failed with 53 errors before the std gate and passed with -D warnings after it. anyke_reader_gate: the finding on the cooperative crate is gone; the one left is crates/wz-zenoh/src/api/selector.rs, which is that crate's session's.",
+        "The hosted run 40336482814 (graded 0eb41830c, red in eleven jobs) read from each job's own log: Layer C1cf is this round's (repaired here); Layers C1cn shard 0 (wz-session-mcu has 137 tests only a feature) and shard 1 (zenoh has 5), C1bf (wz-zenoh missing from COVERED), C1bnl and C1bo for wz-capture, C1 (the open-plan golden), C0 (the pico numbers made five pinned names carried, which its author took out of the set in cbf9c9a6d since; lane reach), A3 (runtime-tokio owns no cfg-necessary symbol, reproduced on this tree), Layer Z and the routing job's time alarm are other work and are not repaired here. The run before step L1 landed (40331829655, graded 898cde544) was red in the same jobs, C1cf and A3 among them, so step L1 caused none.",
+        "Layer C1cs was green in both runs: the eight cooperative budgets held on the hosted machine.",
+        "Not done: the hosted run that holds these commits has not finished."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "carry_forward_bullets": [
+        "L2 of the listening role (a face table of one) is next.",
+        "Layer A3 reads runtime-tokio as owning no cfg-necessary symbol; find the commit that moved it (the facade's lib.rs is its only gate) and tell its session.",
+        "Attribute the 9,000 to 11,000 bytes the query-answering cooperative builds grew beyond the client's at step L1.",
+        "SubscriberPeer::reconcile had no caller before step L1: ask who owns the slot node whether a subscription registered after a peer's interest is meant not to be announced there.",
+        "Read C1cs, C1cc, C1ce, C1co and C1aq to C1av from the first hosted run that finishes and holds step L1."
+      ],
+      "publishable_decision_summary": "Two repairs in the cooperative engine's crate, and the reading of the hosted run that refused the push. The anyke reader gate named crates/wz-capi-coop/src/tests/advanced.rs: the recovery get's options spelled the selector parameter as a literal in a file the gate does not take for a test file (its name is not tests.rs and it holds no mod tests), so the test now takes the parameter from selector_params::ANYKE_PARAM, which the zenoh reader owns. Layer C1cf named the crate too: the no_std engine build (the commit that made the lib no_std without std) left `#[cfg(test)] mod tests;` ungated, and its tests run a router stand-in on std threads, so `--no-default-features --all-targets` did not compile (53 errors, reproduced). The module is now `#[cfg(all(test, feature = \"std\"))]`. The previous push's hosted run was red in eleven jobs, and the run before step L1 landed was red in the same ten, so L1 caused none of them.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-coop/src/tests/advanced.rs: the recovery get's parameter is selector_params::ANYKE_PARAM. crates/wz-capi-coop/src/lib.rs: the tests module is compiled only with std.",
+        "docs/hosted-red-acks.md: the row of this push's acknowledgement of the previous run."
+      ],
+      "publishable_verification_bullets": [
+        "wz-capi-coop with every plane on: 56 passed after the anyke change. `cargo clippy -p wz-capi-coop --no-default-features --all-targets` failed with 53 errors before the std gate and passed with -D warnings after it. anyke_reader_gate: the finding on the cooperative crate is gone; the one left is crates/wz-zenoh/src/api/selector.rs, which is that crate's session's.",
+        "The hosted run 40336482814 (graded 0eb41830c, red in eleven jobs) read from each job's own log: Layer C1cf is this round's (repaired here); Layers C1cn shard 0 (wz-session-mcu has 137 tests only a feature) and shard 1 (zenoh has 5), C1bf (wz-zenoh missing from COVERED), C1bnl and C1bo for wz-capture, C1 (the open-plan golden), C0 (the pico numbers made five pinned names carried, which its author took out of the set in cbf9c9a6d since; lane reach), A3 (runtime-tokio owns no cfg-necessary symbol, reproduced on this tree), Layer Z and the routing job's time alarm are other work and are not repaired here. The run before step L1 landed (40331829655, graded 898cde544) was red in the same jobs, C1cf and A3 among them, so step L1 caused none.",
+        "Layer C1cs was green in both runs: the eight cooperative budgets held on the hosted machine.",
+        "Not done: the hosted run that holds these commits has not finished."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "publishable_carry_forward_bullets": [
+        "L2 of the listening role (a face table of one) is next.",
+        "Layer A3 reads runtime-tokio as owning no cfg-necessary symbol; find the commit that moved it (the facade's lib.rs is its only gate) and tell its session.",
+        "Attribute the 9,000 to 11,000 bytes the query-answering cooperative builds grew beyond the client's at step L1.",
+        "SubscriberPeer::reconcile had no caller before step L1: ask who owns the slot node whether a subscription registered after a peer's interest is meant not to be announced there.",
+        "Read C1cs, C1cc, C1ce, C1co and C1aq to C1av from the first hosted run that finishes and holds step L1."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
