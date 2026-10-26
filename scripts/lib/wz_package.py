@@ -8,6 +8,7 @@ describe what was built.
     wz_package.py --platform ID --artifact ID... --out DIR [--cargo-profile release|debug]
                   [--profile ID] [--node ID]
     wz_package.py --verify DIR
+    wz_package.py --sdk-bundle-check ID
     wz_package.py --selftest
 
 `package` (the default) builds the named artifacts for the platform with cargo, copies each into
@@ -16,13 +17,24 @@ describe what was built.
 it re-measures every artifact the manifest names and compares, so a manifest that no longer says
 what the files are is a finding.
 
+## Bundling (T5)
+
+A NEEDED is `system` when the platform row assumes every device of its kind has it, and `bundled`
+when the row lists it in `bundle_from_sdk`: the SDK ships it for applications to carry and a device
+may lack it. The entry then copies the file the platform's linker finds into `DIR/lib/<SONAME>`,
+measures it, and does the same for what it needs in turn, so the package's closure is closed. The
+manifest's `bundled` lists each with its own measurements, and the artifact's NEEDED entry names the
+file. `--sdk-bundle-check ID` reads every library a row bundles from the SDK in the environment,
+whether or not an artifact needs it today (Layer C1sp runs it where the SDK is).
+
 ## What it refuses, and why that is an exit and not a warning (T10)
 
 A refusal writes NO manifest and removes the directory it made: a tool that reads a half-described
 artifact would ship it. It refuses a platform it has no statement for (a platform that does not
 state `os_provides` and `system_assumed` is unassessed), a missing toolchain variable (named, so
 the caller sees which), a build whose capabilities ask for a facility the platform does not give
-(naming the capability), a NEEDED nobody assumed and nothing bundles (naming the library), and a
+(naming the capability), a NEEDED nobody assumed and nothing bundles (naming the library), a
+library to bundle that the SDK does not have or that is another library than its name says, and a
 stamp whose family is not the artifact's.
 
 ## A node declaration as an input
@@ -65,10 +77,13 @@ import wz_node  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 MANIFEST_NAME = "wz-target-manifest.json"
+# `bundled` (the libraries copied from the SDK, T5) was added within schema 1: an added key changes
+# the meaning of none, and a reader ignores a key it does not know (T7).
 MANIFEST_SCHEMA = 1
 
 TOP_KEYS = ["schema", "catalog_version", "built_from", "platform", "profile", "toolchain", "system_assumed",
-            "artifacts"]
+            "bundled", "artifacts"]
+BUNDLED_KEYS = ["soname", "path", "sha256", "size", "elf"]
 PROFILE_KEYS = ["id", "base", "capabilities", "limits"]
 PROFILES_DIR = ROOT / "configs" / "profiles"
 BUILT_FROM_KEYS = ["commit", "tree_clean"]
@@ -89,18 +104,29 @@ class Refusal(Exception):
 # ---------------------------------------------------------------------------
 
 
-def classify_needed(needed: list[str], assumed: list[str], who: str) -> list[dict]:
-    """Every NEEDED as `system` (assumed by the platform row) or a refusal naming the library."""
+def bundled_path(soname: str) -> str:
+    """Where a bundled library lies in the package: under `lib`, by its SONAME, which is the name the
+    loader looks for."""
+    return f"lib/{soname}"
+
+
+def classify_needed(needed: list[str], platform: dict, who: str) -> list[dict]:
+    """Every NEEDED as `system` (assumed by the platform row), `bundled` (a library the row bundles
+    from the SDK, named by the file it becomes in the package), or a refusal naming the library."""
     out = []
     for soname in needed:
-        if soname not in assumed:
+        if soname in platform["system_assumed"]:
+            out.append({"soname": soname, "provided_by": "system"})
+        elif soname in platform.get("bundle_from_sdk", []):
+            out.append({"soname": soname, "provided_by": "bundled", "artifact": bundled_path(soname)})
+        else:
             raise Refusal(f"{who} needs {soname}, which the platform does not assume and nothing bundles: "
-                          "name it in the platform's system_assumed (measured on a device) or bundle it")
-        out.append({"soname": soname, "provided_by": "system"})
+                          "name it in the platform's system_assumed (every device of the kind has it) or "
+                          "bundle_from_sdk (the SDK ships it and a device may lack it)")
     return out
 
 
-def elf_object(measured: dict, assumed: list[str], who: str) -> dict:
+def elf_object(measured: dict, platform: dict, who: str) -> dict:
     return {
         "class": measured["class"],
         "machine": measured["machine"],
@@ -109,7 +135,7 @@ def elf_object(measured: dict, assumed: list[str], who: str) -> dict:
         "soname": measured["soname"],
         "runpath": measured["runpath"],
         "rpath": measured["rpath"],
-        "needed": classify_needed(measured["needed"], assumed, who),
+        "needed": classify_needed(measured["needed"], platform, who),
         "os_floor": {
             "glibc": measured["glibc_floor"],
             "android_api_note": measured["android_api_note"],
@@ -246,7 +272,7 @@ def artifact_entry(decl: dict, platform: dict, row: dict, relpath: str, blob: by
         "path": relpath,
         "sha256": hashlib.sha256(blob).hexdigest(),
         "size": len(blob),
-        "elf": elf_object(measured, platform["system_assumed"], row["id"]),
+        "elf": elf_object(measured, platform, row["id"]),
         "abi": {"family": stamp["family"], "revision": stamp["revision"], "layout": stamp["layout"]},
         "provides": provides_of(decl, row, features, measured),
         "features": features,
@@ -254,6 +280,58 @@ def artifact_entry(decl: dict, platform: dict, row: dict, relpath: str, blob: by
         "device_requires": requires,
         "unassessed_features": unassessed,
     }
+
+
+def bundled_entry(platform: dict, soname: str, blob: bytes) -> dict:
+    """The manifest's entry for one library the package carries from the SDK, from its bytes: the
+    same call serves `bundle` (which writes it) and `--verify` (which compares it). The file must be
+    the library the NEEDED names (its own SONAME), one the platform bundles, and its own NEEDED are
+    classified like an artifact's, so the closure of the package is closed or refused."""
+    who = f"the bundled {soname}"
+    if soname not in platform.get("bundle_from_sdk", []):
+        raise Refusal(f"{who} is not a library platform {platform['id']} bundles from its SDK")
+    measured = elf_facts.linkage_facts(blob)
+    if measured["soname"] != soname:
+        raise Refusal(f"{who}: the SDK's file says SONAME {measured['soname']!r}, so it is not the library "
+                      "the NEEDED names")
+    return {
+        "soname": soname,
+        "path": bundled_path(soname),
+        "sha256": hashlib.sha256(blob).hexdigest(),
+        "size": len(blob),
+        "elf": elf_object(measured, platform, who),
+    }
+
+
+def bundle(platform: dict, entries: list[dict], out: pathlib.Path, locate=None) -> list[dict]:
+    """Copy into `out/lib` every library the package needs from the SDK, and what those need in turn,
+    and describe each; in SONAME order, so the same inputs give the same manifest.
+
+    `locate` finds a SONAME's file in the SDK (`sdk_library`, the search the platform's linker does);
+    a library the SDK does not have is a refusal naming it, since a package that says `bundled` for a
+    file it does not hold is a closure that is not closed.
+    """
+    locate = locate or sdk_library
+    wanted = [n["soname"] for e in entries for n in e["elf"]["needed"] if n["provided_by"] == "bundled"]
+    done: dict[str, dict] = {}
+    while wanted:
+        soname = wanted.pop(0)
+        if soname in done:
+            continue
+        found = locate(platform, soname)
+        if found is None:
+            raise Refusal(f"{soname} is to be bundled for platform {platform['id']} and the SDK's linker does "
+                          "not find it")
+        dest = out / bundled_path(soname)
+        if dest.exists():
+            raise Refusal(f"{soname} is to be bundled and an artifact of the package has that file name")
+        dest.parent.mkdir(exist_ok=True)
+        # The bytes only: the SDK's own mode (often read-only) is not a property of the library.
+        shutil.copyfile(found, dest)
+        entry = bundled_entry(platform, soname, dest.read_bytes())
+        done[soname] = entry
+        wanted += [n["soname"] for n in entry["elf"]["needed"] if n["provided_by"] == "bundled"]
+    return [done[name] for name in sorted(done)]
 
 
 def preflight(decl: dict, platform_id: str, artifact_ids: list[str]) -> tuple[dict, list[dict]]:
@@ -370,7 +448,7 @@ def profile_findings(decl: dict, view: dict, entries: list[dict]) -> list[str]:
 
 
 def assemble(decl: dict, platform: dict, built_from: dict, toolchain: dict, entries: list[dict],
-             profile: dict | None = None) -> dict:
+             profile: dict | None = None, bundled: list[dict] | None = None) -> dict:
     return {
         "schema": MANIFEST_SCHEMA,
         "catalog_version": decl["catalog_version"],
@@ -387,6 +465,7 @@ def assemble(decl: dict, platform: dict, built_from: dict, toolchain: dict, entr
         "profile": profile,
         "toolchain": toolchain,
         "system_assumed": list(platform["system_assumed"]),
+        "bundled": list(bundled or []),
         "artifacts": entries,
     }
 
@@ -422,6 +501,13 @@ def shape_findings(manifest: object) -> list[str]:
     if manifest["profile"] is not None:
         keys("profile", manifest["profile"], PROFILE_KEYS)
     keys("toolchain", manifest["toolchain"], TOOLCHAIN_KEYS)
+    if not isinstance(manifest["bundled"], list):
+        out.append("bundled is not a list")
+        return out
+    for i, lib in enumerate(manifest["bundled"]):
+        if keys(f"bundled[{i}]", lib, BUNDLED_KEYS):
+            if keys(f"bundled[{i}].elf", lib["elf"], ELF_KEYS):
+                keys(f"bundled[{i}].elf.os_floor", lib["elf"]["os_floor"], FLOOR_KEYS)
     if not isinstance(manifest["artifacts"], list) or not manifest["artifacts"]:
         out.append("artifacts is not a non-empty list")
         return out
@@ -511,6 +597,39 @@ def verify_dir(out: pathlib.Path, decl: dict, resolver=None) -> list[str]:
             if again[key] != art[key]:
                 findings.append(f"{who}: {key} is {art[key]!r} in the manifest and {again[key]!r} "
                                 f"read from {art['path']} now")
+    # The libraries carried from the SDK: each re-measured like an artifact, and the set held to the
+    # closure, so a bundled file nothing needs and a `bundled` NEEDED with no file are both findings.
+    bundled = manifest["bundled"]
+    names = [lib["soname"] for lib in bundled]
+    if bundled and sdk is None:
+        findings.append("libraries are bundled and the manifest names no SDK they were taken from")
+    if names != sorted(set(names)):
+        findings.append(f"bundled is {names}, not one entry per SONAME in SONAME order")
+    for lib in bundled:
+        who = f"bundled {lib['soname']!r}"
+        if "/" in lib["soname"] or not safe_relpath(lib["path"]) or lib["path"] != bundled_path(lib["soname"]):
+            findings.append(f"{who}: path {lib['path']!r} is not lib/ and the SONAME, inside the directory")
+            continue
+        listed.add(lib["path"])
+        file = out / lib["path"]
+        if not file.is_file():
+            findings.append(f"{who}: {lib['path']} is missing")
+            continue
+        try:
+            again = bundled_entry(row, lib["soname"], file.read_bytes())
+        except (Refusal, elf_facts.ElfError) as err:
+            findings.append(f"{who}: re-measuring {lib['path']}: {err}")
+            continue
+        for key in BUNDLED_KEYS:
+            if again[key] != lib[key]:
+                findings.append(f"{who}: {key} is {lib[key]!r} in the manifest and {again[key]!r} "
+                                f"read from {lib['path']} now")
+    asked = {n.get("soname") for item in [*manifest["artifacts"], *bundled]
+             for n in item["elf"]["needed"] if isinstance(n, dict) and n.get("provided_by") == "bundled"}
+    for name in sorted(asked - set(names)):
+        findings.append(f"{name} is needed as bundled and the manifest bundles no {name}")
+    for name in sorted(set(names) - asked):
+        findings.append(f"{name} is bundled and nothing in the package needs it")
     profile = manifest["profile"]
     if profile is not None:
         # A profile is a registered contract, so it is resolved again from its file: a manifest that
@@ -669,6 +788,97 @@ def sdk_identity(platform: dict, cross: bool) -> dict | None:
     return {"kind": kind, "revision": revision}
 
 
+def unique(items: list[str]) -> list[str]:
+    return list(dict.fromkeys(items))
+
+
+def search_dirs_of(text: str) -> list[str]:
+    """The library directories a GCC or Clang driver states in `-print-search-dirs`, in its order:
+    the `libraries: =a:b:...` line."""
+    for line in text.splitlines():
+        if line.startswith("libraries: "):
+            return unique([d for d in line[len("libraries: "):].lstrip("=").split(":") if d])
+    return []
+
+
+def qcc_link_dirs(text: str) -> list[str]:
+    """The library directories `qcc -v` hands the linker when it links a program, in the linker's
+    order: each `-L`, then the default path `-Y` replaces the built-in one with. `qcc` answers neither
+    `-print-file-name` nor `-print-search-dirs` (measured on the QNX 7.1 SDP), and the GCC under it
+    states a sysroot the SDP was built in, not the one it links with; the link line is what it does."""
+    for line in text.splitlines():
+        words = shlex.split(line.rstrip(" \\")) if line.strip() else []
+        if not words or not os.path.basename(words[0]).endswith("ld"):
+            continue
+        dirs, defaults, it = [], [], iter(words[1:])
+        for word in it:
+            if word == "-L":
+                dirs.append(next(it, ""))
+            elif word.startswith("-L"):
+                dirs.append(word[2:])
+            elif word.startswith("-Y"):
+                defaults += word[2:].split(":")
+        return unique([d for d in dirs + defaults if d])
+    return []
+
+
+def linker_search_dirs(platform: dict) -> list[str]:
+    """The directories the platform's linker searches for a library, in its order, as the linker
+    driver itself states them, so no list of an SDK's library directories is kept beside the SDK.
+    A refusal when the driver states none."""
+    variable = f"CARGO_TARGET_{platform['triple'].replace('-', '_').upper()}_LINKER"
+    command = os.environ.get(variable, "")
+    if not command.strip():
+        raise Refusal(f"{variable} is not set, so the SDK's library search cannot be read")
+    argv = shlex.split(command)
+    if platform.get("sdk_kind") == "qnx-sdp":
+        variant = QNX_QCC_VARIANT.get(platform["triple"].split("-", 1)[0])
+        if variant is None:
+            raise Refusal(f"platform {platform['id']}: no qcc variant is known for its architecture")
+        with tempfile.TemporaryDirectory(prefix="wz-qcc-link-") as work:
+            source = pathlib.Path(work) / "main.c"
+            source.write_text("int main(void) { return 0; }\n")
+            try:
+                run = subprocess.run([*argv, f"-V{variant}", "-v", "-o", str(pathlib.Path(work) / "main"),
+                                      str(source)], capture_output=True, text=True, check=False, cwd=work)
+            except OSError:
+                run = None
+        dirs = qcc_link_dirs(run.stdout + run.stderr) if run is not None and run.returncode == 0 else []
+    else:
+        dirs = search_dirs_of(run_text([*argv, "-print-search-dirs"]) or "")
+    if not dirs:
+        raise Refusal(f"platform {platform['id']}: the linker ({argv[0]}) did not state the directories it "
+                      "searches for a library")
+    return dirs
+
+
+def sdk_library(platform: dict, soname: str) -> pathlib.Path | None:
+    """The SDK's file for a SONAME: the first of the linker's search directories that holds it, which
+    is the file the link itself would take. None when no directory holds it."""
+    for directory in linker_search_dirs(platform):
+        found = pathlib.Path(directory) / soname
+        if found.is_file():
+            return found
+    return None
+
+
+def sdk_bundle_check(platform: dict, locate=None) -> list[str]:
+    """What the lane holds a platform's `bundle_from_sdk` to where its SDK is: every name is found by
+    the linker, is the library it names, and needs only what the platform assumes or bundles. Read
+    whether or not an artifact needs it today, so the row is a statement checked against its SDK and
+    not one first tested by the build that needs it. One line per library."""
+    locate = locate or sdk_library
+    lines = []
+    for soname in platform.get("bundle_from_sdk", []):
+        found = locate(platform, soname)
+        if found is None:
+            raise Refusal(f"platform {platform['id']} bundles {soname} and the SDK's linker does not find it")
+        entry = bundled_entry(platform, soname, found.read_bytes())
+        needs = ", ".join(f"{n['soname']} ({n['provided_by']})" for n in entry["elf"]["needed"]) or "nothing"
+        lines.append(f"{soname}: {entry['size']} B, needs {needs}")
+    return lines
+
+
 def check_toolchain_env(platform: dict, cross: bool) -> None:
     if not cross:
         return
@@ -825,7 +1035,8 @@ def package(decl: dict, platform_id: str, artifact_ids: list[str], out: pathlib.
             shutil.copymode(built, out / sub / want)
             blob = (out / sub / want).read_bytes()
             entries.append(artifact_entry(decl, platform, row, f"{sub}/{want}", blob, features, resolved))
-        manifest = assemble(decl, platform, git_state(), toolchain, entries, view)
+        bundled = bundle(platform, entries, out)
+        manifest = assemble(decl, platform, git_state(), toolchain, entries, view, bundled)
         (out / MANIFEST_NAME).write_text(render(manifest), encoding="utf-8")
         findings = verify_dir(out, decl)
         if findings:
@@ -838,7 +1049,8 @@ def package(decl: dict, platform_id: str, artifact_ids: list[str], out: pathlib.
             for leftover in out.iterdir():
                 shutil.rmtree(leftover) if leftover.is_dir() else leftover.unlink()
         raise
-    print(f"  wz-package: {platform['id']}: {len(entries)} artifact(s) in {out}, manifest verified")
+    print(f"  wz-package: {platform['id']}: {len(entries)} artifact(s) and {len(bundled)} bundled "
+          f"librar{'y' if len(bundled) == 1 else 'ies'} in {out}, manifest verified")
     return 0
 
 
@@ -1006,7 +1218,7 @@ def _selftest() -> int:
             d, lambda m: m.__setitem__("extra", 1)), "keys")
         verified_after("a key missing from an artifact", lambda d: edit_manifest(
             d, lambda m: m["artifacts"][0].pop("sha256")), "keys")
-        verified_after("an unknown schema", lambda d: edit_manifest(d, lambda m: m.__setitem__("schema", 2)), "schema")
+        verified_after("an unknown schema", lambda d: edit_manifest(d, lambda m: m.__setitem__("schema", 99)), "schema")
         verified_after("a platform edited away from its declaration", lambda d: edit_manifest(
             d, lambda m: m["platform"].__setitem__("triple", "aarch64-linux-android")), "differs from its declaration")
         verified_after("a path that leaves the directory", lambda d: edit_manifest(
@@ -1343,6 +1555,8 @@ def _selftest() -> int:
             os.environ.pop(v, None)
         os.environ.update(saved_y)
 
+    _selftest_bundle(decl, expect, refuses)
+
     # The declaration and the stamp gate agree on which families exist.
     import abi_stamp_gate
 
@@ -1352,6 +1566,174 @@ def _selftest() -> int:
            all("/" not in a["file"] for a in decl["artifacts"]))
     print("wz-package: selftest OK")
     return 0
+
+
+def _selftest_bundle(decl: dict, expect, refuses) -> None:
+    """Bundling (T5): a library a platform bundles is copied from a stand-in SDK, measured, closed
+    over what it needs in turn, and re-measured by `--verify`; each defect has a file or a manifest
+    whose fault is known, beside the clean package that verifies."""
+    host = "linux-x86_64-glibc"
+    bdecl = copy.deepcopy(decl)
+    platform = next(p for p in bdecl["platforms"] if p["id"] == host)
+    # The host row bundles nothing and names no SDK; a copy is given both, so the arms run on files.
+    platform["sdk_kind"] = "yocto"
+    platform["bundle_from_sdk"] = ["libcxx.so.1", "libcxxabi.so.1"]
+    sdk = {"kind": "yocto", "revision": "0", "target_arch": "x86_64", "target_os": "linux"}
+    system = [n for n in platform["system_assumed"] if n != "ld-linux-x86-64.so.2"]
+    pico = next(a for a in bdecl["artifacts"] if a["id"] == "capi-pico")
+
+    def library(soname: str | None, needed: list[str]) -> bytes:
+        return elf_facts.build_test_elf(needed=needed, soname=soname, machine=62,
+                                        verneed=[("libc.so.6", ["GLIBC_2.17"])])
+
+    with tempfile.TemporaryDirectory(prefix="wz-package-bundle-") as work:
+        root = pathlib.Path(work)
+        sdk_dir = root / "sdk"
+        sdk_dir.mkdir()
+        (sdk_dir / "libcxx.so.1").write_bytes(library("libcxx.so.1", [*system, "libcxxabi.so.1"]))
+        (sdk_dir / "libcxxabi.so.1").write_bytes(library("libcxxabi.so.1", system))
+        (sdk_dir / "libcxxabi.so.1").chmod(0o444)
+
+        def locate(_platform: dict, soname: str) -> pathlib.Path | None:
+            found = sdk_dir / soname
+            return found if found.is_file() else None
+
+        pico_blob = _synthetic(pico, [*system, "libcxx.so.1"])
+        entry = artifact_entry(bdecl, platform, pico, "lib/libwz_capi_pico.so", pico_blob, ["peer"])
+        expect("a NEEDED the platform bundles is `bundled` and names its file",
+               entry["elf"]["needed"][-1] == {"soname": "libcxx.so.1", "provided_by": "bundled",
+                                              "artifact": "lib/libcxx.so.1"})
+        out = root / "out"
+        (out / "lib").mkdir(parents=True)
+        (out / "lib" / "libwz_capi_pico.so").write_bytes(pico_blob)
+        bundled = bundle(platform, [entry], out, locate)
+        expect("what a bundled library needs in turn is bundled too, in SONAME order",
+               [b["soname"] for b in bundled] == ["libcxx.so.1", "libcxxabi.so.1"])
+        expect("a bundled file is the SDK's bytes",
+               (out / "lib" / "libcxxabi.so.1").read_bytes() == (sdk_dir / "libcxxabi.so.1").read_bytes())
+        expect("a bundled file does not keep the SDK's read-only mode",
+               os.access(out / "lib" / "libcxxabi.so.1", os.W_OK))
+        manifest = assemble(bdecl, platform, {"commit": "0" * 40, "tree_clean": True},
+                            {"rustc": "rustc 0", "cc": None, "sdk": sdk}, [entry], None, bundled)
+        expect("the shape of a manifest that bundles is clean", shape_findings(manifest) == [])
+        (out / MANIFEST_NAME).write_text(render(manifest), encoding="utf-8")
+        expect(f"a package that bundles verifies ({verify_dir(out, bdecl)})", verify_dir(out, bdecl) == [])
+        again = root / "again"
+        (again / "lib").mkdir(parents=True)
+        expect("bundling the same SDK twice gives the same entries",
+               bundle(platform, [entry], again, locate) == bundled)
+
+        def found_after(label: str, damage, words: str, dec: dict | None = None) -> None:
+            copy_dir = root / "copy"
+            if copy_dir.exists():
+                shutil.rmtree(copy_dir)
+            shutil.copytree(out, copy_dir)
+            damage(copy_dir)
+            found = verify_dir(copy_dir, dec or bdecl)
+            expect(f"{label}: not reported ({found})", any(words in f for f in found))
+
+        def flip(dir_: pathlib.Path) -> None:
+            file = dir_ / "lib" / "libcxxabi.so.1"
+            data = bytearray(file.read_bytes())
+            data[-1] ^= 0xFF
+            file.write_bytes(bytes(data))
+
+        def edit(fn):
+            def damage(dir_: pathlib.Path) -> None:
+                data = json.loads((dir_ / MANIFEST_NAME).read_text())
+                fn(data)
+                (dir_ / MANIFEST_NAME).write_text(json.dumps(data, indent=2) + "\n")
+            return damage
+
+        found_after("a byte of a bundled library changed", flip, "sha256")
+        found_after("a bundled library removed", lambda d: (d / "lib" / "libcxxabi.so.1").unlink(), "is missing")
+        found_after("a bundled library replaced by one with another SONAME",
+                    lambda d: (d / "lib" / "libcxxabi.so.1").write_bytes(library("libother.so.1", system)),
+                    "SONAME")
+        found_after("a bundled library replaced by one that needs what nobody provides",
+                    lambda d: (d / "lib" / "libcxxabi.so.1").write_bytes(
+                        library("libcxxabi.so.1", [*system, "libfoo.so.1"])), "libfoo.so.1")
+        found_after("a bundled entry removed from the manifest, its file left",
+                    edit(lambda m: m["bundled"].pop()), "bundles no libcxxabi.so.1")
+        found_after("a bundled entry nothing needs", edit(lambda m: m["artifacts"][0]["elf"]["needed"].pop()),
+                    "nothing in the package needs it")
+        found_after("bundled entries out of order", edit(lambda m: m["bundled"].reverse()), "SONAME order")
+        found_after("a bundled path that leaves the directory",
+                    edit(lambda m: m["bundled"][0].__setitem__("path", "../libcxx.so.1")), "inside the directory")
+        found_after("a bundle with no SDK named", edit(lambda m: m["toolchain"].__setitem__("sdk", None)),
+                    "names no SDK")
+        unbundled = copy.deepcopy(bdecl)
+        next(p for p in unbundled["platforms"] if p["id"] == host)["bundle_from_sdk"] = ["libcxx.so.1"]
+        found_after("a library the platform no longer bundles", lambda d: None,
+                    "not a library platform", unbundled)
+
+        refuses("a library the SDK does not have", "does not find it",
+                lambda: bundle(platform, [entry], root / "missing-sdk", lambda _p, _s: None))
+        (sdk_dir / "libcxx.so.1").write_bytes(library("libcxx.so.2", system))
+        refuses("an SDK file that is another library", "SONAME 'libcxx.so.2'",
+                lambda: sdk_bundle_check(platform, locate))
+        (sdk_dir / "libcxx.so.1").write_bytes(library("libcxx.so.1", [*system, "libfoo.so.1"]))
+        refuses("an SDK library that needs what the platform neither assumes nor bundles", "libfoo.so.1",
+                lambda: sdk_bundle_check(platform, locate))
+        (sdk_dir / "libcxx.so.1").write_bytes(library("libcxx.so.1", [*system, "libcxxabi.so.1"]))
+        expect("the lane's check reads every library the platform bundles",
+               [line.split(":", 1)[0] for line in sdk_bundle_check(platform, locate)]
+               == ["libcxx.so.1", "libcxxabi.so.1"])
+        clash = root / "clash"
+        (clash / "lib").mkdir(parents=True)
+        (clash / "lib" / "libcxx.so.1").write_bytes(b"x")
+        refuses("a bundled name an artifact already has", "has that file name",
+                lambda: bundle(platform, [entry], clash, locate))
+    expect("a platform that bundles nothing is checked as such",
+           sdk_bundle_check(next(p for p in decl["platforms"] if p["id"] == host)) == [])
+
+    # Where the SDK's file is: the linker driver's own search directories, in its order. The texts
+    # have the shapes the drivers print (an NDK Clang's `-print-search-dirs`, `qcc -v` linking).
+    expect("a driver's library directories are its `libraries:` line, in order, once each",
+           search_dirs_of("programs: =/p\nlibraries: =/a/36:/a:/b:/a\n") == ["/a/36", "/a", "/b"])
+    expect("a driver that states no libraries line states no directory", search_dirs_of("programs: =/p\n") == [])
+    qcc_text = ("cc: looking for gcc_ntoaarch64le_cxx in /s/etc/qcc/gcc/8.3.0/gcc_ntoaarch64le_cxx.conf\n"
+                "/s/lib/cc1 -quiet -Asystem(unix) -isystem /t/usr/include m.c -o - | \\\n"
+                " /s/bin/aarch64-unknown-nto-qnx7.1.0-as -EL -o m.o\n"
+                "/s/bin/aarch64-unknown-nto-qnx7.1.0-ld --sysroot=/t/aarch64le/ -rpath-link /t/aarch64le/lib "
+                "-Y/t/aarch64le/lib:/t/aarch64le/usr/lib -L/s/gcc -L /t/aarch64le/lib -L/t/aarch64le/usr/lib "
+                "-lc -lgcc_s /s/crtend.o\n"
+                "cc: unlinking m.o\n")
+    expect("qcc's link line gives each -L, then the -Y default path, in the linker's order",
+           qcc_link_dirs(qcc_text) == ["/s/gcc", "/t/aarch64le/lib", "/t/aarch64le/usr/lib"])
+    expect("a qcc run with no link line states no directory", qcc_link_dirs("cc: no files to process\n") == [])
+    with tempfile.TemporaryDirectory(prefix="wz-package-driver-") as work:
+        root = pathlib.Path(work)
+        (root / "first").mkdir()
+        (root / "second").mkdir()
+        (root / "second" / "libcxx.so.1").write_bytes(b"x")
+        (root / "first" / "libcxxabi.so.1").write_bytes(b"x")
+        (root / "second" / "libcxxabi.so.1").write_bytes(b"y")
+        driver = root / "driver"
+        driver.write_text(f"#!/bin/sh\necho 'libraries: ={root / 'first'}:{root / 'second'}'\n")
+        driver.chmod(0o755)
+        silent = root / "silent"
+        silent.write_text("#!/bin/sh\nexit 0\n")
+        silent.chmod(0o755)
+        android = next(p for p in decl["platforms"] if p["id"] == "android-arm64")
+        variable = f"CARGO_TARGET_{android['triple'].replace('-', '_').upper()}_LINKER"
+        saved = os.environ.get(variable)
+        try:
+            os.environ[variable] = str(driver)
+            expect("the SDK's file is found in a later directory when the earlier lacks it",
+                   sdk_library(android, "libcxx.so.1") == root / "second" / "libcxx.so.1")
+            expect("the first directory that holds the name wins, as in the link",
+                   sdk_library(android, "libcxxabi.so.1") == root / "first" / "libcxxabi.so.1")
+            expect("a name no directory holds is not found", sdk_library(android, "libnone.so.1") is None)
+            os.environ[variable] = str(silent)
+            refuses("a linker that states no search directory", "did not state the directories",
+                    lambda: sdk_library(android, "libcxx.so.1"))
+            os.environ.pop(variable)
+            refuses("no linker named", "is not set", lambda: sdk_library(android, "libcxx.so.1"))
+        finally:
+            os.environ.pop(variable, None)
+            if saved is not None:
+                os.environ[variable] = saved
 
 
 def ready_platforms(decl: dict, host: str, environ: dict[str, str]) -> list[str]:
@@ -1388,6 +1770,21 @@ def main(argv: list[str]) -> int:
             print(f"wz-package: REFUSED -- {err}", file=sys.stderr)
             return 2
         print("\n".join([f"artifact {a}" for a in plain] + [f"node {n}" for n in nodes]))
+        return 0
+    if len(argv) == 2 and argv[0] == "--sdk-bundle-check":
+        decl = wz_config.load_decl()
+        platform = next((p for p in decl["platforms"] if p["id"] == argv[1]), None)
+        try:
+            if platform is None:
+                raise Refusal(f"no platform `{argv[1]}` is declared")
+            if platform.get("bundle_from_sdk"):
+                check_toolchain_env(platform, True)
+            lines = sdk_bundle_check(platform)
+        except (Refusal, elf_facts.ElfError) as err:
+            print(f"wz-package: REFUSED -- {err}", file=sys.stderr)
+            return 2
+        for line in lines or ["bundles nothing from its SDK"]:
+            print(f"  wz-package: {argv[1]}: {line}")
         return 0
     if argv == ["--selftest"]:
         try:

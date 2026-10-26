@@ -146,6 +146,35 @@ assumption as such, and the consumer, which can ask each device, decides whether
 given device has what the artifact needs. The entry's check stops a build that
 needs something nobody assumed; it does not prove any device has it.
 
+Which list a library belongs in is decided by one test: a SONAME is `system_assumed`
+when every device of the row's kind has it, because no process starts without it (the
+C library, the loader, libm, `libgcc_s` where the compiler's runtime is part of the
+base image) or because the kind is defined by it (the network stack's library, which is
+why the two QNX stacks are two rows). It is in `bundle_from_sdk` when the SDK ships it
+for applications to carry and a device has it only if its image's integrator put it
+there: a C++ runtime (`libc++_shared.so` on Android, which the NDK says an app carries;
+`libc++.so.1` on QNX and the `libcatalog.so.1` it needs, both measured missing from a
+board of the io-sock stack; `libstdc++.so.6` on Yocto, present only when a package of the
+image needs it), or any library a device of the kind was measured without. A name is in at most one list
+(`wz_config.py --check`), and a row with no `sdk_kind` bundles nothing. A device fact
+that contradicts the row (a board without an assumed library) moves the name to
+`bundle_from_sdk` in the declaration; it is not an argument of the entry, so one
+platform, profile and toolchain always give one package.
+
+When an artifact needs a bundled library, the entry takes the file from the first of the
+linker's own search directories that holds it, as the linker driver states them (GCC
+and Clang in `-print-search-dirs`; QNX's `qcc`, which answers neither that nor
+`-print-file-name`, in the `-L` and `-Y` of the link line `qcc -v` prints), so no list of
+SDK directories is kept beside the SDK. It copies its bytes to `lib/<SONAME>`, measures it like an
+artifact (sha256, size, the ELF facts) and requires its SONAME to be the name; what it
+needs is classified the same way and bundled in turn, so the package's closure is closed
+or the entry refuses naming the library. `--verify` re-measures each bundled file, and a
+bundled file nothing needs and a `bundled` NEEDED with no file are findings. The entry
+does not set a RUNPATH: making the bundled file reachable by the device's loader is the
+placing path's, which binds the closure by SONAME. `--sdk-bundle-check ID` reads every
+library a row bundles from the SDK, whether or not an artifact needs it today, so the
+row is checked against its SDK before the build that first needs it.
+
 **T6. Every artifact carries an ABI stamp, readable without running it.** An ELF note
 (section `.note.wz.abi`, owner `wz`, type 1, written by `crates/wz-abi-stamp`) holds
 one JSON object with `schema`, `family`, `revision` and, for the C ABI libraries, the
@@ -309,6 +338,7 @@ keys, their order and their values are the entry's own output.
   "toolchain": { "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
                  "cc": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0", "sdk": null },
   "system_assumed": ["libgcc_s.so.1", "libm.so.6", "libc.so.6", "ld-linux-x86-64.so.2"],
+  "bundled": [],
   "artifacts": [
     {
       "id": "capi-pico", "name": "libwz_capi_pico.so", "kind": "shared-library",
@@ -361,9 +391,24 @@ may ask for; an executable's is the base plus what the runtime features cargo re
 for it may ask for, or `null` with the unassessed ones named (see T9). The
 glibc floor `GLIBC_2.39` is the host's own, which is the measured reason a library built
 on this host does not run on an older glibc: the manifest of a cross build records the
-SDK's. The entry does not bundle yet, so a NEEDED nobody assumed is a refusal and `provided_by`
-is always `system`; a bundled entry would read `{ "soname": "<...>", "provided_by":
-"bundled", "artifact": "lib/<file>" }`. Nothing here was run on a device.
+SDK's. The host row bundles nothing (it names no SDK), so `bundled` is empty and every
+`provided_by` is `system`. Where an artifact needs a library its row bundles (T5), its NEEDED
+entry reads `{ "soname": "libc++_shared.so", "provided_by": "bundled", "artifact":
+"lib/libc++_shared.so" }` and `bundled` lists that file, in SONAME order:
+
+```json
+"bundled": [
+  { "soname": "libc++_shared.so", "path": "lib/libc++_shared.so", "sha256": "...", "size": 9486376,
+    "elf": { "class": 64, "machine": "aarch64", "linking": "dynamic", "interpreter": null,
+             "soname": "libc++_shared.so", "runpath": null, "rpath": null,
+             "needed": [ { "soname": "libc.so", "provided_by": "system" }, "..." ],
+             "os_floor": { "...": "as for an artifact" } } }
+]
+```
+
+`bundled` was added within schema 1 (T7: an added key changes the meaning of none). The size
+is the NDK 30 file's, read by `--sdk-bundle-check`; no wz artifact needs it today, so no
+manifest of the lanes bundles it. Nothing here was run on a device.
 
 ## 5. Steps
 
@@ -405,7 +450,8 @@ the owner approves each use; steps 5 and 6 begin there.
    second description in a schema file: a file would be a second statement of the same
    shape, and the consumer's parser is the fixture of step 7.
 
-   What it does not do yet: bundle a library; take a profile for an executable (T13);
+   What it does not do yet: take a profile for an executable (T13; bundling landed later, see
+   the end of step 6);
    and "the same bytes" is checked in one build directory, which says the manifest is
    deterministic and not that two machines' builds agree. (The profile input landed after
    this step as T13, and the cross path was exercised by step 4.)
@@ -469,8 +515,30 @@ the owner approves each use; steps 5 and 6 begin there.
    `Unsupported`, though the SDP headers have all three (`TCP_KEEPIDLE`,
    `LOCAL_PEERCRED` with `struct xucred`, `ipv6_mreq`); the io-pkt headers have no
    `IP_RECVTOS`, so the QUIC transport does not request the IPv4 type of service there;
-   ring detects no CPU extensions on QNX at run time. Not done: bundling a library the
-   SDP provides and a board may lack, and sending the copies' changes upstream.
+   ring detects no CPU extensions on QNX at run time. Not done: sending the copies' changes
+   upstream.
+
+   **Bundling a library the SDK provides and a device may lack (landed in the entry; read
+   from the three SDKs).** Each cross row states `bundle_from_sdk` by the test of T5: Android
+   `libc++_shared.so`, both QNX rows `libc++.so.1` and `libcatalog.so.1`, Yocto
+   `libstdc++.so.6`. The entry bundles
+   what an artifact needs from that list, its selftest drives each refusal and finding
+   through a stand-in SDK of synthetic libraries beside a clean package that verifies (a
+   changed byte, a removed or replaced file, another SONAME, an unassumed NEEDED of the
+   bundled file, an entry removed or added by hand, the order, a path leaving the
+   directory, no SDK named, a row that stopped bundling the name), and Layer C1sp runs
+   `--sdk-bundle-check` for every ready platform. Read with the owner's approval on the
+   machine of each SDK: Android against NDK 30 (`libc++_shared.so`, needing `libc.so`,
+   `libm.so` and `libdl.so`); Yocto against the glibc 2.35 SDK (`libstdc++.so.6`, needing
+   `libm.so.6`, `libc.so.6` and `libgcc_s.so.1`); both QNX rows against the QNX 7.1 SDP
+   (`libc++.so.1` needing `libcatalog.so.1`, `libc.so.5`, `libm.so.3` and `libgcc_s.so.1`;
+   `libcatalog.so.1` needing `libc.so.5` and `libgcc_s.so.1`). The first QNX read found two
+   things the design had wrong: `qcc` answers no `-print-file-name` (the entry first asked the
+   linker that way), and the C++ runtime needs `libcatalog.so.1`, which the row did not bundle,
+   so the closure check refused it. The SDP's `libc++.so.1` carries an RPATH of
+   `$ORIGIN/../lib` and a build-host directory; it is measured into the manifest, not changed.
+   No wz artifact needs a bundled library today (the measured NEEDED sets above are all
+   assumed), so no lane's package carries one yet.
 7. **A fixture for the consumer.** One manifest per green target checked in as a
    fixture its tool can parse, regenerated by `--check`, so a schema change is a
    visible diff.
@@ -489,7 +557,7 @@ set against what the tree has. It is a list of obligations, not a claim that the
 | A second, separate path: a Cortex-M board built by its own board repository and flashed (FreeRTOS and lwIP) | The kit's images, `wz-runtime-freertos`, `wz-link-lwip`, the Zephyr images: wz already builds firmware for this class | A platform CLASS in the contract beside the host one: a firmware image as an artifact kind with the stamp inside it, its facilities, and a flash lane; none of it is written. Owed, and not started |
 | One executable per node, built from a manifest, linked against a shared-library closure; traffic nodes are endpoints inside it; it can carry dialled and listened links, joined multicast groups, publishers, subscribers, liveliness tokens, queryables and queriers, with pool and time budgets | The pico and zenoh-c libraries built from a profile (T13); the session node with a config document; `deploy/host-slot-node`, a fixed-memory node as a process, driven by its arguments | A NODE DECLARATION as an input that yields one executable: its endpoints and entities and its budgets (the limits) in one declaration the entry builds from, as the placing path's manifest does. The pieces exist (limits, capabilities, the slot node's no-allocator profile) and the declaration and the generator that joins them do not. Proposed shape in section 5b; undecided |
 | Capabilities it names: client mode, peer links over TCP (dial and listen), UDP multicast group join, publish and subscribe, liveliness, queryable and querier, fragmentation; none of router mode, scouting, admin keys | A superset: each is a capability or a default of the graph (`peer`, `link-udp`, `multicast-transport`, `liveliness`, `query`, `queryable`, the fragmentation feature) | A table that holds each named capability to a declared capability and fails when one disappears; not written. The reverse (what wz has that the path does not place) needs no table |
-| Device facts it checks: the executable's machine and interpreter, every library of the closure by SONAME, the run place's properties, process facts, the transport (ssh, adb) | The manifest carries machine, interpreter, SONAME, NEEDED with `provided_by`, `linking`, `runpath`, `rpath` and the floors | The closure must be COMPLETE and enumerable, because the path binds it by SONAME: where a platform lacks a library (a QNX board without the C++ runtime), the entry must bundle it from the SDK (`provided_by: bundled`), which it does not yet. The run-place, process and transport checks are the consumer's and are not wz's to model |
+| Device facts it checks: the executable's machine and interpreter, every library of the closure by SONAME, the run place's properties, process facts, the transport (ssh, adb) | The manifest carries machine, interpreter, SONAME, NEEDED with `provided_by`, `linking`, `runpath`, `rpath` and the floors | The closure must be COMPLETE and enumerable, because the path binds it by SONAME: where a platform lacks a library (a QNX board without the C++ runtime), the entry bundles it from the SDK (`provided_by: bundled`, the manifest's `bundled`, T5), each row's list read against its SDK (step 6). The run-place, process and transport checks are the consumer's and are not wz's to model |
 
 ## 5b. The node declaration (decided: the slot profile; landed for Linux)
 

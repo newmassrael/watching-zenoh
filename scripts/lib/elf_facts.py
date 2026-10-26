@@ -353,8 +353,9 @@ def android_api(data: bytes) -> int | None:
     return struct.unpack_from(end + "I", found[0].desc, 0)[0]
 
 
-def describe(data: bytes) -> dict:
-    """Every fact of the module for one file, as the manifest records them."""
+def linkage_facts(data: bytes) -> dict:
+    """The facts any ELF has, read the same way for a file wz built and for one it only carries (a
+    library bundled from an SDK, which has no wz note)."""
     tags = version_tags(data)
     return {
         **header_facts(data),
@@ -362,6 +363,14 @@ def describe(data: bytes) -> dict:
         "symbol_version_tags": tags,
         "glibc_floor": glibc_floor(tags),
         "android_api_note": android_api(data),
+    }
+
+
+def describe(data: bytes) -> dict:
+    """Every fact of the module for one file wz built, as the manifest records them: the linkage
+    facts and the wz notes, the stamp being required."""
+    return {
+        **linkage_facts(data),
         "abi_stamp": read_abi_stamp(data),
         "facts": read_facts(data),
     }

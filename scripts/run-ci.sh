@@ -14204,6 +14204,7 @@ layer_c1st_abi_stamp() {
 # no declaration; the two manifests must be the same bytes, then the first is verified against its
 # files. Where the operating system has the declared-node artifact (Linux and QNX Neutrino), each
 # registered node is then packaged and verified too, the first twice (`wz_package.py --lane-plan`).
+# Each ready platform's `bundle_from_sdk` is read from its SDK (`--sdk-bundle-check`).
 layer_c1sp_cross_platforms() {
     command -v python3 >/dev/null 2>&1 || { echo "  C1sp FAIL: python3 is absent"; return 1; }
     local ready required id work rc=0
@@ -14237,6 +14238,13 @@ layer_c1sp_cross_platforms() {
             echo "  C1sp OK: $id (${#nodes[@]} node(s) to follow)"
         else
             echo "  C1sp FAIL: $id did not package, reproduce or verify"
+            rc=1
+        fi
+        # What the row bundles from its SDK (T5) is read from the SDK here, whether or not an artifact
+        # needs it today: each library is found by the platform's linker, is the library it names and
+        # needs only what the row assumes or bundles.
+        if ! python3 scripts/lib/wz_package.py --sdk-bundle-check "$id"; then
+            echo "  C1sp FAIL: $id bundles a library its SDK does not provide as declared"
             rc=1
         fi
         first=1

@@ -470,8 +470,17 @@ RUNTIME_FEATURE_KEYS = {"package", "feature", "os_needs", "help"}
 PARITY_KEYS = {"need", "capabilities", "runtime_features", "help"}
 PLATFORM_KEYS = {
     "id", "triple", "os", "libc", "network_stack", "std", "toolchain_env_extra",
-    "os_provides", "system_assumed", "lane", "support", "sdk_kind", "help",
+    "os_provides", "system_assumed", "bundle_from_sdk", "lane", "support", "sdk_kind", "help",
 }
+# The two answers to "where does a NEEDED come from" (docs/target-build-contract.md T5). A SONAME in
+# `system_assumed` is one every device of the platform's kind has, because a process cannot start
+# without it (the C library, the loader, libm) or because the kind is defined by it (the network
+# stack's library, which is why the two QNX stacks are two rows). A SONAME in `bundle_from_sdk` is
+# one the SDK ships for applications to carry and a device has only when its image's integrator put
+# it there: a C++ runtime, or any library a device of the kind was measured without. The entry copies
+# such a file from the SDK into the package when an artifact needs it. A name is in at most one list,
+# and a platform with no named SDK has nothing to bundle from.
+SONAME_RE = re.compile(r"^[A-Za-z0-9_+.-]+\.so(\.[0-9]+)*$")
 # What identifies the SDK a cross build used (docs/target-build-contract.md T2): the entry knows how
 # to read each kind, and a platform that names one the entry cannot read is refused by the entry.
 SDK_KINDS = ("android-ndk", "yocto", "qnx-sdp")
@@ -568,6 +577,24 @@ def validate_platforms(data: dict) -> list[str]:
             if key in p and (not isinstance(p[key], list) or not p[key]
                              or not all(isinstance(x, str) and x for x in p[key])):
                 out.append(f"{who}: `{key}` is not a non-empty list of names (leave it out when unassessed)")
+        bundled = p.get("bundle_from_sdk")
+        if isinstance(bundled, list) and bundled and all(isinstance(x, str) and x for x in bundled):
+            for name in bundled:
+                if not SONAME_RE.match(name):
+                    out.append(f"{who}: bundle_from_sdk names `{name}`, which is not a full SONAME")
+            if len(bundled) != len(set(bundled)):
+                out.append(f"{who}: bundle_from_sdk names a library twice")
+            if "system_assumed" not in p:
+                out.append(f"{who}: bundle_from_sdk is stated and system_assumed is not: what a device may "
+                           "lack is judged against what it is assumed to have")
+            elif isinstance(p["system_assumed"], list):
+                for name in sorted(set(bundled) & set(p["system_assumed"])):
+                    out.append(f"{who}: `{name}` is both assumed on the device and bundled from the SDK")
+            if "sdk_kind" not in p:
+                out.append(f"{who}: bundle_from_sdk is stated and the platform names no sdk_kind to bundle from")
+        elif "bundle_from_sdk" in p:
+            out.append(f"{who}: `bundle_from_sdk` is not a non-empty list of names (leave it out when nothing "
+                       "is bundled)")
         if "os_provides" in p:
             out += facility_findings(who, p["os_provides"], "os_provides")
             if isinstance(p["os_provides"], list):
@@ -2559,6 +2586,23 @@ def cmd_selftest() -> int:
            caps_refused('support = "built"', 'support = "built"\nsdk_kind = "gcc"', "sdk_kind is `gcc`"))
     expect("an sdk kind of the list validates",
            validate_decl(read_decl_toml(SAMPLE.replace('support = "built"', 'support = "built"\nsdk_kind = "android-ndk"'))) == [])
+    yocto = 'support = "built"\nsdk_kind = "yocto"\nsystem_assumed = ["libc.so.6"]'
+    expect("a library bundled from a named SDK validates",
+           validate_decl(read_decl_toml(SAMPLE.replace(
+               'support = "built"', yocto + '\nbundle_from_sdk = ["libstdc++.so.6"]'))) == [])
+    expect("a library both assumed and bundled is refused",
+           caps_refused('support = "built"', yocto + '\nbundle_from_sdk = ["libc.so.6"]',
+                        "both assumed on the device and bundled"))
+    expect("a bundle with no SDK to take it from is refused",
+           caps_refused('support = "built"', 'support = "built"\nsystem_assumed = ["libc.so.6"]\n'
+                        'bundle_from_sdk = ["libstdc++.so.6"]', "names no sdk_kind"))
+    expect("a bundle on a platform that assumes nothing is refused",
+           caps_refused('support = "built"', 'support = "built"\nsdk_kind = "yocto"\n'
+                        'bundle_from_sdk = ["libstdc++.so.6"]', "system_assumed is not"))
+    expect("a bundled name that is not a SONAME is refused",
+           caps_refused('support = "built"', yocto + '\nbundle_from_sdk = ["c++"]', "not a full SONAME"))
+    expect("an empty bundle list is refused",
+           caps_refused('support = "built"', yocto + '\nbundle_from_sdk = []', "not a non-empty list"))
     expect("a platform that states no support is refused",
            caps_refused('support = "built"\n', "", "has no `support`"))
     expect("a platform with an unknown support word is refused",
