@@ -236,7 +236,21 @@ liveliness = ["wz-capi-core/liveliness"]
 # The snapshot get of the liveliness plane; it is a query.
 liveliness-get = ["liveliness", "query", "wz-capi-core/liveliness-get"]
 # The advanced publisher and subscriber, with the plane they replay through.
-advanced = ["liveliness", "queryable", "timestamping", "wz-capi-core/advanced"]
+#
+# The subscriber is the neutral `wz-ext-pubsub`'s, hosted over the engine's port
+# (`docs/advanced-pubsub-on-a-neutral-core.md`), as the pico ABI's is. Its gets are the engine's
+# requesting end, which the core is built with and which exports nothing: `query` itself is the
+# C `z_get` and the querier, and `advanced` does not select them.
+advanced = [
+    "liveliness",
+    "queryable",
+    "timestamping",
+    "wz-capi-core/advanced",
+    "wz-capi-core/query",
+    "dep:wz-ext-pubsub",
+    "dep:wz-capi-port",
+    "wz-ext-pubsub/engine-host",
+]
 # The group membership of zenoh-ext.
 group = ["wz-capi-core/group"]
 # A session told of a node by one it holds a link to dials it.
@@ -385,6 +399,10 @@ wz-abi-stamp = { path = "../wz-abi-stamp" }
 # `low_pass_filter`, `downsampling`) a zenoh-c node's config states are enforced, not accepted and
 # dropped.
 wz-capi-core = { path = "../wz-capi-core", default-features = false, features = ["rx-busy-poll", "transport-qos", "open-plan"] }
+# The engine's port and the advanced plane's rules, for the advanced subscriber's host
+# (`advanced`); optional, so a build without the plane links neither.
+wz-capi-port = { path = "../wz-capi-port", optional = true }
+wz-ext-pubsub = { path = "../wz-ext-pubsub", optional = true }
 # `query-reply-err` is DECLARED rather than inherited from the default set, and
 # R311y568 is why: `z_query_reply_err` routes through
 # `ReplyOut::reply_err`, whose body is `#[cfg(feature = "query-reply-err")]` and

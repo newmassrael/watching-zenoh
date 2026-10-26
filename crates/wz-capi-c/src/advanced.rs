@@ -31,6 +31,12 @@
 //! on the session it binds to, so a per-face declaration is the only shape in
 //! which a subscriber's recovery GET can reach the cache at all.
 //!
+//! The subscriber is no longer the registry's: it is the neutral `wz-ext-pubsub`'s
+//! `EngineSubscriber`, hosted over the engine's port exactly as the pico ABI's is
+//! (`docs/advanced-pubsub-on-a-neutral-core.md`), so the engine does the per-face
+//! fan-out of its entities and nothing here declares per face. The publisher is
+//! still the registry's.
+//!
 //! ## The two ABIs' option structs are NOT the same shape
 //!
 //! pico's `ze_advanced_subscriber_options_t` embeds a one-byte dummy for its
@@ -47,9 +53,9 @@
 //!
 //! Upstream's `z_advanced_sub.c` declares the subscriber first and
 //! `ze_advanced_subscriber_declare_background_sample_miss_listener` second, and
-//! any number of listeners may follow. The C subscriber is one wz subscriber PER
-//! FACE, so each face's wz subscriber reports into one [`ListenerSet`] that
-//! belongs to the C handle, and each C listener is one entry in it.
+//! any number of listeners may follow. The C subscriber's one miss callback
+//! reports into one [`ListenerSet`] that belongs to the C handle, and each C
+//! listener is one entry in it.
 //!
 //! R2814 — that set replaced a single slot a listener "installed into": a
 //! second listener replaced the first, and dropping the first then silenced the
@@ -85,8 +91,9 @@ use crate::session::session_state;
 use crate::sub::{subscriber_state_handle, z_subscriber_options_t, CClosure};
 use crate::zid::{z_id_t, Z_ID_SIZE};
 
-use wz_capi_core::faces::{AdvPubId, AdvSubId, SharedSession};
+use wz_capi_core::faces::{AdvPubId, SharedSession};
 use wz_capi_core::listeners::ListenerSet;
+use wz_ext_pubsub::advanced_subscriber::{EngineSubscriber, HostError};
 
 /// `true` when this build targets a zenoh-c compiled WITH
 /// `Z_FEATURE_SHARED_MEMORY`. The advanced PUBLISHER is one of the types that
@@ -1140,19 +1147,16 @@ type MissSlot = Arc<ListenerSet<CMissClosure>>;
 /// Behind a `ze_owned_advanced_subscriber_t` handle.
 struct AdvSubState {
     shared: Arc<SharedSession>,
-    id: AdvSubId,
+    /// The subscriber the session's engine hosts. Dropping it retracts everything it declared, in the
+    /// order the runtime's own subscriber does, so an implicit `z_drop` and an explicit
+    /// `ze_undeclare_advanced_subscriber` take the identical path.
+    subscriber: EngineSubscriber,
     /// The miss listeners the C side declares AFTER declaring this — see the
     /// module note on ordering.
     miss: MissSlot,
     /// R311y568 — the keyexpr this subscriber was declared under, so
     /// [`ze_advanced_subscriber_keyexpr`] can answer.
     keyexpr: crate::keyexpr::DeclaredKeyexpr,
-}
-
-impl Drop for AdvSubState {
-    fn drop(&mut self) {
-        self.shared.undeclare_advanced_subscriber(self.id);
-    }
 }
 
 /// Read the state behind a loaned advanced subscriber.
@@ -1293,13 +1297,21 @@ pub unsafe extern "C" fn ze_declare_background_advanced_subscriber(
     callback: *mut z_moved_closure_sample_t,
     options: *mut ze_advanced_subscriber_options_t,
 ) -> ZResult {
-    let mut sink = ze_owned_advanced_subscriber_t::null_value();
-    // SAFETY: the caller's contract, delegated — the local sink absorbs the
-    // handle the owned form would have written out and then goes out of scope
-    // without reclaiming it, so the subscription lives until the session is
-    // closed. See `crate::sub::z_declare_background_subscriber` for the full
-    // argument, including why the discard is deliberate.
-    unsafe { ze_declare_advanced_subscriber(session, &mut sink, key_expr, callback, options) }
+    guarded(|| {
+        if callback.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: the caller's contract, delegated.
+        match unsafe { declare_subscriber_state(session, key_expr, callback, options) } {
+            Ok(state) => {
+                // No handle is left, so nothing will retract what the subscriber declared: it
+                // runs in the background, its entities standing until the session ends.
+                state.subscriber.background();
+                Z_OK
+            }
+            Err(code) => code,
+        }
+    })
 }
 
 /// Declare an advanced subscriber (zenoh-c `ze_declare_advanced_subscriber`,
@@ -1325,63 +1337,81 @@ pub unsafe extern "C" fn ze_declare_advanced_subscriber(
         // The gravestone contract, written before any fallible work.
         // SAFETY: the caller's contract.
         unsafe { *subscriber = ze_owned_advanced_subscriber_t::null_value() };
-
-        // Consume the moved closure FIRST (consume-on-all-paths, as
-        // `crate::sub` documents): from here the `CClosure` owns the C
-        // `drop(context)` responsibility, so every early return frees the
-        // caller's context exactly as upstream does.
-        // SAFETY: the caller's contract.
-        let owned = unsafe { &mut (*callback)._this };
-        let cclosure = Arc::new(CClosure::new(owned.context, owned.call, owned.drop));
-        *owned = z_owned_closure_sample_t::null_value();
-
-        // SAFETY: the caller's contract for both handles.
-        let (Some(state), Some(ke)) = (unsafe { session_state(session) }, unsafe {
-            keyexpr_str(key_expr)
-        }) else {
-            return Z_ENULL;
-        };
-        let ke = ke.to_owned();
-        if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
-            return Z_EINVAL;
+        // SAFETY: the caller's contract, delegated.
+        match unsafe { declare_subscriber_state(session, key_expr, callback, options) } {
+            Ok(boxed) => {
+                // SAFETY: `subscriber` was checked non-null above.
+                unsafe { (*subscriber).handle = Box::into_raw(boxed) as Handle };
+                Z_OK
+            }
+            Err(code) => code,
         }
-        let miss: MissSlot = Arc::new(ListenerSet::new());
-        // SAFETY: the caller's contract.
-        let opts = unsafe { advanced_subscriber_options(options) };
-        let declared = ke.clone();
-        let id = state.shared.declare_advanced_subscriber(ke, opts, {
-            let closure = cclosure.clone();
-            let miss = miss.clone();
-            Arc::new(move || {
-                let sample_cb = {
-                    let mut inner = crate::sub::make_subscriber_callback(closure.clone());
-                    // The advanced subscriber hands an OWNED `Sample`; the
-                    // existing marshal reads `&dyn SampleView`, which `Sample`
-                    // implements — so the two planes share one marshal instead of
-                    // growing a second.
-                    Box::new(move |sample: Sample| inner(&sample as &dyn SampleView))
-                        as Box<dyn FnMut(Sample) + Send + 'static>
-                };
-                let miss_cb = {
-                    let miss = miss.clone();
-                    Box::new(move |m: Miss| fire_miss(&miss, &m))
-                        as Box<dyn FnMut(Miss) + Send + 'static>
-                };
-                (sample_cb, miss_cb)
-            })
-        });
-        let mut boxed = Box::new(AdvSubState {
-            shared: state.shared.clone(),
-            id,
-            miss,
-            keyexpr: crate::keyexpr::DeclaredKeyexpr::new(declared),
-        });
-        // Bind AFTER boxing — the state is at its final address only here.
-        boxed.keyexpr.bind();
-        // SAFETY: `subscriber` was checked non-null above.
-        unsafe { (*subscriber).handle = Box::into_raw(boxed) as Handle };
-        Z_OK
     })
+}
+
+/// What an advanced subscriber's two entry points, owned and background, both make: the
+/// subscriber on the session's engine, and the state a handle to it stands on. Consumes the moved
+/// sample closure on every path.
+///
+/// # Safety
+/// As [`ze_declare_advanced_subscriber`], with `callback` non-null.
+unsafe fn declare_subscriber_state(
+    session: *const z_loaned_session_t,
+    key_expr: *const z_loaned_keyexpr_t,
+    callback: *mut z_moved_closure_sample_t,
+    options: *mut ze_advanced_subscriber_options_t,
+) -> Result<Box<AdvSubState>, ZResult> {
+    // Consume the moved closure FIRST (consume-on-all-paths, as
+    // `crate::sub` documents): from here the `CClosure` owns the C
+    // `drop(context)` responsibility, so every early return frees the
+    // caller's context exactly as upstream does.
+    // SAFETY: the caller's contract.
+    let owned = unsafe { &mut (*callback)._this };
+    let cclosure = Arc::new(CClosure::new(owned.context, owned.call, owned.drop));
+    *owned = z_owned_closure_sample_t::null_value();
+
+    // SAFETY: the caller's contract for both handles.
+    let (Some(state), Some(ke)) = (unsafe { session_state(session) }, unsafe {
+        keyexpr_str(key_expr)
+    }) else {
+        return Err(Z_ENULL);
+    };
+    let ke = ke.to_owned();
+    if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
+        return Err(Z_EINVAL);
+    }
+    let miss: MissSlot = Arc::new(ListenerSet::new());
+    // SAFETY: the caller's contract.
+    let opts = unsafe { advanced_subscriber_options(options) };
+    let engine = state.shared.as_engine();
+    let subscriber = {
+        let miss = miss.clone();
+        let mut inner = crate::sub::make_subscriber_callback(cclosure);
+        EngineSubscriber::declare_with_miss_listener(
+            &engine,
+            ke.clone(),
+            opts,
+            // The advanced subscriber hands an OWNED `Sample`; the existing marshal reads
+            // `&dyn SampleView`, which `Sample` implements — so the two planes share one
+            // marshal instead of growing a second.
+            move |sample: Sample| inner(&sample as &dyn SampleView),
+            move |m: Miss| fire_miss(&miss, &m),
+        )
+    }
+    .map_err(|refused| match refused {
+        // A bound that asks for nothing is the caller's, as upstream's own builder refuses it.
+        HostError::HistoryBoundZero { .. } => Z_EINVAL,
+        _ => Z_EGENERIC,
+    })?;
+    let mut boxed = Box::new(AdvSubState {
+        shared: state.shared.clone(),
+        subscriber,
+        miss,
+        keyexpr: crate::keyexpr::DeclaredKeyexpr::new(ke),
+    });
+    // Bind AFTER boxing — the state is at its final address only here.
+    boxed.keyexpr.bind();
+    Ok(boxed)
 }
 
 /// Zero an owned advanced subscriber (zenoh-c
@@ -1424,9 +1454,17 @@ pub unsafe extern "C" fn ze_advanced_subscriber_id(
 ) -> z_entity_global_id_t {
     guard_val(z_entity_global_id_t::empty(), || {
         // SAFETY: the caller's contract, delegated.
+        // The identity the detection token names, which is the subscriber's own.
         match unsafe { adv_sub_state(subscriber) } {
             Some(state) => {
-                z_entity_global_id_t::for_entity(&state.shared, subscriber as *const c_void)
+                let id = state.subscriber.id();
+                let mut zid = [0u8; Z_ID_SIZE];
+                let n = id.zid().len().min(zid.len());
+                zid[..n].copy_from_slice(&id.zid()[..n]);
+                z_entity_global_id_t {
+                    zid: z_id_t { id: zid },
+                    eid: id.eid(),
+                }
             }
             None => z_entity_global_id_t::empty(),
         }
@@ -1799,10 +1837,7 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
         let Some(state) = (unsafe { adv_sub_state(subscriber) }) else {
             return Z_ENULL;
         };
-        let Some(base) = state.shared.advanced_subscriber_keyexpr(state.id) else {
-            return Z_EINVAL;
-        };
-        let ke = format!("{base}/@adv/pub/**");
+        let ke = format!("{}/@adv/pub/**", state.subscriber.keyexpr());
         let history = if options.is_null() {
             false
         } else {
@@ -1888,9 +1923,16 @@ mod tests {
             )
             .expect("test host entropy"),
         );
+        let subscriber = EngineSubscriber::declare(
+            &shared.as_engine(),
+            "demo/data",
+            AdvancedSubscriberOptions::new(),
+            |_| {},
+        )
+        .expect("a plain subscriber declares on a session with no face");
         let mut state = Box::new(AdvSubState {
             shared,
-            id: 0,
+            subscriber,
             miss: Arc::new(ListenerSet::new()),
             keyexpr: crate::keyexpr::DeclaredKeyexpr::new("demo/data".to_owned()),
         });
