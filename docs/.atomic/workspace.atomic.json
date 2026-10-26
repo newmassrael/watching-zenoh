@@ -290190,6 +290190,56 @@
         "Read the hosted run of this push per job by head sha."
       ]
     },
+    "Round 3701": {
+      "decision_summary": "Step 4a of the advanced plane: the subscriber's rules move to wz-ext-pubsub. The options (RecoveryConfig, HistoryConfig, the detection and the declaration forms), the plans (a get's timeout, the history selector, a reply turned back into a sample, the @adv token a liveliness sample names, the table of gets in flight) and the ordering machine (State, the per-source states, the miss listeners and their registry) live in advanced_subscriber/ there, behind advanced-subscriber, advanced-recovery and advanced-history, which the tokio runtime's features of those names forward. The machine reads no clock: each method that reaches a source takes the host's reading in milliseconds, and a source's retention is measured in them, so a test chooses the instant and the cooperative engine can pass its own. The tokio host keeps its declarations, its gets, its two timers and the tests that need a session, and passes its session's clock. The cooperative host is step 4b.",
+      "changes_bullets": [
+        "crates/wz-ext-pubsub: advanced_subscriber/ (mod.rs, options.rs, plans.rs, state.rs and the tests of the last two); the module root is a mod.rs so that a bare mention of the file name advanced_subscriber.rs still names the tokio host's file and the 16 reason citations of it stay resolvable.",
+        "crates/wz-runtime-tokio: advanced_subscriber.rs loses about 2,000 lines of options, plans, machine and their tests, re-exports the public types at their old paths, and passes its session's clock; the three subscriber features forward to wz-ext-pubsub.",
+        "scripts/lib/feature_gate_diagnostic.py: a re-export of one name (pub use a::b::Name;) is read as a path, as a module item is, so the tokio runtime's two features that gate only such re-exports are probed instead of waiting; the census row of wz-ext-pubsub names the three new features; the non-default test leg of wz-ext-pubsub lists them; the tokio doc budget 433 to 427.",
+        "docs/advanced-pubsub-on-a-neutral-core.md: step 4 records what is done and what is left."
+      ],
+      "verification_bullets": [
+        "20 tests moved with the machine and the plans and run against no session: wz-ext-pubsub, all features, 51 passed; with advanced-history alone 44 passed. wz-runtime-tokio with all features: the 55 tests whose names start with advanced_ pass, among them the composed publisher-to-subscriber legs.",
+        "clippy with -D warnings: wz-ext-pubsub (default and all features, and each of advanced-subscriber, advanced-recovery, advanced-history alone), wz-runtime-tokio (all features, and each of the three subscriber features alone), wz-capi-core, wz-capi-pico, wz-capi-c and wz-ap-demo (all features).",
+        "Doc budgets counted on the lane's command: wz-runtime-tokio 427 (it was 433), wz-capi-pico 41, wz-capi-c 41, wz-capi-core 8 and wz-ap-demo 26 in raw error lines, which is each crate's budget plus the one summary line the lane excludes; wz-ext-pubsub 0.",
+        "The feature gate diagnostic ran its selftest and its check on pc2 (116 probes built, each told by rustc which feature was missing); the census check and selftest and the citation gate pass; the hook's gate array plus the surface gates: 116 run, 0 failed.",
+        "Not done: the interop legs (zenoh-ext and pico) are read from the hosted run; the cooperative host does not exist yet."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "carry_forward_bullets": [
+        "Step 4b: the cooperative host of the subscriber. It declares the live subscription, the heartbeat and late-publisher liveliness subscriptions and the detection token through the port (declare_subscriber_on_wire, declare_liveliness_subscriber_on_wire, declare_liveliness_token_on_wire), issues each get through get_on_wire and feeds each reply and Final to the machine, and runs the periodic re-ask and the retention sweep as port tickers (start_ticker). The tokio host's get-issuing helpers name the heap session's query and are not shared yet: write the engine's in a module of the cooperative engine and compare with them.",
+        "Step 3b, the rest: pico's advanced module over the port without the tokio engine, which now needs only the above.",
+        "Read the hosted run of this push: C1cs (the five cases), C1bj, C1j, C1bf, C4e, C1cn, C1bnl, the doc budgets and the interop legs of the advanced plane (zenoh-ext and pico) of rounds 3675, 3688 and this one.",
+        "A test feeding wz-ext-pubsub's time_range and the zenoh-util family's the same strings.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine."
+      ],
+      "publishable_decision_summary": "Step 4a of the advanced plane: the subscriber's rules move to wz-ext-pubsub. The options (RecoveryConfig, HistoryConfig, the detection and the declaration forms), the plans (a get's timeout, the history selector, a reply turned back into a sample, the @adv token a liveliness sample names, the table of gets in flight) and the ordering machine (State, the per-source states, the miss listeners and their registry) live in advanced_subscriber/ there, behind advanced-subscriber, advanced-recovery and advanced-history, which the tokio runtime's features of those names forward. The machine reads no clock: each method that reaches a source takes the host's reading in milliseconds, and a source's retention is measured in them, so a test chooses the instant and the cooperative engine can pass its own. The tokio host keeps its declarations, its gets, its two timers and the tests that need a session, and passes its session's clock. The cooperative host is step 4b.",
+      "publishable_changes_bullets": [
+        "crates/wz-ext-pubsub: advanced_subscriber/ (mod.rs, options.rs, plans.rs, state.rs and the tests of the last two); the module root is a mod.rs so that a bare mention of the file name advanced_subscriber.rs still names the tokio host's file and the 16 reason citations of it stay resolvable.",
+        "crates/wz-runtime-tokio: advanced_subscriber.rs loses about 2,000 lines of options, plans, machine and their tests, re-exports the public types at their old paths, and passes its session's clock; the three subscriber features forward to wz-ext-pubsub.",
+        "scripts/lib/feature_gate_diagnostic.py: a re-export of one name (pub use a::b::Name;) is read as a path, as a module item is, so the tokio runtime's two features that gate only such re-exports are probed instead of waiting; the census row of wz-ext-pubsub names the three new features; the non-default test leg of wz-ext-pubsub lists them; the tokio doc budget 433 to 427.",
+        "docs/advanced-pubsub-on-a-neutral-core.md: step 4 records what is done and what is left."
+      ],
+      "publishable_verification_bullets": [
+        "20 tests moved with the machine and the plans and run against no session: wz-ext-pubsub, all features, 51 passed; with advanced-history alone 44 passed. wz-runtime-tokio with all features: the 55 tests whose names start with advanced_ pass, among them the composed publisher-to-subscriber legs.",
+        "clippy with -D warnings: wz-ext-pubsub (default and all features, and each of advanced-subscriber, advanced-recovery, advanced-history alone), wz-runtime-tokio (all features, and each of the three subscriber features alone), wz-capi-core, wz-capi-pico, wz-capi-c and wz-ap-demo (all features).",
+        "Doc budgets counted on the lane's command: wz-runtime-tokio 427 (it was 433), wz-capi-pico 41, wz-capi-c 41, wz-capi-core 8 and wz-ap-demo 26 in raw error lines, which is each crate's budget plus the one summary line the lane excludes; wz-ext-pubsub 0.",
+        "The feature gate diagnostic ran its selftest and its check on pc2 (116 probes built, each told by rustc which feature was missing); the census check and selftest and the citation gate pass; the hook's gate array plus the surface gates: 116 run, 0 failed.",
+        "Not done: the interop legs (zenoh-ext and pico) are read from the hosted run; the cooperative host does not exist yet."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 4b: the cooperative host of the subscriber. It declares the live subscription, the heartbeat and late-publisher liveliness subscriptions and the detection token through the port (declare_subscriber_on_wire, declare_liveliness_subscriber_on_wire, declare_liveliness_token_on_wire), issues each get through get_on_wire and feeds each reply and Final to the machine, and runs the periodic re-ask and the retention sweep as port tickers (start_ticker). The tokio host's get-issuing helpers name the heap session's query and are not shared yet: write the engine's in a module of the cooperative engine and compare with them.",
+        "Step 3b, the rest: pico's advanced module over the port without the tokio engine, which now needs only the above.",
+        "Read the hosted run of this push: C1cs (the five cases), C1bj, C1j, C1bf, C4e, C1cn, C1bnl, the doc budgets and the interop legs of the advanced plane (zenoh-ext and pico) of rounds 3675, 3688 and this one.",
+        "A test feeding wz-ext-pubsub's time_range and the zenoh-util family's the same strings.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
