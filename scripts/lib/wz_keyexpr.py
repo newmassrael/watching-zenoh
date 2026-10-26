@@ -21,6 +21,18 @@ The last two are held to the real ones by the corpus `wz_key_set.py --write` gen
 from __future__ import annotations
 
 import functools
+import re
+
+# The text of a zid as zenoh prints it and as `credential_identity::zid_from_key_text` reads it (the
+# one place its refusals are written): lowercase hex, no leading zero, at most 32 digits, the value
+# of a `u128` whose little-endian bytes are the zid's sixteen.
+ZID_RE = re.compile(r"[1-9a-f][0-9a-f]{0,31}")
+
+
+def zid_bytes(text: str) -> list[int]:
+    """The sixteen bytes of a zid's text, the little-endian bytes of its `u128`: the form a node's
+    `PEER_NODES` holds and a peer's zid is looked up by."""
+    return list(int(text, 16).to_bytes(16, "little"))
 
 
 def rust_string(text: str) -> str:

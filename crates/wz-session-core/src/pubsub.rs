@@ -104,6 +104,7 @@ use crate::caps;
 use crate::id_map::key_text_as;
 #[cfg(feature = "storage-profile")]
 use crate::id_map::{IdMap, PeerAliases};
+use crate::key_allowance::{ClassId, PeerOp};
 use crate::key_catalogue::{EntityId, EntityKind, KeyCatalogue, KeyId};
 use crate::key_gate::{Admitted, KeyGate, Refused};
 use crate::keyexpr_match::{
@@ -351,6 +352,11 @@ pub struct SubscriberPeer<P: Storage = Profile> {
     naming: PeerNaming<P>,
     #[cfg(feature = "declare-subscriber")]
     interests: InterestSide<P>,
+    /// Which peer the image declares this session's peer to be, once the session knows its zid
+    /// ([`PeerAllowance::class_of`](crate::key_allowance::PeerAllowance::class_of)): the row of the
+    /// allowance a message from it is asked against. `None` is a peer not declared, which a closed
+    /// image that declares its peers allows nothing.
+    class: Option<ClassId>,
     /// Names the policy where no field above does (a build without the session
     /// machinery). Zero-sized.
     _policy: core::marker::PhantomData<P>,
@@ -769,17 +775,46 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         self.key_gate.refused()
     }
 
-    /// What the key gate says of a message, by the key it arrived on. A message that is not from a
-    /// peer (a local publish) is the application's own and is not gated.
+    /// What the key gate says of a message, by the key it arrived on and the peer it came from
+    /// (`class`, the row the session found for the peer's zid). A message that is not from a peer
+    /// (a local publish) is the application's own and is not gated.
     #[inline]
-    fn admission(&mut self, keyexpr: &str, is_remote: bool) -> Admission {
+    fn admission(&mut self, keyexpr: &str, is_remote: bool, class: Option<ClassId>) -> Admission {
         if !is_remote {
             return Admission::Matched;
         }
-        match self.key_gate.admit_key(keyexpr) {
+        match self
+            .key_gate
+            .admit_key_from(class, PeerOp::Publish, keyexpr)
+        {
             Ok(Admitted::Key(key)) => Admission::Numbered(key),
             Ok(Admitted::Unchecked) => Admission::Matched,
             Err(_) => Admission::Refused,
+        }
+    }
+
+    /// Deliver a message that was read in place, whose key may lie in the peer's own table so that
+    /// this table is borrowed apart from it ([`SubscriberPeer`]): the gate, then the selection of a
+    /// key of a closed set or the match of every subscription, and no memory of the key. The
+    /// delivery of the in-place receive path, which a closed image of the fixed profile takes.
+    #[cfg(all(
+        feature = "storage-profile",
+        any(feature = "pubsub-put", feature = "pubsub-delete")
+    ))]
+    pub(super) fn fire_lent(&mut self, view: &dyn SampleView, class: Option<ClassId>) -> usize {
+        match self.admission(view.keyexpr(), true, class) {
+            Admission::Refused => 0,
+            Admission::Numbered(key) => match self.key_gate.catalogue() {
+                Some(catalogue) => fire_by_selection(
+                    &mut self.subscribers,
+                    catalogue,
+                    key,
+                    view.keyexpr(),
+                    |sink| sink.deliver(view),
+                ),
+                None => fire_into(&mut self.subscribers, view, true),
+            },
+            Admission::Matched => fire_into(&mut self.subscribers, view, true),
         }
     }
 
@@ -1977,7 +2012,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
             }
         }
 
-        self.fire_to_subscribers(&sample, is_remote);
+        self.fire_to_subscribers(&sample, is_remote, peer.class);
     }
 
     /// The receive-side un-swap of a sliced Put, at the priority the push was sent
@@ -2047,11 +2082,27 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// `Sample` through the same matcher via the `Sample: SampleView`
     /// coercion (one matching SSOT). Returns the count of sinks fired.
     pub fn dispatch_borrowed(&mut self, view: &dyn SampleView, is_remote: bool) -> usize {
-        self.fire_to_subscribers(view, is_remote)
+        self.fire_to_subscribers(view, is_remote, None)
     }
 
-    fn fire_to_subscribers(&mut self, view: &dyn SampleView, is_remote: bool) -> usize {
-        match self.admission(view.keyexpr(), is_remote) {
+    /// [`Self::dispatch_borrowed`] for a message from a peer whose declared class is `class`: what a
+    /// closed image that declares its peers must call, since without a class a message from a peer is
+    /// allowed nothing.
+    pub fn dispatch_borrowed_from(
+        &mut self,
+        view: &dyn SampleView,
+        class: Option<ClassId>,
+    ) -> usize {
+        self.fire_to_subscribers(view, true, class)
+    }
+
+    fn fire_to_subscribers(
+        &mut self,
+        view: &dyn SampleView,
+        is_remote: bool,
+        class: Option<ClassId>,
+    ) -> usize {
+        match self.admission(view.keyexpr(), is_remote, class) {
             Admission::Refused => return 0,
             Admission::Numbered(key) => {
                 if let Some(catalogue) = self.key_gate.catalogue() {
@@ -2094,8 +2145,9 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         &mut self,
         sample: &crate::sink::PlainSample<'_>,
         is_remote: bool,
+        class: Option<ClassId>,
     ) -> usize {
-        match self.admission(sample.keyexpr(), is_remote) {
+        match self.admission(sample.keyexpr(), is_remote, class) {
             Admission::Refused => return 0,
             Admission::Numbered(key) => {
                 if let Some(catalogue) = self.key_gate.catalogue() {
@@ -2499,7 +2551,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     /// every receiver.
     #[cfg(feature = "alloc")]
     pub fn local_publish(&mut self, sample: &Sample) -> usize {
-        self.fire_to_subscribers(sample, false)
+        self.fire_to_subscribers(sample, false, None)
     }
 }
 
@@ -2518,6 +2570,7 @@ impl<P: Storage> Default for SubscriberPeer<P> {
             },
             #[cfg(feature = "declare-subscriber")]
             interests: InterestSide::default(),
+            class: None,
             _policy: core::marker::PhantomData,
         }
     }
@@ -2537,6 +2590,7 @@ impl SubscriberPeer<crate::bounded::Static> {
             },
             #[cfg(feature = "declare-subscriber")]
             interests: InterestSide::new_static(),
+            class: None,
             _policy: core::marker::PhantomData,
         }
     }
@@ -2573,6 +2627,22 @@ impl<P: Storage> SubscriberPeer<P> {
         self.naming.aliases.reset();
         #[cfg(feature = "declare-subscriber")]
         self.interests.forget();
+        // The next peer on this slot is not known to be the last one.
+        self.class = None;
+    }
+
+    /// Say which declared peer this session's peer is, once its zid is known:
+    /// [`PeerAllowance::class_of`](crate::key_allowance::PeerAllowance::class_of) of the zid, or `None`
+    /// for a peer the image does not declare. A closed image that declares its peers allows a message
+    /// from a peer with no class nothing; an image that declares none ignores the class. Forgotten with
+    /// the peer ([`Self::forget_peer`]).
+    pub fn set_class(&mut self, class: Option<ClassId>) {
+        self.class = class;
+    }
+
+    /// The declared peer this session's peer was said to be, `None` when none was.
+    pub const fn class(&self) -> Option<ClassId> {
+        self.class
     }
 
     /// R311y739 — install OUR id space, the `M=0` half of the pair.

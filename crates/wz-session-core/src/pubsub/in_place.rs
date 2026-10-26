@@ -41,7 +41,7 @@ use wz_codecs::encoding::Encoding;
 use wz_codecs::push::{Push, PushVariant};
 use wz_codecs::timestamp::Timestamp;
 
-use super::{fire_into, SubscriberPeer, SubscriberTable};
+use super::{SubscriberPeer, SubscriberTable};
 use crate::bounded::Storage;
 use crate::driver_loop::InPlaceRecord;
 use crate::reliability::Reliability;
@@ -310,7 +310,9 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
                 return Ok(());
             }
         }
-        fire_into(&mut self.subscribers, &sample, true);
+        // Through the key gate and, for a key of a closed set, the selection: the one delivery of
+        // a message from a peer, as the copying receive takes it.
+        self.fire_lent(&sample, peer.class);
         Ok(())
     }
 
@@ -412,7 +414,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
             if repeats {
                 sample = sample.repeating_the_previous_key();
             }
-            self.fire_plain_to_subscribers(&sample, true);
+            self.fire_plain_to_subscribers(&sample, true, peer.class);
         }
         // The frame is done with this table: a sink that gathered its samples hands over.
         for subscriber in self.subscribers.iter_mut() {
@@ -545,6 +547,68 @@ mod tests {
         );
         assert_eq!(lent[0].reliability, Reliability::BestEffort);
         assert_eq!(fallbacks, InPlaceFallbacks::default(), "nothing fell back");
+    }
+
+    /// A literal Put on `key`, decoded from the wire bytes a peer would send, as both paths read it.
+    fn put_on<T>(key: &str, then: impl FnOnce(&Push<'_>) -> T) -> T {
+        let built = crate::push_build::build_push_literal_with_meta(key, b"payload", &meta())
+            .expect("build");
+        let wire = wire_of(&built);
+        let push = Push::decode(&mut SceCursor::new(&wire)).expect("decode");
+        then(&push)
+    }
+
+    /// The lent path was the one delivery that did not go through the key gate: it called the
+    /// matcher directly. A closed key set must drop a key outside it there as on the copying path.
+    #[test]
+    fn a_closed_key_set_drops_a_key_outside_it_on_the_lent_path_as_on_the_owned_path() {
+        use crate::key_catalogue::tests::TABLE;
+        use crate::key_gate::KeyGate;
+        // `a/b` is a key of the three-key table and `a/*` covers it; `a/c` is covered and is not one.
+        let closed = |r: &mut SubscriberRegistry| r.set_key_gate(KeyGate::closed(&TABLE));
+        let (lent, owned, _) = put_on("a/b", |push| both_ways(push, "a/*", closed));
+        assert_eq!(owned.len(), 1, "a key of the set is delivered");
+        assert_eq!(lent, owned);
+        let (lent, owned, _) = put_on("a/c", |push| both_ways(push, "a/*", closed));
+        assert!(
+            owned.is_empty(),
+            "a key outside the set is dropped on the owned path"
+        );
+        assert!(lent.is_empty(), "and on the lent path");
+        // The same two keys on an open table are both delivered.
+        let (lent, owned, _) = put_on("a/c", |push| both_ways(push, "a/*", |_| {}));
+        assert_eq!((lent.len(), owned.len()), (1, 1));
+    }
+
+    /// The peer's class, which the session says, is what the allowance is asked about on both paths.
+    #[test]
+    fn a_peer_is_allowed_the_keys_of_its_class_on_the_lent_path_as_on_the_owned_path() {
+        use crate::key_allowance::{tests::TABLE as ALLOWANCE, ClassId};
+        use crate::key_catalogue::tests::TABLE;
+        use crate::key_gate::KeyGate;
+        // The allowance table of `key_allowance`'s tests: peer 0 may use key 0 (`a`), and key 2 (`a/b`)
+        // is in no row of it.
+        let prepared = |class: Option<ClassId>| {
+            move |r: &mut SubscriberRegistry| {
+                r.set_key_gate(KeyGate::closed(&TABLE).with_allowance(&ALLOWANCE));
+                r.peer.set_class(class);
+            }
+        };
+        let declared = Some(ClassId::new(0));
+        let (lent, owned, _) = put_on("a", |push| both_ways(push, "a/**", prepared(declared)));
+        assert_eq!(owned.len(), 1, "the key its row allows is delivered");
+        assert_eq!(lent, owned);
+        let (lent, owned, _) = put_on("a/b", |push| both_ways(push, "a/**", prepared(declared)));
+        assert!(
+            owned.is_empty() && lent.is_empty(),
+            "a key its row does not allow is dropped"
+        );
+        // A peer with no class, on a key that class 0 may use.
+        let (lent, owned, _) = put_on("a", |push| both_ways(push, "a/**", prepared(None)));
+        assert!(
+            owned.is_empty() && lent.is_empty(),
+            "a peer not declared is allowed nothing"
+        );
     }
 
     #[cfg(feature = "pubsub-delete")]

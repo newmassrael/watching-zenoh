@@ -189,6 +189,12 @@ pub mod delivery_lane;
 /// Unconditional, no_std and no_alloc.
 pub mod key_catalogue;
 
+/// Which keys each declared peer may use: [`key_allowance::PeerAllowance`], one bit for each peer, each
+/// operation and each key of the closed key set (`docs/closed-key-set.md`, phase 4). The arrays are
+/// generated and static; a bad table stops the build that contains it. Unconditional, no_std and
+/// no_alloc.
+pub mod key_allowance;
+
 /// What a closed key set refuses and counts: [`key_gate::KeyGate`], open (admits every key, looks at
 /// none) or closed over a [`key_catalogue::KeyCatalogue`] (admits a key of the set, or a key the
 /// image declares in the role asked, and counts every refusal by reason). No host calls it yet.

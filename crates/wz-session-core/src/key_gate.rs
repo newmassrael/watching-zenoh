@@ -33,6 +33,7 @@
 //! (a query's, an interest's) are patterns and not data keys: they are not looked up here, and
 //! nothing refuses them.
 
+use crate::key_allowance::{ClassId, PeerAllowance, PeerOp};
 use crate::key_catalogue::{EntityId, EntityKind, KeyCatalogue, KeyId};
 
 /// Why a closed gate did not admit a key.
@@ -42,6 +43,11 @@ pub enum Refusal {
     OutsideSet,
     /// The text is a key of the set, and the image declares no entity of this kind on it.
     RoleNotDeclared(EntityKind),
+    /// The key is of the set, and the peer is not one the image declares: it is allowed nothing.
+    PeerUnknown,
+    /// The key is of the set and the peer is declared, and its row does not allow the operation on
+    /// this key.
+    PeerNotAllowed(PeerOp),
 }
 
 /// What an admitted key is.
@@ -62,6 +68,10 @@ pub struct Refused {
     pub outside_set: usize,
     /// [`Refusal::RoleNotDeclared`], for every kind.
     pub role_not_declared: usize,
+    /// [`Refusal::PeerUnknown`].
+    pub peer_unknown: usize,
+    /// [`Refusal::PeerNotAllowed`], for every operation.
+    pub peer_not_allowed: usize,
 }
 
 /// The catalogue of a closed build that was given none: no key, so the gate over it refuses every
@@ -73,6 +83,8 @@ const NO_KEYS: KeyCatalogue<'static> = KeyCatalogue::new("", &[], &[0], &[], &[]
 #[derive(Debug, Clone, Copy)]
 pub struct KeyGate<'a> {
     catalogue: Option<&'a KeyCatalogue<'a>>,
+    /// What each declared peer may do on each key, when the image declares its peers.
+    allowance: Option<&'a PeerAllowance<'a>>,
     refused: Refused,
     /// The key of the last message admitted: a stream's next message is on the same key, and one
     /// comparison with its text answers it where the search of the table would take several.
@@ -84,10 +96,13 @@ impl<'a> KeyGate<'a> {
     pub const fn open() -> Self {
         Self {
             catalogue: None,
+            allowance: None,
             refused: Refused {
                 total: 0,
                 outside_set: 0,
                 role_not_declared: 0,
+                peer_unknown: 0,
+                peer_not_allowed: 0,
             },
             last: None,
         }
@@ -98,6 +113,42 @@ impl<'a> KeyGate<'a> {
         Self {
             catalogue: Some(catalogue),
             ..Self::open()
+        }
+    }
+
+    /// This gate, also holding what each declared peer may do. Without it a closed gate asks nothing
+    /// of the peer a message came from; with it [`Self::admit_key_from`] does.
+    pub const fn with_allowance(self, allowance: &'a PeerAllowance<'a>) -> Self {
+        Self {
+            allowance: Some(allowance),
+            ..self
+        }
+    }
+
+    /// The table of what each declared peer may do, `None` when the image declares none.
+    pub const fn allowance(&self) -> Option<&'a PeerAllowance<'a>> {
+        self.allowance
+    }
+
+    /// Admit the key of a message that a peer sent, for the peer's `class` (the row
+    /// [`PeerAllowance::class_of`] found for its zid, `None` for a peer the image does not declare).
+    /// The key must be one of the set, as for [`Self::admit_key`]; then, when the image declares its
+    /// peers, the peer must be one of them and its row must allow `op` on the key. An open gate
+    /// admits everything, and a closed one that declares no peers asks nothing of the peer.
+    pub fn admit_key_from(
+        &mut self,
+        class: Option<ClassId>,
+        op: PeerOp,
+        text: &str,
+    ) -> Result<Admitted, Refusal> {
+        let admitted = self.admit_key(text)?;
+        let (Some(allowance), Admitted::Key(key)) = (self.allowance, admitted) else {
+            return Ok(admitted);
+        };
+        match class {
+            None => Err(self.refuse(Refusal::PeerUnknown)),
+            Some(class) if allowance.allows(class, op, key) => Ok(admitted),
+            Some(_) => Err(self.refuse(Refusal::PeerNotAllowed(op))),
         }
     }
 
@@ -194,6 +245,12 @@ impl<'a> KeyGate<'a> {
             Refusal::RoleNotDeclared(_) => {
                 self.refused.role_not_declared = self.refused.role_not_declared.saturating_add(1);
             }
+            Refusal::PeerUnknown => {
+                self.refused.peer_unknown = self.refused.peer_unknown.saturating_add(1);
+            }
+            Refusal::PeerNotAllowed(_) => {
+                self.refused.peer_not_allowed = self.refused.peer_not_allowed.saturating_add(1);
+            }
         }
         reason
     }
@@ -243,7 +300,7 @@ mod tests {
             Refused {
                 total: 3,
                 outside_set: 3,
-                role_not_declared: 0
+                ..Refused::default()
             }
         );
     }
@@ -274,10 +331,96 @@ mod tests {
             gate.refused(),
             Refused {
                 total: 2,
-                outside_set: 0,
-                role_not_declared: 2
+                role_not_declared: 2,
+                ..Refused::default()
             }
         );
+    }
+
+    // Three keys, "a", "a/*" and "a/b" (the test table of `key_catalogue`), and two declared peers: A
+    // may publish on key 2 ("a/b") and B on key 0 ("a").
+    const PEER_A: [u8; 16] = [1; 16];
+    const PEER_B: [u8; 16] = [2; 16];
+    const PEERS: [[u8; 16]; 2] = [PEER_A, PEER_B];
+    const PEER_BITS: [u8; 2] = [0b100, 0b001];
+    const ALLOWANCE: PeerAllowance<'static> = PeerAllowance::new(&PEERS, 3, &PEER_BITS);
+
+    #[test]
+    fn a_message_from_a_declared_peer_is_admitted_on_the_keys_its_row_allows() {
+        let mut gate = KeyGate::closed(&TABLE).with_allowance(&ALLOWANCE);
+        let a = ALLOWANCE.class_of(&PEER_A);
+        let b = ALLOWANCE.class_of(&PEER_B);
+        let publish = PeerOp::Publish;
+        assert_eq!(
+            gate.admit_key_from(a, publish, "a/b"),
+            Ok(Admitted::Key(KeyId::new(2)))
+        );
+        assert_eq!(
+            gate.admit_key_from(b, publish, "a"),
+            Ok(Admitted::Key(KeyId::new(0)))
+        );
+        // Declared peers, keys of the set, and the row does not allow it.
+        assert_eq!(
+            gate.admit_key_from(a, publish, "a"),
+            Err(Refusal::PeerNotAllowed(publish))
+        );
+        assert_eq!(
+            gate.admit_key_from(b, publish, "a/b"),
+            Err(Refusal::PeerNotAllowed(publish))
+        );
+        assert_eq!(
+            gate.refused(),
+            Refused {
+                total: 2,
+                peer_not_allowed: 2,
+                ..Refused::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_peer_that_is_not_declared_is_allowed_nothing_and_the_set_is_asked_first() {
+        let mut gate = KeyGate::closed(&TABLE).with_allowance(&ALLOWANCE);
+        let stranger = ALLOWANCE.class_of(&[9; 16]);
+        assert_eq!(stranger, None);
+        assert_eq!(
+            gate.admit_key_from(stranger, PeerOp::Publish, "a/b"),
+            Err(Refusal::PeerUnknown)
+        );
+        // A key outside the set is refused as that, whoever sent it.
+        assert_eq!(
+            gate.admit_key_from(stranger, PeerOp::Publish, "a/c"),
+            Err(Refusal::OutsideSet)
+        );
+        assert_eq!(
+            gate.admit_key_from(ALLOWANCE.class_of(&PEER_A), PeerOp::Publish, "a/c"),
+            Err(Refusal::OutsideSet)
+        );
+        assert_eq!(
+            gate.refused(),
+            Refused {
+                total: 3,
+                outside_set: 2,
+                peer_unknown: 1,
+                ..Refused::default()
+            }
+        );
+    }
+
+    #[test]
+    fn a_gate_that_declares_no_peers_asks_nothing_of_the_peer() {
+        let mut closed = KeyGate::closed(&TABLE);
+        assert!(closed.allowance().is_none());
+        assert_eq!(
+            closed.admit_key_from(None, PeerOp::Publish, "a/b"),
+            Ok(Admitted::Key(KeyId::new(2)))
+        );
+        let mut open = KeyGate::open().with_allowance(&ALLOWANCE);
+        assert_eq!(
+            open.admit_key_from(None, PeerOp::Publish, "anything"),
+            Ok(Admitted::Unchecked)
+        );
+        assert_eq!(closed.refused().total + open.refused().total, 0);
     }
 
     #[test]

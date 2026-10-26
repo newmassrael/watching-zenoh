@@ -89,3 +89,21 @@ key = "lab/alive/node1"
 [[entity]]
 kind = "liveliness-token"
 key = "lab/alive/node2"
+
+# What each declared peer may publish (phase 4): one peer on a subtree, one on a wildcard and a
+# literal, and one on `**`, which does not cross the verbatim chunk of `@/lab/adv`.
+
+[[allow]]
+peer = "a1"
+ops = ["publish"]
+keys = ["lab/sensor/**"]
+
+[[allow]]
+peer = "b2"
+ops = ["publish"]
+keys = ["lab/ctl/*", "lab/doc/small"]
+
+[[allow]]
+peer = "c3"
+ops = ["publish"]
+keys = ["**"]

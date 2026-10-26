@@ -105,7 +105,15 @@ GENERATED_NOTE = "scripts/lib/wz_key_set.py --write"
 
 # The ports of the matcher and of the canonical-form verdict live in `wz_keyexpr.py`, which
 # `wz_node.py` also uses; they are imported here under their own names.
-from wz_keyexpr import is_key_expression, is_wild, intersects, key_problem, rust_string  # noqa: E402,F401
+from wz_keyexpr import (  # noqa: E402,F401
+    ZID_RE,
+    intersects,
+    is_key_expression,
+    is_wild,
+    key_problem,
+    rust_string,
+    zid_bytes,
+)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -215,6 +223,88 @@ def build(entities: list[dict]) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------------------------
+# what each declared peer may use
+# ---------------------------------------------------------------------------------------------
+
+# The operations an allowance decides, in the order of `PeerOp::ALL`: the row beside a peer's.
+PEER_OPS = ("publish",)
+ALLOW_WORDS = {"peer", "ops", "keys"}
+
+
+def validate_allows(allows: object, entities: list[dict], limit: int, peers: set[str] | None = None) -> list[str]:
+    """Why the `[[allow]]` tables are not an allowance the table can carry, or nothing. `entities` are
+    the entities of the key set, already valid; `peers` are the zids the node declares as peers, when
+    there is a node to say (a peer that is allowed something must be one it declares)."""
+    if not isinstance(allows, list):
+        return ["allow: not a list of tables"]
+    concrete = sorted({e["key"] for e in entities if not is_wild(e["key"])})
+    problems: list[str] = []
+    for number, allow in enumerate(allows, 1):
+        who = f"allow {number}"
+        if not isinstance(allow, dict):
+            problems.append(f"{who}: not a table")
+            continue
+        for stray in sorted(set(allow) - ALLOW_WORDS):
+            problems.append(f"{who}: `{stray}` is not a word of an allowance")
+        peer = allow.get("peer")
+        if not isinstance(peer, str) or ZID_RE.fullmatch(peer) is None:
+            problems.append(f"{who}: peer is {peer!r}, not the lowercase hex of a zid (no leading 0, at most 32 digits)")
+        elif peers is not None and peer not in peers:
+            problems.append(f"{who}: peer {peer} is not a peer endpoint the node declares")
+        else:
+            who = f"{who} (peer {peer})"
+        ops = allow.get("ops")
+        if not isinstance(ops, list) or not ops or any(op not in PEER_OPS for op in ops):
+            problems.append(f"{who}: ops is {ops!r}, a non-empty list of {', '.join(PEER_OPS)}")
+        patterns = allow.get("keys")
+        if not isinstance(patterns, list) or not patterns:
+            problems.append(f"{who}: keys is missing or not a non-empty list of key expressions")
+            continue
+        for pattern in patterns:
+            if not isinstance(pattern, str):
+                problems.append(f"{who}: key {pattern!r} is not a string")
+            elif key_problem(pattern, limit) or not is_key_expression(pattern):
+                problems.append(f"{who}: key `{pattern}` is not a canonical key expression")
+            elif not any(intersects(pattern, key) for key in concrete):
+                problems.append(f"{who}: key `{pattern}` allows no concrete key of the set, so it allows nothing")
+    return problems
+
+
+def build_allowance(entities: list[dict], allows: list[dict]) -> dict:
+    """The allowance of valid `[[allow]]` tables over the table of `entities`: the declared peers in
+    ascending order of their zid bytes (the form `PEER_NODES` holds), and a row of one bit for each key
+    of the set for each peer and operation. A key is allowed to a peer for an operation when it is
+    concrete and some pattern listed for that peer and operation intersects it."""
+    keys = build(entities)["keys"]
+    by_peer: dict[str, dict[str, set[str]]] = {}
+    for allow in allows:
+        for op in allow["ops"]:
+            by_peer.setdefault(allow["peer"], {}).setdefault(op, set()).update(allow["keys"])
+    peers = sorted(by_peer, key=lambda peer: bytes(zid_bytes(peer)))
+    row = (len(keys) + 7) // 8
+    bits: list[int] = []
+    for peer in peers:
+        for op in PEER_OPS:
+            patterns = by_peer[peer].get(op, set())
+            cells = [0] * row
+            for index, key in enumerate(keys):
+                if not is_wild(key) and any(intersects(pattern, key) for pattern in patterns):
+                    cells[index // 8] |= 1 << (index % 8)
+            bits.extend(cells)
+    return {
+        "zids": [zid_bytes(peer) for peer in peers],
+        "keys": len(keys),
+        "bits": bits,
+        "declared": [
+            (zid_bytes(peer), PEER_OPS.index(op), sorted(by_peer[peer][op]))
+            for peer in peers
+            for op in PEER_OPS
+            if op in by_peer[peer]
+        ],
+    }
+
+
 def packed(items: list[str], indent: str, width: int = wz_config.RUST_MAX_WIDTH) -> list[str]:
     """`items` as lines no wider than `width`, each a run of `item,` separated by spaces."""
     lines: list[str] = []
@@ -250,18 +340,22 @@ def open_lines() -> list[str]:
         "pub mod key_set {",
         "    #![allow(dead_code)]",
         "    pub const CLOSED: Option<&'static wz_session_core::key_catalogue::KeyCatalogue<'static>> = None;",
+        "    pub const ALLOWED_PEERS: Option<&'static wz_session_core::key_allowance::PeerAllowance<'static>> = None;",
         "}",
     ]
 
 
-def table_lines(table: dict, declared: bool = False, closed: bool = False) -> list[str]:
+def table_lines(
+    table: dict, declared: bool = False, closed: bool = False, allowance: dict | None = None
+) -> list[str]:
     """The Rust of a table, as one module `key_set` that a file includes where it is wanted: the arrays,
     private, and the `CATALOGUE` built over them, public. It is a module so that it names nothing of
     its includer's (a node's `declared.rs` has its own `MEMBERS`), carries its own `use` and inner
     attribute, and refers to the crate by its name, so it is the same text in an image and in a test.
     `declared` adds the declaration as the entities were numbered, which the model test reads and an
     image has no use for. `closed` adds `CLOSED`, the table as an `Option`, which is `Some` here and
-    `None` in [`open_lines`], so that code reads one name for both."""
+    `None` in [`open_lines`], so that code reads one name for both; with it, `ALLOWED_PEERS` is the
+    peer allowance as an `Option` in the same way, `Some` when `allowance` is given."""
     skip = "    #[rustfmt::skip]"
     out = [
         "/// The key catalogue of the declaration, as `KeyCatalogue` reads it. A bad table is a build",
@@ -302,6 +396,48 @@ def table_lines(table: dict, declared: bool = False, closed: bool = False) -> li
             "    /// The table of a node that states a closed key set; `None` for one that does not.",
             "    pub const CLOSED: Option<&'static KeyCatalogue<'static>> = Some(&CATALOGUE);",
         ]
+        if allowance is None:
+            out += [
+                "",
+                "    /// What each declared peer may use: none declared, so the peer is not asked.",
+                "    pub const ALLOWED_PEERS: Option<&'static wz_session_core::key_allowance::PeerAllowance<'static>> =",
+                "        None;",
+            ]
+        else:
+            zids = [f"[{', '.join(str(b) for b in zid)}]" for zid in allowance["zids"]]
+            out += [
+                "",
+                "    /// What each declared peer may use: a row of one bit for each key of the set, for each",
+                "    /// peer (by the sixteen bytes of its zid, as `PEER_NODES` holds it) and each operation.",
+                skip,
+                f"    const PEER_ZIDS: [[u8; 16]; {len(zids)}] = [",
+            ]
+            out += packed(zids, "        ", 100)
+            out += ["    ];", "", skip, f"    const PEER_BITS: [u8; {len(allowance['bits'])}] = ["]
+            out += packed([str(n) for n in allowance["bits"]], "        ")
+            out += [
+                "    ];",
+                "",
+                skip,
+                "    pub const PEER_ALLOWANCE: wz_session_core::key_allowance::PeerAllowance<'static> =",
+                f"        wz_session_core::key_allowance::PeerAllowance::new(&PEER_ZIDS, {allowance['keys']}, &PEER_BITS);",
+                "",
+                skip,
+                "    pub const ALLOWED_PEERS: Option<&'static wz_session_core::key_allowance::PeerAllowance<'static>> =",
+                "        Some(&PEER_ALLOWANCE);",
+            ]
+    if declared and allowance is not None:
+        out += [
+            "",
+            "    /// The allowance as declared: for each peer and operation (an index of `PeerOp::ALL`) the",
+            "    /// patterns the declaration lists, which the model test compares every bit with.",
+            skip,
+            f"    pub const ALLOW_DECLARED: [([u8; 16], usize, &[&str]); {len(allowance['declared'])}] = [",
+        ]
+        for zid, op, patterns in allowance["declared"]:
+            listed = ", ".join(rust_string(pattern) for pattern in patterns)
+            out.append(f"        ([{', '.join(str(b) for b in zid)}], {op}, &[{listed}]),")
+        out.append("    ];")
     if declared:
         out += [
             "",
@@ -318,9 +454,11 @@ def table_lines(table: dict, declared: bool = False, closed: bool = False) -> li
     return out
 
 
-def emit_table(table: dict, source: str, declared: bool = False, closed: bool = False) -> str:
+def emit_table(
+    table: dict, source: str, declared: bool = False, closed: bool = False, allowance: dict | None = None
+) -> str:
     """The file a test includes: a header and the module of [`table_lines`]."""
-    return "\n".join(header(source) + table_lines(table, declared, closed)) + "\n"
+    return "\n".join(header(source) + table_lines(table, declared, closed, allowance)) + "\n"
 
 
 def corpus_keys() -> list[str]:
@@ -401,23 +539,37 @@ def emit_corpus() -> str:
 # ---------------------------------------------------------------------------------------------
 
 
-def load_entities(path: pathlib.Path, limit: int) -> list[dict]:
+def load_declaration(path: pathlib.Path, limit: int) -> tuple[list[dict], list[dict]]:
+    """A declaration file's entities and its `[[allow]]` tables, validated."""
     data = wz_config.read_decl_toml(path.read_text(encoding="utf-8"))
-    stray = sorted(set(data) - {"entity"})
+    stray = sorted(set(data) - {"entity", "allow"})
     if stray:
         raise ValueError(f"{path.name}: `{', '.join(stray)}` is not a table of a key set declaration")
     entities = data.get("entity", [])
+    allows = data.get("allow", [])
     problems = validate(entities, limit)
+    if not problems:
+        problems = validate_allows(allows, entities, limit)
     if problems:
         raise ValueError(f"{path.name}: " + "; ".join(problems))
-    return entities
+    return entities, allows
+
+
+def load_entities(path: pathlib.Path, limit: int) -> list[dict]:
+    return load_declaration(path, limit)[0]
 
 
 def derived(decl: dict) -> dict[pathlib.Path, str]:
-    table = build(load_entities(FIXTURE, key_limit(decl)))
+    entities, allows = load_declaration(FIXTURE, key_limit(decl))
+    table = build(entities)
+    allowance = build_allowance(entities, allows) if allows else None
     return {
         FIXTURE_RS: emit_table(
-            table, "crates/wz-session-core/tests/key_set_data/fixture.toml", declared=True, closed=True
+            table,
+            "crates/wz-session-core/tests/key_set_data/fixture.toml",
+            declared=True,
+            closed=True,
+            allowance=allowance,
         ),
         CORPUS_RS: emit_corpus(),
     }
@@ -559,6 +711,37 @@ def _selftest() -> int:
            validate([entity("subscriber", "a/**"), entity("publisher", "a/b")], limit) == [])
     expect("one key under two kinds is one key",
            build([entity("subscriber", "a"), entity("queryable", "a")])["keys"] == ["a"])
+
+    # Allowances: what each declared peer may publish.
+    small = [entity("publisher", "a/b"), entity("subscriber", "a/*"), entity("queryable", "a")]
+
+    def allow(peer: str, keys: list, ops: tuple = ("publish",)) -> dict:
+        return {"peer": peer, "ops": list(ops), "keys": list(keys)}
+
+    def refuses_allow(what: str, allows: list, needle: str, peers: set | None = None) -> None:
+        found = validate_allows(allows, small, limit, peers)
+        expect(f"{what}: expected a finding naming {needle!r}, got {found}", any(needle in p for p in found))
+
+    expect("an allowance over the key set is valid",
+           validate_allows([allow("a1", ["a/**"]), allow("b2", ["a/b", "a"])], small, limit, {"a1", "b2"}) == [])
+    allowed = build_allowance(small, [allow("b2", ["a/**"]), allow("a1", ["a/b"])])
+    expect("peers are in ascending order of their zid bytes", allowed["zids"][0][0] == 0xA1 and allowed["zids"][1][0] == 0xB2)
+    expect("a key is allowed when a listed pattern intersects it, and a pattern key never is",
+           allowed["bits"] == [0b100, 0b101] and allowed["keys"] == 3)
+    expect("the declaration is kept as it was listed", allowed["declared"][0][2] == ["a/b"])
+    refuses_allow("a peer that is not a zid", [allow("0a", ["a/b"])], "lowercase hex")
+    refuses_allow("an operation outside the vocabulary", [allow("a1", ["a/b"], ("subscribe",))], "ops is")
+    refuses_allow("an allowance with no keys", [allow("a1", [])], "keys is missing")
+    refuses_allow("a pattern that is not canonical", [allow("a1", ["a/**/*"])], "canonical key expression")
+    refuses_allow("a pattern that allows nothing", [allow("a1", ["zzz/**"])], "allows nothing")
+    refuses_allow("a word outside the vocabulary", [{**allow("a1", ["a/b"]), "deny": []}], "is not a word")
+    refuses_allow("a peer the node does not declare", [allow("a1", ["a/b"])], "not a peer endpoint", {"b2"})
+    one = emit_table(build(small), "x.toml", closed=True, allowance=allowed)
+    expect("the allowance is a table checked in a const, and `ALLOWED_PEERS` is `Some` of it",
+           "PeerAllowance::new(&PEER_ZIDS, 3, &PEER_BITS)" in one and "Some(&PEER_ALLOWANCE)" in one)
+    expect("a closed key set that declares no peers has `ALLOWED_PEERS = None`",
+           "ALLOWED_PEERS" in emit_table(build(small), "x.toml", closed=True)
+           and "PEER_BITS" not in emit_table(build(small), "x.toml", closed=True))
 
     # The fixture and the derived files are current, and the fixture uses every kind.
     kinds = {e["kind"] for e in load_entities(FIXTURE, limit)}

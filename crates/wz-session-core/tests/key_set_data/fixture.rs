@@ -111,6 +111,37 @@ pub mod key_set {
     /// The table of a node that states a closed key set; `None` for one that does not.
     pub const CLOSED: Option<&'static KeyCatalogue<'static>> = Some(&CATALOGUE);
 
+    /// What each declared peer may use: a row of one bit for each key of the set, for each
+    /// peer (by the sixteen bytes of its zid, as `PEER_NODES` holds it) and each operation.
+    #[rustfmt::skip]
+    const PEER_ZIDS: [[u8; 16]; 3] = [
+        [161, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [178, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [195, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    ];
+
+    #[rustfmt::skip]
+    const PEER_BITS: [u8; 9] = [
+        0, 128, 2, 0, 38, 0, 192, 182, 2,
+    ];
+
+    #[rustfmt::skip]
+    pub const PEER_ALLOWANCE: wz_session_core::key_allowance::PeerAllowance<'static> =
+        wz_session_core::key_allowance::PeerAllowance::new(&PEER_ZIDS, 18, &PEER_BITS);
+
+    #[rustfmt::skip]
+    pub const ALLOWED_PEERS: Option<&'static wz_session_core::key_allowance::PeerAllowance<'static>> =
+        Some(&PEER_ALLOWANCE);
+
+    /// The allowance as declared: for each peer and operation (an index of `PeerOp::ALL`) the
+    /// patterns the declaration lists, which the model test compares every bit with.
+    #[rustfmt::skip]
+    pub const ALLOW_DECLARED: [([u8; 16], usize, &[&str]); 3] = [
+        ([161, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 0, &["lab/sensor/**"]),
+        ([178, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 0, &["lab/ctl/*", "lab/doc/small"]),
+        ([195, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 0, &["**"]),
+    ];
+
     /// The declaration as the entities were numbered: row `n` is entity `n`.
     #[rustfmt::skip]
     pub const DECLARED: [(EntityKind, &str); 21] = [

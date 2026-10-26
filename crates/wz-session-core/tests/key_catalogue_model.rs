@@ -268,6 +268,99 @@ fn delivery_by_selection_is_what_the_scan_delivers_in_the_order_it_delivers() {
     assert_eq!(numbered.key_gate_refused().total, 0);
 }
 
+#[test]
+fn every_bit_of_the_peer_allowance_is_what_the_matcher_says() {
+    use fixture::key_set::{ALLOWED_PEERS, ALLOW_DECLARED};
+    use wz_session_core::key_allowance::PeerOp;
+    use wz_session_core::keyexpr_match::{is_wild, keyexpr_intersects_text};
+
+    let allowance = ALLOWED_PEERS.expect("the fixture declares peers");
+    assert_eq!(allowance.class_count(), ALLOW_DECLARED.len());
+    let (mut allowed, mut refused, mut wildcard_keys) = (0usize, 0usize, 0usize);
+    for (zid, op, patterns) in ALLOW_DECLARED {
+        let class = allowance.class_of(&zid).expect("a declared peer has a row");
+        let op = PeerOp::ALL[op];
+        for key in key_ids() {
+            let text = CATALOGUE.text(key);
+            // A key is allowed when it is concrete and some listed pattern intersects it.
+            let want = !is_wild(text)
+                && patterns
+                    .iter()
+                    .any(|pattern| keyexpr_intersects_text(pattern, text));
+            assert_eq!(
+                allowance.allows(class, op, key),
+                want,
+                "peer {zid:?}, `{text}`, against {patterns:?}"
+            );
+            allowed += usize::from(want);
+            refused += usize::from(!want);
+            wildcard_keys += usize::from(is_wild(text));
+        }
+    }
+    // Not vacuous: both answers occur, and the keys that are patterns were all refused.
+    assert!(
+        allowed > 10 && refused > allowed,
+        "{allowed} allowed, {refused} refused"
+    );
+    assert!(wildcard_keys > 0);
+    // `**` does not cross the verbatim chunk, so the peer allowed `**` still may not use `@/lab/adv`.
+    let c3 = allowance
+        .class_of(&[0xC3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        .expect("declared");
+    let adv = CATALOGUE.find_exact("@/lab/adv").expect("declared");
+    let set = CATALOGUE.find_exact("lab/ctl/set").expect("declared");
+    assert!(!allowance.allows(c3, PeerOp::Publish, adv));
+    assert!(allowance.allows(c3, PeerOp::Publish, set));
+    // A peer that is not declared has no row.
+    assert_eq!(allowance.class_of(&[9; 16]), None);
+}
+
+#[test]
+fn a_gate_with_the_fixtures_allowance_asks_the_peer_what_it_may_publish() {
+    use fixture::key_set::{ALLOWED_PEERS, CLOSED};
+    use wz_session_core::key_allowance::PeerOp;
+    use wz_session_core::key_gate::{KeyGate, Refusal};
+
+    // What a node does with its generated file: the table, then the allowance.
+    let table = CLOSED.expect("closed");
+    let peers = ALLOWED_PEERS.expect("declared peers");
+    let mut gate = KeyGate::closed(table).with_allowance(peers);
+    let zid = |first: u8| {
+        let mut bytes = [0u8; 16];
+        bytes[0] = first;
+        bytes
+    };
+    let a1 = peers.class_of(&zid(0xA1));
+    let b2 = peers.class_of(&zid(0xB2));
+    let stranger = peers.class_of(&zid(0x44));
+    let publish = PeerOp::Publish;
+    assert!(gate.admit_key_from(a1, publish, "lab/sensor/temp").is_ok());
+    assert!(gate.admit_key_from(b2, publish, "lab/ctl/set").is_ok());
+    assert_eq!(
+        gate.admit_key_from(a1, publish, "lab/ctl/set"),
+        Err(Refusal::PeerNotAllowed(publish))
+    );
+    assert_eq!(
+        gate.admit_key_from(stranger, publish, "lab/sensor/temp"),
+        Err(Refusal::PeerUnknown)
+    );
+    // A key outside the set is refused as that, for a declared peer too.
+    assert_eq!(
+        gate.admit_key_from(a1, publish, "lab/sensor/pressure"),
+        Err(Refusal::OutsideSet)
+    );
+    let refused = gate.refused();
+    assert_eq!(
+        (
+            refused.peer_not_allowed,
+            refused.peer_unknown,
+            refused.outside_set,
+            refused.total
+        ),
+        (1, 1, 1, 3)
+    );
+}
+
 #[cfg(feature = "alloc")]
 #[test]
 fn a_node_adopts_its_table_by_reading_closed() {

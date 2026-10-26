@@ -1,8 +1,9 @@
 # Closed key set
 
 Status: design; phases 1 to 3b (the pure table, the generator, the model test, the gate, the policy, the
-refusal of a peer's data key and delivery by the selection of a key) are built in the subscriber table;
-no image supplies a table yet. Written 2026-10-26 so that what a deployment asks of "every key is known at build time" is
+refusal of a peer's data key and delivery by the selection of a key) are built in the subscriber table,
+a node's declaration carries its table, and phase 4 (what each declared peer may publish) is built up
+to the gate; no node's code calls `set_key_gate` with its table yet. Written 2026-10-26 so that what a deployment asks of "every key is known at build time" is
 decided once, against what the host session already does, and not rebuilt beside it.
 
 ## What it is
@@ -83,9 +84,12 @@ shrinks from a bounded string to a number; the saving is measured, not claimed.
 
 **D6. Per-peer allowance is a set of key ids per peer class.** The generator emits, for each peer class
 the image knows, the key ids that class may publish, subscribe to, query and serve. This overlaps
-upstream's access control, which stays the AP's answer for open deployments; the closed set is the
-fixed-memory profile's answer and may be generated from the same rules later. Whether the two share a
-declaration is a decision for the owner below.
+upstream's access control, which stays the AP's answer for open deployments. Read against the tree,
+the two are not one thing declared twice: `wz-access-control` is std and AP only, its rules are JSON5
+over a subject of five axes, and a fixed-memory node declaration has no place for them. The closed
+allowance is therefore one table with two possible sources (a direct declaration in the node file,
+and, for an AP image that is closed, a compilation of its access-control rules), and the part that
+must agree is what each says for the same peer and key. See "Phase 4, as built".
 
 **D7. In the closed mode the table replaces the memo.** The selection is the exact answer a memo
 approximates, so `MATCH_MEMO_SLOTS` does nothing in a closed image and the memo is not built.
@@ -127,7 +131,7 @@ publishes it receives) is the per-peer allowance, phase 4.
      reaches its subscribers by the selection of that key, by number; the subscriber rows hold the
      entity they were declared as. Measured against open with the memo on one machine and condition:
      allocations and time per sample, alias row bytes, ROM and RAM of the table.
-4. **Per-peer allowance** (D6).
+4. **Per-peer allowance** (D6), built up to the gate: see "Phase 4, as built".
 5. **The cooperative engine, the slot node and the C ABIs** (sessions 11 and ef own the first two; a C
    ABI door is the third), once phase 3 shows the receive path.
 
@@ -194,9 +198,12 @@ publishes it receives) is the per-peer allowance, phase 4.
   `deploy/wz-config.toml` with its generated Kconfig and typed `SessionPolicy::key_set`. A build that
   states `closed` has a gate that refuses every key until a host gives it its table
   (`KeyGate::of_build`), so a closed image that forgot its table takes nothing and not everything.
-- **The place.** `SubscriberTable` holds a `KeyGate` and applies it in the two functions every
-  delivery goes through (`fire_to_subscribers` and `fire_plain_to_subscribers`), to a message that
-  came from a peer. A local publish is the application's own and is not gated. A refused message
+- **The place.** `SubscriberTable` holds a `KeyGate` and applies it to a message that came from a peer,
+  in `fire_to_subscribers`, `fire_plain_to_subscribers` and, added later, `fire_lent` (see "Phase 4, as
+  built" for why the third was missing: the first cut of this phase claimed that the first two were
+  every delivery, from a search of `pubsub.rs` alone, and the in-place receive path, which a
+  fixed-memory image takes, is in the child module `pubsub/in_place.rs` and called the matcher
+  directly). A local publish is the application's own and is not gated. A refused message
   reaches no subscriber, as a message that matched none, and is counted by reason
   (`SubscriberTable::key_gate_refused`). `set_key_gate` replaces the gate, which is how an image gives
   its table and how a test names the mode.
@@ -286,12 +293,59 @@ publishes it receives) is the per-peer allowance, phase 4.
 - **The matcher and verdict ports moved to `scripts/lib/wz_keyexpr.py`**, with `key_problem` and
   `rust_string`, so that `wz_node.py` uses them without importing the generator that imports it.
 
+## Phase 4, as built
+
+- **A correction first.** The gate of phases 3a and 3b did not cover the in-place receive path:
+  `deliver_lent` in `pubsub/in_place.rs` called `fire_into`, the matcher, directly, so a closed table
+  neither refused a key outside its set nor delivered by selection there. That is the path of the
+  fixed-memory slot images, the profile the closed set is for. It is now `fire_lent`, which the lent
+  path calls, with the gate and the selection, and the plain-Put path of the same module passes the
+  peer's class. Two tests in `in_place.rs` hold the lent path to the owned path for a key outside the
+  set and for a peer's class; with the gate bypassed again in `fire_lent` the first fails. These two
+  tests need the `storage-profile` feature, which is why a run of the default features did not show
+  them: the first run of them in the default build matched none, and they were run with the feature on.
+- **The table.** `crates/wz-session-core/src/key_allowance.rs`: `PeerAllowance`, one row of bits for each
+  declared peer and operation, one bit for each key of the set. `class_of(zid)` finds a peer's row once,
+  from the sixteen bytes of its zid (the form `PEER_NODES` holds), and `allows(class, op, key)` is one
+  bit test. A peer that is not declared has no row. `PeerAllowance::new` is a `const fn` that checks the
+  shape (the zids' order and uniqueness, the size of the bit array, the spare bits zero). Only one
+  operation, `Publish` (a peer's Put or Delete on a key, received here), is decided so far.
+- **The gate.** `KeyGate::with_allowance` and `admit_key_from(class, op, text)`: the key must be of the
+  set first (so a key outside it is refused as that, whoever sent it), then the peer must be one the
+  image declares and its row must allow the key. A closed gate that declares no peers asks nothing of
+  the peer. Refusals are counted: `peer_unknown` and `peer_not_allowed` beside the others.
+- **The peer's class.** `SubscriberPeer` holds the class (`set_class`, forgotten with the peer), and
+  every delivery of a peer's message passes it. A caller with no peer to give, `dispatch_borrowed`,
+  passes none, which an image that declares its peers refuses, so a closed image that declares peers
+  must call `dispatch_borrowed_from`. Nothing in the tree calls `set_class` yet: the session that
+  learns a peer's zid does.
+- **The source, direct.** A node that states a closed key set may declare `[[allow]]` tables: a `peer`
+  (a zid the node declares as a peer endpoint), `ops` and `keys`. The generator refuses a peer the node
+  does not declare, an operation outside the vocabulary, a key that is not canonical, and a pattern no
+  concrete key of the set meets (it would allow nothing), and an `[[allow]]` in a node that states no
+  closed key set. A key is allowed to a peer for an operation when it is concrete and some pattern
+  listed for that peer and operation intersects it. For a concrete key that is the directional
+  inclusion access control uses (the pattern covers the key) and the symmetric intersection of the
+  matcher alike, which is why the existing port of the matcher is enough and nothing new was ported.
+  The table is written into the node's `declared.rs` as `key_set::ALLOWED_PEERS`, `Some` when the node
+  declares allowances and `None` otherwise.
+- **Tested.** The model test compares every bit of the fixture's allowance (three peers, 18 keys) with the
+  real matcher over what was declared, including that `**` does not allow a verbatim key and that no
+  key that is itself a pattern is allowed; the generator, with the rule that a pattern key is not
+  allowed removed, fails it. A gate over the fixture's tables refuses a key outside the set, a peer not
+  declared and a key a declared peer's row does not allow, each counted once.
+- **Not built.** The second source (compiling access-control rules), the other operations (a peer's
+  query, its declarations, what this node sends it), and a node's code that reads `ALLOWED_PEERS` and
+  `set_class`, which is the slot node's and the cooperative engine's.
+
 ## What is not decided
 
 - **D4 for the owner.** Does a closed image admit a message whose key is undeclared but matches a
   declared wildcard selector? The design above refuses it. The alternative admits it as a bounded text
   row under an allowed selector, at the price of a run-time matcher and a run-time bound.
-- **D6 for the owner.** One declaration for open access control and the closed allowance, or two.
+- **D6, narrowed.** Whether an AP image that is closed and already has access-control rules should
+  have its allowance compiled from them (the second source of "Phase 4, as built") is the open part;
+  the fixed-memory node does not need it.
 - **Publisher wildcards.** A publisher on a wildcard key is not expressible in a table of concrete
   keys. The design lists the concrete keys a publisher uses; whether a wildcard publisher is needed at
   all is a question for the deployments that have one.

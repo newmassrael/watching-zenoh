@@ -92,7 +92,7 @@ import wz_key_set  # noqa: E402
 
 # `key_problem` and `rust_string` moved to `wz_keyexpr.py`, which `wz_key_set.py` shares; they stay
 # names of this module, which its selftest and `wz_package.py` read.
-from wz_keyexpr import key_problem, rust_string  # noqa: E402,F401
+from wz_keyexpr import ZID_RE, key_problem, rust_string  # noqa: E402,F401
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 NODES = ROOT / "deploy" / "nodes"
@@ -104,7 +104,7 @@ ENTITY_KINDS = ("publisher", "subscriber", "queryable", "querier", "liveliness-t
 NODE_KEYS = {"id", "help", "target"}
 ENDPOINT_KEYS = {"role", "locator", "accepts", "members", "ttl", "zid"}
 ENTITY_KEYS = {"kind", "key", "document_bytes", "sample_bytes", "from", "period_ms", "timeout_ms", "reply_bytes"}
-TOP_KEYS = {"node", "endpoint", "entity", "limits", "policy"}
+TOP_KEYS = {"node", "endpoint", "entity", "limits", "policy", "allow"}
 
 # What each target builds. `slot` is the per-session fixed-memory profile of the cooperative runtime:
 # one dialled session, no allocator, queries answered from documents that are prefixes of one static.
@@ -169,11 +169,6 @@ TARGETS = {
         },
     },
 }
-
-# The text of a zid as zenoh prints it and as `credential_identity::zid_from_key_text` reads it (the
-# one place its refusals are written): lowercase hex, no leading zero, at most 32 digits, the value
-# of a `u128` whose little-endian bytes are the zid's sixteen.
-ZID_RE = re.compile(r"[1-9a-f][0-9a-f]{0,31}")
 
 LOCATOR_RE = re.compile(r"(?P<scheme>[a-z]+)/(?P<a>\d{1,3})\.(?P<b>\d{1,3})\.(?P<c>\d{1,3})\.(?P<d>\d{1,3}):(?P<port>\d{1,5})")
 
@@ -450,7 +445,15 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
     # A node that states a closed key set is held to what the table can carry: canonical keys, concrete
     # publishers and tokens, no wildcard that nothing concrete meets, no entity twice.
     if states_closed_key_set(data):
-        out += [f"key set: {why}" for why in wz_key_set.validate(key_set_entities(data), values["MAX_KEYEXPR_BYTES"])]
+        found = wz_key_set.validate(key_set_entities(data), values["MAX_KEYEXPR_BYTES"])
+        if not found and "allow" in data:
+            found = wz_key_set.validate_allows(
+                data["allow"], key_set_entities(data), values["MAX_KEYEXPR_BYTES"], peer_zids_of(data)
+            )
+        out += [f"key set: {why}" for why in found]
+    elif "allow" in data:
+        out.append("allow: an allowance is over a closed key set; the node states `key-set = \"closed\"` "
+                   "in [policy] or declares no [[allow]]")
     return out
 
 
@@ -501,6 +504,11 @@ def states_closed_key_set(data: dict) -> bool:
     return isinstance(stated, dict) and stated.get("key-set") == "closed"
 
 
+def peer_zids_of(data: dict) -> set[str]:
+    """The zids the node declares as `peer` endpoints: the peers it may allow something."""
+    return {ep.get("zid") for ep in data.get("endpoint", []) if isinstance(ep, dict) and ep.get("role") == "peer"}
+
+
 def key_set_entities(data: dict) -> list[dict]:
     """The node's entities as the key set sees them: a kind and a key. An entity that is not a table
     counts for nothing here; `validate` has already said so."""
@@ -513,7 +521,10 @@ def key_set_lines(data: dict) -> list[str]:
     not, so the node's code reads one name for both. Valid input only."""
     if not states_closed_key_set(data):
         return wz_key_set.open_lines()
-    return wz_key_set.table_lines(wz_key_set.build(key_set_entities(data)), closed=True)
+    entities = key_set_entities(data)
+    allows = data.get("allow", [])
+    allowance = wz_key_set.build_allowance(entities, allows) if allows else None
+    return wz_key_set.table_lines(wz_key_set.build(entities), closed=True, allowance=allowance)
 
 
 def emit(name: str, data: dict, declaration_sha256: str) -> str:
@@ -1166,6 +1177,19 @@ document_bytes = 8
             closed.replace("lab/doc/a", "lab/doc/*"), "no concrete key")
     expect("the same keys in an open node are not held to it",
            problems(SAMPLE.replace("lab/doc/a", "lab/doc/*")) == [])
+
+    # An allowance: what a peer the node declares may publish, over its closed key set.
+    allow = '\n[[allow]]\npeer = "a1b2c3"\nops = ["publish"]\nkeys = ["lab/doc/a"]\n'
+    expect("a closed node may allow a peer it declares", problems(closed + peer + allow) == [])
+    allowed_rs = emit("n", wz_config.read_decl_toml(closed + peer + allow), sha)
+    expect("its table carries the allowance, and `ALLOWED_PEERS` is `Some` of it",
+           "pub const PEER_ALLOWANCE" in allowed_rs and "Some(&PEER_ALLOWANCE)" in allowed_rs)
+    expect("a closed node with no allowance has `ALLOWED_PEERS = None`",
+           "ALLOWED_PEERS" in closed_rs and "PEER_ALLOWANCE" not in closed_rs)
+    refuses("an allowance for a peer the node does not declare", closed + allow, "not a peer endpoint")
+    refuses("an allowance in a node that states no closed key set", SAMPLE + peer + allow, "over a closed key set")
+    refuses("an allowance of a key nothing concrete meets",
+            closed + peer + allow.replace("lab/doc/a", "zzz/**"), "allows nothing")
     refuses("no help", SAMPLE.replace('help = "A node."\n', ""), "help is missing")
     refuses("no node table", "[limits]\nMAX_QUERYABLES = 2\n", "no [node] table")
 

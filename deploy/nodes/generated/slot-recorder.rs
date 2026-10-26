@@ -63,4 +63,5 @@ pub const PUBLISHED: [(&str, u32, usize); 0] = [];
 pub mod key_set {
     #![allow(dead_code)]
     pub const CLOSED: Option<&'static wz_session_core::key_catalogue::KeyCatalogue<'static>> = None;
+    pub const ALLOWED_PEERS: Option<&'static wz_session_core::key_allowance::PeerAllowance<'static>> = None;
 }
