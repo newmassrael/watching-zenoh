@@ -289758,6 +289758,58 @@
         "Next, in order: the later parts of Z0c of docs/zenoh-api-on-the-engine.md, each landing when its closure exists: handlers with the channels, then key_expr and selector, then sample and the quality-of-service types; then Z1, where the table that maps the keys of a Config onto the engine is written and is a file of the family that wz wrote, which this gate sweeps. The top crate has not been run on the Windows host."
       ]
     },
+    "Round 3693": {
+      "decision_summary": "A flow's zenoh word is now a sequential probability ratio test, answering the analyzer design's claim that its thresholds belong to wz. Each observation adds a weight in whole millibits, log2 of its likelihood ratio, and the sum is read against +20 and -20 bits (alpha = beta = 2^-20) at every moment, which Ville's inequality bounds for a reader that reads after every packet. Model 1 weighs five checks: cookie_echo and init_roles (handshake), sn_follows judged without the ring when no InitAck gave one (state), version_header (header) and unit_reading (unit). Field widths give the null side of four, the generated corpus the unit one by its largest share, and the zenoh side is assumed until a corpus measures it. A lone Init, Join, Scout or Hello is undecided; a session joined mid-stream is yes on its SN steps. The old word survives as announced_version, and zenoh_evidence carries the sum, the thresholds and each check with its basis.",
+      "changes_bullets": [
+        "wz-session-core `passive.rs`: `SnSteps` per direction (`follows`, `breaks`), from the ring's verdict or, with no ring, as the step to the next integer on the conduit; SNs seen before the ring are cleared when it arrives, so its first verdict is still `Baseline`; `OPENS_LZ4_BATCHES` names what the build can open.",
+        "wz-capture `zenoh_evidence.rs`: `Check`, `Strength`, `Basis`, `CheckTally`, `ZenohEvidence` and model 1's weights in millibits, each recomputed by a test from the probabilities its doc states.",
+        "`session_table.rs`: `LinkIngest` observes cookie echoes, version headers and unit readings at ingest and adds the Init roles and the sessions' SN steps when asked; `ZenohVerdict` is `yes`, `no` or `undecided` from that evidence; `AnnouncedVersion` keeps what the version-bearing messages said; a unit a build without lz4 cannot open is counted and not weighed.",
+        "Documents: fields 43 and session_table 5 carry `zenoh` with the new words, `announced_version` and `zenoh_evidence`; selector_fields 4 and selector_diagnose 9 take the three words; the header and the C consumer follow; the ABI revision does not move. Design note `docs/flow-zenoh-verdict.md`."
+      ],
+      "verification_bullets": [
+        "After the rebase onto the tip, on a build host: `cargo test -p wz-capture --features dissect` 1603 passed, 6 ignored; with `compression` the session table's 63 passed; `cargo test -p wz-session-core --features dissect,reassembly passive::` 76 passed; `cargo test -p wz-capi-dissect` 227 passed; `cargo check -p wz-analyze --all-targets`.",
+        "Layers C1bo, C1bn, C1bt and C1bz (subset of the three crates) passed on a build host; clippy with -D warnings on each crate with and without its features; the guarded-count gate judged 6 of 6 over the round's commits; the pre-push static gate array passed.",
+        "Measured over the generated corpus (six protocols, 600 flows at each of seven lengths): no flow reads `yes`; at 20 and 50 datagrams every flow reads `no`; at 10, 3599 of 3600. The DNS datagram whose id reads as a Join is `undecided`.",
+        "The repository's captures: the publisher and raweth flows are `yes`, each scouting flow (one Scout or one Hello) is `undecided`, the flow joined mid-session with two units is `undecided`, and the compressed session is `yes` with and without lz4."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/3-scouting-layer",
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages",
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing"
+      ],
+      "carry_forward_bullets": [
+        "Step 2 of the claim: a corpus of real captures committed under `captures/` after anonymisation (owner decision 2026-10-26): zenoh mid-session, lz4 and several versions on the zenoh side; mDNS, DNS, SSDP, RTPS and SOME/IP first on the other; and a ROC regression test of the false `yes` and false `no` rates per protocol.",
+        "Step 3: the `generated` and `assumed` sides of the weights replaced by measured ones, and `model` moved. Until then a weight is a statement against the generated protocols only; a counter of another protocol where a zenoh SN sits can beat `sn_follows`'s derived chance.",
+        "A declared id referenced later, a request answered and a KeepAlive inside the lease are not checks yet: the first two are tallied from held messages only and need ingest tallies, and their zenoh side depends on where the capture began.",
+        "The word moves as evidence accumulates, so a kept fold whose selector reads `zenoh` begins again on each move; the port is not evidence, and a posterior beside the verdict needs per-port base rates from the corpus."
+      ],
+      "publishable_decision_summary": "A flow's zenoh word is now a sequential probability ratio test, answering the analyzer design's claim that its thresholds belong to wz. Each observation adds a weight in whole millibits, log2 of its likelihood ratio, and the sum is read against +20 and -20 bits (alpha = beta = 2^-20) at every moment, which Ville's inequality bounds for a reader that reads after every packet. Model 1 weighs five checks: cookie_echo and init_roles (handshake), sn_follows judged without the ring when no InitAck gave one (state), version_header (header) and unit_reading (unit). Field widths give the null side of four, the generated corpus the unit one by its largest share, and the zenoh side is assumed until a corpus measures it. A lone Init, Join, Scout or Hello is undecided; a session joined mid-stream is yes on its SN steps. The old word survives as announced_version, and zenoh_evidence carries the sum, the thresholds and each check with its basis.",
+      "publishable_changes_bullets": [
+        "wz-session-core `passive.rs`: `SnSteps` per direction (`follows`, `breaks`), from the ring's verdict or, with no ring, as the step to the next integer on the conduit; SNs seen before the ring are cleared when it arrives, so its first verdict is still `Baseline`; `OPENS_LZ4_BATCHES` names what the build can open.",
+        "wz-capture `zenoh_evidence.rs`: `Check`, `Strength`, `Basis`, `CheckTally`, `ZenohEvidence` and model 1's weights in millibits, each recomputed by a test from the probabilities its doc states.",
+        "`session_table.rs`: `LinkIngest` observes cookie echoes, version headers and unit readings at ingest and adds the Init roles and the sessions' SN steps when asked; `ZenohVerdict` is `yes`, `no` or `undecided` from that evidence; `AnnouncedVersion` keeps what the version-bearing messages said; a unit a build without lz4 cannot open is counted and not weighed.",
+        "Documents: fields 43 and session_table 5 carry `zenoh` with the new words, `announced_version` and `zenoh_evidence`; selector_fields 4 and selector_diagnose 9 take the three words; the header and the C consumer follow; the ABI revision does not move. Design note `docs/flow-zenoh-verdict.md`."
+      ],
+      "publishable_verification_bullets": [
+        "After the rebase onto the tip, on a build host: `cargo test -p wz-capture --features dissect` 1603 passed, 6 ignored; with `compression` the session table's 63 passed; `cargo test -p wz-session-core --features dissect,reassembly passive::` 76 passed; `cargo test -p wz-capi-dissect` 227 passed; `cargo check -p wz-analyze --all-targets`.",
+        "Layers C1bo, C1bn, C1bt and C1bz (subset of the three crates) passed on a build host; clippy with -D warnings on each crate with and without its features; the guarded-count gate judged 6 of 6 over the round's commits; the pre-push static gate array passed.",
+        "Measured over the generated corpus (six protocols, 600 flows at each of seven lengths): no flow reads `yes`; at 20 and 50 datagrams every flow reads `no`; at 10, 3599 of 3600. The DNS datagram whose id reads as a Join is `undecided`.",
+        "The repository's captures: the publisher and raweth flows are `yes`, each scouting flow (one Scout or one Hello) is `undecided`, the flow joined mid-session with two units is `undecided`, and the compressed session is `yes` with and without lz4."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/3-scouting-layer",
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages",
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 2 of the claim: a corpus of real captures committed under `captures/` after anonymisation (owner decision 2026-10-26): zenoh mid-session, lz4 and several versions on the zenoh side; mDNS, DNS, SSDP, RTPS and SOME/IP first on the other; and a ROC regression test of the false `yes` and false `no` rates per protocol.",
+        "Step 3: the `generated` and `assumed` sides of the weights replaced by measured ones, and `model` moved. Until then a weight is a statement against the generated protocols only; a counter of another protocol where a zenoh SN sits can beat `sn_follows`'s derived chance.",
+        "A declared id referenced later, a request answered and a KeepAlive inside the lease are not checks yet: the first two are tallied from held messages only and need ingest tallies, and their zenoh side depends on where the capture began.",
+        "The word moves as evidence accumulates, so a kept fold whose selector reads `zenoh` begins again on each move; the port is not evidence, and a posterior beside the verdict needs per-port base rates from the corpus."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
