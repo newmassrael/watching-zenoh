@@ -2199,25 +2199,21 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *                   "last_seen_ts_ns":"1700000000000015000",
  *                   "frames":10,"bytes":48,"zenoh":"yes",
  *                   "announced_version":"own",
- *                   "zenoh_evidence":{"log2_lr_millibits":34175,
- *                     "log2_lr_no_millibits":66315,
+ *                   "zenoh_evidence":{"log2_lr_millibits":26607,
+ *                     "log2_lr_no_millibits":53597,
  *                     "yes_at_millibits":20000,"no_at_millibits":-20000,
  *                     "model":2,
  *                     "checks":[{"check":"init_roles","strength":"handshake",
- *                                "confirmed":1,"violated":0,"millibits":999,
- *                                "no_millibits":999,
- *                                "q_basis":"derived","eps_basis":"assumed"},
+ *                                "confirmed":1,"violated":0,"millibits":983,
+ *                                "no_millibits":983,
+ *                                "q_basis":"derived","eps_basis":"measured"},
  *                               {"check":"version_header","strength":"header",
- *                                "confirmed":2,"violated":0,"millibits":15998,
- *                                "no_millibits":15998,
- *                                "q_basis":"derived","eps_basis":"assumed"},
+ *                                "confirmed":2,"violated":0,"millibits":15984,
+ *                                "no_millibits":15984,
+ *                                "q_basis":"derived","eps_basis":"measured"},
  *                               {"check":"unit_reading","strength":"unit",
  *                                "confirmed":10,"violated":0,
- *                                "millibits":9420,"no_millibits":36410,
- *                                "q_basis":"measured","eps_basis":"measured"},
- *                               {"check":"stream_framing","strength":"unit",
- *                                "confirmed":2,"violated":0,
- *                                "millibits":7758,"no_millibits":12908,
+ *                                "millibits":9640,"no_millibits":36630,
  *                                "q_basis":"measured",
  *                                "eps_basis":"measured"}]},
  *                   "unit_readings":{"explained":{"units":10,"bytes":28},
@@ -2359,11 +2355,13 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *                     from model 2);
  *   `unit_reading`    a unit read `explained` (`unit`), or `residual` or
  *                     `undecoded` (a violation): see HOW A FLOW'S UNITS READ;
- *   `stream_framing`  a stream direction framed a unit before this reader lost
- *                     its framing (`unit`), or lost it first (a violation: a
- *                     stream joined inside a unit, or bytes that are not zenoh's
- *                     framing), from model 2. A hole the capture reported judges
- *                     nothing, and a datagram link has no framing to lose.
+ *   `stream_framing`  a TCP direction the capture holds from its SYN framed a
+ *                     unit before this reader lost its framing (`unit`), or
+ *                     lost it first (a violation: bytes that are not zenoh's
+ *                     framing), from model 2. A direction joined after its SYN
+ *                     is not judged: a tap that joins a zenoh stream inside a
+ *                     unit loses its framing too. A hole the capture reported
+ *                     judges nothing, and a datagram link has no framing.
  *
  * `q_basis` and `eps_basis` say where the two probabilities a weight is computed
  * from come from: `derived` from the widths of the fields compared, `measured`

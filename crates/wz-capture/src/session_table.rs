@@ -1088,7 +1088,7 @@ fn links_of(d: &Dissection) -> (Vec<Link>, Excluded) {
             frames,
             census.bytes as u64,
             &d.serial_ingest,
-            SessionObservations::of(&d.serial_session),
+            d.serial_session_observations(),
         ));
     }
     (links, excluded)
@@ -1107,6 +1107,12 @@ pub(crate) fn session_sn_steps(session: &wz_session_core::passive::PassiveSessio
 /// directions whose framing was first judged held or lost
 /// ([`wz_session_core::passive::PassiveSession::first_framing`]; a datagram
 /// direction has no framing to judge).
+///
+/// A direction's framing is weighed only where the capture holds the
+/// stream's START (a TCP direction synchronised from its SYN). A tap that
+/// joins a stream later lands inside a unit nearly always, and a zenoh stream
+/// joined there loses its framing as surely as bytes that are not zenoh's: the
+/// observation would say how the capture began, not what the bytes are.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SessionObservations {
     /// The SN steps.
@@ -1118,14 +1124,15 @@ pub struct SessionObservations {
 }
 
 impl SessionObservations {
-    /// One session's.
-    pub fn of(session: &wz_session_core::passive::PassiveSession) -> Self {
+    /// One session's, with its framing judged in the directions whose start
+    /// the capture holds (`start_held`, `A` then `B`).
+    pub fn of(session: &wz_session_core::passive::PassiveSession, start_held: [bool; 2]) -> Self {
         let mut out = Self {
             steps: session_sn_steps(session),
             ..Self::default()
         };
-        for direction in [Direction::A, Direction::B] {
-            match session.first_framing(direction) {
+        for (direction, held) in [Direction::A, Direction::B].into_iter().zip(start_held) {
+            match session.first_framing(direction).filter(|_| held) {
                 Some(true) => out.framing_held += 1,
                 Some(false) => out.framing_lost += 1,
                 None => {}

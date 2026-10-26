@@ -1868,24 +1868,21 @@ fn the_headers_example_is_the_document_of_a_real_session() {
         "the example's numbers"
     );
     let doc = session_table_json(&packets.dissect());
-    // Two version headers, the Init roles, ten units read whole and two stream
-    // directions whose framing held; the keep-alives carry no SN and the
-    // fixture's cookie is empty.
+    // Two version headers, the Init roles and ten units read whole; the
+    // keep-alives carry no SN, the fixture's cookie is empty, and its TCP opens
+    // without a SYN, so its framing is not weighed.
     let zenoh = "\"zenoh\":\"yes\",\"announced_version\":\"own\",\
-                 \"zenoh_evidence\":{\"log2_lr_millibits\":34175,\
-                 \"log2_lr_no_millibits\":66315,\
+                 \"zenoh_evidence\":{\"log2_lr_millibits\":26607,\
+                 \"log2_lr_no_millibits\":53597,\
                  \"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":2,\
                  \"checks\":[{\"check\":\"init_roles\",\"strength\":\"handshake\",\
-                 \"confirmed\":1,\"violated\":0,\"millibits\":999,\"no_millibits\":999,\
-                 \"q_basis\":\"derived\",\"eps_basis\":\"assumed\"},\
+                 \"confirmed\":1,\"violated\":0,\"millibits\":983,\"no_millibits\":983,\
+                 \"q_basis\":\"derived\",\"eps_basis\":\"measured\"},\
                  {\"check\":\"version_header\",\"strength\":\"header\",\
-                 \"confirmed\":2,\"violated\":0,\"millibits\":15998,\"no_millibits\":15998,\
-                 \"q_basis\":\"derived\",\"eps_basis\":\"assumed\"},\
+                 \"confirmed\":2,\"violated\":0,\"millibits\":15984,\"no_millibits\":15984,\
+                 \"q_basis\":\"derived\",\"eps_basis\":\"measured\"},\
                  {\"check\":\"unit_reading\",\"strength\":\"unit\",\
-                 \"confirmed\":10,\"violated\":0,\"millibits\":9420,\"no_millibits\":36410,\
-                 \"q_basis\":\"measured\",\"eps_basis\":\"measured\"},\
-                 {\"check\":\"stream_framing\",\"strength\":\"unit\",\
-                 \"confirmed\":2,\"violated\":0,\"millibits\":7758,\"no_millibits\":12908,\
+                 \"confirmed\":10,\"violated\":0,\"millibits\":9640,\"no_millibits\":36630,\
                  \"q_basis\":\"measured\",\"eps_basis\":\"measured\"}]}";
     let want = alloc::format!(
         "{{\"document\":{{\"name\":\"session_table\",\"revision\":6}},\"ok\":true,\
@@ -2356,9 +2353,10 @@ fn tally(units: u64, bytes: u64) -> wz_session_core::passive::UnitTally {
 
 /// A flow joined after its handshake carries no Init. Every unit of it reads as
 /// a message that accounts for every byte: the fixture knows it put seven
-/// one-byte units in the stream. Seven keep-alives and two directions whose
-/// framing held are not enough for `yes`. The unit at which they would be is
-/// the model's: the framing's weight and one unit's, against the threshold.
+/// one-byte units in the stream. Seven keep-alives, and the framing where the
+/// capture holds the stream's start, are not enough for `yes`. The unit at
+/// which they would be is the model's: the framing's weight and one unit's,
+/// against the threshold.
 #[test]
 fn a_flow_joined_after_its_handshake_reads_as_explained_units() {
     use crate::zenoh_evidence::model;
@@ -2367,7 +2365,12 @@ fn a_flow_joined_after_its_handshake_reads_as_explained_units() {
     let table = session_table(&d);
     let row = only(&table);
     assert_eq!(word(row.evidence), ZenohVerdict::Undecided);
-    let held = 2 * model::FRAMING_HELD.yes;
+    // What the stream's framing weighs, as the row says it: nothing when the
+    // fixture's TCP opens without a SYN, whose start the capture does not hold.
+    let held = row
+        .evidence
+        .tally(crate::zenoh_evidence::Check::StreamFraming)
+        .millibits;
     let crossing = ((model::YES_AT - held) as u64).div_ceil(model::UNIT_EXPLAINED.yes as u64);
     for (units, want) in [
         (crossing - 1, ZenohVerdict::Undecided),

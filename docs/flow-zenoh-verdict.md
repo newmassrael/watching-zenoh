@@ -226,15 +226,20 @@ model 2 (`crates/wz-capture/src/zenoh_evidence.rs`). Three things move.
 `no_millibits`. A check whose null chance is derived from field widths weighs
 the same in both.
 
-**Measured weights.** `unit_reading`, and the new `stream_framing`, take their
+**Measured weights.** Every check's zenoh side but the SN steps', and the
+null side of `unit_reading` and the new `stream_framing`, take their
 probabilities from the counts of `captures/corpus/` (written out in
 `model::measured`, re-measured by
 `the_corpus_measures_the_counts_model_two_is_computed_from`, and turned into
 the weights by `model_weights_are_their_stated_probabilities`):
 
 - zenoh's chance of each failure is the one-sided 95% Clopper-Pearson upper
-  bound on its count (0 residual and 0 undecoded in 346 units; 4 framings lost
-  in 16 directions), and the confirming outcome takes the rest;
+  bound on its count, and the confirming outcome takes the rest: 0 residual
+  and 0 undecoded in 2824 units; 0 framings lost in 256 directions held from
+  their start; 0 differing cookies in 256 echoes; 0 Init pairs of one kind in
+  256; 0 other versions in 512 version headers. The zenoh files are 1.10.1
+  routers and clients, an upstream 1.5.0 router, zenoh-pico 1.10.1 clients,
+  240 short sessions captured for their handshakes, and a lossy link;
 - the `yes` sum's null chance of an outcome is the largest such upper bound
   over the null protocols (a unit read whole: mDNS, 13 of 36 units, bound
   0.51; a framing held: MQTT, 0 of 84 directions, bound 0.035);
@@ -243,38 +248,49 @@ the weights by `model_weights_are_their_stated_probabilities`):
 
 | outcome | `yes` sum | `no` sum | model 1 |
 |---|---|---|---|
-| unit read whole | +942 | +3641 | +2603 |
-| unit residual | -6858 | -5004 | -6745 |
-| unit undecoded | -6858 | -6225 | -7000 |
-| stream framing held | +3879 | +6454 | (none) |
-| stream framing lost | -1046 | -1037 | (none) |
-| version of this reader | +7999 | +7999 | +8000 |
-| another version | -9994 | -9994 | (none) |
+| unit read whole | +964 | +3663 | +2603 |
+| unit residual | -9881 | -8027 | -6745 |
+| unit undecoded | -9881 | -9248 | -7000 |
+| stream framing held | +4818 | +7393 | (none) |
+| stream framing lost | -6426 | -6417 | (none) |
+| cookie matched (8 bytes) | +63983 | +63983 | +63999 |
+| cookie differing | -6426 | -6426 | -10000 |
+| Inits of opposite kinds | +983 | +983 | +999 |
+| Inits of one kind | -5426 | -5426 | -9000 |
+| version of this reader | +7992 | +7992 | +8000 |
+| another version | -7416 | -7416 | (none) |
 
 The unit weight fell because the corpus's real mDNS reads a unit whole 36% of
 the time where the generated mDNS model 1 was priced on did 16%: model 1's
 weight claimed more than the bytes give, against a protocol the corpus holds.
-The SN steps keep their assumed zenoh break rate: the zenoh captures are taken
-on loopback, which loses nothing, and a rate measured there would understate a
-real link's. The cookie and the Init roles keep theirs for want of handshakes
-to count.
+The handshake violations weigh less than model 1's assumed `2^-10` gave them:
+256 clean handshakes bound a failure only to about 1.2%, and a weight may not
+claim more than the corpus shows.
+
+**The SN steps stay assumed, as a tolerance.** How often a step breaks is a
+property of the link, what it loses and reorders, and not of zenoh: the
+loopback captures break nothing and `zenoh-udp-lossy.pcap`, a link dropping 5%
+each way, breaks 6 steps of 110 (5.5%). A rate measured on either would
+describe that capture's link. The assumed `2^-4` is the loss the test is built to tolerate,
+and the lossy capture holds it there: both its flows read `yes`.
 
 **`stream_framing`.** A stream direction is judged once, by what happened
 first: a unit framed (held) or a desynchronisation this reader inferred
 (lost); a hole the capture reported judges nothing
-(`PassiveSession::first_framing`). A zenoh stream joined inside a unit loses
-its framing first, which is why the zenoh side of `lost` is a quarter and not
-zero. The forty short MQTT connections lose it in both directions and read
-`undecided` still: twenty-odd bytes a direction are too few to say `no` at
-2^-20, and that is the honest word.
+(`PassiveSession::first_framing`). It is weighed only for a TCP direction the
+capture holds from its SYN: a tap that joins a zenoh stream later lands inside
+a unit nearly always and loses the framing too, so there the observation says
+how the capture began and not what the bytes are. Held from the start, zenoh
+never lost it (0 in 256). The forty short MQTT connections lose it in both
+directions and read `undecided` still: twenty-odd bytes a direction are too
+few to say `no` at 2^-20, and that is the honest word.
 
-What moved on the corpus: one longer MQTT connection from `no` to
-`undecided`; every zenoh flow stays `yes` and no other flow reads `yes`. Of
-the repository's own captures, the seven-unit raweth capture moved from `yes`
-to `undecided`: a version header, seven units read whole and one SN break come
-to about ten and a half bits, and model 1's crossing rested on the unit weight
-the real mDNS beats.
+What moved on the corpus: no zenoh flow and no other flow changed word; every
+new zenoh flow reads `yes`. Of the repository's own captures, the seven-unit
+raweth capture moved from `yes` to `undecided`: a version header, seven units
+read whole and one SN break come to about ten and a half bits, and model 1's
+crossing rested on the unit weight the real mDNS beats.
 
-Still open after model 2: the zenoh side measured only on 1.10.1 over
-loopback, the null side only on the protocols the corpus holds, and the
-handshake checks' `eps` assumed.
+Still open after model 2: zenoh versions other than 1.10.1 and 1.5.0, links
+other than loopback and one emulated lossy link, and the null side only on
+the protocols the corpus holds.

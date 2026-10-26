@@ -42,6 +42,13 @@ The original captures are not kept anywhere.
 | `zenoh-tcp-lz4.pcap` | zenoh | TCP, lz4 | compression enabled on all three |
 | `zenoh-udp-lz4-midsession.pcap` | zenoh | UDP, lz4 | joined six seconds in |
 | `zenoh-tcp-lz4-midsession.pcap` | zenoh | TCP, lz4 | joined six seconds in |
+| `zenoh15-tcp-full.pcap` | zenoh | TCP | an upstream zenohd 1.5.0 router |
+| `zenoh15-tcp-midsession.pcap` | zenoh | TCP | the same, joined six seconds in |
+| `zenoh15-udp-full.pcap` | zenoh | UDP unicast | the same, from before the first Init |
+| `zenoh-pico-tcp.pcap` | zenoh | TCP | zenoh-pico 1.10.1 clients |
+| `zenoh-pico-udp.pcap` | zenoh | UDP unicast | zenoh-pico 1.10.1 clients |
+| `zenoh-handshakes.pcap` | zenoh | TCP and UDP | 240 short sessions, the handshake checks' population |
+| `zenoh-udp-lossy.pcap` | zenoh | UDP unicast | a link that drops 5% each way |
 | `lan-dns.pcap` | other | DNS | one host's queries and answers, fifteen minutes |
 | `lan-mdns.pcap` | other | mDNS | the devices of an office Wi-Fi, fifteen minutes |
 | `lan-ssdp.pcap` | other | SSDP | one search and the devices' answers |
@@ -54,8 +61,9 @@ The original captures are not kept anywhere.
 ## What it does not hold yet
 
 LLMNR, WS-Discovery, NTP and DHCP from a busier network,
-structured TCP such as HTTP and TLS, and on the zenoh side other zenoh versions
-and zenoh-pico. Each is added the same way: captured from the real
+structured TCP such as HTTP and TLS, and on the zenoh side versions other than
+1.10.1 and 1.5.0 and links other than loopback and an emulated lossy one.
+Each is added the same way: captured from the real
 implementation, a parser in the anonymiser where a payload of other devices can
 carry an identity, and the measured tally pinned beside the others. QUIC needed
 such a parser even for the capturer's own traffic, because its Initial packets

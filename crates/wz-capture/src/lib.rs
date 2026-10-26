@@ -1838,11 +1838,14 @@ impl DatagramDissection {
 
     /// What every session of this flow observed that the zenoh test weighs,
     /// its own and one per QUIC stream
-    /// ([`session_table::SessionObservations`]).
+    /// ([`session_table::SessionObservations`]). No start is known to be
+    /// held: a datagram has no framing to judge, and a QUIC stream recovered
+    /// from a capture need not begin at its first byte.
     pub fn session_observations(&self) -> session_table::SessionObservations {
+        let none = [false; 2];
         self.quic_streams.iter().fold(
-            session_table::SessionObservations::of(&self.session),
-            |sum, s| sum.and(session_table::SessionObservations::of(&s.session)),
+            session_table::SessionObservations::of(&self.session, none),
+            |sum, s| sum.and(session_table::SessionObservations::of(&s.session, none)),
         )
     }
 
@@ -2974,9 +2977,16 @@ impl FlowDissection {
     }
 
     /// What this flow's session observed that the zenoh test weighs
-    /// ([`session_table::SessionObservations`]).
+    /// ([`session_table::SessionObservations`]), its framing judged in the
+    /// directions the capture holds from their SYN.
     pub fn session_observations(&self) -> session_table::SessionObservations {
-        session_table::SessionObservations::of(&self.session)
+        session_table::SessionObservations::of(
+            &self.session,
+            [
+                self.low_to_high.synced_from_syn(),
+                self.high_to_low.synced_from_syn(),
+            ],
+        )
     }
 
     /// This flow's evidence for the zenoh test
@@ -6788,7 +6798,14 @@ impl Dissection {
     /// ([`zenoh_evidence::ZenohEvidence`]).
     pub fn serial_zenoh_evidence(&self) -> zenoh_evidence::ZenohEvidence {
         self.serial_ingest
-            .evidence(session_table::SessionObservations::of(&self.serial_session))
+            .evidence(self.serial_session_observations())
+    }
+
+    /// What the serial line's session observed that the zenoh test weighs
+    /// ([`session_table::SessionObservations`]). A line has no SYN, so no
+    /// start is known to be held and its framing is not weighed.
+    pub(crate) fn serial_session_observations(&self) -> session_table::SessionObservations {
+        session_table::SessionObservations::of(&self.serial_session, [false; 2])
     }
 
     /// R2508 (open-debt item 713) — every message of every list, in the order

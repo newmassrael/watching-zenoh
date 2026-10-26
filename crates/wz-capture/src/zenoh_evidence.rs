@@ -139,15 +139,19 @@ impl Check {
 
     /// Where the chance that a zenoh flow fails the check comes from.
     ///
-    /// The SN steps stay assumed though the corpus counts them: its zenoh
-    /// captures are taken on loopback, which loses nothing, and a break rate
-    /// measured there would understate a real link's.
+    /// The SN steps stay assumed though the corpus counts them: how often a
+    /// step breaks is a property of the LINK (what it loses and reorders), not
+    /// of zenoh, so the assumed rate is the loss the test is built to tolerate,
+    /// and `zenoh-udp-lossy.pcap`, a link dropping 5% each way, holds it to
+    /// reading `yes` there.
     pub const fn eps_basis(self) -> Basis {
         match self {
-            Check::CookieEcho | Check::InitRoles | Check::SnFollows | Check::VersionHeader => {
-                Basis::Assumed
-            }
-            Check::UnitReading | Check::StreamFraming => Basis::Measured,
+            Check::SnFollows => Basis::Assumed,
+            Check::CookieEcho
+            | Check::InitRoles
+            | Check::VersionHeader
+            | Check::UnitReading
+            | Check::StreamFraming => Basis::Measured,
         }
     }
 
@@ -288,20 +292,22 @@ pub mod model {
     /// can make.
     pub const COOKIE_ECHO_MAX_BYTES: i64 = 8;
 
-    /// `log2(1 - 2^-10)`, the zenoh side of a cookie match: a zenoh OpenSyn
-    /// fails to echo its InitAck's cookie with chance `2^-10` (assumed).
-    pub const COOKIE_ECHO_FIDELITY: i64 = -1;
+    /// `log2(1 - e)`, the zenoh side of a cookie match: a zenoh OpenSyn fails
+    /// to echo its InitAck's cookie with chance `e`, the bound of 0 failures
+    /// in the corpus's 256 echoes ([`measured::ZENOH_COOKIE`]).
+    pub const COOKIE_ECHO_FIDELITY: i64 = -17;
 
-    /// `log2(2^-10 / 1)`: a cookie that differs. An arbitrary pair of byte
-    /// strings differs with chance close to one.
-    pub const COOKIE_ECHO_VIOLATED: Weight = Weight::both(-10_000);
+    /// `log2(e / 1)`: a cookie that differs. An arbitrary pair of byte strings
+    /// differs with chance close to one.
+    pub const COOKIE_ECHO_VIOLATED: Weight = Weight::both(-6_426);
 
-    /// `log2((1 - 2^-10) / (1/2))`: two Inits of opposite kinds, which two
-    /// arbitrary Inits are with chance one half.
-    pub const INIT_ROLES_CONFIRMED: Weight = Weight::both(999);
+    /// `log2((1 - e) / (1/2))`: two Inits of opposite kinds, which two
+    /// arbitrary Inits are with chance one half; `e` the bound of 0 pairs of
+    /// one kind in 256 ([`measured::ZENOH_ROLES`]).
+    pub const INIT_ROLES_CONFIRMED: Weight = Weight::both(983);
 
-    /// `log2(2^-10 / (1/2))`: two Inits of the same kind.
-    pub const INIT_ROLES_VIOLATED: Weight = Weight::both(-9_000);
+    /// `log2(e / (1/2))`: two Inits of the same kind.
+    pub const INIT_ROLES_VIOLATED: Weight = Weight::both(-5_426);
 
     /// `log2((1 - 2^-4) / 2^-8)`: a frame one step after the last. A varint
     /// equals a given value with chance at most `2^-8`, and a zenoh frame
@@ -312,50 +318,51 @@ pub mod model {
     /// `log2(2^-4 / (1 - 2^-8))`: a frame that is not one step after the last.
     pub const SN_BREAKS: Weight = Weight::both(-3_994);
 
-    /// `log2((1 - 2^-10) / 2^-8)`: the version byte of a message that names
-    /// one is this reader's. A byte equals it by chance `2^-8`, and a zenoh
-    /// flow of this version names another with chance `2^-10` (assumed).
-    pub const VERSION_HEADER: Weight = Weight::both(7_999);
+    /// `log2((1 - e) / 2^-8)`: the version byte of a message that names one
+    /// is this reader's. A byte equals it by chance `2^-8`, and a zenoh flow
+    /// of this version names another with chance `e`, the bound of 0 in the
+    /// corpus's 512 version headers ([`measured::ZENOH_VERSIONS`]).
+    pub const VERSION_HEADER: Weight = Weight::both(7_992);
 
-    /// `log2(2^-10 / (1 - 2^-8))`: it names another version. Model 1 weighed
+    /// `log2(e / (1 - 2^-8))`: it names another version. Model 1 weighed
     /// only the match, which bounds neither sum: an observation that can only
     /// confirm raises the `yes` sum's expectation under the null.
-    pub const VERSION_FOREIGN: Weight = Weight::both(-9_994);
+    pub const VERSION_FOREIGN: Weight = Weight::both(-7_416);
 
     /// A unit read whole. Zenoh: one less the two failures' bounds. `yes`:
     /// mDNS's bound, 13 of 36 units; `no`: the members' average.
     pub const UNIT_EXPLAINED: Weight = Weight {
-        yes: 942,
-        no: 3_641,
+        yes: 964,
+        no: 3_663,
     };
 
-    /// A unit with bytes left over. Zenoh: the bound of 0 in 346 units; `yes`:
-    /// QUIC's 22 of 22; `no`: the members' average.
+    /// A unit with bytes left over. Zenoh: the bound of 0 in 2824 units;
+    /// `yes`: QUIC's 22 of 22; `no`: the members' average.
     pub const UNIT_RESIDUAL: Weight = Weight {
-        yes: -6_858,
-        no: -5_004,
+        yes: -9_881,
+        no: -8_027,
     };
 
     /// A unit that did not decode. Zenoh: as residual; `yes`: SSDP's 26 of
     /// 26; `no`: the members' average.
     pub const UNIT_UNDECODED: Weight = Weight {
-        yes: -6_858,
-        no: -6_225,
+        yes: -9_881,
+        no: -9_248,
     };
 
-    /// A stream direction that framed a unit before it lost its framing.
-    /// Zenoh: one less the bound of 4 lost in 16; `yes`: MQTT's bound, 0 held
-    /// in 84; `no`: MQTT's smoothed share.
+    /// A stream direction, captured from its start, that framed a unit before
+    /// it lost its framing. Zenoh: one less the bound of 0 lost in 256; `yes`:
+    /// MQTT's bound, 0 held in 84; `no`: MQTT's smoothed share.
     pub const FRAMING_HELD: Weight = Weight {
-        yes: 3_879,
-        no: 6_454,
+        yes: 4_818,
+        no: 7_393,
     };
 
-    /// A stream direction that lost its framing before it framed a unit: a
-    /// stream joined mid-unit, or bytes that are not zenoh's framing.
+    /// A stream direction, captured from its start, that lost its framing
+    /// before it framed a unit: bytes that are not zenoh's framing.
     pub const FRAMING_LOST: Weight = Weight {
-        yes: -1_046,
-        no: -1_037,
+        yes: -6_426,
+        no: -6_417,
     };
 
     /// The counts of `captures/corpus/` the measured weights are computed
@@ -425,10 +432,20 @@ pub mod model {
         ];
 
         /// The zenoh files' framing units: read whole, residual, undecoded.
-        pub const ZENOH_UNITS: [u64; 3] = [346, 0, 0];
+        pub const ZENOH_UNITS: [u64; 3] = [2_824, 0, 0];
 
-        /// The zenoh files' stream directions: framing held, framing lost.
-        pub const ZENOH_FRAMING: [u64; 2] = [12, 4];
+        /// The zenoh files' stream directions captured from their start:
+        /// framing held, framing lost.
+        pub const ZENOH_FRAMING: [u64; 2] = [256, 0];
+
+        /// The zenoh files' cookie echoes: matched, differing.
+        pub const ZENOH_COOKIE: [u64; 2] = [256, 0];
+
+        /// The zenoh files' Init pairs: of opposite kinds, of one kind.
+        pub const ZENOH_ROLES: [u64; 2] = [256, 0];
+
+        /// The zenoh files' version headers: this reader's, another.
+        pub const ZENOH_VERSIONS: [u64; 2] = [512, 0];
     }
 }
 
@@ -627,24 +644,30 @@ mod tests {
     /// assumed ones from theirs, the measured ones from the corpus counts.
     #[test]
     fn model_weights_are_their_stated_probabilities() {
-        let eps_handshake = 2f64.powi(-10);
+        use model::measured;
+        // A zenoh flow's chance of failing a check: the bound on its failures
+        // in the corpus.
+        let eps = |[ok, failed]: [u64; 2]| upper_bound(failed, ok + failed);
+        let eps_cookie = eps(measured::ZENOH_COOKIE);
+        let eps_roles = eps(measured::ZENOH_ROLES);
+        let eps_version = eps(measured::ZENOH_VERSIONS);
         let eps_sn = 2f64.powi(-4);
         let byte = 2f64.powi(-8);
         assert_eq!(model::YES_AT, millibits(1.0 / 2f64.powi(-20)));
         assert_eq!(model::NO_AT, millibits(2f64.powi(-20)));
         assert_eq!(model::COOKIE_ECHO_PER_BYTE, millibits(1.0 / byte));
-        assert_eq!(model::COOKIE_ECHO_FIDELITY, millibits(1.0 - eps_handshake));
+        assert_eq!(model::COOKIE_ECHO_FIDELITY, millibits(1.0 - eps_cookie));
         assert_eq!(
             model::COOKIE_ECHO_VIOLATED,
-            Weight::both(millibits(eps_handshake))
+            Weight::both(millibits(eps_cookie))
         );
         assert_eq!(
             model::INIT_ROLES_CONFIRMED,
-            Weight::both(millibits((1.0 - eps_handshake) / 0.5))
+            Weight::both(millibits((1.0 - eps_roles) / 0.5))
         );
         assert_eq!(
             model::INIT_ROLES_VIOLATED,
-            Weight::both(millibits(eps_handshake / 0.5))
+            Weight::both(millibits(eps_roles / 0.5))
         );
         assert_eq!(
             model::SN_FOLLOWS,
@@ -656,11 +679,11 @@ mod tests {
         );
         assert_eq!(
             model::VERSION_HEADER,
-            Weight::both(millibits((1.0 - eps_handshake) / byte))
+            Weight::both(millibits((1.0 - eps_version) / byte))
         );
         assert_eq!(
             model::VERSION_FOREIGN,
-            Weight::both(millibits(eps_handshake / (1.0 - byte)))
+            Weight::both(millibits(eps_version / (1.0 - byte)))
         );
         let units: Vec<&[u64]> = model::measured::NULL.iter().map(|m| &m.units[..]).collect();
         assert_eq!(
@@ -719,9 +742,9 @@ mod tests {
     /// fidelity, the same in both sums.
     #[test]
     fn a_cookie_match_weighs_its_bytes_up_to_the_cap() {
-        assert_eq!(cookie_echo_weight(1), Weight::both(7_999));
-        assert_eq!(cookie_echo_weight(8), Weight::both(63_999));
-        assert_eq!(cookie_echo_weight(40), Weight::both(63_999));
+        assert_eq!(cookie_echo_weight(1), Weight::both(7_983));
+        assert_eq!(cookie_echo_weight(8), Weight::both(63_983));
+        assert_eq!(cookie_echo_weight(40), Weight::both(63_983));
     }
 
     /// Evidence sums per check and over checks, in each sum, and two bodies of

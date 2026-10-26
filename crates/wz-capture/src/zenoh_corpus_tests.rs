@@ -188,17 +188,26 @@ const EXPECTED: &[(&str, Tally, Tally)] = &[
     ("zenoh-tcp-lz4.pcap", (2, 0, 0), (2, 0, 0)),
     ("zenoh-udp-lz4-midsession.pcap", (2, 0, 0), (2, 0, 0)),
     ("zenoh-tcp-lz4-midsession.pcap", (2, 0, 0), (2, 0, 0)),
+    // An upstream zenohd 1.5.0 router, zenoh-pico clients, 240 short sessions
+    // (the handshake checks' population) and a link that drops 5% each way:
+    // every flow `yes`, the lossy one on the SN steps that survive the loss.
+    ("zenoh15-tcp-full.pcap", (2, 0, 0), (2, 0, 0)),
+    ("zenoh15-tcp-midsession.pcap", (2, 0, 0), (2, 0, 0)),
+    ("zenoh15-udp-full.pcap", (2, 0, 0), (2, 0, 0)),
+    ("zenoh-pico-tcp.pcap", (2, 0, 0), (2, 0, 0)),
+    ("zenoh-pico-udp.pcap", (2, 0, 0), (2, 0, 0)),
+    ("zenoh-handshakes.pcap", (240, 0, 0), (240, 0, 0)),
+    ("zenoh-udp-lossy.pcap", (2, 0, 0), (2, 0, 0)),
     ("lan-dns.pcap", (0, 2, 185), (0, 2, 185)),
     ("lan-mdns.pcap", (0, 1, 18), (0, 1, 18)),
     ("lan-ssdp.pcap", (0, 1, 1), (0, 1, 1)),
     // The real implementations of three protocols that run beside zenoh, in
     // containers (2026-10-26). The forty MQTT connections that publish once and
-    // leave lose their framing in both directions and frame no unit: model 2
-    // weighs that (`stream_framing`, about a bit a direction), and twenty-odd
-    // bytes a direction are rightly too few to say `no` at 2^-20. One longer
-    // connection moved from `no` to `undecided` with model 2, whose unit weights
-    // are measured against the real nulls and weaker than model 1's.
-    ("stack-mqtt.pcap", (0, 3, 41), (0, 3, 41)),
+    // leave lose their framing in both directions, from their SYN, and frame
+    // no unit: model 2 weighs that (`stream_framing`, about six bits a
+    // direction), and twenty-odd bytes a direction are rightly too few to say
+    // `no` at 2^-20.
+    ("stack-mqtt.pcap", (0, 4, 40), (0, 4, 40)),
     ("stack-rtps.pcap", (0, 9, 3), (0, 9, 3)),
     ("stack-coap.pcap", (0, 5, 20), (0, 5, 20)),
     // Upstream vsomeip between two containers: service discovery, a method
@@ -287,30 +296,77 @@ fn the_corpus_holds_both_error_rates_and_every_files_tally() {
     );
 }
 
-/// One file's counts the measured weights rest on: framing units read whole,
-/// residual and undecoded, and stream directions whose framing held or was
-/// lost first.
-fn counts(d: &Dissection) -> ([u64; 3], [u64; 2]) {
-    let mut units = [0u64; 3];
-    let mut add = |r: wz_session_core::passive::ReadingEvidence| {
-        units[0] += r.explained.units;
-        units[1] += r.residual.units;
-        units[2] += r.undecoded.units;
+/// One file's counts the measured weights rest on.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Counts {
+    /// Framing units read whole, residual, undecoded.
+    units: [u64; 3],
+    /// Stream directions whose framing held, or was lost first.
+    framing: [u64; 2],
+    /// Cookie echoes matched, differing.
+    cookie: [u64; 2],
+    /// Init pairs of opposite kinds, of one kind.
+    roles: [u64; 2],
+    /// Version headers of this reader's version, of another.
+    versions: [u64; 2],
+    /// SN steps that followed, that broke: reported, not weighed from here
+    /// (`Check::eps_basis`).
+    sn: [u64; 2],
+}
+
+impl Counts {
+    fn and(&mut self, other: &Counts) {
+        let add = |a: &mut [u64], b: &[u64]| {
+            for (x, y) in a.iter_mut().zip(b) {
+                *x += y;
+            }
+        };
+        add(&mut self.units, &other.units);
+        add(&mut self.framing, &other.framing);
+        add(&mut self.cookie, &other.cookie);
+        add(&mut self.roles, &other.roles);
+        add(&mut self.versions, &other.versions);
+        add(&mut self.sn, &other.sn);
+    }
+}
+
+fn counts(d: &Dissection) -> Counts {
+    use crate::zenoh_evidence::{Check, ZenohEvidence};
+    let mut out = Counts::default();
+    let mut add = |r: wz_session_core::passive::ReadingEvidence,
+                   o: crate::session_table::SessionObservations,
+                   e: ZenohEvidence| {
+        out.units[0] += r.explained.units;
+        out.units[1] += r.residual.units;
+        out.units[2] += r.undecoded.units;
+        out.framing[0] += o.framing_held;
+        out.framing[1] += o.framing_lost;
+        for (check, slot) in [
+            (Check::CookieEcho, &mut out.cookie),
+            (Check::InitRoles, &mut out.roles),
+            (Check::VersionHeader, &mut out.versions),
+            (Check::SnFollows, &mut out.sn),
+        ] {
+            let t = e.tally(check);
+            slot[0] += t.confirmed;
+            slot[1] += t.violated;
+        }
     };
-    let mut framing = [0u64; 2];
     for f in d.flows() {
-        add(f.ingest.readings());
-        let o = f.session_observations();
-        framing[0] += o.framing_held;
-        framing[1] += o.framing_lost;
+        add(
+            f.ingest.readings(),
+            f.session_observations(),
+            f.zenoh_evidence(),
+        );
     }
     for f in d.datagram_flows() {
-        add(f.ingest.readings());
-        let o = f.session_observations();
-        framing[0] += o.framing_held;
-        framing[1] += o.framing_lost;
+        add(
+            f.ingest.readings(),
+            f.session_observations(),
+            f.zenoh_evidence(),
+        );
     }
-    (units, framing)
+    out
 }
 
 /// THE MEASURED WEIGHTS REST ON THIS CORPUS. Model 2's counts
@@ -325,48 +381,50 @@ fn counts(d: &Dissection) -> ([u64; 3], [u64; 2]) {
 #[test]
 fn the_corpus_measures_the_counts_model_two_is_computed_from() {
     use crate::zenoh_evidence::model::measured;
-    let mut zenoh_units = [0u64; 3];
-    let mut zenoh_framing = [0u64; 2];
+    let mut zenoh = Counts::default();
     let mut failures = Vec::new();
     for entry in manifest() {
         let bytes = std::fs::read(corpus_dir().join(&entry.file))
             .unwrap_or_else(|e| panic!("{}: {e}", entry.file));
         let d = Dissection::from_capture(&bytes)
             .unwrap_or_else(|e| panic!("{}: the capture reads: {e:?}", entry.file));
-        let (units, framing) = counts(&d);
+        let c = counts(&d);
         if entry.hypothesis == "zenoh" {
-            for (sum, n) in zenoh_units.iter_mut().zip(units) {
-                *sum += n;
-            }
-            for (sum, n) in zenoh_framing.iter_mut().zip(framing) {
-                *sum += n;
-            }
+            zenoh.and(&c);
             continue;
         }
         match measured::NULL.iter().find(|m| m.file == entry.file) {
-            Some(m) if m.units == units && m.framing == framing => {}
+            Some(m) if m.units == c.units && m.framing == c.framing => {}
             Some(m) => failures.push(alloc::format!(
-                "{}: units {units:?} framing {framing:?}, stated {:?} {:?}",
+                "{}: units {:?} framing {:?}, stated {:?} {:?}",
                 entry.file,
+                c.units,
+                c.framing,
                 m.units,
                 m.framing
             )),
             None => failures.push(alloc::format!(
-                "{}: units {units:?} framing {framing:?}, and no member states it",
-                entry.file
+                "{}: units {:?} framing {:?}, and no member states it",
+                entry.file,
+                c.units,
+                c.framing
             )),
         }
     }
-    let want_units = if wz_session_core::passive::OPENS_LZ4_BATCHES {
-        measured::ZENOH_UNITS
-    } else {
-        [measured::ZENOH_UNITS[0] - 1, 0, 1]
+    let want = Counts {
+        units: if wz_session_core::passive::OPENS_LZ4_BATCHES {
+            measured::ZENOH_UNITS
+        } else {
+            [measured::ZENOH_UNITS[0] - 1, 0, 1]
+        },
+        framing: measured::ZENOH_FRAMING,
+        cookie: measured::ZENOH_COOKIE,
+        roles: measured::ZENOH_ROLES,
+        versions: measured::ZENOH_VERSIONS,
+        sn: zenoh.sn,
     };
-    if zenoh_units != want_units || zenoh_framing != measured::ZENOH_FRAMING {
-        failures.push(alloc::format!(
-            "zenoh: units {zenoh_units:?} framing {zenoh_framing:?}, stated {want_units:?} {:?}",
-            measured::ZENOH_FRAMING
-        ));
+    if zenoh != want {
+        failures.push(alloc::format!("zenoh: {zenoh:?}, stated {want:?}"));
     }
     let listed: Vec<String> = manifest().into_iter().map(|e| e.file).collect();
     for m in &measured::NULL {

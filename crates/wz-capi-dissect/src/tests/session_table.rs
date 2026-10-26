@@ -155,17 +155,17 @@ fn a_session_crosses_the_boundary_with_every_cell_stated() {
         doc.contains(&format!(
             "\"frames\":6,\"bytes\":{want_bytes},\"zenoh\":\"yes\",\
              \"announced_version\":\"own\",\"zenoh_evidence\":{{\
-             \"log2_lr_millibits\":22649,\"log2_lr_no_millibits\":38843,\
+             \"log2_lr_millibits\":22751,\"log2_lr_no_millibits\":38945,\
              \"yes_at_millibits\":20000,\
              \"no_at_millibits\":-20000,\"model\":2,\"checks\":[\
              {{\"check\":\"init_roles\",\"strength\":\"handshake\",\"confirmed\":1,\
-             \"violated\":0,\"millibits\":999,\"no_millibits\":999,\
-             \"q_basis\":\"derived\",\"eps_basis\":\"assumed\"}},\
+             \"violated\":0,\"millibits\":983,\"no_millibits\":983,\
+             \"q_basis\":\"derived\",\"eps_basis\":\"measured\"}},\
              {{\"check\":\"version_header\",\"strength\":\"header\",\"confirmed\":2,\
-             \"violated\":0,\"millibits\":15998,\"no_millibits\":15998,\
-             \"q_basis\":\"derived\",\"eps_basis\":\"assumed\"}},\
+             \"violated\":0,\"millibits\":15984,\"no_millibits\":15984,\
+             \"q_basis\":\"derived\",\"eps_basis\":\"measured\"}},\
              {{\"check\":\"unit_reading\",\"strength\":\"unit\",\"confirmed\":6,\
-             \"violated\":0,\"millibits\":5652,\"no_millibits\":21846,\
+             \"violated\":0,\"millibits\":5784,\"no_millibits\":21978,\
              \"q_basis\":\"measured\",\"eps_basis\":\"measured\"}}]}},\
              \"unit_readings\":{{\"explained\":{{\"units\":6,\"bytes\":{want_bytes}}},\
              \"residual\":{{\"units\":0,\"bytes\":0}},\
