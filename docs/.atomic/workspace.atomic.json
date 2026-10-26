@@ -291514,6 +291514,48 @@
         "K1: the SCE element gate is SCE's ADR 0057, proposed; the wz feature model is generated from deploy/wz-config.toml once it is approved."
       ]
     },
+    "Round 3733": {
+      "decision_summary": "A declared fixed-memory node now replays a recorded trace compiled into its image, closing the slot interpreter of contract 5c. A replay kind takes the driver's timing, gap_ms, speed and max_gap_ms; its samples are top-level [[sample]] tables naming the replay by key, since declaration tables do not nest, with text or hex, an optional key, captured_at_ms and the driver's mutation words. The image holds samples as read-only data and each replay as a range of them; wz_session_mcu::slot_replay plays the same Pacing walk and Mutation::apply_into at run time into the node's one buffer, so no second definition exists. Decimal::as_f64 is the one float of a speed, read by both the driver and the image. Times chain from the session start without drift and lateness is counted. The vocabulary JSON gained vocabulary_schema 2 so a reader refuses a shape it does not know, as the analyzer asked.",
+      "changes_bullets": [
+        "crates/wz-session-mcu: new slot_replay (Sample, Replay, Replaying, ReplayCounts, ReplayWatch; re-exports Decimal, Mutation, Schedule, Timing); slot_active plays replays beside publishers through the one MadeBuffer.",
+        "crates/wz-workload: Mutation::output_len is const; Decimal::as_f64; the driver's replay reads its speed through it.",
+        "scripts/lib/wz_node.py: replay kind, [[sample]] shape, decimal, text and hex values, a with that lists values, REPLAYED and REPLAY_SAMPLES rows, sample keys in a closed key set as publishers, vocabulary samples section and vocabulary_schema 2.",
+        "deploy: declared_node.rs builds the replays, sizes MADE_MAX by mutated samples and says HOST-WZ-REPLAYED; slot-reporter replays three samples; Zpub witness 4 legs, C1m replay 5; contract 5b and 5c."
+      ],
+      "verification_bullets": [
+        "On the build machine: wz-workload tests and clippy with and without alloc; wz-session-mcu slot tests with query-get (85, the replay's 5 among them) and clippy with client-slot, with query-get and with group; wz-ap-demo clippy and its replay tests.",
+        "The no-allocator link gate builds the seven declared nodes clean with no warning, slot-reporter's replay included.",
+        "The publisher and replay witness against zenohd 1.10.1 with its REST plugin passes 4 of 4 on the packaged slot-reporter: the three replayed samples arrive in order, mutated as declared, the first two about the plan's 200 ms apart.",
+        "wz_node.py and wz_package.py selftests, the barrier needle gate, the feature surface census and the guarded count gate (9 of 9) pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "The fixed-memory replay takes no max_total_ms and no growth ceilings: 64 samples of at most a put each and a capped gap bound the plan instead; a node with a group refuses a replay.",
+        "Mutation at the wire rather than the payload stays out of the workload; it is a codec's fault injection."
+      ],
+      "publishable_decision_summary": "A declared fixed-memory node now replays a recorded trace compiled into its image, closing the slot interpreter of contract 5c. A replay kind takes the driver's timing, gap_ms, speed and max_gap_ms; its samples are top-level [[sample]] tables naming the replay by key, since declaration tables do not nest, with text or hex, an optional key, captured_at_ms and the driver's mutation words. The image holds samples as read-only data and each replay as a range of them; wz_session_mcu::slot_replay plays the same Pacing walk and Mutation::apply_into at run time into the node's one buffer, so no second definition exists. Decimal::as_f64 is the one float of a speed, read by both the driver and the image. Times chain from the session start without drift and lateness is counted. The vocabulary JSON gained vocabulary_schema 2 so a reader refuses a shape it does not know, as the analyzer asked.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-mcu: new slot_replay (Sample, Replay, Replaying, ReplayCounts, ReplayWatch; re-exports Decimal, Mutation, Schedule, Timing); slot_active plays replays beside publishers through the one MadeBuffer.",
+        "crates/wz-workload: Mutation::output_len is const; Decimal::as_f64; the driver's replay reads its speed through it.",
+        "scripts/lib/wz_node.py: replay kind, [[sample]] shape, decimal, text and hex values, a with that lists values, REPLAYED and REPLAY_SAMPLES rows, sample keys in a closed key set as publishers, vocabulary samples section and vocabulary_schema 2.",
+        "deploy: declared_node.rs builds the replays, sizes MADE_MAX by mutated samples and says HOST-WZ-REPLAYED; slot-reporter replays three samples; Zpub witness 4 legs, C1m replay 5; contract 5b and 5c."
+      ],
+      "publishable_verification_bullets": [
+        "On the build machine: wz-workload tests and clippy with and without alloc; wz-session-mcu slot tests with query-get (85, the replay's 5 among them) and clippy with client-slot, with query-get and with group; wz-ap-demo clippy and its replay tests.",
+        "The no-allocator link gate builds the seven declared nodes clean with no warning, slot-reporter's replay included.",
+        "The publisher and replay witness against zenohd 1.10.1 with its REST plugin passes 4 of 4 on the packaged slot-reporter: the three replayed samples arrive in order, mutated as declared, the first two about the plan's 200 ms apart.",
+        "wz_node.py and wz_package.py selftests, the barrier needle gate, the feature surface census and the guarded count gate (9 of 9) pass."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The fixed-memory replay takes no max_total_ms and no growth ceilings: 64 samples of at most a put each and a capped gap bound the plan instead; a node with a group refuses a replay.",
+        "Mutation at the wire rather than the payload stays out of the workload; it is a codec's fault injection."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
