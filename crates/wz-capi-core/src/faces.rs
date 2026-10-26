@@ -1620,6 +1620,7 @@ impl SharedSession {
             crate::drive::LinkTx {
                 queue: wz_runtime_tokio::session_glue::TxQueueConf::default(),
                 batch_size: crate::drive::DEFAULT_BATCH_SIZE,
+                lease_ms: crate::drive::DEFAULT_LEASE_MS,
             },
         )?;
         let actions = new_session_actions(driver, params, clock);

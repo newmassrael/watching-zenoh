@@ -265,6 +265,13 @@ classified `maps` (a wz switch), `always` (always on in wz), `never` (absent; a 
 row) or `n/a` (with the reason). The gate derives the upstream set from the pinned
 upstream source (pico's `CMakeLists.txt`, zenoh's and zenoh-c's `Cargo.toml`) and
 fails on an unclassified switch and on a classified one upstream does not have.
+pico's switches include the ones that carry a number rather than on or off: every
+CMake variable its config template substitutes (`include/zenoh-pico/config.h.in`,
+`@NAME@`), such as its batch sizes and lease. Such a value switch is `maps` to the
+limit that states the same number for the pico ABI (`limit:<ID>`), whose default
+the gate holds to pico's own, `never`, or `n/a`; never `always`, because a number
+wz holds fixed reproduces pico's default build only. Counting only `Z_FEATURE_*` had
+left the pico ABI advertising zenoh's unicast batch size instead of pico's.
 
 **C8. Test unit.** Every switch lands with an on and an off image: a cost-gate case
 for a capability, a pair of behaviour tests for a policy, fill-to-N and

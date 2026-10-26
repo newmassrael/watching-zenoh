@@ -67,3 +67,12 @@ pub(super) const DECLARATION_SYNC_FINAL_TIMEOUT_MS: usize = limit(
 );
 pub(super) const DECLARATION_SYNC_INTERVAL_MS: usize =
     limit(option_env!("WZ_LIMIT_DECLARATION_SYNC_INTERVAL_MS"), 10);
+pub(super) const PICO_UNICAST_BATCH_BYTES: usize =
+    limit(option_env!("WZ_LIMIT_PICO_UNICAST_BATCH_BYTES"), 2048);
+pub(super) const PICO_MULTICAST_BATCH_BYTES: usize =
+    limit(option_env!("WZ_LIMIT_PICO_MULTICAST_BATCH_BYTES"), 2048);
+pub(super) const PICO_LEASE_MS: usize = limit(option_env!("WZ_LIMIT_PICO_LEASE_MS"), 10000);
+pub(super) const PICO_SOCKET_TIMEOUT_MS: usize =
+    limit(option_env!("WZ_LIMIT_PICO_SOCKET_TIMEOUT_MS"), 100);
+pub(super) const PICO_CONNECT_TIMEOUT_MS: usize =
+    limit(option_env!("WZ_LIMIT_PICO_CONNECT_TIMEOUT_MS"), 10000);

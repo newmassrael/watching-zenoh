@@ -35,6 +35,10 @@ itself (their Kconfig symbol, default and help). This tool is everything that de
                                   arguments of ABI
     --drop-in-features c HEADER   the cargo arguments of the wz-capi-c build a program compiled
                                   against an installed zenoh-c's zenoh_configure.h links
+    --env pico CONFIG             the WZ_LIMIT_<NAME>=<n> environment of the wz-capi-pico build
+                                  that states the numbers a pico config.h states for its value
+                                  switches (batch sizes, lease, timeouts), each where it differs
+                                  from the default; with --features pico, the whole drop-in build
     --original-features ORIGINAL  resolve configs/<ORIGINAL>_defconfig alone and print the cargo
                                   arguments of the ABI that original is built through
     --resolve-env PRESET...       the same merge; print WZ_LIMIT_<NAME>=<value> for each limit it
@@ -925,6 +929,61 @@ SWITCH_KEYS = {"original", "switch", "class", "anchor", "note", "macro", "sense"
 SWITCH_ORIGINALS = ("zenoh-pico", "zenoh-c")
 SWITCH_CLASSES = ("maps", "always", "never", "n/a")
 PICO_DROP_IN = "wz-capi-pico/"
+# A zenoh-pico switch that carries a VALUE (a batch size, a lease) is not a capability: its `maps`
+# row anchors to the limit that states the same number for the pico ABI, as `limit:<ID>`.
+LIMIT_ANCHOR = "limit:"
+# The pinned zenoh-pico's config template: the value switches are the CMake variables it
+# substitutes as `@NAME@`, each into the macro its line defines.
+PICO_CONFIG_IN = ROOT / "vendor" / "zenoh-pico" / "include" / "zenoh-pico" / "config.h.in"
+PICO_VALUE_RE = re.compile(
+    r'^\s*#\s*(?:define|cmakedefine)\s+([A-Z][A-Z0-9_]*)\s+"?@([A-Z][A-Z0-9_]*)@"?\s*$', re.MULTILINE)
+# A number a pico `config.h` defines a value macro to: decimal, or hexadecimal as pico writes its
+# resolutions.
+VALUE_DEFINE_RE = re.compile(r"^\s*#\s*define\s+([A-Z][A-Z0-9_]*)\s+(0[xX][0-9a-fA-F]+|[0-9]+)\s*$")
+
+
+def pico_value_macros(text: str) -> dict[str, str]:
+    """Each value switch of a zenoh-pico `config.h.in` (a CMake variable it substitutes as
+    `@NAME@`, other than the `Z_FEATURE_*` switches) to the macro its `config.h` defines with it."""
+    return {m.group(2): m.group(1) for m in PICO_VALUE_RE.finditer(text)
+            if not m.group(2).startswith("Z_FEATURE_")}
+
+
+def limit_rows(decl: dict) -> list[tuple[str, str]]:
+    """(switch, limit id) of every zenoh-pico `maps` row that anchors to a limit, in row order."""
+    return [(s["switch"], s["anchor"][len(LIMIT_ANCHOR):]) for s in decl["switches"]
+            if s.get("original") == "zenoh-pico" and s.get("class") == "maps"
+            and str(s.get("anchor", "")).startswith(LIMIT_ANCHOR)]
+
+
+def pico_value_env(decl: dict, text: str, macros: dict[str, str]) -> tuple[list[str], list[str]]:
+    """The `WZ_LIMIT_<ID>=<n>` lines a zenoh-pico `config.h` states for the limits its value
+    switches map to, each where the header's number differs from the limit's default, and the
+    problems. A macro the header does not define leaves its limit at the default, which is pico's
+    own; one it defines to something that is not a number is a problem, never a default."""
+    defaults = {lim["id"]: lim["default"] for lim in decl["limits"]}
+    stated: dict[str, str] = {}
+    for line in text.splitlines():
+        if m := VALUE_DEFINE_RE.match(line):
+            stated[m.group(1)] = m.group(2)
+    lines: list[str] = []
+    problems: list[str] = []
+    defined = {d.group(1) for line in text.splitlines()
+               if (d := re.match(r"^\s*#\s*define\s+([A-Z][A-Z0-9_]*)\b", line))}
+    for switch, lid in limit_rows(decl):
+        macro = macros.get(switch)
+        if macro is None:
+            problems.append(f"`{switch}` maps to limit {lid}, and the pinned config.h.in has no "
+                            f"value line for it")
+            continue
+        if macro not in stated:
+            if macro in defined:
+                problems.append(f"{macro} is defined to something that is not a number")
+            continue
+        value = int(stated[macro], 0)
+        if value != defaults[lid]:
+            lines.append(f"WZ_LIMIT_{lid}={value}")
+    return lines, problems
 
 
 def pico_rows_to(switches: list[dict], cid: str) -> list[str]:
@@ -963,6 +1022,12 @@ def validate_switches(data: dict) -> list[str]:
             out.append(f"{where} carries no note -- a verdict with no reason is not one")
         if (row.get("class") in ("maps", "always")) != ("anchor" in row):
             out.append(f"{where}: a `maps` or `always` row names an anchor and no other does")
+        anchor = str(row.get("anchor", ""))
+        if anchor.startswith(LIMIT_ANCHOR):
+            if row.get("original") != "zenoh-pico" or row.get("class") != "maps":
+                out.append(f"{where}: only a zenoh-pico `maps` row anchors to a limit")
+            elif anchor[len(LIMIT_ANCHOR):] not in {lim.get("id") for lim in data.get("limit", [])}:
+                out.append(f"{where}: anchors to `{anchor}`, which no [[limit]] declares")
         if "macro" in row and not (row.get("original") == "zenoh-c" and row.get("class") == "maps"
                                    and str(row["macro"]).startswith("Z_FEATURE_")):
             out.append(f"{where}: only a zenoh-c `maps` row names a macro, and it is Z_FEATURE_*")
@@ -1263,6 +1328,10 @@ def pico_reference(decl: dict, enabled: set[str]) -> dict[str, int]:
     out: dict[str, int] = {}
     for row in decl["switches"]:
         if row.get("original") != "zenoh-pico":
+            continue
+        # A value switch is not on or off: the reference keeps pico's number, which is also the
+        # default of the limit a `maps` value row anchors to, so the two builds state the same one.
+        if not row["switch"].startswith("Z_FEATURE_"):
             continue
         cls = row["class"]
         if cls == "always":
@@ -2357,6 +2426,45 @@ def cmd_selftest() -> int:
     expect("a header reads a 0 and an #undef as stated off and a bare define as on",
            pico_flag_states("#define Z_FEATURE_A 0\n/* #undef Z_FEATURE_B */\n#define Z_FEATURE_C\n")
            == ({"Z_FEATURE_C"}, {"Z_FEATURE_A", "Z_FEATURE_B"}))
+    template = ('#cmakedefine ZP_SYSTEM_PLATFORM_HEADER "@ZP_SYSTEM_PLATFORM_HEADER@"\n'
+                "#define Z_BATCH_MULTICAST_SIZE @BATCH_MULTICAST_SIZE@\n"
+                "#define Z_TRANSPORT_LEASE @Z_TRANSPORT_LEASE@\n"
+                "#define Z_FEATURE_QUERY @Z_FEATURE_QUERY@\n#define Z_SN_RESOLUTION 0x02\n")
+    expect("a config template's value switches are its @NAME@ lines other than Z_FEATURE_*",
+           pico_value_macros(template) == {"ZP_SYSTEM_PLATFORM_HEADER": "ZP_SYSTEM_PLATFORM_HEADER",
+                                           "BATCH_MULTICAST_SIZE": "Z_BATCH_MULTICAST_SIZE",
+                                           "Z_TRANSPORT_LEASE": "Z_TRANSPORT_LEASE"})
+    value_decl = {"limits": [{"id": "MCAST", "default": 2048}, {"id": "LEASE", "default": 10000}],
+                  "switches": [{"original": "zenoh-pico", "switch": "BATCH_MULTICAST_SIZE",
+                                "class": "maps", "anchor": "limit:MCAST"},
+                               {"original": "zenoh-pico", "switch": "Z_TRANSPORT_LEASE",
+                                "class": "maps", "anchor": "limit:LEASE"},
+                               {"original": "zenoh-pico", "switch": "Z_FEATURE_QUERY",
+                                "class": "maps", "anchor": "wz-capi-pico/query"}]}
+    macros = pico_value_macros(template)
+    expect("a header's value differing from the limit's default becomes its WZ_LIMIT line",
+           pico_value_env(value_decl, "#define Z_BATCH_MULTICAST_SIZE 1024\n"
+                                      "#define Z_TRANSPORT_LEASE 10000\n", macros)
+           == (["WZ_LIMIT_MCAST=1024"], []))
+    expect("a hexadecimal value reads as its number and a header silent on a switch states nothing",
+           pico_value_env(value_decl, "#define Z_BATCH_MULTICAST_SIZE 0x400\n", macros)
+           == (["WZ_LIMIT_MCAST=1024"], []))
+    expect("a value macro defined to something that is not a number is a problem, not a default",
+           pico_value_env(value_decl, "#define Z_TRANSPORT_LEASE LEASE_MS\n", macros)[1] != [])
+    expect("a value row whose switch the template does not carry is a problem",
+           pico_value_env(value_decl, "", {})[1] != [])
+    expect("only a zenoh-pico maps row anchors to a limit, and only to a declared one",
+           validate_switches({"limit": [{"id": "MCAST"}], "upstream_switch": [
+               {"original": "zenoh-pico", "switch": "BATCH_MULTICAST_SIZE", "class": "maps",
+                "anchor": "limit:MCAST", "note": "x"}]}) == []
+           and validate_switches({"limit": [], "upstream_switch": [
+               {"original": "zenoh-pico", "switch": "BATCH_MULTICAST_SIZE", "class": "maps",
+                "anchor": "limit:MCAST", "note": "x"}]}) != []
+           and validate_switches({"limit": [{"id": "MCAST"}], "upstream_switch": [
+               {"original": "zenoh-c", "switch": "batch", "class": "maps",
+                "anchor": "limit:MCAST", "note": "x"}]}) != [])
+    expect("a value switch is no switch of the pico reference build",
+           all(s.startswith("Z_FEATURE_") for s in pico_reference(decl, set())))
     expect("the multicast transport needs both of its switches",
            "multicast-transport" not in read_config(decl, "#define Z_FEATURE_MULTICAST_TRANSPORT 1\n")
            and "multicast-transport" in read_config(
@@ -3071,6 +3179,19 @@ def main(argv: list[str]) -> int:
             print(f"  wz-config FAIL: {exc}", file=sys.stderr)
             return 1
         print(cargo_args(decl, argv[2], resolved_caps(decl, kconf)))
+        return 0
+    if len(argv) == 4 and argv[1] == "--env" and argv[2] == "pico":
+        # The numbers a pico `config.h` states for its value switches, as the environment of the
+        # cargo build of the drop-in; `--features pico` is the same header's capabilities.
+        decl = load_decl()
+        macros = pico_value_macros(PICO_CONFIG_IN.read_text(encoding="utf-8"))
+        lines, problems = pico_value_env(decl, pathlib.Path(argv[3]).read_text(encoding="utf-8"), macros)
+        for problem in problems:
+            print(f"  wz-config FAIL: {argv[3]}: {problem}", file=sys.stderr)
+        if problems:
+            return 1
+        for line in lines:
+            print(line)
         return 0
     if len(argv) == 4 and argv[1] == "--drop-in-features" and argv[2] == "c":
         # The canonical rule a consumer that builds the zenoh-c drop-in for its installed

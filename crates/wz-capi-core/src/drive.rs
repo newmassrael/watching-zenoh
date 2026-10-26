@@ -1197,11 +1197,19 @@ pub struct LinkTx {
     pub queue: TxQueueConf,
     /// The batch size advertised, in bytes.
     pub batch_size: u16,
+    /// The lease advertised, in milliseconds. The ABIs state it differently: zenoh-c passes
+    /// [`DEFAULT_LEASE_MS`], and zenoh-pico's ABI the number its build states for pico's
+    /// `Z_TRANSPORT_LEASE`.
+    pub lease_ms: u64,
 }
 
 /// The batch size a session advertises when its config states none: zenoh's own default
 /// (`transport/link/tx/batch_size`, 65535).
 pub const DEFAULT_BATCH_SIZE: u16 = 65535;
+
+/// The lease a session advertises when nothing states another: zenoh's own default
+/// (`transport/link/tx/lease`, 10000 ms), which is also zenoh-pico's `Z_TRANSPORT_LEASE`.
+pub const DEFAULT_LEASE_MS: u64 = 10_000;
 
 /// Fixed session-init parameters (mirrors the wz-ap-demo defaults), with a
 /// per-session [`fresh_zid`].
@@ -1223,7 +1231,7 @@ pub(crate) fn init_params(
         seq_num_res: 2,
         req_id_res: 2,
         batch_size: link_tx.batch_size,
-        lease_ms: 10_000,
+        lease_ms: link_tx.lease_ms,
         initial_sn: 0,
         cookie: Vec::new(),
         tx_queue: link_tx.queue,
@@ -3789,8 +3797,10 @@ pub struct OpenStance {
     /// The batch size the session advertises at its handshake, dialled and accepted alike; see
     /// [`LinkTx`]. A zenoh-c session reads it from `transport/link/tx/batch_size` and a session
     /// whose config states none passes [`DEFAULT_BATCH_SIZE`]; zenoh-pico's ABI has no such key
-    /// and passes the constant.
+    /// and passes the number its build states for pico's `BATCH_UNICAST_SIZE`.
     pub batch_size: u16,
+    /// The lease the session advertises at its handshake, in milliseconds; see [`LinkTx`].
+    pub lease_ms: u64,
     /// What the session's links offer at their handshake, every dialled link and
     /// every accepted one alike: the other half of the same fact. A zenoh-c
     /// session offers what its config enables — QoS, and shared memory on the
@@ -4079,6 +4089,7 @@ pub fn open_blocking(
     let OpenStance {
         tx_queue,
         batch_size,
+        lease_ms,
         offer,
         zid,
         start_read_task,
@@ -4123,6 +4134,7 @@ pub fn open_blocking(
     let link_tx = LinkTx {
         queue: tx_queue,
         batch_size,
+        lease_ms,
     };
     let clock = TokioTime::new();
     // R3074 -- where the nodes a peer is told of are posted. Made here because both ends are
@@ -4516,6 +4528,7 @@ mod tests {
                     LinkTx {
                         queue: TxQueueConf::default(),
                         batch_size: 1024,
+                        lease_ms: DEFAULT_LEASE_MS,
                     },
                 )
                 .expect("entropy"),
@@ -5094,6 +5107,7 @@ mod tests {
         OpenStance {
             tx_queue: TxQueueConf::pico(),
             batch_size: DEFAULT_BATCH_SIZE,
+            lease_ms: DEFAULT_LEASE_MS,
             offer: SessionOffer::universal(),
             zid: None,
             start_read_task: true,

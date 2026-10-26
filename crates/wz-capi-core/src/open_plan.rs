@@ -834,6 +834,7 @@ impl OpenPlan {
             stance: OpenStance {
                 tx_queue: abi.tx_queue,
                 batch_size: self.batch_size,
+                lease_ms: crate::drive::DEFAULT_LEASE_MS,
                 offer,
                 zid: self.zid,
                 start_read_task: abi.start_read_task,

@@ -71,7 +71,6 @@ use crate::result::{ZResult, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK};
 #[cfg(feature = "engine-tokio")]
 use wz_capi_core::drive::{
     open_blocking, CapiTlsConfig, DialPhase, OpenError, OpenStance, SessionState,
-    DEFAULT_BATCH_SIZE,
 };
 use wz_session_core::session_init_params::TxQueueConf;
 use wz_session_core::WhatAmI;
@@ -96,18 +95,43 @@ fn is_group_endpoint(endpoint: &str) -> bool {
     locator.starts_with("udp/") && metadata.split(';').any(|pair| pair.starts_with("iface="))
 }
 
+/// A batch size of this ABI as the wire carries it, in two bytes: a number of
+/// [`wz_session_core::caps`], refused when the build is made if it states one past `u16::MAX`.
+const fn pico_batch(bytes: usize) -> u16 {
+    assert!(
+        bytes <= u16::MAX as usize,
+        "a zenoh-pico batch size is at most 65535 bytes"
+    );
+    bytes as u16
+}
+
+/// The cooperative engine's read wait, in milliseconds: a number of [`wz_session_core::caps`],
+/// refused when the build is made if it is past what the engine's wait holds.
+#[cfg(not(feature = "engine-tokio"))]
+const fn pico_socket_timeout(ms: usize) -> u32 {
+    assert!(
+        ms <= u32::MAX as usize,
+        "a zenoh-pico socket timeout is at most u32::MAX ms"
+    );
+    ms as u32
+}
+
 /// What pico's JOIN advertises on a group (`vendor/zenoh-pico/src/protocol/definitions/transport.c`
-/// @ `_z_transport_message_t _z_t_msg_make_join(`): its `Z_TRANSPORT_LEASE` (10000 ms),
-/// beaconed every `Z_JOIN_INTERVAL` (2500 ms), its `Z_SN_RESOLUTION` and `Z_REQ_RESOLUTION`
-/// (0x02 each), its `Z_BATCH_MULTICAST_SIZE` (2048, `vendor/zenoh-pico/CMakeLists.txt` @
-/// `set(BATCH_MULTICAST_SIZE 2048`), and no per-priority conduits.
+/// @ `_z_transport_message_t _z_t_msg_make_join(`): its `Z_TRANSPORT_LEASE`, beaconed every
+/// `Z_JOIN_INTERVAL` (2500 ms), its `Z_SN_RESOLUTION` and `Z_REQ_RESOLUTION` (0x02 each), its
+/// `Z_BATCH_MULTICAST_SIZE`, and no per-priority conduits. The lease and the batch size are build
+/// switches of pico's (`BATCH_MULTICAST_SIZE`, `Z_TRANSPORT_LEASE` in its CMakeLists), so they are
+/// the numbers this build states for them ([`wz_session_core::caps::PICO_LEASE_MS`],
+/// [`wz_session_core::caps::PICO_MULTICAST_BATCH_BYTES`]), pico's own by default: pico refuses a
+/// member whose Join states another batch size. The join interval and the two resolutions are
+/// fixed in pico's config template, not switches.
 #[cfg(feature = "multicast-transport")]
 const PICO_GROUP: wz_capi_core::drive::GroupProfile = wz_capi_core::drive::GroupProfile {
-    lease_ms: 10_000,
+    lease_ms: wz_session_core::caps::PICO_LEASE_MS as u64,
     join_interval_ms: 2_500,
     seq_num_res: 0x02,
     req_id_res: 0x02,
-    batch_size: 2_048,
+    batch_size: pico_batch(wz_session_core::caps::PICO_MULTICAST_BATCH_BYTES),
     is_qos: false,
 };
 
@@ -561,9 +585,13 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
         },
         OpenStance {
             tx_queue: TxQueueConf::pico(),
-            // pico's config has no batch-size key this ABI reads, so it advertises zenoh's
-            // default, as it did when the number was a constant in the core.
-            batch_size: DEFAULT_BATCH_SIZE,
+            // pico's batch size and lease are build switches of its, not config keys
+            // (`BATCH_UNICAST_SIZE`, `Z_TRANSPORT_LEASE`): its InitSyn carries
+            // `Z_BATCH_UNICAST_SIZE` (`vendor/zenoh-pico/src/protocol/definitions/transport.c` @
+            // `msg._body._init._batch_size = Z_BATCH_UNICAST_SIZE;`), 2048 by default and not
+            // zenoh's 65535, so this advertises the numbers the build states for them.
+            batch_size: pico_batch(wz_session_core::caps::PICO_UNICAST_BATCH_BYTES),
+            lease_ms: wz_session_core::caps::PICO_LEASE_MS as u64,
             // pico negotiates no transport capability on unicast: its InitSyn
             // carries the patch ext and nothing else
             // (`vendor/zenoh-pico/src/protocol/codec/transport.c` @
@@ -698,18 +726,22 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
             endpoints: connect,
             whatami: dial_whatami,
             zid: None,
-            batch_size: u16::MAX,
-            lease_ms: 10_000,
+            // The numbers of pico's value build switches, as this build states them: the
+            // batch size and lease its InitSyn carries (`BATCH_UNICAST_SIZE`,
+            // `Z_TRANSPORT_LEASE`) and its handshake's receive deadline
+            // (`Z_TRANSPORT_CONNECT_TIMEOUT`).
+            batch_size: pico_batch(wz_session_core::caps::PICO_UNICAST_BATCH_BYTES),
+            lease_ms: wz_session_core::caps::PICO_LEASE_MS as u64,
             tx_queue: TxQueueConf::pico(),
             timeouts: wz_session_core::session_timeouts::SessionTimeouts::spec_defaults(),
-            open_timeout_ms: 10_000,
+            open_timeout_ms: wz_session_core::caps::PICO_CONNECT_TIMEOUT_MS as u64,
             // pico tries again every 1000 ms while the reopen fails
             // (`vendor/zenoh-pico/src/net/session.c` @
             // `return _z_fut_fn_result_wake_up_after(1000);`).
             redial_ms: Some(1000),
-            // A read waits on the link as long as pico's socket receive times out
-            // (`vendor/zenoh-pico/CMakeLists.txt` @ `set(Z_CONFIG_SOCKET_TIMEOUT 100`).
-            idle_wait_ms: 100,
+            // A read waits on the link as long as pico's socket receive times out, its
+            // `Z_CONFIG_SOCKET_TIMEOUT` as this build states it.
+            idle_wait_ms: pico_socket_timeout(wz_session_core::caps::PICO_SOCKET_TIMEOUT_MS),
         },
     );
     let engine = match opened {

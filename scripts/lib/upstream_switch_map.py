@@ -167,8 +167,10 @@ def shape_arm(
     table: str,
     rows: tuple[tuple[str, str, str | None, str], ...],
     features: dict[str, set[str]],
+    limits: frozenset[str] = frozenset(),
 ) -> list[str]:
-    """Is the table well formed, and does every anchor it names exist?"""
+    """Is the table well formed, and does every anchor it names exist? A `maps` anchor is a
+    crate's feature, or `limit:<ID>` for a value switch, which a [[limit]] of `limits` declares."""
     failures: list[str] = []
     if not rows:
         return [f"{table}: the table is empty -- a census with no population reports green about nothing"]
@@ -181,7 +183,10 @@ def shape_arm(
             continue
         if not note.strip():
             failures.append(f"{where} carries no note -- a verdict with no reason is not one")
-        if cls == "maps":
+        if cls == "maps" and (anchor or "").startswith(wz_config.LIMIT_ANCHOR):
+            if anchor[len(wz_config.LIMIT_ANCHOR):] not in limits:
+                failures.append(f"{where} maps to `{anchor}`, which no [[limit]] declares")
+        elif cls == "maps":
             crate, _, feature = (anchor or "").partition("/")
             if not crate or not feature:
                 failures.append(f"{where} is `maps` but its anchor `{anchor}` is not `<crate>/<feature>`")
@@ -247,8 +252,64 @@ PICO_DEFAULT = re.compile(
 )
 
 
+def pico_value_defaults(source: Path) -> dict[str, str]:
+    """Each VALUE switch of a zenoh-pico source tree (the CMake variables its config template
+    substitutes, `wz_config.pico_value_macros`) to the text of its first definition in the
+    CMakeLists, which is its default: `set(<name> <value> CACHE ...)`. A switch with no such
+    definition reads as the empty text."""
+    template = source / "include" / "zenoh-pico" / "config.h.in"
+    if not template.is_file():
+        raise InputError(f"no zenoh-pico config template at {template}")
+    text = (source / "CMakeLists.txt").read_text(errors="replace")
+    out: dict[str, str] = {}
+    for name in wz_config.pico_value_macros(template.read_text(errors="replace")):
+        m = re.search(rf'^\s*set\(\s*{name}\s+("[^"]*"|[^\s)]+)', text, re.MULTILINE)
+        out[name] = m.group(1) if m else ""
+    return out
+
+
+def value_arm(decl: dict, rows: tuple[tuple[str, str, str | None, str], ...],
+              defaults: dict[str, str]) -> list[str]:
+    """Is each value switch answered as a value, and does the number wz states for it start where
+    pico's does?
+
+    A value switch is `maps` to the limit that states the same number for the pico ABI, `never`
+    (wz states a number of its own and no image can change it; a register item carries that) or
+    `n/a`. It is not `always`: a number wz holds fixed is pico's default build only, and a pico
+    built with another number would not be matched. A `maps` row's limit defaults to pico's own
+    default, so the drop-in's default build states what pico's does."""
+    failures: list[str] = []
+    limits = {lim["id"]: lim["default"] for lim in decl["limits"]}
+    for switch, cls, anchor, _ in rows:
+        is_value = switch in defaults
+        to_limit = (anchor or "").startswith(wz_config.LIMIT_ANCHOR)
+        if not is_value:
+            if to_limit:
+                failures.append(f"zenoh-pico: `{switch}` is not a value switch and anchors to {anchor}")
+            continue
+        if cls == "always":
+            failures.append(f"zenoh-pico: value switch `{switch}` is `always` -- a number held fixed "
+                            f"matches pico's default build only; it is `maps` to a limit or `never`")
+        elif cls == "maps" and not to_limit:
+            failures.append(f"zenoh-pico: value switch `{switch}` maps to `{anchor}`, not to a limit")
+        elif cls == "maps":
+            lid = anchor[len(wz_config.LIMIT_ANCHOR):]
+            try:
+                upstream = int(defaults[switch], 0)
+            except ValueError:
+                failures.append(f"zenoh-pico: value switch `{switch}` maps to limit {lid}, and its "
+                                f"default `{defaults[switch]}` is not a number")
+                continue
+            if lid in limits and limits[lid] != upstream:
+                failures.append(f"zenoh-pico: limit {lid} defaults to {limits[lid]}, and pico's "
+                                f"`{switch}` to {upstream} -- the drop-in's default build would state "
+                                f"another number")
+    return failures
+
+
 def pico_switches(source: Path) -> tuple[str, set[str]]:
-    """(version, switches) of a zenoh-pico source tree."""
+    """(version, switches) of a zenoh-pico source tree: its `Z_FEATURE_*` switches. Its value
+    switches are `pico_value_defaults`'s, and the population is the two together."""
     cmake = source / "CMakeLists.txt"
     version_file = source / "version.txt"
     if not cmake.is_file() or not version_file.is_file():
@@ -572,7 +633,49 @@ def selftest() -> int:
             print(f"  selftest FAIL [{label}]: expected {'pass' if want_ok else 'FAIL'}", file=sys.stderr)
             return 1
 
+    # Value switches: a number is `maps` to a limit that starts where pico does, or `never`/`n/a`.
+    vdefaults = {"BATCH_MULTICAST_SIZE": "2048", "Z_TRANSPORT_LEASE": "10000", "ZP_HEADER": '""'}
+    vdecl = {"limits": [{"id": "MCAST", "default": 2048}]}
+    value_cases: list[tuple[str, dict, tuple, bool]] = [
+        ("a value switch maps to a limit that defaults to pico's number", vdecl,
+         (("BATCH_MULTICAST_SIZE", "maps", "limit:MCAST", "x"),), True),
+        ("a value switch is never or n/a", vdecl,
+         (("Z_TRANSPORT_LEASE", "never", None, "x"), ("ZP_HEADER", "n/a", None, "x")), True),
+        ("a limit that starts elsewhere than pico fails", {"limits": [{"id": "MCAST", "default": 1024}]},
+         (("BATCH_MULTICAST_SIZE", "maps", "limit:MCAST", "x"),), False),
+        ("a value switch held fixed (always) fails", vdecl,
+         (("Z_TRANSPORT_LEASE", "always", "crates/x", "x"),), False),
+        ("a value switch mapped to a feature fails", vdecl,
+         (("BATCH_MULTICAST_SIZE", "maps", "wz-capi-pico/query", "x"),), False),
+        ("a capability switch anchored to a limit fails", vdecl,
+         (("Z_FEATURE_QUERY", "maps", "limit:MCAST", "x"),), False),
+        ("a value switch with no numeric default mapped to a limit fails", vdecl,
+         (("ZP_HEADER", "maps", "limit:MCAST", "x"),), False),
+    ]
+    for label, d, rows, want_ok in value_cases:
+        got_ok = not value_arm(d, rows, vdefaults)
+        if got_ok != want_ok:
+            print(f"  selftest FAIL [{label}]: expected {'pass' if want_ok else 'FAIL'}", file=sys.stderr)
+            return 1
+    limit_row = (("BATCH_MULTICAST_SIZE", "maps", "limit:MCAST", "a number"),)
+    if shape_arm("t", limit_row, features, frozenset({"MCAST"})) != [] \
+            or shape_arm("t", limit_row, features, frozenset()) == []:
+        print("  selftest FAIL [a limit anchor names a declared limit]", file=sys.stderr)
+        return 1
+
     # The readers: a CMakeLists with both spellings, and every unusable zenoh-c answer.
+    with tempfile.TemporaryDirectory() as td:
+        vsrc = Path(td) / "valued"
+        (vsrc / "include" / "zenoh-pico").mkdir(parents=True)
+        (vsrc / "include" / "zenoh-pico" / "config.h.in").write_text(
+            "#define Z_BATCH_MULTICAST_SIZE @BATCH_MULTICAST_SIZE@\n"
+            "#define Z_FEATURE_QUERY @Z_FEATURE_QUERY@\n#define Z_TRANSPORT_LEASE @Z_TRANSPORT_LEASE@\n")
+        (vsrc / "CMakeLists.txt").write_text(
+            'set(BATCH_MULTICAST_SIZE 2048 CACHE STRING "m")\n'
+            'if(X)\n  set(BATCH_MULTICAST_SIZE 512 CACHE STRING "m" FORCE)\nendif()\n')
+        if pico_value_defaults(vsrc) != {"BATCH_MULTICAST_SIZE": "2048", "Z_TRANSPORT_LEASE": ""}:
+            print(f"  selftest FAIL [the pico value reader]: {pico_value_defaults(vsrc)}", file=sys.stderr)
+            return 1
     with tempfile.TemporaryDirectory() as td:
         src = Path(td)
         (src / "version.txt").write_text("1.0.0\n")
@@ -635,7 +738,8 @@ def selftest() -> int:
 
     print(
         f"  upstream-switch-map: selftest {len(shape_cases)} shape + {len(decl_cases)} declaration "
-        f"+ {len(default_cases) + 2} default + {len(up_cases)} upstream case(s) and the readers pass"
+        f"+ {len(default_cases) + 2} default + {len(up_cases)} upstream + {len(value_cases) + 1} value "
+        f"case(s) and the readers pass"
     )
     return 0
 
@@ -664,7 +768,7 @@ def main() -> int:
     tables = {original: rows_of(decl, original) for original in ORIGINALS}
     for table, rows in tables.items():
         report(table, rows)
-        failures += shape_arm(table, rows, features)
+        failures += shape_arm(table, rows, features, frozenset(lim["id"] for lim in decl["limits"]))
     failures += declaration_arm(decl)
 
     try:
@@ -684,8 +788,12 @@ def main() -> int:
             )
         else:
             version, switches = pico_switches(PICO_SOURCE)
+            value_defaults = pico_value_defaults(PICO_SOURCE)
             failures += upstream_arm("zenoh-pico", tables["zenoh-pico"], version, pinned["zenoh-pico"],
-                                     switches)
+                                     switches | set(value_defaults))
+            failures += value_arm(decl, tables["zenoh-pico"], value_defaults)
+            print(f"    zenoh-pico value switches: {len(value_defaults)} judged as values "
+                  f"({', '.join(sorted(value_defaults))})")
             expected = pico_expected(decl, pico_defaults(PICO_SOURCE))
             failures += upstream_default_arm("zenoh-pico", decl, expected)
             unswitched = sorted(cid for cid, cap in decl["caps"].items()

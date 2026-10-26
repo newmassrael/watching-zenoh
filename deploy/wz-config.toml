@@ -1322,6 +1322,83 @@ class = "maps"
 anchor = "wz-capi-pico/admin-space"
 note = "zp_start_admin_space / zp_stop_admin_space and the open flag, serving pico's @/<zid>/pico/** documents; the session-local connectivity half has no observer while the local switches are off"
 
+# zenoh-pico's VALUE switches: the CMake variables its config template substitutes as `@NAME@`
+# (`include/zenoh-pico/config.h.in`), each a number or a path rather than on or off. A `maps` row
+# anchors to the limit that states the same number for the pico ABI (`limit:<ID>`), whose default
+# is pico's own; `wz_config.py --env pico <config.h>` turns a header's numbers into those limits.
+# A value is never `always`: a number wz holds fixed reproduces pico's default build only.
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "BATCH_UNICAST_SIZE"
+class = "maps"
+anchor = "limit:PICO_UNICAST_BATCH_BYTES"
+note = "the batch size a unicast session advertises in its InitSyn and InitAck, which the two sides then take the smaller of"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "BATCH_MULTICAST_SIZE"
+class = "maps"
+anchor = "limit:PICO_MULTICAST_BATCH_BYTES"
+note = "the batch size a group session advertises in its Join; pico refuses a member whose Join states another"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_TRANSPORT_LEASE"
+class = "maps"
+anchor = "limit:PICO_LEASE_MS"
+note = "the lease a session advertises, unicast and in a group's Join"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_CONFIG_SOCKET_TIMEOUT"
+class = "maps"
+anchor = "limit:PICO_SOCKET_TIMEOUT_MS"
+note = "how long a read of the cooperative engine waits on the link before the step returns"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_TRANSPORT_CONNECT_TIMEOUT"
+class = "maps"
+anchor = "limit:PICO_CONNECT_TIMEOUT_MS"
+note = "how long the cooperative engine's open waits for the session to be established"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_TRANSPORT_ACCEPT_TIMEOUT"
+class = "never"
+note = "the accepting side's handshake bound; wz holds it at one second, pico's default, with no switch: open-debt item 925"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "FRAG_MAX_SIZE"
+class = "never"
+note = "the largest message pico reassembles; wz bounds reassembly by its own slot size with no switch: open-debt item 926"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_TRANSPORT_LEASE_EXPIRE_FACTOR"
+class = "never"
+note = "pico sends a keepalive every lease divided by this; wz has no switch for the divisor: open-debt item 926"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_RUNTIME_MAX_TASKS"
+class = "n/a"
+note = "the task table of pico's own cooperative executor; wz's engines do not run pico's executor"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_RUNTIME_IDLE_READ_TASK_SLEEP"
+class = "n/a"
+note = "how long pico's executor sleeps when its read task found nothing; wz's engines wait on the link instead"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "ZP_SYSTEM_PLATFORM_HEADER"
+class = "n/a"
+note = "the C header of a custom pico platform; a wz build's platform is its target and runtime"
+
 [[upstream_switch]]
 original = "zenoh-c"
 switch = "shared-memory"
@@ -1813,6 +1890,61 @@ How long, in milliseconds, a paced declaration replay waits between two of its
 turns, when the declaration-sync-pacing policy is on. The session keeps being
 served during the wait. It is read only when that policy is on, and must be at
 least 1.
+'''
+
+# The numbers of zenoh-pico's value switches (the `maps` rows above that anchor to a limit), as the
+# pico ABI states them. Each defaults to pico's own default, so the drop-in's default build states
+# what pico's does; a pico built with other numbers is matched by stating them here.
+
+[[limit]]
+id = "PICO_UNICAST_BATCH_BYTES"
+kconfig = "WZ_LIMIT_PICO_UNICAST_BATCH_BYTES"
+default = 2048
+help = '''
+The batch size, in bytes, a session of the zenoh-pico interface advertises when
+it opens a unicast session, as zenoh-pico's BATCH_UNICAST_SIZE. The two sides
+send frames no larger than the smaller of the two sizes. At most 65535.
+'''
+
+[[limit]]
+id = "PICO_MULTICAST_BATCH_BYTES"
+kconfig = "WZ_LIMIT_PICO_MULTICAST_BATCH_BYTES"
+default = 2048
+help = '''
+The batch size, in bytes, a session of the zenoh-pico interface advertises in
+the Join of a multicast group, as zenoh-pico's BATCH_MULTICAST_SIZE. zenoh-pico
+refuses a member whose Join states another size, so every member of a group
+states the same. At most 65535.
+'''
+
+[[limit]]
+id = "PICO_LEASE_MS"
+kconfig = "WZ_LIMIT_PICO_LEASE_MS"
+default = 10000
+help = '''
+The lease, in milliseconds, a session of the zenoh-pico interface advertises,
+unicast and in a multicast group's Join, as zenoh-pico's Z_TRANSPORT_LEASE. A
+peer that hears nothing from the session for this long closes it.
+'''
+
+[[limit]]
+id = "PICO_SOCKET_TIMEOUT_MS"
+kconfig = "WZ_LIMIT_PICO_SOCKET_TIMEOUT_MS"
+default = 100
+help = '''
+How long, in milliseconds, one read step of the cooperative zenoh-pico session
+waits on its link before it returns with nothing, as zenoh-pico's
+Z_CONFIG_SOCKET_TIMEOUT.
+'''
+
+[[limit]]
+id = "PICO_CONNECT_TIMEOUT_MS"
+kconfig = "WZ_LIMIT_PICO_CONNECT_TIMEOUT_MS"
+default = 10000
+help = '''
+How long, in milliseconds, opening a cooperative zenoh-pico session waits for
+the session to be established before the open fails, as zenoh-pico's
+Z_TRANSPORT_CONNECT_TIMEOUT.
 '''
 
 # A policy is behaviour upstream does not have; it is declared with what upstream does and

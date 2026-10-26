@@ -425,3 +425,34 @@ pub const DECLARATION_SYNC_FINAL_TIMEOUT_MS: usize = generated::DECLARATION_SYNC
 /// `declaration-sync-pacing` policy is on. It is read only then, and must be at least `1`. A time
 /// and not a table size: it sizes no memory.
 pub const DECLARATION_SYNC_INTERVAL_MS: usize = generated::DECLARATION_SYNC_INTERVAL_MS;
+
+// The numbers of zenoh-pico's value build switches, as the pico C ABI states them. Each defaults
+// to pico's own default (`upstream_switch_map.py` holds that, the `maps` rows of
+// `deploy/wz-config.toml` that anchor to these), so the drop-in's default build states what
+// pico's does, and a pico built with other numbers is matched by stating them
+// (`wz_config.py --env pico <config.h>`). None sizes memory; the two batch sizes bound frames.
+
+/// The batch size a unicast session of the pico ABI advertises, pico's `BATCH_UNICAST_SIZE`
+/// (`vendor/zenoh-pico/src/protocol/definitions/transport.c` @
+/// `msg._body._init._batch_size = Z_BATCH_UNICAST_SIZE;`). At most `u16::MAX`.
+pub const PICO_UNICAST_BATCH_BYTES: usize = generated::PICO_UNICAST_BATCH_BYTES;
+
+/// The batch size a group session of the pico ABI advertises in its Join, pico's
+/// `BATCH_MULTICAST_SIZE`, which pico requires every member to state alike
+/// (`vendor/zenoh-pico/src/transport/multicast/rx.c` @ `(msg->_batch_size != Z_BATCH_MULTICAST_SIZE)`).
+/// At most `u16::MAX`.
+pub const PICO_MULTICAST_BATCH_BYTES: usize = generated::PICO_MULTICAST_BATCH_BYTES;
+
+/// The lease, in milliseconds, a session of the pico ABI advertises, unicast and in a Join: pico's
+/// `Z_TRANSPORT_LEASE`.
+pub const PICO_LEASE_MS: usize = generated::PICO_LEASE_MS;
+
+/// How long, in milliseconds, one read step of the pico ABI's cooperative engine waits on its
+/// link: pico's `Z_CONFIG_SOCKET_TIMEOUT`, its socket's receive timeout.
+pub const PICO_SOCKET_TIMEOUT_MS: usize = generated::PICO_SOCKET_TIMEOUT_MS;
+
+/// How long, in milliseconds, the pico ABI's cooperative engine gives an endpoint to complete the
+/// handshake: pico's `Z_TRANSPORT_CONNECT_TIMEOUT`, its handshake's receive deadline
+/// (`vendor/zenoh-pico/src/transport/unicast/transport.c` @
+/// `z_clock_advance_ms(&recv_deadline, Z_TRANSPORT_CONNECT_TIMEOUT);`).
+pub const PICO_CONNECT_TIMEOUT_MS: usize = generated::PICO_CONNECT_TIMEOUT_MS;
