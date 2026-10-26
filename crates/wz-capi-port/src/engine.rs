@@ -44,6 +44,12 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// The session's own zid, zero-padded to 16 bytes.
     fn zid(&self) -> [u8; 16];
 
+    /// The engine's own clock, in whole milliseconds since an epoch of its choosing: monotonic,
+    /// and the one its periodic jobs ([`Self::start_ticker`]) and its deadlines run on. A caller
+    /// that measures how long ago it last heard of something (a source's retention, say) reads it
+    /// here and compares two readings of this one engine, never with another clock.
+    fn now_ms(&self) -> u64;
+
     /// A fresh entity id, for the source info and the global id of what the C program declares.
     fn next_entity_id(&self) -> u64;
 

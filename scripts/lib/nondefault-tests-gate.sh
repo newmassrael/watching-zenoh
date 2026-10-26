@@ -347,8 +347,9 @@ transport-link-unixpipe,transport-link-ws|"
     # `advanced-publisher` and the features the tokio runtime forwards (QoS, encoding, attachment,
     # miss detection). The subscriber's ordering machine, its plans and their tests are compiled
     # only with `advanced-subscriber`, `advanced-recovery` and `advanced-history`; the leg is the
-    # crate's, with no filter. MEASURED: 51 passed with all of them.
-    "wz-ext-pubsub|hook|transport-shm,advanced-publisher,advanced-history,pubsub-qos,\
+    # crate's, with no filter. The subscriber hosted on an engine's port and its tests (a scripted
+    # engine) are compiled only with `engine-host`. MEASURED: 64 passed with all of them.
+    "wz-ext-pubsub|hook|transport-shm,advanced-publisher,advanced-history,engine-host,pubsub-qos,\
 pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # The node's time (the wall clock, the node HLC with its per-role switch, the stamper). The HLC,
     # the Push stamp and its tests are compiled only with the three features, which the tokio

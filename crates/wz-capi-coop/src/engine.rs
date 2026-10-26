@@ -1543,6 +1543,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         self.zid
     }
 
+    fn now_ms(&self) -> u64 {
+        // The session's own clock, which is what its deadlines and its jobs run on. Read under the
+        // session's lock, which nothing here holds while a callback runs.
+        lock(&self.core).0.clock.now_us() / 1000
+    }
+
     fn next_entity_id(&self) -> u64 {
         self.next_entity.fetch_add(1, Ordering::Relaxed)
     }

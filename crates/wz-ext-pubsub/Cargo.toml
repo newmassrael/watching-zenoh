@@ -55,6 +55,22 @@ advanced-publisher = [
 advanced-subscriber = []
 advanced-recovery = ["advanced-subscriber"]
 advanced-history = ["advanced-recovery"]
+# The subscriber hosted on an engine's port (`advanced_subscriber::host`): its declarations, its
+# gets, its two periodic jobs and its teardown, over `SessionEngine` alone, so the cooperative
+# engine and the tokio engine run the same host. The widest form (history, which implies recovery),
+# which is what a C ABI's option struct asks for; the setters it uses on the session-core types
+# are turned on here and not by the machine, so a build that wants the machine alone takes none.
+engine-host = [
+    "advanced-history",
+    "dep:wz-capi-port",
+    "wz-session-core/query-get",
+    "wz-session-core/query-selector-parameters",
+    "wz-session-core/query-timeout",
+    "wz-session-core/query-target",
+    "wz-session-core/query-consolidation",
+    "wz-session-core/reply-source-info",
+    "wz-session-core/ext-pubsub-serde-codec",
+]
 # A cached sample may hold a buffer of shared memory and a recovery reply sends its descriptor
 # again (`CachedSample::shared`). The tokio runtime's feature of the same name forwards here.
 transport-shm = ["wz-session-core/transport-shm"]
@@ -77,6 +93,9 @@ ext-pubsub-sample-miss-detection = ["ext-pubsub-serde-codec"]
 # into. `alloc` is the heap profile, which is the only profile the advanced plane runs on. What the
 # composite stamps with is the `advanced-publisher` feature's, above.
 wz-session-core = { path = "../wz-session-core", default-features = false, features = ["alloc"] }
+# The engine's port, which the hosted subscriber (`engine-host`) is written over. It names no
+# engine, no async runtime and no thread.
+wz-capi-port = { path = "../wz-capi-port", optional = true }
 # The node's time: the HLC an advanced publisher stamps from and the stamper it borrows it through.
 wz-node-time = { path = "../wz-node-time", optional = true }
 # A reply the cache could not stage is warned about and the answer goes on, as upstream's does.

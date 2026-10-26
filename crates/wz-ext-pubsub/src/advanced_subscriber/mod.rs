@@ -18,9 +18,14 @@
 //! because a file named `advanced_subscriber.rs` is also the tokio host's, and a bare mention of
 //! that name in a record would then name two files.
 
+#[cfg(feature = "engine-host")]
+pub mod host;
 pub mod options;
 pub mod plans;
 pub mod state;
+
+#[cfg(feature = "engine-host")]
+pub use host::{EngineSubscriber, HostError};
 
 #[cfg(feature = "advanced-history")]
 pub use options::HistoryConfig;

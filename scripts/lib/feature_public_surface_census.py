@@ -469,7 +469,9 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "sent with, forwarded the same way) and the subscriber's three, `advanced-subscriber` "
         "(its options and its ordering machine), `advanced-recovery` (the gap-recovery half) "
         "and `advanced-history` (the startup and late-publisher history), which the tokio "
-        "runtime's `ext-pubsub-advanced-subscriber`, `-recovery` and `-history` turn on",
+        "runtime's `ext-pubsub-advanced-subscriber`, `-recovery` and `-history` turn on, and "
+        "`engine-host` (the subscriber hosted on an engine's port, which the cooperative "
+        "engine's C ABI turns on)",
         frozenset(
             {
                 "transport-shm",
@@ -477,6 +479,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "advanced-subscriber",
                 "advanced-recovery",
                 "advanced-history",
+                "engine-host",
                 "ext-pubsub-sample-miss-detection",
             }
         ),

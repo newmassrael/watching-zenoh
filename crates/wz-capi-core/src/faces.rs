@@ -3866,6 +3866,12 @@ impl SharedSession {
         self.lock().take_entity_id()
     }
 
+    /// The session's own clock in whole milliseconds, monotonic: the one its periodic jobs run on.
+    pub fn now_ms(&self) -> u64 {
+        use wz_runtime_core::TimeSource as _;
+        self.clock.now_monotonic_ms()
+    }
+
     /// Run `tick` every `period_ms` in a task of the `net` runtime, on the session's clock, until
     /// it answers `false` or [`Self::stop_ticker`] is called with the id returned.
     #[cfg(feature = "advanced")]

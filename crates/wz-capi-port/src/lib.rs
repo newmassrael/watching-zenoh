@@ -84,7 +84,8 @@ pub type Tick = Arc<dyn Fn() -> bool + Send + Sync>;
 /// It holds the engine, so the engine lives as long as the job can be asked to stop; a job whose
 /// owner is gone does not outlive it.
 pub struct Ticker {
-    engine: Arc<dyn SessionEngine>,
+    /// `None` once [`Self::detach`] let the job go on without this handle.
+    engine: Option<Arc<dyn SessionEngine>>,
     id: TickerId,
 }
 
@@ -94,15 +95,23 @@ impl Ticker {
     pub fn start(engine: &Arc<dyn SessionEngine>, period_ms: u64, tick: Tick) -> Option<Self> {
         let id = engine.start_ticker(period_ms, tick)?;
         Some(Self {
-            engine: Arc::clone(engine),
+            engine: Some(Arc::clone(engine)),
             id,
         })
+    }
+
+    /// Let the job run on without this handle: it ends when it answers `false` (a job that holds
+    /// what it works on weakly does, once that is gone) or with the engine.
+    pub fn detach(mut self) {
+        self.engine = None;
     }
 }
 
 impl Drop for Ticker {
     fn drop(&mut self) {
-        self.engine.stop_ticker(self.id);
+        if let Some(engine) = self.engine.take() {
+            engine.stop_ticker(self.id);
+        }
     }
 }
 

@@ -133,6 +133,10 @@ impl SessionEngine for SharedSession {
         SharedSession::zid(self)
     }
 
+    fn now_ms(&self) -> u64 {
+        SharedSession::now_ms(self)
+    }
+
     fn next_entity_id(&self) -> u64 {
         SharedSession::next_entity_id(self)
     }

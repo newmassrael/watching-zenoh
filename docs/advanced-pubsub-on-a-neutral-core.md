@@ -204,8 +204,23 @@ defect of this plane; it is documented on the plane and not worked around with a
    method that reaches a source takes the host's reading in milliseconds, and the retention of a
    source is measured in them. Twenty tests moved with it and run against no session; the tokio
    host keeps its declarations, its gets, its two timers and the tests that need a session, and
-   passes its session's clock. Left for this step: the cooperative host, which declares the same
-   entities and issues the same gets over the engine port.
+   passes its session's clock.
+   The engine-port host (`advanced_subscriber::host`, feature `engine-host`) is the other half:
+   `EngineSubscriber` declares the same entities in the tokio host's order (the subscription,
+   the retention job, the periodic job, the startup get, the late-publisher subscription, the
+   heartbeat subscription, the detection token) through `declare_subscriber_on_wire`,
+   `declare_liveliness_subscriber_on_wire` and `declare_liveliness_token_on_wire`, issues each
+   get with `get_on_wire` and runs the two periodic jobs as tickers. Three seams are settled
+   there. A get ends when the last leg's reply callback is dropped, so each get holds its
+   legs in one counted end that finishes the get once, and the host holds one reference of its
+   own while the legs are issued so a get that got no leg still ends, after the call returns.
+   A teardown sets a closing flag and then cancels the gets in flight, because a get ended by
+   a cancellation is indistinguishable from one that ended by itself; the entities retract in
+   the tokio host's order, and the jobs answer `false` once the flag is set. The machine's
+   clock is the engine's, which is why the port gained `SessionEngine::now_ms`. Its tests run
+   against a scripted engine that records declarations and hands the test each callback.
+   Left for this step: the pico module's `advanced` entry points over this host, which retires
+   its use of the tokio engine.
 5. **Retire the old paths** only after a differential test (the same events into the old and the
    new give the same commands and deliveries) and the existing interop tests pass: the zenoh-ext
    interop (`wz_advanced_pubsub_zenoh_ext_interop`), the pico interop
