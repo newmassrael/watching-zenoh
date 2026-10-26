@@ -1,7 +1,7 @@
 # Closed key set
 
-Status: design; phase 1 (the pure table, the generator and the model test) is built and no host reads
-it yet. Written 2026-10-26 so that what a deployment asks of "every key is known at build time" is
+Status: design; phases 1 and 2 (the pure table, the generator, the model test and the gate) are built
+and no host reads them yet. Written 2026-10-26 so that what a deployment asks of "every key is known at build time" is
 decided once, against what the host session already does, and not rebuilt beside it.
 
 ## What it is
@@ -94,11 +94,14 @@ approximates, so `MATCH_MEMO_SLOTS` does nothing in a closed image and the memo 
 1. **Pure catalogue, generator and oracle.** `KeyCatalogue`, the declaration and its validation (a
    duplicate key, a wildcard that expands to nothing, a role the key cannot have, a table past its
    bound), the generated table, and the model test of D3. No host uses it.
-2. **The policy and the refusal at declare time.** `key-set` in the declaration; the tokio host refuses
-   a declaration, publish or query on a key outside the set under `closed`, by a typed result. Open
-   keeps today's path unchanged, tested.
-3. **Receive through the id.** The peer's alias row holds a key id; the received message reaches its
-   selection by index; refusals counted by reason. Measured against open with the memo on one machine and
+2. **The gate.** `KeyGate`, open or closed, admits a key of the set or a key the image declares in the
+   role asked, and counts each refusal by reason. Pure, tested over the fixture, called by no host.
+   This replaces "the policy and the refusal at declare time" of the first cut of this note: see
+   "Phase 2, as built" for why.
+3. **The policy, and receive through the id.** `key-set` (`open` is the default) lands with the first
+   host that acts on it. The peer's alias row holds a key id; the received message reaches its
+   selection by index; a peer's resource or message on a key outside the set is refused and counted.
+   Open keeps today's path unchanged, tested. Measured against open with the memo on one machine and
    condition: allocations and time per sample, alias row bytes, ROM and RAM of the table.
 4. **Per-peer allowance** (D6).
 5. **The cooperative engine, the slot node and the C ABIs** (sessions 11 and ef own the first two; a C
@@ -134,6 +137,32 @@ approximates, so `MATCH_MEMO_SLOTS` does nothing in a closed image and the memo 
 - **Not done in phase 1.** No host, node image or generated `declared.rs` carries a catalogue, there is
   no `key-set` policy, and nothing is measured. The table's ROM size for a real node is a phase 3
   question, with the alias row.
+
+## Phase 2, as built
+
+- **The gate.** `crates/wz-session-core/src/key_gate.rs`: `KeyGate::open()` admits every key and looks
+  at none; `KeyGate::closed(&catalogue)` has two questions. `admit_key(text)` is for a key that is one
+  of the set (a message's key, a resource a peer declares); `admit_declared(text, kind)` is for a local
+  declaration and also needs an entity of that kind declared on the key. Both answer with the `KeyId`,
+  and a refusal is `OutsideSet` or `RoleNotDeclared(kind)`, counted by reason and saturating.
+- **The catalogue gained `find_entity(kind, key)`**, a binary search that is sound because the table
+  now checks, in a `const`, that entities ascend strictly by kind and then key (the generator already
+  wrote them so, and `--selftest` holds it), which also means an entity is declared once.
+- **Why the first cut of this phase changed.** Reading the tokio host before writing the refusal showed
+  that `declare_subscriber`, `declare_queryable`, `declare_publisher` and `declare_querier` return a
+  handle and not a `Result`, and that there are over a dozen entry points once the aliased, buffered,
+  offloaded and shm forms are counted. A refusal there is either a change of the public API or a hole
+  in some of the forms. It is also the wrong place: an image built from a declaration declares exactly
+  its entities, so a local refusal is true by construction there, and what a closed image has to refuse
+  at run time is what a peer sends. That is the receive path, which phase 3 builds, and the host that
+  refuses there is where the policy belongs.
+- **No policy yet.** A `key-set` switch that no host acts on would tell a deployer that a build is
+  closed when nothing is, so it is declared with the first host that refuses on it.
+- **Tested** by the unit tests of the gate (open admits everything and counts nothing, closed numbers
+  what it admits, a pattern-covered key is outside the set, a role is admitted or refused, counters
+  saturate) and by `tests/key_catalogue_model.rs` over the fixture: every declared role is admitted,
+  every other (key, kind) pair is refused by role and counted, a key a declared pattern covers is
+  outside the set.
 
 ## What is not decided
 

@@ -155,6 +155,53 @@ fn the_table_is_the_declaration() {
 }
 
 #[test]
+fn the_gate_admits_exactly_the_declared_roles() {
+    use wz_session_core::key_gate::{Admitted, KeyGate, Refusal};
+    let mut gate = KeyGate::closed(&CATALOGUE);
+    let mut not_declared = 0usize;
+    let mut declared_seen = 0usize;
+    for key in key_ids() {
+        let text = CATALOGUE.text(key);
+        // A key of the set is admitted as a message's key, whatever roles it has.
+        assert_eq!(gate.admit_key(text), Ok(Admitted::Key(key)), "`{text}`");
+        for kind in EntityKind::ALL {
+            let declared = DECLARED
+                .iter()
+                .any(|(entity, pattern)| *entity == kind && *pattern == text);
+            let answer = gate.admit_declared(text, kind);
+            if declared {
+                assert_eq!(answer, Ok(Admitted::Key(key)), "{kind:?} on `{text}`");
+                declared_seen += 1;
+            } else {
+                assert_eq!(
+                    answer,
+                    Err(Refusal::RoleNotDeclared(kind)),
+                    "{kind:?} on `{text}`"
+                );
+                not_declared += 1;
+            }
+        }
+    }
+    assert_eq!(declared_seen, DECLARED.len());
+    // Every undeclared (key, kind) pair was refused by role, and none by the set.
+    let refused = gate.refused();
+    assert_eq!(refused.role_not_declared, not_declared);
+    assert_eq!(refused.outside_set, 0);
+    assert_eq!(refused.total, not_declared);
+    // The keys a declared pattern covers but that are not declared are outside the set.
+    for text in ["lab/sensor/pressure", "lab/ctl/reset", "nothing", ""] {
+        assert_eq!(gate.admit_key(text), Err(Refusal::OutsideSet), "`{text}`");
+    }
+    assert_eq!(gate.refused().outside_set, 4);
+    // An open gate over the same keys admits all of them and counts none.
+    let mut open = KeyGate::open();
+    for text in ["lab/sensor/pressure", "nothing", ""] {
+        assert_eq!(open.admit_key(text), Ok(Admitted::Unchecked));
+    }
+    assert_eq!(open.refused().total, 0);
+}
+
+#[test]
 fn a_key_that_is_not_declared_is_not_found_even_when_a_declared_pattern_covers_it() {
     // `lab/**` and `lab/sensor/*` cover each of these, and none is a key of the set (decision D4).
     for undeclared in [

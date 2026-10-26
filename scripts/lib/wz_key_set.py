@@ -506,6 +506,9 @@ def _selftest() -> int:
     expect("the selections are the intersections",
            table["offsets"] == [0, 0, 0, 1, 1, 1, 2, 3, 3, 3, 3, 4, 5, 5, 5, 5] and table["members"] == [2, 0, 1, 0, 1])
     expect("key ends are cumulative", table["ends"] == [1, 4, 7])
+    ordered = [(KINDS.index(kind), key) for kind, key, _ in table["entities"]]
+    expect("entities ascend strictly by kind and then key id, which find_entity searches on",
+           all(a < b for a, b in zip(ordered, ordered[1:])))
     expect("renumbering: another entity sorting after changes no earlier number",
            build(entities + [entity("querier", "a/b")])["entities"][:3] == table["entities"])
     expect("the order of declaration does not change the table", build(list(reversed(entities))) == table)

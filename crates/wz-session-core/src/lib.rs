@@ -189,6 +189,12 @@ pub mod delivery_lane;
 /// Unconditional, no_std and no_alloc.
 pub mod key_catalogue;
 
+/// What a closed key set refuses and counts: [`key_gate::KeyGate`], open (admits every key, looks at
+/// none) or closed over a [`key_catalogue::KeyCatalogue`] (admits a key of the set, or a key the
+/// image declares in the role asked, and counts every refusal by reason). No host calls it yet.
+/// Unconditional, no_std and no_alloc.
+pub mod key_gate;
+
 /// The pace of a paced declaration replay: [`replay_pacing::ReplayPacing`], the burst and the
 /// interval between turns, and the pace a build states through the `declaration-sync-pacing`
 /// policy. A value and not a clock, so the heap runtime and the slot node hold the same type.

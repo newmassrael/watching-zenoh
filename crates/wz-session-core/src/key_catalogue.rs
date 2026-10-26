@@ -19,7 +19,8 @@
 //!   [`KeyCatalogue::find_exact`] is a binary search and a key's id does not depend on the order
 //!   the keys were declared in.
 //! * A selection is one entity kind's entities, in entity order, with no repeat.
-//! * An entity is a kind and a key. An [`EntityId`] is its row in the entity table.
+//! * An entity is a kind and a key, declared once. An [`EntityId`] is its row in the entity table,
+//!   and the rows ascend by kind and then key, so [`KeyCatalogue::find_entity`] is a binary search.
 //! * A text that is not in the table is [`None`], which is what a closed image refuses; this
 //!   module does not decide what a refusal does.
 //! * What a selection contains is the intersection the glob matcher answers
@@ -171,6 +172,9 @@ pub enum TableError {
     Offsets,
     /// An entity's key is not a key of the table.
     EntityKey,
+    /// The entities are not strictly ascending by kind and then key, which is what
+    /// [`KeyCatalogue::find_entity`] searches on and what makes an entity declared once.
+    EntityOrder,
     /// A selection names an entity that is not in the table, or names kinds mixed, or repeats or
     /// reorders entities.
     Members,
@@ -186,6 +190,9 @@ impl TableError {
             TableError::KeyOrder => "a key catalogue's keys are not strictly sorted by their bytes",
             TableError::Offsets => "a key catalogue's selection offsets do not cover its members",
             TableError::EntityKey => "a key catalogue's entity names a key that is not in it",
+            TableError::EntityOrder => {
+                "a key catalogue's entities are not strictly ascending by kind and key"
+            }
             TableError::Members => {
                 "a key catalogue's selection names an unknown, repeated, misordered or foreign entity"
             }
@@ -295,6 +302,26 @@ impl<'a> KeyCatalogue<'a> {
         self.entities.get(entity.index()).copied()
     }
 
+    /// The entity of `kind` declared on exactly `key`, if the image declares one: the question a
+    /// local declaration asks, where [`Self::selection`] answers the one a message asks. A binary
+    /// search, since entities are ascending by kind and then key.
+    pub fn find_entity(&self, kind: EntityKind, key: KeyId) -> Option<EntityId> {
+        let (mut low, mut high) = (0usize, self.entities.len());
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let row = self.entities.get(middle)?;
+            let order = (row.kind.index(), row.key.index()).cmp(&(kind.index(), key.index()));
+            match order {
+                core::cmp::Ordering::Equal => {
+                    return Some(EntityId::new(u16::try_from(middle).ok()?))
+                }
+                core::cmp::Ordering::Less => low = middle + 1,
+                core::cmp::Ordering::Greater => high = middle,
+            }
+        }
+        None
+    }
+
     /// The entities of `kind` whose pattern intersects `key`, in entity order: two reads of the
     /// offsets and one slice. Empty for an id that is not in the table.
     pub fn selection(&self, key: KeyId, kind: EntityKind) -> Selection<'a> {
@@ -382,6 +409,15 @@ impl<'a> KeyCatalogue<'a> {
             if self.entities[index].key.index() >= self.ends.len() {
                 return Err(TableError::EntityKey);
             }
+            if index > 0 {
+                let (before, this) = (self.entities[index - 1], self.entities[index]);
+                let ascending = before.kind.index() < this.kind.index()
+                    || (before.kind.index() == this.kind.index()
+                        && before.key.index() < this.key.index());
+                if !ascending {
+                    return Err(TableError::EntityOrder);
+                }
+            }
             index += 1;
         }
         Ok(())
@@ -433,7 +469,7 @@ const fn bytes_less(a: &[u8], b: &[u8]) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     // Three keys, "a", "a/b" and "a/*", sorted by bytes: "a" < "a/*" < "a/b" ('*' is 0x2A, 'b' is
@@ -457,7 +493,8 @@ mod tests {
         EntityId::new(0),
         EntityId::new(1),
     ];
-    const TABLE: KeyCatalogue<'static> =
+    /// The three-key table of these tests, for the tests of what is built on a catalogue.
+    pub(crate) const TABLE: KeyCatalogue<'static> =
         KeyCatalogue::new(TEXT, &ENDS, &OFFSETS, &MEMBERS, &ENTITIES);
 
     fn rebuilt(
@@ -604,11 +641,11 @@ mod tests {
 
     #[test]
     fn a_selection_that_repeats_or_reorders_is_refused() {
-        // Two subscribers on "a/*" (entities 1 and 2) give one cell two members.
+        // Two subscribers (entities 1 and 2) give one cell two members.
         const ENTITIES_TWO: [EntityRow; 4] = [
             EntityRow::new(EntityKind::Publisher, KeyId::new(2)),
             EntityRow::new(EntityKind::Subscriber, KeyId::new(1)),
-            EntityRow::new(EntityKind::Subscriber, KeyId::new(1)),
+            EntityRow::new(EntityKind::Subscriber, KeyId::new(2)),
             EntityRow::new(EntityKind::Queryable, KeyId::new(0)),
         ];
         // Key 0 queryable [3]; key 1 publisher [0] and subscriber [a, b]; key 2 the same.
@@ -629,6 +666,48 @@ mod tests {
         assert_eq!(keys_of(1, 2), Ok(3));
         assert_eq!(keys_of(2, 1), Err(TableError::Members));
         assert_eq!(keys_of(1, 1), Err(TableError::Members));
+    }
+
+    #[test]
+    fn an_entity_is_found_by_its_kind_and_key() {
+        let key = |text: &str| TABLE.find_exact(text).expect("a key of the table");
+        assert_eq!(
+            TABLE.find_entity(EntityKind::Publisher, key("a/b")),
+            Some(EntityId::new(0))
+        );
+        assert_eq!(
+            TABLE.find_entity(EntityKind::Subscriber, key("a/*")),
+            Some(EntityId::new(1))
+        );
+        assert_eq!(
+            TABLE.find_entity(EntityKind::Queryable, key("a")),
+            Some(EntityId::new(2))
+        );
+        // The key is in the set, and this role is not declared on it.
+        assert_eq!(TABLE.find_entity(EntityKind::Subscriber, key("a/b")), None);
+        assert_eq!(TABLE.find_entity(EntityKind::Publisher, key("a")), None);
+        assert_eq!(TABLE.find_entity(EntityKind::Querier, key("a")), None);
+        assert_eq!(
+            TABLE.find_entity(EntityKind::Publisher, KeyId::new(9)),
+            None
+        );
+    }
+
+    #[test]
+    fn entities_out_of_order_or_repeated_are_refused() {
+        let with = |entities: &[EntityRow]| {
+            KeyCatalogue::try_new(TEXT, &ENDS, &OFFSETS, &MEMBERS, entities)
+                .map(|table| table.entity_count())
+        };
+        // A subscriber before a publisher, and the same entity twice.
+        assert_eq!(
+            with(&[ENTITIES[1], ENTITIES[0], ENTITIES[2]]),
+            Err(TableError::EntityOrder)
+        );
+        assert_eq!(
+            with(&[ENTITIES[0], ENTITIES[1], ENTITIES[1]]),
+            Err(TableError::EntityOrder)
+        );
     }
 
     #[test]
