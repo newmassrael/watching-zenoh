@@ -292272,6 +292272,60 @@
         "Hosted C1bz of this push reads wz-session-core's doc lane at zero only once the six broken links of lifecycle_node.rs are repaired, which is the lifecycle session's unpushed commit."
       ]
     },
+    "Round 3753": {
+      "decision_summary": "The second half of open-debt item 926 is paid, and the item is closed: zenoh-pico's Z_TRANSPORT_LEASE_EXPIRE_FACTOR is the limit PICO_KEEPALIVES_PER_LEASE (default 3, pico's) and its C7 row maps to it. It is not one build limit because it is upstream's transport/link/tx/keep_alive as well, and the two divide different leases: zenoh its own, pico the one adopted at the handshake. So a session carries a KeepAliveConf (keepalives per lease, and which lease), SessionInitParams gains it, and the keepalive wake and the tokio pacer read one accessor, keepalive_interval_ms. The pico interface states pico's; the zenoh-c interface now honours transport/link/tx/keep_alive (default 4, zero refused). Default is the cadence every wz session kept, pico's, so the router, the demo and the capacity model, calibrated on three, do not move; making them zenoh's four is carried.",
+      "changes_bullets": [
+        "wz-session-core: KeepAliveConf and LeaseBasis (session_init_params.rs), the field SessionInitParams::keep_alive, and SessionLinkActions::keepalive_interval_ms, which keepalive_wake_deadline and the tokio keepalive pacer read instead of the adopted lease over a constant.",
+        "deploy/wz-config.toml: limit PICO_KEEPALIVES_PER_LEASE (3); the Z_TRANSPORT_LEASE_EXPIRE_FACTOR row of the C7 table is maps; caps_generated.rs and Kconfig.limits regenerated; caps.rs binds it.",
+        "wz-capi-core, wz-capi-coop, wz-capi-pico: LinkTx, OpenStance, OpenPlan and CoopConfig carry the keepalive; the pico ABI states pico's from the limit on both engines; the zenoh-c plan reads transport/link/tx/keep_alive.",
+        "wz-runtime-tokio: ZenohNodeConfig::keep_alive and the defect ZeroKeepAlive; the key moved from the unhonoured lists to the C ABI session's.",
+        "Every SessionInitParams literal states the field; the MCU, lwIP and coop ones state pico's.",
+        "Tests: the interval pairs zenoh's own lease against pico's adopted one, with a control; the plan and the parameters carry a stated value, with controls."
+      ],
+      "verification_bullets": [
+        "On a build host: cargo check --all-targets of fifteen crates, cargo test of wz-session-core lib (737), wz-runtime-tokio zenoh_config with its feature (77), session_keepalive_tx (14), wz-capi-core lib (106), wz-capi-pico lib (105), session_fsm_lease_deadline, lent_slot_send, wz-capi-coop, wz-capi-c lib and fragmentation_roundtrip, wz-session-mcu lib: pass. clippy -D warnings of nine crates, one at a time: pass with clippy::doc-lazy-continuation allowed, which fails on main in files this round does not touch (reported to their owner).",
+        "wz-session-lwip and wz-mcu-session-acceptor were checked locally with the lwIP sources initialised, since the build host's tracked-only send does not carry them: pass. The five deploy firmware crates carry the same one-line edit and were NOT built here; their hosted lane is the witness.",
+        "One red found and repaired on the way: the finding test asked only the node's honoured keys, so a defect in a key only the C ABI reads failed it; it asks the whole honoured surface now.",
+        "Layer C1bz for the six touched crates: pass. wz_config --check, upstream_switch_map, config_key_fixture_gate, prose_named_identifier_gate, prose_feature_gate, store_reason_citation_gate, count_guard_lint: pass; deepenable_audit needs a built zenohd and was not run.",
+        "Not measured: a pico ABI session against a real zenoh-pico peer with a non-default factor."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "Make the router and the demo keep zenoh's cadence, the key's four of their own lease, which is what a zenoh peer does: the capacity model divides by LEASE_EXPIRE_FACTOR (3) in liveness_bound, the lateness limit and the control interval, so it must take the count from the session first; its owner is session 31. Until then the demo and router ignore transport/link/tx/keep_alive.",
+        "Build the five deploy firmware crates (mcu-admin-node, mcu-freertos-demo, zephyr-admin-node) in their lanes and read the result.",
+        "teardown_drain still passes both fixtures with the dial role's drain removed; establish what it guards.",
+        "Open-debt item 925 and the sequence-number resolution policy remain the next items of this track."
+      ],
+      "publishable_decision_summary": "The second half of open-debt item 926 is paid, and the item is closed: zenoh-pico's Z_TRANSPORT_LEASE_EXPIRE_FACTOR is the limit PICO_KEEPALIVES_PER_LEASE (default 3, pico's) and its C7 row maps to it. It is not one build limit because it is upstream's transport/link/tx/keep_alive as well, and the two divide different leases: zenoh its own, pico the one adopted at the handshake. So a session carries a KeepAliveConf (keepalives per lease, and which lease), SessionInitParams gains it, and the keepalive wake and the tokio pacer read one accessor, keepalive_interval_ms. The pico interface states pico's; the zenoh-c interface now honours transport/link/tx/keep_alive (default 4, zero refused). Default is the cadence every wz session kept, pico's, so the router, the demo and the capacity model, calibrated on three, do not move; making them zenoh's four is carried.",
+      "publishable_changes_bullets": [
+        "wz-session-core: KeepAliveConf and LeaseBasis (session_init_params.rs), the field SessionInitParams::keep_alive, and SessionLinkActions::keepalive_interval_ms, which keepalive_wake_deadline and the tokio keepalive pacer read instead of the adopted lease over a constant.",
+        "deploy/wz-config.toml: limit PICO_KEEPALIVES_PER_LEASE (3); the Z_TRANSPORT_LEASE_EXPIRE_FACTOR row of the C7 table is maps; caps_generated.rs and Kconfig.limits regenerated; caps.rs binds it.",
+        "wz-capi-core, wz-capi-coop, wz-capi-pico: LinkTx, OpenStance, OpenPlan and CoopConfig carry the keepalive; the pico ABI states pico's from the limit on both engines; the zenoh-c plan reads transport/link/tx/keep_alive.",
+        "wz-runtime-tokio: ZenohNodeConfig::keep_alive and the defect ZeroKeepAlive; the key moved from the unhonoured lists to the C ABI session's.",
+        "Every SessionInitParams literal states the field; the MCU, lwIP and coop ones state pico's.",
+        "Tests: the interval pairs zenoh's own lease against pico's adopted one, with a control; the plan and the parameters carry a stated value, with controls."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: cargo check --all-targets of fifteen crates, cargo test of wz-session-core lib (737), wz-runtime-tokio zenoh_config with its feature (77), session_keepalive_tx (14), wz-capi-core lib (106), wz-capi-pico lib (105), session_fsm_lease_deadline, lent_slot_send, wz-capi-coop, wz-capi-c lib and fragmentation_roundtrip, wz-session-mcu lib: pass. clippy -D warnings of nine crates, one at a time: pass with clippy::doc-lazy-continuation allowed, which fails on main in files this round does not touch (reported to their owner).",
+        "wz-session-lwip and wz-mcu-session-acceptor were checked locally with the lwIP sources initialised, since the build host's tracked-only send does not carry them: pass. The five deploy firmware crates carry the same one-line edit and were NOT built here; their hosted lane is the witness.",
+        "One red found and repaired on the way: the finding test asked only the node's honoured keys, so a defect in a key only the C ABI reads failed it; it asks the whole honoured surface now.",
+        "Layer C1bz for the six touched crates: pass. wz_config --check, upstream_switch_map, config_key_fixture_gate, prose_named_identifier_gate, prose_feature_gate, store_reason_citation_gate, count_guard_lint: pass; deepenable_audit needs a built zenohd and was not run.",
+        "Not measured: a pico ABI session against a real zenoh-pico peer with a non-default factor."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Make the router and the demo keep zenoh's cadence, the key's four of their own lease, which is what a zenoh peer does: the capacity model divides by LEASE_EXPIRE_FACTOR (3) in liveness_bound, the lateness limit and the control interval, so it must take the count from the session first; its owner is session 31. Until then the demo and router ignore transport/link/tx/keep_alive.",
+        "Build the five deploy firmware crates (mcu-admin-node, mcu-freertos-demo, zephyr-admin-node) in their lanes and read the result.",
+        "teardown_drain still passes both fixtures with the dial role's drain removed; establish what it guards.",
+        "Open-debt item 925 and the sequence-number resolution policy remain the next items of this track."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
