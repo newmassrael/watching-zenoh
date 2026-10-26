@@ -2354,7 +2354,7 @@ pub struct LifecycleKey<'a> {
 /// reset is the one verb that is not idempotent by nature, so a duplicate is
 /// told apart by the generation it carries.
 #[cfg(feature = "session-close-ingress")]
-pub const RESET_VERB: &str = "reset";
+pub use crate::lifecycle_wire::RESET_VERB;
 
 #[cfg(feature = "session-close-ingress")]
 impl<'a> LifecycleKey<'a> {

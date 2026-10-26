@@ -82,32 +82,18 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use crate::drive::RESET_VERB;
 // Re-exported: the two types a host binds the queries with, so it names one module.
 pub use crate::drive::{LifecycleKey, SessionLifecycleAuthority};
-// The vocabulary a node with no allocator answers in too: the words are the same list.
-use crate::lifecycle_wire::{write_verb_list, OPEN_VERB};
-pub use crate::lifecycle_wire::{OpenOutcome, OpenVerdict, RefusedReason};
+// The vocabulary a node with no allocator answers in too: the words of every verb are
+// written once, in `lifecycle_wire`.
+pub use crate::lifecycle_wire::{
+    write_verbs_json, CloseOrder, CloseVerdict, MachineReport, OpenOutcome, OpenVerdict,
+    RefusedReason, ResetVerdict, SessionLinks, StatusVerdict, VERBS,
+};
+use crate::lifecycle_wire::{CLOSE_VERB, OPEN_VERB, RESET_VERB, STATUS_VERB};
 use crate::query_sink::{QueryView, ReplyError, ReplyOut};
-use crate::text_out::{FixedText, TextOut};
+use crate::text_out::FixedText;
 use crate::zid_hex::{canonical_zid, same_zid, zenoh_hex_to_zid};
-
-/// The verb the close query carries in its key.
-const CLOSE_VERB: &str = "close";
-
-/// What a node's sessions did when told to close: how many links to the peer were
-/// ordered closed by this call, and how many had been ordered before it.
-///
-/// Two counts rather than one verdict because the node that holds the sessions
-/// knows them and the verdict is this module's: `newly_ordered` is the number a
-/// reply reports as `links`, and the sum says whether the peer was there at all.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct CloseOrder {
-    /// Links to the peer that this call ordered closed.
-    pub newly_ordered: u32,
-    /// Links to the peer that a close had already been ordered for.
-    pub already_ordered: u32,
-}
 
 /// The node's table of sessions, as the close query needs it: told a peer's zid,
 /// it orders closed every session it holds with that peer.
@@ -136,34 +122,6 @@ impl<D: SessionDirectory + ?Sized> SessionDirectory for &D {
     fn links(&self, peer_zid: &[u8]) -> SessionLinks {
         (**self).links(peer_zid)
     }
-}
-
-/// The links a node holds to a peer, by whether a close was ordered for each.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct SessionLinks {
-    /// Links no close has been ordered for.
-    pub open: u32,
-    /// Links a close has been ordered for and that are still held.
-    pub closing: u32,
-}
-
-/// One machine a node works to hold a peer by, as the status query shows it.
-///
-/// The state is in words ([`crate::peer_table::StateWords`], read off the machine
-/// by the host), because the host that keeps the machines may publish them to the
-/// answerer as plain data: the face loop of AP does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MachineReport<'a> {
-    /// The configured endpoint the machine dials, as the host names it, or
-    /// `None` for the machine of the node itself (an `open` by its zid).
-    pub endpoint: Option<&'a str>,
-    /// The state's word.
-    pub state: &'a str,
-    /// For a refusal, its cause.
-    pub cause: Option<&'a str>,
-    /// Whether the machine holds the peer in the node's intent
-    /// ([`crate::peer_connection::PeerConnectionState::in_intent`]).
-    pub in_intent: bool,
 }
 
 /// The machines a node works to hold its peers by (decision D5), as the status
@@ -261,198 +219,6 @@ impl PeerOpener for NoOpener {
     fn open(&self, _peer_zid: &[u8]) -> OpenOutcome {
         OpenOutcome::OpenerGone
     }
-}
-
-/// The answer to a close query.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CloseVerdict {
-    /// The close was ordered on `links` links; the sessions are on their way out.
-    Closing {
-        /// Links this call ordered closed.
-        links: u32,
-    },
-    /// Every session with that peer had already been ordered closed.
-    AlreadyClosed,
-    /// This node holds no session with that peer.
-    NotFound,
-    /// The close was not attempted.
-    Refused(RefusedReason),
-}
-
-impl CloseVerdict {
-    /// The verdict a [`CloseOrder`] amounts to.
-    pub fn of(order: CloseOrder) -> Self {
-        if order.newly_ordered > 0 {
-            Self::Closing {
-                links: order.newly_ordered,
-            }
-        } else if order.already_ordered > 0 {
-            Self::AlreadyClosed
-        } else {
-            Self::NotFound
-        }
-    }
-
-    /// Write the reply document: one JSON object. The words of `verdict` are the
-    /// closed set `closing`, `already_closed`, `not_found`, `refused`; `links`
-    /// appears only on `closing` and `reason` only on `refused`.
-    pub fn write_json<W: TextOut + ?Sized>(&self, out: &mut W) {
-        match self {
-            Self::Closing { links } => {
-                let _ = write!(out, "{{\"verdict\":\"closing\",\"links\":{links}}}");
-            }
-            Self::AlreadyClosed => out.push_str("{\"verdict\":\"already_closed\"}"),
-            Self::NotFound => out.push_str("{\"verdict\":\"not_found\"}"),
-            Self::Refused(reason) => {
-                out.push_str("{\"verdict\":\"refused\",\"reason\":\"");
-                out.push_str(reason.words());
-                out.push_str("\"}");
-            }
-        }
-    }
-
-    /// The `verdict` word, for a declared set to be held to.
-    pub const fn word(&self) -> &'static str {
-        match self {
-            Self::Closing { .. } => "closing",
-            Self::AlreadyClosed => "already_closed",
-            Self::NotFound => "not_found",
-            Self::Refused(_) => "refused",
-        }
-    }
-
-    /// Every `verdict` word, for a declared set to be held to.
-    pub const WORDS: [&'static str; 4] = ["closing", "already_closed", "not_found", "refused"];
-}
-
-/// The answer to a reset query (decision D6): the close a generation asks for,
-/// once.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResetVerdict {
-    /// The close was ordered on `links` links; a peer the node still holds by
-    /// intent is connected again by its machine.
-    Resetting {
-        /// Links this call ordered closed.
-        links: u32,
-    },
-    /// Every session with that peer had already been ordered closed.
-    AlreadyClosed,
-    /// This node holds no session with that peer.
-    NotFound,
-    /// A reset of this generation or a later one was already taken, so this one
-    /// is a retransmission and closes nothing.
-    Duplicate {
-        /// The latest generation taken for the peer.
-        last: u64,
-    },
-    /// The reset was not attempted.
-    Refused(RefusedReason),
-}
-
-impl ResetVerdict {
-    /// The verdict a [`CloseOrder`] amounts to, for a generation not seen before.
-    pub fn of(order: CloseOrder) -> Self {
-        match CloseVerdict::of(order) {
-            CloseVerdict::Closing { links } => Self::Resetting { links },
-            CloseVerdict::AlreadyClosed => Self::AlreadyClosed,
-            _ => Self::NotFound,
-        }
-    }
-
-    /// Write the reply document: one JSON object. The words of `verdict` are the
-    /// closed set `resetting`, `already_closed`, `not_found`, `duplicate`,
-    /// `refused`; `links` appears only on `resetting`, `generation` only on
-    /// `duplicate` and `reason` only on `refused`.
-    pub fn write_json<W: TextOut + ?Sized>(&self, out: &mut W) {
-        match self {
-            Self::Resetting { links } => {
-                let _ = write!(out, "{{\"verdict\":\"resetting\",\"links\":{links}}}");
-            }
-            Self::AlreadyClosed => out.push_str("{\"verdict\":\"already_closed\"}"),
-            Self::NotFound => out.push_str("{\"verdict\":\"not_found\"}"),
-            Self::Duplicate { last } => {
-                let _ = write!(out, "{{\"verdict\":\"duplicate\",\"generation\":{last}}}");
-            }
-            Self::Refused(reason) => {
-                out.push_str("{\"verdict\":\"refused\",\"reason\":\"");
-                out.push_str(reason.words());
-                out.push_str("\"}");
-            }
-        }
-    }
-
-    /// The `verdict` word, for a declared set to be held to.
-    pub const fn word(&self) -> &'static str {
-        match self {
-            Self::Resetting { .. } => "resetting",
-            Self::AlreadyClosed => "already_closed",
-            Self::NotFound => "not_found",
-            Self::Duplicate { .. } => "duplicate",
-            Self::Refused(_) => "refused",
-        }
-    }
-
-    /// Every `verdict` word, for a declared set to be held to.
-    pub const WORDS: [&'static str; 5] = [
-        "resetting",
-        "already_closed",
-        "not_found",
-        "duplicate",
-        "refused",
-    ];
-}
-
-/// The answer to a status query (decision D6), as [`Answered`] reports it: the
-/// reply itself also lists each machine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StatusVerdict {
-    /// What the node holds for the peer.
-    Status {
-        /// The links of the node's sessions with the peer.
-        links: SessionLinks,
-        /// Whether a machine holds the peer in the node's intent.
-        intent: bool,
-        /// How many machines work to hold the peer.
-        machines: u32,
-    },
-    /// The status was not read.
-    Refused(RefusedReason),
-}
-
-impl StatusVerdict {
-    /// The `verdict` word, for a declared set to be held to.
-    pub const fn word(&self) -> &'static str {
-        match self {
-            Self::Status { .. } => "status",
-            Self::Refused(_) => "refused",
-        }
-    }
-
-    /// Every `verdict` word, for a declared set to be held to.
-    pub const WORDS: [&'static str; 2] = ["status", "refused"];
-}
-
-/// The verb the status query carries in its key.
-const STATUS_VERB: &str = "status";
-
-/// Every lifecycle verb a node can have bound, in the order the capability query
-/// lists them. `open` is last, and listed only by a node whose host has an opener
-/// ([`PeerOpener::BOUND`]).
-pub const VERBS: [&str; 4] = [CLOSE_VERB, RESET_VERB, STATUS_VERB, OPEN_VERB];
-
-/// Write the capability document `{"verbs":["close","reset","status"]}`, with
-/// `"open"` after them when `open_bound`.
-pub fn write_verbs_json<W: TextOut + ?Sized>(out: &mut W, open_bound: bool) {
-    let mut bound: [&str; VERBS.len()] = [""; VERBS.len()];
-    let mut count = 0;
-    for verb in VERBS {
-        if verb == OPEN_VERB && !open_bound {
-            continue;
-        }
-        bound[count] = verb;
-        count += 1;
-    }
-    write_verb_list(out, &bound[..count]);
 }
 
 /// The queryables a node hosts to serve the lifecycle queries, as the key
@@ -725,12 +491,10 @@ where
     /// works to hold it, written into `body`. Reads only: nothing here changes a
     /// session, a machine or the intent.
     fn status(&self, key: &LifecycleKey<'_>, body: &mut String) -> StatusVerdict {
-        use core::fmt::Write as _;
         let refused = |reason: RefusedReason, body: &mut String| {
-            body.push_str("{\"verdict\":\"refused\",\"reason\":\"");
-            body.push_str(reason.words());
-            body.push_str("\"}");
-            StatusVerdict::Refused(reason)
+            let verdict = StatusVerdict::Refused(reason);
+            verdict.write_json(body, &[]);
+            verdict
         };
         if !self.authority.admits_status(key) {
             return refused(RefusedReason::StatusNotPermitted, body);
@@ -739,37 +503,37 @@ where
             return refused(RefusedReason::PeerNotAZid, body);
         };
         let links = self.directory.links(&peer);
-        let mut rows = String::new();
-        let mut machines = 0u32;
-        let mut intent = false;
-        self.machines.each_machine(&peer, &mut |machine| {
-            if machines > 0 {
-                rows.push(',');
-            }
-            machines = machines.saturating_add(1);
-            intent |= machine.in_intent;
-            rows.push_str("{\"state\":");
-            crate::json::escape_into(machine.state, &mut rows);
-            if let Some(cause) = machine.cause {
-                rows.push_str(",\"cause\":");
-                crate::json::escape_into(cause, &mut rows);
-            }
-            if let Some(endpoint) = machine.endpoint {
-                rows.push_str(",\"endpoint\":");
-                crate::json::escape_into(endpoint, &mut rows);
-            }
-            rows.push('}');
-        });
-        let _ = write!(
-            body,
-            "{{\"verdict\":\"status\",\"links\":{{\"open\":{},\"closing\":{}}},\"intent\":{intent},\"machines\":[{rows}]}}",
-            links.open, links.closing
-        );
-        StatusVerdict::Status {
-            links,
-            intent,
-            machines,
+        // A machine's words are lent for the length of the callback, so each is
+        // copied once here, and the document is written from the copies: the
+        // intent and the count the document opens with are read from the same
+        // rows it lists, never from a second read of a machine that may have moved.
+        struct Row {
+            endpoint: Option<String>,
+            state: String,
+            cause: Option<String>,
+            in_intent: bool,
         }
+        let mut rows: Vec<Row> = Vec::new();
+        self.machines.each_machine(&peer, &mut |machine| {
+            rows.push(Row {
+                endpoint: machine.endpoint.map(String::from),
+                state: String::from(machine.state),
+                cause: machine.cause.map(String::from),
+                in_intent: machine.in_intent,
+            });
+        });
+        let reports: Vec<MachineReport<'_>> = rows
+            .iter()
+            .map(|row| MachineReport {
+                endpoint: row.endpoint.as_deref(),
+                state: &row.state,
+                cause: row.cause.as_deref(),
+                in_intent: row.in_intent,
+            })
+            .collect();
+        let verdict = StatusVerdict::of(links, &reports);
+        verdict.write_json(body, &reports);
+        verdict
     }
 }
 

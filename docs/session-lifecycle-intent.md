@@ -1149,13 +1149,14 @@ Each step lands with its own done-when; sizes are not estimated here.
   the second keeps a flood of opens from filling the bounded table. Neither is
   measured, and a table that reclaims a refused entry would allow both.
 
-## 6. Proposed: the contract for every verb (step 8, not built)
+## 6. The contract for every verb (step 8; A built, B to D not yet)
 
 Step 7e held the transports to one table for `open`. The other verbs of D6
 (`close`, `reset <generation>`, `status`) and a node's own identity are not
 yet on the table, because the fixed-memory profile has no port for them. This
 section is the design that closes it, written before the code so that the
-owner can rule on the questions at its end. Nothing here is built.
+owner could rule on the questions at its end (6.5). Only step A is built
+(6.6).
 
 ### 6.1 What exists, measured by reading the code
 
@@ -1257,9 +1258,9 @@ being skipped. The rows:
 
 ### 6.4 Order of work
 
-1. Step A: the vocabulary into `lifecycle_wire` and the status writer over
-   the text-out trait; the heap profile's tests are the witness and nothing
-   else moves.
+1. Step A (built, 6.6): the vocabulary into `lifecycle_wire` and the status
+   writer over the text-out trait; the heap profile's tests are the witness
+   and nothing else moves.
 2. Step B: `LifecycleNode` and `lifecycle_verdict`; the heap profile
    implements it; the rows for the three verbs run on the heap adapter. This
    proves the function on the profile that already has every effect.
@@ -1268,23 +1269,49 @@ being skipped. The rows:
    the rows run on the process adapter and on the fixed in-band adapter.
 4. Step D: the capabilities and the capability document.
 
-### 6.5 Questions for the owner
+### 6.5 Decisions (owner, 2026-10-26)
 
-- **The generation record's bound.** A heap node takes a generation even for
-  a peer it holds no session with, so a retransmission after the peer
-  returns closes nothing. A fixed node has a record per peer it has room
-  for. For a peer outside that room it can refuse by `NoRoom` (the request
-  is not taken, and the sender learns why) or answer `not_found` and take
-  nothing (a retransmission after the peer returns would then close it once
-  more). The recommendation is to refuse: at-most-once is the verb's whole
-  reason to carry a generation.
-- **The authority of an out-of-band channel.** One permit for every verb (the
-  node's write permit, as `open` has), or one per verb as the heap profile's
-  authority has. The recommendation is one per verb, since a channel that may
-  open a peer is not thereby one that may close every session.
-- **Whether the fixed in-band profile binds the new verbs at all.** The
-  Zephyr images are measured against flash budgets; the capabilities of 6.2
-  keep that choice with the build, and the question is only which of the
-  existing images, if any, selects them.
+- **The generation record's bound: refuse.** A heap node takes a generation
+  even for a peer it holds no session with, so a retransmission after the
+  peer returns closes nothing. A fixed node has a record per peer it has
+  room for, and for a peer outside that room it refuses by `NoRoom`: the
+  request is not taken and the sender learns why. At-most-once is the verb's
+  whole reason to carry a generation (Birrell and Nelson, 1984), and an
+  answer of `not_found` that took nothing would let a retransmission close
+  the peer once more after it returned. The table is never grown and never
+  evicts, since eviction breaks the same guarantee. The limit is written
+  where the verb is: a session reached by a configured endpoint has no node
+  row, so it cannot be reset by its zid on a fixed node.
+- **The authority of an out-of-band channel: one permit per verb**, as the
+  heap profile's authority has (least privilege, default deny). A channel
+  that may open a peer is not thereby one that may close every session. The
+  permit question widens from `NodeOpening::permitted` to a question per
+  verb on `LifecycleNode` (step B).
+- **The fixed in-band profile binds no new verb by default.** Each verb is a
+  capability of the build (6.2 item 6), so an image chooses against its own
+  flash budget and a default would only penalise the images that have the
+  budget. The code lands with no image selecting it, and the choice is the
+  image owner's.
 - **The two items already filed in section 5** (a locator target with no
   expected zid, and the listen intent) stay the owner's.
+
+### 6.6 Step A, built
+
+The words of `close`, `reset` and `status` are in `lifecycle_wire` beside
+those of `open`: `CloseOrder`, `SessionLinks`, `MachineReport`,
+`CloseVerdict`, `ResetVerdict`, `StatusVerdict`, the verb names, `VERBS` and
+`write_verbs_json`. `lifecycle_query` re-exports them, so no caller's path
+moved, and `drive::RESET_VERB` is the same constant. Two things differ from
+the sketch of 6.2:
+
+- The status document is written from the rows it lists. `StatusVerdict::of`
+  reads the intent and the count out of a slice of `MachineReport`, and
+  `write_json(out, machines)` writes those same rows, so the two figures the
+  document opens with cannot disagree with its list. The heap profile copies
+  the rows a machine lends it into owned ones first and writes from the
+  copies; a node with a fixed table builds the slice on its stack.
+- The writer is `storage-profile` only, because the escaper it calls is, and
+  both profiles that have a session tier select that feature. It takes any
+  text-out sink and a test writes it into a fixed buffer, so it allocates
+  nothing; the bytes are those the heap profile wrote before, which the
+  existing `lifecycle_query` tests, unchanged, hold.
