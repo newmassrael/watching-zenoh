@@ -139,7 +139,16 @@ derived from the declaration and never chosen by hand:
      This does not exist: today a generated machine is included or not as a whole
      (`crates/wz-session-core/src/lib.rs`, `#[cfg(feature = "session-unicast")]` around the
      `include!`), and SCE has no element gate (`docs/feature_inventory.md` section 8 is a
-     sketch). It is a change to SCE's codegen and is asked of the SCE repository.
+     sketch). SCE took it (its ADR 0057, proposed 2026-10-26): an attribute `sce:requires`
+     whose predicate is a name, `all(..)` or `any(..)` (no `not`: a build is a union of
+     features, which only adds), on states, transitions, executable content, entry and exit,
+     invocations, static data and imports; an event's variant and a host action's method
+     gated by the `any(..)` of their users; every one of the 2^N worlds checked to be a valid
+     machine; the Rust emit `cfg`-gated with `compile_error!` guards for the requires edges and
+     a cargo `[features]` fragment beside it. The features are declared in a feature-model
+     document of their own that every machine imports, and wz GENERATES that document from
+     `deploy/wz-config.toml` (`wz_config.py`), so the declaration stays the one source and the
+     gate is that the committed model is the generated one.
   5. The C drop-in headers carry the original's own switch macros (`Z_FEATURE_*` for pico)
      generated from the same `.config` (C12's header generation).
   6. Gates: every feature an SCXML source names is declared (a C0 check), the emit compiles
@@ -176,6 +185,38 @@ MCU first, by the owner's choice.
    declared in `deploy/wz-config.toml`. K3: the gates of D7.6. K2 waits on K1; K3's ABSENCE
    check on the MCU images can start now.
 8. **L. The loop.** Each LOSS or TIE cell, largest ratio first (D5).
+
+## 5a. C12 on the MCU: one engine, host seams behind a seam
+
+Counted on 2026-10-26: the cooperative engine (`wz-capi-coop`) uses `std` at 23 sites against
+2,574 lines of session logic that already stand on `no_std` crates (`wz-session-core`,
+`wz-runtime-coop`, `wz-session-mcu`), and its link (`IpStack`) is handed in by the ABI. A second
+engine for the MCU would copy that logic. So the pico C ABI on the MCU runs on the same engine
+(agreed with the engine's author the same day):
+
+- **E1. The engine builds without `std`.** What remains of `std` goes behind two seams: the os
+  seam (thread identity, spawn and sleep for pico's multi-threaded arm, the thread-local delivery
+  set, a monotonic millisecond clock), whose host backend is `std` and whose Zephyr backend is
+  the kernel (`k_current_get`, `k_thread_create`, `k_sleep`, `k_uptime_get`); and the lock
+  (`wz-capi-port`'s `sync::Lock` or the runtime's critical section). `std` stays the default
+  feature, and the change that moves them changes no behaviour.
+- **E2. The link is the image's.** On a host the ABI hands the engine `wz-runtime-posix`'s
+  sockets; on the MCU, Zephyr's sockets or lwIP through `wz-session-lwip`, in the same place.
+  Scouting's multicast sockets are the host's (`wz-host-net`) and stay a host feature until the
+  MCU has its own.
+- **E3. Heap and fixed are the storage policy's, not the engine's.** The policy is already in
+  `wz-session-mcu`.
+- **What must survive the move** (the engine author's list): the session lock is held across a
+  step, so the lock decides who may step from where, and the rule that callbacks run outside it
+  (decision D8 of `docs/capi-pico-on-coop-engine.md`) must hold on both backends; the tickers and
+  the timed waits need the clock and the sleep of the os seam; `Arc<dyn SessionEngine>` and the
+  atomics need a target with compare-and-swap (the kit's thumbv7em has it, thumbv6m does not);
+  the closed-session answers and the `live()` guard stay in the engine and only the lock moves;
+  the `pico-client-coop*` cases of `capability_cost_gate.py` are run at the commit, since a
+  generic lock is to cost no text.
+- **The pico ABI's own host layer** gains `src/os/zephyr.rs`, modelled on zenoh-pico's
+  `system/zephyr/system.c`, beside `unix.rs` and `windows.rs` (the types the C program
+  stack-allocates are the ones pico's Zephyr header gives them).
 
 ## 6. Open
 
