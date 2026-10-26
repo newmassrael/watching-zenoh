@@ -787,7 +787,13 @@ impl OpenPlan {
         line(format!("dial: {:?}", self.dial));
         line(format!("listen_phase: {:?}", self.listen_phase));
         line(format!("batch_size: {}", self.batch_size));
-        line(format!("offer: {:?}", self.offer));
+        // The three facts of the offer a document decides, and not its `Debug`: a build that carries
+        // the shared-memory protocols adds a list of them to the type, and a description that held
+        // the list would differ with the features it is built with.
+        line(format!(
+            "offer: mode={:?} compression={} shm={}",
+            self.offer.mode, self.offer.compression, self.offer.shm
+        ));
         line(format!("shm: {:?}", self.shm));
         line(format!("zid: {:?}", self.zid));
         line(format!("timestamping: {:?}", self.timestamping));
@@ -1336,7 +1342,7 @@ mod tests {
                  listen_phase: ListenPhase {{ policy: PhasePolicy {{ budget: PhaseBudget(0), \
                  exit_on_failure: true }}, schedule: {SCHEDULE} }}\n\
                  batch_size: 65535\n\
-                 offer: SessionOffer {{ mode: Qos, compression: false, shm: false }}\n\
+                 offer: mode=Qos compression=false shm=false\n\
                  shm: ShmKeys {{ enabled: true, transport_optimization: true, pool_size: 16777216 }}\n\
                  zid: None\n\
                  timestamping: TimestampingEnabled {{ router: true, peer: false, client: false }}\n\
