@@ -184,9 +184,11 @@ ROSTER: frozenset[tuple[str, str]] = frozenset(
         # layer since the assembler existed and read by nothing outside it, which
         # is the debt this roster files, so the rows are struck and not kept with
         # a note: the gate is a ratchet in both directions.
+        # R3743 -- `StreamAssembler::synced_from_syn` left the same way: the
+        # zenoh test's `stream_framing` check is weighed only for a direction
+        # synchronised from its SYN, and both shipped surfaces carry the test.
         ("StreamAssembler", "held_segments"),
         ("StreamAssembler", "is_empty"),
-        ("StreamAssembler", "synced_from_syn"),
         ("Tunnel", "depth"),
     }
 )
