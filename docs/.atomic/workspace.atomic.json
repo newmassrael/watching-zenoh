@@ -291892,6 +291892,44 @@
         "Read C1cs, C1cc, C1ce, C1co and C1aq to C1av from the first hosted run that finishes and holds step L1."
       ]
     },
+    "Round 3743": {
+      "decision_summary": "The zenoh verdict's corpus gains seven zenoh captures: an upstream zenohd 1.5.0 router (TCP full and joined mid-session, UDP), zenoh-pico 1.10.1 clients over TCP and UDP, 240 short sessions captured for their handshakes, and a link dropping 5% each way. Every new flow reads yes. Model 2's zenoh side is now measured for the cookie echo, the Init roles and the version header too (0 failures in 256, 256 and 512), and the unit and framing counts grow. The framing check is weighed only for a TCP direction the capture holds from its SYN: a tap joining a zenoh stream later lands inside a unit and loses the framing too, so there the observation says how the capture began. The SN break rate stays an assumed tolerance, a property of the link, and the lossy capture holds it to reading yes.",
+      "changes_bullets": [
+        "`captures/corpus/`: `zenoh15-tcp-full`, `zenoh15-tcp-midsession`, `zenoh15-udp-full`, `zenoh-pico-tcp`, `zenoh-pico-udp`, `zenoh-handshakes` and `zenoh-udp-lossy`, listed in `corpus.json5`; the README table and pending list follow.",
+        "`zenoh_evidence.rs`: `measured::ZENOH_COOKIE`, `ZENOH_ROLES`, `ZENOH_VERSIONS`; the cookie, roles and version weights computed from them; the unit and framing weights recomputed; `eps_basis` measured for every check but `sn_follows`. `SessionObservations::of` takes which directions' start is held (a TCP assembler synchronised from its SYN).",
+        "The corpus counts test measures the handshake checks as well; `wz_dissect.h`, the C ABI tests and the design note 6.2 follow the new weights."
+      ],
+      "verification_bullets": [
+        "Measured, both builds: every flow of the seven files reads yes (240 of 240 short sessions); MQTT reads 0 yes, 4 no, 40 undecided and every other file keeps its tally. The lossy link breaks 6 SN steps of 110 and still reads yes.",
+        "wz-capture 1608 tests, the corpus tests with lz4, wz-capi-dissect with its C consumer pass; clippy -D warnings on wz-capture and wz-capi-dissect; wz-capture's docs build with broken links denied. The pre-push static gate array passed after the append."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "Still to measure: zenoh versions other than 1.10.1 and 1.5.0, links other than loopback and one emulated lossy link, and a busier LAN's LLMNR, WS-Discovery, NTP and DHCP (the last two need anonymiser parsers).",
+        "Lower bounds of the SN resolution and the batch size, to be proposed to the analyzer design."
+      ],
+      "publishable_decision_summary": "The zenoh verdict's corpus gains seven zenoh captures: an upstream zenohd 1.5.0 router (TCP full and joined mid-session, UDP), zenoh-pico 1.10.1 clients over TCP and UDP, 240 short sessions captured for their handshakes, and a link dropping 5% each way. Every new flow reads yes. Model 2's zenoh side is now measured for the cookie echo, the Init roles and the version header too (0 failures in 256, 256 and 512), and the unit and framing counts grow. The framing check is weighed only for a TCP direction the capture holds from its SYN: a tap joining a zenoh stream later lands inside a unit and loses the framing too, so there the observation says how the capture began. The SN break rate stays an assumed tolerance, a property of the link, and the lossy capture holds it to reading yes.",
+      "publishable_changes_bullets": [
+        "`captures/corpus/`: `zenoh15-tcp-full`, `zenoh15-tcp-midsession`, `zenoh15-udp-full`, `zenoh-pico-tcp`, `zenoh-pico-udp`, `zenoh-handshakes` and `zenoh-udp-lossy`, listed in `corpus.json5`; the README table and pending list follow.",
+        "`zenoh_evidence.rs`: `measured::ZENOH_COOKIE`, `ZENOH_ROLES`, `ZENOH_VERSIONS`; the cookie, roles and version weights computed from them; the unit and framing weights recomputed; `eps_basis` measured for every check but `sn_follows`. `SessionObservations::of` takes which directions' start is held (a TCP assembler synchronised from its SYN).",
+        "The corpus counts test measures the handshake checks as well; `wz_dissect.h`, the C ABI tests and the design note 6.2 follow the new weights."
+      ],
+      "publishable_verification_bullets": [
+        "Measured, both builds: every flow of the seven files reads yes (240 of 240 short sessions); MQTT reads 0 yes, 4 no, 40 undecided and every other file keeps its tally. The lossy link breaks 6 SN steps of 110 and still reads yes.",
+        "wz-capture 1608 tests, the corpus tests with lz4, wz-capi-dissect with its C consumer pass; clippy -D warnings on wz-capture and wz-capi-dissect; wz-capture's docs build with broken links denied. The pre-push static gate array passed after the append."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Still to measure: zenoh versions other than 1.10.1 and 1.5.0, links other than loopback and one emulated lossy link, and a busier LAN's LLMNR, WS-Discovery, NTP and DHCP (the last two need anonymiser parsers).",
+        "Lower bounds of the SN resolution and the batch size, to be proposed to the analyzer design."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
