@@ -1,0 +1,29 @@
+# A node declaration (docs/target-build-contract.md section 5b), checked by scripts/lib/wz_node.py.
+#
+# The fixed-memory node of deploy/host-slot-node stated as data: it dials one router and answers
+# queries with documents, on the per-session slot profile (no allocator). The endpoint is the lab's
+# router; a deployment states its own.
+
+schema = 1
+
+[node]
+id = "slot-answerer"
+help = "A fixed-memory client that dials one router over TCP and answers queries under two keys."
+target = "slot"
+
+[[endpoint]]
+role = "dial"
+locator = "tcp/192.168.1.10:7447"
+
+[[entity]]
+kind = "queryable"
+key = "lab/doc/small"
+document_bytes = 256
+
+[[entity]]
+kind = "queryable"
+key = "lab/doc/large"
+document_bytes = 4096
+
+[limits]
+MAX_QUERYABLES = 2

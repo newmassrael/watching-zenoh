@@ -9,6 +9,7 @@ describe what was built.
                   [--profile ID] [--node ID | --node-file PATH]
     wz_package.py --verify DIR
     wz_package.py --sdk-bundle-check ID
+    wz_package.py --write-fixtures | --check-fixtures | --record-measured DIR
     wz_package.py --selftest
 
 `package` (the default) builds the named artifacts for the platform with cargo, copies each into
@@ -16,6 +17,13 @@ describe what was built.
 `DIR/wz-target-manifest.json`: the one file a deployment tool reads. `--verify` is the gate on it:
 it re-measures every artifact the manifest names and compares, so a manifest that no longer says
 what the files are is a finding.
+
+## Fixtures (step 7)
+
+`deploy/fixtures/manifests/` is a conformance corpus a consumer's reader and `--verify` are both held
+to: synthetic packages made here (valid ones, and each with one defect, at the level a reader sees it:
+`shape`, `manifest` or `files`), measured manifests of real builds, and an `index.json` of verdicts.
+`--check-fixtures` (in the selftest) holds the corpus to what the entry makes now.
 
 ## Bundling (T5)
 
@@ -1172,18 +1180,263 @@ def _facts(roles: list[str] | None = None, lists: dict[str, list[str]] | None = 
     return json.dumps({"schema": 1, "lists": lists}, separators=(",", ":")).encode() + b"\x00"
 
 
+# The machine, the loader and the C library's version needs a synthetic file of each platform has, so
+# a synthetic package reads like one of that platform (the selftest's default is the x86_64 host).
+SYNTHETIC_TARGETS = {
+    "x86_64-unknown-linux-gnu": (62, "/lib64/ld-linux-x86-64.so.2", [("libc.so.6", ["GLIBC_2.17", "GLIBC_2.34"])]),
+    "aarch64-linux-android": (183, "/system/bin/linker64", []),
+}
+
+
 def _synthetic(row: dict, needed: list[str], roles: list[str] | None = None, family: str | None = None,
-               revision: int = 1, facts_lists: dict[str, list[str]] | None = None) -> bytes:
+               revision: int = 1, facts_lists: dict[str, list[str]] | None = None,
+               triple: str = "x86_64-unknown-linux-gnu") -> bytes:
+    machine, interp, verneed = SYNTHETIC_TARGETS[triple]
     notes = [(elf_facts.STAMP_SECTION, "wz", 1, _stamp(family or row["family"], revision))]
     if roles is not None:
         notes.append((elf_facts.FACTS_SECTION, "wz", 2, _facts(roles)))
     elif facts_lists is not None:
         notes.append((elf_facts.FACTS_SECTION, "wz", 2, _facts(lists=facts_lists)))
     return elf_facts.build_test_elf(
-        notes_=notes, needed=needed, machine=62,
+        notes_=notes, needed=needed, machine=machine,
         soname=f"lib{row['file']}.so" if row["kind"] == "shared-library" else None,
-        interp="/lib64/ld-linux-x86-64.so.2" if row["kind"] == "executable" else None,
-        verneed=[("libc.so.6", ["GLIBC_2.17", "GLIBC_2.34"])])
+        interp=interp if row["kind"] == "executable" else None,
+        verneed=verneed)
+
+
+# ---------------------------------------------------------------------------
+# Fixtures (docs/target-build-contract.md step 7): one corpus a consumer's reader and this gate are
+# both held to
+# ---------------------------------------------------------------------------
+
+FIXTURES = ROOT / "deploy" / "fixtures" / "manifests"
+FIXTURE_INDEX = "index.json"
+FIXTURE_SCHEMA = 1
+# What a reader needs to see a defect: the manifest's keys (`shape`), the manifest alone, read for
+# its own consistency (`manifest`), or the files it describes, measured again (`files`).
+FIXTURE_LEVELS = {
+    "shape": "the keys of the manifest, in order, none more (shape_findings)",
+    "manifest": "the manifest alone, read for its own consistency (the closure, the inputs, the paths)",
+    "files": "the files the manifest describes, measured again from their bytes",
+}
+FIXTURE_BUILT_FROM = {"commit": "0" * 40, "tree_clean": True}
+
+
+def _fixture_packages(decl: dict) -> dict[str, tuple[str, dict, dict[str, bytes]]]:
+    """The valid synthetic packages, by name: (platform id, manifest, files by path). Each is what
+    `package` writes for its inputs, made from synthetic files instead of a build."""
+    arts = {a["id"]: a for a in decl["artifacts"]}
+    plats = {p["id"]: p for p in decl["platforms"]}
+    toolchain = {"rustc": "rustc 0 (synthetic)", "cc": None, "sdk": None}
+    out: dict[str, tuple[str, dict, dict[str, bytes]]] = {}
+
+    host = plats["linux-x86_64-glibc"]
+    needs = [n for n in host["system_assumed"] if not n.startswith("ld-")]
+    pico, demo = arts["capi-pico"], arts["ap-demo"]
+    files = {"lib/libwz_capi_pico.so": _synthetic(pico, needs),
+             "bin/wz-ap-demo": _synthetic(demo, needs, roles=["publish", "subscribe"])}
+    resolved = {"wz-runtime-tokio": sorted(r["feature"] for r in decl["runtime_features"])}
+    entries = [artifact_entry(decl, host, pico, "lib/libwz_capi_pico.so", files["lib/libwz_capi_pico.so"],
+                              ["peer", "scout", "link-udp", "multi-thread"]),
+               artifact_entry(decl, host, demo, "bin/wz-ap-demo", files["bin/wz-ap-demo"],
+                              ["zenoh-config"], resolved)]
+    out["host-library-and-executable"] = (host["id"], assemble(decl, host, FIXTURE_BUILT_FROM, toolchain, entries),
+                                          files)
+
+    android = plats["android-arm64"]
+    runtime = android["bundle_from_sdk"][0]
+    triple = android["triple"]
+    lib = _synthetic(pico, [*android["system_assumed"], runtime], triple=triple)
+    bundled_blob = elf_facts.build_test_elf(needed=list(android["system_assumed"]), soname=runtime,
+                                            machine=SYNTHETIC_TARGETS[triple][0])
+    files = {"lib/libwz_capi_pico.so": lib, bundled_path(runtime): bundled_blob}
+    entries = [artifact_entry(decl, android, pico, "lib/libwz_capi_pico.so", lib, ["peer", "link-udp"])]
+    bundled = [bundled_entry(android, runtime, bundled_blob)]
+    sdk_toolchain = {**toolchain, "sdk": {"kind": "android-ndk", "revision": "0 (synthetic)"}}
+    out["android-bundled-runtime"] = (android["id"], assemble(decl, android, FIXTURE_BUILT_FROM, sdk_toolchain,
+                                                              entries, None, bundled), files)
+
+    node_row = arts["declared-node"]
+    view = wz_node.resolve("slot-answerer", decl)
+    blob = _synthetic(node_row, needs, facts_lists={"node_id": [view["id"]],
+                                                    "declaration_sha256": [view["declaration_sha256"]]})
+    files = {"bin/declared-node": blob, declaration_path(view["id"]): view["source"]}
+    entries = [artifact_entry(decl, host, node_row, "bin/declared-node", blob, view["features"], None,
+                              {view["declaration_sha256"]: view})]
+    out["host-declared-node"] = (host["id"], assemble(decl, host, FIXTURE_BUILT_FROM, toolchain, entries, None,
+                                                      None, [input_entry(view)]), files)
+    return out
+
+
+def _flip_last(blob: bytes) -> bytes:
+    return blob[:-1] + bytes([blob[-1] ^ 0xFF])
+
+
+# The invalid synthetic packages: (name, the valid package it damages, level, the words of the
+# finding this gate reports, the damage to (manifest, files)). Each has one defect.
+FIXTURE_DAMAGES = [
+    ("shape-extra-key", "host-library-and-executable", "shape", "keys",
+     lambda m, f: m.__setitem__("extra", 1)),
+    ("manifest-unknown-schema", "host-library-and-executable", "manifest", "schema is 99",
+     lambda m, f: m.__setitem__("schema", 99)),
+    ("shape-artifact-key-missing", "host-library-and-executable", "shape", "keys",
+     lambda m, f: m["artifacts"][0].pop("sha256")),
+    ("manifest-path-leaves-directory", "host-library-and-executable", "manifest", "relative path",
+     lambda m, f: m["artifacts"][0].__setitem__("path", "../libwz_capi_pico.so")),
+    ("manifest-bundled-nothing-needs", "android-bundled-runtime", "manifest", "nothing in the package needs it",
+     lambda m, f: m["artifacts"][0]["elf"]["needed"].pop()),
+    ("manifest-bundled-entry-missing", "android-bundled-runtime", "manifest", "the manifest bundles no",
+     lambda m, f: m.__setitem__("bundled", [])),
+    ("manifest-input-nothing-built-from", "host-declared-node", "manifest", "nothing in it was built from it",
+     lambda m, f: m["artifacts"][0]["provides"][0].__setitem__("declaration_sha256", ["0" * 64])),
+    ("files-artifact-byte-changed", "host-library-and-executable", "files", "sha256",
+     lambda m, f: f.__setitem__("lib/libwz_capi_pico.so", _flip_last(f["lib/libwz_capi_pico.so"]))),
+    ("files-artifact-missing", "host-library-and-executable", "files", "is missing",
+     lambda m, f: f.pop("bin/wz-ap-demo")),
+    ("files-stray-file", "host-library-and-executable", "files", "does not describe",
+     lambda m, f: f.__setitem__("lib/stray.so", b"stray")),
+    ("files-bundled-other-library", "android-bundled-runtime", "files", "SONAME",
+     lambda m, f: f.__setitem__(bundled_path("libc++_shared.so"), elf_facts.build_test_elf(
+         needed=["libc.so"], soname="libother.so", machine=183))),
+    ("files-declaration-edited", "host-declared-node", "files", "sha256",
+     lambda m, f: f.__setitem__("node/slot-answerer.toml", f["node/slot-answerer.toml"] + b"# edited\n")),
+]
+
+
+def fixture_corpus(decl: dict) -> list[dict]:
+    """Every synthetic case: its path under the corpus, the platform, the expected verdict, and the
+    files of the package (the manifest among them), valid ones first."""
+    packages = _fixture_packages(decl)
+    cases = []
+    for name, (platform_id, manifest, files) in packages.items():
+        cases.append({"path": f"synthetic/{name}", "platform": platform_id, "expect": {"verdict": "valid"},
+                      "files": {**files, MANIFEST_NAME: render(manifest).encode()}})
+    for name, base, level, words, damage in FIXTURE_DAMAGES:
+        platform_id, manifest, files = packages[base]
+        manifest, files = copy.deepcopy(manifest), dict(files)
+        damage(manifest, files)
+        cases.append({"path": f"synthetic/{name}", "platform": platform_id,
+                      "expect": {"verdict": "invalid", "level": level, "finding": words},
+                      "files": {**files, MANIFEST_NAME: render(manifest).encode()}})
+    return cases
+
+
+def fixture_index(cases: list[dict], measured: list[pathlib.Path]) -> dict:
+    """The corpus's own description, which a reader reads first: each fixture's path, whether it was
+    measured from a build or made here, its platform and the verdict this gate gives it."""
+    entries = [{"path": c["path"], "origin": "synthetic", "platform": c["platform"], "expect": c["expect"]}
+               for c in cases]
+    for path in measured:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        entries.append({"path": f"measured/{path.name}", "origin": "measured",
+                        "platform": manifest["platform"]["id"], "expect": {"verdict": "valid", "files": False}})
+    return {"schema": FIXTURE_SCHEMA, "manifest_schema": MANIFEST_SCHEMA, "levels": FIXTURE_LEVELS,
+            "fixtures": entries}
+
+
+def _write_case(root: pathlib.Path, case: dict) -> None:
+    for rel, blob in case["files"].items():
+        target = root / case["path"] / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(blob)
+
+
+def write_fixtures(decl: dict, root: pathlib.Path = FIXTURES) -> int:
+    """Write the synthetic corpus and the index; the measured manifests are kept as they are."""
+    cases = fixture_corpus(decl)
+    if (root / "synthetic").exists():
+        shutil.rmtree(root / "synthetic")
+    for case in cases:
+        _write_case(root, case)
+    measured = sorted((root / "measured").glob("*.json")) if (root / "measured").is_dir() else []
+    (root / FIXTURE_INDEX).write_text(json.dumps(fixture_index(cases, measured), indent=2) + "\n", encoding="utf-8")
+    print(f"  wz-package: wrote {len(cases)} synthetic fixture(s) and the index of {len(measured)} measured one(s)")
+    return 0
+
+
+def fixture_findings(decl: dict, root: pathlib.Path = FIXTURES) -> list[str]:
+    """What is wrong with the corpus: synthetic cases that are not what this entry makes now (byte for
+    byte, none missing, none more), an index that does not describe the corpus, a case this gate does
+    not judge as the index says (a valid one with a finding, an invalid one without its words, or one
+    whose level is not where the defect is), and a measured manifest whose shape is not this schema's
+    or that was not built from a committed tree."""
+    findings: list[str] = []
+    cases = fixture_corpus(decl)
+    stale = "regenerate with wz_package.py --write-fixtures"
+    want = {f"{c['path']}/{rel}": blob for c in cases for rel, blob in c["files"].items()}
+    synthetic = root / "synthetic"
+    have = {str(p.relative_to(root)): p.read_bytes() for p in synthetic.rglob("*") if p.is_file()} \
+        if synthetic.is_dir() else {}
+    for rel in sorted(set(want) - set(have)):
+        findings.append(f"fixture {rel} is missing: {stale}")
+    for rel in sorted(set(have) - set(want)):
+        findings.append(f"fixture {rel} is not one this entry makes: {stale}")
+    for rel in sorted(set(want) & set(have)):
+        if want[rel] != have[rel]:
+            findings.append(f"fixture {rel} is not what this entry makes now: {stale}")
+    measured = sorted((root / "measured").glob("*.json")) if (root / "measured").is_dir() else []
+    index_path = root / FIXTURE_INDEX
+    try:
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as err:
+        findings.append(f"{FIXTURE_INDEX} is not readable: {err}")
+    else:
+        if index != fixture_index(cases, measured):
+            findings.append(f"{FIXTURE_INDEX} does not describe the corpus: {stale}")
+    with tempfile.TemporaryDirectory(prefix="wz-fixtures-") as work:
+        for case in cases:
+            _write_case(pathlib.Path(work), case)
+            directory = pathlib.Path(work) / case["path"]
+            manifest = json.loads(case["files"][MANIFEST_NAME])
+            found = verify_dir(directory, decl)
+            expect = case["expect"]
+            if expect["verdict"] == "valid":
+                if found:
+                    findings.append(f"{case['path']} is indexed valid and this gate finds {found}")
+                continue
+            if not any(expect["finding"] in f for f in found):
+                findings.append(f"{case['path']} is indexed invalid ({expect['finding']!r}) and this gate "
+                                f"finds {found}")
+            in_shape = bool(shape_findings(manifest))
+            if in_shape != (expect["level"] == "shape"):
+                findings.append(f"{case['path']} is indexed at level {expect['level']} and its shape is "
+                                f"{'not ' if not in_shape else ''}what breaks")
+    for path in measured:
+        try:
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+        except ValueError as err:
+            findings.append(f"measured/{path.name} is not JSON: {err}")
+            continue
+        for problem in shape_findings(manifest):
+            findings.append(f"measured/{path.name}: {problem}: record it again from a build "
+                            "(wz_package.py --record-measured DIR)")
+        if isinstance(manifest, dict) and manifest.get("schema") != MANIFEST_SCHEMA:
+            findings.append(f"measured/{path.name} is schema {manifest.get('schema')!r}, this entry writes "
+                            f"{MANIFEST_SCHEMA}")
+        if isinstance(manifest, dict) and not (manifest.get("built_from") or {}).get("tree_clean"):
+            findings.append(f"measured/{path.name} was built from a tree with uncommitted changes")
+    return findings
+
+
+def record_measured(decl: dict, directory: pathlib.Path, root: pathlib.Path = FIXTURES) -> int:
+    """Record a package this entry built and verified as a measured fixture: its manifest, named by
+    the platform (and the node, for a node package), from a committed tree only. The files stay out of
+    the tree; the measured fixtures are read for their shape and values, the synthetic ones for every
+    level."""
+    findings = verify_dir(directory, decl)
+    if findings:
+        raise Refusal(f"{directory} does not verify: " + "; ".join(findings))
+    text = (directory / MANIFEST_NAME).read_text(encoding="utf-8")
+    manifest = json.loads(text)
+    if not manifest["built_from"]["tree_clean"]:
+        raise Refusal(f"{directory} was built from a tree with uncommitted changes; a measured fixture is "
+                      "built from a commit")
+    name = manifest["platform"]["id"] + "".join(f"-{i['id']}" for i in manifest["inputs"])
+    (root / "measured").mkdir(parents=True, exist_ok=True)
+    (root / "measured" / f"{name}.json").write_text(text, encoding="utf-8")
+    write_fixtures(decl, root)
+    print(f"  wz-package: recorded measured/{name}.json")
+    return 0
 
 
 def _selftest() -> int:
@@ -1751,6 +2004,44 @@ def _selftest() -> int:
 
     _selftest_bundle(decl, expect, refuses)
 
+    # The fixture corpus: the tracked one is what this entry makes now and is judged as its index says,
+    # and the check sees a corpus that drifted, an index that went, and a measured manifest it cannot
+    # trust.
+    found = fixture_findings(decl)
+    expect(f"the tracked fixture corpus is current ({found})", found == [])
+    with tempfile.TemporaryDirectory(prefix="wz-package-fixtures-") as fixture_work:
+        root = pathlib.Path(fixture_work) / "corpus"
+        shutil.copytree(FIXTURES, root)
+        drifted = root / "synthetic" / "host-library-and-executable" / "lib" / "libwz_capi_pico.so"
+        drifted.write_bytes(_flip_last(drifted.read_bytes()))
+        expect("a fixture that is not what the entry makes is reported",
+               any("is not what this entry makes now" in f for f in fixture_findings(decl, root)))
+        drifted.write_bytes(_flip_last(drifted.read_bytes()))
+        (root / FIXTURE_INDEX).unlink()
+        expect("a corpus with no index is reported", any("not readable" in f for f in fixture_findings(decl, root)))
+        write_fixtures(decl, root)
+        expect("writing the corpus again makes it current", fixture_findings(decl, root) == [])
+        clean = root / "synthetic" / "host-declared-node"
+        record_measured(decl, clean, root)
+        expect("a verified package of a committed tree is recorded as measured and indexed",
+               (root / "measured" / "linux-x86_64-glibc-slot-answerer.json").is_file()
+               and fixture_findings(decl, root) == [])
+        refuses("a package that does not verify is not recorded", "does not verify",
+                lambda: record_measured(decl, root / "synthetic" / "files-artifact-missing", root))
+        dirty = root / "dirty"
+        shutil.copytree(clean, dirty)
+        data = json.loads((dirty / MANIFEST_NAME).read_text())
+        data["built_from"]["tree_clean"] = False
+        (dirty / MANIFEST_NAME).write_text(render(data), encoding="utf-8")
+        refuses("a package built from uncommitted changes is not recorded", "uncommitted",
+                lambda: record_measured(decl, dirty, root))
+        measured = root / "measured" / "linux-x86_64-glibc-slot-answerer.json"
+        data = json.loads(measured.read_text())
+        data["extra"] = 1
+        measured.write_text(render(data), encoding="utf-8")
+        expect("a measured manifest of another shape is reported",
+               any("record it again" in f for f in fixture_findings(decl, root)))
+
     # The declaration and the stamp gate agree on which families exist.
     import abi_stamp_gate
 
@@ -1980,6 +2271,22 @@ def main(argv: list[str]) -> int:
         for line in lines or ["bundles nothing from its SDK"]:
             print(f"  wz-package: {argv[1]}: {line}")
         return 0
+    if argv in (["--write-fixtures"], ["--check-fixtures"]) or (len(argv) == 2 and argv[0] == "--record-measured"):
+        decl = wz_config.load_decl()
+        if argv == ["--write-fixtures"]:
+            return write_fixtures(decl)
+        if argv == ["--check-fixtures"]:
+            findings = fixture_findings(decl)
+            for finding in findings:
+                print(f"  wz-package FAIL: {finding}", file=sys.stderr)
+            if not findings:
+                print("  wz-package: the fixture corpus is current and judged as its index says")
+            return 1 if findings else 0
+        try:
+            return record_measured(decl, pathlib.Path(argv[1]))
+        except Refusal as err:
+            print(f"wz-package: REFUSED -- {err}", file=sys.stderr)
+            return 2
     if argv == ["--selftest"]:
         try:
             return _selftest()

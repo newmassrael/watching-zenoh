@@ -1,0 +1,132 @@
+{
+  "schema": 1,
+  "catalog_version": 2,
+  "built_from": {
+    "commit": "0000000000000000000000000000000000000000",
+    "tree_clean": true
+  },
+  "platform": {
+    "id": "android-arm64",
+    "triple": "aarch64-linux-android",
+    "os": "android",
+    "libc": "bionic",
+    "network_stack": null,
+    "support": "verified",
+    "strongest_green_lane": "build"
+  },
+  "profile": null,
+  "toolchain": {
+    "rustc": "rustc 0 (synthetic)",
+    "cc": null,
+    "sdk": {
+      "kind": "android-ndk",
+      "revision": "0 (synthetic)"
+    }
+  },
+  "system_assumed": [
+    "libdl.so",
+    "libm.so",
+    "libc.so"
+  ],
+  "bundled": [
+    {
+      "soname": "libc++_shared.so",
+      "path": "lib/libc++_shared.so",
+      "sha256": "7f2790675eab1fc4e6f46b31443b3406c149f8028c5a798147d2fbcc395477bc",
+      "size": 472,
+      "elf": {
+        "class": 64,
+        "machine": "aarch64",
+        "linking": "dynamic",
+        "interpreter": null,
+        "soname": "libc++_shared.so",
+        "runpath": null,
+        "rpath": null,
+        "needed": [
+          {
+            "soname": "libdl.so",
+            "provided_by": "system"
+          },
+          {
+            "soname": "libm.so",
+            "provided_by": "system"
+          },
+          {
+            "soname": "libc.so",
+            "provided_by": "system"
+          }
+        ],
+        "os_floor": {
+          "glibc": null,
+          "android_api_note": null,
+          "symbol_version_tags": []
+        }
+      }
+    }
+  ],
+  "inputs": [],
+  "artifacts": [
+    {
+      "id": "capi-pico",
+      "name": "libwz_capi_pico.so",
+      "kind": "shared-library",
+      "path": "lib/libwz_capi_pico.so",
+      "sha256": "d47d805466c107351bd5ad752048ec6f131cca5a7d817a6f7e238217a2cb9f88",
+      "size": 664,
+      "elf": {
+        "class": 64,
+        "machine": "aarch64",
+        "linking": "dynamic",
+        "interpreter": null,
+        "soname": "libwz_capi_pico.so",
+        "runpath": null,
+        "rpath": null,
+        "needed": [
+          {
+            "soname": "libdl.so",
+            "provided_by": "system"
+          },
+          {
+            "soname": "libm.so",
+            "provided_by": "system"
+          },
+          {
+            "soname": "libc.so",
+            "provided_by": "system"
+          }
+        ],
+        "os_floor": {
+          "glibc": null,
+          "android_api_note": null,
+          "symbol_version_tags": []
+        }
+      },
+      "abi": {
+        "family": "capi-pico",
+        "revision": 1,
+        "layout": {}
+      },
+      "provides": [
+        {
+          "role": "pico-library"
+        }
+      ],
+      "features": [
+        "link-udp",
+        "peer"
+      ],
+      "resolved_features": {
+        "wz-runtime-tokio": []
+      },
+      "device_requires": [
+        "entropy",
+        "interface-list",
+        "multicast",
+        "sockets-tcp",
+        "sockets-udp",
+        "threads"
+      ],
+      "unassessed_features": []
+    }
+  ]
+}

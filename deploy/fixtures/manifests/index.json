@@ -1,0 +1,155 @@
+{
+  "schema": 1,
+  "manifest_schema": 1,
+  "levels": {
+    "shape": "the keys of the manifest, in order, none more (shape_findings)",
+    "manifest": "the manifest alone, read for its own consistency (the closure, the inputs, the paths)",
+    "files": "the files the manifest describes, measured again from their bytes"
+  },
+  "fixtures": [
+    {
+      "path": "synthetic/host-library-and-executable",
+      "origin": "synthetic",
+      "platform": "linux-x86_64-glibc",
+      "expect": {
+        "verdict": "valid"
+      }
+    },
+    {
+      "path": "synthetic/android-bundled-runtime",
+      "origin": "synthetic",
+      "platform": "android-arm64",
+      "expect": {
+        "verdict": "valid"
+      }
+    },
+    {
+      "path": "synthetic/host-declared-node",
+      "origin": "synthetic",
+      "platform": "linux-x86_64-glibc",
+      "expect": {
+        "verdict": "valid"
+      }
+    },
+    {
+      "path": "synthetic/shape-extra-key",
+      "origin": "synthetic",
+      "platform": "linux-x86_64-glibc",
+      "expect": {
+        "verdict": "invalid",
+        "level": "shape",
+        "finding": "keys"
+      }
+    },
+    {
+      "path": "synthetic/manifest-unknown-schema",
+      "origin": "synthetic",
+      "platform": "linux-x86_64-glibc",
+      "expect": {
+        "verdict": "invalid",
+        "level": "manifest",
+        "finding": "schema is 99"
+      }
+    },
+    {
+      "path": "synthetic/shape-artifact-key-missing",
+      "origin": "synthetic",
+      "platform": "linux-x86_64-glibc",
+      "expect": {
+        "verdict": "invalid",
+        "level": "shape",
+        "finding": "keys"
+      }
+    },
+    {
+      "path": "synthetic/manifest-path-leaves-directory",
+      "origin": "synthetic",
+      "platform": "linux-x86_64-glibc",
+      "expect": {
+        "verdict": "invalid",
+        "level": "manifest",
+        "finding": "relative path"
+      }
+    },
+    {
+      "path": "synthetic/manifest-bundled-nothing-needs",
+      "origin": "synthetic",
+      "platform": "android-arm64",
+      "expect": {
+        "verdict": "invalid",
+        "level": "manifest",
+        "finding": "nothing in the package needs it"
+      }
+    },
+    {
+      "path": "synthetic/manifest-bundled-entry-missing",
+      "origin": "synthetic",
+      "platform": "android-arm64",
+      "expect": {
+        "verdict": "invalid",
+        "level": "manifest",
+        "finding": "the manifest bundles no"
+      }
+    },
+    {
+      "path": "synthetic/manifest-input-nothing-built-from",
+      "origin": "synthetic",
+      "platform": "linux-x86_64-glibc",
+      "expect": {
+        "verdict": "invalid",
+        "level": "manifest",
+        "finding": "nothing in it was built from it"
+      }
+    },
+    {
+      "path": "synthetic/files-artifact-byte-changed",
+      "origin": "synthetic",
+      "platform": "linux-x86_64-glibc",
+      "expect": {
+        "verdict": "invalid",
+        "level": "files",
+        "finding": "sha256"
+      }
+    },
+    {
+      "path": "synthetic/files-artifact-missing",
+      "origin": "synthetic",
+      "platform": "linux-x86_64-glibc",
+      "expect": {
+        "verdict": "invalid",
+        "level": "files",
+        "finding": "is missing"
+      }
+    },
+    {
+      "path": "synthetic/files-stray-file",
+      "origin": "synthetic",
+      "platform": "linux-x86_64-glibc",
+      "expect": {
+        "verdict": "invalid",
+        "level": "files",
+        "finding": "does not describe"
+      }
+    },
+    {
+      "path": "synthetic/files-bundled-other-library",
+      "origin": "synthetic",
+      "platform": "android-arm64",
+      "expect": {
+        "verdict": "invalid",
+        "level": "files",
+        "finding": "SONAME"
+      }
+    },
+    {
+      "path": "synthetic/files-declaration-edited",
+      "origin": "synthetic",
+      "platform": "linux-x86_64-glibc",
+      "expect": {
+        "verdict": "invalid",
+        "level": "files",
+        "finding": "sha256"
+      }
+    }
+  ]
+}

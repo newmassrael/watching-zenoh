@@ -1,0 +1,235 @@
+{
+  "schema": 1,
+  "catalog_version": 2,
+  "built_from": {
+    "commit": "0000000000000000000000000000000000000000",
+    "tree_clean": true
+  },
+  "platform": {
+    "id": "linux-x86_64-glibc",
+    "triple": "x86_64-unknown-linux-gnu",
+    "os": "linux",
+    "libc": "glibc",
+    "network_stack": null,
+    "support": "built",
+    "strongest_green_lane": "none"
+  },
+  "profile": null,
+  "toolchain": {
+    "rustc": "rustc 0 (synthetic)",
+    "cc": null,
+    "sdk": null
+  },
+  "system_assumed": [
+    "libgcc_s.so.1",
+    "libm.so.6",
+    "libc.so.6",
+    "ld-linux-x86-64.so.2"
+  ],
+  "bundled": [],
+  "inputs": [],
+  "artifacts": [
+    {
+      "id": "capi-pico",
+      "name": "libwz_capi_pico.so",
+      "kind": "shared-library",
+      "path": "lib/libwz_capi_pico.so",
+      "size": 784,
+      "elf": {
+        "class": 64,
+        "machine": "x86_64",
+        "linking": "dynamic",
+        "interpreter": null,
+        "soname": "libwz_capi_pico.so",
+        "runpath": null,
+        "rpath": null,
+        "needed": [
+          {
+            "soname": "libgcc_s.so.1",
+            "provided_by": "system"
+          },
+          {
+            "soname": "libm.so.6",
+            "provided_by": "system"
+          },
+          {
+            "soname": "libc.so.6",
+            "provided_by": "system"
+          }
+        ],
+        "os_floor": {
+          "glibc": "GLIBC_2.34",
+          "android_api_note": null,
+          "symbol_version_tags": [
+            "GLIBC_2.17",
+            "GLIBC_2.34"
+          ]
+        }
+      },
+      "abi": {
+        "family": "capi-pico",
+        "revision": 1,
+        "layout": {}
+      },
+      "provides": [
+        {
+          "role": "pico-library"
+        }
+      ],
+      "features": [
+        "link-udp",
+        "multi-thread",
+        "peer",
+        "scout"
+      ],
+      "resolved_features": {
+        "wz-runtime-tokio": []
+      },
+      "device_requires": [
+        "entropy",
+        "interface-list",
+        "multicast",
+        "sockets-tcp",
+        "sockets-udp",
+        "threads"
+      ],
+      "unassessed_features": []
+    },
+    {
+      "id": "ap-demo",
+      "name": "wz-ap-demo",
+      "kind": "executable",
+      "path": "bin/wz-ap-demo",
+      "sha256": "50774be9a1ba35d733c106a02876959fead8aeaa2b0c6ee990e51029f147da13",
+      "size": 1020,
+      "elf": {
+        "class": 64,
+        "machine": "x86_64",
+        "linking": "dynamic",
+        "interpreter": "/lib64/ld-linux-x86-64.so.2",
+        "soname": null,
+        "runpath": null,
+        "rpath": null,
+        "needed": [
+          {
+            "soname": "libgcc_s.so.1",
+            "provided_by": "system"
+          },
+          {
+            "soname": "libm.so.6",
+            "provided_by": "system"
+          },
+          {
+            "soname": "libc.so.6",
+            "provided_by": "system"
+          }
+        ],
+        "os_floor": {
+          "glibc": "GLIBC_2.34",
+          "android_api_note": null,
+          "symbol_version_tags": [
+            "GLIBC_2.17",
+            "GLIBC_2.34"
+          ]
+        }
+      },
+      "abi": {
+        "family": "ap-demo-surface",
+        "revision": 1,
+        "layout": {}
+      },
+      "provides": [
+        {
+          "role": "session-node",
+          "via": {
+            "argument": "--config",
+            "kind": "stock-zenoh-config"
+          }
+        },
+        {
+          "role": "traffic-driver",
+          "via": {
+            "argument": "--sessions",
+            "key": "driver"
+          },
+          "driver_roles": [
+            "publish",
+            "subscribe"
+          ]
+        }
+      ],
+      "features": [
+        "zenoh-config"
+      ],
+      "resolved_features": {
+        "wz-runtime-tokio": [
+          "codec-close",
+          "codec-declare",
+          "codec-fragment",
+          "codec-frame",
+          "codec-hello",
+          "codec-init-body",
+          "codec-join",
+          "codec-keep-alive",
+          "codec-open-body",
+          "codec-push",
+          "codec-request",
+          "codec-response",
+          "codec-response-final",
+          "codec-scout",
+          "declare-final",
+          "declare-interest",
+          "declare-keyexpr",
+          "declare-queryable",
+          "declare-subscriber",
+          "declare-token",
+          "declare-undeclare",
+          "keyexpr-canon",
+          "keyexpr-dollar-star",
+          "keyexpr-includes",
+          "keyexpr-wildcard-double",
+          "keyexpr-wildcard-single",
+          "link-interfaces",
+          "liveliness-get",
+          "liveliness-history",
+          "liveliness-subscriber",
+          "liveliness-token",
+          "pubsub-delete",
+          "pubsub-encoding",
+          "pubsub-put",
+          "pubsub-timestamp",
+          "query-consolidation",
+          "query-get",
+          "query-queryable",
+          "query-reply",
+          "query-target",
+          "query-timeout",
+          "reassembly",
+          "scouting-active",
+          "scouting-static",
+          "session-matching",
+          "session-reconnect",
+          "session-unicast-accept",
+          "session-unicast-open",
+          "switchboard",
+          "transport-batching",
+          "transport-fragmentation",
+          "transport-keepalive",
+          "transport-link-tcp",
+          "transport-link-udp",
+          "transport-multicast",
+          "transport-unicast"
+        ]
+      },
+      "device_requires": [
+        "entropy",
+        "interface-list",
+        "multicast",
+        "sockets-tcp",
+        "sockets-udp",
+        "threads"
+      ],
+      "unassessed_features": []
+    }
+  ]
+}
