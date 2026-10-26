@@ -60,7 +60,8 @@ mod prelude {
 mod engine;
 #[cfg(feature = "scout")]
 pub mod scout;
-#[cfg(test)]
+// The tests are a host's: they run a router stand-in on threads of `std`.
+#[cfg(all(test, feature = "std"))]
 mod tests;
 
 pub use engine::{CoopConfig, CoopEngine, OpenError};
