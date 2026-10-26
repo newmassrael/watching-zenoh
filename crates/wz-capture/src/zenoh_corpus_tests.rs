@@ -202,6 +202,11 @@ const EXPECTED: &[(&str, Tally, Tally)] = &[
     // Upstream vsomeip between two containers: service discovery, a method
     // over UDP and TCP, and a field's notifications.
     ("stack-someip.pcap", (0, 5, 2), (0, 5, 2)),
+    // HTTP/3 on aioquic, QUIC versions 1 and 2. Every one of the 23 QUIC
+    // connections is `undecided`, as it should be: zenoh runs over QUIC too,
+    // and a protected flow carries nothing that tells the two apart. The two
+    // `no` are the host's own mDNS on the bridge.
+    ("stack-quic.pcap", (0, 2, 23), (0, 2, 23)),
 ];
 
 #[test]

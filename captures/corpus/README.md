@@ -49,13 +49,15 @@ The original captures are not kept anywhere.
 | `stack-rtps.pcap` | other | RTPS | ROS 2 Jazzy publisher and subscriber, containers |
 | `stack-coap.pcap` | other | CoAP | libcoap 4.3.1 server and client, containers |
 | `stack-someip.pcap` | other | SOME/IP, SOME/IP-SD | upstream vsomeip 3.7.6 service and client, containers |
+| `stack-quic.pcap` | other | QUIC v1 and v2, HTTP/3 | aioquic 1.2.0 server and client, containers |
 
 ## What it does not hold yet
 
-QUIC, LLMNR, WS-Discovery, NTP and DHCP from a busier network,
+LLMNR, WS-Discovery, NTP and DHCP from a busier network,
 structured TCP such as HTTP and TLS, and on the zenoh side other zenoh versions
 and zenoh-pico. Each is added the same way: captured from the real
 implementation, a parser in the anonymiser where a payload of other devices can
-carry an identity, and the measured tally pinned beside the others. QUIC needs
-such a parser even for the capturer's own traffic to be readable as it is: its
-Initial packets carry the server name under keys anyone can derive.
+carry an identity, and the measured tally pinned beside the others. QUIC needed
+such a parser even for the capturer's own traffic, because its Initial packets
+carry the server name under keys anyone can derive: the anonymiser opens them
+(`scripts/lib/quic_initial.py`), replaces the name and seals them again.

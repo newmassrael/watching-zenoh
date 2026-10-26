@@ -165,8 +165,11 @@ selftest and `--verify-corpus` run in the pre-push static gate array.
 It holds six zenoh 1.10.1 captures (TCP and UDP, from before the handshake and
 joined mid-session, with and without lz4), three of an office Wi-Fi (DNS,
 mDNS, SSDP), and the real implementations of MQTT (mosquitto), RTPS (ROS 2
-Jazzy), CoAP (libcoap) and SOME/IP (vsomeip) run in containers. Every zenoh flow reads `yes`; no
-flow of the others reads `yes`.
+Jazzy), CoAP (libcoap), SOME/IP (vsomeip) and HTTP/3 over QUIC versions 1 and
+2 (aioquic) run in containers. Every zenoh flow reads `yes`; no flow of the
+others reads `yes`. Every QUIC connection reads `undecided`, which is the
+honest word: zenoh runs over QUIC as well, and a protected flow shows nothing
+that tells the two apart.
 
 A TCP flow of another protocol whose bytes never frame a unit carries nothing
 model 1 weighs, and reads `undecided`: forty short MQTT connections do. A
@@ -195,7 +198,7 @@ one the bytes can infer, with the counts it rests on per direction
 holds the handshake states its compression and every one joined mid-session
 infers the same value.
 
-Still to come for step 2: QUIC captures, LLMNR, WS-Discovery, NTP
+Still to come for step 2: LLMNR, WS-Discovery, NTP
 and DHCP on a busier network, and several zenoh versions and zenoh-pico on the
 zenoh side. Step 3 waits for a corpus large enough to measure
 the weights it would replace.

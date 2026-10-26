@@ -145,5 +145,16 @@
       packets: 488,
       notes: "ARP, IGMP (IPv4 options) and IPv6 hop-by-hop dropped by the anonymiser; the host's own mDNS on the bridge is kept, its names scrubbed",
     },
+    {
+      file: "stack-quic.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "quic/udp (http/3), versions 1 and 2",
+      source: "aioquic 1.2.0 on python:3.12-slim in containers; an HTTP/3 server with a self-signed certificate, and a client that opens twenty connections of five requests (the first carries 300 kB) and three that offer QUIC version 2 first",
+      capture: "the bridge of a docker network of its own, from before the server started",
+      taken: "2026-10-26",
+      packets: 949,
+      notes: "the client's Initials opened and resealed with the server name replaced (23 connections, 69 Initials); ARP, ICMPv6 and IPv6 hop-by-hop dropped by the anonymiser; the host's own mDNS on the bridge is kept, its names scrubbed",
+    },
   ],
 }
