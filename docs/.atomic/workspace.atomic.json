@@ -290508,6 +290508,38 @@
         "The anonymiser drops IPv4 fragments, because the UDP checksum covers the whole datagram; an RTPS message larger than the MTU is lost from the corpus, and the count is in the manifest's notes."
       ]
     },
+    "Round 3708": {
+      "decision_summary": "The receive match cache is now written once over both storage policies, so its limit is read where tables are fixed in size, not only on the heap. A fixed table holds its slots in RAM from the start, so it reads its own count, MATCH_MEMO_FIXED_SLOTS, whose default is 0: a build that does not ask for the cache pays nothing and every message is matched against the subscriptions as before. MATCH_MEMO_KEY_BYTES (64) bounds the key a fixed slot holds; a longer key is delivered as matched and not remembered, never cut short. The in-place receive path of the fixed profile now goes through the cache as well. The heap policy keeps MATCH_MEMO_SLOTS and its behaviour. Closed key sets still bypass the cache for the keys of their table. The stack-chain rows of the committed Zephyr images were not measured here.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/pubsub.rs: MatchMemo and MemoSlot generic over the storage policy, memo_slots, fire_lent through the cache, new test.",
+        "crates/wz-session-core/src/caps.rs, caps_generated.rs, deploy/wz-config.toml, deploy/Kconfig.limits: limits MATCH_MEMO_FIXED_SLOTS and MATCH_MEMO_KEY_BYTES.",
+        "docs/closed-key-set.md: the memo section."
+      ],
+      "verification_bullets": [
+        "Crate tests pass in the default build and with all gating features, with the fixed slots at 0 and at 4; the new test fails when the fixed slot count is forced to 0. Clippy -D warnings passes for wz-session-core in four configurations, wz-session-mcu, wz-capi-coop and wz-runtime-tokio. The generated files are current and the FreeRTOS image passes the stack frame gate. All runs were local because the pc2 checkout slot failed its submodule step twice."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "Read the stack-chain rows of the Zephyr images in hosted CI; the pc2 checkout slot submodule failure; node adoption of the closed key set; pool-monitor and multi-route-atomic-tx."
+      ],
+      "publishable_decision_summary": "The receive match cache is now written once over both storage policies, so its limit is read where tables are fixed in size, not only on the heap. A fixed table holds its slots in RAM from the start, so it reads its own count, MATCH_MEMO_FIXED_SLOTS, whose default is 0: a build that does not ask for the cache pays nothing and every message is matched against the subscriptions as before. MATCH_MEMO_KEY_BYTES (64) bounds the key a fixed slot holds; a longer key is delivered as matched and not remembered, never cut short. The in-place receive path of the fixed profile now goes through the cache as well. The heap policy keeps MATCH_MEMO_SLOTS and its behaviour. Closed key sets still bypass the cache for the keys of their table. The stack-chain rows of the committed Zephyr images were not measured here.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/pubsub.rs: MatchMemo and MemoSlot generic over the storage policy, memo_slots, fire_lent through the cache, new test.",
+        "crates/wz-session-core/src/caps.rs, caps_generated.rs, deploy/wz-config.toml, deploy/Kconfig.limits: limits MATCH_MEMO_FIXED_SLOTS and MATCH_MEMO_KEY_BYTES.",
+        "docs/closed-key-set.md: the memo section."
+      ],
+      "publishable_verification_bullets": [
+        "Crate tests pass in the default build and with all gating features, with the fixed slots at 0 and at 4; the new test fails when the fixed slot count is forced to 0. Clippy -D warnings passes for wz-session-core in four configurations, wz-session-mcu, wz-capi-coop and wz-runtime-tokio. The generated files are current and the FreeRTOS image passes the stack frame gate. All runs were local because the pc2 checkout slot failed its submodule step twice."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the stack-chain rows of the Zephyr images in hosted CI; the pc2 checkout slot submodule failure; node adoption of the closed key set; pool-monitor and multi-route-atomic-tx."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
