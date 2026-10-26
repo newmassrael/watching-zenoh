@@ -764,6 +764,57 @@ fn a_window_leaves_as_one_lent_slot_and_its_flush_copies_nothing() {
     link.assert_every_slot_home();
 }
 
+/// A link whose writer pulls what the session stages keeps the link's window open for good
+/// (`set_auto_batching`), and the writer flushes it when it falls idle (`flush_staged`). The
+/// caller's window (`batch_start` .. `batch_stop`) is not the writer's to drain: pico drains it
+/// on an overflow, an express message, a keepalive, or the caller's flush or stop, and never
+/// for being idle (`vendor/zenoh-pico/src/transport/common/tx.c` @
+/// `static z_result_t _z_transport_tx_send_n_msg_inner(`). So the idle flush sends nothing
+/// while the caller's window is open, and the window leaves as one frame when the caller
+/// stops it. CONTROL: with only the link's window open the same idle flush sends the frame.
+#[cfg(feature = "transport-batching")]
+#[test]
+fn the_writer_at_idle_leaves_a_callers_window_alone() {
+    let control_link = LendingLink::new(false, 0, 0, 0);
+    let control = batching_session(control_link.clone());
+    control.set_auto_batching(true);
+    control
+        .send_push_literal("home/batch", b"one", true)
+        .expect("push");
+    assert!(
+        control_link.heap().is_empty(),
+        "CONTROL: the link's window staged the message"
+    );
+    control.flush_staged();
+    assert_eq!(
+        control_link.heap().len(),
+        1,
+        "CONTROL: with no caller window the idle flush sends the staged frame"
+    );
+
+    let link = LendingLink::new(false, 0, 0, 0);
+    let actions = batching_session(link.clone());
+    actions.set_auto_batching(true);
+    actions.batch_start().expect("batch_start");
+    for payload in [b"one".as_slice(), b"two"] {
+        actions
+            .send_push_literal("home/batch", payload, true)
+            .expect("push");
+        actions.flush_staged();
+    }
+    assert!(
+        link.heap().is_empty(),
+        "the idle flush sent the caller's open window: {} frame(s) went out before the stop",
+        link.heap().len()
+    );
+    actions.batch_stop().expect("batch_stop");
+    assert_eq!(
+        link.heap().len(),
+        1,
+        "the caller's stop sends the window as one frame"
+    );
+}
+
 /// A message that does not fit what the slot has left closes the batch: the
 /// slot leaves as the frame and the message opens the next one. Nothing is lost
 /// or reordered, and the boundaries are the heap stage's, because a slot is

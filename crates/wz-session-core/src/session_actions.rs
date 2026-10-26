@@ -785,6 +785,17 @@ impl<R: SessionRuntime> TxConduits<R> {
         self.auto.store(auto, core::sync::atomic::Ordering::SeqCst);
     }
 
+    /// The caller's window alone (`zp_batch_start` .. `zp_batch_stop`), without the link's.
+    /// While it is open the conduits hold what they stage until it is drained the ways pico
+    /// drains it: an overflow, an express message, a transport message such as a keepalive,
+    /// or the caller's flush or stop (`vendor/zenoh-pico/src/transport/common/tx.c` @
+    /// `static z_result_t _z_transport_tx_send_n_msg_inner(`). The writer's flush at idle is
+    /// not one of them, so the writer reads this to know when to stay its hand.
+    #[cfg(feature = "transport-batching")]
+    fn caller_window_open(&self) -> bool {
+        self.active.load(core::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Every conduit back to its initial state, the window closed. The
     /// reopen path's (`reset_for_reopen`), and gated as that arm is.
     #[cfg(feature = "session-reconnect")]
@@ -10446,14 +10457,22 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let _ = on;
     }
 
-    /// Send every conduit's open batch frame now, whatever opened the window: the flush the
-    /// link's writer runs when it has nothing to write ([`BoxedLinkDriver::set_idle_flush`]).
+    /// Send every conduit's open batch frame now when only the link's window is open: the flush
+    /// the link's writer runs when it has nothing to write ([`BoxedLinkDriver::set_idle_flush`]).
     /// [`Self::batch_flush`] without the typed answer a caller of `zp_batch_flush` is owed.
+    ///
+    /// While the caller's window is open this sends nothing. That window is the caller's to
+    /// drain, and pico's writer never drains it for being idle: a frame the caller is building
+    /// leaves when it overflows, when an express message or a keepalive goes out, or when the
+    /// caller flushes or stops it. Draining it here sent each message as soon as the writer
+    /// fell idle, so a caller's batch never held more than one burst.
     pub fn flush_staged(&self) {
         // The writer calls this, and a writer must not wait for a conduit's lock: see
         // [`Self::flush_open_batch_nowait`].
         #[cfg(feature = "transport-batching")]
-        self.flush_open_batch_nowait();
+        if !self.tx_conduits.caller_window_open() {
+            self.flush_open_batch_nowait();
+        }
     }
 
     /// R311jq — typed chokepoint entries: each hands its per-type body
