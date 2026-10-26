@@ -291290,6 +291290,46 @@
         "Still red on the last hosted runs and not of this family: the repository-captures test of wz-capture, Layer C1cs for the size of the C ABI builds, and wz-ext-pubsub in the audit of Layer C1bf. Hosted runs of this family's pushes were cancelled by the next push each time, so their per-job result is still to be read. A worktree made by bx-wt has no submodules, so a push from it fails validate-workspace on the stale exclusion of vendor; a push goes from a worktree that has them."
       ]
     },
+    "Round 3728": {
+      "decision_summary": "The zenoh test moves to model 2 (fields 46, session table 6). Measuring the corpus showed two defects of model 1: real mDNS reads a unit whole 36% of the time where the generated mDNS the unit weight was priced on did 16%, so that weight claimed more than the bytes give; and one sum priced at each outcome's largest null chance bounds only the false yes, since those chances sum past one. Model 2 keeps two sums, yes against the largest Clopper-Pearson bound over the null protocols and no against their average Jeffreys distribution, and weighs a unit and a new stream_framing check on counts the corpus re-measures. A version header now weighs another version too: a check that only confirms bounds neither sum. Every zenoh flow stays yes and none other reads yes; one MQTT flow and the seven-unit raweth capture move to undecided.",
+      "changes_bullets": [
+        "`zenoh_evidence.rs`: `Weight {yes, no}`, the two sums, `Check::StreamFraming`, `Basis::Measured` (and `generated`, `none` retired), `model::measured` with the corpus counts, the weights recomputed from them by the Clopper-Pearson and Jeffreys rule; `ZenohVerdict::of` reads both sums.",
+        "`wz-session-core`: `PassiveSession::first_framing`, how a stream direction's framing was first judged (a reported capture hole judges nothing). `session_table::SessionObservations` carries it and the SN steps into the evidence; `version_header` weighs another version.",
+        "Fields 46 and session table 6 (`log2_lr_no_millibits`, `no_millibits`, `stream_framing`, `measured`); `wz_dissect.h`, the C consumer and the design note 6.2 follow; the corpus test re-measures the counts in both builds."
+      ],
+      "verification_bullets": [
+        "Both builds: wz-capture 1608 tests, the corpus tests with lz4 (both error rates hold; mqtt re-pinned at 0 yes, 3 no, 41 undecided), the passive tests (111) and wz-capi-dissect with its C consumer pass; clippy -D warnings on each of the three crates. The weights equal their rule computed from the counts, and the corpus measures those counts.",
+        "C1bz finds no broken link in wz-capture after one was fixed; wz-session-core reads 515 against a budget of 494 as the tip did before this change, from other rounds' files. The pre-push static gate array passed after the append."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "The zenoh side is measured only on 1.10.1 over loopback and the null side only on the protocols the corpus holds; other zenoh versions, zenoh-pico and a busier LAN (LLMNR, WS-Discovery, NTP, DHCP) would move the counts, and the weights move with them.",
+        "The handshake checks' eps stay assumed, and the SN break rate stays assumed until a lossy-link zenoh capture can price it.",
+        "Lower bounds of the SN resolution and the batch size, to be proposed to the analyzer design as a shape of their own."
+      ],
+      "publishable_decision_summary": "The zenoh test moves to model 2 (fields 46, session table 6). Measuring the corpus showed two defects of model 1: real mDNS reads a unit whole 36% of the time where the generated mDNS the unit weight was priced on did 16%, so that weight claimed more than the bytes give; and one sum priced at each outcome's largest null chance bounds only the false yes, since those chances sum past one. Model 2 keeps two sums, yes against the largest Clopper-Pearson bound over the null protocols and no against their average Jeffreys distribution, and weighs a unit and a new stream_framing check on counts the corpus re-measures. A version header now weighs another version too: a check that only confirms bounds neither sum. Every zenoh flow stays yes and none other reads yes; one MQTT flow and the seven-unit raweth capture move to undecided.",
+      "publishable_changes_bullets": [
+        "`zenoh_evidence.rs`: `Weight {yes, no}`, the two sums, `Check::StreamFraming`, `Basis::Measured` (and `generated`, `none` retired), `model::measured` with the corpus counts, the weights recomputed from them by the Clopper-Pearson and Jeffreys rule; `ZenohVerdict::of` reads both sums.",
+        "`wz-session-core`: `PassiveSession::first_framing`, how a stream direction's framing was first judged (a reported capture hole judges nothing). `session_table::SessionObservations` carries it and the SN steps into the evidence; `version_header` weighs another version.",
+        "Fields 46 and session table 6 (`log2_lr_no_millibits`, `no_millibits`, `stream_framing`, `measured`); `wz_dissect.h`, the C consumer and the design note 6.2 follow; the corpus test re-measures the counts in both builds."
+      ],
+      "publishable_verification_bullets": [
+        "Both builds: wz-capture 1608 tests, the corpus tests with lz4 (both error rates hold; mqtt re-pinned at 0 yes, 3 no, 41 undecided), the passive tests (111) and wz-capi-dissect with its C consumer pass; clippy -D warnings on each of the three crates. The weights equal their rule computed from the counts, and the corpus measures those counts.",
+        "C1bz finds no broken link in wz-capture after one was fixed; wz-session-core reads 515 against a budget of 494 as the tip did before this change, from other rounds' files. The pre-push static gate array passed after the append."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The zenoh side is measured only on 1.10.1 over loopback and the null side only on the protocols the corpus holds; other zenoh versions, zenoh-pico and a busier LAN (LLMNR, WS-Discovery, NTP, DHCP) would move the counts, and the weights move with them.",
+        "The handshake checks' eps stay assumed, and the SN break rate stays assumed until a lossy-link zenoh capture can price it.",
+        "Lower bounds of the SN resolution and the batch size, to be proposed to the analyzer design as a shape of their own."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
