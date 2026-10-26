@@ -1202,9 +1202,12 @@ owner can rule on the questions at its end. Nothing here is built.
 4. **The node's own identity, out of band only.** In-band, the key names the
    node (`@/<zid>/<whatami>/session/...`), so it needs no verb. An agent
    driving a node through a pipe has no key, so `whoami` answers the node's
-   zid and role as the admin space spells them. It is a query and changes
-   nothing, so it is idempotent by construction and has no row of its own in
-   the cases of D6.
+   zid, spelled as `z_id_to_string` prints it (the hex a wire capture of the
+   node's InitSyn can be compared with, byte for byte; its length follows
+   from the text). A role is not needed by the agent that asked for this and
+   is left out. It is a query and changes nothing, so it is idempotent by
+   construction and has no row of its own in the cases of D6. Asked of the
+   agent's side on 2026-10-26: the zid alone is enough.
 5. **The fixed-memory node's side.** Every request a node serves outside its
    loop reaches the loop as a typed request in the existing queue, and its
    answer is what the node knows without the loop, accepted and not
@@ -1221,7 +1224,11 @@ owner can rule on the questions at its end. Nothing here is built.
      machine connects again because the peer stays in the intent.
    - `status`: the mirror of node states and the planner's states, written
      as the heap profile writes them: `links`, `intent`, and one row per
-     machine.
+     machine. What the agent that asked needs out of band is smaller, the
+     one state word of each machine, to see that a session intent took
+     effect (its application calls go through the node's own client
+     interface); the in-band document stays the whole one, so the out-of-band
+     answer is the same document and a reader may use only its machine rows.
 6. **Capabilities, not defaults.** Each verb adds code to an image that has no
    spare flash, so by `docs/build-configuration.md` C2 and C3 each is an
    additive capability of the build (`lifecycle-close`, `lifecycle-reset`,
