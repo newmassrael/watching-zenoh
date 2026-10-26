@@ -290958,6 +290958,50 @@
         "advanced_publish still takes only period_ms and a text payload; it reads the stream keys when it is moved onto stream.rs."
       ]
     },
+    "Round 3720": {
+      "decision_summary": "Step 5b of the advanced plane: the zenoh-c ABI's advanced publisher is the neutral composite (AdvancedPublisherOn) on a plane of its own, CPlane, and no longer one tokio advanced publisher per face of the registry. CPlane declares the cache queryable and the liveliness token through the engine's port on their literal keys, so the engine fans each out to every peer and the session's own plane and replays it onto later faces; puts and heartbeats go through the registry's fan-out publish (publish_all, publish_shm_all for a chunk of shared memory) and the beacon is a port ticker. One publisher has one cache ring and one token however many peers the session has, where it had one of each per face. ze_advanced_publisher_id reports the session zid and the publisher's entity id, which its samples and token name. The registry's advanced code in wz-capi-core has no user left and is not deleted yet.",
+      "changes_bullets": [
+        "crates/wz-capi-c/src/advanced_plane.rs (new): CPlane, the plane of one zenoh-c session, with the queryable and token guards that retract on drop.",
+        "crates/wz-capi-c/src/advanced.rs: AdvPubState holds the composite; declare, put (bytes and chunk), delete and id go through it.",
+        "crates/wz-capi-c/Cargo.toml, lib.rs: advanced names the publisher and miss-detection features of wz-ext-pubsub; the plane module."
+      ],
+      "verification_bullets": [
+        "Against the real zenoh-c (the unstable arm and the default shared-memory oracle) and a real zenoh-pico, run locally with the cdylib built from this tree, each confirmed to run and not skip: the zenoh-ext families, history over a link, the declaration answered with the same code on wz and libzenohc, a subscriber hearing the publisher of its own session, the node clock rows, upstream z_advanced_pub and z_advanced_sub (against pico). All pass, before and after the publisher moved.",
+        "clippy with -D warnings, all targets, on the four arms of wz-capi-c; wz-capi-c lib tests; the doc budget unchanged at 40.",
+        "The hook's gate array plus the surface gates: 118 run, 0 failed after rebasing over the fix that declares the open plan; the push went through the hooks.",
+        "Not done: the shared-memory legs (z_sub_shm, z_pub_shm, the chunk put through an advanced publisher) need the zenohd-shm binaries, which are not built on this machine, so they are read from the hosted run. The registry's advanced code is still in wz-capi-core."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "carry_forward_bullets": [
+        "Read the first finished hosted run that holds a191789b6: the shared-memory legs of the zenoh-c ABI (C1cc and C1ce: a chunk put through an advanced publisher, a cache-only advanced publisher to z_sub_shm), C1co, C1aq to C1av, C1cs, C1cn.",
+        "Step 5c, after those read green: delete the registry's advanced publisher and subscriber code in wz-capi-core (AdvPubEntry, AdvSubEntry, the per-face adv_pubs and adv_subs, declare_advanced_*, attach_advanced_subscriber and their replay in face_up, the face-less tests), and the tokio engine's advanced typed API stays for the Rust runtime.",
+        "End-to-end witnesses on the cooperative engine of the heartbeat beacon, the periodic re-ask and the late-publisher detection.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine; the listening role."
+      ],
+      "publishable_decision_summary": "Step 5b of the advanced plane: the zenoh-c ABI's advanced publisher is the neutral composite (AdvancedPublisherOn) on a plane of its own, CPlane, and no longer one tokio advanced publisher per face of the registry. CPlane declares the cache queryable and the liveliness token through the engine's port on their literal keys, so the engine fans each out to every peer and the session's own plane and replays it onto later faces; puts and heartbeats go through the registry's fan-out publish (publish_all, publish_shm_all for a chunk of shared memory) and the beacon is a port ticker. One publisher has one cache ring and one token however many peers the session has, where it had one of each per face. ze_advanced_publisher_id reports the session zid and the publisher's entity id, which its samples and token name. The registry's advanced code in wz-capi-core has no user left and is not deleted yet.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-c/src/advanced_plane.rs (new): CPlane, the plane of one zenoh-c session, with the queryable and token guards that retract on drop.",
+        "crates/wz-capi-c/src/advanced.rs: AdvPubState holds the composite; declare, put (bytes and chunk), delete and id go through it.",
+        "crates/wz-capi-c/Cargo.toml, lib.rs: advanced names the publisher and miss-detection features of wz-ext-pubsub; the plane module."
+      ],
+      "publishable_verification_bullets": [
+        "Against the real zenoh-c (the unstable arm and the default shared-memory oracle) and a real zenoh-pico, run locally with the cdylib built from this tree, each confirmed to run and not skip: the zenoh-ext families, history over a link, the declaration answered with the same code on wz and libzenohc, a subscriber hearing the publisher of its own session, the node clock rows, upstream z_advanced_pub and z_advanced_sub (against pico). All pass, before and after the publisher moved.",
+        "clippy with -D warnings, all targets, on the four arms of wz-capi-c; wz-capi-c lib tests; the doc budget unchanged at 40.",
+        "The hook's gate array plus the surface gates: 118 run, 0 failed after rebasing over the fix that declares the open plan; the push went through the hooks.",
+        "Not done: the shared-memory legs (z_sub_shm, z_pub_shm, the chunk put through an advanced publisher) need the zenohd-shm binaries, which are not built on this machine, so they are read from the hosted run. The registry's advanced code is still in wz-capi-core."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the first finished hosted run that holds a191789b6: the shared-memory legs of the zenoh-c ABI (C1cc and C1ce: a chunk put through an advanced publisher, a cache-only advanced publisher to z_sub_shm), C1co, C1aq to C1av, C1cs, C1cn.",
+        "Step 5c, after those read green: delete the registry's advanced publisher and subscriber code in wz-capi-core (AdvPubEntry, AdvSubEntry, the per-face adv_pubs and adv_subs, declare_advanced_*, attach_advanced_subscriber and their replay in face_up, the face-less tests), and the tokio engine's advanced typed API stays for the Rust runtime.",
+        "End-to-end witnesses on the cooperative engine of the heartbeat beacon, the periodic re-ask and the late-publisher detection.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine; the listening role."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
