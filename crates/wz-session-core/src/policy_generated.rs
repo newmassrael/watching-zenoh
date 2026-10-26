@@ -102,6 +102,9 @@ impl Default for SubscriberOverload {
 /// key is dropped before a subscriber is looked up, and counted by reason. A closed build
 /// that is given no table takes no key at all. The selectors a peer asks with, a query or
 /// an interest, are patterns and not data keys, and are answered as in an open build.
+/// `closed` needs the cargo feature `key-set-closed` of wz-session-core, which compiles the
+/// mode in; a build that states it without the feature does not compile, and an open build
+/// has neither the code nor its bytes.
 /// Upstream: Takes a message on any key a peer sends, and finds the subscribers it reaches
 /// by matching that key against each subscription's pattern as text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
