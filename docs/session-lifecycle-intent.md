@@ -1261,9 +1261,10 @@ being skipped. The rows:
 1. Step A (built, 6.6): the vocabulary into `lifecycle_wire` and the status
    writer over the text-out trait; the heap profile's tests are the witness
    and nothing else moves.
-2. Step B: `LifecycleNode` and `lifecycle_verdict`; the heap profile
-   implements it; the rows for the three verbs run on the heap adapter. This
-   proves the function on the profile that already has every effect.
+2. Step B (built, 6.7): `LifecycleNode` and `lifecycle_verdict`; the heap
+   profile implements it; the rows for the three verbs run on the heap
+   adapter. This proves the function on the profile that already has every
+   effect.
 3. Step C: the fixed-memory store gains the typed requests, the link mirror
    and the generation record; the control port gains the three commands;
    the rows run on the process adapter and on the fixed in-band adapter.
@@ -1315,3 +1316,45 @@ the sketch of 6.2:
   text-out sink and a test writes it into a fixed buffer, so it allocates
   nothing; the bytes are those the heap profile wrote before, which the
   existing `lifecycle_query` tests, unchanged, hold.
+
+### 6.7 Step B, built
+
+`lifecycle_node` (under `storage-profile`) holds the whole contract of the
+four verbs once: `Command` (the peer and the generation as the text a
+transport carried), the port `LifecycleNode`, and `lifecycle_verdict(node,
+command, out)`, which writes the document through any text sink and returns
+a `Verdict`. The order of checks is the same for every verb and is written
+once: the node's permit for the verb, the spelling of the peer, for a reset
+the spelling of the generation, then the effect. Where it differs from the
+sketch of 6.2:
+
+- The port is eight small methods, none of which checks a permit or spells a
+  zid: `permits(Verb)`, `open`, `withdraw`, `order_close`,
+  `take_generation` (answering `Taken`, `Duplicate { last }` or `NoRoom`),
+  `links` and `read_machines`. The last lends the rows to a callback as one
+  slice, so a node with a fixed table lends a slice of its own stack and the
+  heap profile lends copies; the document's intent and count come from those
+  rows.
+- `LifecycleQueries::answer` parses the key into a `Command` and calls the
+  function through `Asked`, the node of one query: the host's five ports and
+  the parsed key, because the heap profile's authority judges a target. The
+  four per-verb methods it had are gone. The heap body is a string for every
+  verb now, since the function writes through a sink and no verb needs a
+  fixed bound.
+- `NoRoom` from `take_generation` is what a fixed node answers for a peer
+  outside its room (6.5); the function turns it into a refusal, and a heap
+  node never says it.
+- The fixed profile's `open_verdict` and `NodeOpening` remain until step C,
+  when the fixed node implements `LifecycleNode` and the open arm is the
+  function's.
+
+The table is extended in `lifecycle_contract::verbs`: nine sequences of
+requests, each with the literal document of every request and the number of
+times the node must be told to order a close, so that "a refused request
+touches nothing" is a number. They are sequences rather than repeated
+requests because the idempotency of these verbs is itself the sequence (a
+close is `closing` and the same close again is `already_closed`). One case
+differs by profile, and the table says so by name: a reset for a peer the
+node holds nothing of is `not_found` and then `duplicate` on the heap
+profile, and `NoRoom` on a fixed node with no room for that peer. The heap
+adapter (`lifecycle_query` tests) conforms to all nine.

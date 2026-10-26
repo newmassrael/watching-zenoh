@@ -86,6 +86,10 @@ use core::cell::RefCell;
 pub use crate::drive::{LifecycleKey, SessionLifecycleAuthority};
 // The vocabulary a node with no allocator answers in too: the words of every verb are
 // written once, in `lifecycle_wire`.
+use crate::credential_identity::canonical_zid;
+use crate::lifecycle_node::{
+    lifecycle_verdict, Command, Generation, LifecycleNode, Verb, Verdict, Zid,
+};
 pub use crate::lifecycle_wire::{
     write_verbs_json, CloseOrder, CloseVerdict, MachineReport, OpenOutcome, OpenVerdict,
     RefusedReason, ResetVerdict, SessionLinks, StatusVerdict, VERBS,
@@ -93,7 +97,7 @@ pub use crate::lifecycle_wire::{
 use crate::lifecycle_wire::{CLOSE_VERB, OPEN_VERB, RESET_VERB, STATUS_VERB};
 use crate::query_sink::{QueryView, ReplyError, ReplyOut};
 use crate::text_out::FixedText;
-use crate::zid_hex::{canonical_zid, same_zid, zenoh_hex_to_zid};
+use crate::zid_hex::same_zid;
 
 /// The node's table of sessions, as the close query needs it: told a peer's zid,
 /// it orders closed every session it holds with that peer.
@@ -391,122 +395,106 @@ where
         {
             return Answered::Unserved;
         }
-        if parsed.verb == STATUS_VERB {
-            // Its own body: the machines are a list, so the reply has no bound
-            // this module could size a fixed buffer to.
-            let mut body = String::new();
-            let verdict = self.status(&parsed, &mut body);
-            // A reply the stage refused was still a read: the verdict says what
-            // the node holds, and the host's reply-stage counters say the rest.
-            let _ = reply_json(out, key, &body);
-            return Answered::Status(verdict);
-        }
-        let mut body: FixedText<192> = FixedText::new();
-        let answered = match parsed.verb {
-            CLOSE_VERB => {
-                let verdict = self.close(&parsed);
-                verdict.write_json(&mut body);
-                Answered::Close(verdict)
-            }
-            RESET_VERB => {
-                let verdict = self.reset(&parsed);
-                verdict.write_json(&mut body);
-                Answered::Reset(verdict)
-            }
+        let command = match parsed.verb {
+            CLOSE_VERB => Command::Close {
+                peer: parsed.peer_zid,
+            },
+            RESET_VERB => Command::Reset {
+                peer: parsed.peer_zid,
+                // The key grammar gives a reset its generation chunk; a key with none
+                // is read as a generation that is no number.
+                generation: parsed.argument.unwrap_or(""),
+            },
+            STATUS_VERB => Command::Status {
+                peer: parsed.peer_zid,
+            },
             // A host with no opener binds no open query, so the verb is no query
             // of this node's and nothing is replied.
-            OPEN_VERB if O::BOUND => {
-                let verdict = self.open(&parsed);
-                verdict.write_json(&mut body);
-                Answered::Open(verdict)
-            }
+            OPEN_VERB if O::BOUND => Command::Open {
+                peer: parsed.peer_zid,
+            },
             _ => return Answered::Unserved,
         };
-        match body.finish() {
-            Ok(text) if reply_json(out, key, text).is_ok() => answered,
-            // A reply the stage refused still happened as an order: the verdict is
-            // what the node did, and the host's reply-stage counters say the rest.
-            Ok(_) => answered,
-            Err(_) => Answered::Unserved,
+        // The body is a list for a status, so it has no bound a fixed buffer could be
+        // sized to: a string, which this profile has.
+        let mut body = String::new();
+        let verdict = lifecycle_verdict(
+            &Asked {
+                queries: self,
+                key: &parsed,
+            },
+            command,
+            &mut body,
+        );
+        // A reply the stage refused still happened as an order or a read: the verdict is
+        // what the node did, and the host's reply-stage counters say the rest.
+        let _ = reply_json(out, key, &body);
+        match verdict {
+            Verdict::Open(verdict) => Answered::Open(verdict),
+            Verdict::Close(verdict) => Answered::Close(verdict),
+            Verdict::Reset(verdict) => Answered::Reset(verdict),
+            Verdict::Status(verdict) => Answered::Status(verdict),
+        }
+    }
+}
+
+/// The node of one query: the host's ports and the key being asked, as the
+/// [`LifecycleNode`] [`lifecycle_verdict`] decides on. The permits read the key because the
+/// heap profile's authority judges a target.
+struct Asked<'q, 'k, A, D, I, M, O> {
+    queries: &'q LifecycleQueries<A, D, I, M, O>,
+    key: &'q LifecycleKey<'k>,
+}
+
+impl<A, D, I, M, O> LifecycleNode for Asked<'_, '_, A, D, I, M, O>
+where
+    A: SessionLifecycleAuthority,
+    D: SessionDirectory,
+    I: PeerIntent,
+    M: PeerMachines,
+    O: PeerOpener,
+{
+    fn permits(&self, verb: Verb) -> bool {
+        let authority = &self.queries.authority;
+        match verb {
+            Verb::Open => authority.admits_open(self.key),
+            Verb::Close => authority.admits_close(self.key),
+            Verb::Reset => authority.admits_reset(self.key),
+            Verb::Status => authority.admits_status(self.key),
         }
     }
 
-    /// Close: the peer leaves the intent, and every session with it is ordered
-    /// closed. Withdrawn first, so a session that ends before the withdrawal
-    /// reaches the node's machines is not dialled again for long: the machine
-    /// that took the loss is stopped where it waits.
-    fn close(&self, key: &LifecycleKey<'_>) -> CloseVerdict {
-        if !self.authority.admits_close(key) {
-            return CloseVerdict::Refused(RefusedReason::NotPermitted);
-        }
-        let Some(peer) = zenoh_hex_to_zid(key.peer_zid) else {
-            return CloseVerdict::Refused(RefusedReason::PeerNotAZid);
-        };
-        self.intent.withdraw(&peer);
-        CloseVerdict::of(self.directory.order_close(&peer))
+    fn open(&self, peer: &Zid) -> OpenOutcome {
+        self.queries.opener.open(canonical_zid(peer))
     }
 
-    /// Open: the node's machines are asked to hold the peer, which joins the
-    /// intent. A peer already held is unchanged, so a retransmission is safe.
-    fn open(&self, key: &LifecycleKey<'_>) -> OpenVerdict {
-        if !self.authority.admits_open(key) {
-            return OpenVerdict::Refused(RefusedReason::OpenNotPermitted);
-        }
-        let Some(peer) = zenoh_hex_to_zid(key.peer_zid) else {
-            return OpenVerdict::Refused(RefusedReason::PeerNotAZid);
-        };
-        OpenVerdict::of(self.opener.open(&peer))
+    fn withdraw(&self, peer: &Zid) {
+        self.queries.intent.withdraw(canonical_zid(peer));
     }
 
-    /// Reset: every session with the peer is ordered closed once for the key's
-    /// generation, and the intent is left as it is. A generation no later than
-    /// the latest taken for the peer is a retransmission and closes nothing.
-    fn reset(&self, key: &LifecycleKey<'_>) -> ResetVerdict {
-        if !self.authority.admits_reset(key) {
-            return ResetVerdict::Refused(RefusedReason::ResetNotPermitted);
-        }
-        let Some(peer) = zenoh_hex_to_zid(key.peer_zid) else {
-            return ResetVerdict::Refused(RefusedReason::PeerNotAZid);
-        };
-        let Some(generation) = key.argument.and_then(|g| g.parse::<u64>().ok()) else {
-            return ResetVerdict::Refused(RefusedReason::GenerationNotANumber);
-        };
-        let canonical = Vec::from(canonical_zid(&peer));
-        {
-            let mut resets = self.resets.borrow_mut();
-            if let Some(&last) = resets.get(&canonical) {
-                if generation <= last {
-                    return ResetVerdict::Duplicate { last };
-                }
+    fn order_close(&self, peer: &Zid) -> CloseOrder {
+        self.queries.directory.order_close(canonical_zid(peer))
+    }
+
+    fn take_generation(&self, peer: &Zid, generation: u64) -> Generation {
+        let canonical = Vec::from(canonical_zid(peer));
+        let mut resets = self.queries.resets.borrow_mut();
+        if let Some(&last) = resets.get(&canonical) {
+            if generation <= last {
+                return Generation::Duplicate { last };
             }
-            // Taken before the close is ordered: a close the node could not carry
-            // out (no session) is still this generation's, so a retransmission
-            // after the peer is back does not close it.
-            resets.insert(canonical, generation);
         }
-        ResetVerdict::of(self.directory.order_close(&peer))
+        resets.insert(canonical, generation);
+        Generation::Taken
     }
 
-    /// Status: the links of the sessions with the peer, and each machine that
-    /// works to hold it, written into `body`. Reads only: nothing here changes a
-    /// session, a machine or the intent.
-    fn status(&self, key: &LifecycleKey<'_>, body: &mut String) -> StatusVerdict {
-        let refused = |reason: RefusedReason, body: &mut String| {
-            let verdict = StatusVerdict::Refused(reason);
-            verdict.write_json(body, &[]);
-            verdict
-        };
-        if !self.authority.admits_status(key) {
-            return refused(RefusedReason::StatusNotPermitted, body);
-        }
-        let Some(peer) = zenoh_hex_to_zid(key.peer_zid) else {
-            return refused(RefusedReason::PeerNotAZid, body);
-        };
-        let links = self.directory.links(&peer);
-        // A machine's words are lent for the length of the callback, so each is
-        // copied once here, and the document is written from the copies: the
-        // intent and the count the document opens with are read from the same
-        // rows it lists, never from a second read of a machine that may have moved.
+    fn links(&self, peer: &Zid) -> SessionLinks {
+        self.queries.directory.links(canonical_zid(peer))
+    }
+
+    fn read_machines(&self, peer: &Zid, read: &mut dyn FnMut(&[MachineReport<'_>])) {
+        // A machine's words are lent for the length of the callback, so each is copied once
+        // here and the rows are lent on from the copies.
         struct Row {
             endpoint: Option<String>,
             state: String,
@@ -514,14 +502,16 @@ where
             in_intent: bool,
         }
         let mut rows: Vec<Row> = Vec::new();
-        self.machines.each_machine(&peer, &mut |machine| {
-            rows.push(Row {
-                endpoint: machine.endpoint.map(String::from),
-                state: String::from(machine.state),
-                cause: machine.cause.map(String::from),
-                in_intent: machine.in_intent,
+        self.queries
+            .machines
+            .each_machine(canonical_zid(peer), &mut |machine| {
+                rows.push(Row {
+                    endpoint: machine.endpoint.map(String::from),
+                    state: String::from(machine.state),
+                    cause: machine.cause.map(String::from),
+                    in_intent: machine.in_intent,
+                });
             });
-        });
         let reports: Vec<MachineReport<'_>> = rows
             .iter()
             .map(|row| MachineReport {
@@ -531,9 +521,7 @@ where
                 in_intent: row.in_intent,
             })
             .collect();
-        let verdict = StatusVerdict::of(links, &reports);
-        verdict.write_json(body, &reports);
-        verdict
+        read(&reports);
     }
 }
 
@@ -639,6 +627,7 @@ mod tests {
     use crate::peer_connection::PeerConnectionState;
     use crate::query_sink::BorrowedQuery;
     use crate::sample::{EncodingHint, QosLevel};
+    use crate::zid_hex::zenoh_hex_to_zid;
     use alloc::vec;
     use alloc::vec::Vec;
     use core::cell::{Cell, RefCell};
@@ -1512,5 +1501,109 @@ mod tests {
         ];
         let words: Vec<&str> = all.iter().map(OpenVerdict::word).collect();
         assert_eq!(words, OpenVerdict::WORDS);
+    }
+
+    /// What a case's world is, for the ports of the heap profile: the sessions the directory
+    /// holds, and one flag that is both the intent a close withdraws the peer from and the
+    /// machine that holds it while it is there.
+    #[cfg(feature = "lifecycle-contract")]
+    struct World {
+        permits: crate::lifecycle_contract::verbs::Permits,
+        in_intent: Cell<bool>,
+        orders: Cell<u32>,
+        table: Table,
+    }
+
+    #[cfg(feature = "lifecycle-contract")]
+    impl SessionLifecycleAuthority for World {
+        fn admits_close(&self, _key: &LifecycleKey<'_>) -> bool {
+            self.permits.close
+        }
+        fn admits_reset(&self, _key: &LifecycleKey<'_>) -> bool {
+            self.permits.reset
+        }
+        fn admits_status(&self, _key: &LifecycleKey<'_>) -> bool {
+            self.permits.status
+        }
+    }
+
+    #[cfg(feature = "lifecycle-contract")]
+    impl SessionDirectory for World {
+        fn order_close(&self, peer_zid: &[u8]) -> CloseOrder {
+            self.orders.set(self.orders.get() + 1);
+            self.table.order_close(peer_zid)
+        }
+        fn links(&self, peer_zid: &[u8]) -> SessionLinks {
+            self.table.links(peer_zid)
+        }
+    }
+
+    #[cfg(feature = "lifecycle-contract")]
+    impl PeerIntent for World {
+        fn withdraw(&self, peer_zid: &[u8]) {
+            let held = zenoh_hex_to_zid(crate::lifecycle_contract::verbs::HELD).expect("a zid");
+            if crate::zid_hex::same_zid(peer_zid, &held) {
+                self.in_intent.set(false);
+            }
+        }
+    }
+
+    #[cfg(feature = "lifecycle-contract")]
+    impl PeerMachines for World {
+        fn each_machine(&self, peer_zid: &[u8], each: &mut dyn FnMut(&MachineReport<'_>)) {
+            let held = zenoh_hex_to_zid(crate::lifecycle_contract::verbs::HELD).expect("a zid");
+            if self.in_intent.get() && crate::zid_hex::same_zid(peer_zid, &held) {
+                each(&MachineReport {
+                    endpoint: None,
+                    state: "established",
+                    cause: None,
+                    in_intent: true,
+                });
+            }
+        }
+    }
+
+    /// The heap profile conforms to the table of `close`, `reset` and `status` that every
+    /// transport of every profile is held to (decision D7), through its in-band queries.
+    #[cfg(feature = "lifecycle-contract")]
+    #[test]
+    fn the_heap_query_conforms_to_the_table_of_every_verb() {
+        use crate::lifecycle_contract::verbs::{judge_session, Profile, Request, SESSION_CASES};
+        for case in SESSION_CASES {
+            let world = World {
+                permits: case.world.permits,
+                in_intent: Cell::new(case.world.in_intent),
+                orders: Cell::new(0),
+                table: Table(RefCell::new(
+                    (0..case.world.open_links)
+                        .map(|_| fake(crate::lifecycle_contract::verbs::HELD))
+                        .collect(),
+                )),
+            };
+            let queries = LifecycleQueries::new(ME, "peer", &world, &world)
+                .with_intent(&world)
+                .with_machines(&world);
+            let answers: Vec<Option<String>> = case
+                .requests
+                .iter()
+                .map(|request| {
+                    let key = match request {
+                        Request::Close(peer) => alloc::format!("@/{ME}/peer/session/close/{peer}"),
+                        Request::Reset(peer, generation) => {
+                            alloc::format!("@/{ME}/peer/session/reset/{generation}/{peer}")
+                        }
+                        Request::Status(peer) => {
+                            alloc::format!("@/{ME}/peer/session/status/{peer}")
+                        }
+                    };
+                    let mut out = Recorder::default();
+                    queries.answer(&query(&key), &mut out);
+                    out.replies.into_iter().next().map(|(_, body, _)| body)
+                })
+                .collect();
+            let answers: Vec<Option<&str>> = answers.iter().map(Option::as_deref).collect();
+            judge_session(case, Profile::Heap, &answers, world.orders.get())
+                .unwrap_or_else(|violation| panic!("{violation:?}"));
+        }
     }
 }

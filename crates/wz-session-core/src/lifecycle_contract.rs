@@ -286,6 +286,288 @@ pub fn judge_asking(
     }
 }
 
+/// What the contract says of `close`, `reset` and `status`, as sequences of requests a node is
+/// asked in order, each with the literal document it must answer.
+///
+/// Not repeated as [`CASES`] repeats an open: a close of a held peer is `closing` and the same
+/// close again is `already_closed`, so the idempotency of these verbs is itself a sequence of the
+/// table. A transport that cannot express a case (a node whose sessions end by themselves cannot
+/// say what a status reads after a close) says so by name and does not run it.
+pub mod verbs {
+    use super::Violation;
+
+    /// The peer every world holds, as a key spells it.
+    pub const HELD: &str = "1f";
+    /// A peer no world holds.
+    pub const OTHER: &str = "2f";
+
+    /// Which verbs the node permits.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Permits {
+        /// May close.
+        pub close: bool,
+        /// May reset.
+        pub reset: bool,
+        /// May read the status.
+        pub status: bool,
+    }
+
+    /// What the node holds when a case begins: [`HELD`] is held by `open_links` links, none
+    /// closing, and is in the node's intent (one machine, `established`) when `in_intent`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct World {
+        /// What the node permits.
+        pub permits: Permits,
+        /// Links to [`HELD`] no close has been ordered for.
+        pub open_links: u32,
+        /// Whether [`HELD`] is in the intent.
+        pub in_intent: bool,
+    }
+
+    /// One request, in the words a key carries.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Request {
+        /// Close the sessions with the peer.
+        Close(&'static str),
+        /// Reset the sessions with the peer for the generation.
+        Reset(&'static str, &'static str),
+        /// Read what the node holds for the peer.
+        Status(&'static str),
+    }
+
+    /// Which profile an adapter runs: the heap profile remembers a generation for any peer, the
+    /// fixed-memory profile for the peers it has room for.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Profile {
+        /// The growable profile.
+        Heap,
+        /// The fixed-memory profile.
+        Fixed,
+    }
+
+    /// One case: a world, the requests made in order, and what the contract says of them.
+    #[derive(Debug, Clone, Copy)]
+    pub struct SessionCase {
+        /// The case's name, which a failure quotes.
+        pub name: &'static str,
+        /// What the node holds and permits.
+        pub world: World,
+        /// The requests, in order.
+        pub requests: &'static [Request],
+        /// The document each request must be answered with.
+        pub answers: &'static [&'static str],
+        /// How many times the node must be told to order a close.
+        pub orders: u32,
+        /// Where the fixed-memory profile answers otherwise (decision of 2026-10-26: a peer
+        /// outside its room is refused rather than remembered), the documents and the orders.
+        pub fixed: Option<(&'static [&'static str], u32)>,
+    }
+
+    const ALL: Permits = Permits {
+        close: true,
+        reset: true,
+        status: true,
+    };
+    const NONE: Permits = Permits {
+        close: false,
+        reset: false,
+        status: false,
+    };
+
+    const HELD_BY_TWO: World = World {
+        permits: ALL,
+        open_links: 2,
+        in_intent: true,
+    };
+    const HELD_BY_ONE: World = World {
+        permits: ALL,
+        open_links: 1,
+        in_intent: true,
+    };
+    const NOTHING: World = World {
+        permits: ALL,
+        open_links: 0,
+        in_intent: false,
+    };
+
+    const CLOSING_2: &str = "{\"verdict\":\"closing\",\"links\":2}";
+    const ALREADY_CLOSED: &str = "{\"verdict\":\"already_closed\"}";
+    const NOT_FOUND: &str = "{\"verdict\":\"not_found\"}";
+    const RESETTING_1: &str = "{\"verdict\":\"resetting\",\"links\":1}";
+    const DUPLICATE_1: &str = "{\"verdict\":\"duplicate\",\"generation\":1}";
+    const DUPLICATE_5: &str = "{\"verdict\":\"duplicate\",\"generation\":5}";
+    const CLOSE_REFUSED: &str = "{\"verdict\":\"refused\",\"reason\":\"this node does not permit closing the session with that peer\"}";
+    const RESET_REFUSED: &str = "{\"verdict\":\"refused\",\"reason\":\"this node does not permit resetting the session with that peer\"}";
+    const STATUS_REFUSED: &str = "{\"verdict\":\"refused\",\"reason\":\"this node does not permit reading the status of the session with that peer\"}";
+    const NOT_A_ZID: &str =
+        "{\"verdict\":\"refused\",\"reason\":\"the last chunk of the key is not a zid\"}";
+    const NOT_A_NUMBER: &str =
+        "{\"verdict\":\"refused\",\"reason\":\"the generation chunk of the key is not a number\"}";
+    const NO_ROOM: &str = "{\"verdict\":\"refused\",\"reason\":\"this node holds as many peers by their zid as it was built for\"}";
+    const NOTHING_HELD: &str = "{\"verdict\":\"status\",\"links\":{\"open\":0,\"closing\":0},\"intent\":false,\"machines\":[]}";
+    const HELD_2_OPEN: &str = "{\"verdict\":\"status\",\"links\":{\"open\":2,\"closing\":0},\"intent\":true,\"machines\":[{\"state\":\"established\"}]}";
+    const HELD_1_OPEN: &str = "{\"verdict\":\"status\",\"links\":{\"open\":1,\"closing\":0},\"intent\":true,\"machines\":[{\"state\":\"established\"}]}";
+    const HELD_1_CLOSING: &str = "{\"verdict\":\"status\",\"links\":{\"open\":0,\"closing\":1},\"intent\":true,\"machines\":[{\"state\":\"established\"}]}";
+    const LEFT_THE_INTENT: &str = "{\"verdict\":\"status\",\"links\":{\"open\":0,\"closing\":2},\"intent\":false,\"machines\":[]}";
+
+    /// The table. Every transport that can express a case answers it the same way.
+    pub const SESSION_CASES: &[SessionCase] = &[
+        SessionCase {
+            name: "a held peer is closed with every link, and the close is told once",
+            world: HELD_BY_TWO,
+            requests: &[
+                Request::Status(HELD),
+                Request::Close(HELD),
+                Request::Close(HELD),
+                Request::Status(HELD),
+            ],
+            answers: &[HELD_2_OPEN, CLOSING_2, ALREADY_CLOSED, LEFT_THE_INTENT],
+            orders: 2,
+            fixed: None,
+        },
+        SessionCase {
+            name: "a peer never held is not found",
+            world: NOTHING,
+            requests: &[Request::Close(HELD), Request::Status(HELD)],
+            answers: &[NOT_FOUND, NOTHING_HELD],
+            orders: 1,
+            fixed: None,
+        },
+        SessionCase {
+            name: "a node that does not permit a close orders nothing",
+            world: World {
+                permits: Permits {
+                    close: false,
+                    reset: true,
+                    status: true,
+                },
+                open_links: 1,
+                in_intent: true,
+            },
+            requests: &[Request::Close(HELD), Request::Status(HELD)],
+            answers: &[CLOSE_REFUSED, HELD_1_OPEN],
+            orders: 0,
+            fixed: None,
+        },
+        SessionCase {
+            name: "the permit is judged before the spelling of the peer, for every verb",
+            world: World {
+                permits: NONE,
+                open_links: 1,
+                in_intent: true,
+            },
+            requests: &[
+                Request::Close("0abc"),
+                Request::Reset("0abc", "1"),
+                Request::Status("0abc"),
+            ],
+            answers: &[CLOSE_REFUSED, RESET_REFUSED, STATUS_REFUSED],
+            orders: 0,
+            fixed: None,
+        },
+        SessionCase {
+            name: "a peer that names no zid is refused after the permit, for every verb",
+            world: HELD_BY_ONE,
+            requests: &[
+                Request::Close("0abc"),
+                Request::Reset("0abc", "1"),
+                Request::Status("0abc"),
+            ],
+            answers: &[NOT_A_ZID, NOT_A_ZID, NOT_A_ZID],
+            orders: 0,
+            fixed: None,
+        },
+        SessionCase {
+            name: "a reset closes once per generation and leaves the peer in the intent",
+            world: HELD_BY_ONE,
+            requests: &[
+                Request::Reset(HELD, "1"),
+                Request::Reset(HELD, "1"),
+                Request::Reset(HELD, "5"),
+                Request::Reset(HELD, "3"),
+                Request::Status(HELD),
+            ],
+            answers: &[
+                RESETTING_1,
+                DUPLICATE_1,
+                ALREADY_CLOSED,
+                DUPLICATE_5,
+                HELD_1_CLOSING,
+            ],
+            orders: 2,
+            fixed: None,
+        },
+        SessionCase {
+            name: "a generation that is no number is refused after the peer and takes nothing",
+            world: HELD_BY_ONE,
+            requests: &[
+                Request::Reset(HELD, "x"),
+                Request::Reset(HELD, "-1"),
+                Request::Reset("0abc", "x"),
+                Request::Reset(HELD, "1"),
+            ],
+            answers: &[NOT_A_NUMBER, NOT_A_NUMBER, NOT_A_ZID, RESETTING_1],
+            orders: 1,
+            fixed: None,
+        },
+        SessionCase {
+            name: "a reset for a peer the node holds nothing of is remembered, or refused for room",
+            world: NOTHING,
+            requests: &[Request::Reset(HELD, "1"), Request::Reset(HELD, "1")],
+            answers: &[NOT_FOUND, DUPLICATE_1],
+            orders: 1,
+            fixed: Some((&[NO_ROOM, NO_ROOM], 0)),
+        },
+        SessionCase {
+            name: "a close and a status are about the peer they name and no other",
+            world: HELD_BY_TWO,
+            requests: &[
+                Request::Status(OTHER),
+                Request::Close(OTHER),
+                Request::Status(HELD),
+            ],
+            answers: &[NOTHING_HELD, NOT_FOUND, HELD_2_OPEN],
+            orders: 1,
+            fixed: None,
+        },
+    ];
+
+    /// Whether what a transport answered, request by request, and how many times the node was
+    /// told to order a close, is what the contract says of `case` on `profile`. `None` is no
+    /// answer.
+    pub fn judge_session(
+        case: &SessionCase,
+        profile: Profile,
+        answers: &[Option<&str>],
+        orders: u32,
+    ) -> Result<(), Violation> {
+        let (want, want_orders) = match (profile, case.fixed) {
+            (Profile::Fixed, Some(fixed)) => fixed,
+            _ => (case.answers, case.orders),
+        };
+        let fail = |what| {
+            Err(Violation {
+                case: case.name,
+                what,
+            })
+        };
+        if answers.len() != case.requests.len() {
+            return fail("the adapter did not make every request");
+        }
+        for (got, want) in answers.iter().zip(want) {
+            match got {
+                Some(got) if got == want => {}
+                Some(_) => return fail("answered another document"),
+                None => return fail("did not answer"),
+            }
+        }
+        if orders != want_orders {
+            return fail("ordered a close another number of times than the contract says");
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -356,5 +638,89 @@ mod tests {
         assert!(judge_asking(case, 2, zid(0x1f)).is_ok());
         assert!(judge_asking(case, 2, zid(0x2f)).is_err(), "another peer");
         assert!(judge_asking(case, 3, zid(0x1f)).is_err(), "asked too often");
+    }
+
+    /// The verb table is held to what the wire can say, as the open table is: every verdict word
+    /// and every refusal of `close`, `reset` and `status` is answered by some case, one request
+    /// has one answer, and a case's name is its identity.
+    #[test]
+    fn the_session_table_has_a_case_for_every_answer_a_verb_can_get() {
+        use verbs::{Request, SESSION_CASES};
+        let documents: std::vec::Vec<&str> = SESSION_CASES
+            .iter()
+            .flat_map(|case| {
+                case.answers
+                    .iter()
+                    .chain(case.fixed.iter().flat_map(|(answers, _)| answers.iter()))
+            })
+            .copied()
+            .collect();
+        for word in [
+            "\"verdict\":\"closing\"",
+            "\"verdict\":\"already_closed\"",
+            "\"verdict\":\"not_found\"",
+            "\"verdict\":\"resetting\"",
+            "\"verdict\":\"duplicate\"",
+            "\"verdict\":\"status\"",
+        ] {
+            assert!(
+                documents.iter().any(|d| d.contains(word)),
+                "no case says {word}"
+            );
+        }
+        for reason in [
+            RefusedReason::NotPermitted,
+            RefusedReason::ResetNotPermitted,
+            RefusedReason::StatusNotPermitted,
+            RefusedReason::PeerNotAZid,
+            RefusedReason::GenerationNotANumber,
+            RefusedReason::NoRoom,
+        ] {
+            assert!(
+                documents.iter().any(|d| d.contains(reason.words())),
+                "no case answers {reason:?}"
+            );
+        }
+        for (i, a) in SESSION_CASES.iter().enumerate() {
+            assert_eq!(a.requests.len(), a.answers.len(), "{}", a.name);
+            if let Some((answers, _)) = a.fixed {
+                assert_eq!(a.requests.len(), answers.len(), "{}", a.name);
+            }
+            assert!(
+                SESSION_CASES[i + 1..].iter().all(|b| b.name != a.name),
+                "{}",
+                a.name
+            );
+            assert!(a.requests.iter().all(|r| matches!(
+                r,
+                Request::Close(_) | Request::Reset(..) | Request::Status(_)
+            )));
+        }
+        // The two profiles differ only where the table says so.
+        assert_eq!(
+            SESSION_CASES.iter().filter(|c| c.fixed.is_some()).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn the_session_judge_refuses_a_transport_that_drifts() {
+        use verbs::{judge_session, Profile, SESSION_CASES};
+        let case = &SESSION_CASES[1];
+        let [first, second] = [case.answers[0], case.answers[1]];
+        assert!(judge_session(case, Profile::Heap, &[Some(first), Some(second)], 1).is_ok());
+        assert!(judge_session(case, Profile::Heap, &[Some(second), Some(first)], 1).is_err());
+        assert!(judge_session(case, Profile::Heap, &[Some(first), None], 1).is_err());
+        assert!(judge_session(case, Profile::Heap, &[Some(first)], 1).is_err());
+        assert!(judge_session(case, Profile::Heap, &[Some(first), Some(second)], 2).is_err());
+
+        let room = SESSION_CASES
+            .iter()
+            .find(|c| c.fixed.is_some())
+            .expect("a case where the profiles differ");
+        let (fixed, orders) = room.fixed.expect("fixed");
+        let got: std::vec::Vec<Option<&str>> = fixed.iter().map(|d| Some(*d)).collect();
+        assert!(judge_session(room, Profile::Fixed, &got, orders).is_ok());
+        assert!(judge_session(room, Profile::Heap, &got, orders).is_err());
     }
 }
