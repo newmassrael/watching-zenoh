@@ -289986,6 +289986,54 @@
         "Read the first finished hosted run that holds rounds 3674, 3678, 3679, 3686 and this one: the C1m legs (the moved counts and the two new ones), Qzb and the no-allocator rows. Open: an out-of-band open and a declared peer that succeed over a real secure channel, the text the declared value saves (not measured), the Hello hint source, the image witness, the Qzb chain fall and the C1cn shard 1 time budget."
       ]
     },
+    "Round 3698": {
+      "decision_summary": "A node that states the key-set policy as closed now carries its key table (docs/closed-key-set.md). wz_node.py takes the node's entities, each a kind and a key, as its key set, holds them to what the table can carry (canonical keys, concrete publishers and tokens, no wildcard that nothing concrete meets, no entity twice) and writes the table into the node's generated declared.rs as a module key_set with CATALOGUE and CLOSED. A node that states nothing, or open, has CLOSED = None and is held to nothing new, so the seven registered nodes keep their declarations and gain five lines each. A node's code reads one name for both cases and adopts its table with set_key_gate before its first subscription; that adoption is in the slot node and the cooperative engine, which other sessions own. The table is a module that names nothing of its includer's, since a node's file has its own MEMBERS; the matcher ports moved to wz_keyexpr.py to avoid a cycle. Not done: no node's code reads CLOSED.",
+      "changes_bullets": [
+        "scripts/lib/wz_node.py: key_set_lines and the check of a closed node's key set through wz_key_set.validate; emit writes the module key_set into declared.rs; key_problem and rust_string now come from wz_keyexpr.py; selftest cases for a closed node, its refusals and an open node.",
+        "scripts/lib/wz_keyexpr.py (new): key_problem, rust_string, is_key_expression and the matcher port, moved out of wz_key_set.py. scripts/lib/wz_key_set.py: table_lines and open_lines emit the table as an includable module key_set with CLOSED.",
+        "deploy/nodes/generated/*.rs (seven): regenerated, each gains the module key_set with CLOSED = None.",
+        "crates/wz-session-core tests/key_catalogue_model.rs, key_set_cost.rs and key_set_data/fixture.rs: the fixture is included as the module a node's file includes; a test of the adoption path through CLOSED.",
+        "docs/closed-key-set.md: the node's table, as built."
+      ],
+      "verification_bullets": [
+        "On the shared build machine: the model tests pass; declared-node type-checks against two regenerated node files (slot-answerer, slot-beacon) with no warning about the new constant; clippy -D warnings over all targets of wz-session-core passes.",
+        "wz_node.py --selftest and --check, wz_key_set.py --check, wz_package.py --selftest, wz_config.py --check, round_fed_gate_reach.py and gate_provenance_lint.py pass.",
+        "Not run: the hosted run (the two before it were cancelled by the pushes that followed and graded nothing); a build of every node image; any node's code reading CLOSED."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "Tell sessions ef (slot node) and 11 (cooperative engine) that declared::key_set::CLOSED is there and how to adopt it: if let Some(table) = CLOSED, set_key_gate(KeyGate::closed(table)) before the first subscription.",
+        "Per-peer allowance (phase 4 of the note) needs the owner's answer on one declaration or two with access control; the note recommends one declaration compiled into the closed sets, with a model test against the access-control interpreter.",
+        "The alias row stays text, a reply's key is not gated, and the selector side is as before.",
+        "Owner decisions still open: undeclared key under a declared wildcard (data keys), one declaration or two with access control, publisher wildcards, sender-fixed resource ids.",
+        "Read the hosted run of this push per job, compared by head sha; consecutive pushes cancelled each other's runs, so push in batches."
+      ],
+      "publishable_decision_summary": "A node that states the key-set policy as closed now carries its key table (docs/closed-key-set.md). wz_node.py takes the node's entities, each a kind and a key, as its key set, holds them to what the table can carry (canonical keys, concrete publishers and tokens, no wildcard that nothing concrete meets, no entity twice) and writes the table into the node's generated declared.rs as a module key_set with CATALOGUE and CLOSED. A node that states nothing, or open, has CLOSED = None and is held to nothing new, so the seven registered nodes keep their declarations and gain five lines each. A node's code reads one name for both cases and adopts its table with set_key_gate before its first subscription; that adoption is in the slot node and the cooperative engine, which other sessions own. The table is a module that names nothing of its includer's, since a node's file has its own MEMBERS; the matcher ports moved to wz_keyexpr.py to avoid a cycle. Not done: no node's code reads CLOSED.",
+      "publishable_changes_bullets": [
+        "scripts/lib/wz_node.py: key_set_lines and the check of a closed node's key set through wz_key_set.validate; emit writes the module key_set into declared.rs; key_problem and rust_string now come from wz_keyexpr.py; selftest cases for a closed node, its refusals and an open node.",
+        "scripts/lib/wz_keyexpr.py (new): key_problem, rust_string, is_key_expression and the matcher port, moved out of wz_key_set.py. scripts/lib/wz_key_set.py: table_lines and open_lines emit the table as an includable module key_set with CLOSED.",
+        "deploy/nodes/generated/*.rs (seven): regenerated, each gains the module key_set with CLOSED = None.",
+        "crates/wz-session-core tests/key_catalogue_model.rs, key_set_cost.rs and key_set_data/fixture.rs: the fixture is included as the module a node's file includes; a test of the adoption path through CLOSED.",
+        "docs/closed-key-set.md: the node's table, as built."
+      ],
+      "publishable_verification_bullets": [
+        "On the shared build machine: the model tests pass; declared-node type-checks against two regenerated node files (slot-answerer, slot-beacon) with no warning about the new constant; clippy -D warnings over all targets of wz-session-core passes.",
+        "wz_node.py --selftest and --check, wz_key_set.py --check, wz_package.py --selftest, wz_config.py --check, round_fed_gate_reach.py and gate_provenance_lint.py pass.",
+        "Not run: the hosted run (the two before it were cancelled by the pushes that followed and graded nothing); a build of every node image; any node's code reading CLOSED."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Tell sessions ef (slot node) and 11 (cooperative engine) that declared::key_set::CLOSED is there and how to adopt it: if let Some(table) = CLOSED, set_key_gate(KeyGate::closed(table)) before the first subscription.",
+        "Per-peer allowance (phase 4 of the note) needs the owner's answer on one declaration or two with access control; the note recommends one declaration compiled into the closed sets, with a model test against the access-control interpreter.",
+        "The alias row stays text, a reply's key is not gated, and the selector side is as before.",
+        "Owner decisions still open: undeclared key under a declared wildcard (data keys), one declaration or two with access control, publisher wildcards, sender-fixed resource ids.",
+        "Read the hosted run of this push per job, compared by head sha; consecutive pushes cancelled each other's runs, so push in batches."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
