@@ -221,6 +221,11 @@ pub struct FlowContext {
     /// through [`Self::compression()`]. Once established, frame bodies are
     /// lz4-wrapped batches.
     compression: bool,
+    /// Per direction, indexed as [`Self::open_seen`] is, whether this observer
+    /// INFERRED from the bytes that the direction's batches open with a
+    /// `BatchHeader`, because it did not see the Init pair that would say so.
+    /// See [`Self::batch_header_active`] and [`BatchHeader::Inferred`].
+    batch_header_inferred: [bool; 2],
     /// `QoS` (`0x1`) offered by BOTH sides, as the running `&=`; read through
     /// [`Self::qos()`]. Whether a non-DEFAULT `ext_qos` priority on a Frame or
     /// Fragment is meaningful.
@@ -557,6 +562,25 @@ pub struct HalfFacts {
     pub close_seen: bool,
 }
 
+/// Whether a direction's batches open with a `BatchHeader`, and on what grounds
+/// ([`FlowContext::batch_header`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BatchHeader {
+    /// No header: compression was not negotiated, or the capture holds no Init
+    /// and the bytes showed none.
+    #[default]
+    Absent,
+    /// The Init pair negotiated compression and the direction has sent its
+    /// `Open`.
+    Negotiated,
+    /// The capture holds no Init, and the bytes showed a header: the last unit
+    /// of the direction that read whole in only one of the two readings read
+    /// whole behind a header byte, or the stream's framing was found again on
+    /// a chain of boundaries that open with one. The direction is read headed
+    /// until the bytes show otherwise.
+    Inferred,
+}
+
 impl Default for FlowContext {
     fn default() -> Self {
         Self {
@@ -575,6 +599,7 @@ impl Default for FlowContext {
             // make that false.
             open_seen: [false; 2],
             compression: true,
+            batch_header_inferred: [false; 2],
             qos: true,
             patch: None,
             auth_offered: false,
@@ -678,12 +703,53 @@ impl FlowContext {
     /// questions whose wrong answers were that defect. Its inputs stay on the
     /// field document (`negotiated`, `compression`, `phase`), so no reader lost
     /// a fact; `accessor_reach_census.py` found it asked by no shipped surface.
+    ///
+    /// # Without the handshake
+    ///
+    /// A capture that began after the Init pair holds no negotiation, and a
+    /// compressed session's every batch still opens with the header. Read as a
+    /// message, that byte is an OAM or an Init MID and the unit does not decode,
+    /// so the whole session read as bytes that are not zenoh. Where the pair was
+    /// not seen, the answer is what the bytes showed: [`BatchHeader::Inferred`].
     pub fn batch_header_active(&self, direction: Direction) -> bool {
-        self.negotiated()
-            && self.compression
+        self.batch_header(direction) != BatchHeader::Absent
+    }
+
+    /// Whether no Init of either direction was seen: the capture joined the
+    /// session after its handshake, and the only place left to learn the
+    /// framing from is the bytes. One Init seen is a handshake in progress, and
+    /// its partner's arrival settles the framing the way a negotiation does.
+    pub fn holds_no_init(&self) -> bool {
+        !self.init_seen.iter().any(|seen| *seen)
+    }
+
+    /// Whether, and on what grounds, `direction`'s batches open with a
+    /// `BatchHeader`. See [`Self::batch_header_active`].
+    pub fn batch_header(&self, direction: Direction) -> BatchHeader {
+        let seat = usize::from(direction == Direction::B);
+        if !self.negotiated() {
+            return if self.holds_no_init() && self.batch_header_inferred[seat] {
+                BatchHeader::Inferred
+            } else {
+                BatchHeader::Absent
+            };
+        }
+        if self.compression
             && !self.lowlatency
             && self.phase == SessionPhase::Established
-            && self.open_seen[usize::from(direction == Direction::B)]
+            && self.open_seen[seat]
+        {
+            BatchHeader::Negotiated
+        } else {
+            BatchHeader::Absent
+        }
+    }
+
+    /// Whether `direction`'s batches open with a `BatchHeader`, as the last
+    /// unit that decided it showed ([`walk_unit`]'s probe). Ignored once the
+    /// Init pair is seen: the negotiation is the answer then.
+    fn set_batch_header_inferred(&mut self, direction: Direction, headed: bool) {
+        self.batch_header_inferred[usize::from(direction == Direction::B)] = headed;
     }
 
     /// Whether the observer SAW the handshake that fixes the session's
@@ -1753,6 +1819,43 @@ const _: () = assert!(BATCH_HEADER_COMPRESSION == crate::compression::BATCH_HEAD
 /// that weighs units as evidence must not weigh it.
 pub const OPENS_LZ4_BATCHES: bool = cfg!(feature = "transport-compression");
 
+/// Whether `unit` reads WHOLE as a run of transport messages, the way
+/// [`walk_unit`] decides it for a unit with no header and no lean framing:
+/// every message decodes, carries a length and is of this reader's protocol
+/// version, and the last one ends where the unit ends. No state is read or
+/// written, so it can be asked of a unit before the walk reads it.
+fn unit_reads_whole(unit: &[u8]) -> bool {
+    let mut pos = 0;
+    while pos < unit.len() {
+        match parse_inbound_consuming(&unit[pos..]) {
+            Ok((frame, consumed))
+                if consumed > 0
+                    && frame
+                        .announced_version()
+                        .map_or(true, |v| v == wz_codecs::wire_const::PROTOCOL_VERSION) =>
+            {
+                pos += consumed;
+            }
+            _ => return false,
+        }
+    }
+    !unit.is_empty()
+}
+
+/// Whether `unit` reads whole behind a `BatchHeader`: its first byte is the
+/// header, and the rest, decompressed where the header says lz4, is a unit
+/// [`unit_reads_whole`] accepts. A build that cannot open lz4 answers `false`
+/// for a compressed one: it has nothing to read.
+fn headed_unit_reads_whole(unit: &[u8]) -> bool {
+    match unit.first() {
+        Some(h) if h & BATCH_HEADER_COMPRESSION != 0 => {
+            decompress_unit(unit).is_some_and(|plain| unit_reads_whole(&plain))
+        }
+        Some(_) => unit_reads_whole(&unit[1..]),
+        None => false,
+    }
+}
+
 /// Open one headed batch whose COMPRESSION bit is set: `wire` is
 /// the unit, header byte included.
 ///
@@ -2244,18 +2347,39 @@ impl PassiveSession {
         let lean = self.context.lowlatency_active(direction);
         // And whether the unit opens with a batch header rather
         // than with a message.
-        let headed = self.context.batch_header_active(direction);
+        let mut headed = self.context.batch_header_active(direction);
         let depth = self.resync_depth;
-        let stream = self.stream_mut(direction);
 
         // R311y609 — a desynchronised direction is no longer terminal: the
-        // detecting call announced it, and every later one scans.
-        if stream.desync.is_some() {
-            match stream.try_resync(width, depth) {
-                Some(resync) => stream.pending_resync = Some(resync),
+        // detecting call announced it, and every later one scans. Where no
+        // Init was seen the scan may find the stream headed or not, and the
+        // reading its chain confirmed is the direction's from then on.
+        if self.stream(direction).desync.is_some() {
+            let may_infer = self.context.holds_no_init();
+            let modes: &[bool] = match (may_infer, headed) {
+                (true, true) => &[true, false],
+                (true, false) => &[false, true],
+                (false, h) => {
+                    if h {
+                        &[true]
+                    } else {
+                        &[false]
+                    }
+                }
+            };
+            match self.stream_mut(direction).try_resync(width, depth, modes) {
+                Some((resync, resumed_headed)) => {
+                    self.stream_mut(direction).pending_resync = Some(resync);
+                    if may_infer {
+                        self.context
+                            .set_batch_header_inferred(direction, resumed_headed);
+                        headed = resumed_headed;
+                    }
+                }
                 None => return Err(PassiveStall::NeedMoreBytes),
             }
         }
+        let stream = self.stream_mut(direction);
 
         if stream.buf.len() < width {
             return Err(PassiveStall::NeedMoreBytes);
@@ -3198,6 +3322,30 @@ fn walk_unit(
         .context()
         .batch_size()
         .is_some_and(|max| bytes.len() > max as usize);
+    // THE BATCH HEADER, INFERRED. With no Init in the capture nothing
+    // negotiated the header, and a compressed session's batches carry it all
+    // the same. A unit that does not read whole in the direction's current
+    // reading and does read whole in the other one moves the direction to the
+    // other: behind a header byte the sender could have written, or as it
+    // stands. Unit by unit and both ways, because the bytes ahead of the first
+    // true boundary of a stream joined mid-unit are noise, and noise can read
+    // whole behind a header once; a reading that stuck would then refuse every
+    // real unit after it. The probes have no side effect, so the walk below is
+    // the only reading the unit gets.
+    if handshake == LinkHandshake::Present && judge.context().holds_no_init() && !bytes.is_empty() {
+        let inferred = judge.context().batch_header_active(direction);
+        let header_byte = bytes[0] & !BATCH_HEADER_COMPRESSION == 0;
+        let moves = if inferred {
+            !headed_unit_reads_whole(bytes) && unit_reads_whole(bytes)
+        } else {
+            header_byte && !unit_reads_whole(bytes) && headed_unit_reads_whole(bytes)
+        };
+        if moves {
+            judge
+                .context()
+                .set_batch_header_inferred(direction, !inferred);
+        }
+    }
     // THE BATCH HEADER, where this direction has one. See
     // `FlowContext::batch_header_active` for where upstream puts it. A
     // multicast link has no handshake to have negotiated it on.
@@ -3746,7 +3894,7 @@ enum Candidate {
 }
 
 /// R311y609 — test the bytes at `at` as one framed transport message.
-fn candidate_at(buf: &[u8], at: usize, width: usize) -> Candidate {
+fn candidate_at(buf: &[u8], at: usize, width: usize, headed: bool) -> Candidate {
     if buf.len() < at + width {
         return Candidate::Short { needed: at + width };
     }
@@ -3759,7 +3907,15 @@ fn candidate_at(buf: &[u8], at: usize, width: usize) -> Candidate {
             needed: at + width + 1,
         };
     }
-    if !wz_codecs::wire_const::is_credible_transport_header(buf[at + width]) {
+    // A headed unit opens with the BatchHeader, whose one defined bit is
+    // compression: the boundary `read_unit` accepts on a headed stream.
+    let header = buf[at + width];
+    let credible = if headed {
+        header & !BATCH_HEADER_COMPRESSION == 0
+    } else {
+        wz_codecs::wire_const::is_credible_transport_header(header)
+    };
+    if !credible {
         return Candidate::Refuted;
     }
     if buf.len() < at + width + len {
@@ -3840,7 +3996,23 @@ impl DirectionStream {
     /// that honest rather than sloppy is that [`StreamResync::skipped`] says
     /// how much it stepped over. The cursor still advances only across a
     /// CONTIGUOUS refuted prefix, so no offset is abandoned unexamined.
-    fn try_resync(&mut self, width: usize, depth: usize) -> Option<StreamResync> {
+    ///
+    /// # Headed or not, one chain one reading
+    ///
+    /// `modes` are the readings a boundary may be in, the direction's current
+    /// one first: `false` opens with a message header, `true` with a
+    /// `BatchHeader`. A chain is confirmed in ONE of them, because a sender
+    /// writes every unit of a direction the same way; a chain that mixed them
+    /// would be accepting twice as many bytes as boundaries for nothing. Both
+    /// are offered only where no Init was seen, so that the header is not
+    /// known; the reading of the chain that confirmed is handed back, and is
+    /// the direction's reading from the resumed offset on.
+    fn try_resync(
+        &mut self,
+        width: usize,
+        depth: usize,
+        modes: &[bool],
+    ) -> Option<(StreamResync, bool)> {
         let state = self.desync?;
         if depth == 0 {
             return None;
@@ -3855,40 +4027,53 @@ impl DirectionStream {
         let mut rescan_at = usize::MAX;
         let mut accepted = None;
         let mut candidate = cursor;
-        while candidate < self.buf.len() {
-            let mut at = candidate;
+        let buf = &self.buf;
+        let chain = |start: usize, headed: bool| -> Candidate {
+            let mut at = start;
             let mut confirmed = 0usize;
-            let verdict = loop {
+            loop {
                 if confirmed == depth {
                     break Candidate::Framed(at);
                 }
-                match candidate_at(&self.buf, at, width) {
+                match candidate_at(buf, at, width, headed) {
                     Candidate::Framed(next) => {
                         at = next;
                         confirmed += 1;
                     }
                     other => break other,
                 }
-            };
-            match verdict {
-                Candidate::Framed(_) => {
-                    accepted = Some(candidate);
-                    break;
-                }
-                // Refuted for good — the bytes cannot change. The cursor
-                // follows only while the refutations are contiguous from it.
-                Candidate::Refuted => {
-                    if candidate == cursor {
-                        cursor += 1;
+            }
+        };
+        while candidate < buf.len() {
+            let mut refuted = true;
+            for &headed in modes {
+                match chain(candidate, headed) {
+                    Candidate::Framed(_) => {
+                        accepted = Some((candidate, headed));
+                        break;
+                    }
+                    // Refuted for good in this reading — the bytes cannot
+                    // change.
+                    Candidate::Refuted => {}
+                    // Unresolved. Remember when it could be judged again, and
+                    // keep looking at the offsets after it.
+                    Candidate::Short { needed } => {
+                        refuted = false;
+                        rescan_at = rescan_at.min(needed);
                     }
                 }
-                // Unresolved. Remember when it could be judged again, and keep
-                // looking at the offsets after it.
-                Candidate::Short { needed } => rescan_at = rescan_at.min(needed),
+            }
+            if accepted.is_some() {
+                break;
+            }
+            // The cursor follows only while the refutations, in every reading,
+            // are contiguous from it.
+            if refuted && candidate == cursor {
+                cursor += 1;
             }
             candidate += 1;
         }
-        let Some(offset) = accepted else {
+        let Some((offset, headed)) = accepted else {
             let state = self.desync.as_mut().expect("state was Some");
             state.scan_cursor = cursor;
             // Nothing unresolved means nothing to wait FOR: only a longer
@@ -3920,13 +4105,16 @@ impl DirectionStream {
         self.accounting.recoveries += 1;
         let skipped = self.consumed - state.at_offset;
         self.accounting.skipped_bytes += skipped as u64;
-        Some(StreamResync {
-            desync_offset: state.at_offset,
-            reason: state.reason,
-            resumed_offset: self.consumed,
-            skipped,
-            confirmed: depth,
-        })
+        Some((
+            StreamResync {
+                desync_offset: state.at_offset,
+                reason: state.reason,
+                resumed_offset: self.consumed,
+                skipped,
+                confirmed: depth,
+            },
+            headed,
+        ))
     }
 }
 
@@ -6704,6 +6892,155 @@ mod tests {
                 follows: 2,
                 breaks: 0
             }
+        );
+    }
+
+    // ─── a batch header inferred where no Init pair was seen ───
+
+    /// A `Frame` behind the uncompressed `BatchHeader` (`0x00`), the batch a
+    /// compressed session sends when the batch is too small to compress.
+    fn headed_frame(sn: u64) -> Vec<u8> {
+        let mut wire = vec![0x00];
+        wire.extend_from_slice(&frame_wire(sn, &oam_record(sn)));
+        wire
+    }
+
+    /// A COMPRESSED SESSION JOINED MID-STREAM, as a real one measured
+    /// (`captures/corpus/zenoh-udp-lz4-midsession.pcap`): every datagram opens
+    /// with the header byte, and read as a message that byte is an OAM MID and
+    /// the unit does not decode. The first unit that reads whole only behind
+    /// the header makes the direction headed, and from then on its Frames
+    /// decode, with their SN steps. The other direction sent nothing and is not
+    /// touched.
+    #[test]
+    fn a_compressed_session_joined_mid_stream_infers_its_batch_header() {
+        let mut s = PassiveSession::new();
+        assert_eq!(s.context().batch_header(Direction::A), BatchHeader::Absent);
+        let first = s.next_datagram(Direction::A, &headed_frame(40), 0);
+        assert_eq!(
+            s.context().batch_header(Direction::A),
+            BatchHeader::Inferred
+        );
+        assert!(
+            first.iter().all(|f| f.frame.is_ok() && f.unit_read_whole),
+            "the unit that showed the header is itself read headed: {first:?}"
+        );
+        for (i, sn) in [41u64, 42].into_iter().enumerate() {
+            let unit = s.next_datagram(Direction::A, &headed_frame(sn), i + 1);
+            assert!(unit.iter().all(|f| f.unit_read_whole), "{unit:?}");
+        }
+        assert_eq!(
+            s.sn_steps(Direction::A),
+            SnSteps {
+                follows: 2,
+                breaks: 0
+            }
+        );
+        assert_eq!(s.context().batch_header(Direction::B), BatchHeader::Absent);
+    }
+
+    /// A session with no header is never read as headed: a unit that reads
+    /// whole as it stands is never asked what it reads as behind a header.
+    #[test]
+    fn a_plain_session_joined_mid_stream_infers_no_header() {
+        let mut s = PassiveSession::new();
+        for sn in 0..4u64 {
+            s.next_datagram(Direction::A, &frame_wire(sn, &oam_record(sn)), sn as usize);
+        }
+        assert_eq!(s.context().batch_header(Direction::A), BatchHeader::Absent);
+    }
+
+    /// THE INFERENCE FOLLOWS THE BYTES BOTH WAYS. A headed unit makes the
+    /// direction headed, and a plain unit after it that reads whole only as it
+    /// stands makes it plain again: noise ahead of a stream's first true
+    /// boundary can read whole behind a header once, and a reading that stuck
+    /// would refuse every real unit behind it.
+    #[test]
+    fn an_inferred_header_gives_way_to_a_unit_that_reads_whole_without_one() {
+        let mut s = PassiveSession::new();
+        s.next_datagram(Direction::A, &headed_frame(1), 0);
+        assert_eq!(
+            s.context().batch_header(Direction::A),
+            BatchHeader::Inferred
+        );
+        let plain = s.next_datagram(Direction::A, &frame_wire(2, &oam_record(2)), 1);
+        assert_eq!(s.context().batch_header(Direction::A), BatchHeader::Absent);
+        assert!(plain.iter().all(|f| f.unit_read_whole), "{plain:?}");
+    }
+
+    /// Where the Init pair WAS seen, the negotiation is the answer and the
+    /// bytes are not asked: a session that did not negotiate compression reads
+    /// a header byte as the message it is not, as its peer would.
+    #[test]
+    fn a_negotiated_session_is_not_read_headed_by_inference() {
+        let mut s = established(vec![]);
+        let unit = s.next_datagram(Direction::A, &headed_frame(7), 0);
+        assert_eq!(s.context().batch_header(Direction::A), BatchHeader::Absent);
+        assert!(!unit.iter().all(|f| f.unit_read_whole), "{unit:?}");
+    }
+
+    /// The same on a stream, joined at a unit boundary. A stream's boundary is
+    /// judged by its first byte before the unit is read, and with nothing
+    /// negotiated that byte is expected to be a message header: the header
+    /// byte desynchronises the direction once, and the scan finds the framing
+    /// again on a chain of boundaries that all open with a header byte, which
+    /// makes the direction headed. Every unit from the resumed offset on reads
+    /// whole, with its SN steps.
+    #[test]
+    fn a_compressed_stream_joined_mid_stream_infers_its_batch_header() {
+        let mut s = PassiveSession::new();
+        let units = 2 * DEFAULT_RESYNC_DEPTH as u64;
+        for sn in 10..10 + units {
+            s.push(Direction::B, &framed(&headed_frame(sn), 2));
+        }
+        let mut read = 0u64;
+        loop {
+            match s.next_frame(Direction::B) {
+                Ok(frame) => {
+                    assert!(frame.frame.is_ok() && frame.unit_read_whole, "{frame:?}");
+                    read += 1;
+                }
+                Err(PassiveStall::Desynchronised { .. }) => {}
+                Err(PassiveStall::NeedMoreBytes) => break,
+            }
+        }
+        assert_eq!(read, units, "the scan resumed at the first boundary");
+        assert_eq!(s.resync_accounting(Direction::B).recoveries, 1);
+        assert_eq!(
+            s.context().batch_header(Direction::B),
+            BatchHeader::Inferred
+        );
+        assert_eq!(s.sn_steps(Direction::B).follows, units - 1);
+    }
+
+    /// A capture that begins INSIDE a headed unit: the stream loses its framing
+    /// on the tail it cannot frame, finds it again on boundaries that open with
+    /// the header byte, and reads the units behind them headed.
+    #[test]
+    fn a_compressed_stream_joined_inside_a_unit_resynchronises_on_headed_boundaries() {
+        let mut s = PassiveSession::new();
+        let mut wire = framed(&headed_frame(20), 2);
+        wire.drain(..3);
+        for sn in 21..21 + 2 * DEFAULT_RESYNC_DEPTH as u64 {
+            wire.extend_from_slice(&framed(&headed_frame(sn), 2));
+        }
+        s.push(Direction::A, &wire);
+        let mut read = 0;
+        loop {
+            match s.next_frame(Direction::A) {
+                Ok(frame) => {
+                    assert!(frame.unit_read_whole, "{frame:?}");
+                    read += 1;
+                }
+                Err(PassiveStall::Desynchronised { .. }) => {}
+                Err(PassiveStall::NeedMoreBytes) => break,
+            }
+        }
+        assert!(read > 0, "the framing was found again");
+        assert_eq!(s.resync_accounting(Direction::A).recoveries, 1);
+        assert_eq!(
+            s.context().batch_header(Direction::A),
+            BatchHeader::Inferred
         );
     }
 
