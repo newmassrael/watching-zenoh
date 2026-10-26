@@ -292098,6 +292098,42 @@
         "Open-debt item 925 and the sequence-number resolution policy remain the next items of this track."
       ]
     },
+    "Round 3748": {
+      "decision_summary": "Two pieces of the parity loop's kit work. The kit lane's lock lived in each session's lane home, so two sessions running the lane from homes of their own could both touch the one kit; the lock is now one file on the bench host outside every home, and a refusal names the run that holds it. The fixed client's kit stack peak is re-read on the tree with log_args never inlined: 6,336 bytes in three of three runs against a row of 6,000, so the row moves to the reading. Its static chain is left at the hosted image's 7,280, which the stack gate's own comment says the row follows; the bench host reads 7,152, inside the tolerance. The rise of the peak since 2026-10-23 is not bisected.",
+      "changes_bullets": [
+        "scripts/kit-lane.sh: KIT_LANE_LOCK (default under the bench host's state directory) replaces the per-home kit.lock; take_kit takes it for run and compare and writes the holder line.",
+        "deploy/resource_budget.json: zephyr-client-fixed peak_stack_bytes 6,000 to 6,336, with the reading in its measured text."
+      ],
+      "verification_bullets": [
+        "On the bench host at 65d07530d plus the lock commit: zephyr-client-fixed built (text 176,988, worst chain 7,152 against the committed 7,280, stack gate OK), then a run while another process held the new lock was refused naming the lock, then three runs: kit reset, READY, the M7_0 region written and read back, 2,000 GETs of each document, no FAIL line, stack peak 6,336 each.",
+        "resource_budget_gate.py --check and --selftest, stack_frame_gate.py --selftest, shellcheck of kit-lane.sh."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "The fixed client's kit stack peak rose from 6,000 (2026-10-23) to 6,480 before log_args and 6,336 after; the commits between are not bisected for the run peak, only for the static chain.",
+        "Step L continues: the reply's 1,104-byte Response builder (an encode from borrowed parts, asked of SCE) and the handshake dispatch's copies of a transport message.",
+        "core.hooksPath names the main checkout's hooks, so pre-push gate 0p binds every push once that checkout reaches round 3746."
+      ],
+      "publishable_decision_summary": "Two pieces of the parity loop's kit work. The kit lane's lock lived in each session's lane home, so two sessions running the lane from homes of their own could both touch the one kit; the lock is now one file on the bench host outside every home, and a refusal names the run that holds it. The fixed client's kit stack peak is re-read on the tree with log_args never inlined: 6,336 bytes in three of three runs against a row of 6,000, so the row moves to the reading. Its static chain is left at the hosted image's 7,280, which the stack gate's own comment says the row follows; the bench host reads 7,152, inside the tolerance. The rise of the peak since 2026-10-23 is not bisected.",
+      "publishable_changes_bullets": [
+        "scripts/kit-lane.sh: KIT_LANE_LOCK (default under the bench host's state directory) replaces the per-home kit.lock; take_kit takes it for run and compare and writes the holder line.",
+        "deploy/resource_budget.json: zephyr-client-fixed peak_stack_bytes 6,000 to 6,336, with the reading in its measured text."
+      ],
+      "publishable_verification_bullets": [
+        "On the bench host at 65d07530d plus the lock commit: zephyr-client-fixed built (text 176,988, worst chain 7,152 against the committed 7,280, stack gate OK), then a run while another process held the new lock was refused naming the lock, then three runs: kit reset, READY, the M7_0 region written and read back, 2,000 GETs of each document, no FAIL line, stack peak 6,336 each.",
+        "resource_budget_gate.py --check and --selftest, stack_frame_gate.py --selftest, shellcheck of kit-lane.sh."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The fixed client's kit stack peak rose from 6,000 (2026-10-23) to 6,480 before log_args and 6,336 after; the commits between are not bisected for the run peak, only for the static chain.",
+        "Step L continues: the reply's 1,104-byte Response builder (an encode from borrowed parts, asked of SCE) and the handshake dispatch's copies of a transport message.",
+        "core.hooksPath names the main checkout's hooks, so pre-push gate 0p binds every push once that checkout reaches round 3746."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
