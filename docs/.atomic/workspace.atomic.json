@@ -290880,6 +290880,46 @@
         "Lower bounds of the SN resolution and the batch size, to be proposed to the analyzer design as a shape of their own."
       ]
     },
+    "Round 3718": {
+      "decision_summary": "Step 5a of the advanced plane: the zenoh-c ABI's advanced subscriber is the neutral EngineSubscriber on the session's engine, as the pico ABI's is, and no longer a subscriber of the face registry. ze_declare_advanced_subscriber and its background form share one declare that builds the subscriber and the C handle's state; the background form runs it with EngineSubscriber::background, where it had leaked a state to keep its subscription. ze_advanced_subscriber_id reports the identity the detection token names, the subscriber's own, where it had derived an eid from the handle's address. The registry's subscriber (SharedSession::declare_advanced_subscriber and its per-face replay) is now used by nobody but its own tests and is not yet deleted: the deletion waits for the hosted twice-and-diff legs against the real zenoh-c to read green, and for the publisher's move.",
+      "changes_bullets": [
+        "crates/wz-capi-c/src/advanced.rs: declare_subscriber_state (the one declare of the owned and the background forms), AdvSubState holding an EngineSubscriber, the id and the detect-publishers key read from the subscriber, module notes.",
+        "crates/wz-capi-c/Cargo.toml: advanced names the neutral host (wz-ext-pubsub engine-host, wz-capi-port) and the core's query switch, without the C query surface; the two dependencies are optional."
+      ],
+      "verification_bullets": [
+        "clippy with -D warnings, all targets, wz-capi-c with its default features (which include advanced), before and after the rebase over the open-plan change; wz-capi-c lib tests pass, among them the miss-listener set test, now over an EngineSubscriber on a session with no face.",
+        "The hook's gate array plus the surface gates: 118 run, 0 failed; the push went through the hooks (the first was refused because the remote moved during the hook, the second landed).",
+        "Not done: the twice-and-diff legs of the zenoh-c ABI against the real libzenohc (zenoh_c_ext_families_twice_and_diff and the advanced legs of zenoh_c_shm_and_advanced_on_wz_capi_c) need a provisioned zenoh-c and are read from the hosted run; no hosted run of this round has finished (each was cancelled by a later push)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "carry_forward_bullets": [
+        "Read the first finished hosted run that holds this round: the zenoh-c twice-and-diff legs (Layer C1cc / C1ce / Z) for the advanced subscriber, C1co, C1aq to C1av, C1cs, C1cn. Hosted runs are being cancelled by each later push, so read the first one that completes and holds 7ab59ce54.",
+        "Step 5b: the zenoh-c ABI's advanced publisher on the neutral composite over a plane on the port (as pico's PicoPlane is), then delete the registry's advanced publisher and subscriber code in wz-capi-core after the legs read green.",
+        "End-to-end witnesses on the cooperative engine of the heartbeat beacon, the periodic re-ask and the late-publisher detection.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine; the listening role."
+      ],
+      "publishable_decision_summary": "Step 5a of the advanced plane: the zenoh-c ABI's advanced subscriber is the neutral EngineSubscriber on the session's engine, as the pico ABI's is, and no longer a subscriber of the face registry. ze_declare_advanced_subscriber and its background form share one declare that builds the subscriber and the C handle's state; the background form runs it with EngineSubscriber::background, where it had leaked a state to keep its subscription. ze_advanced_subscriber_id reports the identity the detection token names, the subscriber's own, where it had derived an eid from the handle's address. The registry's subscriber (SharedSession::declare_advanced_subscriber and its per-face replay) is now used by nobody but its own tests and is not yet deleted: the deletion waits for the hosted twice-and-diff legs against the real zenoh-c to read green, and for the publisher's move.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-c/src/advanced.rs: declare_subscriber_state (the one declare of the owned and the background forms), AdvSubState holding an EngineSubscriber, the id and the detect-publishers key read from the subscriber, module notes.",
+        "crates/wz-capi-c/Cargo.toml: advanced names the neutral host (wz-ext-pubsub engine-host, wz-capi-port) and the core's query switch, without the C query surface; the two dependencies are optional."
+      ],
+      "publishable_verification_bullets": [
+        "clippy with -D warnings, all targets, wz-capi-c with its default features (which include advanced), before and after the rebase over the open-plan change; wz-capi-c lib tests pass, among them the miss-listener set test, now over an EngineSubscriber on a session with no face.",
+        "The hook's gate array plus the surface gates: 118 run, 0 failed; the push went through the hooks (the first was refused because the remote moved during the hook, the second landed).",
+        "Not done: the twice-and-diff legs of the zenoh-c ABI against the real libzenohc (zenoh_c_ext_families_twice_and_diff and the advanced legs of zenoh_c_shm_and_advanced_on_wz_capi_c) need a provisioned zenoh-c and are read from the hosted run; no hosted run of this round has finished (each was cancelled by a later push)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the first finished hosted run that holds this round: the zenoh-c twice-and-diff legs (Layer C1cc / C1ce / Z) for the advanced subscriber, C1co, C1aq to C1av, C1cs, C1cn. Hosted runs are being cancelled by each later push, so read the first one that completes and holds 7ab59ce54.",
+        "Step 5b: the zenoh-c ABI's advanced publisher on the neutral composite over a plane on the port (as pico's PicoPlane is), then delete the registry's advanced publisher and subscriber code in wz-capi-core after the legs read green.",
+        "End-to-end witnesses on the cooperative engine of the heartbeat beacon, the periodic re-ask and the late-publisher detection.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine; the listening role."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
