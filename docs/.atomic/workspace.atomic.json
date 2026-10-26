@@ -289810,6 +289810,54 @@
         "The word moves as evidence accumulates, so a kept fold whose selector reads `zenoh` begins again on each move; the port is not evidence, and a posterior beside the verdict needs per-port base rates from the corpus."
       ]
     },
+    "Round 3694": {
+      "decision_summary": "Phase 3a of the closed key set (docs/closed-key-set.md): the key-set policy and the refusal of a peer's data key. The policy is open (default, upstream's behaviour) or closed, declared in the build configuration with a generated Kconfig and a typed field. A subscriber table holds a KeyGate, which starts as the build's policy and which an image replaces with the gate over its own table, and applies it in the two functions every delivery goes through, to a peer's message: a key outside the set reaches no subscriber and is counted by reason. A local publish is not gated. A closed build given no table takes no key. A data key and a selector differ: a selector (a query's, an interest's, a peer's declared pattern) cannot be looked up and must not be refused, since that breaks what every zenoh node answers; the matcher answers it over the image's own entities. D4 binds data keys only. Not done: no image supplies a table; a reply's key is not gated; nothing is measured.",
+      "changes_bullets": [
+        "deploy/wz-config.toml: the key-set policy (open, closed; default open); deploy/Kconfig.policies and crates/wz-session-core/src/policy_generated.rs regenerated, which add SessionPolicy::key_set and the KeySet type.",
+        "crates/wz-session-core src/key_gate.rs: KeyGate::of_build over the policy, and a gate over an empty table for a closed build given none; two more unit tests.",
+        "src/pubsub.rs: SubscriberTable holds a KeyGate (set_key_gate, key_gate_refused) and applies it to a peer's message in fire_to_subscribers and fire_plain_to_subscribers.",
+        "tests/key_catalogue_model.rs: an open table delivers a key a pattern covers; a closed one drops and counts it, delivers a declared key to its selection, and does not gate a local publish.",
+        "docs/closed-key-set.md: data keys against selectors, phase 3 split into 3a and 3b, and phase 3a as built."
+      ],
+      "verification_bullets": [
+        "On the shared build machine: the seven model tests pass; all 739 unit tests of wz-session-core pass on an open build; the gate and policy tests pass on a build whose environment states closed; clippy -D warnings over all targets passes for wz-session-core (default features and none), wz-session-mcu and wz-runtime-tokio.",
+        "wz_config.py --check, wz_node.py --selftest and wz_package.py --selftest pass; --check-presets skips, kconfiglib is absent.",
+        "Not run: the hosted run; any image with a table; the selector side; a reply's key; any measurement of time or allocation (the added work on an open build is one flag test and one Option test per peer message)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "Phase 3b: look a peer's key up once and deliver by the selection of that key; subscriber rows hold the entity they were declared as, so register_sink changes; first measurement against open with the match memo, on one machine and condition.",
+        "A node's generated declared.rs does not carry its table yet, so no image calls set_key_gate with one; the slot node and the cooperative engine (sessions ef and 11) take that when they adopt it.",
+        "A reply's key is not gated, and a selector is answered as before: a query's selector against a closed image's queryables is the next piece of the receive side.",
+        "Owner decisions still open: undeclared key under a declared wildcard (the note refuses it, for data keys), one declaration or two with access control, publisher wildcards, sender-fixed resource ids.",
+        "Read the hosted run of this push per job, compared by head sha."
+      ],
+      "publishable_decision_summary": "Phase 3a of the closed key set (docs/closed-key-set.md): the key-set policy and the refusal of a peer's data key. The policy is open (default, upstream's behaviour) or closed, declared in the build configuration with a generated Kconfig and a typed field. A subscriber table holds a KeyGate, which starts as the build's policy and which an image replaces with the gate over its own table, and applies it in the two functions every delivery goes through, to a peer's message: a key outside the set reaches no subscriber and is counted by reason. A local publish is not gated. A closed build given no table takes no key. A data key and a selector differ: a selector (a query's, an interest's, a peer's declared pattern) cannot be looked up and must not be refused, since that breaks what every zenoh node answers; the matcher answers it over the image's own entities. D4 binds data keys only. Not done: no image supplies a table; a reply's key is not gated; nothing is measured.",
+      "publishable_changes_bullets": [
+        "deploy/wz-config.toml: the key-set policy (open, closed; default open); deploy/Kconfig.policies and crates/wz-session-core/src/policy_generated.rs regenerated, which add SessionPolicy::key_set and the KeySet type.",
+        "crates/wz-session-core src/key_gate.rs: KeyGate::of_build over the policy, and a gate over an empty table for a closed build given none; two more unit tests.",
+        "src/pubsub.rs: SubscriberTable holds a KeyGate (set_key_gate, key_gate_refused) and applies it to a peer's message in fire_to_subscribers and fire_plain_to_subscribers.",
+        "tests/key_catalogue_model.rs: an open table delivers a key a pattern covers; a closed one drops and counts it, delivers a declared key to its selection, and does not gate a local publish.",
+        "docs/closed-key-set.md: data keys against selectors, phase 3 split into 3a and 3b, and phase 3a as built."
+      ],
+      "publishable_verification_bullets": [
+        "On the shared build machine: the seven model tests pass; all 739 unit tests of wz-session-core pass on an open build; the gate and policy tests pass on a build whose environment states closed; clippy -D warnings over all targets passes for wz-session-core (default features and none), wz-session-mcu and wz-runtime-tokio.",
+        "wz_config.py --check, wz_node.py --selftest and wz_package.py --selftest pass; --check-presets skips, kconfiglib is absent.",
+        "Not run: the hosted run; any image with a table; the selector side; a reply's key; any measurement of time or allocation (the added work on an open build is one flag test and one Option test per peer message)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Phase 3b: look a peer's key up once and deliver by the selection of that key; subscriber rows hold the entity they were declared as, so register_sink changes; first measurement against open with the match memo, on one machine and condition.",
+        "A node's generated declared.rs does not carry its table yet, so no image calls set_key_gate with one; the slot node and the cooperative engine (sessions ef and 11) take that when they adopt it.",
+        "A reply's key is not gated, and a selector is answered as before: a query's selector against a closed image's queryables is the next piece of the receive side.",
+        "Owner decisions still open: undeclared key under a declared wildcard (the note refuses it, for data keys), one declaration or two with access control, publisher wildcards, sender-fixed resource ids.",
+        "Read the hosted run of this push per job, compared by head sha."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
