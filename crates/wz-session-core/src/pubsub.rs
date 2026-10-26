@@ -308,8 +308,7 @@ pub struct SubscriberTable<C: SampleSink, P: Storage = Profile> {
     /// again is delivered without matching it against every subscription's pattern.
     /// Valid for one `epoch`: a subscription registered or retired moves it,
     /// and an entry from an earlier one is not read. See `MatchMemo`.
-    #[cfg(feature = "alloc")]
-    memo: MatchMemo,
+    memo: MatchMemo<P>,
     /// Which keys a message from a peer may be on: open takes every key, closed takes the keys of
     /// the image's key set and drops the rest, counted by reason. Starts as the build's
     /// `key-set` policy ([`KeyGate::of_build`]); see [`Self::set_key_gate`].
@@ -740,7 +739,6 @@ impl<C: SampleSink, P: Storage> Default for SubscriberTable<C, P> {
             epoch: 0,
             #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
             local_live: alloc::sync::Arc::new(core::sync::atomic::AtomicUsize::new(0)),
-            #[cfg(feature = "alloc")]
             memo: MatchMemo::new(),
             key_gate: KeyGate::of_build(),
             #[cfg(feature = "transport-shm")]
@@ -795,27 +793,38 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
 
     /// Deliver a message that was read in place, whose key may lie in the peer's own table so that
     /// this table is borrowed apart from it ([`SubscriberPeer`]): the gate, then the selection of a
-    /// key of a closed set or the match of every subscription, and no memory of the key. The
-    /// delivery of the in-place receive path, which a closed image of the fixed profile takes.
+    /// key of a closed set or the match of every subscription (through the match cache, which a
+    /// fixed table holds only where `MATCH_MEMO_FIXED_SLOTS` asks for it). The delivery of the
+    /// in-place receive path, which a closed image of the fixed profile takes.
     #[cfg(all(
         feature = "storage-profile",
         any(feature = "pubsub-put", feature = "pubsub-delete")
     ))]
     pub(super) fn fire_lent(&mut self, view: &dyn SampleView, class: Option<ClassId>) -> usize {
         match self.admission(view.keyexpr(), true, class) {
-            Admission::Refused => 0,
-            Admission::Numbered(key) => match self.key_gate.catalogue() {
-                Some(catalogue) => fire_by_selection(
-                    &mut self.subscribers,
-                    catalogue,
-                    key,
-                    view.keyexpr(),
-                    |sink| sink.deliver(view),
-                ),
-                None => fire_into(&mut self.subscribers, view, true),
-            },
-            Admission::Matched => fire_into(&mut self.subscribers, view, true),
+            Admission::Refused => return 0,
+            Admission::Numbered(key) => {
+                if let Some(catalogue) = self.key_gate.catalogue() {
+                    return fire_by_selection(
+                        &mut self.subscribers,
+                        catalogue,
+                        key,
+                        view.keyexpr(),
+                        |sink| sink.deliver(view),
+                    );
+                }
+            }
+            Admission::Matched => {}
         }
+        fire_into_memoized(
+            &mut self.subscribers,
+            &mut self.memo,
+            self.epoch,
+            view.keyexpr(),
+            true,
+            false,
+            |sink| sink.deliver(view),
+        )
     }
 
     /// What the in-place receive path's Puts cost in owned fallbacks since this
@@ -2117,22 +2126,15 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
             }
             Admission::Matched => {}
         }
-        #[cfg(feature = "alloc")]
-        {
-            fire_into_memoized(
-                &mut self.subscribers,
-                &mut self.memo,
-                self.epoch,
-                view.keyexpr(),
-                is_remote,
-                false,
-                |sink| sink.deliver(view),
-            )
-        }
-        #[cfg(not(feature = "alloc"))]
-        {
-            fire_into(&mut self.subscribers, view, is_remote)
-        }
+        fire_into_memoized(
+            &mut self.subscribers,
+            &mut self.memo,
+            self.epoch,
+            view.keyexpr(),
+            is_remote,
+            false,
+            |sink| sink.deliver(view),
+        )
     }
 
     /// [`Self::fire_to_subscribers`] for a plain `Put` of a frame
@@ -2216,22 +2218,31 @@ fn fire_by_selection<C: SampleSink, P: Storage>(
     fired
 }
 
-/// How many distinct keys `MatchMemo` remembers at once: the limit `MATCH_MEMO_SLOTS`. Zero
-/// leaves the memory out, and every message is matched afresh.
-#[cfg(feature = "alloc")]
-const MEMO_SLOTS: usize = caps::MATCH_MEMO_SLOTS;
+/// How many distinct keys a `MatchMemo` of policy `P` remembers at once. A table that grows
+/// with the allocator states it as `MATCH_MEMO_SLOTS`, its slots filling as keys arrive; a table
+/// of fixed size holds every slot in RAM from the start and so states its own count,
+/// `MATCH_MEMO_FIXED_SLOTS`, which is `0` unless the image asks for the memory. Zero leaves the
+/// memory out, and every message is matched afresh.
+const fn memo_slots<P: Storage>() -> usize {
+    if P::ENFORCES_CAPACITY {
+        caps::MATCH_MEMO_FIXED_SLOTS
+    } else {
+        caps::MATCH_MEMO_SLOTS
+    }
+}
 
 /// One remembered key: which subscribers it matched, under which table state.
-#[cfg(feature = "alloc")]
-struct MemoSlot {
+struct MemoSlot<P: Storage> {
     /// The table epoch the answer was worked out at.
     epoch: u64,
     /// The locality the answer was worked out for: wire-arrived and local-origin
     /// deliveries filter on different sides of a subscriber's `allowed_origin`.
     remote: bool,
-    key: alloc::string::String,
+    /// The key. Where the policy fixes capacity it holds `MATCH_MEMO_KEY_BYTES`, and a longer key
+    /// is not remembered (it is matched each time it arrives).
+    key: BoundedString<{ caps::MATCH_MEMO_KEY_BYTES }, P>,
     /// The positions in the subscriber table, ascending, of the subscribers that matched.
-    hits: alloc::vec::Vec<u16>,
+    hits: BoundedVec<u16, { caps::MAX_SUBSCRIPTIONS }, P>,
 }
 
 /// A small direct-mapped memory of which subscribers a key matched, so that the key arriving
@@ -2244,9 +2255,12 @@ struct MemoSlot {
 /// that version, and it moves on every registration and every retirement, the only two
 /// writers of the subscriber list. An entry carries the epoch it was made at and is read only
 /// at that one, so a subscription added or retired between two messages is seen by the second.
-#[cfg(feature = "alloc")]
-struct MatchMemo {
-    slots: [Option<MemoSlot>; MEMO_SLOTS],
+///
+/// Written once for both storage policies: the slots are a [`BoundedVec`], so a heap table fills
+/// `MATCH_MEMO_SLOTS` of them and a fixed table holds `MATCH_MEMO_FIXED_SLOTS` inline, and a
+/// fixed table with none holds nothing at all.
+struct MatchMemo<P: Storage> {
+    slots: BoundedVec<Option<MemoSlot<P>>, { caps::MATCH_MEMO_FIXED_SLOTS }, P>,
     /// How many times a slot was written. A repeated key may be answered from the slot the key
     /// before it was, but only while no slot has been written since.
     writes: u64,
@@ -2255,11 +2269,15 @@ struct MatchMemo {
     last: Option<(usize, u64)>,
 }
 
-#[cfg(feature = "alloc")]
-impl MatchMemo {
+impl<P: Storage> MatchMemo<P> {
     fn new() -> Self {
+        let mut slots = BoundedVec::default();
+        for _ in 0..memo_slots::<P>() {
+            // A fixed table's capacity is its slot count, so this never refuses.
+            let _ = slots.push(None);
+        }
         Self {
-            slots: core::array::from_fn(|_| None),
+            slots,
             writes: 0,
             last: None,
         }
@@ -2275,15 +2293,17 @@ impl MatchMemo {
         }
         // `max(1)` only keeps the remainder defined where there are no slots: nothing reaches
         // this function then (see `fire_into_memoized`).
-        (hash ^ (hash >> 15)) as usize % MEMO_SLOTS.max(1)
+        (hash ^ (hash >> 15)) as usize % memo_slots::<P>().max(1)
     }
 }
 
-/// `fire_into` with the memory: a key remembered at this epoch is delivered to the
-/// subscribers it matched without being matched again; any other key is matched as
-/// `fire_into` matches it and what it matched is remembered.
+/// Deliver a key to the subscribers it matches, over the subscriber table alone so that a caller
+/// holding other fields of the registry borrowed (the in-place delivery, whose keyexpr may be the
+/// peer table's own literal) can fire with them still borrowed. A key remembered at this epoch
+/// is delivered to the subscribers it matched without being matched again; any other key is
+/// matched by `scan_subscribers`, and what it matched is remembered where a slot can hold it.
 ///
-/// The subscribers fired and the order they fire in are `fire_into`'s: the matched positions
+/// The subscribers fired and the order they fire in are the scan's: the matched positions
 /// are kept ascending, which is the table's order.
 ///
 /// `repeats_previous` is the caller's word that `key` is the key of the delivery just before this
@@ -2291,18 +2311,17 @@ impl MatchMemo {
 /// from a slot and no slot has been written nor the table changed since, this one is answered
 /// from the same slot without hashing the key or comparing it again; anything else is looked up
 /// as usual.
-#[cfg(feature = "alloc")]
 fn fire_into_memoized<C: SampleSink, P: Storage>(
     subscribers: &mut BoundedVec<Subscriber<C, P>, { caps::MAX_SUBSCRIPTIONS }, P>,
-    memo: &mut MatchMemo,
+    memo: &mut MatchMemo<P>,
     epoch: u64,
     key: &str,
     is_remote: bool,
     repeats_previous: bool,
     mut deliver: impl FnMut(&mut C),
 ) -> usize {
-    // No slots: the memory is out, and the message is matched as `fire_into` matches it.
-    if MEMO_SLOTS == 0 {
+    // No slots: the memory is out, and the message is matched by the scan alone.
+    if memo_slots::<P>() == 0 {
         return scan_subscribers(subscribers, key, is_remote, deliver, |_| {}).unwrap_or(0);
     }
     if repeats_previous {
@@ -2310,7 +2329,7 @@ fn fire_into_memoized<C: SampleSink, P: Storage>(
             if writes == memo.writes {
                 if let Some(slot) = &memo.slots[at] {
                     if slot.epoch == epoch && slot.remote == is_remote {
-                        for position in &slot.hits {
+                        for position in slot.hits.iter() {
                             if let Some(subscriber) = subscribers.get_mut(usize::from(*position)) {
                                 deliver(&mut subscriber.sink);
                             }
@@ -2322,11 +2341,11 @@ fn fire_into_memoized<C: SampleSink, P: Storage>(
         }
     }
     memo.last = None;
-    let at = MatchMemo::slot_of(key);
+    let at = MatchMemo::<P>::slot_of(key);
     if let Some(slot) = &memo.slots[at] {
         if slot.epoch == epoch && slot.remote == is_remote && slot.key == key {
             memo.last = Some((at, memo.writes));
-            for position in &slot.hits {
+            for position in slot.hits.iter() {
                 if let Some(subscriber) = subscribers.get_mut(usize::from(*position)) {
                     deliver(&mut subscriber.sink);
                 }
@@ -2334,48 +2353,31 @@ fn fire_into_memoized<C: SampleSink, P: Storage>(
             return slot.hits.len();
         }
     }
-    // Not remembered at this epoch: match it as `fire_into` does, noting each hit. A key
+    // Not remembered at this epoch: match it with the scan, noting each hit. A key
     // that cannot be matched at all (deeper than the bound) delivers to nobody and is not
     // remembered.
-    let mut hits: alloc::vec::Vec<u16> = alloc::vec::Vec::new();
+    let mut hits: BoundedVec<u16, { caps::MAX_SUBSCRIPTIONS }, P> = BoundedVec::default();
     let Some(fired) = scan_subscribers(subscribers, key, is_remote, deliver, |position| {
-        hits.push(position as u16)
+        // At most one position per subscriber, and the table holds `MAX_SUBSCRIPTIONS`.
+        let _ = hits.push(position as u16);
     }) else {
         return 0;
     };
+    // A key longer than a fixed slot holds is delivered as matched and not remembered; the slot
+    // it would have taken keeps what it had.
+    let mut text: BoundedString<{ caps::MATCH_MEMO_KEY_BYTES }, P> = BoundedString::default();
+    if text.push_str(key).is_err() {
+        return fired;
+    }
     memo.slots[at] = Some(MemoSlot {
         epoch,
         remote: is_remote,
-        key: alloc::string::String::from(key),
+        key: text,
         hits,
     });
     memo.writes += 1;
     memo.last = Some((at, memo.writes));
     fired
-}
-
-/// [`SubscriberRegistry::fire_to_subscribers`] over the subscriber table alone,
-/// so a caller that holds other fields of the registry borrowed (the in-place
-/// delivery, whose keyexpr may be the peer table's own literal) can fire with
-/// them still borrowed. The one matcher both reach.
-///
-/// With an allocator the copying receive reaches it through `fire_into_memoized`, which
-/// remembers what a key matched; the in-place receive and every build without an allocator
-/// reach it directly, and a build that has neither caller leaves it unused.
-#[cfg_attr(feature = "alloc", allow(dead_code))]
-fn fire_into<C: SampleSink, P: Storage>(
-    subscribers: &mut BoundedVec<Subscriber<C, P>, { caps::MAX_SUBSCRIPTIONS }, P>,
-    view: &dyn SampleView,
-    is_remote: bool,
-) -> usize {
-    scan_subscribers(
-        subscribers,
-        view.keyexpr(),
-        is_remote,
-        |sink| sink.deliver(view),
-        |_| {},
-    )
-    .unwrap_or(0)
 }
 
 /// The one matcher: every subscriber whose locality admits the origin and whose pattern
@@ -7162,6 +7164,65 @@ mod tests {
             if caps::MATCH_MEMO_SLOTS == 0 { 5 } else { 1 },
             "a registration is seen by the next message, then the key is remembered again"
         );
+    }
+
+    /// A table of the fixed storage policy holds its cache in RAM and so reads its own count,
+    /// `MATCH_MEMO_FIXED_SLOTS` (0 unless the image asks): with slots a repeated key is matched
+    /// once and a registration is seen by the next message, with none every message is matched,
+    /// and either way a key longer than a slot holds is matched every time it arrives.
+    #[test]
+    fn a_fixed_table_remembers_a_key_where_its_own_slots_ask_and_never_one_too_long() {
+        use crate::bounded::Static;
+        use crate::sink::BorrowedSample;
+
+        struct Noop;
+        impl SampleSink for Noop {
+            fn deliver(&mut self, _sample: &dyn SampleView) {}
+        }
+
+        let scans = || MATCH_SCANS.with(|count| count.get());
+        let key = |keyexpr: &'static str| BorrowedSample {
+            keyexpr,
+            payload: b"x",
+            kind: SampleKind::Put,
+            reliability: Reliability::Reliable,
+        };
+        let remembered = if caps::MATCH_MEMO_FIXED_SLOTS == 0 {
+            5
+        } else {
+            1
+        };
+        let mut reg: SubscriberRegistry<Noop, Static> = SubscriberRegistry::default();
+        reg.register_sink("a/*", crate::locality::Locality::Any, Noop)
+            .expect("one subscription fits");
+
+        let start = scans();
+        for _ in 0..5 {
+            assert_eq!(reg.dispatch_borrowed(&key("a/x"), true), 1);
+        }
+        assert_eq!(scans() - start, remembered, "five messages on one key");
+
+        reg.register_sink("a/x", crate::locality::Locality::Any, Noop)
+            .expect("two subscriptions fit");
+        let start = scans();
+        for _ in 0..5 {
+            assert_eq!(reg.dispatch_borrowed(&key("a/x"), true), 2);
+        }
+        assert_eq!(
+            scans() - start,
+            remembered,
+            "a registration is seen by the next message"
+        );
+
+        // A key longer than `MATCH_MEMO_KEY_BYTES` is delivered, and matched each time.
+        let long: &'static str = std::boxed::Box::leak(
+            std::format!("a/{}", "k".repeat(caps::MATCH_MEMO_KEY_BYTES)).into_boxed_str(),
+        );
+        let start = scans();
+        for _ in 0..5 {
+            assert_eq!(reg.dispatch_borrowed(&key(long), true), 1);
+        }
+        assert_eq!(scans() - start, 5, "a key too long for a slot");
     }
 }
 

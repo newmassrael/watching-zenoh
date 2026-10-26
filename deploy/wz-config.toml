@@ -1266,7 +1266,7 @@ original = "zenoh-pico"
 switch = "Z_FEATURE_RX_CACHE"
 class = "always"
 anchor = "crates/wz-session-core/src/pubsub.rs"
-note = "a receive-path memo of which subscriptions a key matched (`MatchMemo`), on by default where upstream's default is off; behaviour-neutral. The limit MATCH_MEMO_SLOTS sizes it, and 0 leaves it out"
+note = "a receive-path memo of which subscriptions a key matched (`MatchMemo`), on by default where upstream's default is off; behaviour-neutral. The limit MATCH_MEMO_SLOTS sizes it (MATCH_MEMO_FIXED_SLOTS for a build of fixed tables), and 0 leaves it out"
 
 [[upstream_switch]]
 original = "zenoh-pico"
@@ -1455,7 +1455,34 @@ direct-mapped table, so a key that maps to a used slot replaces what was
 there. More slots keep more keys at the cost of memory. 0 leaves the cache
 out: every message is matched against the subscriptions, which reaches the
 same subscribers in the same order, as zenoh-pico does where its
-Z_FEATURE_RX_CACHE is off (its default).
+Z_FEATURE_RX_CACHE is off (its default). A build whose tables are fixed in
+size reads MATCH_MEMO_FIXED_SLOTS instead: its cache is paid for in RAM
+whether used or not, a heap's only as it fills.
+'''
+
+[[limit]]
+id = "MATCH_MEMO_FIXED_SLOTS"
+kconfig = "WZ_LIMIT_MATCH_MEMO_FIXED_SLOTS"
+default = 0
+help = '''
+MATCH_MEMO_SLOTS for a build whose tables are fixed in size (no allocator,
+or the fixed storage policy): how many distinct keys the receive match cache
+remembers, each held in RAM for good, a key's text of up to
+MATCH_MEMO_KEY_BYTES bytes plus the subscriptions it matched. 0 (the
+default) leaves the cache out, so a build that does not ask for it pays
+nothing; every message is then matched against the subscriptions, which
+reaches the same subscribers in the same order. A closed key set needs no
+cache for the keys of its table.
+'''
+
+[[limit]]
+id = "MATCH_MEMO_KEY_BYTES"
+kconfig = "WZ_LIMIT_MATCH_MEMO_KEY_BYTES"
+default = 64
+help = '''
+The longest key, in bytes, the receive match cache of a fixed-size build
+remembers. A longer key is matched every time it arrives, never cut short.
+Read only where MATCH_MEMO_FIXED_SLOTS is above 0.
 '''
 
 [[limit]]

@@ -114,6 +114,15 @@ pub const MAX_SUBSCRIPTIONS: usize = generated::MAX_SUBSCRIPTIONS;
 /// not a table of sessions: it sizes the cache only.
 pub const MATCH_MEMO_SLOTS: usize = generated::MATCH_MEMO_SLOTS;
 
+/// [`MATCH_MEMO_SLOTS`] for a table of the fixed storage policy, which holds its cache in RAM
+/// whether or not a slot is used and so states the count apart from the heap's. `0` (the default)
+/// leaves the cache out of such a build.
+pub const MATCH_MEMO_FIXED_SLOTS: usize = generated::MATCH_MEMO_FIXED_SLOTS;
+
+/// The longest key, in bytes, a fixed-policy match cache slot holds. A longer key is matched on
+/// every arrival and not remembered. Read only where [`MATCH_MEMO_FIXED_SLOTS`] is above `0`.
+pub const MATCH_MEMO_KEY_BYTES: usize = generated::MATCH_MEMO_KEY_BYTES;
+
 /// How many samples one delivery lane ([`crate::delivery_lane::DeliveryLane`]) holds at once, the
 /// `EVENTS` of the lane a host builds. A sample past it is refused and counted. Must be at least
 /// `1`: a lane nothing can enter is not a smaller lane.

@@ -13,6 +13,10 @@ use super::limit;
 pub(super) const MAX_KEYEXPR_BYTES: usize = limit(option_env!("WZ_LIMIT_MAX_KEYEXPR_BYTES"), 256);
 pub(super) const MAX_SUBSCRIPTIONS: usize = limit(option_env!("WZ_LIMIT_MAX_SUBSCRIPTIONS"), 16);
 pub(super) const MATCH_MEMO_SLOTS: usize = limit(option_env!("WZ_LIMIT_MATCH_MEMO_SLOTS"), 8);
+pub(super) const MATCH_MEMO_FIXED_SLOTS: usize =
+    limit(option_env!("WZ_LIMIT_MATCH_MEMO_FIXED_SLOTS"), 0);
+pub(super) const MATCH_MEMO_KEY_BYTES: usize =
+    limit(option_env!("WZ_LIMIT_MATCH_MEMO_KEY_BYTES"), 64);
 pub(super) const DELIVERY_LANE_EVENTS: usize =
     limit(option_env!("WZ_LIMIT_DELIVERY_LANE_EVENTS"), 64);
 pub(super) const DELIVERY_LANE_BYTES: usize =

@@ -35,8 +35,11 @@ Read from the tree on 2026-10-26; nothing here is inferred.
   `keyexpr_pattern_matches` (`keyexpr_match.rs`). The cost of a received key is the number of rows times
   the length of the key.
 - **A memo shortens repeats, not first sight.** `MatchMemo` holds `MATCH_MEMO_SLOTS` (8; 0 leaves it
-  out) recently matched keys, valid for one epoch. A key that has not arrived lately is matched in full;
-  the heap profile only.
+  out) recently matched keys, valid for one epoch. A key that has not arrived lately is matched in full.
+  Measured on 2026-10-26 it was built on the heap profile only; it is now written once over both storage
+  policies. A fixed table holds its slots in RAM, so it reads its own `MATCH_MEMO_FIXED_SLOTS` (default
+  0: a build that does not ask pays nothing) and remembers a key of at most `MATCH_MEMO_KEY_BYTES` (64);
+  a longer key is matched on every arrival.
 - **A peer's naming is text.** `PeerNaming` keeps the peer's keyexpr aliases, bounded by
   `MAX_PEER_KEYEXPR_ALIASES`; each row carries the key as text.
 - **Access control is text, and its adapter is AP only.** The policy engine is the crate

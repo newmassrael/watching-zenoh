@@ -265,7 +265,7 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         };
         // The keyexpr may be the peer table's own literal, so the table stays
         // borrowed through the delivery; the subscribers are a field of their
-        // own (`fire_into`). A composed keyexpr lies in `composed`, in this
+        // own (`fire_lent`). A composed keyexpr lies in `composed`, in this
         // frame: fixed on the fixed backing, an empty string until written on
         // the growable one.
         let spaces = peer.mapping_spaces();
