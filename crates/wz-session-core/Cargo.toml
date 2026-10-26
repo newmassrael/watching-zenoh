@@ -657,6 +657,11 @@ session-unicast-accept = []
 # secure channel proved, and a build with no such channel would expose a
 # destructive verb no peer can be authorised for.
 session-close-ingress = []
+# lifecycle-contract -- the conformance table of decision D7 of docs/session-lifecycle-intent.md
+# (`lifecycle_contract`): the cases every transport of the open verb is held to, for an adapter in a
+# sibling crate's tests. It adds no code to a build that does not name it, and no production build
+# does.
+lifecycle-contract = []
 # secure-channel -- this build has a link that authenticates its peer's key inside
 # a channel that protects every later frame under keys the same handshake derived
 # (decision D9 of docs/session-lifecycle-intent.md: TLS 1.3 with mutual

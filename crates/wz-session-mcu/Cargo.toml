@@ -49,7 +49,7 @@ alloc = [
 
 # Exposes the in-memory network the shell's own tests run on, for a sibling
 # crate that wants a stack-neutral peer. Never in a production build.
-test-support = []
+test-support = ["wz-session-core/lifecycle-contract"]
 
 # Fixed-memory step S5 — the shell on the per-session slot profile
 # (`wz-runtime-coop`'s `session-slot`). The application layer is generic over the
@@ -211,8 +211,12 @@ wz-codecs = { path = "../wz-codecs", default-features = false }
 # The far end of the client node's tests is an ACCEPTOR session, which the client build itself
 # does not carry: a client never accepts. Dev-only, so a test build has the accept path and the
 # build that ships does not.
+#
+# The conformance table of decision D7 (`contract` re-exports it), which this crate's own tests
+# run its transports through.
 wz-session-core = { path = "../wz-session-core", default-features = false, features = [
     "session-unicast-accept",
+    "lifecycle-contract",
 ] }
 
 [lints]

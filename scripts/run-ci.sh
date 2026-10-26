@@ -11491,24 +11491,25 @@ layer_c1m_session_lwip() {
     # 31 -> 41, 8 -> 18, 41 -> 51, the numbers each command PRINTED. The heap dialer then holds a
     # dial made for a node to that node (`a_dial_for_a_node_holds_the_session_to_that_node`, in
     # `dial`, which only the two legs that select `dial` compile): 41 -> 42 and 51 -> 52. The
-    # conformance table of that decision (`contract`, the cases every transport of the contract is
-    # held to, run through the verdict function and the control port, and the table's own two
-    # checks) adds FOUR to the same five legs: 14 -> 18, 15 -> 19, 42 -> 46, 18 -> 22, 52 -> 56.
-    _runci_guarded_test "C1m mcu default" 18 \
+    # conformance table of that decision (the cases every transport of the contract is held to, which
+    # lives in `wz-session-core` as `lifecycle_contract`; `contract` here runs it through the
+    # verdict function and the control port, and checks the recorder it serves through) adds THREE
+    # to the same five legs: 14 -> 17, 15 -> 18, 42 -> 45, 18 -> 21, 52 -> 55.
+    _runci_guarded_test "C1m mcu default" 17 \
         cargo test -p wz-session-mcu --quiet || return 1
-    _runci_guarded_test "C1m mcu unicast app layer" 19 \
+    _runci_guarded_test "C1m mcu unicast app layer" 18 \
         cargo test -p wz-session-mcu \
         --features query-queryable,codec-response,codec-response-final,pubsub-put \
         --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace-write" 46 \
+    _runci_guarded_test "C1m mcu adminspace-write" 45 \
         cargo test -p wz-session-mcu --features adminspace-write --quiet || return 1
     _runci_guarded_test "C1m mcu peer nodes" 22 \
         env WZ_LIMIT_MAX_PEER_NODES=2 \
         cargo test -p wz-session-mcu --features adminspace-write --lib connect_manager \
         --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace-core" 22 \
+    _runci_guarded_test "C1m mcu adminspace-core" 21 \
         cargo test -p wz-session-mcu --features adminspace-core --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace read+write" 56 \
+    _runci_guarded_test "C1m mcu adminspace read+write" 55 \
         cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
     # The fixed-memory client node's shared mechanism (`slot_node`, compiled only on the slot profile
     # with the client core): no leg above selects both, so its tests ran in none until this one. 28 =

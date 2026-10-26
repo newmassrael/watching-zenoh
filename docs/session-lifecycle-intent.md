@@ -1085,14 +1085,22 @@ Each step lands with its own done-when; sizes are not estimated here.
          transport could drift from the others with every test green. The
          remedy of protocol engineering is a conformance suite: one table of
          cases, one adapter per implementation. The table is
-         `wz_session_mcu::contract` (`test-support`, never in a production
-         build): fifteen cases, each with the literal document the contract
+         `wz_session_core::lifecycle_contract` (the feature
+         `lifecycle-contract`, never in a production build), beside the
+         verdict's words so that an adapter of either profile is written in
+         the crate that has its transport; `wz_session_mcu::contract`
+         re-exports it and adds the opener an adapter serves through. It has
+         fifteen cases, each with the literal document the contract
          answers and the zid the opener must be asked for (the answers are
          written out and not computed by the code under test, or the table
          would agree with it by construction). A case is run twice, because
          idempotency is the contract's. The adapters: the verdict function
-         and the control port (unit tests of the crate), the in-band query
-         (`admin_open_query`, no heap touched as before), and the node as a
+         and the control port (unit tests of the crate), the in-band query of
+         the fixed-memory profile (`admin_open_query`, no heap touched as
+         before), the in-band query of the heap profile (`lifecycle_query`'s
+         tests; it was asserted to speak in the same words and is now held to
+         it, its opener being told the zid in this profile's wire form, which
+         the judge reads in the sixteen-byte one), and the node as a
          process, which can be seen to answer the cases a node with no room
          shows (five of the fifteen: its opener is its own, and it is asked
          about nothing it cannot be seen to be). The third transport has a

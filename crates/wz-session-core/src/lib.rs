@@ -1984,6 +1984,12 @@ pub mod drive;
 /// `lifecycle_query` re-exports it.
 pub mod lifecycle_wire;
 
+/// The table every transport of the lifecycle contract is held to (decision D7), for a test of
+/// this crate or an adapter in a sibling (`lifecycle-contract`, which the census leg turns on so
+/// that the crate's own adapter runs). No production build names it.
+#[cfg(feature = "lifecycle-contract")]
+pub mod lifecycle_contract;
+
 /// The session lifecycle as a QUERY: close a session and be answered with a
 /// verdict, and ask a node which lifecycle verbs it has. The verb is the one
 /// [`drive::SessionLifecycleInjector`] takes as a Push, with a reply path.

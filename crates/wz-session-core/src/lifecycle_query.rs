@@ -1356,6 +1356,47 @@ mod tests {
         );
     }
 
+    /// The in-band query of the heap profile held to the table every transport of the contract is
+    /// held to (`lifecycle_contract`, decision D7): the same cases the fixed-memory profile's query
+    /// and the control port answer, asked as a GET on the node's own key. The opener here is told
+    /// the zid as wire bytes without their trailing zeros, which is this profile's form; the judge
+    /// reads it in the sixteen-byte form the others give.
+    #[cfg(feature = "lifecycle-contract")]
+    #[test]
+    fn the_heap_query_conforms_to_the_contract_every_transport_is_held_to() {
+        use crate::credential_identity::zid_from_wire;
+        use crate::lifecycle_contract::{judge_answers, judge_asking, Binding, CASES, REPEATS};
+
+        for case in CASES {
+            let key = alloc::format!("@/{ME}/peer/session/open/{}", case.peer_text);
+            let bound =
+                node(case.permitted, Vec::new()).with_opener(Opener::answering(case.outcome));
+            let bare = node(case.permitted, Vec::new());
+            let answers: Vec<Option<String>> = (0..REPEATS)
+                .map(|_| {
+                    let replies = match case.binding {
+                        Binding::Bound => ask(&bound, &key).1,
+                        Binding::Unbound => ask(&bare, &key).1,
+                    };
+                    replies
+                        .into_iter()
+                        .find(|(reply_key, _)| *reply_key == key)
+                        .map(|(_, body)| body)
+                })
+                .collect();
+            let seen: Vec<Option<&str>> = answers.iter().map(Option::as_deref).collect();
+            judge_answers(case, &seen).unwrap_or_else(|v| panic!("{v:?}: {seen:?}"));
+            if matches!(case.binding, Binding::Bound) {
+                let asked = bound.opener.asked.borrow();
+                let last = asked
+                    .last()
+                    .and_then(|zid| zid_from_wire(zid))
+                    .unwrap_or([0; crate::credential_identity::CREDENTIAL_ZID_BYTES]);
+                judge_asking(case, asked.len() as u32, last).unwrap_or_else(|v| panic!("{v:?}"));
+            }
+        }
+    }
+
     /// The machines of a host, each with the zid of the peer it holds.
     struct Machines(Vec<(Vec<u8>, Option<&'static str>, PeerConnectionState)>);
 

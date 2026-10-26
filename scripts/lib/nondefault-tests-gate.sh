@@ -490,6 +490,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         ext-pubsub-group-membership,\
         ext-pubsub-serde-codec,\
         keyexpr-prefix,\
+        lifecycle-contract,\
         liveliness-get,\
         liveliness-subscriber,\
         liveliness-token,\
