@@ -291624,6 +291624,34 @@
         "Read the hosted run of this push per job; the pico size budgets of the earlier round are tightened once the feature's reading is known."
       ]
     },
+    "Round 3736": {
+      "decision_summary": "Round 3733's layer docs linked the querier schedule with an explicit target that is redundant once query-get imports it, so the all-features rustdoc of wz-session-mcu failed and C1bz counted one broken link against a budget of 0. The link now names the item by its path, which resolves under every feature set without an explicit target.",
+      "changes_bullets": [
+        "crates/wz-session-mcu/src/slot_active.rs: the module doc names crate::slot_schedule::Schedule by path."
+      ],
+      "verification_bullets": [
+        "On the build machine cargo doc of wz-session-mcu with all features passes; before the change it failed with a redundant explicit link target at slot_active.rs line 11."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "The reduced-feature rustdoc of wz-session-mcu (client-slot alone) still reports unresolved links in slot_plane, slot_node and slot_active that predate this round; C1bz measures all features and does not count them."
+      ],
+      "publishable_decision_summary": "Round 3733's layer docs linked the querier schedule with an explicit target that is redundant once query-get imports it, so the all-features rustdoc of wz-session-mcu failed and C1bz counted one broken link against a budget of 0. The link now names the item by its path, which resolves under every feature set without an explicit target.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-mcu/src/slot_active.rs: the module doc names crate::slot_schedule::Schedule by path."
+      ],
+      "publishable_verification_bullets": [
+        "On the build machine cargo doc of wz-session-mcu with all features passes; before the change it failed with a redundant explicit link target at slot_active.rs line 11."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The reduced-feature rustdoc of wz-session-mcu (client-slot alone) still reports unresolved links in slot_plane, slot_node and slot_active that predate this round; C1bz measures all features and does not count them."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
