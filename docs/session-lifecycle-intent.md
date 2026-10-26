@@ -1148,3 +1148,136 @@ Each step lands with its own done-when; sizes are not estimated here.
   directory learns later satisfy it and shows the refusal in the status read;
   the second keeps a flood of opens from filling the bounded table. Neither is
   measured, and a table that reclaims a refused entry would allow both.
+
+## 6. Proposed: the contract for every verb (step 8, not built)
+
+Step 7e held the transports to one table for `open`. The other verbs of D6
+(`close`, `reset <generation>`, `status`) and a node's own identity are not
+yet on the table, because the fixed-memory profile has no port for them. This
+section is the design that closes it, written before the code so that the
+owner can rule on the questions at its end. Nothing here is built.
+
+### 6.1 What exists, measured by reading the code
+
+- The words of `open` are alloc-free and shared (`lifecycle_wire`:
+  `OpenOutcome`, `RefusedReason`, `OpenVerdict`). The words of `close`,
+  `reset` and `status` are not: `CloseVerdict`, `ResetVerdict`,
+  `StatusVerdict`, `CloseOrder` and `SessionLinks` live in `lifecycle_query`,
+  which needs a heap. Their `write_json` methods use only the text-out trait
+  and `core::fmt`, so nothing in them needs the heap; the status document
+  alone builds a `String` and escapes with `json::escape_into`.
+- The heap profile answers through five ports (`SessionLifecycleAuthority`,
+  `SessionDirectory`, `PeerMachines`, `PeerIntent`, `PeerOpener`) and a
+  per-peer generation record of its own (a map behind a `RefCell`). Each
+  verb's order of checks is written in its method: the permit, then the
+  spelling of the peer, then (for `reset`) the spelling of the generation,
+  then the effect.
+- The fixed-memory profile has `NodeOpening` (open only), and a manager whose
+  tables are static: the machines, the directory, a request queue an opener
+  fills from outside the loop (`PeerStore.requests`, served by the next
+  tick), and a mirror of the nodes held (`held`). `close_node` and
+  `node_states` exist on the manager; nothing outside the loop can ask for
+  them.
+
+### 6.2 The structure
+
+1. **One vocabulary.** Move the verdict types, `CloseOrder`, `SessionLinks`
+   and the `write_json` methods of the three verbs into `lifecycle_wire`, and
+   write the status document over the text-out trait with an escaper that
+   allocates nothing. `lifecycle_query` re-exports them, as it does for
+   `open`. The words of every verb are then written once.
+2. **One function.** `Command` (`Open`, `Close`, `Reset` with its generation,
+   `Status`) and `lifecycle_verdict(node, command, out)`, which is the
+   order of checks above, written once, over one port, `LifecycleNode`:
+   the permit per verb, `open`, `close` (a `CloseOrder`), the generation
+   record (`take_generation(peer, generation)`, answering the latest taken
+   when the generation is no later), the links, and the machines. The heap
+   profile's four ports and its map become one implementation of
+   `LifecycleNode`; `LifecycleQueries::answer` parses the key into a
+   `Command` and calls the function. `open_verdict` becomes the `Open` arm.
+3. **Parsers per transport.** In-band: the key parser that exists. Out-of-band:
+   the line parser of `control_port` gains `close <peer>`, `reset <peer>
+   <generation>` and `status <peer>`, each answered with the verb's JSON. A
+   line that is no command keeps its error words.
+4. **The node's own identity, out of band only.** In-band, the key names the
+   node (`@/<zid>/<whatami>/session/...`), so it needs no verb. An agent
+   driving a node through a pipe has no key, so `whoami` answers the node's
+   zid and role as the admin space spells them. It is a query and changes
+   nothing, so it is idempotent by construction and has no row of its own in
+   the cases of D6.
+5. **The fixed-memory node's side.** Every request a node serves outside its
+   loop reaches the loop as a typed request in the existing queue, and its
+   answer is what the node knows without the loop, accepted and not
+   completed, as `open` already is:
+   - `close`: the request queue takes a close for a node held or asked for;
+     the tick calls `close_node`. The verdict's `links` is read from the
+     mirror, which becomes `(zid, links)` rather than the zid alone, so a
+     node held by its zid says one link and one reached through an endpoint
+     says what the manager counted. A node neither held nor asked for is
+     `not_found`; a close already ordered is `already_closed`.
+   - `reset`: a bounded record of `(zid, latest generation)` per node the
+     store has room for, in the store. A generation no later than the latest
+     is `duplicate`; otherwise it is taken and a close is ordered, and the
+     machine connects again because the peer stays in the intent.
+   - `status`: the mirror of node states and the planner's states, written
+     as the heap profile writes them: `links`, `intent`, and one row per
+     machine.
+6. **Capabilities, not defaults.** Each verb adds code to an image that has no
+   spare flash, so by `docs/build-configuration.md` C2 and C3 each is an
+   additive capability of the build (`lifecycle-close`, `lifecycle-reset`,
+   `lifecycle-status`), and an image that binds none keeps today's size. The
+   capability document lists what the build bound, as it lists `open`.
+
+### 6.3 The table, extended
+
+The cases of `lifecycle_contract` gain a verb column and rows for each verb,
+on the same three rules: the answers are literal words, each request is made
+twice, and a transport that cannot express a case says so by name instead of
+being skipped. The rows:
+
+- `close`: a held peer is closed with its links; the same close again is
+  `already_closed`; a peer never held is `not_found`; a node that does not
+  permit is refused and nothing is ordered; a text that names no zid is
+  refused after the permit.
+- `reset`: a first generation resets and the same one again is `duplicate`
+  with the latest taken; a later one resets again; a generation that is no
+  number is refused after the peer's spelling; the peer stays in the
+  intent (a following `status` says so).
+- `status`: a held peer reports its links, its intent and one row per
+  machine; a peer the node knows nothing of reports none; the refusals.
+- Cross-verb: `close` then `status` (the peer left the intent), `reset` then
+  `status` (it did not).
+
+### 6.4 Order of work
+
+1. Step A: the vocabulary into `lifecycle_wire` and the status writer over
+   the text-out trait; the heap profile's tests are the witness and nothing
+   else moves.
+2. Step B: `LifecycleNode` and `lifecycle_verdict`; the heap profile
+   implements it; the rows for the three verbs run on the heap adapter. This
+   proves the function on the profile that already has every effect.
+3. Step C: the fixed-memory store gains the typed requests, the link mirror
+   and the generation record; the control port gains the three commands;
+   the rows run on the process adapter and on the fixed in-band adapter.
+4. Step D: the capabilities and the capability document.
+
+### 6.5 Questions for the owner
+
+- **The generation record's bound.** A heap node takes a generation even for
+  a peer it holds no session with, so a retransmission after the peer
+  returns closes nothing. A fixed node has a record per peer it has room
+  for. For a peer outside that room it can refuse by `NoRoom` (the request
+  is not taken, and the sender learns why) or answer `not_found` and take
+  nothing (a retransmission after the peer returns would then close it once
+  more). The recommendation is to refuse: at-most-once is the verb's whole
+  reason to carry a generation.
+- **The authority of an out-of-band channel.** One permit for every verb (the
+  node's write permit, as `open` has), or one per verb as the heap profile's
+  authority has. The recommendation is one per verb, since a channel that may
+  open a peer is not thereby one that may close every session.
+- **Whether the fixed in-band profile binds the new verbs at all.** The
+  Zephyr images are measured against flash budgets; the capabilities of 6.2
+  keep that choice with the build, and the question is only which of the
+  existing images, if any, selects them.
+- **The two items already filed in section 5** (a locator target with no
+  expected zid, and the listen intent) stay the owner's.
