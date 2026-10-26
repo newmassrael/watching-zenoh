@@ -386,6 +386,29 @@ Each lands whole with its surface lines, tests and faults in one round.
     session, which is what the C ABI measured, and folding changes the join of `close`; it is a
     slice of its own. The router's role mapping is held by Z1b, where a router is opened and
     observed.
+  - **Z1b (landed).** The decision the slice was named for, and the table of D6. A router is
+    **refused by its key** (`mode` = "router"): measured with upstream's own nodes on the other
+    side of a real connection, the engine's acceptor announces a peer's role to a node that dials
+    it whatever `mode` says, and a router is the router data plane, which a session does not carry;
+    announcing the role without being one would be the silent fallback this note refuses, so 15 of
+    upstream's 31 tests that open a router are, for now, the half of the Z8 gate that does not
+    apply, recorded as such and held by a differential line that holds the words of both. D6 is
+    `wz_capi_core::open_plan::key_state`: every leaf key is mapped (the engine acts on it, from the
+    reader's list), inert (upstream does nothing with it either) or unmapped (upstream acts and the
+    engine does not), the plan reports the keys a document states that the engine does not act on,
+    the C ABI accepts them and `zenoh::open` refuses the unmapped ones whose value is not the
+    default, by name; a test walks every leaf of the default configuration and fails on one with no
+    state, which found five (the inline base64 certificate keys, which a running zenohd does not
+    serialise and the reader's lists, adjudicated against it, therefore lack) and now names them. The
+    differential gained the roles: each of this crate's nodes opens beside an upstream node, and the
+    upstream node reports what it sees (`routers_zid`, `peers_zid`, the transports with their role
+    and qualities), with a control that runs upstream's nodes as the subject. It found what the
+    first slice's tests could not: the sessions opened but dropped every connection, because the
+    manifest took the engine without `transport-qos` while the session offers QoS as upstream's
+    default does (the C ABI names the capability for this reason, and the manifest of this crate now
+    names the same set); a "listening" check that a port answers proves nothing, since the kernel
+    completes a handshake no one accepts. 8 differential tests, 6 injected faults of this slice and
+    the 12 of the last, one fault that did not compile run again.
 - **Z2. Publish and subscribe.** `put`, `delete`, `declare_publisher`, `declare_subscriber` with
   the handlers the surface has (callback, callback with a drop, the default handler, fifo, ring),
   QoS, attachments, encodings, localities, express, congestion control, `new_timestamp`, the
