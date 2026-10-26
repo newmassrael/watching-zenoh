@@ -185,7 +185,17 @@ only as it stands makes it plain again, and a stream finds its framing again on
 a chain of boundaries all in one of the two readings. The model did not move;
 the evidence was misread.
 
-Still to come for step 2: SOME/IP and QUIC captures, LLMNR, WS-Discovery, NTP
+What the header showed is also a negotiated value the handshake would have
+stated: a batch header means the session negotiated compression, and a batch
+that reads whole without one means it did not. From field document revision 45
+each flow's `context.parameters` carries every negotiated value beside its
+basis (`stated`, `inferred`, `conflicting`, `absent`), and `compression` is the
+one the bytes can infer, with the counts it rests on per direction
+(`PassiveSession::compression_reading`). On the corpus every capture that
+holds the handshake states its compression and every one joined mid-session
+infers the same value.
+
+Still to come for step 2: QUIC captures, LLMNR, WS-Discovery, NTP
 and DHCP on a busier network, and several zenoh versions and zenoh-pico on the
 zenoh side. Step 3 waits for a corpus large enough to measure
 the weights it would replace.

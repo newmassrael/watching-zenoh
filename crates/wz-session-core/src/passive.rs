@@ -581,6 +581,71 @@ pub enum BatchHeader {
     Inferred,
 }
 
+/// What one direction's bytes showed about its `BatchHeader` while no Init had
+/// been seen ([`PassiveSession::batch_header_evidence`]): the grounds an
+/// inferred reading rests on, which a reader of the inference can weigh.
+///
+/// A unit counts when it reads whole in exactly one of the two readings (as
+/// it stands, or behind a header byte); a unit that reads whole in both or in
+/// neither decides nothing and is not counted. A resynchronisation counts
+/// when the stream's framing was found again on a chain of boundaries all in
+/// one reading.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BatchHeaderEvidence {
+    /// Units that read whole behind a header byte and not as they stand.
+    pub headed_units: u64,
+    /// Units that read whole as they stand and not behind a header byte.
+    pub plain_units: u64,
+    /// Framings found again on a chain of headed boundaries.
+    pub headed_resyncs: u64,
+    /// Framings found again on a chain of plain boundaries.
+    pub plain_resyncs: u64,
+}
+
+impl BatchHeaderEvidence {
+    /// Whether anything was counted.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// On what grounds a session parameter's value is known
+/// ([`FlowContext::compression_reading`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Basis {
+    /// The handshake the capture holds said it.
+    Stated,
+    /// The capture holds no handshake, and the bytes showed it. A reading of
+    /// the bytes so far, which later bytes can overturn.
+    Inferred,
+    /// The capture holds no handshake, and the bytes showed two values that
+    /// cannot both hold: the session's two directions read differently. There
+    /// are grounds, and they disagree, which is not the same as having none.
+    Conflicting,
+    /// Nothing in the capture says it.
+    Absent,
+}
+
+/// A session parameter's value and the grounds it is known on: `value` is
+/// `Some` exactly when `basis` is [`Basis::Stated`] or [`Basis::Inferred`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reading<T> {
+    pub value: Option<T>,
+    pub basis: Basis,
+}
+
+impl<T> Reading<T> {
+    /// A value the handshake said, or `Absent` where it said nothing.
+    pub fn stated(value: Option<T>) -> Self {
+        let basis = if value.is_some() {
+            Basis::Stated
+        } else {
+            Basis::Absent
+        };
+        Self { value, basis }
+    }
+}
+
 impl Default for FlowContext {
     fn default() -> Self {
         Self {
@@ -746,10 +811,59 @@ impl FlowContext {
     }
 
     /// Whether `direction`'s batches open with a `BatchHeader`, as the last
-    /// unit that decided it showed ([`walk_unit`]'s probe). Ignored once the
-    /// Init pair is seen: the negotiation is the answer then.
+    /// unit or resynchronisation that decided it showed ([`walk_unit`]'s
+    /// probe, [`PassiveSession::read_unit`]'s scan). Ignored once the Init
+    /// pair is seen: the negotiation is the answer then.
     fn set_batch_header_inferred(&mut self, direction: Direction, headed: bool) {
         self.batch_header_inferred[usize::from(direction == Direction::B)] = headed;
+    }
+
+    /// Whether the session negotiated compression, and on what grounds, given
+    /// what each direction's bytes showed (`evidence`, `a` then `b`; see
+    /// [`PassiveSession::compression_reading`]).
+    ///
+    /// With the Init pair in the capture the negotiation says it
+    /// ([`Self::compression()`], [`Basis::Stated`]). With one Init only, the
+    /// handshake is in progress and nothing says it yet.
+    ///
+    /// With no Init the bytes say it. Each direction reads as its last
+    /// deciding unit or resynchronisation read: a header means compression
+    /// was negotiated, because only a negotiated session puts one on its
+    /// batches; a batch that reads whole with no header means it was not,
+    /// because a link that does not batch (lowlatency) sends no batch to read
+    /// and a batching link of a compressed session heads every batch after its
+    /// `Open`. A direction with no evidence says nothing. One reading from the
+    /// directions that have evidence is [`Basis::Inferred`]; two is
+    /// [`Basis::Conflicting`], with no value.
+    pub fn compression_reading(&self, evidence: [BatchHeaderEvidence; 2]) -> Reading<bool> {
+        if self.negotiated() {
+            return Reading::stated(self.compression());
+        }
+        if !self.holds_no_init() {
+            return Reading::stated(None);
+        }
+        let mut headed = false;
+        let mut plain = false;
+        for (seen, inferred) in evidence.iter().zip(self.batch_header_inferred) {
+            if !seen.is_empty() {
+                if inferred {
+                    headed = true;
+                } else {
+                    plain = true;
+                }
+            }
+        }
+        match (headed, plain) {
+            (true, true) => Reading {
+                value: None,
+                basis: Basis::Conflicting,
+            },
+            (false, false) => Reading::stated(None),
+            (headed, _) => Reading {
+                value: Some(headed),
+                basis: Basis::Inferred,
+            },
+        }
     }
 
     /// Whether the observer SAW the handshake that fixes the session's
@@ -1742,6 +1856,12 @@ pub struct PassiveSession {
     last_seen_ns: [Option<u64>; 2],
     /// R3054 — whether this direction carried a `Close`.
     close_seen: [bool; 2],
+    /// Per direction, what its bytes showed about its `BatchHeader` while no
+    /// Init had been seen ([`Self::batch_header_evidence`]). Here and not on
+    /// the [`FlowContext`]: the context is what a unit is read in, kept once
+    /// per value for every unit ([`crate::passive_messages`]), and these
+    /// counts move on every unit that decides.
+    batch_header_evidence: [BatchHeaderEvidence; 2],
     /// R311y609 (C12) — last SN seen per `[direction][conduit]`, where the
     /// conduit index is [`sn_conduit`]. `None` = nothing seen there yet, which
     /// is what makes the first frame a [`SnVerdict::Baseline`] rather than a
@@ -1966,6 +2086,7 @@ impl Default for PassiveSession {
             lease_ms: [None; 2],
             last_seen_ns: [None; 2],
             close_seen: [false; 2],
+            batch_header_evidence: [BatchHeaderEvidence::default(); 2],
             #[cfg(feature = "codec-frame")]
             sn_last: [[None; SN_CONDUITS]; 2],
             #[cfg(feature = "codec-frame")]
@@ -2373,6 +2494,13 @@ impl PassiveSession {
                     if may_infer {
                         self.context
                             .set_batch_header_inferred(direction, resumed_headed);
+                        let seen =
+                            &mut self.batch_header_evidence[usize::from(direction == Direction::B)];
+                        if resumed_headed {
+                            seen.headed_resyncs = seen.headed_resyncs.saturating_add(1);
+                        } else {
+                            seen.plain_resyncs = seen.plain_resyncs.saturating_add(1);
+                        }
                         headed = resumed_headed;
                     }
                 }
@@ -2566,6 +2694,24 @@ impl PassiveSession {
             (Some(held), Some(this)) => Some(held.max(this)),
             (held, this) => this.or(held),
         };
+    }
+
+    /// What `direction`'s bytes showed about its `BatchHeader` while no Init
+    /// had been seen: the grounds of an inferred reading. Nothing counts once
+    /// an Init is seen, so a capture that holds the handshake counts at most
+    /// the units read before it, the one carrying the first Init included,
+    /// and its reading is the handshake's (`stated`), not these counts'.
+    pub fn batch_header_evidence(&self, direction: Direction) -> BatchHeaderEvidence {
+        self.batch_header_evidence[usize::from(direction == Direction::B)]
+    }
+
+    /// Whether the session negotiated compression, and on what grounds:
+    /// [`FlowContext::compression_reading`] over this session's context and
+    /// both directions' [`Self::batch_header_evidence`].
+    pub fn compression_reading(&self) -> Reading<bool> {
+        self.context.compression_reading(
+            [Direction::A, Direction::B].map(|d| self.batch_header_evidence(d)),
+        )
     }
 
     /// R311y631 (§1.2b) — bytes of a framing unit no decoded message accounts
@@ -3196,6 +3342,10 @@ trait UnitJudge {
     fn batch_read(&mut self, direction: Direction, batch: &BatchParse);
     /// A record of `seat`'s direction captured at `instant`.
     fn note_last_seen(&mut self, seat: usize, instant: Option<u64>);
+    /// A unit of `seat`'s direction that read whole in only one of the two
+    /// batch-header readings, behind a header byte when `headed`, in a capture
+    /// that holds no Init.
+    fn count_batch_header_unit(&mut self, seat: usize, headed: bool);
     /// `bytes` of the unit that no decoded message accounts for.
     fn count_unaccounted(&mut self, seat: usize, bytes: u64);
     /// A message whose header sets a bit its MID does not define.
@@ -3252,6 +3402,15 @@ impl UnitJudge for LiveJudge<'_, '_> {
 
     fn note_last_seen(&mut self, seat: usize, instant: Option<u64>) {
         self.session.note_last_seen(seat, instant);
+    }
+
+    fn count_batch_header_unit(&mut self, seat: usize, headed: bool) {
+        let seen = &mut self.session.batch_header_evidence[seat];
+        if headed {
+            seen.headed_units = seen.headed_units.saturating_add(1);
+        } else {
+            seen.plain_units = seen.plain_units.saturating_add(1);
+        }
     }
 
     fn count_unaccounted(&mut self, seat: usize, bytes: u64) {
@@ -3331,19 +3490,19 @@ fn walk_unit(
     // true boundary of a stream joined mid-unit are noise, and noise can read
     // whole behind a header once; a reading that stuck would then refuse every
     // real unit after it. The probes have no side effect, so the walk below is
-    // the only reading the unit gets.
+    // the only reading the unit gets. Every unit that decides is counted, the
+    // ones that keep the direction's reading as well as the ones that move it:
+    // that count is what the inference rests on
+    // ([`PassiveSession::batch_header_evidence`]).
     if handshake == LinkHandshake::Present && judge.context().holds_no_init() && !bytes.is_empty() {
-        let inferred = judge.context().batch_header_active(direction);
         let header_byte = bytes[0] & !BATCH_HEADER_COMPRESSION == 0;
-        let moves = if inferred {
-            !headed_unit_reads_whole(bytes) && unit_reads_whole(bytes)
-        } else {
-            header_byte && !unit_reads_whole(bytes) && headed_unit_reads_whole(bytes)
-        };
-        if moves {
+        let plain_whole = unit_reads_whole(bytes);
+        let headed_whole = header_byte && headed_unit_reads_whole(bytes);
+        if plain_whole != headed_whole {
             judge
                 .context()
-                .set_batch_header_inferred(direction, !inferred);
+                .set_batch_header_inferred(direction, headed_whole);
+            judge.count_batch_header_unit(seat, headed_whole);
         }
     }
     // THE BATCH HEADER, where this direction has one. See
@@ -3808,6 +3967,8 @@ impl UnitJudge for Recorded<'_> {
     fn batch_read(&mut self, _direction: Direction, _batch: &BatchParse) {}
 
     fn note_last_seen(&mut self, _seat: usize, _instant: Option<u64>) {}
+
+    fn count_batch_header_unit(&mut self, _seat: usize, _headed: bool) {}
 
     fn count_unaccounted(&mut self, _seat: usize, _bytes: u64) {}
 
@@ -7011,6 +7172,87 @@ mod tests {
             BatchHeader::Inferred
         );
         assert_eq!(s.sn_steps(Direction::B).follows, units - 1);
+        // The grounds: the one framing found again on headed boundaries, and
+        // every unit read from it, each whole only behind its header.
+        assert_eq!(
+            s.batch_header_evidence(Direction::B),
+            BatchHeaderEvidence {
+                headed_units: units,
+                plain_units: 0,
+                headed_resyncs: 1,
+                plain_resyncs: 0,
+            }
+        );
+    }
+
+    /// THE COMPRESSION READING AND ITS GROUNDS, where no Init was seen. A
+    /// direction whose units read whole only behind a header says the session
+    /// negotiated compression, and its count of such units is what that rests
+    /// on. When the other direction's units then read whole with no header,
+    /// the two directions disagree: the reading has grounds and they conflict,
+    /// which is not the same answer as having none.
+    #[test]
+    fn compression_is_read_from_the_bytes_with_its_grounds_where_no_init_was_seen() {
+        let mut s = PassiveSession::new();
+        assert_eq!(
+            s.compression_reading(),
+            Reading {
+                value: None,
+                basis: Basis::Absent
+            }
+        );
+        for (i, sn) in [1u64, 2, 3].into_iter().enumerate() {
+            s.next_datagram(Direction::A, &headed_frame(sn), i);
+        }
+        assert_eq!(
+            s.compression_reading(),
+            Reading {
+                value: Some(true),
+                basis: Basis::Inferred
+            }
+        );
+        assert_eq!(
+            s.batch_header_evidence(Direction::A),
+            BatchHeaderEvidence {
+                headed_units: 3,
+                ..BatchHeaderEvidence::default()
+            }
+        );
+        assert!(s.batch_header_evidence(Direction::B).is_empty());
+        s.next_datagram(Direction::B, &frame_wire(9, &oam_record(9)), 3);
+        assert_eq!(s.batch_header_evidence(Direction::B).plain_units, 1);
+        assert_eq!(
+            s.compression_reading(),
+            Reading {
+                value: None,
+                basis: Basis::Conflicting
+            }
+        );
+    }
+
+    /// Where the Init pair was seen the handshake states compression, and the
+    /// bytes after the first Init are not asked. The unit that carried the
+    /// InitSyn was read while no Init had been seen, and counts as what it
+    /// was, one unit that reads whole with no header; nothing after it counts.
+    #[test]
+    fn a_negotiated_session_states_its_compression_and_counts_no_evidence_after_an_init() {
+        let mut s = established(vec![]);
+        s.next_datagram(Direction::A, &headed_frame(7), 0);
+        assert_eq!(
+            s.compression_reading(),
+            Reading {
+                value: Some(false),
+                basis: Basis::Stated
+            }
+        );
+        assert_eq!(
+            s.batch_header_evidence(Direction::A),
+            BatchHeaderEvidence {
+                plain_units: 1,
+                ..BatchHeaderEvidence::default()
+            }
+        );
+        assert!(s.batch_header_evidence(Direction::B).is_empty());
     }
 
     /// A capture that begins INSIDE a headed unit: the stream loses its framing

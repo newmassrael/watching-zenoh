@@ -13732,9 +13732,15 @@ mod tests {
             out.extend_from_slice(message);
             out
         };
+        // The context's flat cells, closed as an object: the `parameters`
+        // object field revision 45 added after them restates them with a
+        // basis, and the field document's own tests hold it.
         let context_of = |doc: &str| -> String {
             let at = doc.find("\"context\":").expect("a flow carries a context") + 10;
-            doc[at..=at + doc[at..].find('}').expect("the object closes")].to_string()
+            let flat = doc[at..]
+                .find(",\"parameters\":")
+                .expect("a context carries its parameters");
+            format!("{}}}", &doc[at..at + flat])
         };
         let pcap_of = |packets: &[Vec<u8>]| {
             let rows: Vec<(u32, u32, &[u8])> = packets
@@ -13795,9 +13801,15 @@ mod tests {
             out.extend_from_slice(message);
             out
         };
+        // The context's flat cells, closed as an object: the `parameters`
+        // object field revision 45 added after them restates them with a
+        // basis, and the field document's own tests hold it.
         let context_of = |doc: &str| -> String {
             let at = doc.find("\"context\":").expect("a flow carries a context") + 10;
-            doc[at..=at + doc[at..].find('}').expect("the object closes")].to_string()
+            let flat = doc[at..]
+                .find(",\"parameters\":")
+                .expect("a context carries its parameters");
+            format!("{}}}", &doc[at..at + flat])
         };
         let both_doors = |syn_ext: &[u8], ack_ext: &[u8]| {
             // The Z flag is set only when a chain follows.

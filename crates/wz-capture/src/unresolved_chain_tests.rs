@@ -52,6 +52,10 @@ use crate::Dissection;
 /// 4096-byte value under this key encodes to 4120 bytes, cut into pieces of 245
 /// (16 of them and a last one of 200), which is 17 fragments.
 const ROBOT_KEY: &str = "demo/robots/1/pose";
+
+/// A `context.parameters` entry nothing in the capture states (field document
+/// revision 45).
+const ABSENT: &str = "{\"value\":null,\"basis\":\"absent\"}";
 const ROBOT_VALUE_LEN: usize = 4096;
 const ROBOT_PIECE: usize = 245;
 const ROBOT_FRAGMENTS: usize = 17;
@@ -491,9 +495,10 @@ fn closed_chains_of_consecutive_fragments_reassemble_with_no_handshake_in_the_ca
 
         // The ring is still unknown, and the verdict on every sequence number
         // says so: reassembly's raw continuity is not an in-order judgement.
+        // The flat cell, then `parameters`' entry for it.
         assert_eq!(
             values_of(&doc, "sn_mask"),
-            vec!["null"],
+            vec!["null", ABSENT],
             "{link:?}: the flow has no ring"
         );
         let verdicts = words(&doc, "verdict");
@@ -608,8 +613,11 @@ fn behind_a_handshake_the_same_fragments_read_alike_but_for_the_sn_verdict() {
         );
 
         // The flow's context says which of the two it was.
-        assert_eq!(values_of(&without_doc, "sn_mask"), vec!["null"]);
-        assert_eq!(values_of(&with_doc, "sn_mask"), vec!["268435455"]);
+        assert_eq!(values_of(&without_doc, "sn_mask"), vec!["null", ABSENT]);
+        assert_eq!(
+            values_of(&with_doc, "sn_mask"),
+            vec!["268435455", "{\"value\":268435455,\"basis\":\"stated\"}"]
+        );
 
         // And every plane agrees across the pair.
         let (p_without, p_with) = (
@@ -946,8 +954,11 @@ fn with_only_the_initsyn_the_markers_are_enforced_and_the_ring_is_still_unknown(
         "still no ring, so no verdict: {doc}"
     );
     // What the flow knows: the patch (one Init seen), no ring, not negotiated.
-    assert_eq!(values_of(&doc, "sn_mask"), vec!["null"]);
-    assert_eq!(values_of(&doc, "patch"), vec!["1"]);
+    assert_eq!(values_of(&doc, "sn_mask"), vec!["null", ABSENT]);
+    assert_eq!(
+        values_of(&doc, "patch"),
+        vec!["1", "{\"value\":1,\"basis\":\"stated\"}"]
+    );
     assert_eq!(values_of(&doc, "negotiated"), vec!["false"]);
     assert_eq!(planes_agree(&d, &doc).puts, 1);
 }

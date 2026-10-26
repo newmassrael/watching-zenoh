@@ -306,7 +306,11 @@ mod tests {
             let context = session.context();
             assert_eq!(context.lowlatency(), expected, "{stage}: the fold itself");
             let mut written = String::new();
-            crate::fields_json::push_context(&context, &mut written);
+            crate::fields_json::push_context(
+                &context,
+                &crate::fields_json::CompressionGrounds::of(session),
+                &mut written,
+            );
             let object = written
                 .strip_prefix(",\"context\":")
                 .unwrap_or_else(|| panic!("the writer's shape moved: {written}"));

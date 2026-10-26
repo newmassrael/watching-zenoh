@@ -1078,13 +1078,57 @@
  *
  * @values fields phase
  *
+ *     Since field-document revision 45 -- EACH VALUE BESIDE ITS GROUNDS. The
+ *     context also carries
+ *
+ *       "parameters":{"compression":{"value":"lz4"|"off"|null,"basis":B,
+ *                                    "evidence":null|{"halves":[
+ *                       {"direction":"a","headed_units":N,"plain_units":N,
+ *                        "headed_resyncs":N,"plain_resyncs":N},
+ *                       {"direction":"b", ...the same five keys...}]}},
+ *                     "lowlatency":{"value":bool|null,"basis":B},
+ *                     "qos":{"value":bool|null,"basis":B},
+ *                     "patch":{"value":N|null,"basis":B},
+ *                     "sn_mask":{"value":N|null,"basis":B},
+ *                     "batch_size":{"value":N|null,"basis":B},
+ *                     "version":{"value":N|null,"basis":B}}
+ *
+ *     where `basis` is `stated` (the handshake the capture holds said it),
+ *     `inferred` (the capture holds no Init, and the bytes showed it: a
+ *     reading so far, which later bytes can overturn), `conflicting` (the
+ *     capture holds no Init, and the two directions' bytes showed values that
+ *     cannot both hold; `value` is `null`), or `absent` (nothing says it;
+ *     `value` is `null`). The flat cells above say what the handshake said
+ *     and `null` otherwise, so they cannot tell a compressed session joined
+ *     after its handshake, whose batches the halves read `inferred` headed,
+ *     from one nothing is known of; `parameters` can.
+ *
+ *     Only `compression` is read from the bytes today. A batch header means
+ *     the session negotiated compression (`lz4`); a batch that reads whole
+ *     with no header means it did not (`off`), because a lowlatency link sends
+ *     no batches and a batching link of a compressed session heads every batch
+ *     after its `Open`. `evidence` is written exactly when the basis is
+ *     `inferred` or `conflicting`, the two the bytes decided, and is `null`
+ *     under `stated` and `absent`: per direction, `headed_units` and `plain_units` are
+ *     the units that read whole in only one of the two readings, and
+ *     `headed_resyncs` and `plain_resyncs` the times a stream's framing was
+ *     found again on a chain of boundaries all in one reading. The other
+ *     entries are `stated` or `absent`; `patch` and `version` are carried by
+ *     no message after the Init pair. The integers follow the integer rule
+ *     (a bare number up to 2^53 - 1 and a string of the same digits above
+ *     it), which `sn_mask` can reach. Each half carries the same shape for
+ *     its own `lease_ms` (see `halves` below).
+ *
+ * @values fields basis
+ *
  * Also per FLOW, beside `context`, and since field-document revision 25 --
  * WHAT EACH DIRECTION'S SENDER HAS DONE:
  *
  *   "halves":[{"direction":"a","lease_ms":N|null,"last_seen_ts_ns":N|null,
  *              "close_seen":bool,"fin_seen":bool|null,"rst_seen":bool|null,
- *              "batch_header":"absent"|"negotiated"|"inferred"},
- *             {"direction":"b", ...the same seven keys...}]
+ *              "batch_header":"absent"|"negotiated"|"inferred",
+ *              "parameters":{"lease_ms":{"value":N|null,"basis":B}}},
+ *             {"direction":"b", ...the same eight keys...}]
  *
  *     Two entries, `a` then `b`, with the `direction` the rows carry. The
  *     context says what the handshake settled for the SESSION; whether a
@@ -1106,7 +1150,9 @@
  *     bytes showed a header (a compressed session joined after its handshake:
  *     a unit read whole only behind a header byte, or the stream's framing was
  *     found again on boundaries that open with one; the direction's rows are
- *     read headed until the bytes show otherwise), or `absent`.
+ *     read headed until the bytes show otherwise), or `absent`. `parameters`
+ *     (revision 45) is `lease_ms` again in the context's `parameters` shape:
+ *     `stated` by the direction's own `Open`, or `absent`.
  *
  * @values fields batch_header
  *
@@ -1212,7 +1258,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":44,"key":"kind","values":[...],
+ *     {"name":"fields","revision":45,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -1243,6 +1289,7 @@
  * @carries census offset_space passenger
  * @carries census sender_end passenger
  * @carries fields announced_version passenger
+ * @carries fields basis passenger
  * @carries fields batch_header passenger
  * @carries fields body passenger
  * @carries fields carried_state discriminant
@@ -4789,7 +4836,7 @@ int wz_dissect_transport_layout(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":44,"key":"state",
+ *     "value_families":[{"name":"fields","revision":45,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

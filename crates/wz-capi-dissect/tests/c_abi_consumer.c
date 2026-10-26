@@ -3984,8 +3984,12 @@ int main(void) {
      * Values move, keys arrive and families are declared; nothing retires.
      * 44: every half carries `batch_header` (absent, negotiated, inferred), and
      * a capture with no Init reads a compressed session's batches headed.
-     * A key arrives and a family is declared; nothing retires. */
-    revisioned[2].revision = 44;
+     * A key arrives and a family is declared; nothing retires.
+     * 45: every context and every half carries `parameters`, each value
+     * beside its basis (stated, inferred, conflicting, absent), and the
+     * compression entry its evidence. Keys arrive and a family is declared;
+     * nothing retires. */
+    revisioned[2].revision = 45;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

@@ -87,6 +87,79 @@ fn verdicts(d: &Dissection) -> Vec<ZenohVerdict> {
     out
 }
 
+/// The compression reading of every flow of `d` that reads `yes`, as
+/// `value/basis` (`lz4`, `off` or `-`; the basis word of the field document),
+/// sorted.
+fn compression_readings(d: &Dissection) -> Vec<String> {
+    use wz_session_core::passive::{Basis, Reading};
+    let word = |r: Reading<bool>| {
+        let value = match r.value {
+            Some(true) => "lz4",
+            Some(false) => "off",
+            None => "-",
+        };
+        let basis = match r.basis {
+            Basis::Stated => "stated",
+            Basis::Inferred => "inferred",
+            Basis::Conflicting => "conflicting",
+            Basis::Absent => "absent",
+        };
+        alloc::format!("{value}/{basis}")
+    };
+    let mut out: Vec<String> = d
+        .flows()
+        .iter()
+        .filter(|f| ZenohVerdict::of(&f.zenoh_evidence()) == ZenohVerdict::Yes)
+        .map(|f| word(f.session.compression_reading()))
+        .chain(
+            d.datagram_flows()
+                .iter()
+                .filter(|f| ZenohVerdict::of(&f.zenoh_evidence()) == ZenohVerdict::Yes)
+                .map(|f| word(f.session.compression_reading())),
+        )
+        .collect();
+    out.sort();
+    out
+}
+
+/// What every zenoh file's sessions say of compression, and on what grounds,
+/// in both builds. A capture that holds the handshake states it; one joined
+/// mid-session infers it from the bytes, `lz4` from the batch headers a
+/// compressed session puts on every batch and `off` from batches that read
+/// whole with none.
+const COMPRESSION: &[(&str, &[&str])] = &[
+    ("zenoh-tcp-full.pcap", &["off/stated", "off/stated"]),
+    (
+        "zenoh-tcp-midsession.pcap",
+        &["off/inferred", "off/inferred"],
+    ),
+    ("zenoh-udp-full.pcap", &["off/stated", "off/stated"]),
+    ("zenoh-tcp-lz4.pcap", &["lz4/stated", "lz4/stated"]),
+    (
+        "zenoh-udp-lz4-midsession.pcap",
+        &["lz4/inferred", "lz4/inferred"],
+    ),
+    (
+        "zenoh-tcp-lz4-midsession.pcap",
+        &["lz4/inferred", "lz4/inferred"],
+    ),
+];
+
+#[test]
+fn every_zenoh_session_of_the_corpus_reads_its_compression_and_its_grounds() {
+    let mut failures = Vec::new();
+    for (file, want) in COMPRESSION {
+        let bytes =
+            std::fs::read(corpus_dir().join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
+        let d = Dissection::from_capture(&bytes).unwrap_or_else(|e| panic!("{file}: {e:?}"));
+        let got = compression_readings(&d);
+        if got != *want {
+            failures.push(alloc::format!("{file}: {got:?}, pinned {want:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 fn tally(words: &[ZenohVerdict]) -> Tally {
     let n = |w: ZenohVerdict| words.iter().filter(|v| **v == w).count() as u64;
     (

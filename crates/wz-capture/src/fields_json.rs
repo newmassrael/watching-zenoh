@@ -2140,7 +2140,11 @@ fn push_stream_flow(
     push_flow_number(tags.flow_id, out);
     push_zenoh(flow.ingest.versions(), &flow.zenoh_evidence(), out);
     push_unit_readings(flow.ingest.readings(), out);
-    push_context(&flow.session.context(), out);
+    push_context(
+        &flow.session.context(),
+        &CompressionGrounds::of(&flow.session),
+        out,
+    );
     push_halves(&flow.half(Direction::A), &flow.half(Direction::B), out);
     out.push_str(",\"messages\":[");
     let (mut shown, mut omitted, mut emitted) = (0usize, 0usize, 0usize);
@@ -2491,7 +2495,11 @@ fn push_datagram_flow(
     push_flow_number(tags.flow_id, out);
     push_zenoh(flow.ingest.versions(), &flow.zenoh_evidence(), out);
     push_unit_readings(flow.ingest.readings(), out);
-    push_context(&flow.session.context(), out);
+    push_context(
+        &flow.session.context(),
+        &CompressionGrounds::of(&flow.session),
+        out,
+    );
     push_halves(&flow.half(Direction::A), &flow.half(Direction::B), out);
     out.push_str(",\"messages\":[");
     let (mut shown, mut omitted, mut emitted) = (0usize, 0usize, 0usize);
@@ -4436,7 +4444,11 @@ impl core::fmt::Display for TallyJson {
 /// message could read it, so a header drawn from the flow's context had to go
 /// back to that row. See [`wz_session_core::passive::FlowContext::version`] for
 /// why the acceptor's word is preferred.
-pub(crate) fn push_context(context: &wz_session_core::passive::FlowContext, out: &mut String) {
+pub(crate) fn push_context(
+    context: &wz_session_core::passive::FlowContext,
+    compression: &CompressionGrounds,
+    out: &mut String,
+) {
     out.push_str(",\"context\":{\"phase\":");
     escape_into(phase_word(context.phase).name(), out);
     let _ = write!(
@@ -4475,7 +4487,202 @@ pub(crate) fn push_context(context: &wz_session_core::passive::FlowContext, out:
         }
         None => out.push_str("null"),
     }
+    push_parameters(context, compression, out);
     out.push('}');
+}
+
+/// A session's compression reading and the two directions' evidence it rests
+/// on, which the session holds beside its context and not in it
+/// ([`wz_session_core::passive::PassiveSession::batch_header_evidence`]).
+pub(crate) struct CompressionGrounds {
+    pub(crate) reading: wz_session_core::passive::Reading<bool>,
+    pub(crate) evidence: [wz_session_core::passive::BatchHeaderEvidence; 2],
+}
+
+impl CompressionGrounds {
+    pub(crate) fn of(session: &wz_session_core::passive::PassiveSession) -> Self {
+        Self {
+            reading: session.compression_reading(),
+            evidence: [Direction::A, Direction::B].map(|d| session.batch_header_evidence(d)),
+        }
+    }
+
+    /// What a context alone says, with no bytes read for it: what its
+    /// handshake stated, or nothing.
+    #[cfg(test)]
+    pub(crate) fn of_context(context: &wz_session_core::passive::FlowContext) -> Self {
+        let evidence = [wz_session_core::passive::BatchHeaderEvidence::default(); 2];
+        Self {
+            reading: context.compression_reading(evidence),
+            evidence,
+        }
+    }
+}
+
+/// Revision 45 — `parameters`: every negotiated parameter of the session as
+/// `{"value": ..., "basis": ...}`, the value beside the grounds it is known on
+/// ([`BasisWord`]).
+///
+/// The flat keys beside it say what the handshake said and `null` otherwise,
+/// which cannot tell "the capture holds no handshake and the bytes showed it"
+/// from "nothing says it". A capture that joined a compressed session after
+/// its handshake reads its batches headed (`halves[].batch_header`
+/// `inferred`), and the flat `compression` stays `null` there. So each
+/// parameter is written again here with its basis, and a consumer reads one
+/// rule for all of them:
+///
+/// * `compression` — `"lz4"`, `"off"` or `null`, from
+///   [`wz_session_core::passive::FlowContext::compression_reading`]: `stated`
+///   by the Init pair; `inferred` from the bytes where the capture holds no
+///   Init; `conflicting` where the two directions' bytes read differently;
+///   `absent` otherwise. `evidence` is written exactly when the basis is
+///   `inferred` or `conflicting`, the two the bytes decided, and is `null`
+///   under `stated` and `absent`: per direction, `headed_units` and `plain_units`
+///   (units that read whole in only one of the two readings) and
+///   `headed_resyncs` and `plain_resyncs` (framings found again on a chain of
+///   boundaries all in one reading).
+/// * `lowlatency`, `qos` (booleans), `patch`, `sn_mask`, `batch_size` and
+///   `version` (integers): `stated` or `absent`. Nothing reads them from the
+///   bytes of a capture without the handshake today; `patch` and `version`
+///   are carried by no message after the Init pair at all.
+///
+/// The integers follow the integer rule: a bare number up to 2^53 - 1 and a
+/// string of the same digits above it, which `sn_mask` can reach.
+fn push_parameters(
+    context: &wz_session_core::passive::FlowContext,
+    compression: &CompressionGrounds,
+    out: &mut String,
+) {
+    use wz_session_core::passive::Reading;
+    out.push_str(",\"parameters\":{");
+    push_compression(compression.reading, compression.evidence, out);
+    let flag = |name: &str, reading: Reading<bool>, out: &mut String| {
+        let _ = write!(out, ",\"{name}\":{{\"value\":{}", tri_state(reading.value));
+        push_basis(reading.basis, out);
+        out.push('}');
+    };
+    flag("lowlatency", Reading::stated(context.lowlatency()), out);
+    flag("qos", Reading::stated(context.qos()), out);
+    let number = |name: &str, reading: Reading<u64>, out: &mut String| {
+        let _ = write!(out, ",\"{name}\":{{\"value\":");
+        match reading.value {
+            Some(v) => wz_session_core::json::u64_into(v, out),
+            None => out.push_str("null"),
+        }
+        push_basis(reading.basis, out);
+        out.push('}');
+    };
+    number("patch", Reading::stated(context.patch.map(u64::from)), out);
+    number("sn_mask", Reading::stated(context.sn_mask()), out);
+    number(
+        "batch_size",
+        Reading::stated(context.batch_size().map(u64::from)),
+        out,
+    );
+    number(
+        "version",
+        Reading::stated(context.version.map(u64::from)),
+        out,
+    );
+    out.push('}');
+}
+
+/// The `compression` entry of [`push_parameters`], from the session's reading
+/// and its two directions' evidence (`a` then `b`).
+fn push_compression(
+    reading: wz_session_core::passive::Reading<bool>,
+    evidence: [wz_session_core::passive::BatchHeaderEvidence; 2],
+    out: &mut String,
+) {
+    use wz_session_core::json::u64_into;
+    out.push_str("\"compression\":{\"value\":");
+    match reading.value {
+        Some(true) => out.push_str("\"lz4\""),
+        Some(false) => out.push_str("\"off\""),
+        None => out.push_str("null"),
+    }
+    push_basis(reading.basis, out);
+    out.push_str(",\"evidence\":");
+    use wz_session_core::passive::Basis;
+    if !matches!(reading.basis, Basis::Inferred | Basis::Conflicting) {
+        out.push_str("null}");
+        return;
+    }
+    out.push_str("{\"halves\":[");
+    for (i, (direction, e)) in [Direction::A, Direction::B]
+        .iter()
+        .zip(evidence)
+        .enumerate()
+    {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"direction\":");
+        escape_into(dir_name(*direction), out);
+        out.push_str(",\"headed_units\":");
+        u64_into(e.headed_units, out);
+        out.push_str(",\"plain_units\":");
+        u64_into(e.plain_units, out);
+        out.push_str(",\"headed_resyncs\":");
+        u64_into(e.headed_resyncs, out);
+        out.push_str(",\"plain_resyncs\":");
+        u64_into(e.plain_resyncs, out);
+        out.push('}');
+    }
+    out.push_str("]}}");
+}
+
+fn push_basis(basis: wz_session_core::passive::Basis, out: &mut String) {
+    out.push_str(",\"basis\":");
+    escape_into(BasisWord::of(basis).name(), out);
+}
+
+/// Revision 45 — the word a parameter's `basis` carries
+/// ([`wz_session_core::passive::Basis`]).
+#[derive(Clone, Copy)]
+pub(crate) enum BasisWord {
+    Stated,
+    Inferred,
+    Conflicting,
+    Absent,
+}
+
+impl BasisWord {
+    pub(crate) fn of(basis: wz_session_core::passive::Basis) -> Self {
+        use wz_session_core::passive::Basis;
+        match basis {
+            Basis::Stated => Self::Stated,
+            Basis::Inferred => Self::Inferred,
+            Basis::Conflicting => Self::Conflicting,
+            Basis::Absent => Self::Absent,
+        }
+    }
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Stated => "stated",
+            Self::Inferred => "inferred",
+            Self::Conflicting => "conflicting",
+            Self::Absent => "absent",
+        }
+    }
+
+    /// Every word, sorted: what the field document's family is held to.
+    #[cfg(test)]
+    pub(crate) fn names() -> Vec<&'static str> {
+        use wz_session_core::passive::Basis;
+        let mut words: Vec<&'static str> = [
+            Basis::Stated,
+            Basis::Inferred,
+            Basis::Conflicting,
+            Basis::Absent,
+        ]
+        .into_iter()
+        .map(|b| Self::of(b).name())
+        .collect();
+        words.sort_unstable();
+        words
+    }
 }
 
 /// R3054 — the flow's two DIRECTIONS, each with what its sender has been seen
@@ -4528,12 +4735,22 @@ fn push_halves(a: &crate::HalfObservation, b: &crate::HalfObservation, out: &mut
         }
         let _ = write!(
             out,
-            ",\"close_seen\":{},\"fin_seen\":{},\"rst_seen\":{},\"batch_header\":\"{}\"}}",
+            ",\"close_seen\":{},\"fin_seen\":{},\"rst_seen\":{},\"batch_header\":\"{}\"",
             half.close_seen,
             tri_state(half.fin_seen),
             tri_state(half.rst_seen),
             BatchHeaderWord::of(half.batch_header).name()
         );
+        // Revision 45 — the direction's own parameter, in `push_parameters`'
+        // shape: the lease its `Open` stated, or nothing.
+        let lease = wz_session_core::passive::Reading::stated(half.lease_ms);
+        out.push_str(",\"parameters\":{\"lease_ms\":{\"value\":");
+        match lease.value {
+            Some(ms) => u64_into(ms, out),
+            None => out.push_str("null"),
+        }
+        push_basis(lease.basis, out);
+        out.push_str("}}}");
     }
     out.push(']');
 }
@@ -7507,7 +7724,11 @@ mod tests {
             // crate, so a struct-update literal cannot be written here.
             let mut context = FlowContext::default();
             context.phase = phase;
-            push_context(&context, &mut out);
+            push_context(
+                &context,
+                &CompressionGrounds::of_context(&context),
+                &mut out,
+            );
             arms.push(out);
         }
         // Every `batch_header` word, on a half.
@@ -7523,6 +7744,31 @@ mod tests {
             let mut out = String::new();
             push_halves(&half, &half, &mut out);
             arms.push(out);
+        }
+        // Every `basis` word, on a compression reading that carries evidence
+        // wherever the word allows it, so the evidence keys are written too.
+        {
+            use wz_session_core::passive::{Basis, BatchHeaderEvidence, Reading};
+            let seen = BatchHeaderEvidence {
+                headed_units: 1,
+                plain_units: 1,
+                headed_resyncs: 1,
+                plain_resyncs: 1,
+            };
+            let mut words = alloc::collections::BTreeSet::new();
+            for (value, basis) in [
+                (Some(true), Basis::Stated),
+                (Some(false), Basis::Inferred),
+                (None, Basis::Conflicting),
+                (None, Basis::Absent),
+            ] {
+                words.insert(BasisWord::of(basis).name());
+                let mut out = String::from("{");
+                push_compression(Reading { value, basis }, [seen, seen], &mut out);
+                out.push('}');
+                arms.push(out);
+            }
+            assert_eq!(words.into_iter().collect::<Vec<_>>(), BasisWord::names());
         }
         // Every `zenoh` and `announced_version` word, from the evidence that
         // decides it, and every check with both sides observed, so the check,
@@ -7927,14 +8173,53 @@ mod tests {
         (d, file)
     }
 
-    /// The `context` object of each flow in `doc`, exactly as written. The
-    /// object has no nested object, so the first `}` ends it.
-    fn context_objects(doc: &str) -> Vec<&str> {
+    /// The FLAT cells of each flow's `context` object in `doc`, exactly as
+    /// written and closed as an object: every key ahead of the `parameters`
+    /// object revision 45 added, which restates them with their basis and is
+    /// held by its own tests (`context_parameters`).
+    fn context_objects(doc: &str) -> Vec<String> {
         const KEY: &str = "\"context\":";
         doc.match_indices(KEY)
             .map(|(at, _)| {
                 let rest = &doc[at + KEY.len()..];
-                &rest[..=rest.find('}').expect("a context object closes")]
+                let flat = rest
+                    .find(",\"parameters\":")
+                    .expect("a context object carries its parameters");
+                alloc::format!("{}}}", &rest[..flat])
+            })
+            .collect()
+    }
+
+    /// The `parameters` object of each flow's `context` in `doc`, exactly as
+    /// written.
+    fn context_parameters(doc: &str) -> Vec<&str> {
+        const KEY: &str = "\"context\":";
+        doc.match_indices(KEY)
+            .map(|(at, _)| {
+                let rest = &doc[at + KEY.len()..];
+                let from = rest
+                    .find("\"parameters\":")
+                    .expect("a context carries parameters")
+                    + "\"parameters\":".len();
+                let body = &rest[from..];
+                let mut depth = 0usize;
+                let end = body
+                    .char_indices()
+                    .find_map(|(i, c)| {
+                        match c {
+                            '{' => depth += 1,
+                            '}' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    return Some(i);
+                                }
+                            }
+                            _ => {}
+                        }
+                        None
+                    })
+                    .expect("the parameters object closes");
+                &body[..=end]
             })
             .collect()
     }
@@ -8042,6 +8327,27 @@ mod tests {
         assert_eq!(
             context_objects(&doc),
             alloc::vec![CLOSED_WITHOUT_A_HANDSHAKE],
+            "{doc}"
+        );
+        // Revision 45 — what the flat cells cannot say: with no Init, the bytes
+        // say the batches carry no header, so compression is `off`, inferred,
+        // on the seven units, each of which reads whole only as it stands. The
+        // other parameters only a handshake states are absent.
+        assert_eq!(
+            context_parameters(&doc),
+            alloc::vec![
+                "{\"compression\":{\"value\":\"off\",\"basis\":\"inferred\",\"evidence\":\
+                 {\"halves\":[{\"direction\":\"a\",\"headed_units\":0,\"plain_units\":5,\
+                 \"headed_resyncs\":0,\"plain_resyncs\":0},{\"direction\":\"b\",\
+                 \"headed_units\":0,\"plain_units\":2,\"headed_resyncs\":0,\
+                 \"plain_resyncs\":0}]}},\
+                 \"lowlatency\":{\"value\":null,\"basis\":\"absent\"},\
+                 \"qos\":{\"value\":null,\"basis\":\"absent\"},\
+                 \"patch\":{\"value\":null,\"basis\":\"absent\"},\
+                 \"sn_mask\":{\"value\":null,\"basis\":\"absent\"},\
+                 \"batch_size\":{\"value\":null,\"basis\":\"absent\"},\
+                 \"version\":{\"value\":null,\"basis\":\"absent\"}}"
+            ],
             "{doc}"
         );
         // In capture order. The Frames and the rest read as they always did; the
@@ -8399,9 +8705,11 @@ mod tests {
         let doc = fields_json(&d, &file, None, None);
 
         assert_eq!(d.flows().len(), 1, "one TCP flow: {doc}");
+        // Scoped by a key only a half carries: `lease_ms` names
+        // `parameters`' entry too.
         let halves = scoped(
             &doc,
-            "lease_ms",
+            "last_seen_ts_ns",
             &[
                 "direction",
                 "lease_ms",
@@ -9200,7 +9508,9 @@ mod tests {
         // against a rename and against each other and against NOTHING a
         // consumer could read.
         let mut failures: Vec<String> = Vec::new();
-        let live: [(&str, &str, Vec<&'static str>); 79] = [
+        let live: [(&str, &str, Vec<&'static str>); 80] = [
+            // On what grounds a session parameter's value is known.
+            (rev::FIELDS, "basis", BasisWord::names()),
             // The session's per-frame verdicts, each held to the
             // walk its emitter's exhaustive match is bound to.
             (rev::FIELDS, "verdict", SnVerdictWord::names()),
