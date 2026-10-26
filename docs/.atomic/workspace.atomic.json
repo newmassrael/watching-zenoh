@@ -291134,6 +291134,40 @@
         "bx: remote runs from this worktree end in \"submodule checkout failed\" on pc2 and hkl001 with no terminal record in the log; reported to the bx session."
       ]
     },
+    "Round 3724": {
+      "decision_summary": "The workload's arrival processes are three (periodic, Poisson from a seed, burst) and the schedule is now only the intended send times: a send that cannot be made at its time is made at once and the ones behind it follow, so the offered load is the plan's, and the interpreter reports the lateness (late_max_us on the done line). Corrected the day it landed (Round 3719): the first version dropped the times already passed, which thinned the load and, on a Poisson stream, dropped exactly the short gaps a 1 ms timer cannot hit, the coordinated omission a load generator must not commit; a binary test caught it. advanced_publish plays the same stream keys and loop as publish (stream.rs, one key table by macro). The query role takes think_ms for a closed loop: the next question think_ms after the last one's final, and a final that never comes is said, not waited on forever.",
+      "changes_bullets": [
+        "crates/wz-workload: arrivals Process (Periodic, Poisson, Burst) and Arrivals (due, advance), the exponential gap with libm::log (already in the lock); tests with gaps computed independently.",
+        "crates/wz-ap-demo: stream.rs (stream_keys! macro, arrivals, arrival_seed and burst rules, schedule over Arrivals, one run loop with late_max_us), publish and advanced_publish on it, query with think_ms and the lost-final line; binary tests for a Poisson and a burst stream and for the closed loop, refusal tests updated.",
+        "scripts/run-ci.sh: C1by lists the new workload tests; C1AY sessions_driver_binary 7 and sessions_driver_query_binary 4. docs/target-build-contract.md: 5c table and driver paragraph."
+      ],
+      "verification_bullets": [
+        "On pc2 through bx: wz-workload 12 tests; wz-ap-demo unit 96 (100 with advanced), sessions_driver_binary 7, sessions_driver_query_binary 4, sessions_driver_advanced_binary 2; clippy of wz-workload, of wz-ap-demo and of wz-ap-demo with advanced, one crate per command; wz-workload built for thumbv7em-none-eabihf with libm; Layer C1by pass; the guarded-count gate over the range, 32 of 32.",
+        "The Poisson gaps of seed 0 match values computed independently with the C library's log, and 200000 gaps of mean 1 ms average within 1 percent. The first run of the new binary test failed with skipped=1 on the Poisson stream, which is what exposed the dropping rule; after the correction it passes."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "The fixed-memory interpreter: the slot publisher's schedule (slot_schedule, which sends once after a stall and counts again from then) is to be replaced by the workload's Arrivals with made payloads, and a replay entity of a bounded trace compiled into the image, with its generator rule, const assertions, link-gate proof and witness."
+      ],
+      "publishable_decision_summary": "The workload's arrival processes are three (periodic, Poisson from a seed, burst) and the schedule is now only the intended send times: a send that cannot be made at its time is made at once and the ones behind it follow, so the offered load is the plan's, and the interpreter reports the lateness (late_max_us on the done line). Corrected the day it landed (Round 3719): the first version dropped the times already passed, which thinned the load and, on a Poisson stream, dropped exactly the short gaps a 1 ms timer cannot hit, the coordinated omission a load generator must not commit; a binary test caught it. advanced_publish plays the same stream keys and loop as publish (stream.rs, one key table by macro). The query role takes think_ms for a closed loop: the next question think_ms after the last one's final, and a final that never comes is said, not waited on forever.",
+      "publishable_changes_bullets": [
+        "crates/wz-workload: arrivals Process (Periodic, Poisson, Burst) and Arrivals (due, advance), the exponential gap with libm::log (already in the lock); tests with gaps computed independently.",
+        "crates/wz-ap-demo: stream.rs (stream_keys! macro, arrivals, arrival_seed and burst rules, schedule over Arrivals, one run loop with late_max_us), publish and advanced_publish on it, query with think_ms and the lost-final line; binary tests for a Poisson and a burst stream and for the closed loop, refusal tests updated.",
+        "scripts/run-ci.sh: C1by lists the new workload tests; C1AY sessions_driver_binary 7 and sessions_driver_query_binary 4. docs/target-build-contract.md: 5c table and driver paragraph."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2 through bx: wz-workload 12 tests; wz-ap-demo unit 96 (100 with advanced), sessions_driver_binary 7, sessions_driver_query_binary 4, sessions_driver_advanced_binary 2; clippy of wz-workload, of wz-ap-demo and of wz-ap-demo with advanced, one crate per command; wz-workload built for thumbv7em-none-eabihf with libm; Layer C1by pass; the guarded-count gate over the range, 32 of 32.",
+        "The Poisson gaps of seed 0 match values computed independently with the C library's log, and 200000 gaps of mean 1 ms average within 1 percent. The first run of the new binary test failed with skipped=1 on the Poisson stream, which is what exposed the dropping rule; after the correction it passes."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The fixed-memory interpreter: the slot publisher's schedule (slot_schedule, which sends once after a stall and counts again from then) is to be replaced by the workload's Arrivals with made payloads, and a replay entity of a bounded trace compiled into the image, with its generator rule, const assertions, link-gate proof and witness."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
