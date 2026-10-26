@@ -291372,6 +291372,46 @@
         "A declared fixed-memory node takes no stop condition (count, duration_ms) and no written text or hex payload beyond a document; those stay the driver's."
       ]
     },
+    "Round 3730": {
+      "decision_summary": "Step L0 of the listening role and the cooperative scout budget. L0: the slot observer, the fixed-memory profile's cut of the registry (what the application registers once, what each peer writes per session), is no longer refused to a heap build; its gate in wz-session-core was storage-profile and bounded-heapless and is storage-profile, because its tables are PeerTables over the build's own policy. A listening engine holding several peers needs exactly this cut. slot_observer_heap.rs holds three tests: two peers numbering aliases from one id each hear their own key, two peers asking with one request id are each answered on their own sink with the Final after the replies, and for one session the slot observer sends and delivers what the one-session observer does. Size: pico-client-coop-scout read 981,698 on pc2, 698 over its 981,000; the same host read 987,023, 985,903, 985,879 and 981,698 at four successive commits, so no commit is blamed and the budget moves to 983,000.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/lib.rs: slot_observer is compiled under storage-profile alone. crates/wz-session-core/tests/slot_observer_heap.rs (new): the three tests. scripts/run-ci.sh: lane C1g runs them with the union of the features.",
+        "scripts/lib/capability_cost_gate.py: pico-client-coop-scout budget 981,000 to 983,000, the note carrying the pc2 series.",
+        "docs/capi-pico-on-coop-engine.md: section 7 records L0 as done."
+      ],
+      "verification_bullets": [
+        "wz-session-core slot_observer_heap with the C1g features: 3 passed; the hook's gate array plus the surface gates: 117 of 118 passed, the one failing being duplicate_module_lint on the cfg pair of key_gate (not this round's; its owner has the fix locally).",
+        "capability_cost_gate.py --check for the two cooperative cases passes locally (scout 965,547 of 983,000; admin-space 1,097,615 of 1,115,000); the pc2 readings are the series above. The pc2 reading of pico-client-coop-admin-space at the origin tip was 1,114,729, 271 under its budget; another session moves that budget in its own commit.",
+        "Not done: the hosted run that holds these commits has not finished."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "carry_forward_bullets": [
+        "L1 of the listening role (the engine on SlotObserver with one link's PeerTables and Requesters, no change of behaviour) waits for the cooperative engine's no_std seam commits of the MCU session to reach origin; that session hands engine.rs over afterwards.",
+        "Read C1cs, C1cc, C1ce, C1co and C1aq to C1av from the first hosted run that finishes and holds 3722 or later.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine; the differential of the typed tokio host against the port's host."
+      ],
+      "publishable_decision_summary": "Step L0 of the listening role and the cooperative scout budget. L0: the slot observer, the fixed-memory profile's cut of the registry (what the application registers once, what each peer writes per session), is no longer refused to a heap build; its gate in wz-session-core was storage-profile and bounded-heapless and is storage-profile, because its tables are PeerTables over the build's own policy. A listening engine holding several peers needs exactly this cut. slot_observer_heap.rs holds three tests: two peers numbering aliases from one id each hear their own key, two peers asking with one request id are each answered on their own sink with the Final after the replies, and for one session the slot observer sends and delivers what the one-session observer does. Size: pico-client-coop-scout read 981,698 on pc2, 698 over its 981,000; the same host read 987,023, 985,903, 985,879 and 981,698 at four successive commits, so no commit is blamed and the budget moves to 983,000.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/lib.rs: slot_observer is compiled under storage-profile alone. crates/wz-session-core/tests/slot_observer_heap.rs (new): the three tests. scripts/run-ci.sh: lane C1g runs them with the union of the features.",
+        "scripts/lib/capability_cost_gate.py: pico-client-coop-scout budget 981,000 to 983,000, the note carrying the pc2 series.",
+        "docs/capi-pico-on-coop-engine.md: section 7 records L0 as done."
+      ],
+      "publishable_verification_bullets": [
+        "wz-session-core slot_observer_heap with the C1g features: 3 passed; the hook's gate array plus the surface gates: 117 of 118 passed, the one failing being duplicate_module_lint on the cfg pair of key_gate (not this round's; its owner has the fix locally).",
+        "capability_cost_gate.py --check for the two cooperative cases passes locally (scout 965,547 of 983,000; admin-space 1,097,615 of 1,115,000); the pc2 readings are the series above. The pc2 reading of pico-client-coop-admin-space at the origin tip was 1,114,729, 271 under its budget; another session moves that budget in its own commit.",
+        "Not done: the hosted run that holds these commits has not finished."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "publishable_carry_forward_bullets": [
+        "L1 of the listening role (the engine on SlotObserver with one link's PeerTables and Requesters, no change of behaviour) waits for the cooperative engine's no_std seam commits of the MCU session to reach origin; that session hands engine.rs over afterwards.",
+        "Read C1cs, C1cc, C1ce, C1co and C1aq to C1av from the first hosted run that finishes and holds 3722 or later.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine; the differential of the typed tokio host against the port's host."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
