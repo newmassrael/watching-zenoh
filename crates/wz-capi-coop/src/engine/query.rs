@@ -205,8 +205,12 @@ pub(super) const LOCAL_QUERY: u64 = 0;
 /// queryables and the queries a C program keeps.
 #[derive(Default)]
 pub(super) struct QueryPlane {
-    /// The generation of the link the session dialled last, which every query arrives on.
+    /// The generation of the link dialled last: each link is given the next.
     pub(super) generation: AtomicU64,
+    /// The generation of the link whose frame is being dispatched, which the queries that arrive
+    /// meanwhile belong to. A session with several faces has several links, each dispatching in its
+    /// own turn, so a query cannot be told its link by the last one dialled.
+    pub(super) arriving: AtomicU64,
     /// Set while the session hands its own get to its queryables, under the session's lock: the
     /// queries that arrive meanwhile are the get's, not the link's (`local-queryable`).
     #[cfg(feature = "local-queryable")]
@@ -231,7 +235,7 @@ impl QueryPlane {
         if self.asking.load(Ordering::Acquire) {
             return LOCAL_QUERY;
         }
-        self.generation.load(Ordering::Acquire)
+        self.arriving.load(Ordering::Acquire)
     }
 
     /// Run `ask`, the session handing its own get to its queryables, with what arrives meanwhile

@@ -75,11 +75,13 @@ fn a_get_answered_with_several_replies_hands_the_leg_all_of_them() {
     });
     // The options of a recovery get: the replies answer on the samples' own key, which the
     // selector's `_anyke` admits, each once and with its timestamp.
-    let options = QueryOptions::get()
+    let mut options = QueryOptions::get()
         .with_expose_timestamp(true)
         .with_parameters(ANYKE_PARAM.as_bytes().to_vec())
         .with_target(QueryTarget::All)
         .with_consolidation(ConsolidationMode::None);
+    // The publisher's cache is a peer's: the session's own queryables are not asked.
+    options.allowed_destination = wz_session_core::locality::Locality::Remote;
     assert_eq!(
         options.resolved_consolidation(),
         ConsolidationMode::None,

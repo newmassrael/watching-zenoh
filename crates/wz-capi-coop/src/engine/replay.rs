@@ -29,7 +29,8 @@ use wz_session_core::replay_cursor::{Insertion, Removal, ReplayCursor};
 use wz_session_core::replay_pacing::ReplayPacing;
 use wz_session_mcu::dial::McuActions;
 
-use super::Core;
+use super::{Core, Link};
+use crate::prelude::*;
 
 /// How long a turn that a refused send cut short waits when the session is not paced, so a link
 /// that keeps refusing is asked again on the next step and not in a spin.
@@ -86,11 +87,21 @@ pub(super) struct Replay {
 
 impl Replay {
     pub(super) fn new() -> Self {
+        Self::with_pacing(ReplayPacing::BUILD)
+    }
+
+    /// A replay that tells at the pace `pacing` states, as the face before it was set to.
+    pub(super) fn with_pacing(pacing: Option<ReplayPacing>) -> Self {
         Self {
             cursor: ReplayCursor::idle(),
-            pacing: ReplayPacing::BUILD,
+            pacing,
             next_turn_ms: 0,
         }
+    }
+
+    /// How a link's declarations go out.
+    pub(super) fn pacing(&self) -> Option<ReplayPacing> {
+        self.pacing
     }
 
     /// State how a link's declarations go out, for a caller that wants a pace regardless of the
@@ -175,74 +186,127 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         true
     }
 
-    /// A link has been established: begin to tell its peer what the session holds, and send the
-    /// first turn of it.
-    pub(super) fn begin_replay(&mut self, actions: &McuActions<C>, now_ms: u64) {
-        self.replay.cursor = ReplayCursor::begin(self.sequence_len());
-        self.replay.next_turn_ms = now_ms;
-        self.replay_turn(actions, now_ms);
+    /// The link of the face at `at` has been established: begin to tell its peer what the session
+    /// holds, and send the first turn of it.
+    pub(super) fn begin_replay(&mut self, at: usize, actions: &McuActions<C>, now_ms: u64) {
+        let owed = self.sequence_len();
+        let replay = &mut self.faces[at].replay;
+        replay.cursor = ReplayCursor::begin(owed);
+        replay.next_turn_ms = now_ms;
+        self.replay_turn(at, actions, now_ms);
     }
 
-    /// One turn of the replay, if one is owed and due: the burst of the pace, or everything when
-    /// the session is not paced, from the entry the last turn stopped at.
-    pub(super) fn replay_turn(&mut self, actions: &McuActions<C>, now_ms: u64) {
-        if self.replay.cursor.finished() || now_ms < self.replay.next_turn_ms {
+    /// One turn of the replay of the face at `at`, if one is owed and due: the burst of the pace,
+    /// or everything when the session is not paced, from the entry the last turn stopped at.
+    pub(super) fn replay_turn(&mut self, at: usize, actions: &McuActions<C>, now_ms: u64) {
+        let replay = &self.faces[at].replay;
+        if replay.cursor.finished() || now_ms < replay.next_turn_ms {
             return;
         }
-        let burst = self.replay.pacing.map_or(usize::MAX, |pace| pace.burst());
-        let mut cursor = self.replay.cursor;
+        let burst = replay.pacing.map_or(usize::MAX, |pace| pace.burst());
+        let mut cursor = replay.cursor;
         for place in cursor.turn(burst) {
             if !self.emit(actions, place) {
                 cursor.refused(place);
                 break;
             }
         }
-        self.replay.cursor = cursor;
+        let replay = &mut self.faces[at].replay;
+        replay.cursor = cursor;
         if !cursor.finished() {
-            let wait_ms = self
-                .replay
-                .pacing
-                .map_or(RETRY_MS, |pace| pace.interval_ms());
-            self.replay.next_turn_ms = now_ms.saturating_add(wait_ms);
+            let wait_ms = replay.pacing.map_or(RETRY_MS, |pace| pace.interval_ms());
+            replay.next_turn_ms = now_ms.saturating_add(wait_ms);
         }
     }
 
-    /// A declaration of `kind` is about to be stored at the end of its list: tell the peer of it
-    /// with `send`, unless it is not to be told now, and say whether the link took it. It is not
-    /// told when no link is up, which declares it when it comes up, and when the replay has not
-    /// reached its place, which sends it in its turn; both count as taken. A refusal is answered as
-    /// `on_refusal` says. Call it once, before the push.
-    pub(super) fn announce(
+    /// A declaration of `kind` is about to be stored at the end of its list: tell the peer of each
+    /// face that is up of it with `send`, unless it is not to be told now, and say whether it was
+    /// taken. It is not told to a face that is not up, which declares it when it comes up, and
+    /// when that face's replay has not reached its place, which sends it in its turn; both count
+    /// as taken. A refusal is answered as `on_refusal` says: [`OnRefusal::Forget`] counts what
+    /// was refused as told, and [`OnRefusal::Undo`] makes the declaration over, putting every
+    /// face's replay back as it was and taking back, with `undo`, what the faces that took it
+    /// were told. Call it once, before the push.
+    fn announce_with(
         &mut self,
         kind: Kind,
         on_refusal: OnRefusal,
-        send: impl FnOnce(&McuActions<C>) -> bool,
+        send: impl Fn(&McuActions<C>) -> bool,
+        undo: impl Fn(&McuActions<C>),
     ) -> bool {
-        let Some(actions) = self.up().cloned() else {
-            return true;
-        };
-        let before = self.replay.cursor;
         let place = self.start_of(kind) + self.len_of(kind);
-        match self.replay.cursor.inserted(place) {
-            Insertion::Owed => true,
-            Insertion::EmitNow if send(&actions) => true,
-            Insertion::EmitNow => {
-                if on_refusal == OnRefusal::Undo {
-                    self.replay.cursor = before;
-                }
-                false
+        // What each face's replay was and what its link made of the declaration, so that a refusal
+        // that undoes the declaration can put every face back.
+        let mut told: Vec<(usize, ReplayCursor, Told)> = Vec::new();
+        for (at, face) in self.faces.iter_mut().enumerate() {
+            let Link::Up(wire) = &face.link else {
+                continue;
+            };
+            let before = face.replay.cursor;
+            let outcome = match face.replay.cursor.inserted(place) {
+                Insertion::Owed => Told::Owed,
+                Insertion::EmitNow if send(&wire.actions) => Told::Sent,
+                Insertion::EmitNow => Told::Refused,
+            };
+            told.push((at, before, outcome));
+        }
+        let refused = told.iter().any(|(_, _, outcome)| *outcome == Told::Refused);
+        if !refused || on_refusal == OnRefusal::Forget {
+            return true;
+        }
+        for (at, before, outcome) in told {
+            let face = &mut self.faces[at];
+            face.replay.cursor = before;
+            if let (Told::Sent, Link::Up(wire)) = (outcome, &face.link) {
+                undo(&wire.actions);
             }
         }
+        false
     }
 
-    /// The declaration at `index` of `kind`'s list is about to be removed: the link to retract it
-    /// over, or `None` when nothing is to be sent, because no link is up or the peer was never told
-    /// of it. Call it once, before the removal.
-    pub(super) fn retract(&mut self, kind: Kind, index: usize) -> Option<Rc<McuActions<C>>> {
-        let actions = self.up()?.clone();
-        match self.replay.cursor.removed(self.start_of(kind) + index) {
-            Removal::Retract => Some(actions),
-            Removal::Silent => None,
-        }
+    /// [`Self::announce_with`] for a declaration that is stored whatever a link makes of it: one
+    /// that a link refused is counted as told, and the peer learns it when the session declares
+    /// over a new link.
+    pub(super) fn announce(&mut self, kind: Kind, send: impl Fn(&McuActions<C>) -> bool) {
+        self.announce_with(kind, OnRefusal::Forget, send, |_| {});
     }
+
+    /// [`Self::announce_with`] for a declaration that is not made when a link refuses it: whether
+    /// it was made.
+    pub(super) fn announce_or_undo(
+        &mut self,
+        kind: Kind,
+        send: impl Fn(&McuActions<C>) -> bool,
+        undo: impl Fn(&McuActions<C>),
+    ) -> bool {
+        self.announce_with(kind, OnRefusal::Undo, send, undo)
+    }
+
+    /// The declaration at `index` of `kind`'s list is about to be removed: the links to retract it
+    /// over, which are those of the faces that are up and whose peers were told of it. Call it
+    /// once, before the removal.
+    pub(super) fn retract(&mut self, kind: Kind, index: usize) -> Vec<Rc<McuActions<C>>> {
+        let place = self.start_of(kind) + index;
+        let mut links = Vec::new();
+        for face in &mut self.faces {
+            let Link::Up(wire) = &face.link else {
+                continue;
+            };
+            if matches!(face.replay.cursor.removed(place), Removal::Retract) {
+                links.push(wire.actions.clone());
+            }
+        }
+        links
+    }
+}
+
+/// What a face's link made of a declaration it was offered.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Told {
+    /// The face's replay has not reached the declaration: it is sent in its turn.
+    Owed,
+    /// The link took it now.
+    Sent,
+    /// The link refused it.
+    Refused,
 }

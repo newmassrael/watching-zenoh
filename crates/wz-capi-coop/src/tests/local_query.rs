@@ -126,7 +126,11 @@ fn a_get_for_any_destination_waits_for_the_peer_and_the_session() {
         None,
         None,
     );
-    assert_eq!(issued, Some(1));
+    assert_eq!(
+        issued,
+        Some(2),
+        "a leg to the peer and one to the session's own"
+    );
     {
         let leg = leg.lock().unwrap();
         assert!(!leg.ended, "CONTROL: the router's Final is still owed");

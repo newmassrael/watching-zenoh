@@ -68,16 +68,16 @@ impl PendingGet {
     /// Drop this leg's entry from its face's pending gets, which ends the leg (its sink's guard
     /// says so). A face the session no longer holds took its entries with it.
     pub(super) fn unregister(&self, registry: &mut Registry) {
-        let Some(face) = registry.face_mut(self.face) else {
+        let Some(gets) = registry.gets_mut(self.face) else {
             return;
         };
         match self.kind {
             GetKind::Query => {
-                face.gets.replies.unregister(self.rid);
+                gets.replies.unregister(self.rid);
             }
             #[cfg(feature = "liveliness-get")]
             GetKind::Liveliness => {
-                face.gets.liveliness_gets.unregister(self.rid);
+                gets.liveliness_gets.unregister(self.rid);
             }
         }
     }

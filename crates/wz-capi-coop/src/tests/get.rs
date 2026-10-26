@@ -15,21 +15,40 @@ use wz_session_core::reply_sink::{ReplyKind, ReplyView};
 
 use super::{open, until, CatchAll, Command, Engine, Router};
 
-/// What a leg's callback saw: each reply as its kind, key and payload, and whether the callback
-/// has been dropped.
+/// What the callbacks of a get's legs saw: each reply as its kind, key and payload, and whether
+/// every callback has been dropped, which is when the get is over.
 #[derive(Default)]
 pub(super) struct Leg {
     pub(super) replies: Vec<(ReplyKind, String, Vec<u8>)>,
     pub(super) ended: bool,
+    /// The callbacks minted and not yet dropped.
+    open: usize,
 }
 
-/// Owned by a leg's callback, so the leg is marked ended when the callback is dropped.
+/// Owned by a leg's callback: the get is marked ended when the last callback is dropped.
 struct Ends(Arc<Mutex<Leg>>);
+
+impl Ends {
+    fn mint(leg: &Arc<Mutex<Leg>>) -> Self {
+        leg.lock().unwrap().open += 1;
+        Self(leg.clone())
+    }
+}
 
 impl Drop for Ends {
     fn drop(&mut self) {
-        self.0.lock().unwrap().ended = true;
+        let mut leg = self.0.lock().unwrap();
+        leg.open -= 1;
+        leg.ended = leg.open == 0;
     }
+}
+
+/// Options for a get of the link's peer alone: the session's own queryables are not asked, so the
+/// get has the one leg a test of the peer's part is about.
+pub(super) fn remote_get() -> QueryOptions {
+    let mut opts = QueryOptions::get();
+    opts.allowed_destination = wz_session_core::locality::Locality::Remote;
+    opts
 }
 
 /// Ask a get on `keyexpr` with `opts`, its legs recorded in what is returned, each holding
@@ -46,7 +65,7 @@ pub(super) fn ask(
     let leg = Arc::new(Mutex::new(Leg::default()));
     let seen = leg.clone();
     let issued = engine.get_on_wire(keyexpr, &WireKey::literal(), opts, fan, &mut || {
-        let ends = Ends(seen.clone());
+        let ends = Ends::mint(&seen);
         let registration = registration.clone();
         let step = step.clone();
         Box::new(move |view: &dyn ReplyView| {
@@ -84,7 +103,7 @@ fn a_get_is_answered_and_ends_with_its_final() {
     let (issued, leg) = ask(
         &engine,
         "demo/g/a",
-        &QueryOptions::get(),
+        &remote_get(),
         None,
         None,
         Some(engine.clone()),
@@ -112,7 +131,7 @@ fn a_get_nobody_answers_ends_at_its_deadline() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     settle(&router, &engine, Command::Silence);
-    let mut opts = QueryOptions::get();
+    let mut opts = remote_get();
     opts.timeout_ms = 300;
     let asked = Instant::now();
     let (issued, leg) = ask(&engine, "demo/g/a", &opts, None, None, None);
@@ -147,7 +166,7 @@ fn a_cancelled_get_ends_without_a_step() {
     let (issued, leg) = ask(
         &engine,
         "demo/g/a",
-        &QueryOptions::get(),
+        &remote_get(),
         Some(&fan),
         Some(registration.clone()),
         None,
@@ -172,7 +191,7 @@ fn a_get_ends_with_its_link() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     settle(&router, &engine, Command::Silence);
-    let (issued, leg) = ask(&engine, "demo/g/a", &QueryOptions::get(), None, None, None);
+    let (issued, leg) = ask(&engine, "demo/g/a", &remote_get(), None, None, None);
     assert_eq!(issued, Some(1));
     until(&engine, "the query to reach the router", || {
         router.seen(|s| s.queries) == 1

@@ -45,11 +45,11 @@ const LOOPBACK: [u8; 4] = [127, 0, 0, 1];
 
 /// The identity of the advanced publisher the router stands in for, and the key its cache and its
 /// liveliness token share (`<base>/@adv/pub/<zid in hex>/<eid>/_`).
-#[cfg(feature = "query")]
+#[cfg(all(feature = "ticker", feature = "query", feature = "liveliness"))]
 const ADVANCED_PUBLISHER_ZID: [u8; 1] = [0x02];
-#[cfg(feature = "query")]
+#[cfg(all(feature = "ticker", feature = "query", feature = "liveliness"))]
 const ADVANCED_PUBLISHER_EID: u32 = 7;
-#[cfg(feature = "query")]
+#[cfg(all(feature = "ticker", feature = "query", feature = "liveliness"))]
 const ADVANCED_PUBLISHER_KEY: &str = "demo/data/@adv/pub/2/7/_";
 
 type Engine = CoopEngine<PosixLinks, PosixClock>;
@@ -106,12 +106,12 @@ enum Command {
     HoldToken(u64, &'static str),
     /// Push `.1` on the key as the advanced publisher of identity `(zid 2, eid 7)` would, with
     /// sequence number `.2`.
-    #[cfg(feature = "query")]
+    #[cfg(all(feature = "ticker", feature = "query", feature = "liveliness"))]
     PushSequenced(&'static str, &'static [u8], u32),
     /// Hold the cache of that advanced publisher: a queryable on its `@adv` key that answers as
     /// the publisher's own cache does, out of the samples with the sequence numbers `.0`, each
     /// carrying its number as its payload. The selectors it is asked are recorded.
-    #[cfg(feature = "query")]
+    #[cfg(all(feature = "ticker", feature = "query", feature = "liveliness"))]
     HoldCache(&'static [u8]),
 }
 
@@ -131,7 +131,7 @@ struct Seen {
     #[cfg(feature = "query")]
     queries: usize,
     /// The parameters of each query the held cache was asked, in the order they arrived.
-    #[cfg(feature = "query")]
+    #[cfg(all(feature = "ticker", feature = "query", feature = "liveliness"))]
     selectors: Vec<String>,
     /// Whether the router has done what the test told it about queries: holds the queryable it
     /// was told to, or has gone quiet.
@@ -397,7 +397,7 @@ fn run_router(
                 silent.set(true);
                 counted_queries.lock().unwrap().settled = true;
             }
-            #[cfg(feature = "query")]
+            #[cfg(all(feature = "ticker", feature = "query", feature = "liveliness"))]
             Ok(Command::PushSequenced(key, value, sn)) => {
                 let meta = wz_session_core::metadata::PushMetadata {
                     source_info: Some(wz_session_core::sample::SourceInfo::new(
@@ -409,7 +409,7 @@ fn run_router(
                 };
                 let _ = actions.send_push_with_meta_literal(key, value, true, &meta);
             }
-            #[cfg(feature = "query")]
+            #[cfg(all(feature = "ticker", feature = "query", feature = "liveliness"))]
             Ok(Command::HoldCache(sns)) => {
                 use wz_ext_pubsub::advanced_cache::{CacheConfig, CacheStore, CachedSample};
                 use wz_session_core::sample::{SampleKind, SourceInfo, TimestampHint};
@@ -944,6 +944,8 @@ fn a_session_that_redials_none_ends_with_its_link() {
 
 #[cfg(all(feature = "ticker", feature = "query", feature = "liveliness"))]
 mod advanced;
+#[cfg(all(feature = "query", feature = "queryable", feature = "local-queryable"))]
+mod face_table;
 #[cfg(feature = "connectivity")]
 mod faces;
 #[cfg(feature = "query")]

@@ -101,6 +101,36 @@ impl<R: ReplySink, G: ReplySink> Default for Requesters<R, G> {
     }
 }
 
+/// What the OTHER faces of a session declare, which the matching verdicts of one face's dispatch
+/// count beside that face's own and the application's: a matching listener on a publisher
+/// matches while ANY face's peer holds a subscriber for it, so a peer that undeclares one
+/// leaves the listener matching while another still holds its own. A session with one face has
+/// no other ([`NoOtherPeers`]).
+pub trait OtherPeers {
+    /// Whether another face's peer declared a subscriber the publisher `criterion` reaches.
+    #[cfg(feature = "declare-subscriber")]
+    fn subscribes(&self, criterion: &crate::declare::subscriber::PublisherCriterion) -> bool;
+
+    /// Whether another face's peer declared a queryable the querier `criterion` reaches.
+    #[cfg(feature = "declare-queryable")]
+    fn answers(&self, criterion: &crate::declare::queryable::QuerierCriterion) -> bool;
+}
+
+/// The session has no face but the one dispatched.
+pub struct NoOtherPeers;
+
+impl OtherPeers for NoOtherPeers {
+    #[cfg(feature = "declare-subscriber")]
+    fn subscribes(&self, _criterion: &crate::declare::subscriber::PublisherCriterion) -> bool {
+        false
+    }
+
+    #[cfg(feature = "declare-queryable")]
+    fn answers(&self, _criterion: &crate::declare::queryable::QuerierCriterion) -> bool {
+        false
+    }
+}
+
 /// What the application registered, shared by every session of the process. See
 /// the module documentation. The sinks it registers are the types `K` names
 /// ([`ObserverSinks`]): [`SlotObserver`] is the heap profile's, with boxed closures.
@@ -469,6 +499,19 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
         requesters: &mut Requesters<R, G>,
         event: IterationEvent<'_>,
     ) {
+        self.dispatch_event_among(peers, requesters, event, &NoOtherPeers);
+    }
+
+    /// [`Self::dispatch_event`] for a session that holds other faces: `others` is what their
+    /// peers declare, counted by the matching verdicts beside this face's own.
+    #[inline(never)]
+    pub fn dispatch_event_among<R: ReplySink, G: ReplySink, O: OtherPeers>(
+        &mut self,
+        peers: &mut PeerTables,
+        requesters: &mut Requesters<R, G>,
+        event: IterationEvent<'_>,
+        others: &O,
+    ) {
         self.subscribers
             .dispatch_iteration_event(&mut peers.subscribers, event);
         // The two id spaces this session resolves through, as the subscriber side
@@ -503,7 +546,9 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
                 event,
                 peer_table,
                 &|c| {
-                    c.locality.allows_local() && subscribers.has_local_matching(c.keyexpr.as_str())
+                    (c.locality.allows_local()
+                        && subscribers.has_local_matching(c.keyexpr.as_str()))
+                        || others.subscribes(c)
                 },
             );
         }
@@ -515,16 +560,18 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
                 event,
                 peer_table,
                 &|c| {
-                    c.locality.allows_local()
-                        && queryables.has_local_matching(c.keyexpr.as_str(), c.complete_required)
+                    (c.locality.allows_local()
+                        && queryables.has_local_matching(c.keyexpr.as_str(), c.complete_required))
+                        || others.answers(c)
                 },
             );
         }
         #[cfg(all(feature = "declare-queryable", not(feature = "query-queryable")))]
-        self.remote_queryables.dispatch_iteration_event(
+        self.remote_queryables.dispatch_iteration_event_with_local(
             &mut peers.remote_queryables,
             event,
             peer_table,
+            &|c| others.answers(c),
         );
         // A `Declare(DeclToken)` whose outer `interest_id` names a pending
         // liveliness GET belongs to that GET and to no observer plane (zenoh
@@ -572,7 +619,7 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
         // Consumed only by the arms above, which a build with none of them lacks.
         #[cfg(not(feature = "liveliness-get"))]
         let _ = &requesters;
-        let _ = (&peers, event);
+        let _ = (&peers, event, others);
     }
 
     /// Drain what the last [`Self::dispatch_event`] staged for this session
@@ -670,6 +717,17 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
     /// had declared is gone, and the matching watches are re-evaluated against what
     /// remains. Returns the number of declarations dropped.
     pub fn flush_declarations_on_link_loss(&mut self, peers: &mut PeerTables) -> usize {
+        self.flush_declarations_on_link_loss_among(peers, &NoOtherPeers)
+    }
+
+    /// [`Self::flush_declarations_on_link_loss`] for a session that holds other faces: what their
+    /// peers declare is counted by the matching verdicts the flush re-evaluates, so a listener
+    /// another face's peer still satisfies keeps matching.
+    pub fn flush_declarations_on_link_loss_among<O: OtherPeers>(
+        &mut self,
+        peers: &mut PeerTables,
+        others: &O,
+    ) -> usize {
         #[allow(unused_mut)]
         let mut dropped = 0usize;
         #[cfg(all(feature = "declare-subscriber", feature = "codec-declare"))]
@@ -678,7 +736,9 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
             dropped += self.remote_subscribers.flush_declarations_on_link_loss(
                 &mut peers.remote_subscribers,
                 &|c| {
-                    c.locality.allows_local() && subscribers.has_local_matching(c.keyexpr.as_str())
+                    (c.locality.allows_local()
+                        && subscribers.has_local_matching(c.keyexpr.as_str()))
+                        || others.subscribes(c)
                 },
             );
         }
@@ -692,8 +752,9 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
             dropped += self.remote_queryables.flush_declarations_on_link_loss(
                 &mut peers.remote_queryables,
                 &|c| {
-                    c.locality.allows_local()
-                        && queryables.has_local_matching(c.keyexpr.as_str(), c.complete_required)
+                    (c.locality.allows_local()
+                        && queryables.has_local_matching(c.keyexpr.as_str(), c.complete_required))
+                        || others.answers(c)
                 },
             );
         }
@@ -705,9 +766,11 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
         {
             dropped += self
                 .remote_queryables
-                .flush_declarations_on_link_loss(&mut peers.remote_queryables, &|_| false);
+                .flush_declarations_on_link_loss(&mut peers.remote_queryables, &|c| {
+                    others.answers(c)
+                });
         }
-        let _ = &peers;
+        let _ = (&peers, others);
         dropped
     }
 
