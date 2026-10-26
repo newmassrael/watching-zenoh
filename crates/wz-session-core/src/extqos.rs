@@ -12,6 +12,7 @@
 //!   - `pub type QoSLink = zextz64!(0x1, false)` — the z64 form a peer with
 //!     `#priorities=` / `#reliability=` endpoint metadata sends (the packed
 //!     priority-range + reliability), NEVER alongside the unit.
+//!
 //! Both mean `is_qos = true` unless the `QoSLink` body says otherwise: a body of
 //! `0` is `NoQoS`, as is the absence of BOTH forms
 //! (`io/zenoh-transport/src/unicast/establishment/ext/qos.rs`
