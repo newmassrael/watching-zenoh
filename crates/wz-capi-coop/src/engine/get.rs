@@ -24,7 +24,7 @@ use wz_session_core::reply::InboundReply;
 use wz_session_core::reply_sink::{BoxedReplySink, ReplyView};
 
 use super::lock;
-use super::registry::Gets;
+use super::registry::{FaceId, Registry};
 
 /// What a get leg's sink queued, in the order it happened.
 ///
@@ -55,25 +55,29 @@ pub(super) enum GetKind {
     Liveliness,
 }
 
-/// A leg the session has pending: the id its callback is held under, and the id its entry is
-/// registered with (a request id or an Interest id, as its kind says).
+/// A leg the session has pending: the face it was asked of, the id its callback is held under,
+/// and the id its entry is registered with (a request id or an Interest id, as its kind says).
 pub(super) struct PendingGet {
+    pub(super) face: FaceId,
     pub(super) leg: u64,
     pub(super) rid: u64,
     pub(super) kind: GetKind,
 }
 
 impl PendingGet {
-    /// Drop this leg's entry from the session's pending gets, which ends the leg (its sink's
-    /// guard says so).
-    pub(super) fn unregister(&self, gets: &mut Gets) {
+    /// Drop this leg's entry from its face's pending gets, which ends the leg (its sink's guard
+    /// says so). A face the session no longer holds took its entries with it.
+    pub(super) fn unregister(&self, registry: &mut Registry) {
+        let Some(face) = registry.face_mut(self.face) else {
+            return;
+        };
         match self.kind {
             GetKind::Query => {
-                gets.replies.unregister(self.rid);
+                face.gets.replies.unregister(self.rid);
             }
             #[cfg(feature = "liveliness-get")]
             GetKind::Liveliness => {
-                gets.liveliness_gets.unregister(self.rid);
+                face.gets.liveliness_gets.unregister(self.rid);
             }
         }
     }
