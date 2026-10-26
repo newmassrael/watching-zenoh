@@ -41,14 +41,28 @@ git config core.hooksPath .githooks
   One push spent over 16 minutes in static checks; the previous full hook took
   about 90 minutes. Historical warm timings are not a current runtime budget.
 
-  Mandatory gates remain: confidential vocabulary, home paths and identities
-  (0/0b/0c), schema and tool pins (1), workspace SSOT validation (2), the
-  claim-scoped proof audit (2b), and the previous hosted verdict (2c, without
-  waiting for a running job). Since open-debt item 897 the default hook also
-  runs the cheap, tree-only checks that hosted CI went red on while the hook
-  stayed green: the upstream-citation form gates (2f, about 11s), the hosted
-  static lanes C0d/C0e/C0f with the count-guard lint (2c2, about 7s), and the
-  count-guard oracle in its build-free mode (2c3, item 898, about 2s):
+  **Push through `bash scripts/land.sh`** (owner, 2026-10-27). Several
+  sessions push to `main` from worktrees of one clone, and a push that filed
+  ledger round N used to lose the hook's minute to another push that filed N,
+  then be refused by origin after its hook passed. `land.sh` holds an exclusive
+  `flock` on `<git common dir>/wz-push.lock` from its fetch to the end of its
+  push: it rebases HEAD onto `origin/main`, files the ledger round with the
+  next number when append-round arguments follow `--` (without `--entry-id`),
+  and pushes `HEAD:main` through the hooks. Gate 0p refuses a push to `main`
+  that does not hold the lock. `--ack-red <run>` sets `WZ_ACK_RED` for that one
+  push; `--status` names the holder; a second session waits for the lock.
+
+  Mandatory gates remain: the push lock (0p), confidential vocabulary, home
+  paths and identities (0/0b/0c), schema and tool pins (1), workspace SSOT
+  validation (2), the claim-scoped proof audit (2b), and the previous hosted
+  verdict (2c, without waiting for a running job). The owner's 2026-10-27
+  decision keeps beside them only the cheap checks that refuse often, judged by
+  how often `docs/hosted-red-acks.md` names them: the upstream-citation form
+  gate (2f, about 11s), the doc-link lane C0d (2c2, about 5s), and the
+  count-guard oracle in its build-free mode (2c3, item 898, about 2s). The
+  store-reason and prose-feature gates, C0e, C0f, the count-guard and
+  build-evidence lints and the region gate moved to hosted CI (the extended
+  sweep runs them as gate 2c2x). The count-guard oracle row works like this:
   `guarded_count_gate.py --cached-only` selects the guards the push range
   reaches and judges them against the per-clone measurement cache. A cached
   count that disagrees with its declared number REFUSES the push (a known wrong
@@ -68,7 +82,7 @@ git config core.hooksPath .githooks
   do not repeat a broad CI sweep just because a push is about to happen.
 
   To explicitly request the preserved extended local sweep, use
-  `WZ_PREPUSH_EXTENDED=1 git push origin main`. This does not bypass mandatory
+  `WZ_PREPUSH_EXTENDED=1 bash scripts/land.sh`. This does not bypass mandatory
   checks. Count-guard builds remain separately opt-in with
   `WZ_PREPUSH_COUNT_GUARD=1` inside that extended sweep. The scripts and hosted
   lane assertions are unchanged; hosted failures are diagnosed next round.

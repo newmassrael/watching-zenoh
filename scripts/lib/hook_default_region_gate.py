@@ -51,6 +51,17 @@ comment does not run), with a backslash-continued command read as one line:
   * a hook with no boundary, or two, is a finding: the split is the subject, so
     a scanner that found none has agreed with nothing.
 
+## 2026-10-27: only the checks that refuse often
+
+The owner's 2026-10-27 decision narrowed the ordinary push to the checks that
+refuse often, judged by how often `docs/hosted-red-acks.md` names them: the
+upstream citation form, the doc-link lane C0d, the cached count guards and the
+home-path range stay; the store-reason and prose-feature siblings, the C0e and
+C0f lanes, the two run-ci lints and this gate itself moved to DEFERRED, where
+the rule above (a default-region run of a deferred check is a finding) holds
+the move. The same decision added the push-lock row: a push to main holds the
+clone's push lock, which `scripts/land.sh` takes.
+
 ## What this does NOT claim
 
 That the listed checks are sufficient. They are the ones with a measured cost
@@ -122,37 +133,11 @@ REQUIRED: tuple[Required, ...] = (
         "went red, for a gate the hook named only below the boundary",
     ),
     Required(
-        ("scripts/lib/store_reason_citation_gate.py",),
-        "0.5",
-        "the citation gate's sibling over the store's atom reasons",
-    ),
-    Required(
-        ("scripts/lib/prose_feature_gate.py",),
-        "0.3",
-        "the citation gate's second sibling, over cargo commands written in prose",
-    ),
-    Required(
         ("scripts/run-ci.sh", "--layer C0d"),
         "4.8",
         "the doc-link dependent expansion, including the check that no macro "
         "emits a doc link into another workspace crate; a macro in "
         "wz-capi-dissect made it red on hosted CI after a green hook",
-    ),
-    Required(
-        ("scripts/run-ci.sh", "--layer C0e"),
-        "1.1",
-        "the inventory tag reader; reads the store's predicates, tree only",
-    ),
-    Required(
-        ("scripts/run-ci.sh", "--layer C0f"),
-        "0.8",
-        "the Layer Z demo-feature restore pair; reads run-ci.sh as text",
-    ),
-    Required(
-        ("scripts/lib/count_guard_lint.py",),
-        "0.3",
-        "the statically derivable run-ci count guards (187 of 435); the rest "
-        "need a build and are the next row's subject",
     ),
     Required(
         ("scripts/lib/guarded_count_gate.py", "--cached-only"),
@@ -167,22 +152,37 @@ REQUIRED: tuple[Required, ...] = (
         judges=True,
     ),
     Required(
-        ("scripts/lib/build_evidence_lint.py",),
-        "0.1",
-        "item 858: a cargo test piped into `grep -q`, with or without a `tee`, "
-        "races a SIGPIPE under pipefail and reds a run whose tests passed; the "
-        "lint derives the shape from run-ci.sh and holds it at zero",
-        judges=True,
-    ),
-    Required(
-        ("scripts/lib/hook_default_region_gate.py",),
-        "0.1",
-        "this table: without it the rows above can be moved below the "
-        "boundary by a change that no other gate reads as a change in cost",
+        ("wz-push.lock",),
+        "0.0 (one flock probe)",
+        "owner decision 2026-10-27: a push to main that did not hold the "
+        "clone's push lock raced another session's ledger round through this "
+        "hook's minute, and origin refused it after the hook passed; one batch "
+        "went round six times. `scripts/land.sh` takes the lock",
     ),
 )
 
+#: The reason shared by the rows the owner's 2026-10-27 decision moved off the
+#: ordinary push: they seldom refuse, and hosted CI runs every one of them.
+_SELDOM = (
+    "owner decision 2026-10-27: the push hook keeps only the checks that refuse "
+    "often, and this one is named by at most five rows of "
+    "docs/hosted-red-acks.md; hosted Layer C0 runs it, and the hook's extended "
+    "sweep (gate 2c2x) runs it locally"
+)
+
 DEFERRED: tuple[Deferred, ...] = (
+    Deferred("scripts/lib/store_reason_citation_gate.py", _SELDOM),
+    Deferred("scripts/lib/prose_feature_gate.py", _SELDOM),
+    Deferred("scripts/run-ci.sh --layer C0e", _SELDOM),
+    Deferred("scripts/run-ci.sh --layer C0f", _SELDOM),
+    Deferred("scripts/lib/count_guard_lint.py", _SELDOM),
+    Deferred("scripts/lib/build_evidence_lint.py", _SELDOM),
+    Deferred(
+        "scripts/lib/hook_default_region_gate.py",
+        "this gate grades the hook's TEXT, so only a change to the hook can move "
+        "its verdict; hosted Layer C0 runs it on every push, and the hook's "
+        "extended sweep runs it locally (owner decision 2026-10-27)",
+    ),
     Deferred(
         "scripts/run-ci.sh --layer U",
         "needs the network and a GitHub token (9.4s when reachable) and goes "

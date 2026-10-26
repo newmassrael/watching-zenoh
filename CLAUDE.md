@@ -70,11 +70,17 @@ One-time per clone: `git config core.hooksPath .githooks`. Requires
 - **commit-msg** — enforces `COMMIT_FORMAT.md`: subject and body ≤72 bytes per
   line, no multi-line bullet wraps, no Co-Authored-By / "Generated with Claude
   Code" / emoji.
-- **pre-push** — fast publication and SSOT checks only; slow checks belong to
-  hosted CI (owner, 2026-09-23). Deferral is printed and is not a local pass.
-  Verify the change's focused behavior while developing; do not repeat a broad
-  sweep because a push is near. `WZ_PREPUSH_EXTENDED=1 git push origin main`
-  requests the extended sweep; `bash scripts/run-ci.sh` is the full local CI.
+- **Push to `main` only with `bash scripts/land.sh`** (owner, 2026-10-27). It
+  holds the clone's push lock, rebases, files the ledger round with the next
+  number (append-round arguments after `--`, no `--entry-id`) and pushes
+  through the hooks; pre-push gate 0p refuses a push that does not hold the
+  lock. `--ack-red <run>` sets `WZ_ACK_RED` for that push.
+- **pre-push** — publication, SSOT and the few checks that refuse often; the
+  rest belongs to hosted CI (owner, 2026-09-23 and 2026-10-27). Deferral is
+  printed and is not a local pass. Verify the change's focused behavior while
+  developing; do not repeat a broad sweep because a push is near.
+  `WZ_PREPUSH_EXTENDED=1 bash scripts/land.sh` requests the extended sweep;
+  `bash scripts/run-ci.sh` is the full local CI.
   Gate list, timings and opt-ins: `docs/agent-reference.md` § Local CI gates.
 - **Development speed first** (owner, 2026-10-09). Verification is batched. A
   worker on one item verifies only that item: its build, its tests, and clippy

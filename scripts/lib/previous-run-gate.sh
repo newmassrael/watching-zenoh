@@ -375,7 +375,7 @@ for j in jobs:
     echo "          consecutive rounds proved that a human read will not." >&2
     echo "" >&2
     echo "          Read it, then push again with:" >&2
-    echo "            WZ_ACK_RED=$rid git push origin main" >&2
+    echo "            bash scripts/land.sh --ack-red $rid" >&2
     echo "          (the id is per-run on purpose — it cannot cover the next red)." >&2
     return 1
 }
