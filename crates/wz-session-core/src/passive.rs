@@ -609,6 +609,72 @@ impl BatchHeaderEvidence {
     }
 }
 
+/// What one direction's units showed of the two limits a session negotiates
+/// ([`PassiveSession::batch_size_floor`], [`PassiveSession::sn_mask_floor`]).
+///
+/// Only a unit that read whole and carries no `Init` or `Open` counts. A unit
+/// that did not read whole may be noise, and its length and SNs say nothing
+/// about a sender; the handshake messages are sent before the batch size is
+/// agreed, so their units are not bound by it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UnitExtents {
+    /// The longest unit counted, in the bytes the wire carried for it (a
+    /// stream unit's length prefix not among them), or 0 where none counted.
+    /// The batch is the buffer a sender fills, so no unit is longer than the
+    /// batch size the session negotiated.
+    pub longest_unit: u64,
+    /// The largest sequence number a counted `Frame` or `Fragment` carried. A
+    /// sender cannot put on the wire a number its ring does not hold.
+    pub largest_sn: Option<u64>,
+}
+
+/// A parameter the handshake may state and the bytes bound from below: the
+/// reading with its basis, and what the bytes alone say.
+///
+/// `value` is `Some` exactly when `basis` is [`Basis::Stated`]. `at_least` is
+/// the bound the bytes put under the value, written only where it says
+/// something: where `basis` is [`Basis::Absent`] (nothing states the value, and
+/// the bytes show it is no less than this) or [`Basis::Conflicting`] (the
+/// handshake stated `stated` and the bytes show more). Under `Stated` the
+/// handshake's value is exact and the bytes agree with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FloorReading {
+    pub value: Option<u64>,
+    pub basis: Basis,
+    pub at_least: Option<u64>,
+    /// What the handshake stated, set only when `basis` is
+    /// [`Basis::Conflicting`] (where `value` is `None`: neither reading is
+    /// taken).
+    pub stated: Option<u64>,
+}
+
+impl FloorReading {
+    /// What the handshake stated (`None` where the capture holds none) read
+    /// against the floor the bytes put under it (`None` where they put none).
+    pub fn of(stated: Option<u64>, floor: Option<u64>) -> Self {
+        match (stated, floor) {
+            (Some(v), Some(f)) if f > v => Self {
+                value: None,
+                basis: Basis::Conflicting,
+                at_least: Some(f),
+                stated: Some(v),
+            },
+            (Some(v), _) => Self {
+                value: Some(v),
+                basis: Basis::Stated,
+                at_least: None,
+                stated: None,
+            },
+            (None, f) => Self {
+                value: None,
+                basis: Basis::Absent,
+                at_least: f,
+                stated: None,
+            },
+        }
+    }
+}
+
 /// On what grounds a session parameter's value is known
 /// ([`FlowContext::compression_reading`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1867,6 +1933,10 @@ pub struct PassiveSession {
     /// per value for every unit ([`crate::passive_messages`]), and these
     /// counts move on every unit that decides.
     batch_header_evidence: [BatchHeaderEvidence; 2],
+    /// Per direction, the longest unit and the largest SN read
+    /// ([`Self::batch_size_floor`], [`Self::sn_mask_floor`]). On the session
+    /// for the reason [`Self::batch_header_evidence`] is.
+    unit_extents: [UnitExtents; 2],
     /// R311y609 (C12) — last SN seen per `[direction][conduit]`, where the
     /// conduit index is [`sn_conduit`]. `None` = nothing seen there yet, which
     /// is what makes the first frame a [`SnVerdict::Baseline`] rather than a
@@ -2092,6 +2162,7 @@ impl Default for PassiveSession {
             last_seen_ns: [None; 2],
             close_seen: [false; 2],
             batch_header_evidence: [BatchHeaderEvidence::default(); 2],
+            unit_extents: [UnitExtents::default(); 2],
             #[cfg(feature = "codec-frame")]
             sn_last: [[None; SN_CONDUITS]; 2],
             #[cfg(feature = "codec-frame")]
@@ -2711,6 +2782,36 @@ impl PassiveSession {
     /// and its reading is the handshake's (`stated`), not these counts'.
     pub fn batch_header_evidence(&self, direction: Direction) -> BatchHeaderEvidence {
         self.batch_header_evidence[usize::from(direction == Direction::B)]
+    }
+
+    /// What `direction`'s units showed of the batch size and the SN ring.
+    pub fn unit_extents(&self, direction: Direction) -> UnitExtents {
+        self.unit_extents[usize::from(direction == Direction::B)]
+    }
+
+    /// The negotiated batch size, with the floor the units put under it: the
+    /// longest unit either direction sent.
+    pub fn batch_size_floor(&self) -> FloorReading {
+        let longest = self.unit_extents.iter().map(|e| e.longest_unit).max();
+        FloorReading::of(
+            self.context.batch_size().map(u64::from),
+            longest.filter(|&n| n > 0),
+        )
+    }
+
+    /// The SN ring mask, with the floor the sequence numbers put under it: the
+    /// narrowest ring a session can negotiate that holds the largest SN either
+    /// direction sent ([`crate::sn::narrowest_mask_covering`]). The narrowest
+    /// ring of all is no floor, since every session holds at least that.
+    pub fn sn_mask_floor(&self) -> FloorReading {
+        let narrowest = crate::sn::mask_from_res(0);
+        let largest = self.unit_extents.iter().filter_map(|e| e.largest_sn).max();
+        FloorReading::of(
+            self.context.sn_mask(),
+            largest
+                .map(crate::sn::narrowest_mask_covering)
+                .filter(|&mask| mask > narrowest),
+        )
     }
 
     /// Whether the session negotiated compression, and on what grounds:
@@ -3365,6 +3466,10 @@ trait UnitJudge {
     /// batch-header readings, behind a header byte when `headed`, in a capture
     /// that holds no Init.
     fn count_batch_header_unit(&mut self, seat: usize, headed: bool);
+    /// A unit of `seat`'s direction that read whole and holds no handshake
+    /// message: `wire_len` bytes on the wire, its Frames and Fragments
+    /// carrying `largest_sn` at most ([`UnitExtents`]).
+    fn note_unit_extent(&mut self, seat: usize, wire_len: usize, largest_sn: Option<u64>);
     /// `bytes` of the unit that no decoded message accounts for.
     fn count_unaccounted(&mut self, seat: usize, bytes: u64);
     /// A message whose header sets a bit its MID does not define.
@@ -3430,6 +3535,12 @@ impl UnitJudge for LiveJudge<'_, '_> {
         } else {
             seen.plain_units = seen.plain_units.saturating_add(1);
         }
+    }
+
+    fn note_unit_extent(&mut self, seat: usize, wire_len: usize, largest_sn: Option<u64>) {
+        let seen = &mut self.session.unit_extents[seat];
+        seen.longest_unit = seen.longest_unit.max(wire_len as u64);
+        seen.largest_sn = seen.largest_sn.max(largest_sn);
     }
 
     fn count_unaccounted(&mut self, seat: usize, bytes: u64) {
@@ -3741,7 +3852,32 @@ fn walk_unit(
     for frame in &mut out {
         frame.unit_read_whole = whole;
     }
+    // A unit with a handshake message in it was sent before the batch size was
+    // agreed, so it is not bound by it; one that did not read whole may not be
+    // a unit.
+    let handshake_unit = out
+        .iter()
+        .any(|f| f.frame.as_ref().is_ok_and(is_handshake_message));
+    if whole && !handshake_unit {
+        let largest_sn = out
+            .iter()
+            .filter_map(|f| f.frame.as_ref().ok().and_then(frame_sn))
+            .max();
+        judge.note_unit_extent(seat, bytes.len(), largest_sn);
+    }
     out
+}
+
+/// The sequence number a message carries, which only a `Frame` and a
+/// `Fragment` do.
+fn frame_sn(frame: &InboundFrame) -> Option<u64> {
+    match frame {
+        #[cfg(feature = "codec-frame")]
+        InboundFrame::Frame { sn, .. } => Some(*sn),
+        #[cfg(all(feature = "codec-frame", feature = "reassembly"))]
+        InboundFrame::Fragment { sn, .. } => Some(*sn),
+        _ => None,
+    }
 }
 
 /// R311y583 (A2) — take one decoded transport frame the rest of the way: the
@@ -3988,6 +4124,8 @@ impl UnitJudge for Recorded<'_> {
     fn note_last_seen(&mut self, _seat: usize, _instant: Option<u64>) {}
 
     fn count_batch_header_unit(&mut self, _seat: usize, _headed: bool) {}
+
+    fn note_unit_extent(&mut self, _seat: usize, _wire_len: usize, _largest_sn: Option<u64>) {}
 
     fn count_unaccounted(&mut self, _seat: usize, _bytes: u64) {}
 
@@ -7002,6 +7140,150 @@ mod tests {
         let acc = s.sn_accounting(Direction::A);
         assert_eq!(acc.without_resolution, 2);
         assert_eq!((acc.missing, acc.gaps), (0, 0), "absence is not zero loss");
+    }
+
+    /// An Init that STATES a resolution and a batch size (the S flag set), with
+    /// a cookie of `cookie` zero bytes on an InitAck: `sn_res` is the packed
+    /// byte, whose low two bits are the SN ring's width code.
+    fn init_wire_stating(is_ack: bool, sn_res: u8, batch_size: u16, cookie: usize) -> Vec<u8> {
+        let mut flags = wz_codecs::wire_const::FLAG_T_INIT_S;
+        if is_ack {
+            flags |= wz_codecs::wire_const::FLAG_T_INIT_A;
+        }
+        let zeros = vec![0u8; cookie];
+        let body = wz_codecs::init_body::InitBody {
+            version: 0x09,
+            cbyte: 0x31,
+            zid: &[0xAA; 4],
+            sn_res: Some(sn_res),
+            batch_size: Some(batch_size),
+            cookie_len: is_ack.then_some(cookie as u64),
+            cookie: is_ack.then_some(&zeros[..]),
+        };
+        let mut wire = vec![flags | wz_codecs::wire_const::T_MID_INIT];
+        wire.extend_from_slice(&body.encode_to_vec(1, u8::from(is_ack)));
+        wire
+    }
+
+    /// A session whose Init pair stated a 7-bit ring and a batch of 100 bytes,
+    /// the InitAck carrying a cookie of 200 bytes: longer than the batch, and
+    /// a unit no sender of the session's batches could have written.
+    fn stating_session() -> PassiveSession {
+        let mut s = PassiveSession::new();
+        s.push(
+            Direction::A,
+            &framed(&init_wire_stating(false, 0, 100, 0), 2),
+        );
+        s.push(
+            Direction::B,
+            &framed(&init_wire_stating(true, 0, 100, 200), 2),
+        );
+        s.next_frame(Direction::A).expect("init syn");
+        s.next_frame(Direction::B).expect("init ack");
+        s
+    }
+
+    /// The floors a session's bytes put under its parameters. An Init is sent
+    /// before the batch is agreed, so the 200-byte InitAck above counts for
+    /// nothing, and the handshake's own values stand until a data unit shows
+    /// more.
+    #[test]
+    fn a_handshake_unit_is_not_bound_by_the_batch_it_negotiates() {
+        let s = stating_session();
+        assert_eq!(s.context().batch_size(), Some(100));
+        assert_eq!(s.unit_extents(Direction::B), UnitExtents::default());
+        let batch = s.batch_size_floor();
+        assert_eq!(
+            (batch.value, batch.basis, batch.at_least),
+            (Some(100), Basis::Stated, None)
+        );
+    }
+
+    /// A unit longer than the stated batch, and an SN past the stated ring,
+    /// are the bytes contradicting the handshake: the reading is `Conflicting`
+    /// with neither value taken, the floor is the unit's length and the
+    /// narrowest ring that holds the SN, and the handshake's value is kept
+    /// beside them.
+    #[test]
+    fn a_unit_beyond_the_stated_batch_and_an_sn_beyond_the_stated_ring_conflict() {
+        let mut s = stating_session();
+        let mut batch_of_oams = Vec::new();
+        for id in 0..60 {
+            batch_of_oams.extend_from_slice(&oam_record(id));
+        }
+        let unit = frame_wire(200, &batch_of_oams);
+        assert!(unit.len() > 100, "the fixture is longer than the batch");
+        s.push(Direction::A, &framed(&unit, 2));
+        s.next_frame(Direction::A).expect("a data unit");
+        let batch = s.batch_size_floor();
+        assert_eq!(batch.basis, Basis::Conflicting);
+        assert_eq!(
+            (batch.value, batch.stated, batch.at_least),
+            (None, Some(100), Some(unit.len() as u64))
+        );
+        let ring = s.sn_mask_floor();
+        assert_eq!(ring.basis, Basis::Conflicting);
+        assert_eq!(
+            (ring.value, ring.stated, ring.at_least),
+            (None, Some(0x7F), Some(0x3FFF)),
+            "SN 200 does not fit 7 bits and does fit 14"
+        );
+    }
+
+    /// Within what the handshake stated, the bytes agree and the reading stays
+    /// `Stated`, with no floor written.
+    #[test]
+    fn units_within_the_stated_limits_leave_the_reading_stated() {
+        let mut s = stating_session();
+        s.push(Direction::A, &framed(&frame_wire(5, &oam_record(5)), 2));
+        s.next_frame(Direction::A).expect("a data unit");
+        assert_eq!(s.unit_extents(Direction::A).largest_sn, Some(5));
+        for floor in [s.batch_size_floor(), s.sn_mask_floor()] {
+            assert_eq!(floor.basis, Basis::Stated);
+            assert_eq!(floor.at_least, None);
+        }
+    }
+
+    /// With no handshake in the capture nothing is stated, and the bytes give
+    /// the floors: the longest unit of either direction, and the narrowest
+    /// negotiable ring that holds the largest SN, which is no floor at all
+    /// while that is the narrowest of the four.
+    #[test]
+    fn without_a_handshake_the_bytes_give_the_floors() {
+        let mut s = PassiveSession::new();
+        s.push(Direction::A, &framed(&frame_wire(3, &oam_record(3)), 2));
+        s.next_frame(Direction::A).expect("a data unit");
+        assert_eq!(s.sn_mask_floor().basis, Basis::Absent);
+        assert_eq!(
+            s.sn_mask_floor().at_least,
+            None,
+            "7 bits is every session's floor"
+        );
+        assert!(s.batch_size_floor().at_least.is_some_and(|n| n > 0));
+        // 20000 does not fit 14 bits: the 28-bit ring is the narrowest left.
+        let unit = frame_wire(20_000, &oam_record(1));
+        s.push(Direction::B, &framed(&unit, 2));
+        s.next_frame(Direction::B).expect("a data unit");
+        assert_eq!(s.sn_mask_floor().at_least, Some(0x0FFF_FFFF));
+        assert_eq!(s.sn_mask_floor().value, None);
+        let longest = s
+            .unit_extents(Direction::A)
+            .longest_unit
+            .max(unit.len() as u64);
+        assert_eq!(s.batch_size_floor().at_least, Some(longest));
+    }
+
+    /// A unit that did not read whole may not be a unit, so what it carries
+    /// bounds nothing.
+    #[test]
+    fn a_unit_that_does_not_read_whole_counts_nothing() {
+        let mut s = PassiveSession::new();
+        // A Frame header and no SN behind it.
+        let torn = [wz_codecs::wire_const::T_MID_FRAME | wz_codecs::wire_const::FLAG_T_FRAME_R];
+        s.push(Direction::A, &framed(&torn, 2));
+        let frame = s.next_frame(Direction::A).expect("a record, error and all");
+        assert!(frame.frame.is_err(), "the fixture does not decode");
+        assert_eq!(s.unit_extents(Direction::A), UnitExtents::default());
     }
 
     /// Without a ring there is no verdict, and the step to the next integer is

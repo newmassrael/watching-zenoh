@@ -38,6 +38,18 @@ pub const fn mask_from_res(seq_num_res: u8) -> u64 {
     }
 }
 
+/// The narrowest SN ring a session can negotiate that holds `sn`: the first of
+/// the four masks [`mask_from_res`] answers for, in order, that is at least
+/// `sn`. An `sn` past the widest ring is answered with the widest, which no
+/// sender of a conforming session can pass.
+pub const fn narrowest_mask_covering(sn: u64) -> u64 {
+    let mut res = 0u8;
+    while res < 3 && mask_from_res(res) < sn {
+        res += 1;
+    }
+    mask_from_res(res)
+}
+
 /// Half the ring (`_z_sn_half`): the largest forward distance still
 /// considered "ahead" by [`precedes`].
 pub const fn half(mask: u64) -> u64 {
@@ -539,6 +551,25 @@ mod tests {
         assert_eq!(mask_from_res(0x01), 0x3FFF);
         assert_eq!(mask_from_res(0x02), 0x0FFF_FFFF);
         assert_eq!(mask_from_res(0x03), u64::MAX >> 1);
+    }
+
+    /// The four masks are spelled out, and both sides of each edge are
+    /// checked: an SN equal to a mask fits it, one past it needs the next.
+    #[test]
+    fn the_narrowest_mask_covering_an_sn_is_the_first_that_holds_it() {
+        for (sn, mask) in [
+            (0u64, 0x7Fu64),
+            (127, 0x7F),
+            (128, 0x3FFF),
+            (0x3FFF, 0x3FFF),
+            (0x4000, 0x0FFF_FFFF),
+            (1 << 20, 0x0FFF_FFFF),
+            (0x0FFF_FFFF, 0x0FFF_FFFF),
+            (0x1000_0000, 0x7FFF_FFFF_FFFF_FFFF),
+            (u64::MAX, 0x7FFF_FFFF_FFFF_FFFF),
+        ] {
+            assert_eq!(narrowest_mask_covering(sn), mask, "sn {sn}");
+        }
     }
 
     /// Forward steps within half the ring precede; equality and stale

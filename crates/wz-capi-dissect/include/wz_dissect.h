@@ -906,7 +906,12 @@
  * past the line); to the integer `value` of each entry of a flow's
  * `context.parameters` and of its halves' `parameters` (keys that exist from
  * field document 45 and take the rule from their first appearance: `sn_mask`
- * can pass the line, and a lease is a wire field's value); and to
+ * can pass the line, and a lease is a wire field's value); to the `at_least`
+ * and `stated` of an `sn_mask` or `batch_size` entry of a flow's
+ * `context.parameters` (keys that exist from field document 47 and take the
+ * rule from their first appearance: the floor and the stated value of an
+ * `sn_mask` are rings that can pass the line, and one writer serves both
+ * entries); and to
  * `oldest_ts_ns` in the retention document. It does NOT apply to counts,
  * offsets, sizes and millisecond spans this library measures: those count
  * things the host holds, and stay bare numbers. Revisions: fields 23, census
@@ -1092,8 +1097,10 @@
  *                     "lowlatency":{"value":bool|null,"basis":B},
  *                     "qos":{"value":bool|null,"basis":B},
  *                     "patch":{"value":N|null,"basis":B},
- *                     "sn_mask":{"value":N|null,"basis":B},
- *                     "batch_size":{"value":N|null,"basis":B},
+ *                     "sn_mask":{"value":N|null,"basis":B[,"at_least":N]
+ *                                [,"evidence":{"stated":N,"at_least":N}]},
+ *                     "batch_size":{"value":N|null,"basis":B[,"at_least":N]
+ *                                [,"evidence":{"stated":N,"at_least":N}]},
  *                     "version":{"value":N|null,"basis":B}}
  *
  *     where `basis` is `stated` (the handshake the capture holds said it),
@@ -1121,6 +1128,25 @@
  *     (a bare number up to 2^53 - 1 and a string of the same digits above
  *     it), which `sn_mask` can reach. Each half carries the same shape for
  *     its own `lease_ms` (see `halves` below).
+ *
+ *     Since field-document revision 47 the bytes bound `sn_mask` and
+ *     `batch_size` from BELOW, which is not the value and is never written
+ *     as one. Where the basis is `absent`, `at_least` says the value is no
+ *     less than N: for `batch_size` the longest framing unit either direction
+ *     sent (a unit that read whole and holds no Init or Open: those are sent
+ *     before the batch is agreed; a stream unit's length prefix is not
+ *     counted), and for `sn_mask` the narrowest ring a session can negotiate
+ *     that holds the largest sequence number either direction sent, which is
+ *     one of 127, 16383, 268435455 and 2^63 - 1 and is NOT written at 127,
+ *     which every session holds. `at_least` takes the integer rule as `value`
+ *     does (a string past 2^53 - 1). Where the capture holds a handshake
+ *     that stated a value the bytes exceed, the basis is `conflicting`,
+ *     `value` is `null` and `evidence` is `{"stated":N,"at_least":N}`: the
+ *     handshake's value and the floor the bytes put above it, neither taken.
+ *     Under `stated` neither key is written, and `evidence` is absent there
+ *     (not `null`) for these two entries. A floor is a lower bound the
+ *     capture proves only as far as it holds the sender's units: a unit lost
+ *     from the capture lowers it and never raises it.
  *
  * @values fields basis
  *
@@ -1261,7 +1287,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":46,"key":"kind","values":[...],
+ *     {"name":"fields","revision":47,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -4865,7 +4891,7 @@ int wz_dissect_transport_layout(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":46,"key":"state",
+ *     "value_families":[{"name":"fields","revision":47,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

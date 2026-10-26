@@ -56,6 +56,11 @@ const ROBOT_KEY: &str = "demo/robots/1/pose";
 /// A `context.parameters` entry nothing in the capture states (field document
 /// revision 45).
 const ABSENT: &str = "{\"value\":null,\"basis\":\"absent\"}";
+/// The same entry of `sn_mask` where the sequence numbers read are past the
+/// 14-bit ring (field document revision 47): the 28-bit ring is the narrowest
+/// a session can negotiate that holds them, and the bytes say no less.
+const ABSENT_AT_LEAST_28_BITS: &str =
+    "{\"value\":null,\"basis\":\"absent\",\"at_least\":268435455}";
 const ROBOT_VALUE_LEN: usize = 4096;
 const ROBOT_PIECE: usize = 245;
 const ROBOT_FRAGMENTS: usize = 17;
@@ -498,7 +503,7 @@ fn closed_chains_of_consecutive_fragments_reassemble_with_no_handshake_in_the_ca
         // The flat cell, then `parameters`' entry for it.
         assert_eq!(
             values_of(&doc, "sn_mask"),
-            vec!["null", ABSENT],
+            vec!["null", ABSENT_AT_LEAST_28_BITS],
             "{link:?}: the flow has no ring"
         );
         let verdicts = words(&doc, "verdict");
@@ -613,7 +618,10 @@ fn behind_a_handshake_the_same_fragments_read_alike_but_for_the_sn_verdict() {
         );
 
         // The flow's context says which of the two it was.
-        assert_eq!(values_of(&without_doc, "sn_mask"), vec!["null", ABSENT]);
+        assert_eq!(
+            values_of(&without_doc, "sn_mask"),
+            vec!["null", ABSENT_AT_LEAST_28_BITS]
+        );
         assert_eq!(
             values_of(&with_doc, "sn_mask"),
             vec!["268435455", "{\"value\":268435455,\"basis\":\"stated\"}"]

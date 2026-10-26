@@ -2142,7 +2142,7 @@ fn push_stream_flow(
     push_unit_readings(flow.ingest.readings(), out);
     push_context(
         &flow.session.context(),
-        &CompressionGrounds::of(&flow.session),
+        &ParameterGrounds::of(&flow.session),
         out,
     );
     push_halves(&flow.half(Direction::A), &flow.half(Direction::B), out);
@@ -2497,7 +2497,7 @@ fn push_datagram_flow(
     push_unit_readings(flow.ingest.readings(), out);
     push_context(
         &flow.session.context(),
-        &CompressionGrounds::of(&flow.session),
+        &ParameterGrounds::of(&flow.session),
         out,
     );
     push_halves(&flow.half(Direction::A), &flow.half(Direction::B), out);
@@ -4455,7 +4455,7 @@ impl core::fmt::Display for TallyJson {
 /// why the acceptor's word is preferred.
 pub(crate) fn push_context(
     context: &wz_session_core::passive::FlowContext,
-    compression: &CompressionGrounds,
+    compression: &ParameterGrounds,
     out: &mut String,
 ) {
     out.push_str(",\"context\":{\"phase\":");
@@ -4500,19 +4500,26 @@ pub(crate) fn push_context(
     out.push('}');
 }
 
-/// A session's compression reading and the two directions' evidence it rests
-/// on, which the session holds beside its context and not in it
-/// ([`wz_session_core::passive::PassiveSession::batch_header_evidence`]).
-pub(crate) struct CompressionGrounds {
+/// What the bytes of a session say about its parameters beside what its
+/// handshake stated, which the session holds beside its context and not in it:
+/// the compression reading and the two directions' evidence it rests on
+/// ([`wz_session_core::passive::PassiveSession::batch_header_evidence`]), and
+/// the floors under the batch size and the SN ring
+/// ([`wz_session_core::passive::PassiveSession::batch_size_floor`]).
+pub(crate) struct ParameterGrounds {
     pub(crate) reading: wz_session_core::passive::Reading<bool>,
     pub(crate) evidence: [wz_session_core::passive::BatchHeaderEvidence; 2],
+    pub(crate) batch_size: wz_session_core::passive::FloorReading,
+    pub(crate) sn_mask: wz_session_core::passive::FloorReading,
 }
 
-impl CompressionGrounds {
+impl ParameterGrounds {
     pub(crate) fn of(session: &wz_session_core::passive::PassiveSession) -> Self {
         Self {
             reading: session.compression_reading(),
             evidence: [Direction::A, Direction::B].map(|d| session.batch_header_evidence(d)),
+            batch_size: session.batch_size_floor(),
+            sn_mask: session.sn_mask_floor(),
         }
     }
 
@@ -4520,10 +4527,13 @@ impl CompressionGrounds {
     /// handshake stated, or nothing.
     #[cfg(test)]
     pub(crate) fn of_context(context: &wz_session_core::passive::FlowContext) -> Self {
+        use wz_session_core::passive::FloorReading;
         let evidence = [wz_session_core::passive::BatchHeaderEvidence::default(); 2];
         Self {
             reading: context.compression_reading(evidence),
             evidence,
+            batch_size: FloorReading::of(context.batch_size().map(u64::from), None),
+            sn_mask: FloorReading::of(context.sn_mask(), None),
         }
     }
 }
@@ -4559,7 +4569,7 @@ impl CompressionGrounds {
 /// string of the same digits above it, which `sn_mask` can reach.
 fn push_parameters(
     context: &wz_session_core::passive::FlowContext,
-    compression: &CompressionGrounds,
+    compression: &ParameterGrounds,
     out: &mut String,
 ) {
     use wz_session_core::passive::Reading;
@@ -4582,12 +4592,10 @@ fn push_parameters(
         out.push('}');
     };
     number("patch", Reading::stated(context.patch.map(u64::from)), out);
-    number("sn_mask", Reading::stated(context.sn_mask()), out);
-    number(
-        "batch_size",
-        Reading::stated(context.batch_size().map(u64::from)),
-        out,
-    );
+    out.push(',');
+    floored("sn_mask", compression.sn_mask, out);
+    out.push(',');
+    floored("batch_size", compression.batch_size, out);
     number(
         "version",
         Reading::stated(context.version.map(u64::from)),
@@ -4596,10 +4604,51 @@ fn push_parameters(
     out.push('}');
 }
 
+/// Revision 47 — an entry of [`push_parameters`] the bytes bound from below:
+/// `{"value", "basis"}` as the others, and
+///
+/// * `at_least` where `basis` is `absent`: the bytes show the value is no less
+///   than this, which is not the value. For `batch_size` it is the longest unit
+///   either direction sent; for `sn_mask` the narrowest ring a session can
+///   negotiate (127, 16383, 268435455 or 2^63 - 1) that holds the largest SN
+///   sent, and not written where that is the narrowest of the four, which
+///   every session holds at least. It follows the integer rule as `value`
+///   does, so an `sn_mask` past 2^53 is a string;
+/// * `evidence` where `basis` is `conflicting`: `{"stated", "at_least"}`, the
+///   handshake's value and the floor the bytes put above it, and `value` is
+///   `null` since neither is taken.
+///
+/// Under `stated` neither key is written: the handshake's value is exact.
+fn floored(name: &str, reading: wz_session_core::passive::FloorReading, out: &mut String) {
+    use wz_session_core::passive::Basis;
+    let integer = |v: Option<u64>, out: &mut String| match v {
+        Some(v) => wz_session_core::json::u64_into(v, out),
+        None => out.push_str("null"),
+    };
+    let _ = write!(out, "\"{name}\":{{\"value\":");
+    integer(reading.value, out);
+    push_basis(reading.basis, out);
+    match reading.basis {
+        Basis::Absent if reading.at_least.is_some() => {
+            out.push_str(",\"at_least\":");
+            integer(reading.at_least, out);
+        }
+        Basis::Conflicting => {
+            out.push_str(",\"evidence\":{\"stated\":");
+            integer(reading.stated, out);
+            out.push_str(",\"at_least\":");
+            integer(reading.at_least, out);
+            out.push('}');
+        }
+        _ => {}
+    }
+    out.push('}');
+}
+
 /// The `compression` entry of [`push_parameters`], from the session's reading
 /// and its two directions' evidence (`a` then `b`). The four counts are
 /// counts of units this library read, which the integer rule leaves bare.
-fn push_compression(grounds: &CompressionGrounds, out: &mut String) {
+fn push_compression(grounds: &ParameterGrounds, out: &mut String) {
     use wz_session_core::passive::Basis;
     out.push_str("\"compression\":{\"value\":");
     match grounds.reading.value {
@@ -7725,11 +7774,7 @@ mod tests {
             // crate, so a struct-update literal cannot be written here.
             let mut context = FlowContext::default();
             context.phase = phase;
-            push_context(
-                &context,
-                &CompressionGrounds::of_context(&context),
-                &mut out,
-            );
+            push_context(&context, &ParameterGrounds::of_context(&context), &mut out);
             arms.push(out);
         }
         // Every `batch_header` word, on a half.
@@ -7749,7 +7794,7 @@ mod tests {
         // Every `basis` word, on a compression reading that carries evidence
         // wherever the word allows it, so the evidence keys are written too.
         {
-            use wz_session_core::passive::{Basis, BatchHeaderEvidence, Reading};
+            use wz_session_core::passive::{Basis, BatchHeaderEvidence, FloorReading, Reading};
             let seen = BatchHeaderEvidence {
                 headed_units: 1,
                 plain_units: 1,
@@ -7766,9 +7811,11 @@ mod tests {
                 words.insert(BasisWord::of(basis).name());
                 let mut out = String::from("{");
                 push_compression(
-                    &CompressionGrounds {
+                    &ParameterGrounds {
                         reading: Reading { value, basis },
                         evidence: [seen, seen],
+                        batch_size: FloorReading::of(None, None),
+                        sn_mask: FloorReading::of(None, None),
                     },
                     &mut out,
                 );
@@ -7776,6 +7823,23 @@ mod tests {
                 arms.push(out);
             }
             assert_eq!(words.into_iter().collect::<Vec<_>>(), BasisWord::names());
+        }
+        // Revision 47 — every shape of a floored entry: stated, absent with a
+        // floor (`at_least`), absent with none, and conflicting (`evidence`).
+        {
+            use wz_session_core::passive::FloorReading;
+            for (stated, floor) in [
+                (Some(1000), None),
+                (Some(1000), Some(900)),
+                (None, Some(1398)),
+                (None, None),
+                (Some(1000), Some(70_000)),
+            ] {
+                let mut out = String::from("{");
+                floored("batch_size", FloorReading::of(stated, floor), &mut out);
+                out.push('}');
+                arms.push(out);
+            }
         }
         // Every `zenoh` and `announced_version` word, from the evidence that
         // decides it, and every check with both sides observed, so the check,
@@ -8352,7 +8416,7 @@ mod tests {
                  \"qos\":{\"value\":null,\"basis\":\"absent\"},\
                  \"patch\":{\"value\":null,\"basis\":\"absent\"},\
                  \"sn_mask\":{\"value\":null,\"basis\":\"absent\"},\
-                 \"batch_size\":{\"value\":null,\"basis\":\"absent\"},\
+                 \"batch_size\":{\"value\":null,\"basis\":\"absent\",\"at_least\":6},\
                  \"version\":{\"value\":null,\"basis\":\"absent\"}}"
             ],
             "{doc}"

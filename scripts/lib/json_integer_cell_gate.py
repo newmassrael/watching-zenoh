@@ -115,6 +115,8 @@ _PARAMETERS_HEADER = (
     "the integer `value` of each entry of a flow's `context.parameters` and of its halves' `parameters`"
 )
 _PARAMETERS_ROW = "integer `value` of a `parameters` entry"
+#: Field document 47: the floors under two of those entries.
+_FLOORED_HEADER = "the `at_least` and `stated` of an `sn_mask` or `batch_size` entry of a flow's `context.parameters`"
 _LATENCY_HEADER = "the `min_ns`, `max_ns`, `mean_ns` and `total_ns` of a census latency object"
 #: The protected-frame documents take the rule from their first revision. The
 #: field cells are written by ONE helper both documents share, so they are
@@ -158,6 +160,18 @@ CELLS: dict[tuple[str, str], tuple[Cell, ...]] = {
     ),
     ("crates/wz-capture/src/fields_json.rs", "push_parameters"): (
         Cell("fields", "a context parameters entry's integer value", _PARAMETERS_HEADER, _PARAMETERS_ROW, born=45),
+    ),
+    # Field document 47: the floor the bytes put under `sn_mask` and
+    # `batch_size`, and the value the handshake stated where they contradict it.
+    # One writer serves both entries and all four places it writes an integer.
+    ("crates/wz-capture/src/fields_json.rs", "floored"): (
+        Cell(
+            "fields",
+            "a floored parameters entry's value, at_least and stated",
+            _FLOORED_HEADER,
+            "`at_least` takes the integer rule",
+            born=47,
+        ),
     ),
     ("crates/wz-capture/src/census_json.rs", "interests_json"): (
         Cell("census", "declarations[].id", _ID_HEADER, "`declarations[].id`"),

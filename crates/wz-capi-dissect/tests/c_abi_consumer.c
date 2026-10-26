@@ -3992,8 +3992,11 @@ int main(void) {
      * nothing retires.
      * 46: model 2 of the zenoh test: two sums (`log2_lr_no_millibits`, each
      * check's `no_millibits`), the `stream_framing` check and the `measured`
-     * basis. Keys arrive and words move; nothing retires. */
-    revisioned[2].revision = 46;
+     * basis. Keys arrive and words move; nothing retires.
+     * 47: `sn_mask` and `batch_size` gain `at_least`, the floor the bytes put
+     * under a value nothing states, and `evidence` where they contradict the
+     * handshake. Keys arrive; nothing retires. */
+    revisioned[2].revision = 47;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);

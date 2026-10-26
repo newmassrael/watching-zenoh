@@ -308,7 +308,7 @@ mod tests {
             let mut written = String::new();
             crate::fields_json::push_context(
                 &context,
-                &crate::fields_json::CompressionGrounds::of(session),
+                &crate::fields_json::ParameterGrounds::of(session),
                 &mut written,
             );
             let object = written

@@ -145,6 +145,78 @@ const COMPRESSION: &[(&str, &[&str])] = &[
     ),
 ];
 
+/// The floors every zenoh session of `d` that reads `yes` puts under its batch
+/// size and its SN ring, as `batch_size:basis[>=n] sn_mask:basis[>=n]`.
+fn floor_readings(d: &Dissection) -> Vec<String> {
+    use wz_session_core::passive::{Basis, FloorReading};
+    let word = |r: FloorReading| {
+        let basis = match r.basis {
+            Basis::Stated => "stated",
+            Basis::Inferred => "inferred",
+            Basis::Conflicting => "conflicting",
+            Basis::Absent => "absent",
+        };
+        match r.at_least {
+            Some(n) => alloc::format!("{basis}>={n}"),
+            None => alloc::format!("{basis}"),
+        }
+    };
+    let both = |s: &wz_session_core::passive::PassiveSession| {
+        alloc::format!(
+            "batch_size:{} sn_mask:{}",
+            word(s.batch_size_floor()),
+            word(s.sn_mask_floor())
+        )
+    };
+    let mut out: Vec<String> = d
+        .flows()
+        .iter()
+        .filter(|f| ZenohVerdict::of(&f.zenoh_evidence()) == ZenohVerdict::Yes)
+        .map(|f| both(&f.session))
+        .chain(
+            d.datagram_flows()
+                .iter()
+                .filter(|f| ZenohVerdict::of(&f.zenoh_evidence()) == ZenohVerdict::Yes)
+                .map(|f| both(&f.session)),
+        )
+        .collect();
+    out.sort();
+    out
+}
+
+/// A floor is only a floor if no real sender goes under it. Every zenoh flow of
+/// the corpus, from real zenohd 1.10.1 and 1.5.0 and zenoh-pico, stream and
+/// datagram, whole and joined mid-session, reads its stated batch size and ring
+/// as the bytes bear them out: never `conflicting`. A capture that holds no
+/// handshake gets the floors from its bytes alone.
+#[test]
+fn no_real_zenoh_session_goes_under_the_floors_its_bytes_put_on_its_parameters() {
+    let mut conflicts = Vec::new();
+    let mut seen = 0usize;
+    let mut floors_from_bytes = 0usize;
+    for entry in manifest().iter().filter(|e| e.hypothesis == "zenoh") {
+        let bytes = std::fs::read(corpus_dir().join(&entry.file))
+            .unwrap_or_else(|e| panic!("{}: {e}", entry.file));
+        let d =
+            Dissection::from_capture(&bytes).unwrap_or_else(|e| panic!("{}: {e:?}", entry.file));
+        for reading in floor_readings(&d) {
+            seen += 1;
+            if reading.contains("conflicting") {
+                conflicts.push(alloc::format!("{}: {reading}", entry.file));
+            }
+            if reading.contains("absent>=") {
+                floors_from_bytes += 1;
+            }
+        }
+    }
+    assert!(conflicts.is_empty(), "{}", conflicts.join("\n"));
+    assert!(seen > 0, "the corpus holds zenoh flows that read yes");
+    assert!(
+        floors_from_bytes > 0,
+        "a capture joined mid-session puts a floor under its batch size"
+    );
+}
+
 #[test]
 fn every_zenoh_session_of_the_corpus_reads_its_compression_and_its_grounds() {
     let mut failures = Vec::new();
