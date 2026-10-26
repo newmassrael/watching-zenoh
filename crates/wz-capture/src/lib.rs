@@ -1836,17 +1836,6 @@ impl DatagramDissection {
         self.residue
     }
 
-    /// The SN steps of every session of this flow, its own and one per QUIC
-    /// stream, both directions together. See
-    /// [`wz_session_core::passive::SnSteps`].
-    pub fn sn_steps(&self) -> wz_session_core::passive::SnSteps {
-        self.quic_streams
-            .iter()
-            .fold(session_table::session_sn_steps(&self.session), |sum, s| {
-                sum.and(session_table::session_sn_steps(&s.session))
-            })
-    }
-
     /// What every session of this flow observed that the zenoh test weighs,
     /// its own and one per QUIC stream
     /// ([`session_table::SessionObservations`]).
@@ -2982,12 +2971,6 @@ impl FlowDissection {
     /// bad link and nine good ones reads as uniformly lossy without this.
     pub fn chain_loss(&self) -> ChainLoss {
         self.chain_loss
-    }
-
-    /// The SN steps of this flow's session, both directions together. See
-    /// [`wz_session_core::passive::SnSteps`].
-    pub fn sn_steps(&self) -> wz_session_core::passive::SnSteps {
-        session_table::session_sn_steps(&self.session)
     }
 
     /// What this flow's session observed that the zenoh test weighs
