@@ -76,7 +76,7 @@ STACK_LINE = re.compile(r"stack: peak (\d+) of (\d+) bytes")
 #: The memory report every compare build carries (deploy/zephyr-common/wz_memory_report.c): one
 #: heap line, then one line per thread, printed together whenever a figure moved.
 HEAP_LINE = re.compile(r"mem: heap peak (\d+) of (\d+) bytes")
-THREAD_LINE = re.compile(r"mem: stack (\S+) (\d+) of (\d+) bytes")
+THREAD_LINE = re.compile(r"mem: stack (\S+) used=(\d+) size=(\d+)")
 
 
 @dataclass
@@ -348,11 +348,11 @@ def selftest() -> int:
 
     console = "\r\n".join([
         "mem: heap peak 100 of 4096 bytes",
-        "mem: stack main 900 of 2048 bytes",
+        "mem: stack main used=900 size=2048",
         "ZEPHYR-PICO READY 5a1c0ffee001 udp/192.168.100.1:7447",
         "mem: heap peak 300 of 4096 bytes",
-        "mem: stack main 1000 of 2048 bytes",
-        "mem: stack pthread_0 500 of 1024 bytes",
+        "mem: stack main used=1000 size=2048",
+        "mem: stack pthread_0 used=500 size=1024",
         "some later line",
     ])
     memory = last_memory_report(console)

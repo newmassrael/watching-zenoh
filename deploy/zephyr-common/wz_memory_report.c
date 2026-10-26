@@ -12,7 +12,7 @@
  * image's `ZephyrAllocator` alike) and whose threads both run on:
  *
  *   mem: heap peak <max allocated> of <pool> bytes
- *   mem: stack <thread name> <used> of <size> bytes
+ *   mem: stack <thread name> used=<bytes used> size=<bytes reserved>
  *
  * one line for the heap and one for each thread, printed when any figure moved since
  * the last print, so a quiet image prints nothing and a measured run is not paced by
@@ -79,7 +79,13 @@ static void print_thread(const struct k_thread *thread, void *unused)
 	}
 	const char *name = k_thread_name_get((k_tid_t)thread);
 
-	printk("mem: stack %s %u of %u bytes\n", (name != NULL && name[0] != '\0') ? name : "unnamed",
+	/* Each figure is bound to its name with `=`, so the line reads as the report's and as no
+	 * sentence: with a word between two values ("%u of %u", "%u size %u") the e2e barrier gate
+	 * (scripts/lib/barrier_needle_gate.py) reads a value as any one word and finds the line able
+	 * to print another test's barrier text.
+	 */
+	printk("mem: stack %s used=%u size=%u\n",
+	       (name != NULL && name[0] != '\0') ? name : "unnamed",
 	       (unsigned int)(thread->stack_info.size - unused_bytes),
 	       (unsigned int)thread->stack_info.size);
 }

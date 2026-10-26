@@ -132,7 +132,7 @@ config WZ_MEMORY_REPORT
 	help
 	  A thread of the lowest application priority reads the kernel heap that `k_malloc`
 	  serves and the stack of every thread, and prints `mem: heap peak N of M bytes` and
-	  `mem: stack <thread> U of S bytes` when a figure moved (deploy/zephyr-common/
+	  `mem: stack <thread> used=U size=S` when a figure moved (deploy/zephyr-common/
 	  wz_memory_report.c). It is the one source of those figures in a compare run of the kit
 	  lane (docs/upstream-parity.md step M3), so two images held to each other say them the
 	  same way; it adds a thread and its stack to both. Off by default: an image measured for
