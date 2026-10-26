@@ -291992,6 +291992,56 @@
         "Bring the other crates of the doc budget to zero, smallest first and wz-runtime-tokio (427) last; read the hosted C1bz of this push per crate."
       ]
     },
+    "Round 3746": {
+      "decision_summary": "Two decisions. (1) Step L of the parity loop, the fixed client's stack. The image's LLVM IR shows three large slots under its deepest chain: the console line's buffer, 388 bytes eight times in wz_app_main (log_args inlined into each caller), paid here by never inlining log_args, which also takes 1,460 bytes of text off; a 1,104-byte Response builder whose bounded lists are inline at their maximum, which needs an encode from borrowed parts that SCE puts to its owner as an ADR; four copies of about 720 bytes of a transport message in the handshake dispatch, a decode into one place that waits for the lifecycle work. (2) Owner, 2026-10-27: a push to main goes through scripts/land.sh, which holds the clone's push lock from its fetch to the end of its push and numbers the ledger round inside it, and pre-push gate 0p refuses a push to main without that lock; the ordinary push keeps only the checks that refuse often, and seven others moved to hosted CI.",
+      "changes_bullets": [
+        "crates/wz-runtime-zephyr/src/glue.rs: log_args is #[inline(never)], with the measurement that says why.",
+        "scripts/land.sh (new): the push lock, the rebase, the next ledger number and the push through the hooks; --ack-red, --round, --status.",
+        ".githooks/pre-push: gate 0p (the push lock); the store-reason and prose-feature gates, C0e, C0f, the count-guard and build-evidence lints and the region gate move below the policy boundary as gate 2c2x.",
+        "scripts/lib/hook_default_region_gate.py: those seven are DEFERRED rows, the push lock a REQUIRED one; scripts/lib/previous-run-gate.sh names land.sh in its acknowledgement hint; CLAUDE.md and docs/agent-reference.md say to push with land.sh."
+      ],
+      "verification_bullets": [
+        "The four gated kit images built on the bench host: zephyr-client-fixed worst chain 7,152 (committed 7,280, held); -get 7,784 (held); -batching 7,460 against 7,204 (refused), where the image at a7f11d66e reads 7,604, so the overshoot is the tree's and this change takes 144 off it.",
+        "The compare build of the fixed client: wz_app_main 1,928 to 1,784 bytes, worst chain 7,296 to 7,152, text 179,536 to 178,076; on the kit, 2,000 GETs per document answered, stack peak 6,336 against the row's 6,000, the tree before this change reading 6,480.",
+        "The pre-push hook run directly on this push's tuple: refused with no lock held, refused with the lock held and no token, and passed in 37 s with the holder's token.",
+        "hook_default_region_gate.py and hook_gate_boundary_gate.py, check and selftest; round_fed_gate_reach.py, hook_script_reference_gate.py, decline_arming_gate.py, prose_feature_gate.py, gate_provenance_lint.py; shellcheck of the hook and land.sh."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "The reply's 1,104-byte Response builder: an encode from borrowed parts, asked of SCE; until it lands, the reply frame stays 2,096 bytes.",
+        "The handshake dispatch's copies of a transport message (720, 720, 712, 702 bytes): decode once into one place; agree it with the lifecycle work first.",
+        "wz_app_main is still 1,784 bytes: about twenty SessionLinkActions values of 248 bytes are among its slots.",
+        "The lifecycle session bisects the kit rows that were over before this change (zephyr-client-fixed peak, -batching and -get chains).",
+        "core.hooksPath names the main checkout's .githooks, so gate 0p binds every push once that checkout reaches this commit; until then land.sh serialises the sessions that use it."
+      ],
+      "publishable_decision_summary": "Two decisions. (1) Step L of the parity loop, the fixed client's stack. The image's LLVM IR shows three large slots under its deepest chain: the console line's buffer, 388 bytes eight times in wz_app_main (log_args inlined into each caller), paid here by never inlining log_args, which also takes 1,460 bytes of text off; a 1,104-byte Response builder whose bounded lists are inline at their maximum, which needs an encode from borrowed parts that SCE puts to its owner as an ADR; four copies of about 720 bytes of a transport message in the handshake dispatch, a decode into one place that waits for the lifecycle work. (2) Owner, 2026-10-27: a push to main goes through scripts/land.sh, which holds the clone's push lock from its fetch to the end of its push and numbers the ledger round inside it, and pre-push gate 0p refuses a push to main without that lock; the ordinary push keeps only the checks that refuse often, and seven others moved to hosted CI.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-zephyr/src/glue.rs: log_args is #[inline(never)], with the measurement that says why.",
+        "scripts/land.sh (new): the push lock, the rebase, the next ledger number and the push through the hooks; --ack-red, --round, --status.",
+        ".githooks/pre-push: gate 0p (the push lock); the store-reason and prose-feature gates, C0e, C0f, the count-guard and build-evidence lints and the region gate move below the policy boundary as gate 2c2x.",
+        "scripts/lib/hook_default_region_gate.py: those seven are DEFERRED rows, the push lock a REQUIRED one; scripts/lib/previous-run-gate.sh names land.sh in its acknowledgement hint; CLAUDE.md and docs/agent-reference.md say to push with land.sh."
+      ],
+      "publishable_verification_bullets": [
+        "The four gated kit images built on the bench host: zephyr-client-fixed worst chain 7,152 (committed 7,280, held); -get 7,784 (held); -batching 7,460 against 7,204 (refused), where the image at a7f11d66e reads 7,604, so the overshoot is the tree's and this change takes 144 off it.",
+        "The compare build of the fixed client: wz_app_main 1,928 to 1,784 bytes, worst chain 7,296 to 7,152, text 179,536 to 178,076; on the kit, 2,000 GETs per document answered, stack peak 6,336 against the row's 6,000, the tree before this change reading 6,480.",
+        "The pre-push hook run directly on this push's tuple: refused with no lock held, refused with the lock held and no token, and passed in 37 s with the holder's token.",
+        "hook_default_region_gate.py and hook_gate_boundary_gate.py, check and selftest; round_fed_gate_reach.py, hook_script_reference_gate.py, decline_arming_gate.py, prose_feature_gate.py, gate_provenance_lint.py; shellcheck of the hook and land.sh."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The reply's 1,104-byte Response builder: an encode from borrowed parts, asked of SCE; until it lands, the reply frame stays 2,096 bytes.",
+        "The handshake dispatch's copies of a transport message (720, 720, 712, 702 bytes): decode once into one place; agree it with the lifecycle work first.",
+        "wz_app_main is still 1,784 bytes: about twenty SessionLinkActions values of 248 bytes are among its slots.",
+        "The lifecycle session bisects the kit rows that were over before this change (zephyr-client-fixed peak, -batching and -get chains).",
+        "core.hooksPath names the main checkout's .githooks, so gate 0p binds every push once that checkout reaches this commit; until then land.sh serialises the sessions that use it."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
