@@ -420,7 +420,7 @@ impl TryFrom<&zenoh_protocol::network::timestamp_stack::TimestampStack> for Time
             let point: InterceptionPoint = match record.flags.try_into() {
                 Ok(p) => p,
                 Err(_) => {
-                    // FIXME: find a way to hold unknown interception points
+                    // upstream note: find a way to hold unknown interception points
                     //        (required for forward-compatibility)
                     tracing::warn!(
                         "Skipping instrumentation measurement with unknown or malformed instrumentation flags '{:b}'",
