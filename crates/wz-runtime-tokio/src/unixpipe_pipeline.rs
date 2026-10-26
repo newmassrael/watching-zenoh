@@ -45,6 +45,7 @@
 //!   a dialer probes to detect a live listener.
 //! - the listener holds `LOCK_EX` on each dedicated `P_uplink{suffix}` reader.
 //! - the client holds `LOCK_EX` on each dedicated `P_downlink{suffix}` reader.
+//!
 //! flock is also the SUFFIX-COLLISION detector: a second dialer that draws the
 //! same suffix fails to acquire the dedicated reader lock and retries (NOT
 //! mkfifo-EEXIST, which is a harmless reuse — the node is created no-unlink).

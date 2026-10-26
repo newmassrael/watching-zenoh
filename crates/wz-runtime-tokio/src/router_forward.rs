@@ -219,8 +219,8 @@
 //! `complete_query_directions` + client faces). Each forwarded Request ALLOCATES a
 //! [`PendingQueries`] return entry (the
 //! reverse Response route is C5c, below); an EMPTY route prompts a `ResponseFinal`
-//! to the querier. [`deregister`](FaceForwarder::deregister) purges `client_qabls`
-//! + the pending entries keyed by the departed face BEFORE its linkless
+//! to the querier. [`deregister`](FaceForwarder::deregister) purges `client_qabls` +
+//! the pending entries keyed by the departed face BEFORE its linkless
 //! early-return (OBLIGATION 1).
 //!
 //! ## Slice C5c (query-route RESPONSE half — the reply return) — landed
