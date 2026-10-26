@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R3714 (no register item) — read and rewrite QUIC Initial packets with the
+"""R3716 (no register item) — read and rewrite QUIC Initial packets with the
 standard library only, for `capture_anonymise.py`.
 
 ## Why this exists
