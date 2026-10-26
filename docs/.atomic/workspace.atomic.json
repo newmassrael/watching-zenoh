@@ -291200,6 +291200,50 @@
         "Read the hosted pico sizes after this push and tighten the four budgets moved in the last round. Nodes that adopt the closed set enable the feature. The zenoh crate's five tests are claimed by no leg (not this change)."
       ]
     },
+    "Round 3726": {
+      "decision_summary": "The advanced subscriber's host is run on the cooperative engine itself. wz-capi-coop's tests gain tests::advanced: the router stand-in plays the advanced publisher, pushing sequenced samples and a beacon, declaring its liveliness token and answering the host's gets out of a real cache ring (CacheStore and its query handler), and the stand-in records the selectors it is asked. Five tests: a forward gap filled from the cache, a heartbeat ahead of the stream asking the bounded range, the periodic re-ask run from the engine's step, a publisher that appears late detected through its token and its cache recovered, and a get answered with several replies handing its leg all of them. Each path of the host had been proved rule by rule on a scripted engine and none had run on an engine. The last test came from a false alarm: only the last reply of three arrived, and the cause was the stand-in's cache, whose default ring is one deep, not the engine.",
+      "changes_bullets": [
+        "crates/wz-capi-coop/src/tests.rs: two commands of the stand-in (a sequenced push, a held cache) and the selectors it records; the identity of the publisher it plays.",
+        "crates/wz-capi-coop/src/tests/advanced.rs (new): the five tests. crates/wz-capi-coop/Cargo.toml: wz-ext-pubsub with engine-host as a dev-dependency.",
+        "scripts/lib/nondefault-tests-gate.sh: the leg's note names the new tests and the count (56 with all of them); docs/capi-pico-on-coop-engine.md records the witnesses."
+      ],
+      "verification_bullets": [
+        "wz-capi-coop with the non-default leg's features: 56 passed, the five new ones among them; wz-ext-pubsub with its leg's features still passes after the rebase over the port's no_std conversion; clippy with -D warnings, all targets, with and without the leg's features.",
+        "The hook's gate array plus the surface gates: 117 of 118 passed; the one that did not is duplicate_module_lint, which reads the cfg pair of key_gate in wz-session-core (not this round's, told to its owner, who has the fix locally).",
+        "Read from the hosted run of rounds 3720 and before (it held 5a and 5b and had not finished): C1co passed with the new advanced legs on both engines. Reds there that are not this track's: C1 (an open-plan golden), C1cn shard 0 (a wz-session-mcu test no leg claims), C1cj (the replay vocabulary gate's subject moved with wz-workload), C1bf (wz-zenoh not in COVERED), C0. C1cs read over budget on pico-client-coop-admin-space, -scout, pico-default and capic-default (+92135) at a state that still carried the registry's advanced code beside the new hosts; that code was deleted in 3722, so the size is read again from a run that holds it.",
+        "Not done: the hosted run that holds 3722 and this round has not finished."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "carry_forward_bullets": [
+        "Read C1cs from the first hosted run that finishes and holds the deletion of 3722 (fd51a9f4d or later): capic-default, pico-default and the two cooperative builds. If they are still over, attribute by measuring on one machine at the commits before 3702, after 3711, after 3716 and after 3722, and move a budget only by that measurement.",
+        "Read C1cc and C1ce (the zenoh-c legs with the registry code gone), C1aq to C1av and C1co from the same run.",
+        "The differential of the typed tokio host against the port's host (the same events into both): needs a session the port can give the typed one, or a recording peer both can be driven by.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine; the listening role; the cooperative engine without std (54's seam commit)."
+      ],
+      "publishable_decision_summary": "The advanced subscriber's host is run on the cooperative engine itself. wz-capi-coop's tests gain tests::advanced: the router stand-in plays the advanced publisher, pushing sequenced samples and a beacon, declaring its liveliness token and answering the host's gets out of a real cache ring (CacheStore and its query handler), and the stand-in records the selectors it is asked. Five tests: a forward gap filled from the cache, a heartbeat ahead of the stream asking the bounded range, the periodic re-ask run from the engine's step, a publisher that appears late detected through its token and its cache recovered, and a get answered with several replies handing its leg all of them. Each path of the host had been proved rule by rule on a scripted engine and none had run on an engine. The last test came from a false alarm: only the last reply of three arrived, and the cause was the stand-in's cache, whose default ring is one deep, not the engine.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-coop/src/tests.rs: two commands of the stand-in (a sequenced push, a held cache) and the selectors it records; the identity of the publisher it plays.",
+        "crates/wz-capi-coop/src/tests/advanced.rs (new): the five tests. crates/wz-capi-coop/Cargo.toml: wz-ext-pubsub with engine-host as a dev-dependency.",
+        "scripts/lib/nondefault-tests-gate.sh: the leg's note names the new tests and the count (56 with all of them); docs/capi-pico-on-coop-engine.md records the witnesses."
+      ],
+      "publishable_verification_bullets": [
+        "wz-capi-coop with the non-default leg's features: 56 passed, the five new ones among them; wz-ext-pubsub with its leg's features still passes after the rebase over the port's no_std conversion; clippy with -D warnings, all targets, with and without the leg's features.",
+        "The hook's gate array plus the surface gates: 117 of 118 passed; the one that did not is duplicate_module_lint, which reads the cfg pair of key_gate in wz-session-core (not this round's, told to its owner, who has the fix locally).",
+        "Read from the hosted run of rounds 3720 and before (it held 5a and 5b and had not finished): C1co passed with the new advanced legs on both engines. Reds there that are not this track's: C1 (an open-plan golden), C1cn shard 0 (a wz-session-mcu test no leg claims), C1cj (the replay vocabulary gate's subject moved with wz-workload), C1bf (wz-zenoh not in COVERED), C0. C1cs read over budget on pico-client-coop-admin-space, -scout, pico-default and capic-default (+92135) at a state that still carried the registry's advanced code beside the new hosts; that code was deleted in 3722, so the size is read again from a run that holds it.",
+        "Not done: the hosted run that holds 3722 and this round has not finished."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read C1cs from the first hosted run that finishes and holds the deletion of 3722 (fd51a9f4d or later): capic-default, pico-default and the two cooperative builds. If they are still over, attribute by measuring on one machine at the commits before 3702, after 3711, after 3716 and after 3722, and move a budget only by that measurement.",
+        "Read C1cc and C1ce (the zenoh-c legs with the registry code gone), C1aq to C1av and C1co from the same run.",
+        "The differential of the typed tokio host against the port's host (the same events into both): needs a session the port can give the typed one, or a recording peer both can be driven by.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine; the listening role; the cooperative engine without std (54's seam commit)."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
