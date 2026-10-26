@@ -289688,6 +289688,36 @@
         "Still open: wait_declarations_stable and a synced query on the cooperative engine."
       ]
     },
+    "Round 3691": {
+      "decision_summary": "The gate-provenance lint of Layer C0 failed on the closed key set's generator: its first 60 lines carried no citation of the round and register item it closes. Every session asked said the file was not theirs, and git cannot tell sessions apart, so the round was taken from the ledger: round 3685 filed the key set's phase 1, the table, its generator and the model test, with the generator in the commit that preceded it. The generator's docstring now opens with the citation in the form the other scripts use, round 3685 and no register item, which is what the entry shows (it names none).",
+      "changes_bullets": [
+        "scripts/lib/wz_key_set.py: the docstring opens with the round 3685 citation, no register item."
+      ],
+      "verification_bullets": [
+        "The gate-provenance lint failed on this file alone on the current main, and passed after the change; the generator's own selftest passed.",
+        "Not run: the rest of Layer C0, whose other findings belong to the sessions that claimed them, or the hosted run of this push."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "If the key set's author knows a register item that the generator closes, the citation names it in a later round; the entry for round 3685 names none."
+      ],
+      "publishable_decision_summary": "The gate-provenance lint of Layer C0 failed on the closed key set's generator: its first 60 lines carried no citation of the round and register item it closes. Every session asked said the file was not theirs, and git cannot tell sessions apart, so the round was taken from the ledger: round 3685 filed the key set's phase 1, the table, its generator and the model test, with the generator in the commit that preceded it. The generator's docstring now opens with the citation in the form the other scripts use, round 3685 and no register item, which is what the entry shows (it names none).",
+      "publishable_changes_bullets": [
+        "scripts/lib/wz_key_set.py: the docstring opens with the round 3685 citation, no register item."
+      ],
+      "publishable_verification_bullets": [
+        "The gate-provenance lint failed on this file alone on the current main, and passed after the change; the generator's own selftest passed.",
+        "Not run: the rest of Layer C0, whose other findings belong to the sessions that claimed them, or the hosted run of this push."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "If the key set's author knows a register item that the generator closes, the citation names it in a later round; the entry for round 3685 names none."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
