@@ -544,5 +544,4 @@ it behaves as pico behaves in both of pico's threading arms.
   each as a redial replays them, with the port's factories (`SubscriberSink` and the like)
   minting one callback per face, as that vocabulary already says. A get then has one leg per
   face, which the port's `get_on_wire` already returns.
-- Scouting on the cooperative engine (the advanced publisher and subscriber are there).
 - How the selection is spelled on the build-configuration axis (D5).

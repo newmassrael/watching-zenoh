@@ -240,9 +240,12 @@ defect of this plane; it is documented on the plane and not worked around with a
    and `z_advanced_sub`, and the shared-memory legs (a chunk put through an advanced publisher, a
    cache-only publisher to a real `z_sub_shm`). The tokio runtime's own typed publisher and
    subscriber stay: they are the Rust API's, typed over its session, and the machine they call is
-   the same code. What is left of this step is the differential of those two hosts against each
-   other, the same events into the typed one and into the port's, which has no harness yet because
-   the typed one needs a session the port cannot give it.
+   the same code. The two hosts are not run against each other, the same events into the typed one
+   and into the port's, and that was decided and not left undone: the typed host needs a session
+   the port cannot give it, so the harness would be a third host written for the comparison, and
+   each of the two is already held to the stronger oracle, the upstream library (the typed host by
+   the zenoh-ext interop legs, the port's by the legs above against zenoh-c and zenoh-pico). A
+   difference between the two would show as one of them failing its own oracle.
 
 ## What each step touches that a code change alone does not
 
