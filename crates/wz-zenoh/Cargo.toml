@@ -44,7 +44,23 @@ doctest = false
 # feature; they join the manifest with the slice that gives them meaning, and the three that the
 # surface gate's arms and the `zenoh_macros` attributes read are here from the first.
 [features]
-internal = ["zenoh-config/internal", "zenoh-keyexpr/internal", "zenoh-protocol/internal"]
+# The engine the session runs on (decision D5 of docs/zenoh-api-on-the-engine.md): one per build,
+# chosen by a feature. The tokio engine is the only one that opens a session from a configuration
+# today, so it is the default and the only choice; a build that selects none is refused at compile
+# time, and the cooperative engine joins this list with the slice that gives it an open of its own.
+#
+# Upstream's default features are the transports and the authentications; of them the two
+# transports below have meaning today, and the rest join the manifest with the slice that maps the
+# engine's capabilities onto them (the catalogue of docs/build-configuration.md, C1).
+default = ["engine-tokio", "transport_tcp", "transport_udp"]
+engine-tokio = ["dep:wz-capi-core"]
+# `transport_tcp` is what gives the configuration its default listening endpoints (`tcp/[::]:7447`
+# for a router, `tcp/[::]:0` for a peer), as it does upstream; the engine carries the link always.
+transport_tcp = ["zenoh-config/transport_tcp"]
+# `transport_udp` asks the engine for its udp link, which its own default features also carry: this
+# build cannot yet take the link away.
+transport_udp = ["wz-capi-core?/link-udp"]
+internal =["zenoh-config/internal", "zenoh-keyexpr/internal", "zenoh-protocol/internal"]
 # Upstream's marker for the plugin interface: with it the configuration's notifier can be
 # subscribed to (`Notifier::subscribe`).
 plugins = []
@@ -57,15 +73,19 @@ shared-memory = [
 unstable = ["zenoh-config/unstable", "zenoh-keyexpr/unstable", "zenoh-protocol/unstable"]
 
 [dependencies]
+async-trait = "0.1.89"
 bytes = "1.11.0"
 flume = "0.11.1"
 futures = "0.3.31"
 json5 = "0.4.1"
 phf = { version = "0.13.1", features = ["macros"] }
 serde = { version = "1.0.225", features = ["default"] }
+serde_json = "1.0.145"
 tokio = { version = "1.47.1", default-features = false, features = ["macros", "rt", "sync", "time"] }
 tracing = "0.1.41"
 uhlc = { version = "0.8.0", default-features = false }
+# The tokio engine: what opens a session from the plan of a configuration (`open_plan`) and runs it.
+wz-capi-core = { path = "../wz-capi-core", optional = true }
 zenoh-buffers = { path = "../wz-zenoh-buffers", features = ["std"] }
 zenoh-codec = { path = "../wz-zenoh-codec" }
 zenoh-collections = { path = "../wz-zenoh-collections", features = ["std"] }
@@ -80,10 +100,8 @@ zenoh-runtime = { path = "../wz-zenoh-runtime" }
 zenoh-shm = { path = "../wz-zenoh-shm", optional = true }
 zenoh-util = { path = "../wz-zenoh-util" }
 
-# The tests of the cancellation token run on a runtime of several threads, and those of the
-# configuration read its items back as JSON.
+# The tests of the cancellation token run on a runtime of several threads.
 [dev-dependencies]
-serde_json = "1.0.145"
 tokio ={ version = "1.47.1", default-features = false, features = ["macros", "rt-multi-thread", "sync", "time"] }
 
 [lints]

@@ -4582,6 +4582,7 @@ dependencies = [
 name = "zenoh"
 version = "1.10.1"
 dependencies = [
+ "async-trait",
  "bytes",
  "flume",
  "futures",
@@ -4592,6 +4593,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uhlc",
+ "wz-capi-core",
  "zenoh-buffers",
  "zenoh-codec",
  "zenoh-collections",

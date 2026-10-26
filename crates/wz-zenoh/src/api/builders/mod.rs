@@ -16,4 +16,6 @@
 // src/api/builders/mod.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). Only the modules of
 // the slices that have landed are declared here.
 
+pub(crate) mod close;
 pub(crate) mod sample;
+pub(crate) mod session;

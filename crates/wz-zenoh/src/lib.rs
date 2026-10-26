@@ -41,10 +41,12 @@ pub use zenoh_result::ZResult as Result;
 #[doc(inline)]
 pub use zenoh_util::{init_log_from_env_or, try_init_log_from_env};
 
-// Upstream's root also re-exports `scout`, `open` and `Session`, which arrive with the slices that
-// give them a body.
+// Upstream's root also re-exports `scout`, which arrives with slice Z5.
 #[doc(inline)]
-pub use crate::config::Config;
+pub use crate::{
+    config::Config,
+    session::{open, Session},
+};
 
 /// # Payload primitives and encoding
 ///
@@ -455,6 +457,14 @@ pub mod session {
     pub use zenoh_config::wrappers::ZenohId;
     #[zenoh_macros::unstable]
     pub use zenoh_protocol::core::EntityId;
+
+    // Of upstream's module the builders of a put, a delete and a get, `SessionInfo` with its
+    // builders, `Undeclarable`, the link and transport events and `WeakSession` arrive with the
+    // slices Z2, Z3 and Z6a.
+    pub use crate::api::{
+        builders::{close::CloseBuilder, session::OpenBuilder},
+        session::{open, Session, SessionClosedError},
+    };
 }
 
 /// # Callback handler trait.
