@@ -189,3 +189,10 @@ function(wz_zephyr_rust_app)
     zephyr_linker_sources(RAMFUNC_SECTION ${code_in_ram_ld})
   endif()
 endfunction()
+
+# CONFIG_WZ_MEMORY_REPORT: the kernel heap's peak and every thread's stack, said the same way by
+# every image a compare run holds to another, whatever its program (wz_memory_report.c). It is
+# not a Rust image's alone, so it is added here and not in wz_zephyr_rust_app.
+if(CONFIG_WZ_MEMORY_REPORT)
+  target_sources(app PRIVATE ${WZ_ZEPHYR_COMMON_DIR}/wz_memory_report.c)
+endif()

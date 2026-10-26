@@ -97,4 +97,30 @@ config WZ_CODE_IN_RAM
 	  An experiment with a measurement attached to it where it is turned on (the overlay that
 	  turns it on states the numbers): off by default.
 
+config WZ_MEMORY_REPORT
+	bool "Report the kernel heap's peak and every thread's stack (a compare build)"
+	select SYS_HEAP_RUNTIME_STATS
+	select INIT_STACKS
+	select THREAD_STACK_INFO
+	select THREAD_MONITOR
+	select THREAD_NAME
+	help
+	  A thread of the lowest application priority reads the kernel heap that `k_malloc`
+	  serves and the stack of every thread, and prints `mem: heap peak N of M bytes` and
+	  `mem: stack <thread> U of S bytes` when a figure moved (deploy/zephyr-common/
+	  wz_memory_report.c). It is the one source of those figures in a compare run of the kit
+	  lane (docs/upstream-parity.md step M3), so two images held to each other say them the
+	  same way; it adds a thread and its stack to both. Off by default: an image measured for
+	  anything else keeps the bytes it was measured with.
+
+config WZ_MEMORY_REPORT_PERIOD_MS
+	int "How often the memory report reads the kernel, in milliseconds"
+	depends on WZ_MEMORY_REPORT
+	default 1000
+
+config WZ_MEMORY_REPORT_STACK_SIZE
+	int "The memory report thread's stack, in bytes"
+	depends on WZ_MEMORY_REPORT
+	default 1024
+
 endmenu

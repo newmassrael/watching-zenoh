@@ -24,9 +24,17 @@ the host's clock saw them. A GET is one query in and one reply out, so the gap i
 the REST plugin and the host. Datagrams shorter than `MIN_DATAGRAM` (a KeepAlive) are not a query
 or a reply and are left out on both sides.
 
+A compare build also carries the memory report (CONFIG_WZ_MEMORY_REPORT, step M3): the kernel
+heap's peak and every thread's stack, which both programs allocate from and run on. The last block
+of each boot's report is read (its figures are high-water marks) and the image's worst boot is its
+figure: the heap peak, the stack the threads used summed over them (pico runs a read task and a
+lease task beside `main`, and a comparison of one thread with one thread of two is the error of
+2026-10-22), and the stack they reserve.
+
 Then each image against the reference (`--ref`, the first image by default), by decision D1:
 
-* size is one figure per build: WIN when the image is smaller, LOSS when larger, TIE when equal;
+* size and memory are one figure per build: WIN when the image's is smaller, LOSS when larger, TIE
+  when equal;
 * the turnaround is one median per boot, and the cell is the ratio of the median of the image's
   boot medians to the reference's, with a bootstrap 95% interval over the boots (resampled with
   replacement, seeded, so a run prints the same interval twice). WIN when the whole interval is
@@ -60,6 +68,10 @@ BOOTSTRAP_SEED = 20261026
 CAPTURE_LINE = re.compile(r"^(\d+\.\d+) IP (\S+?)\.(\d+) > (\S+?)\.(\d+): UDP, length (\d+)")
 #: The wz firmware's high-water mark of its main stack (`StackWatch`).
 STACK_LINE = re.compile(r"stack: peak (\d+) of (\d+) bytes")
+#: The memory report every compare build carries (deploy/zephyr-common/wz_memory_report.c): one
+#: heap line, then one line per thread, printed together whenever a figure moved.
+HEAP_LINE = re.compile(r"mem: heap peak (\d+) of (\d+) bytes")
+THREAD_LINE = re.compile(r"mem: stack (\S+) (\d+) of (\d+) bytes")
 
 
 @dataclass
@@ -77,12 +89,37 @@ class Size:
         return self.data + self.bss
 
 
+@dataclass(frozen=True)
+class Memory:
+    """One boot's memory report, its last block: every figure in it is a high-water mark."""
+
+    heap_peak: int
+    heap_pool: int
+    stacks: tuple[tuple[str, int, int], ...]  # (thread, used, size)
+
+    @property
+    def stack_used(self) -> int:
+        return sum(used for _, used, _ in self.stacks)
+
+    @property
+    def stack_reserved(self) -> int:
+        return sum(size for _, _, size in self.stacks)
+
+
 @dataclass
 class Image:
     key: str
     size: Size | None = None
     stack: tuple[int, int] | None = None
     boot_medians: list[float] = field(default_factory=list)  # milliseconds, one per boot
+    memory: list[Memory] = field(default_factory=list)  # one per boot that reported
+
+    def worst_memory(self) -> Memory | None:
+        """The boot whose heap peak and summed stack were the largest: the image's cost is what it
+        needed on its worst boot."""
+        if not self.memory:
+            return None
+        return max(self.memory, key=lambda m: (m.heap_peak, m.stack_used))
 
 
 def turnarounds(capture: str, node: str) -> list[float]:
@@ -106,6 +143,22 @@ def berkeley_size(elf: pathlib.Path) -> Size:
 def last_stack_line(console: str) -> tuple[int, int] | None:
     found = STACK_LINE.findall(console)
     return (int(found[-1][0]), int(found[-1][1])) if found else None
+
+
+def last_memory_report(console: str) -> Memory | None:
+    """The last block of the memory report: its heap line and the thread lines that follow it."""
+    lines = console.replace("\r", "").splitlines()
+    starts = [i for i, line in enumerate(lines) if HEAP_LINE.search(line)]
+    if not starts:
+        return None
+    heap = HEAP_LINE.search(lines[starts[-1]])
+    stacks = []
+    for line in lines[starts[-1] + 1:]:
+        m = THREAD_LINE.search(line)
+        if not m:
+            break
+        stacks.append((m.group(1), int(m.group(2)), int(m.group(3))))
+    return Memory(int(heap.group(1)), int(heap.group(2)), tuple(stacks))
 
 
 def bootstrap_ratio(sample: list[float], ref: list[float]) -> tuple[float, float, float]:
@@ -146,6 +199,9 @@ def read_run(run: pathlib.Path, node: str) -> dict[str, Image]:
         image.size = size
         console = (boot / "console.raw").read_text(errors="replace")
         image.stack = last_stack_line(console) or image.stack
+        memory = last_memory_report(console)
+        if memory is not None:
+            image.memory.append(memory)
         gaps = turnarounds((boot / "cap.txt").read_text(errors="replace"), node)
         if gaps:
             image.boot_medians.append(statistics.median(gaps))
@@ -162,6 +218,16 @@ def report(images: dict[str, Image], ref_key: str) -> list[str]:
         out.append(f"kit-compare: {image.key}: stack "
                    + (f"peak {image.stack[0]} of {image.stack[1]} bytes" if image.stack
                       else "not reported by the firmware"))
+        worst = image.worst_memory()
+        if worst is None:
+            out.append(f"kit-compare: {image.key}: no memory report (a build without "
+                       f"CONFIG_WZ_MEMORY_REPORT)")
+        else:
+            out.append(f"kit-compare: {image.key}: worst of {len(image.memory)} boot(s): heap peak "
+                       f"{worst.heap_peak} of {worst.heap_pool}; {len(worst.stacks)} thread(s) "
+                       f"used {worst.stack_used} of {worst.stack_reserved} bytes of stack")
+            for thread, used, size in worst.stacks:
+                out.append(f"kit-compare: {image.key}:   {thread} {used} of {size}")
         if image.boot_medians:
             m = image.boot_medians
             out.append(f"kit-compare: {image.key}: turnaround over {len(m)} boot(s): median "
@@ -177,6 +243,13 @@ def report(images: dict[str, Image], ref_key: str) -> list[str]:
                 mine, theirs = getattr(image.size, metric), getattr(ref.size, metric)
                 out.append(f"kit-compare: cell {metric}: {image.key} {mine} vs {ref_key} {theirs} "
                            f"({mine / theirs:.3f}) -> {verdict_size(mine, theirs)}")
+        mine_mem, ref_mem = image.worst_memory(), ref.worst_memory()
+        if mine_mem is not None and ref_mem is not None:
+            for metric in ("heap_peak", "stack_used", "stack_reserved"):
+                mine, theirs = getattr(mine_mem, metric), getattr(ref_mem, metric)
+                ratio = f"{mine / theirs:.3f}" if theirs else "n/a"
+                out.append(f"kit-compare: cell {metric}: {image.key} {mine} vs {ref_key} {theirs} "
+                           f"({ratio}) -> {verdict_size(mine, theirs)}")
         if len(image.boot_medians) >= 2 and len(ref.boot_medians) >= 2:
             point, lo, hi = bootstrap_ratio(image.boot_medians, ref.boot_medians)
             out.append(f"kit-compare: cell turnaround: {image.key} vs {ref_key}: ratio {point:.3f} "
@@ -218,6 +291,25 @@ def selftest() -> int:
            last_stack_line("stack: peak 10 of 20 bytes\nx\nstack: peak 30 of 40 bytes") == (30, 40))
     expect("no stack line is None", last_stack_line("nothing") is None)
 
+    console = "\r\n".join([
+        "mem: heap peak 100 of 4096 bytes",
+        "mem: stack main 900 of 2048 bytes",
+        "ZEPHYR-PICO READY 5a1c0ffee001 udp/192.168.100.1:7447",
+        "mem: heap peak 300 of 4096 bytes",
+        "mem: stack main 1000 of 2048 bytes",
+        "mem: stack pthread_0 500 of 1024 bytes",
+        "some later line",
+    ])
+    memory = last_memory_report(console)
+    expect("the last block of the memory report is the one read",
+           memory is not None and memory.heap_peak == 300 and memory.heap_pool == 4096)
+    expect("the block's threads are summed and the line after it is not one of them",
+           memory is not None and memory.stack_used == 1500 and memory.stack_reserved == 3072)
+    expect("a console with no report has none", last_memory_report("nothing") is None)
+    image = Image("x", memory=[Memory(10, 99, (("a", 5, 9),)), Memory(20, 99, (("a", 1, 9),))])
+    expect("the worst boot is the one with the larger heap peak",
+           image.worst_memory() is not None and image.worst_memory().heap_peak == 20)
+
     faster = [0.20, 0.201, 0.199, 0.202, 0.200, 0.198]
     slower = [0.21, 0.211, 0.209, 0.212, 0.210, 0.208]
     _, lo, hi = bootstrap_ratio(faster, slower)
@@ -237,6 +329,16 @@ def selftest() -> int:
     lines = report(images, "pico")
     expect("the report names every cell of the image against the reference",
            sum(" cell " in line for line in lines) == 4)
+    images["pico"].memory = [Memory(9416, 16384, (("main", 2944, 4096), ("pthread_0", 2736, 4096)))]
+    images["wz"].memory = [Memory(0, 131072, (("main", 5928, 9216),))]
+    lines = report(images, "pico")
+    expect("with a memory report on both sides, its three cells join the four",
+           sum(" cell " in line for line in lines) == 7)
+    expect("a heap nobody allocated from is a WIN against one that was",
+           any("cell heap_peak: wz 0 vs pico 9416" in line and line.endswith("WIN") for line in lines))
+    expect("stack is summed over the threads: pico's two against wz's one",
+           any("cell stack_used: wz 5928 vs pico 5680" in line and line.endswith("LOSS")
+               for line in lines))
     expect("a firmware that prints no stack line is said to, not read as zero",
            any("pico: stack not reported" in line for line in lines))
     print(f"  kit-compare selftest: {'PASS' if not fails else f'{fails} FAIL'}")

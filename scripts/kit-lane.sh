@@ -23,7 +23,8 @@
 # the run to the image's line that its peer is verified, and then measures a GET as for an answering
 # image. A MEASURE image (zephyr-tls-fit, the secure channel's fit) runs alone, with no router: it is
 # flashed, reset, and held to its own console verdict. COMPARE images (zephyr-client-heap, the client on
-# the heap profile, and zephyr-pico-queryable, zenoh-pico answering the same two GETs) are run by
+# the heap profile, and zephyr-pico-queryable and -st, zenoh-pico answering the same two GETs with its
+# read and lease tasks and with the program stepping it) are run by
 # `compare` beside answering images (docs/upstream-parity.md M1): each boot in alternating order, the
 # session's datagrams captured at the host's wire, and scripts/lib/kit_compare.py's verdict per cell.
 # The pico image builds from vendor/zenoh-pico, so a tree sent here carries that submodule too.
@@ -94,7 +95,15 @@ image_spec() {
             OVERLAYS="overlays/t2g_zeth.conf;overlays/t2g_client.conf"
             KIND=answer
             ;;
+        # zenoh-pico with the wz client's planes (docs/upstream-parity.md step M2), in its two arms:
+        # its own read and lease tasks, and the program stepping the session.
         zephyr-pico-queryable)
+            APP=zephyr-pico-compare
+            OVERLAYS="overlays/multi_thread.conf"
+            KIND=answer
+            READY_TAG="ZEPHYR-PICO READY"
+            ;;
+        zephyr-pico-queryable-st)
             APP=zephyr-pico-compare
             OVERLAYS=""
             KIND=answer
@@ -137,7 +146,7 @@ IMAGES=(zephyr-client-fixed zephyr-client-fixed-batching zephyr-client-fixed-get
 # row's (the row is set from what they measure).
 MEASURE_IMAGES=(zephyr-tls-fit)
 # The compare images: run only by `compare`, beside the images above.
-COMPARE_IMAGES=(zephyr-client-heap zephyr-pico-queryable)
+COMPARE_IMAGES=(zephyr-client-heap zephyr-pico-queryable zephyr-pico-queryable-st)
 is_compare_image() { [[ " ${COMPARE_IMAGES[*]} " == *" $1 "* ]]; }
 # The port a verify image's router listens on for `tls/` (the image's CONFIG_WZ_CLIENT_ENDPOINT).
 TLS_PORT=7448
@@ -275,10 +284,18 @@ preflight_launcher() {
 }
 
 # ── build ───────────────────────────────────────────────────────────────────────────────────────
+# BUILD_VARIANT=compare builds the image as a compare run holds it (the memory report on, see
+# compare below) into a build directory and a record of its own, so a gated image's own build, the
+# one `run` flashes and its rows describe, is never replaced by a compare build of it.
 build() {
     local key="$1" before="$fails"
     image_spec "$key" || { bad "$key" "not an image of this lane (scripts/kit-lane.sh list)"; return 1; }
-    local dir="$LANE_HOME/build/$key" out="$LANE_HOME/out/$CLOCK_TAG-$key"
+    local name="$key" confs="$OVERLAYS"
+    if [[ "${BUILD_VARIANT:-}" == compare ]]; then
+        name="compare-$key"
+        confs="${confs:+$confs;}$ROOT/deploy/zephyr-common/memory_report.conf"
+    fi
+    local dir="$LANE_HOME/build/$name" out="$LANE_HOME/out/$CLOCK_TAG-$name"
     mkdir -p "$out"
     local avail
     avail="$(LC_ALL=C free -m | awk '/^Mem:/ {print $7}')"
@@ -291,8 +308,14 @@ build() {
     export ZEPHYR_BASE="$ZEPHYR_HOME/zephyr"
     export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-8}" CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-8}"
     local extra=()
+    if [[ -n "$confs" ]]; then
+        extra+=(-DEXTRA_CONF_FILE="$confs")
+    fi
     if [[ "$APP" == zephyr-admin-node ]]; then
-        extra=(-- -DEXTRA_CONF_FILE="$OVERLAYS" -DEXTRA_DTC_OVERLAY_FILE=overlays/t2g_zeth.overlay)
+        extra+=(-DEXTRA_DTC_OVERLAY_FILE=overlays/t2g_zeth.overlay)
+    fi
+    if [[ "${#extra[@]}" -gt 0 ]]; then
+        extra=(-- "${extra[@]}")
     fi
     if (
         cd "$ROOT" && nice -n 10 west build -b "$BOARD" -d "$dir" "deploy/$APP" -p auto "${extra[@]}"
@@ -325,14 +348,14 @@ PY
         ok "$key" "a measure image: its stack is one of the figures it reports, not the stack gate's"
     elif [[ "$KIND" == verify ]]; then
         ok "$key" "a verify image: no stack gate row yet, its first runs on the kit set it"
-    elif is_compare_image "$key"; then
-        ok "$key" "a compare image: no stack gate row, a compare run reports what it reads of it"
+    elif is_compare_image "$key" || [[ "${BUILD_VARIANT:-}" == compare ]]; then
+        ok "$key" "a compare build: not the stack gate's, a compare run reports what it reads of it"
     elif python3 "$ROOT/scripts/lib/stack_frame_gate.py" --check "$key" --elf "$elf" >"$out/stack-gate.log" 2>&1; then
         ok "$key" "the stack gate holds the image ($(grep -a 'stack-chain: OK' "$out/stack-gate.log" | head -n 1 | cut -c1-120))"
     else
         bad "$key" "the stack gate refuses the image ($out/stack-gate.log)"
     fi
-    echo "$out" >"$LANE_HOME/last-out-$key"
+    echo "$out" >"$LANE_HOME/last-out-$name"
     [[ "$fails" -eq "$before" ]]
 }
 
@@ -690,7 +713,9 @@ EOF
 }
 
 # ── compare ─────────────────────────────────────────────────────────────────────────────────────
-# Answering images side by side (docs/upstream-parity.md M1, decision D1). Every image is built, then
+# Answering images side by side (docs/upstream-parity.md M1, decision D1). Every image is built as a
+# compare build (BUILD_VARIANT=compare: the memory report of deploy/zephyr-common/memory_report.conf on,
+# so both sides print their heap peak and every thread's stack the same way, step M3), then
 # each round boots every image once, in the images' order on odd rounds and the reverse on even ones,
 # so a drift of the bench over the run falls on both sides alike. A boot is: the flash written and read
 # back, the router and the console, the reset, the READY line, a capture of the session's datagrams
@@ -718,7 +743,7 @@ compare() {
     done
     preflight "" || return 1
     for key in "${keys[@]}"; do
-        build "$key" || return 1
+        BUILD_VARIANT=compare build "$key" || return 1
     done
     exec 9>"$LANE_HOME/kit.lock"
     if ! flock -n 9; then
@@ -745,7 +770,7 @@ compare() {
         fi
         for key in "${order[@]}"; do
             image_spec "$key"
-            built="$(cat "$LANE_HOME/last-out-$key")"
+            built="$(cat "$LANE_HOME/last-out-compare-$key")"
             OUT="$run_dir/$key-r$round"
             mkdir -p "$OUT"
             cp "$built/elf.path" "$built/m7.sha256" "$OUT/"

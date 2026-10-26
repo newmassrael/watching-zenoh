@@ -98,6 +98,8 @@ int main(void)
 
 	unsigned int reported = 0;
 
+#if Z_FEATURE_MULTI_THREAD == 1
+	/* The multi-threaded arm: the session's own read and lease tasks answer; `main` only reports. */
 	for (;;) {
 		k_sleep(K_SECONDS(10));
 		unsigned int now = atomic_load(&answered);
@@ -107,5 +109,26 @@ int main(void)
 			printk("zephyr-pico-compare: %u GET(s) answered\n", now);
 		}
 	}
+#else
+	/* The single-threaded arm: `main` steps the session, and every read, keep-alive and lease
+	 * check runs in `zp_spin_once`, which pico's own single-threaded examples call in a loop. A
+	 * read waits on its socket for at most the link's timeout, so the loop does not spin while the
+	 * session is quiet, and a query is answered by the call that reads it.
+	 */
+	int64_t next_report = k_uptime_get() + 10 * MSEC_PER_SEC;
+
+	while (zp_spin_once(z_loan(session))) {
+		if (k_uptime_get() >= next_report) {
+			next_report += 10 * MSEC_PER_SEC;
+			unsigned int now = atomic_load(&answered);
+
+			if (now != reported) {
+				reported = now;
+				printk("zephyr-pico-compare: %u GET(s) answered\n", now);
+			}
+		}
+	}
+	printk("ZEPHYR-PICO FAIL the session closed\n");
+#endif
 	return 0;
 }
