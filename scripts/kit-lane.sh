@@ -48,7 +48,10 @@
 #   KIT_CONSOLE     the kit's serial console (default /dev/ttyACM0)
 #   KIT_CM0P_SHA256 sha256 of the CM0+ region as the lab left it (the launcher): `preflight --deep` reads the
 #                   region back and compares; without it the deep check says it has nothing to compare
-# `KIT_LANE_HOME` (default ~/wz-kit-lane) is where builds, outputs and the lock live.
+# `KIT_LANE_HOME` (default ~/wz-kit-lane) is where builds and outputs live. `KIT_LANE_LOCK` (default
+# ~/.local/state/wz/kit.lock) is the kit's lock. It sits outside every lane home because the kit is one
+# board, and sessions run the lane from homes of their own: a lock per home let two of them touch the
+# kit at once (2026-10-27).
 #
 # WHAT IT WILL NOT DO: flash a file that is not the padded region it just built, flash while a debugger,
 # a capture or a ping runs or the console is held, or run while another lane run holds the lock. The kit
@@ -59,6 +62,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LAB_ENV="${KIT_LAB_ENV:-$HOME/.config/wz-kit-lab.env}"
 LANE_HOME="${KIT_LANE_HOME:-$HOME/wz-kit-lane}"
+KIT_LOCK="${KIT_LANE_LOCK:-$HOME/.local/state/wz/kit.lock}"
 ZEPHYR_HOME="${ZEPHYR_HOME:-$HOME/zephyrproject}"
 BOARD="kit_t2g_b_h_lite/cyt4bf8cds/m7_0"
 REGION_BYTES=524288 # the M7_0 image's code flash region of the CYT4BF8CDS
@@ -410,6 +414,19 @@ count_lines() { grep -a -c "$1" "$OUT/console.raw" 2>/dev/null || true; }
 # The node's key id, the first word after the image's READY tag: the keys the host asks are under it.
 ready_node_id() { grep -a -o "$READY_TAG [0-9a-f]*" "$OUT/console.raw" | tail -n 1 | awk '{print $NF}'; }
 
+# Take the kit for the rest of this process (fd 9 closes, and the lock goes, when it exits), and say who
+# holds it. $1 names the step for the refusal. The holder line is written only while the lock is held,
+# so a refusal never quotes a run that has ended.
+take_kit() {
+    mkdir -p "$(dirname "$KIT_LOCK")"
+    exec 9>>"$KIT_LOCK"
+    if ! flock -n 9; then
+        bad "$1" "the kit is held by another lane run ($(cat "$KIT_LOCK.owner" 2>/dev/null || echo unknown)); $KIT_LOCK lets one run at a time touch it"
+        return 1
+    fi
+    printf 'pid=%s home=%s step=%s since=%s\n' "$$" "$LANE_HOME" "$1" "$(date -u +%FT%TZ)" >"$KIT_LOCK.owner"
+}
+
 run() {
     local key="$1" before="$fails"
     image_spec "$key" || { bad "$key" "not an image of this lane (scripts/kit-lane.sh list)"; return 1; }
@@ -421,11 +438,7 @@ run() {
         return 1
     fi
     OUT="$built"
-    exec 9>"$LANE_HOME/kit.lock"
-    if ! flock -n 9; then
-        bad "$key" "another lane run holds $LANE_HOME/kit.lock: one run at a time touches the kit"
-        return 1
-    fi
+    take_kit "$key" || return 1
     local responder="${KIT_RESPONDER:-$LANE_HOME/host-slot-node-get}"
     if [[ "$KIND" == ask && ! -x "$responder" ]]; then
         bad "$key" "no responder at $responder: scripts/kit-lane.sh build-responder"
@@ -745,11 +758,7 @@ compare() {
     for key in "${keys[@]}"; do
         BUILD_VARIANT=compare build "$key" || return 1
     done
-    exec 9>"$LANE_HOME/kit.lock"
-    if ! flock -n 9; then
-        bad compare "another lane run holds $LANE_HOME/kit.lock: one run at a time touches the kit"
-        return 1
-    fi
+    take_kit compare || return 1
     local run_dir="$LANE_HOME/compare/$CLOCK_TAG" round order built i
     mkdir -p "$run_dir"
     {
