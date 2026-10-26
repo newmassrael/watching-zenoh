@@ -39,9 +39,10 @@ bytes READ and that depends on the layout and not on the names.
   and zero the data of record types this parser does not read; SSDP (1900)
   keeps the start line and the values of the standard headers and replaces the
   other values character for character; NTP (123) zeroes the reference id.
-  A loopback capture (`--scope loopback`) also admits TCP and UDP on any port,
-  because the traffic is the capturer's own: its addresses are 127.0.0.1 and
-  its payloads are what the capturer chose to send.
+  A capture of the capturer's own traffic (`--scope own`: loopback, or
+  containers the capturer started on a network of its own) also admits TCP
+  and UDP on any port with the payload as it is, because every payload is
+  what the capturer chose to send; its addresses are mapped all the same.
 * A packet of any other protocol, or one a parser cannot read, is DROPPED and
   counted by reason in the report. Dropping is honest where a guess is not: a
   payload kept unscrubbed could carry an identity, and a payload replaced
@@ -50,13 +51,13 @@ bytes READ and that depends on the layout and not on the names.
 ## The leak check
 
 After writing, every original unicast MAC and IP address (as bytes) and every
-replaced name label of three or more characters (as bytes, either case) is
-searched for in the output file, with any words given as `--forbid`. A hit
-refuses the output: the file is removed and the exit code is 1.
+replaced name or value of `LEAK_MIN` or more characters (as bytes, either case)
+is searched for in the output file, with any words given as `--forbid`. A hit
+refuses the output: nothing is written and the exit code is 1.
 
 ## Usage
 
-  capture_anonymise.py --in RAW.pcap --out CORPUS.pcap --scope lan|loopback
+  capture_anonymise.py --in RAW.pcap --out CORPUS.pcap --scope lan|own
                        [--forbid WORD ...] [--report REPORT.json]
   capture_anonymise.py --verify-corpus captures/corpus
   capture_anonymise.py --selftest
@@ -344,9 +345,39 @@ def scrub_udp_payload(sport, dport, payload, maps, scope):
         return scrub_ssdp(payload, maps)
     if NTP_PORT in ports:
         return scrub_ntp(payload, maps)
-    if scope == "loopback":
-        return payload
+    if scope == "own":
+        return own_payload(payload, maps)
     raise Refused("udp_port_%d_%d" % (min(ports), max(ports)))
+
+
+def own_payload(payload, maps):
+    """The capturer's own payload, as sent, except for the addresses in it.
+
+    A protocol can carry its endpoints' addresses in its payload (an RTPS
+    participant announces its locators), and those are the addresses the
+    headers carried. Every MAC and IP address the file's headers carry is
+    replaced wherever its bytes stand, by its mapping, which has its length.
+    """
+    out = payload
+    for table in (maps.v6, maps.v4, maps.mac):
+        for original, mapped in table.items():
+            if original in out:
+                out = out.replace(original, mapped)
+    return out
+
+
+def prescan(frame, maps):
+    """Map the addresses of one frame's headers, so a payload read before the
+    frame that first carries an address still has its mapping."""
+    maps.mac_of(bytes(frame[0:6]))
+    maps.mac_of(bytes(frame[6:12]))
+    ethertype = struct.unpack("!H", frame[12:14])[0]
+    if ethertype == ETH_IPV4:
+        maps.v4_of(bytes(frame[26:30]))
+        maps.v4_of(bytes(frame[30:34]))
+    elif ethertype == ETH_IPV6:
+        maps.v6_of(bytes(frame[22:38]))
+        maps.v6_of(bytes(frame[38:54]))
 
 
 def transport_checksum(src, dst, proto, segment, v6):
@@ -373,8 +404,10 @@ def rewrite_transport(proto, src, dst, segment, maps, scope, v6):
             ck = transport_checksum(src, dst, proto, bytes(seg), v6) or 0xFFFF
             seg[6:8] = struct.pack("!H", ck)
         return bytes(seg)
-    if proto == PROTO_TCP and scope == "loopback":
+    if proto == PROTO_TCP and scope == "own":
         if len(seg) >= 20:
+            offset = (seg[12] >> 4) * 4
+            seg[offset:] = own_payload(bytes(seg[offset:]), maps)
             seg[16:18] = b"\0\0"
             seg[16:18] = struct.pack("!H", transport_checksum(src, dst, proto, bytes(seg), v6))
         return bytes(seg)
@@ -470,6 +503,11 @@ def anonymise(data, scope):
     # clock, so a file cut out of an anonymised capture is still a fixed point.
     if REBASE_EPOCH <= base < REBASE_EPOCH + REBASE_WINDOW:
         base = REBASE_EPOCH
+    for _, _, frame in records:
+        try:
+            prescan(frame, maps)
+        except (Refused, IndexError, struct.error):
+            pass  # the main pass counts this frame under its reason
     for sec, frac, frame in records:
         try:
             out = rewrite_frame(frame, maps, scope)
@@ -641,6 +679,17 @@ def selftest():
     again, _, _ = anonymise(out, "lan")
     check(again == out, "anonymising twice changes nothing")
     check(anonymise(raw, "lan")[0] != raw, "a raw capture is not a fixed point")
+    # The capturer's own traffic keeps its payload, except for the addresses
+    # in it: a locator announcing the sender's own address carries the mapped
+    # one, at the same offset.
+    peer = b"\xac\x12\x00\x03"  # 172.18.0.3
+    own_raw = write_pcap(
+        [(1700000000, 0, _udp4(host, peer, 7400, 7410, b"RTPS" + host + b"tail"))], False
+    )
+    own_out, own_maps, _ = anonymise(own_raw, "own")
+    check(not leaks(own_out, own_maps, []), "an own payload holds no original address")
+    check(b"RTPS" + own_maps.v4[host] + b"tail" in own_out, "the locator carries the mapped address")
+    check(anonymise(own_out, "own")[0] == own_out, "an own capture is a fixed point too")
     if failures:
         print("capture-anonymise selftest FAIL:")
         for f in failures:
@@ -654,7 +703,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--in", dest="input")
     parser.add_argument("--out", dest="output")
-    parser.add_argument("--scope", choices=("lan", "loopback"))
+    parser.add_argument("--scope", choices=("lan", "own"))
     parser.add_argument("--forbid", action="append", default=[])
     parser.add_argument("--report")
     parser.add_argument("--selftest", action="store_true")

@@ -163,8 +163,16 @@ and without lz4). The anonymiser is `scripts/lib/capture_anonymise.py`; its
 selftest and `--verify-corpus` run in the pre-push static gate array.
 
 It holds six zenoh 1.10.1 captures (TCP and UDP, from before the handshake and
-joined mid-session, with and without lz4) and three of an office Wi-Fi (DNS,
-mDNS, SSDP). Every zenoh flow reads `yes`; no flow of the others reads `yes`.
+joined mid-session, with and without lz4), three of an office Wi-Fi (DNS,
+mDNS, SSDP), and the real implementations of MQTT (mosquitto), RTPS (ROS 2
+Jazzy) and CoAP (libcoap) run in containers. Every zenoh flow reads `yes`; no
+flow of the others reads `yes`.
+
+A TCP flow of another protocol whose bytes never frame a unit carries nothing
+model 1 weighs, and reads `undecided`: forty short MQTT connections do. A
+framing that never takes, measured as the stream's desynchronisations without a
+recovery, is evidence model 1 does not count yet; it is a check for step 3,
+with its weights from this corpus.
 
 **The corpus's first finding** was a false `no`: both flows of a compressed UDP
 session joined mid-session read `no`. With no Init in the capture nothing told
@@ -177,7 +185,7 @@ only as it stands makes it plain again, and a stream finds its framing again on
 a chain of boundaries all in one of the two readings. The model did not move;
 the evidence was misread.
 
-Still to come for step 2: RTPS, SOME/IP, CoAP, MQTT and QUIC captures, LLMNR,
-WS-Discovery, NTP and DHCP on a busier network, and several zenoh versions and
-zenoh-pico on the zenoh side. Step 3 waits for a corpus large enough to measure
+Still to come for step 2: SOME/IP and QUIC captures, LLMNR, WS-Discovery, NTP
+and DHCP on a busier network, and several zenoh versions and zenoh-pico on the
+zenoh side. Step 3 waits for a corpus large enough to measure
 the weights it would replace.

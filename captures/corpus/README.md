@@ -14,12 +14,15 @@ and whether its flows are zenoh.
 
 1. Captured with `tcpdump -w` into a classic pcap, Ethernet link type, on the
    interface the traffic used: `lo` for zenoh 1.10.1 (the pinned zenohd and its
-   example clients), a Wi-Fi interface for the devices of the network it joined.
+   example clients), the bridge of a docker network of its own for the other
+   protocols' real implementations run in containers, and a Wi-Fi interface for
+   the devices of the network it joined.
 2. Anonymised by `scripts/lib/capture_anonymise.py`, with the scope the manifest
    names: `lan` for traffic of other devices, where every payload goes through a
    parser per protocol (DNS, mDNS and LLMNR names, SSDP header values, NTP
-   reference ids) and a packet of a protocol without one is dropped, and
-   `loopback` for traffic the capturer made itself. MAC and IP addresses map to
+   reference ids) and a packet of a protocol without one is dropped, and `own`
+   for traffic the capturer made itself, whose payloads are kept as sent (an
+   ARP or neighbour discovery packet on a bridge is dropped and counted). MAC and IP addresses map to
    locally administered MACs and the documentation ranges; every length stays
    what it was.
 3. Checked: the anonymiser refuses an output in which an original address or
@@ -42,11 +45,16 @@ The original captures are not kept anywhere.
 | `lan-dns.pcap` | other | DNS | one host's queries and answers, fifteen minutes |
 | `lan-mdns.pcap` | other | mDNS | the devices of an office Wi-Fi, fifteen minutes |
 | `lan-ssdp.pcap` | other | SSDP | one search and the devices' answers |
+| `stack-mqtt.pcap` | other | MQTT | eclipse-mosquitto 2.0.18, containers |
+| `stack-rtps.pcap` | other | RTPS | ROS 2 Jazzy publisher and subscriber, containers |
+| `stack-coap.pcap` | other | CoAP | libcoap 4.3.1 server and client, containers |
 
 ## What it does not hold yet
 
-The protocols that run beside zenoh in the deployments it serves: RTPS (ROS 2),
-SOME/IP, CoAP, MQTT, QUIC, LLMNR, WS-Discovery, NTP, DHCP, and structured TCP
-such as HTTP and TLS. Each is added the same way, with a parser in the
-anonymiser where its payload can carry an identity, and the measured tally
-pinned beside the others.
+SOME/IP and QUIC, LLMNR, WS-Discovery, NTP and DHCP from a busier network,
+structured TCP such as HTTP and TLS, and on the zenoh side other zenoh versions
+and zenoh-pico. Each is added the same way: captured from the real
+implementation, a parser in the anonymiser where a payload of other devices can
+carry an identity, and the measured tally pinned beside the others. QUIC needs
+such a parser even for the capturer's own traffic to be readable as it is: its
+Initial packets carry the server name under keys anyone can derive.

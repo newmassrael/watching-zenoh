@@ -3,7 +3,8 @@
 // Every file is a REAL capture, anonymised by scripts/lib/capture_anonymise.py
 // before it was committed; README.md says how. `hypothesis` is what its flows
 // are: "zenoh" or "other". `scope` is the anonymiser's: "lan" for traffic of
-// devices on a network, "loopback" for traffic the capturer made itself.
+// devices on a network, "own" for traffic the capturer made itself (on
+// loopback, or between containers on a network of its own).
 // `packets` is the record count after anonymisation. The tally each file reads
 // as is pinned in crates/wz-capture/src/zenoh_corpus_tests.rs, and
 // `capture_anonymise.py --verify-corpus captures/corpus` holds every file to
@@ -13,7 +14,7 @@
     {
       file: "zenoh-tcp-full.pcap",
       hypothesis: "zenoh",
-      scope: "loopback",
+      scope: "own",
       protocol: "zenoh/tcp",
       source: "zenohd 1.10.1 router, a publisher and a subscriber as clients, on loopback",
       capture: "from before the first Init",
@@ -23,7 +24,7 @@
     {
       file: "zenoh-tcp-midsession.pcap",
       hypothesis: "zenoh",
-      scope: "loopback",
+      scope: "own",
       protocol: "zenoh/tcp",
       source: "zenohd 1.10.1 router, a publisher and a subscriber as clients, on loopback",
       capture: "joined six seconds after both sessions opened",
@@ -33,7 +34,7 @@
     {
       file: "zenoh-udp-full.pcap",
       hypothesis: "zenoh",
-      scope: "loopback",
+      scope: "own",
       protocol: "zenoh/udp",
       source: "zenohd 1.10.1 router, a publisher and a subscriber as clients, on loopback",
       capture: "from before the first Init",
@@ -43,7 +44,7 @@
     {
       file: "zenoh-tcp-lz4.pcap",
       hypothesis: "zenoh",
-      scope: "loopback",
+      scope: "own",
       protocol: "zenoh/tcp, lz4",
       source: "zenohd 1.10.1 router and two clients, transport/unicast/compression/enabled on all three",
       capture: "from before the first Init",
@@ -53,7 +54,7 @@
     {
       file: "zenoh-udp-lz4-midsession.pcap",
       hypothesis: "zenoh",
-      scope: "loopback",
+      scope: "own",
       protocol: "zenoh/udp, lz4",
       source: "zenohd 1.10.1 router and two clients, transport/unicast/compression/enabled on all three",
       capture: "joined six seconds after both sessions opened",
@@ -63,7 +64,7 @@
     {
       file: "zenoh-tcp-lz4-midsession.pcap",
       hypothesis: "zenoh",
-      scope: "loopback",
+      scope: "own",
       protocol: "zenoh/tcp, lz4",
       source: "zenohd 1.10.1 router and two clients, transport/unicast/compression/enabled on all three",
       capture: "joined six seconds after both sessions opened",
@@ -99,6 +100,39 @@
       capture: "fifteen minutes",
       taken: "2026-10-26",
       packets: 26,
+    },
+    {
+      file: "stack-mqtt.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "mqtt/tcp",
+      source: "eclipse-mosquitto 2.0.18 broker in a container; a subscriber and a publisher held open, and forty publishers that connect, publish once at QoS 0, 1 or 2 and leave",
+      capture: "the bridge of a docker network of its own, from before the broker started",
+      taken: "2026-10-26",
+      packets: 1070,
+      notes: "ARP, IPv6 hop-by-hop and ICMPv6 packets dropped by the anonymiser; the host's own mDNS on the bridge is kept, its names scrubbed",
+    },
+    {
+      file: "stack-rtps.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "rtps/udp (ROS 2 Jazzy, its default DDS)",
+      source: "ros:jazzy-ros-core containers: ros2 topic pub at 5 Hz and ros2 topic echo on one topic",
+      capture: "the bridge of a docker network of its own, sixty seconds from before both started",
+      taken: "2026-10-26",
+      packets: 149,
+      notes: "the locators in the participants' announcements carry the mapped addresses; two IPv4 fragments, IGMP with IP options, ARP and ICMP dropped by the anonymiser",
+    },
+    {
+      file: "stack-coap.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "coap/udp",
+      source: "libcoap 4.3.1 coap-server-notls in a container; a client that reads /time twenty times, observes it for thirty seconds, and writes and reads back 600 bytes in 64-byte blocks",
+      capture: "the bridge of a docker network of its own, from before the server started",
+      taken: "2026-10-26",
+      packets: 168,
+      notes: "ARP, IPv6 hop-by-hop and ICMP dropped by the anonymiser; the host's own mDNS on the bridge is kept, its names scrubbed",
     },
   ],
 }

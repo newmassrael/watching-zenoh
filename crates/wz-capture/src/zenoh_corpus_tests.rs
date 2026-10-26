@@ -118,6 +118,14 @@ const EXPECTED: &[(&str, Tally, Tally)] = &[
     ("lan-dns.pcap", (0, 2, 185), (0, 2, 185)),
     ("lan-mdns.pcap", (0, 1, 18), (0, 1, 18)),
     ("lan-ssdp.pcap", (0, 1, 1), (0, 1, 1)),
+    // The real implementations of three protocols that run beside zenoh, in
+    // containers (2026-10-26). A TCP flow whose bytes never frame a unit
+    // carries no evidence the model weighs, so the forty MQTT connections that
+    // publish once and leave read `undecided`; a framing that never takes is
+    // not yet a check.
+    ("stack-mqtt.pcap", (0, 4, 40), (0, 4, 40)),
+    ("stack-rtps.pcap", (0, 9, 3), (0, 9, 3)),
+    ("stack-coap.pcap", (0, 5, 20), (0, 5, 20)),
 ];
 
 #[test]
