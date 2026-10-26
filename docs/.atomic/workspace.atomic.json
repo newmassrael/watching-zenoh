@@ -291038,6 +291038,50 @@
         "The same comparison found the pico ABI advertising zenoh's batch size (65535) in its InitSyn where zenoh-pico 1.10.1 advertises Z_BATCH_UNICAST_SIZE (2048), and fixing the multicast Join's lease and batch: zenoh-pico's value build switches (config.h.in @VAR@) are outside the C7 map. That is the next round."
       ]
     },
+    "Round 3722": {
+      "decision_summary": "Step 5c of the advanced plane: the face registry's advanced publisher and subscriber in wz-capi-core are retired. Both C ABIs host the neutral crate's now (the pico ABI in 3b and 4b, the zenoh-c ABI in 5a and 5b), so nothing declared an advanced entity through the registry any more. Deleted: the per-face tokio publisher and subscriber of each FaceEntry, the sixth and seventh SSOT entries and their id types, the declare, put, delete and undeclare methods, the replay in face_up, the helpers and the target enum that served only them, and the runtime handle a face kept for the declarations that spawned, which nothing else read. The five face-less tests that stood on that API (a timestamping node refusing a cache without miss detection, and a same-session subscriber of four shapes hearing its publisher) are re-written on the new hosts, over CPlane and EngineSubscriber, and pass. The tokio runtime's own typed publisher and subscriber stay: they are the Rust API's.",
+      "changes_bullets": [
+        "crates/wz-capi-core/src/faces.rs: the advanced code of the registry removed (about 700 lines): entries, fields, ids, methods, replay, helpers, tests.",
+        "crates/wz-capi-c/src/advanced_plane.rs: five tests of the same-session cases on the new hosts.",
+        "docs/advanced-pubsub-on-a-neutral-core.md: step 5 records what is retired and what is not."
+      ],
+      "verification_bullets": [
+        "Run on this machine with the cdylib built from the tree, the real zenoh-c of both arms and a real zenoh-pico: all 17 legs of zenoh_c_shm_and_advanced_on_wz_capi_c (the shared-memory legs among them, with the counterparties the main tree had built), and, after the deletion, the zenoh-ext families, history over a link, upstream z_advanced_pub and z_advanced_sub again; the declaration, same-session and clock legs of zenoh_c_advanced_publisher_declare_twice_and_diff ran before it. All pass, each confirmed to run and not skip.",
+        "clippy with -D warnings, all targets: wz-capi-core (default and advanced), wz-capi-c (four arms), wz-capi-pico (default); wz-capi-core and wz-capi-c lib tests; the doc budgets unchanged (wz-capi-core 7, wz-capi-c 40).",
+        "The hook's gate array plus the surface gates: 118 run, 0 failed; the push went through the hooks and the commit is an ancestor of origin main.",
+        "Not done: no hosted run has finished since the first of these moves, each cancelled by a later push, so the hosted legs are still unread; the two hosts of the machine (the typed tokio one and the port's) have no differential against each other."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "carry_forward_bullets": [
+        "Read the first hosted run that finishes and holds 8bd2a752c: C1cc and C1ce (the zenoh-c advanced and shared-memory legs, provisioned there), C1co, C1aq to C1av, C1cs (the size of the C ABI builds after the registry code left), C1cn.",
+        "The differential of the typed tokio host against the port's host (the same events into both): needs a session the port can give the typed one, or a recording peer both can be driven by.",
+        "End-to-end witnesses on the cooperative engine of the heartbeat beacon, the periodic re-ask and the late-publisher detection.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine; the listening role."
+      ],
+      "publishable_decision_summary": "Step 5c of the advanced plane: the face registry's advanced publisher and subscriber in wz-capi-core are retired. Both C ABIs host the neutral crate's now (the pico ABI in 3b and 4b, the zenoh-c ABI in 5a and 5b), so nothing declared an advanced entity through the registry any more. Deleted: the per-face tokio publisher and subscriber of each FaceEntry, the sixth and seventh SSOT entries and their id types, the declare, put, delete and undeclare methods, the replay in face_up, the helpers and the target enum that served only them, and the runtime handle a face kept for the declarations that spawned, which nothing else read. The five face-less tests that stood on that API (a timestamping node refusing a cache without miss detection, and a same-session subscriber of four shapes hearing its publisher) are re-written on the new hosts, over CPlane and EngineSubscriber, and pass. The tokio runtime's own typed publisher and subscriber stay: they are the Rust API's.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-core/src/faces.rs: the advanced code of the registry removed (about 700 lines): entries, fields, ids, methods, replay, helpers, tests.",
+        "crates/wz-capi-c/src/advanced_plane.rs: five tests of the same-session cases on the new hosts.",
+        "docs/advanced-pubsub-on-a-neutral-core.md: step 5 records what is retired and what is not."
+      ],
+      "publishable_verification_bullets": [
+        "Run on this machine with the cdylib built from the tree, the real zenoh-c of both arms and a real zenoh-pico: all 17 legs of zenoh_c_shm_and_advanced_on_wz_capi_c (the shared-memory legs among them, with the counterparties the main tree had built), and, after the deletion, the zenoh-ext families, history over a link, upstream z_advanced_pub and z_advanced_sub again; the declaration, same-session and clock legs of zenoh_c_advanced_publisher_declare_twice_and_diff ran before it. All pass, each confirmed to run and not skip.",
+        "clippy with -D warnings, all targets: wz-capi-core (default and advanced), wz-capi-c (four arms), wz-capi-pico (default); wz-capi-core and wz-capi-c lib tests; the doc budgets unchanged (wz-capi-core 7, wz-capi-c 40).",
+        "The hook's gate array plus the surface gates: 118 run, 0 failed; the push went through the hooks and the commit is an ancestor of origin main.",
+        "Not done: no hosted run has finished since the first of these moves, each cancelled by a later push, so the hosted legs are still unread; the two hosts of the machine (the typed tokio one and the port's) have no differential against each other."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the first hosted run that finishes and holds 8bd2a752c: C1cc and C1ce (the zenoh-c advanced and shared-memory legs, provisioned there), C1co, C1aq to C1av, C1cs (the size of the C ABI builds after the registry code left), C1cn.",
+        "The differential of the typed tokio host against the port's host (the same events into both): needs a session the port can give the typed one, or a recording peer both can be driven by.",
+        "End-to-end witnesses on the cooperative engine of the heartbeat beacon, the periodic re-ask and the late-publisher detection.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine; the listening role."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
