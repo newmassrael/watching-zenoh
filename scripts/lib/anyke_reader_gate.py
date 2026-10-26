@@ -92,15 +92,30 @@ TEST_MODULE = re.compile(r"^\s*(pub\s+)?mod tests\s*\{")
 MODULE_END = re.compile(r"^\}")
 
 
+def is_family(path: pathlib.Path) -> bool:
+    """Whether `path` belongs to the zenoh family: `crates/wz-zenoh` and `crates/wz-zenoh-*`.
+
+    These crates reproduce upstream's files under upstream's package names (inventory atom
+    `api-compat-rust`), so what they hold is upstream's code, not a wz reader: the file of the
+    top crate that declares the constant is the very `zenoh/src/api/selector.rs` the zenoh
+    reader above says it mirrors, and a copy of the reference is not a third rule-set. The
+    population this gate guards is wz's own.
+    """
+    parts = path.parts
+    return len(parts) > 1 and parts[0] == "crates" and (
+        parts[1] == "wz-zenoh" or parts[1].startswith("wz-zenoh-")
+    )
+
+
 def tracked_rust() -> list[pathlib.Path]:
-    """Every tracked Rust source under `crates/`."""
+    """Every tracked Rust source under `crates/` that is wz's own (see [`is_family`])."""
     out = subprocess.run(
         ["git", "-C", str(REPO), "ls-files", "crates/**/*.rs", "crates/*.rs"],
         capture_output=True,
         text=True,
         check=True,
     ).stdout.split()
-    return [pathlib.Path(p) for p in out]
+    return [pathlib.Path(p) for p in out if not is_family(pathlib.Path(p))]
 
 
 def test_lines(path: pathlib.Path, lines: list[str]) -> set[int]:
@@ -268,6 +283,17 @@ def selftest() -> int:
         got = classify(name, body)
         if got != want:
             failures.append(f"classify({name}, {body!r}) = {got}, want {want}")
+
+    # The zenoh family reproduces upstream's files and is not wz's own population; a wz crate
+    # whose name only STARTS like it is.
+    for name, want in [
+        ("crates/wz-zenoh/src/api/selector.rs", True),
+        ("crates/wz-zenoh-protocol/src/lib.rs", True),
+        ("crates/wz-zenohd/src/lib.rs", False),
+        ("crates/wz-session-core/src/selector_params.rs", False),
+    ]:
+        if is_family(pathlib.Path(name)) != want:
+            failures.append(f"is_family({name}) = {not want}, want {want}")
 
     # The OWNERS baseline must bite when an owner stops being a reader. Driven
     # against a real directory rather than argued, because that arm reads files.
