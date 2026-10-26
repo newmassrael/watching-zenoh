@@ -150,6 +150,33 @@
         "level": "files",
         "finding": "sha256"
       }
+    },
+    {
+      "path": "measured/android-arm64.json",
+      "origin": "measured",
+      "platform": "android-arm64",
+      "expect": {
+        "verdict": "valid",
+        "files": false
+      }
+    },
+    {
+      "path": "measured/linux-x86_64-glibc-slot-answerer.json",
+      "origin": "measured",
+      "platform": "linux-x86_64-glibc",
+      "expect": {
+        "verdict": "valid",
+        "files": false
+      }
+    },
+    {
+      "path": "measured/linux-x86_64-glibc.json",
+      "origin": "measured",
+      "platform": "linux-x86_64-glibc",
+      "expect": {
+        "verdict": "valid",
+        "files": false
+      }
     }
   ]
 }
