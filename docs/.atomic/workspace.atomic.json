@@ -290842,6 +290842,44 @@
         "Lowlatency and QoS could be read from a capture without the handshake (the framing width and bare network messages; the priority extensions); no reader does it yet, so they are `stated` or `absent`."
       ]
     },
+    "Round 3717": {
+      "decision_summary": "The zenoh verdict's corpus gains QUIC: aioquic 1.2.0 in two containers on a docker network of its own, an HTTP/3 server and a client that opens twenty connections of five requests (the first carries 300 kB) and three that offer QUIC version 2 first, captured on the bridge. The anonymiser opened every Initial of the 23 connections (69, both versions) with the reader round 3716 added, replaced the server name and sealed them again. Every QUIC connection reads undecided in both builds, which is the honest word: zenoh runs over QUIC as well, and a protected flow shows nothing that tells the two apart.",
+      "changes_bullets": [
+        "`captures/corpus/stack-quic.pcap`, listed in `corpus.json5` with its source, capture and what the anonymiser did to it; the README table gains the row and the pending list loses QUIC.",
+        "`zenoh_corpus_tests.rs`: the file's tally (0 yes, 2 no, 23 undecided) pinned for both builds. `docs/flow-zenoh-verdict.md` 6.1 names QUIC among the stacks and why it reads undecided."
+      ],
+      "verification_bullets": [
+        "Measured, both builds: QUIC 25 flows (0 yes, 2 no, 23 undecided); the two `no` are the host's own mDNS on the bridge, and every other file keeps its tally. The client logged 23 connections and every requested byte received.",
+        "On the raw capture the QUIC reader verified 40 client and 20 server Initials of version 1 and 6 and 3 of version 2; the anonymiser's leak check, which reads the Initials' plaintext, found neither container name. `--verify-corpus` holds 14 files unchanged; the pre-push static gate array passed after the append."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "Step 3: a framing-failure check (a TCP flow whose bytes never frame a unit) with weights measured on the corpus, and the generated and assumed weights replaced by measured ones; the forty short MQTT flows are its first H0 population.",
+        "Still to come for step 2: LLMNR, WS-Discovery, NTP and DHCP from a busier network, other zenoh versions and zenoh-pico.",
+        "Lower bounds of the SN resolution and the batch size, to be proposed to the analyzer design as a shape of their own."
+      ],
+      "publishable_decision_summary": "The zenoh verdict's corpus gains QUIC: aioquic 1.2.0 in two containers on a docker network of its own, an HTTP/3 server and a client that opens twenty connections of five requests (the first carries 300 kB) and three that offer QUIC version 2 first, captured on the bridge. The anonymiser opened every Initial of the 23 connections (69, both versions) with the reader round 3716 added, replaced the server name and sealed them again. Every QUIC connection reads undecided in both builds, which is the honest word: zenoh runs over QUIC as well, and a protected flow shows nothing that tells the two apart.",
+      "publishable_changes_bullets": [
+        "`captures/corpus/stack-quic.pcap`, listed in `corpus.json5` with its source, capture and what the anonymiser did to it; the README table gains the row and the pending list loses QUIC.",
+        "`zenoh_corpus_tests.rs`: the file's tally (0 yes, 2 no, 23 undecided) pinned for both builds. `docs/flow-zenoh-verdict.md` 6.1 names QUIC among the stacks and why it reads undecided."
+      ],
+      "publishable_verification_bullets": [
+        "Measured, both builds: QUIC 25 flows (0 yes, 2 no, 23 undecided); the two `no` are the host's own mDNS on the bridge, and every other file keeps its tally. The client logged 23 connections and every requested byte received.",
+        "On the raw capture the QUIC reader verified 40 client and 20 server Initials of version 1 and 6 and 3 of version 2; the anonymiser's leak check, which reads the Initials' plaintext, found neither container name. `--verify-corpus` holds 14 files unchanged; the pre-push static gate array passed after the append."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 3: a framing-failure check (a TCP flow whose bytes never frame a unit) with weights measured on the corpus, and the generated and assumed weights replaced by measured ones; the forty short MQTT flows are its first H0 population.",
+        "Still to come for step 2: LLMNR, WS-Discovery, NTP and DHCP from a busier network, other zenoh versions and zenoh-pico.",
+        "Lower bounds of the SN resolution and the batch size, to be proposed to the analyzer design as a shape of their own."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
