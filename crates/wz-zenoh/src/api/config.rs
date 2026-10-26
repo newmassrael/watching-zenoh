@@ -104,7 +104,7 @@ impl Config {
     // REVIEW(fuzzypixelz): the error variant of the Result is a Result because this does
     // deserialization AND validation.
     #[zenoh_macros::unstable]
-    // TODO(yellowhatter): clippy says that Error here is extremely large (1k)
+    // yellowhatter (upstream note): clippy says that Error here is extremely large (1k)
     #[allow(clippy::result_large_err)]
     pub fn from_deserializer<'d, D: serde::Deserializer<'d>>(
         d: D,
