@@ -4,11 +4,11 @@
     "zephyr-client-fixed": {
       "built_as": "the fixed-memory client of overlays/t2g_client_fixed.conf with the idle wait and batching off (main stack 9216 bytes), its node wz_session_mcu::slot_node",
       "static_chain_bytes": 7280,
-      "peak_stack_bytes": 6000,
+      "peak_stack_bytes": 6336,
       "peak_stack_tolerance_bytes": 16,
       "get_median_us": 402,
       "get_median_tolerance_pct": 30,
-      "measured": "2026-10-23, the T2G kit (CYT4BF M7) on its own Ethernet to a zenohd on the bench host; the stack line is the same in 7 of 7 runs, the GET figure is the median of 14 medians (0.320 to 0.471 ms) of 2000 queries for each of the node's two documents",
+      "measured": "2026-10-23, the T2G kit (CYT4BF M7) on its own Ethernet to a zenohd on the bench host; the stack line is the same in 7 of 7 runs, the GET figure is the median of 14 medians (0.320 to 0.471 ms) of 2000 queries for each of the node's two documents. The stack peak re-read 2026-10-27 at origin 65d07530d (log_args never inlined): 6,336 in 3 of 3 runs, GETs inside their row; the tree before that change read 6,480; the rise from 6,000 since 10-23 is not bisected",
       "evidence": "docs/storage-policy-and-link-layer.md section 5.5"
     },
     "zephyr-client-fixed-batching": {
