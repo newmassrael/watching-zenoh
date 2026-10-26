@@ -291082,6 +291082,58 @@
         "Still open: wait_declarations_stable and a synced query on the cooperative engine; the listening role."
       ]
     },
+    "Round 3723": {
+      "decision_summary": "Owner, 2026-10-26: wz has presets that correspond exactly to zenoh, zenoh-c and zenoh-pico and is better than each in performance, size and every other measure, MCU first; every capability is switched on and off from Kconfig down to the SCE-generated machine. docs/upstream-parity.md is the plan: a matrix of (original, target, storage, workload, metric) cells against originals this repository builds, a verdict per cell of WIN, TIE or LOSS (a bootstrap interval over alternating boots; only WIN counts), and the switch chain D7. The kit lane compares answering images on alternating boots with the wire captured (kit-lane.sh compare, kit_compare.py). The first MCU matrix: the heap client loses text 1.48x and turnaround 1.03x to zenoh-pico, the fixed client loses text 1.10x and ties the turnaround. The port the C ABIs name builds without std (critical-section lock), the first step of the pico C ABI on an MCU (C12).",
+      "changes_bullets": [
+        "docs/upstream-parity.md (new): the question, what exists with its dated figures, the matrix model, decisions D1 to D7 (D7: one declaration from Kconfig to cargo features, cfg in Rust, an SCE element gate, the drop-in switch macros and their gates), steps M1 to M5, H1, K and L, and what is open.",
+        "scripts/kit-lane.sh: compare images zephyr-client-heap and zephyr-pico-queryable, each with the READY tag it prints; `compare [--boots N] <reference> <image>...` builds every image, boots them in the images' order on odd rounds and the reverse on even ones, captures the session's datagrams at the host's wire around the host's GETs, and hands the run to the verdict module; the selftest holds each compare image to its overlays and to the tag its sources print.",
+        "scripts/lib/kit_compare.py (new): sizes from the ELF, the firmware's stack line, the wire turnaround per boot, and each cell's verdict against the reference; a selftest of 13 cases.",
+        "crates/wz-capi-port: no_std with alloc and a default `std` feature; src/sync.rs (new) is the one lock, std's mutex or a critical section; ListenerSet and CancellableFan take it; the cancellation token, its registration and register_fan stay behind `std`."
+      ],
+      "verification_bullets": [
+        "The compare lane on the T2G kit through its bench host: six alternating boots each of zenoh-pico answering the two GETs, the heap client and the fixed client, 2,000 GETs per document per boot, every boot answered. Sizes: pico text 162,252 (data 1,776, bss 262,399), heap client 240,020 (1,524, 253,442), fixed client 178,448 (1,524, 110,706). Turnaround medians of the boot medians: pico 0.209 ms, heap 0.215 ms (ratio 1.030, interval 1.021 to 1.044, LOSS), fixed 0.207 ms (0.991, 0.986 to 1.007, TIE). Stack: heap 13,288 of 32,768, fixed 6,480 of 9,216; pico prints none. The static RAM cells are WIN for both, and say little: each image's kernel heap pool is in its bss and is configured, not measured.",
+        "kit_compare.py selftest 13 of 13; kit-lane.sh --selftest passes; shellcheck clean.",
+        "wz-capi-port: 8 tests with std; cargo check and clippy -D warnings without std for thumbv7em-none-eabi; clippy -D warnings with std. Checked against the port: wz-capi-core, wz-capi-coop, wz-ext-pubsub with engine-host, wz-capi-pico on the tokio engine and on the cooperative engine."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets",
+        "feature-inventory--composable-framework-atomic--preset-catalog/8-sce-feature-gate-mechanism",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "M2: the pico image's switches derived from what the wz image links, not from the pico ABI's always-on planes; single- and multi-threaded pico both measured, the stronger the reference. Today's pico image has publication, subscription and query on that the wz client does not, so the text cells above flatter wz.",
+        "M3: heap peak and stack summed over the application's threads on both sides (pico prints neither), and the smallest kernel heap pool each image runs in, so that the RAM cells measure rather than restate a configuration.",
+        "The fixed client's text was 157,088 on 2026-10-22 and is 178,448 now: what grew is to be attributed.",
+        "C12: the pico ABI without std behind an os backend for Zephyr (src/os/zephyr.rs, modelled on pico's system/zephyr), then an MCU engine behind SessionEngine and an MCU staticlib.",
+        "D7 K1, the SCE element gate: SCE's session answered that its owner decides the scope and the date; the owner is asked.",
+        "bx: remote runs from this worktree end in \"submodule checkout failed\" on pc2 and hkl001 with no terminal record in the log; reported to the bx session."
+      ],
+      "publishable_decision_summary": "Owner, 2026-10-26: wz has presets that correspond exactly to zenoh, zenoh-c and zenoh-pico and is better than each in performance, size and every other measure, MCU first; every capability is switched on and off from Kconfig down to the SCE-generated machine. docs/upstream-parity.md is the plan: a matrix of (original, target, storage, workload, metric) cells against originals this repository builds, a verdict per cell of WIN, TIE or LOSS (a bootstrap interval over alternating boots; only WIN counts), and the switch chain D7. The kit lane compares answering images on alternating boots with the wire captured (kit-lane.sh compare, kit_compare.py). The first MCU matrix: the heap client loses text 1.48x and turnaround 1.03x to zenoh-pico, the fixed client loses text 1.10x and ties the turnaround. The port the C ABIs name builds without std (critical-section lock), the first step of the pico C ABI on an MCU (C12).",
+      "publishable_changes_bullets": [
+        "docs/upstream-parity.md (new): the question, what exists with its dated figures, the matrix model, decisions D1 to D7 (D7: one declaration from Kconfig to cargo features, cfg in Rust, an SCE element gate, the drop-in switch macros and their gates), steps M1 to M5, H1, K and L, and what is open.",
+        "scripts/kit-lane.sh: compare images zephyr-client-heap and zephyr-pico-queryable, each with the READY tag it prints; `compare [--boots N] <reference> <image>...` builds every image, boots them in the images' order on odd rounds and the reverse on even ones, captures the session's datagrams at the host's wire around the host's GETs, and hands the run to the verdict module; the selftest holds each compare image to its overlays and to the tag its sources print.",
+        "scripts/lib/kit_compare.py (new): sizes from the ELF, the firmware's stack line, the wire turnaround per boot, and each cell's verdict against the reference; a selftest of 13 cases.",
+        "crates/wz-capi-port: no_std with alloc and a default `std` feature; src/sync.rs (new) is the one lock, std's mutex or a critical section; ListenerSet and CancellableFan take it; the cancellation token, its registration and register_fan stay behind `std`."
+      ],
+      "publishable_verification_bullets": [
+        "The compare lane on the T2G kit through its bench host: six alternating boots each of zenoh-pico answering the two GETs, the heap client and the fixed client, 2,000 GETs per document per boot, every boot answered. Sizes: pico text 162,252 (data 1,776, bss 262,399), heap client 240,020 (1,524, 253,442), fixed client 178,448 (1,524, 110,706). Turnaround medians of the boot medians: pico 0.209 ms, heap 0.215 ms (ratio 1.030, interval 1.021 to 1.044, LOSS), fixed 0.207 ms (0.991, 0.986 to 1.007, TIE). Stack: heap 13,288 of 32,768, fixed 6,480 of 9,216; pico prints none. The static RAM cells are WIN for both, and say little: each image's kernel heap pool is in its bss and is configured, not measured.",
+        "kit_compare.py selftest 13 of 13; kit-lane.sh --selftest passes; shellcheck clean.",
+        "wz-capi-port: 8 tests with std; cargo check and clippy -D warnings without std for thumbv7em-none-eabi; clippy -D warnings with std. Checked against the port: wz-capi-core, wz-capi-coop, wz-ext-pubsub with engine-host, wz-capi-pico on the tokio engine and on the cooperative engine."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets",
+        "feature-inventory--composable-framework-atomic--preset-catalog/8-sce-feature-gate-mechanism",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "publishable_carry_forward_bullets": [
+        "M2: the pico image's switches derived from what the wz image links, not from the pico ABI's always-on planes; single- and multi-threaded pico both measured, the stronger the reference. Today's pico image has publication, subscription and query on that the wz client does not, so the text cells above flatter wz.",
+        "M3: heap peak and stack summed over the application's threads on both sides (pico prints neither), and the smallest kernel heap pool each image runs in, so that the RAM cells measure rather than restate a configuration.",
+        "The fixed client's text was 157,088 on 2026-10-22 and is 178,448 now: what grew is to be attributed.",
+        "C12: the pico ABI without std behind an os backend for Zephyr (src/os/zephyr.rs, modelled on pico's system/zephyr), then an MCU engine behind SessionEngine and an MCU staticlib.",
+        "D7 K1, the SCE element gate: SCE's session answered that its owner decides the scope and the date; the owner is asked.",
+        "bx: remote runs from this worktree end in \"submodule checkout failed\" on pc2 and hkl001 with no terminal record in the log; reported to the bx session."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
