@@ -312,6 +312,42 @@ fn the_capability_document_lists_the_one_verb_this_profile_binds() {
     assert_eq!(OPENER.asked(), 0, "asking opens nothing");
 }
 
+/// The in-band transport held to the table every transport of the contract is held to
+/// (`wz_session_mcu::contract`, decision D7): the same cases the control port answers, asked as a
+/// GET on the node's own key. The tests above are this transport's own: the heap not touched, a
+/// pattern not a target, the capability document.
+#[cfg(feature = "test-support")]
+#[test]
+fn the_in_band_query_conforms_to_the_contract_every_transport_is_held_to() {
+    use wz_session_mcu::contract::{self, Binding, CASES, REPEATS};
+
+    for case in CASES {
+        let key = format!("@/a1b2/peer/session/open/{}", case.peer_text);
+        let opener: &'static contract::Recording =
+            Box::leak(Box::new(contract::Recording::for_case(case)));
+        let answers: Vec<Option<String>> = (0..REPEATS)
+            .map(|_| {
+                let replies = match case.binding {
+                    Binding::Bound => ask(opener, &key).0,
+                    Binding::Unbound => {
+                        static NONE: NoOpening = NoOpening;
+                        ask(&NONE, &key).0
+                    }
+                };
+                replies
+                    .into_iter()
+                    .find(|(reply_key, _)| *reply_key == key)
+                    .map(|(_, body)| body)
+            })
+            .collect();
+        let seen: Vec<Option<&str>> = answers.iter().map(Option::as_deref).collect();
+        contract::judge_answers(case, &seen).unwrap_or_else(|v| panic!("{v:?}: {seen:?}"));
+        if matches!(case.binding, Binding::Bound) {
+            contract::judge_asking(case, opener).unwrap_or_else(|v| panic!("{v:?}"));
+        }
+    }
+}
+
 #[test]
 fn a_node_with_no_opener_answers_none_of_it() {
     static NONE: NoOpening = NoOpening;

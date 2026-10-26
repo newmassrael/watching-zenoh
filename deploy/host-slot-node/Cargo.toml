@@ -126,6 +126,13 @@ wz-session-core = { path = "../../crates/wz-session-core", default-features = fa
     "session-slot",
 ] }
 
+[dev-dependencies]
+# The table every transport of the lifecycle contract is held to (decision D7), which the
+# `control` test runs the node's out-of-band channel through. Test builds only.
+wz-session-mcu = { path = "../../crates/wz-session-mcu", default-features = false, features = [
+    "test-support",
+] }
+
 [profile.release]
 codegen-units = 1
 opt-level = "s"

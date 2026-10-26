@@ -65,6 +65,10 @@ pub mod app_layer;
 pub mod node_opening;
 // Its out-of-band transport: one line of a channel the node's host owns is one command.
 pub mod control_port;
+// The table every transport of that contract is held to, for a test or a sibling crate's
+// adapter (`test-support`); no production build names it.
+#[cfg(any(test, feature = "test-support"))]
+pub mod contract;
 // Where an application that is not the session's event leaves a query to be asked.
 #[cfg(feature = "query-get")]
 pub mod get_mailbox;

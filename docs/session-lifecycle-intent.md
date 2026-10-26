@@ -1080,6 +1080,29 @@ Each step lands with its own done-when; sizes are not estimated here.
          is the in-band one, repeated. Not run: an out-of-band open that
          succeeds, which needs a build with room and the secure channel
          (decision D4), the same gap as 7c's.
+       - **7e, the contract as a table (conformance).** Each transport had a
+         test of its own and nothing held those tests to the same cases, so a
+         transport could drift from the others with every test green. The
+         remedy of protocol engineering is a conformance suite: one table of
+         cases, one adapter per implementation. The table is
+         `wz_session_mcu::contract` (`test-support`, never in a production
+         build): fifteen cases, each with the literal document the contract
+         answers and the zid the opener must be asked for (the answers are
+         written out and not computed by the code under test, or the table
+         would agree with it by construction). A case is run twice, because
+         idempotency is the contract's. The adapters: the verdict function
+         and the control port (unit tests of the crate), the in-band query
+         (`admin_open_query`, no heap touched as before), and the node as a
+         process, which can be seen to answer the cases a node with no room
+         shows (five of the fifteen: its opener is its own, and it is asked
+         about nothing it cannot be seen to be). The third transport has a
+         case, a node that binds no opener opens nothing by request, answered
+         with silence or with the refusal. The judge is itself tested to fail
+         on a drifting transport. A transport added later is done when it has
+         an adapter and passes the table; the commands of the out-of-band
+         remainder (Open) enter as rows. Not run: the two cases that need an
+         opener a process cannot be given (an accepted open, and a node that
+         does not permit) through the process.
 
 ## 5. Open
 

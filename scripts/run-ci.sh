@@ -11461,22 +11461,25 @@ layer_c1m_session_lwip() {
     # and `control_port` (the out-of-band line protocol over it, five). 4 -> 14, 5 -> 15,
     # 31 -> 41, 8 -> 18, 41 -> 51, the numbers each command PRINTED. The heap dialer then holds a
     # dial made for a node to that node (`a_dial_for_a_node_holds_the_session_to_that_node`, in
-    # `dial`, which only the two legs that select `dial` compile): 41 -> 42 and 51 -> 52.
-    _runci_guarded_test "C1m mcu default" 14 \
+    # `dial`, which only the two legs that select `dial` compile): 41 -> 42 and 51 -> 52. The
+    # conformance table of that decision (`contract`, the cases every transport of the contract is
+    # held to, run through the verdict function and the control port, and the table's own two
+    # checks) adds FOUR to the same five legs: 14 -> 18, 15 -> 19, 42 -> 46, 18 -> 22, 52 -> 56.
+    _runci_guarded_test "C1m mcu default" 18 \
         cargo test -p wz-session-mcu --quiet || return 1
-    _runci_guarded_test "C1m mcu unicast app layer" 15 \
+    _runci_guarded_test "C1m mcu unicast app layer" 19 \
         cargo test -p wz-session-mcu \
         --features query-queryable,codec-response,codec-response-final,pubsub-put \
         --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace-write" 42 \
+    _runci_guarded_test "C1m mcu adminspace-write" 46 \
         cargo test -p wz-session-mcu --features adminspace-write --quiet || return 1
     _runci_guarded_test "C1m mcu peer nodes" 22 \
         env WZ_LIMIT_MAX_PEER_NODES=2 \
         cargo test -p wz-session-mcu --features adminspace-write --lib connect_manager \
         --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace-core" 18 \
+    _runci_guarded_test "C1m mcu adminspace-core" 22 \
         cargo test -p wz-session-mcu --features adminspace-core --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace read+write" 52 \
+    _runci_guarded_test "C1m mcu adminspace read+write" 56 \
         cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
     # The fixed-memory client node's shared mechanism (`slot_node`, compiled only on the slot profile
     # with the client core): no leg above selects both, so its tests ran in none until this one. 28 =
@@ -11847,10 +11850,12 @@ layer_c1m_session_lwip() {
     # allocator, through the same queryable and a session's own tables: an open answered in the
     # heap profile's words at zero allocations (each refusal by its name), a pattern never a target,
     # a node that does not permit it refusing, the capability document listing the one verb this
-    # profile binds, and a node with no opener answering none of it. 5 = what that command PRINTED.
-    _runci_guarded_test "C1m admin open query" 5 \
+    # profile binds, and a node with no opener answering none of it, and the query held to the
+    # conformance table of decision D7 (`test-support` carries the table). 6 = what that command
+    # PRINTED.
+    _runci_guarded_test "C1m admin open query" 6 \
         cargo test -p wz-session-mcu \
-        --features adminspace-core,adminspace-write,session-slot \
+        --features adminspace-core,adminspace-write,session-slot,test-support \
         --test admin_open_query --quiet || return 1
     # S9d -- the control records of a frame (a keyexpr alias, a subscriber
     # declaration and its withdrawal, a DeclFinal, a subscriber Interest and its
@@ -11932,9 +11937,10 @@ layer_c1m_session_lwip() {
     # The out-of-band transport through a real process (`deploy/host-slot-node`, `--features
     # control`): a line on standard input answered on standard output in the words of the in-band
     # verb, the same answer to a repeated request, an error word for a line that is no command, and
-    # the channel read again after one: 2 = what that command PRINTED. The node is built for no
-    # peers by their zid, so a hold that succeeds over a secure channel is not run here.
-    _runci_guarded_test "C1m host node control channel" 2 \
+    # the channel read again after one, and the channel held to the conformance table of decision D7
+    # on the cases a node with no room can show: 3 = what that command PRINTED. The node is built
+    # for no peers by their zid, so a hold that succeeds over a secure channel is not run here.
+    _runci_guarded_test "C1m host node control channel" 3 \
         cargo test --locked --manifest-path ../deploy/host-slot-node/Cargo.toml \
         --features control --test control_channel --quiet || return 1
     # The group plane of the client node (`slot_group`, the slot profile with `group`): what a

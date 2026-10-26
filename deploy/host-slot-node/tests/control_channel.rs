@@ -108,6 +108,33 @@ fn a_node_answers_each_line_it_is_sent_in_the_words_of_the_in_band_verb() {
     assert_eq!(agent.ask("open 0abc"), refused(RefusedReason::PeerNotAZid));
 }
 
+/// The channel held to the table every transport of the contract is held to
+/// (`wz_session_mcu::contract`, decision D7). The node of this binary permits, binds its own
+/// opener and has no room for a peer by its zid, so the cases it can be seen to answer are the
+/// ones whose opener says `NoRoom`, and a peer that names no zid, which no opener is asked
+/// about. The cases that need another opener are run through the transports that can hold one.
+#[test]
+fn the_channel_conforms_to_the_contract_on_the_cases_a_node_with_no_room_can_show() {
+    use wz_session_mcu::contract::{judge_answers, CASES, REPEATS};
+
+    let mut agent = Agent::start();
+    let mut run = 0;
+    for case in CASES
+        .iter()
+        .filter(|c| c.reachable_on_a_node_with_no_room())
+    {
+        let line = format!("open {}", case.peer_text);
+        let answers: Vec<String> = (0..REPEATS).map(|_| agent.ask(&line)).collect();
+        let seen: Vec<Option<&str>> = answers.iter().map(|a| Some(a.as_str())).collect();
+        judge_answers(case, &seen).unwrap_or_else(|v| panic!("{v:?}: {seen:?}"));
+        run += 1;
+    }
+    assert!(
+        run >= 5,
+        "the table has lost the cases this node can show: {run}"
+    );
+}
+
 #[test]
 fn a_line_that_is_no_command_is_answered_with_an_error_word_and_opens_nothing() {
     let mut agent = Agent::start();
