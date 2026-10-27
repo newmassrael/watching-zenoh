@@ -337,9 +337,10 @@ transport-link-unixpipe,transport-link-ws|"
     # advanced subscriber's host runs on this engine against a stand-in that plays the advanced
     # publisher (`tests::advanced::`, 5, compiled with `ticker`, `query` and `liveliness`), and
     # the session on two faces, a second router dialled beside the first (`tests::face_table::`,
-    # 4, compiled with `query`, `queryable` and `local-queryable`); the crate's own tests were 60
-    # passed with all of them, 4 s.
-    "wz-capi-coop|hook|connectivity,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker|"
+    # 4, compiled with `query`, `queryable` and `local-queryable`), and the session that listens,
+    # taking two clients of its own engine over loopback (`tests::listen::`, 5, compiled with
+    # `listen`, `query` and `queryable`); the crate's own tests were 65 passed with all of them.
+    "wz-capi-coop|hook|connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker|"
     # What a hosted OS tells a node about its network, and the multicast sockets built from it,
     # which the tokio runtime and the cooperative host both open. The `#iface=` honor (the v4 and
     # v6 interface selectors and the tests that read them off the loopback) is compiled only with

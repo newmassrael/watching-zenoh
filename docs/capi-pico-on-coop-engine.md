@@ -660,15 +660,47 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
   and a lost face leaves the other), the cooperative legs of Layer C1co, and the eight
   cooperative cases of the size gate, which grew 17,220 to 24,520 bytes on pc2 (the budgets
   state it, and the symbols of the scout build say where it went).
-- **L3. The acceptor.** The face table takes a face when the accept side yields a link, and
-  loses it when its lease ends or its peer closes. The link layer's `SessionLinks` gains the
-  accepting side: `Accept` over the host's `tcp/` listener first (it exists for the slot profile
-  and is ungated from `session-slot` here), and UDP, by source-address demultiplexing, as its own
-  sub-step once the stream case stands; `read` waits on
-  the readiness of every link and not one (today `IdleWait::Input` is one `LinkReadiness`; two
-  links need either a multiplexed wait or a bounded one, and the choice is measured). Proof: a
-  listener session and two clients of the same engine in one process over loopback, each client
-  declaring and putting, the listener's subscriber hearing both and a get reaching both.
+- **L3. The acceptor, for `tcp/`. Done.** Behind the feature `listen`. The face table takes a
+  face when the accept side yields a link, and loses it when its lease ends, its peer closes or
+  its handshake does not complete. Each decision of the step:
+  - The link layer gained the accepting side where the heap profile's links are, not the slot
+    profile's `Accept` (which is a different seam: a value the node polls, over a driver in a
+    slot). `SessionLinks::open_listener` answers `Unsupported` by default, so lwIP, Zephyr and the
+    in-memory network write nothing; `LinkListener<P>` yields one `OpenedLink` for each
+    connection. A stack that listens does it through `StreamDial::listen`, which `PosixTcpDial`
+    overrides with `PosixTcpListener`; the stream an accept yields is the stream a dial does, so
+    the link over it is the one a dial opens. `IpLinks` keeps what shapes its links (`LinkShape`)
+    once, for its dials and its listeners. UDP (source-address demultiplexing) and `tls/` stay
+    `Unsupported`, each its own sub-step.
+  - The role is the handshake's alone. `open_wire` is what `dial_endpoint` was after the link
+    was opened, run in either role; an acceptor is given the session's entropy to mint its cookie
+    nonce from (without one it refuses every handshake, as session-core fails closed), so the
+    session's source is shared behind a lock (`SharedEntropy`) and `open` asks it to be `Send`.
+  - `Link::Dialing` is `Link::Opening`: a handshake under way, the dial role's or an accepted
+    link's. An accepted face that does not complete is removed, as an attached one is.
+  - The bounds are upstream's and are the config's, which settles that open question:
+    `accept_pending` (handshakes under way, 100) and `max_faces` (faces besides the dial role's,
+    1000, zenoh's `max_sessions`); a connection past either is accepted and closed unread, as the
+    slot profile's `Accept` does, so its peer learns the node is full and no connection waits in
+    the kernel's queue for a handshake that never starts. How long a handshake may take is
+    `timeouts.accepting_inactivity_ms`, and the face's own deadline is the same number.
+  - `CoopConfig::listen` states the ports. A session that dials nothing and listens is open once
+    it is bound; one that does both opens on its dial, which is L5's start. `listening()` reads
+    the bound endpoints back, since a port of 0 is the stack's to choose
+    (`parse_listen_locator`).
+  - `read` waits on every link and every port at once. `LinkReadiness` gained a `handle` and
+    `wait_readable_among`, and `wait_any` gives the stack the whole set: the host polls the
+    descriptors together; a stack that cannot keeps the bounded look at the first, a
+    millisecond. This is the measured choice: the look wakes an idle listener about a thousand
+    times a second for as long as it holds a face, and the multiplexed wait once for each idle
+    wait (`an_idle_listener_waits_on_its_port_and_its_links_together`).
+
+  The proof: `tests::listen::`, five tests of the engine against itself over loopback. A listener
+  with no face is open and states its port; two clients publish and the listener's subscriber
+  hears both; one get from the listener is one leg for each face and ends with both Finals; a
+  client that goes takes its face and the other goes on. A connection past `max_faces`, one past
+  `accept_pending` and one that never speaks are each closed, with a control that the same
+  connection is kept inside the bound.
 - **L4. The ABI.** pico's `z_open(listen)` and `mode=peer` on the cooperative engine: the feature
   `peer` stops selecting the tokio engine. Proof: Layer C1co's legs with the full build's
   `hold_a_listener` as a client of the cooperative listener, the pico interop against the real
@@ -689,8 +721,9 @@ declarations at the pace the session states, whatever the other faces have been 
 role's tables are emptied when its link is lost and it keeps its face, an accepted face is removed
 with its link; a get is one leg for each face and one for the session's own queryables.
 
-Open, to be settled by the step that meets it and not before: how `read` waits on several links
-(L3, which measures a multiplexed wait against the bounded look L2 makes); whether the bound of
-faces is a build constant or the config's; what a liveliness subscriber's history is when two
-faces hold the same token key (L2 hands it every face's tokens, and each face's loss deletes its
-own).
+Decided by L3: `read` waits on every link and port together (a multiplexed wait, with the
+bounded look kept for a stack that cannot); the bounds of an accept are the config's.
+
+Open, to be settled by the step that meets it and not before: what a liveliness subscriber's
+history is when two faces hold the same token key (L2 hands it every face's tokens, and each
+face's loss deletes its own); UDP faces by source address; the secure channel's listening half.

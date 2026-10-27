@@ -386,9 +386,10 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
     "wz-capi-coop": (
         "the cooperative engine behind a wz C ABI: a workspace-internal rlib the C ABI crate "
         "selects as its engine, with no path a C program names; its one feature that gates a "
-        "public item, `scout`, is the blocking scouting window and is run by this crate's own "
-        "tests over loopback sockets",
-        frozenset({"scout"}),
+        "public items, `scout` and `listen`, are the blocking scouting window and the listening "
+        "role's `CoopEngine::listening`, and both are run by this crate's own tests over "
+        "loopback sockets",
+        frozenset({"scout", "listen"}),
     ),
     "wz-capi-c": (
         "a C ABI crate: its public contract is the SYMBOL SET a C program "
