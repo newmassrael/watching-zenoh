@@ -186,6 +186,68 @@ def value_of(content, raw):
     return content if raw else crossimpl_corpus.unescape_rust_string(content)
 
 
+# A console line handed over as parts (`wz_session_core::text_out::LogPart`, since
+# `refactor(log): Hand console lines over as parts`): `port.log(&[Str(P::NAME), Str(": session
+# lost")])` prints the parts in order, so the array is the line's template, a literal `Str(..)`
+# its text and any other part one printed value.
+PART_STR = re.compile(r'^(?:LogPart::)?Str\(\s*(b?r#*"|")')
+
+
+def part_array_templates(lit):
+    """The template of every array literal of comment-stripped text `lit` that holds a `Str(..)`
+    part: its literal `Str("..")` parts as text and every other part as one placeholder, as a
+    `format!` string would read. Yields (start offset, template)."""
+    strings = string_literals(lit)
+    in_string = {}
+    for s, e, content, rawk in strings:
+        in_string[s] = (e, value_of(content, rawk))
+    i, n = 0, len(lit)
+    while i < n:
+        if i in in_string:
+            i = in_string[i][0]
+            continue
+        if lit[i] != "[":
+            i += 1
+            continue
+        # The array's top-level elements, up to its matching `]`.
+        depth, j, start, elements = 0, i + 1, i + 1, []
+        while j < n:
+            if j in in_string:
+                j = in_string[j][0]
+                continue
+            c = lit[j]
+            if c in "([{":
+                depth += 1
+            elif c in ")]}":
+                if depth == 0:
+                    break
+                depth -= 1
+            elif c == "," and depth == 0:
+                elements.append((start, j))
+                start = j + 1
+            j += 1
+        if j >= n:
+            break
+        if lit[start:j].strip():
+            elements.append((start, j))
+        parts = [(a + len(lit[a:b]) - len(lit[a:b].lstrip()), lit[a:b].strip()) for a, b in elements]
+        if any(PART_STR.match(text) for _, text in parts):
+            template = []
+            for offset, text in parts:
+                literal = None
+                if PART_STR.match(text):
+                    head = offset + text.index("(") + 1
+                    while head < n and lit[head].isspace():
+                        head += 1
+                    if head in in_string:
+                        end, value = in_string[head]
+                        if lit[end:offset + len(text)].strip() == ")":
+                            literal = value
+                template.append(literal.replace("{", "{{").replace("}", "}}") if literal is not None else "{}")
+            yield i, "".join(template)
+        i += 1
+
+
 def rust_segments(text):
     text = text.replace("{{", "\x01").replace("}}", "\x02")
     return [p.replace("\x01", "{").replace("\x02", "}") for p in RUST_PH.split(text)]
@@ -502,6 +564,10 @@ def load_producers(rust_paths, c_paths, pico_root, script_paths=()):
             if any(a <= s < b for a, b in spans):
                 continue
             prod.add(rel, "rust", rust_segments(value_of(content, rawk)))
+        for s, template in part_array_templates(lit):
+            if any(a <= s < b for a, b in spans):
+                continue
+            prod.add(rel, "rust", rust_segments(template))
     for rel in rust_paths:
         raw, lit, _code = views(rel)
         if "printf(" not in raw and "#include" not in raw:
@@ -1027,7 +1093,9 @@ class Declarations:
 
 
 def producer_literals(rel):
-    """Literal values of a producer file (not test support, not test code)."""
+    """Literal values of a producer file (not test support, not test code), and for a Rust file
+    the template of each of its part arrays, which a declaration names as it names a `format!`
+    string (`"HOST-WZ-LISTEN {}"` for `[Str("HOST-WZ-LISTEN "), Str(LISTEN)]`)."""
     p = ROOT / rel
     if not p.is_file():
         return None
@@ -1038,8 +1106,10 @@ def producer_literals(rel):
         return None
     _raw, lit, code = views(rel)
     spans = test_spans(code)
-    return [value_of(c, r) for s, _e, c, r in string_literals(lit)
-            if not any(a <= s < b for a, b in spans)]
+    literals = [value_of(c, r) for s, _e, c, r in string_literals(lit)
+                if not any(a <= s < b for a, b in spans)]
+    return literals + [template for s, template in part_array_templates(lit)
+                       if not any(a <= s < b for a, b in spans)]
 
 
 # ── the verdict ──────────────────────────────────────────────────────
@@ -1174,6 +1244,23 @@ def selftest():
         print("  selftest %-66s %s" % (label, "ok" if cond else "FAIL"))
         ok = ok and cond
 
+    # A console line handed over as parts is one template, its non-literal parts values.
+    parts_src = ('port.log(&[\n    Str(P::NAME),\n    Str(": session established, peer "),\n'
+                 '    Hex32(zid),\n]);\nport.log(&[Str(P::NAME), Str(": session lost")]);\n'
+                 'let table = [0u8; 4];\nport.log(&[Str("HOST-WZ-LISTEN "), Str(LISTEN)]);\n'
+                 'port.log(&[Str("a{b}"), LogPart::Str(r"c")]);\n')
+    got = [t for _, t in part_array_templates(parts_src)]
+    expect("a part array reads as its template, every non-literal part a value",
+           got == ["{}: session established, peer {}", "{}: session lost", "HOST-WZ-LISTEN {}",
+                   "a{{b}}c"])
+    from_parts = Producers()
+    for template in got:
+        from_parts.add("fx", "rust", rust_segments(template))
+    expect("a needle a part array prints is covered by it",
+           from_parts.cover("slot-reporter: session lost") is not None
+           and from_parts.cover("HOST-WZ-LISTEN tcp/127.0.0.1:17475") is not None)
+    expect("a needle no part array prints is not",
+           from_parts.cover("slot-reporter: session closed") is None)
     # The measured shape this gate exists for, both halves.
     reworded = "plugin '{declared}' stays Declared -- load failed: {why}"
     fixed = "plugin load failed: {why}"

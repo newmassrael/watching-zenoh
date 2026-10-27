@@ -44,7 +44,7 @@ use wz_integration_tests::common::{
 };
 
 // The node says it listens once the port is bound.
-// barrier-producer: deploy/host-slot-node/src/bin/declared_node.rs @ "HOST-WZ-LISTEN {LISTEN}" for "HOST-WZ-LISTEN tcp/127.0.0.1:17475"
+// barrier-producer: deploy/host-slot-node/src/bin/declared_node.rs @ "HOST-WZ-LISTEN {}" for "HOST-WZ-LISTEN tcp/127.0.0.1:17475"
 
 /// The port the node listens on, as its declaration states it.
 const PORT: u16 = 17475;
