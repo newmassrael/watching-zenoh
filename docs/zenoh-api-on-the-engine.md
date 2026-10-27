@@ -488,7 +488,7 @@ Each lands whole with its surface lines, tests and faults in one round.
     is open.
   - **Carried from Z2c: the engine's reception of a batch with two frames.** Upstream's pipeline
     puts a message of the other reliability in the open batch behind a second frame header
-    (`BatchError::NewFrame`, `io/zenoh-transport/src/common/pipeline.rs`). The engine's reception
+    (`io/zenoh-transport/src/common/pipeline.rs` @ `BatchError::NewFrame`). The engine's reception
     takes the payload of a frame as the tail of the batch (`parse_unit`, the frame arm, in
     `crates/wz-session-core/src/inbound.rs`) and `parse_frame_payload` absorbs an unknown message id
     into the remainder, so what follows the first frame is lost. A burst of 12 operations from an
