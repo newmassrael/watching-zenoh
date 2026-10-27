@@ -293922,6 +293922,34 @@
         "Zenoh versions other than 1.10.1 and 1.5.0, and links other than loopback, one emulated lossy link and one Wi-Fi link, are still to measure; why the reader frames no unit of an HTTP or TLS stream is not yet explained, and a long HTTP response could change it."
       ]
     },
+    "Round 3794": {
+      "decision_summary": "The reduced-features gate (Layer C1cf) was red at the tip of round 3785: wz-session-core did not build its lib tests under --no-default-features, because four tests in text_out.rs named alloc::format!, and the alloc crate is linked only by the alloc feature. std is linked under cfg(test) in this crate, so the tests name std::format!. The two spellings print the same text; nothing outside the test module changed.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/text_out.rs: four test assertions use std::format! in place of alloc::format!."
+      ],
+      "verification_bullets": [
+        "On the build host: clippy of wz-session-core with --no-default-features --all-targets and with default features is clean, and the 11 text_out tests pass (ran=11)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Eleven other jobs of the hosted run at the tip of round 3785 were red; they are read per job in the following rounds. Runs after that tip were cancelled by newer pushes."
+      ],
+      "publishable_decision_summary": "The reduced-features gate (Layer C1cf) was red at the tip of round 3785: wz-session-core did not build its lib tests under --no-default-features, because four tests in text_out.rs named alloc::format!, and the alloc crate is linked only by the alloc feature. std is linked under cfg(test) in this crate, so the tests name std::format!. The two spellings print the same text; nothing outside the test module changed.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/text_out.rs: four test assertions use std::format! in place of alloc::format!."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host: clippy of wz-session-core with --no-default-features --all-targets and with default features is clean, and the 11 text_out tests pass (ran=11)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Eleven other jobs of the hosted run at the tip of round 3785 were red; they are read per job in the following rounds. Runs after that tip were cancelled by newer pushes."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
