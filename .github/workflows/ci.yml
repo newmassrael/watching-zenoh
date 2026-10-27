@@ -2302,10 +2302,27 @@ jobs:
   #
   # The prune is `nondefault`'s, for its stated reason: a job that compiles the
   # feature matrix filled the runner's disk there ("Free space left: 9 MB").
+  #
+  # SHARDED (hosted run 40482567212). The one job read `elapsed 1727s of 1800s budget (95%)`
+  # with every leg green, and the table only grows. It is now a matrix over the legs'
+  # positions in the table, each shard running those congruent to it, so the two land near half
+  # the clock each. The table's order is the partition: a leg inserted mid-table moves the legs
+  # after it to the other shard, which costs nothing but the cache of that run.
+  #
+  # DROP-PROOF INVARIANT (the census's, co-located on purpose): `shard` MUST list exactly
+  # [0 .. WZ_LEGS_SHARDS-1]. A missing shard is legs no job runs while everything stays green;
+  # `scripts/lib/shard_matrix_binding.py` holds the list to the count.
   nondefault-legs:
-    name: non-default test legs (Layer C1bnl)
+    name: non-default test legs (Layer C1bnl, shard ${{ matrix.shard }}/2)
     runs-on: ubuntu-22.04
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
+    env:
+      WZ_LEGS_SHARDS: "2"
+      WZ_LEGS_SHARD: ${{ matrix.shard }}
     steps:
       - name: Budget stamp — start this job's own clock
         # Same reason the `ci` and `nondefault` jobs stamp: `timeout-minutes`

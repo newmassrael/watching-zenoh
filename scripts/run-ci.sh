@@ -3389,6 +3389,10 @@ layer_c0_test_discipline() {
     # and the crates uncompiled with their features.
     python3 scripts/lib/c1cn_part_binding.py --selftest || return 1
     python3 scripts/lib/c1cn_part_binding.py || return 1
+    # A sharded job's matrix lists exactly the shards its count names: a shard dropped from the
+    # list leaves every job green and its part of the work run by nobody.
+    python3 scripts/lib/shard_matrix_binding.py --selftest || return 1
+    python3 scripts/lib/shard_matrix_binding.py || return 1
     # R311y570 — the UNSEQUENCED-PROBE lint. A C probe that passes `&x` to a
     # constructor and reads `x` through a loan accessor in the SAME full
     # expression is reading an uninitialised object: C does not order call
@@ -9121,7 +9125,9 @@ layer_c1y_cargo_test_routing_peer() {
     # which is `routing-peer`-gated like R2761's. Read off what the command PRINTED.
     # Round 3548 -- 15 -> 16: the C1v twin's same +1, D3's joined-hints test. Read off what the
     # command PRINTED.
-    _runci_guarded_test "C1y accept_loop" 16 \
+    # Hosted run 40482567212 -- 16 -> 18: two tests the accept path gained since the last
+    # pin. Read off what the command PRINTED (`18 passed; 909 filtered out`).
+    _runci_guarded_test "C1y accept_loop" 18 \
         cargo test -p wz-runtime-tokio --features routing-peer --lib accept_loop --quiet || return 1
     # R311y509 — 200 -> 202: the peer's two liveliness-TOKEN tier tests. They land
     # in BOTH linkstate pins because the plane is ungated, so it compiles under bare

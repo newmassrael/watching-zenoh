@@ -1097,6 +1097,8 @@ round_fed_gates=(
     # Layer C1cn's census jobs and its builds job are one fact in two places of
     # the workflow; static, a yaml read, well under a second.
     "c1cn_part_binding.py"
+    # A sharded job's matrix lists exactly the shards its count names; static, a yaml read.
+    "shard_matrix_binding.py"
     "unwired_lane_lint.py"
     # R2659 — the link BEFORE `unwired_lane_lint`'s. That one checks lane ->
     # ci.yml; this checks test -> lane, so the chain is test -> lane -> workflow

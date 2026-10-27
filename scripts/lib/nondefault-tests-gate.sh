@@ -1499,6 +1499,22 @@ fi
 want_all=0
 [[ "${1:-}" == "--all-legs" ]] && want_all=1
 
+# SHARDING (hosted C1bnl). The table only grows, and one job read `elapsed 1727s of 1800s
+# budget (95%)` with every leg green. Hosted CI therefore runs `--all-legs` as
+# `WZ_LEGS_SHARDS` jobs, each running the legs whose position in the table is congruent to its
+# `WZ_LEGS_SHARD`. Unset, every leg runs, which is what a local run and the hook want. The
+# partition covers the table only if ALL shards run, and this script cannot see a missing one:
+# `scripts/lib/shard_matrix_binding.py` holds the workflow's list to the count.
+legs_shards="${WZ_LEGS_SHARDS:-1}"
+legs_shard="${WZ_LEGS_SHARD:-0}"
+if ! [[ "$legs_shards" =~ ^[1-9][0-9]*$ && "$legs_shard" =~ ^[0-9]+$ ]] ||
+    (( legs_shard >= legs_shards )); then
+    echo "nondefault-tests: FAIL -- WZ_LEGS_SHARD=$legs_shard of" \
+         "WZ_LEGS_SHARDS=$legs_shards is not a shard of a positive count" >&2
+    exit 1
+fi
+[[ $want_all -eq 1 && "$legs_shards" -gt 1 ]] && echo "  legs: shard $legs_shard of $legs_shards"
+
 rc=0
 
 # ── R2163: PROVISION what a leg's features need, before running any leg ──
@@ -1523,10 +1539,13 @@ rc=0
 # ENOMEM is a DEFECT and fails everywhere; a genuine absence fails hosted (or
 # under `WZ_URING_REQUIRE=1`) and is reported by name locally.
 uring_legs=()
+leg_idx=-1
 for leg in "${LEGS[@]}"; do
+    leg_idx=$((leg_idx + 1))
     IFS='|' read -r _p _s _f _r _h <<<"$leg"
     [[ "${_f//[[:space:]]/}" == *"runtime-tokio-uring"* ]] || continue
     [[ $want_all -eq 1 || "$_s" == "hook" ]] || continue
+    (( leg_idx % legs_shards == legs_shard )) || continue
     uring_legs+=("$_p")
 done
 if [[ ${#uring_legs[@]} -gt 0 ]]; then
@@ -1555,7 +1574,9 @@ if [[ ${#uring_legs[@]} -gt 0 ]]; then
 fi
 
 deferred=()
+leg_idx=-1
 for leg in "${LEGS[@]}"; do
+    leg_idx=$((leg_idx + 1))
     IFS='|' read -r pkg scope feats filter handoff <<<"$leg"
     feats="$(leg_feats "$feats")"
     handoff="${handoff//[[:space:]]/}"
@@ -1600,6 +1621,8 @@ for leg in "${LEGS[@]}"; do
         deferred+=("$pkg ${filter:-<whole crate>}")
         continue
     fi
+    # Another shard's leg: it runs there, and the row checks above have already held it.
+    (( leg_idx % legs_shards == legs_shard )) || continue
     # Refused BY NAME, not merely absent. `--all-features` in a leg would make
     # `--census` vacuous -- the population is DEFINED as what all-features lists,
     # so such a leg covers it by construction and the check could never fire
