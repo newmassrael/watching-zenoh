@@ -182,8 +182,9 @@ original reproduced by naming it. Three things follow from it:
   `unstable` arm, the `config` module with its notifier, the `handlers` module with its
   channels, `key_expr` and `selector`, `sample` with the quality of service, and the opening and
   closing of a session (`open`, `Session`, `close`, `is_closed`, `zid`, `id`, `info`, `declare_keyexpr`, `undeclare`,
-  and the `put` and `delete` of a session with their builder): 408 of 709
-  default lines present, 527 of 965 with `unstable` and 583 of 1,025 with `unstable` and
+  the `put` and `delete` of a session with their builder, and `declare_subscriber` with its
+  five handlers): 433 of 709
+  default lines present, 554 of 965 with `unstable` and 610 of 1,025 with `unstable` and
   `shared-memory`; the seam over the engine is
   `docs/zenoh-api-on-the-engine.md`).
   Behaviour is held beside the surface by Layer E18 (`conformance/`): a differential test of each

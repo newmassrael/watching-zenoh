@@ -466,6 +466,38 @@ Each lands whole with its surface lines, tests and faults in one round.
     link's writer, which then picks by priority; it does not hold the control frame behind them).
     That is the engine's, not this slice's, and is carried. 32 of the default lines and 36 and 36
     of the other two arms, 8 injected faults, none missed.
+  - **Z2c (landed).** `Session::declare_subscriber` with the builder (`callback`, `callback_mut`,
+    `with`, `background`, `allowed_origin`), `Subscriber` and its undeclaration, and the five
+    handlers over them. The engine is handed a `Subscription` (key, scope and suffix on the wire,
+    origin, the callback, a notifier for `wait_callbacks`, and what the engine keeps while it
+    records the subscription: the declared key), and mints one callback per face; each one turns the
+    engine's `SampleView` into a `Sample` (`sample_of`). A subscription is also written in the
+    session's own list, so that `close` undeclares what is left and the channel of a subscriber
+    ends with its session, as upstream's does (the engine itself keeps a sink after close).
+    Two things are differences kept for later. The payload is copied out of the view
+    (`ZBytes::from(vec)`); the zero-copy `ZBytes` over the received bytes of the roadmap waits.
+    And `SubscriberState` is left out of the derived file, with only `SubscriberKind::Subscriber`,
+    until Z4. D4 has its test: a callback on a remote and on a local delivery declares a key,
+    declares a subscriber, puts and undeclares, and the blocking calls return. The differential
+    has an upstream publisher send 12 operations (plain, settings, schema, low priority, stamped,
+    sourced, two deletes, a declared key, a leaf of it, 70,000 bytes, best-effort) to a
+    subscriber, and compares the 12 samples as text with the upstream subscriber's, then the
+    origins and the closing. 25 of the default lines and 27 and 27 of the other two arms; of the
+    10 faults injected, 9 were caught by a failing test; the sixth (an undeclare that never reaches
+    the engine) hung the run and was stopped for memory, which is a hang and not a verdict, so it
+    is open.
+  - **Carried from Z2c: the engine's reception of a batch with two frames.** Upstream's pipeline
+    puts a message of the other reliability in the open batch behind a second frame header
+    (`BatchError::NewFrame`, `io/zenoh-transport/src/common/pipeline.rs`). The engine's reception
+    takes the payload of a frame as the tail of the batch (`parse_unit`, the frame arm, in
+    `crates/wz-session-core/src/inbound.rs`) and `parse_frame_payload` absorbs an unknown message id
+    into the remainder, so what follows the first frame is lost. A burst of 12 operations from an
+    upstream peer with one best-effort put among them arrived as 7; with a pause after it, 11;
+    with the best-effort put last, 12, which is the order the differential uses. Zenoh's codec ends
+    a frame at the first message it cannot read and reads the next transport message. The repair is
+    an engine round of its own: end a frame's payload at a transport message id and park the
+    residue as the next one, on the strict, the best-effort, the in-place and the plain-put paths.
+    Not done here, and it is the owner's to decide.
 - **Z3. Queries.** `get`, `declare_queryable`, `Query`, `Reply`, `declare_querier`, consolidation,
   targets, timeouts. (The cancellation token is already in, Z0b; the builders of `get` that take
   it join here.)
