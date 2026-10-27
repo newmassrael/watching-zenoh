@@ -29,7 +29,10 @@
 //! the advanced plane's heartbeat, periodic re-ask and retention sweep are; the plane itself is
 //! the neutral `wz-ext-pubsub`'s, hosted over the engine's port.
 //!
-//! What it does not do yet, a later step of the note: the listening role.
+//! With `listen` it also listens: the ports `CoopConfig::listen` names take inbound `tcp/` links,
+//! each a face of its own beside the dial role's (`docs/capi-pico-on-coop-engine.md`, step L3).
+//! What it does not do yet, a later step of the note: `udp/` and `tls/` faces, and the C ABI's
+//! listener.
 //!
 //! ## Where it builds
 //!
@@ -64,4 +67,4 @@ pub mod scout;
 #[cfg(all(test, feature = "std"))]
 mod tests;
 
-pub use engine::{CoopConfig, CoopEngine, OpenError};
+pub use engine::{CoopConfig, CoopEngine, OpenError, DEFAULT_ACCEPT_PENDING, DEFAULT_MAX_FACES};

@@ -467,6 +467,15 @@ fn run_router(
 fn config(router: &Router) -> CoopConfig {
     CoopConfig {
         endpoints: vec![router.endpoint()],
+        ..client_config()
+    }
+}
+
+/// A client's config that dials nothing and listens on nothing: what a test states the endpoints
+/// of itself.
+fn client_config() -> CoopConfig {
+    CoopConfig {
+        endpoints: Vec::new(),
         whatami: WhatAmI::Client,
         zid: Some(vec![0xb1; 4]),
         batch_size: 1024,
@@ -479,6 +488,9 @@ fn config(router: &Router) -> CoopConfig {
         open_timeout_ms: 5_000,
         redial_ms: None,
         idle_wait_ms: 100,
+        listen: Vec::new(),
+        accept_pending: crate::DEFAULT_ACCEPT_PENDING,
+        max_faces: crate::DEFAULT_MAX_FACES,
     }
 }
 
@@ -950,6 +962,8 @@ mod face_table;
 mod faces;
 #[cfg(feature = "query")]
 mod get;
+#[cfg(all(feature = "listen", feature = "query", feature = "queryable"))]
+mod listen;
 #[cfg(feature = "liveliness")]
 mod liveliness;
 #[cfg(feature = "local-subscriber")]

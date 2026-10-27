@@ -147,6 +147,12 @@ queryable = [
 # which is pico's default build, the session delivers nothing locally. It needs nothing of
 # session-core that the engine does not already have.
 local-subscriber = []
+# The listening role: a session that takes inbound links off the ports it listens on, each as a
+# face of its own beside the dial role's (`CoopConfig::listen`). The link layer's listener is the
+# stack's (`SessionLinks::open_listener`); a stack that gives none answers the endpoint as
+# unsupported. Off, which is pico's client build, the engine is the dial role alone and its text
+# has no acceptor, no table of ports and no wait on one (the capability-cost gate measures it).
+listen = []
 # Delivery of the session's own get to the session's own queryables (`Z_FEATURE_LOCAL_QUERYABLE`):
 # a get reaches the queryables of the session that made it, after it has gone out on the link,
 # and a querier's write filter or matching listener that counts the session's own entities counts

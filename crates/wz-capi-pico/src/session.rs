@@ -797,6 +797,11 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
             // A read waits on the link as long as pico's socket receive times out, its
             // `Z_CONFIG_SOCKET_TIMEOUT` as this build states it.
             idle_wait_ms: pico_socket_timeout(wz_session_core::caps::PICO_SOCKET_TIMEOUT_MS),
+            // This build listens on nothing (`z_open` refused a listener before this), so the
+            // bounds of an accept are upstream's and are not reached.
+            listen: Vec::new(),
+            accept_pending: wz_capi_coop::DEFAULT_ACCEPT_PENDING,
+            max_faces: wz_capi_coop::DEFAULT_MAX_FACES,
         },
     );
     let engine = match opened {
