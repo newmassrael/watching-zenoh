@@ -82,9 +82,7 @@
         "peer",
         "scout"
       ],
-      "resolved_features": {
-        "wz-runtime-tokio": []
-      },
+      "resolved_features": {},
       "device_requires": [
         "entropy",
         "interface-list",
@@ -233,21 +231,25 @@
       },
       "device_requires": [
         "entropy",
+        "filesystem",
         "interface-list",
         "multicast",
         "sockets-tcp",
         "sockets-udp",
-        "threads"
+        "threads",
+        "wall-clock"
       ],
       "requires": [
         "entropy",
         "threads"
       ],
       "may_require": [
+        "filesystem",
         "interface-list",
         "multicast",
         "sockets-tcp",
-        "sockets-udp"
+        "sockets-udp",
+        "wall-clock"
       ],
       "unassessed_features": []
     }

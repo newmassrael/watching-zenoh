@@ -120,9 +120,7 @@
         "link-udp",
         "peer"
       ],
-      "resolved_features": {
-        "wz-runtime-tokio": []
-      },
+      "resolved_features": {},
       "device_requires": [
         "entropy",
         "interface-list",

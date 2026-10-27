@@ -952,6 +952,12 @@ round_fed_gates=(
     # rules, with a synthetic file for every refusal). A text read, no build; the entry itself builds
     # its subject and is run by Layers C1st and C1sp, not here.
     "wz_package.py --selftest"
+    # The facility oracle (docs/target-build-contract.md T9): each facility's witness observed
+    # alone on a probe compiled here, the empty baseline, and the closed classes (name resolution
+    # and a forked process are findings). Round-fed by scripts/lib/facility_trace.py, its shim and
+    # the vocabulary of wz_config.py. MEASURED: 7.4s, five of them a probe that ignores SIGINT and
+    # must be stopped anyway; the traced arms SKIP, saying so, where strace or cc is absent.
+    "facility_trace.py --selftest"
     # R3573 -- the node declaration (docs/target-build-contract.md 5b). Round-fed by
     # deploy/wz-config.toml (the limits a node's budgets name) and every deploy/nodes/*.toml; the
     # selftest holds each refusal and ends by checking the registered declarations. A text read.

@@ -251,23 +251,49 @@ resource gates of step 13 and the manifest names the profile they belong to.
 An executable's facilities are not a union over capabilities: the ones that matter there (a
 UDP link, multicast, a certificate file) are switched by features of the wz runtime the
 executable links, which cargo resolves and the executable's own four features do not list.
-So the same discipline is applied one level down. Each feature of `wz-runtime-tokio` is
-assessed in `[[runtime_feature]]` for the facilities it may ask for, `--check` holds every
-row to a feature the package still declares, and the entry records the features cargo
-enabled in that package (`resolved_features`, a build fact, kept so a re-measurement can
-recompute) and derives `device_requires` as the base plus those rows. A feature that is
-enabled and has no row makes `device_requires` `null`, which means UNKNOWN (never "asks
-for nothing", never a pass), and the features nobody assessed are listed in
+So the same discipline is applied one level down, to the packages whose code asks the
+operating system for something. They are declared in `[[assessed_package]]`, each with
+what its own code may ask for: a package assessed by feature (`by_feature = true`, the
+runtime `wz-runtime-tokio`) has a `[[package_feature]]` row for each feature a build
+enables, and a package assessed whole (`by_feature = false`, the `wz-ap-demo` executable,
+whose features forward to the runtime's) has one row covering its code under any of its
+features. `--check` holds every feature row to a feature the package still declares, and
+the entry records the features cargo enabled in each assessed package
+(`resolved_features`, a build fact, kept so a re-measurement can recompute) and derives
+`device_requires` as the base, the `os_needs` of each assessed package in the build (the
+executable's own package always is) and the rows of its enabled features. A feature
+that is enabled and has no row makes `device_requires` `null`, which means UNKNOWN
+(never "asks for nothing", never a pass), and the features nobody assessed are listed in
 `unassessed_features`, so a consumer sees which part of the answer is missing. The
 core, the codecs and the switchboard schema take no facility of their own (their
-sources mention `std::net` and `SystemTime` only in documentation), so only the runtime
-package is assessed; a third-party crate's needs are the runtime's, which names the crate
-it pulls. The default `wz-ap-demo` enables 54 runtime features, all assessed, and is
-`entropy`, `interface-list`, `multicast`, `sockets-tcp`, `sockets-udp`, `threads`. Not
+sources mention `std::net` and `SystemTime` only in documentation); a third-party
+crate's needs are those of the assessed package that pulls it, whose row names the
+crate. The demo's own row is `filesystem` (a file its `--config`, `--sessions` or
+`--check-topology` names) and `wall-clock` (env_logger stamps each log line), which the
+facility oracle found missing (below). The default `wz-ap-demo` enables 54 runtime
+features, all assessed, and is `entropy`, `filesystem`, `interface-list`, `multicast`,
+`sockets-tcp`, `sockets-udp`, `threads`, `wall-clock`. Not
 assessed: any runtime feature outside those 54 (the TLS, QUIC, WebSocket, serial,
 storage and access-control planes), whose first use in an executable's build is an
 `unassessed_features` entry until its row is written. A row is an upper bound read from
 the feature's declaration and the modules it gates, not a measurement of a run.
+
+What a run measures is the facility oracle's (`scripts/lib/facility_trace.py`). It runs
+an artifact under strace(1), with a shim (`facility_witness_shim.c`, LD_PRELOAD) marking
+what the trace cannot see (a calendar-time read goes through the vDSO; the C library's
+interface listing and name resolution are system calls that do not say what they are
+for), and gives every traced call exactly one class: a facility, by that facility's
+Linux witness; an exemption, something the loader, the C library or the Rust runtime
+does for itself and does without (the loader's opens of the NEEDED closure, glibc's
+tcache key and its heap-shrink read of `overcommit_memory`, the stack probe of
+`pthread_getattr_np`, the CPU-quota read of `available_parallelism`), each with its
+reason; or unclassified, which is a finding
+(name resolution and starting a process are not in the vocabulary). Layer C1st runs
+each packaged artifact that has scenarios and holds the runs to the manifest's own
+entry: every facility in `requires` was asked for, nothing outside `requires` and
+`may_require` was, and nothing is unclassified. Its first run found the demo's log
+timestamps outside the bound. The libraries have no scenario yet (a C program must
+drive them) and are reported NOT JUDGED.
 
 The bound is split in two keys beside it. `requires` is what every run asks for and
 cannot go on without, whatever its configuration: a device that measurably lacks one
@@ -422,10 +448,13 @@ keys, their order and their values are the entry's own output.
           "driver_roles": ["publish", "put", "delete", "subscribe", "get", "answer", "..."] }
       ],
       "features": ["..."],
-      "resolved_features": { "wz-runtime-tokio": ["codec-close", "...", "transport-unicast"] },
-      "device_requires": ["entropy", "interface-list", "multicast", "sockets-tcp", "sockets-udp", "threads"],
+      "resolved_features": { "wz-ap-demo": ["default", "..."],
+                             "wz-runtime-tokio": ["codec-close", "...", "transport-unicast"] },
+      "device_requires": ["entropy", "filesystem", "interface-list", "multicast", "sockets-tcp",
+                          "sockets-udp", "threads", "wall-clock"],
       "requires": ["entropy", "threads"],
-      "may_require": ["interface-list", "multicast", "sockets-tcp", "sockets-udp"],
+      "may_require": ["filesystem", "interface-list", "multicast", "sockets-tcp", "sockets-udp",
+                      "wall-clock"],
       "unassessed_features": []
     }
   ]

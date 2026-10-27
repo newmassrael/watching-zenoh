@@ -14382,6 +14382,11 @@ layer_c1st_abi_stamp() {
     [ "$rc" -eq 0 ] && { cmp "$work/a/wz-target-manifest.json" "$work/b/wz-target-manifest.json" \
         || { echo "  C1st FAIL: two packagings of one input wrote different manifests"; rc=1; }; }
     [ "$rc" -eq 0 ] && { python3 scripts/lib/wz_package.py --verify "$work/a" || rc=1; }
+    # The facility oracle (T9): run each packaged artifact that has scenarios under strace and hold
+    # what the runs asked of the operating system to the manifest's own `requires` (every run asks
+    # for it) and `may_require` (no run asks outside it), with nothing unclassified.
+    [ "$rc" -eq 0 ] && { python3 scripts/lib/facility_trace.py --selftest || rc=1; }
+    [ "$rc" -eq 0 ] && { python3 scripts/lib/facility_trace.py --judge "$work/a" || rc=1; }
     # A registered node declaration as the input (5b): the node's file says which declaration it was
     # built from, the manifest repeats it, and verifying resolves the declaration again.
     local declared_node_cmd=(python3 scripts/lib/wz_package.py --platform linux-x86_64-glibc
@@ -14391,6 +14396,7 @@ layer_c1st_abi_stamp() {
     [ "$rc" -eq 0 ] && { cmp "$work/na/wz-target-manifest.json" "$work/nb/wz-target-manifest.json" \
         || { echo "  C1st FAIL: two packagings of one node wrote different manifests"; rc=1; }; }
     [ "$rc" -eq 0 ] && { python3 scripts/lib/wz_package.py --verify "$work/na" || rc=1; }
+    [ "$rc" -eq 0 ] && { python3 scripts/lib/facility_trace.py --judge "$work/na" || rc=1; }
     # The same declaration given as a file from outside the registry (a consumer's way in) is the same
     # node: the package carries the same declaration bytes, so the two manifests are the same bytes.
     if [ "$rc" -eq 0 ]; then

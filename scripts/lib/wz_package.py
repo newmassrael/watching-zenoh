@@ -201,21 +201,25 @@ def provides_of(decl: dict, row: dict, features: list[str], measured: dict) -> l
     return out
 
 
-def runtime_requires(decl: dict, platform: dict, row: dict,
-                     resolved: dict[str, list[str]]) -> tuple[list[str] | None, list[str]]:
-    """An executable's facilities from the runtime features cargo resolved for it.
+def executable_requires(decl: dict, platform: dict, row: dict,
+                        resolved: dict[str, list[str]]) -> tuple[list[str] | None, list[str]]:
+    """An executable's facilities from its assessed packages and the features cargo resolved for it.
 
     `None` is UNKNOWN (an enabled feature nobody assessed), with those features named beside it.
-    A facility the platform lacks is a refusal naming the features that ask for it.
+    A facility the platform lacks is a refusal naming the packages and features that ask for it.
     """
-    needs, unassessed = wz_config.resolve_runtime_needs(decl, resolved)
+    needs, unassessed = wz_config.resolve_package_needs(decl, resolved, row["package"])
     provided = set(platform["os_provides"])
-    rows = {(r["package"], r["feature"]): set(r["os_needs"]) for r in decl["runtime_features"]}
-    for facility in sorted(set(decl["os_base"]) | {f for s in rows.values() for f in s}):
+    rows = {(r["package"], r["feature"]): set(r["os_needs"]) for r in decl["package_features"]}
+    present = {p["package"]: set(p["os_needs"]) for p in decl["assessed_packages"]
+               if p["package"] in resolved or p["package"] == row["package"]}
+    for facility in sorted(set(decl["os_base"]) | {f for s in rows.values() for f in s}
+                           | {f for s in present.values() for f in s}):
         if facility in provided:
             continue
-        asking = [f"{p}/{f}" for (p, f), s in sorted(rows.items())
-                  if facility in s and f in resolved.get(p, [])]
+        asking = [p for p, s in sorted(present.items()) if facility in s]
+        asking += [f"{p}/{f}" for (p, f), s in sorted(rows.items())
+                   if facility in s and f in resolved.get(p, [])]
         if facility in decl["os_base"]:
             asking.insert(0, "base")
         if asking:
@@ -226,7 +230,7 @@ def runtime_requires(decl: dict, platform: dict, row: dict,
 
 def device_requires(decl: dict, platform: dict, row: dict, features: list[str]) -> list[str] | None:
     """The facilities a library's capabilities may ask for. A facility the platform lacks is a
-    refusal naming the capability. (An executable's come from `runtime_requires`.)"""
+    refusal naming the capability. (An executable's come from `executable_requires`.)"""
     on = {f for f in features if f in decl["caps"]}
     gaps = wz_config.platform_gaps(decl, platform["id"], on)
     if gaps:
@@ -329,13 +333,14 @@ def artifact_entry(decl: dict, platform: dict, row: dict, relpath: str, blob: by
     if stamp["family"] != row["family"]:
         raise Refusal(f"{row['id']}'s stamp says family {stamp['family']!r}, not {row['family']!r}")
     features = sorted(features)
-    kept = {p: sorted(set((resolved or {}).get(p, []))) for p in wz_config.ASSESSED_PACKAGES}
+    kept = {p["package"]: sorted(set(resolved[p["package"]])) for p in decl["assessed_packages"]
+            if p["package"] in (resolved or {})}
     if row.get("input") == "node":
         node = node_of_file(row, measured, features, declarations or {})
         required, may, unassessed = *node_requires(platform, row, node), []
     else:
         if row["kind"] == "executable":
-            upper, unassessed = runtime_requires(decl, platform, row, kept)
+            upper, unassessed = executable_requires(decl, platform, row, kept)
         else:
             upper, unassessed = device_requires(decl, platform, row, features), []
         required, may = split_requires(decl, upper)
@@ -1290,7 +1295,7 @@ def _fixture_packages(decl: dict) -> dict[str, tuple[str, dict, dict[str, bytes]
     pico, demo = arts["capi-pico"], arts["ap-demo"]
     files = {"lib/libwz_capi_pico.so": _synthetic(pico, needs),
              "bin/wz-ap-demo": _synthetic(demo, needs, roles=["publish", "subscribe"])}
-    resolved = {"wz-runtime-tokio": sorted(r["feature"] for r in decl["runtime_features"])}
+    resolved = {"wz-runtime-tokio": sorted(r["feature"] for r in decl["package_features"])}
     entries = [artifact_entry(decl, host, pico, "lib/libwz_capi_pico.so", files["lib/libwz_capi_pico.so"],
                               ["peer", "scout", "link-udp", "multi-thread"]),
                artifact_entry(decl, host, demo, "bin/wz-ap-demo", files["bin/wz-ap-demo"],
@@ -1550,7 +1555,7 @@ def _selftest() -> int:
     pico_features = ["peer", "scout", "link-udp", "multi-thread"]
     demo_features = ["zenoh-config", "other"]
     # What cargo enabled in the runtime for the default build: every feature the declaration assessed.
-    demo_resolved = {"wz-runtime-tokio": sorted(r["feature"] for r in decl["runtime_features"])}
+    demo_resolved = {"wz-runtime-tokio": sorted(r["feature"] for r in decl["package_features"])}
     with tempfile.TemporaryDirectory(prefix="wz-package-") as work:
         out = pathlib.Path(work) / "out"
         (out / "lib").mkdir(parents=True)
@@ -1576,14 +1581,16 @@ def _selftest() -> int:
         expect("a library's device_requires is the union of what its capabilities may ask",
                entries[0]["device_requires"]
                == ["entropy", "interface-list", "multicast", "sockets-tcp", "sockets-udp", "threads"])
-        expect("an executable's is the base and what its assessed runtime features may ask",
+        expect("an executable's is the base, its own package's and what its runtime features may ask",
                demo_entry["device_requires"]
-               == ["entropy", "interface-list", "multicast", "sockets-tcp", "sockets-udp", "threads"]
+               == ["entropy", "filesystem", "interface-list", "multicast", "sockets-tcp", "sockets-udp",
+                   "threads", "wall-clock"]
                and demo_entry["unassessed_features"] == [])
         expect("what every run asks for is required, and the rest of the bound may be asked",
-               all(e["requires"] == ["entropy", "threads"]
-                   and e["may_require"] == ["interface-list", "multicast", "sockets-tcp", "sockets-udp"]
-                   for e in entries))
+               all(e["requires"] == ["entropy", "threads"] for e in entries)
+               and entries[0]["may_require"] == ["interface-list", "multicast", "sockets-tcp", "sockets-udp"]
+               and demo_entry["may_require"] == ["filesystem", "interface-list", "multicast", "sockets-tcp",
+                                                 "sockets-udp", "wall-clock"])
         unknown = artifact_entry(decl, platform, demo, "bin/wz-ap-demo", demo_blob, demo_features,
                                  {"wz-runtime-tokio": [*demo_resolved["wz-runtime-tokio"], "transport-link-ws"]})
         expect("an enabled runtime feature nobody assessed makes it unknown and is named",
@@ -1610,8 +1617,8 @@ def _selftest() -> int:
                any("in both" in f for f in shape_findings(
                    {**manifest, "artifacts": [{**demo_entry, "requires": ["entropy", "sockets-tcp", "threads"]}]})))
         bare = artifact_entry(decl, platform, demo, "bin/wz-ap-demo", demo_blob, demo_features)
-        expect("an executable with no resolved runtime features asks only for the base",
-               bare["device_requires"] == sorted(decl["os_base"]))
+        expect("an executable with no resolved runtime features asks for the base and its own package's",
+               bare["device_requires"] == sorted(set(decl["os_base"]) | {"filesystem", "wall-clock"}))
         expect("the glibc floor is measured", entries[0]["elf"]["os_floor"]["glibc"] == "GLIBC_2.34")
         no_config = artifact_entry(decl, platform, demo, "bin/wz-ap-demo", demo_blob, ["other"], demo_resolved)
         expect("the session node is absent when its feature is off",

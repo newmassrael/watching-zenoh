@@ -231,8 +231,31 @@ os_provides = ["threads", "sockets-tcp", "sockets-udp", "multicast", "raw-ethern
 system_assumed = ["libgcc_s.so.1", "libm.so.6", "libc.so.6", "ld-linux-x86-64.so.2"]
 help = "The x86_64 Linux host the workspace is built and tested on; the one platform the entry has run on."
 
-# ─── Assessed runtime features (docs/target-build-contract.md T9) ─────────────────────────────
+# ─── Assessed packages and their features (docs/target-build-contract.md T9) ──────────────────
 #
+# The packages of an executable whose code asks the operating system for something, each with what
+# its own code may ask for. `by_feature = true` assesses each enabled feature of the package in a
+# `[[package_feature]]` row of its own, and `os_needs` is then what the package asks whatever its
+# features; `by_feature = false` assesses the package whole, for a package whose features forward to
+# other packages' features, and `os_needs` then covers its code under any of them.
+[[assessed_package]]
+package = "wz-runtime-tokio"
+by_feature = true
+os_needs = []
+help = "The runtime: every socket, thread and file read of a session. What every host build asks of it is the [os] base; the rest is by feature."
+
+# The facility oracle (scripts/lib/facility_trace.py) observed the default wz-ap-demo read the
+# calendar time, which no runtime row covered: env_logger stamps each log line with it
+# (`env_logger::fmt::Formatter::timestamp_seconds`), and the demo logs at `info` unless RUST_LOG
+# says otherwise. The demo reads a file only when `--config`, `--sessions` or `--check-topology`
+# names one (`main.rs`). Its threads (the worker in `main.rs`, the stop watcher in `stop_event.rs`)
+# are the base's. `wz-ap-demo-app`, which `switchboard` pulls, takes none of its own.
+[[assessed_package]]
+package = "wz-ap-demo"
+by_feature = false
+os_needs = ["filesystem", "wall-clock"]
+help = "The demo executable: log timestamps (env_logger) and the files its arguments name."
+
 # What a session-node executable asks of a device is decided by the features of the wz runtime it
 # links, which cargo resolves and the executable's own feature list does not name. Each feature of
 # `wz-runtime-tokio` that a host build has enabled is assessed here for the facilities it MAY ask
@@ -250,79 +273,79 @@ help = "The x86_64 Linux host the workspace is built and tested on; the one plat
 # (`wz-session-core`), the codecs and the switchboard schema use none of them: what their sources
 # say about `std::net` or `SystemTime` is documentation. The rows of a feature that only selects
 # protocol code say `[]`.
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "codec-close"
 os_needs = []
 help = "The Close message codec: bytes in, bytes out."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "codec-frame"
 os_needs = []
 help = "The Frame codec."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "codec-init-body"
 os_needs = []
 help = "The InitSyn and InitAck body codec."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "codec-join"
 os_needs = []
 help = "The Join message codec."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "codec-keep-alive"
 os_needs = []
 help = "The KeepAlive codec."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "codec-open-body"
 os_needs = []
 help = "The OpenSyn and OpenAck body codec."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "keyexpr-canon"
 os_needs = []
 help = "Key expression canonicalisation: pure computation."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "link-interfaces"
 os_needs = ["interface-list"]
 help = "The network interface listing: getifaddrs on unix, GetAdaptersAddresses on Windows."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "session-unicast-accept"
 os_needs = []
 help = "The accepting side of the session state machine: a state machine over an established link."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "session-unicast-open"
 os_needs = []
 help = "The opening side of the session state machine."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "transport-link-tcp"
 os_needs = ["interface-list"]
 help = "The tcp/ link; it carries link-interfaces to honour a locator's #iface=."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "transport-multicast"
 os_needs = ["sockets-udp", "multicast", "interface-list"]
 help = "The UDP multicast transport: a joined group over a UDP socket on a named interface."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "transport-unicast"
 os_needs = []
@@ -331,259 +354,259 @@ help = "The unicast transport state machine."
 # The protocol planes the session-node executable enables beyond those above: codecs, declarations,
 # key-expression matching, liveliness, publication, queries and their options. Each selects code
 # over bytes and tables the runtime already holds; none opens a socket, reads a file or the clock.
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "codec-declare"
 os_needs = []
 help = "The Declare codec."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "codec-fragment"
 os_needs = []
 help = "The Fragment codec."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "codec-hello"
 os_needs = []
 help = "The Hello codec."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "codec-push"
 os_needs = []
 help = "The Push codec."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "codec-request"
 os_needs = []
 help = "The Request codec."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "codec-response"
 os_needs = []
 help = "The Response codec."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "codec-response-final"
 os_needs = []
 help = "The ResponseFinal codec."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "codec-scout"
 os_needs = []
 help = "The Scout codec."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "declare-final"
 os_needs = []
 help = "The DeclareFinal message."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "declare-interest"
 os_needs = []
 help = "Interest declarations."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "declare-keyexpr"
 os_needs = []
 help = "Key expression declarations."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "declare-queryable"
 os_needs = []
 help = "Queryable declarations."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "declare-subscriber"
 os_needs = []
 help = "Subscriber declarations."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "declare-token"
 os_needs = []
 help = "Liveliness token declarations."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "declare-undeclare"
 os_needs = []
 help = "Undeclarations."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "keyexpr-dollar-star"
 os_needs = []
 help = "The $* key expression chunk."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "keyexpr-includes"
 os_needs = []
 help = "Key expression inclusion."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "keyexpr-wildcard-double"
 os_needs = []
 help = "The ** wildcard."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "keyexpr-wildcard-single"
 os_needs = []
 help = "The * wildcard."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "liveliness-get"
 os_needs = []
 help = "The liveliness snapshot get."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "liveliness-history"
 os_needs = []
 help = "The liveliness subscriber's history."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "liveliness-subscriber"
 os_needs = []
 help = "The liveliness subscriber."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "liveliness-token"
 os_needs = []
 help = "The liveliness token."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "pubsub-delete"
 os_needs = []
 help = "Delete publications."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "pubsub-encoding"
 os_needs = []
 help = "The encoding field of a publication."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "pubsub-put"
 os_needs = []
 help = "Put publications."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "pubsub-timestamp"
 os_needs = []
 help = "The timestamp field of a publication; reading the clock is the separate timestamp-wall-clock feature."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "query-consolidation"
 os_needs = []
 help = "Reply consolidation."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "query-get"
 os_needs = []
 help = "The requesting end of a query."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "query-queryable"
 os_needs = []
 help = "The answering end of a query."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "query-reply"
 os_needs = []
 help = "Query replies."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "query-target"
 os_needs = []
 help = "The target field of a query."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "query-timeout"
 os_needs = []
 help = "A query's timeout, on the runtime's own timers."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "reassembly"
 os_needs = []
 help = "Fragment reassembly in memory."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "scouting-active"
 os_needs = ["sockets-udp", "multicast"]
 help = "Active scouting: a Scout sent to a multicast group over UDP, and the Hello answers."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "scouting-static"
 os_needs = []
 help = "Scouting from a static table of locators."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "session-matching"
 os_needs = []
 help = "Matching status of publishers and queriers."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "session-reconnect"
 os_needs = []
 help = "Reconnection, on the runtime's own timers."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "switchboard"
 os_needs = []
 help = "The application switchboard wiring: a generated table over the session; its schema crate uses no OS call."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "transport-batching"
 os_needs = []
 help = "Batching of outgoing messages."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "transport-fragmentation"
 os_needs = []
 help = "Fragmentation of large messages."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "transport-keepalive"
 os_needs = []
 help = "Keep-alive messages, on the runtime's own timers."
 
-[[runtime_feature]]
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "transport-link-udp"
 os_needs = ["sockets-udp", "interface-list"]

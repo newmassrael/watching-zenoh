@@ -94,9 +94,7 @@
       "features": [
         "declared"
       ],
-      "resolved_features": {
-        "wz-runtime-tokio": []
-      },
+      "resolved_features": {},
       "device_requires": [
         "entropy",
         "sockets-tcp"

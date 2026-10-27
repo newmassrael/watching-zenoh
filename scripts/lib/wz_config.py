@@ -178,7 +178,7 @@ def read_decl_toml(text: str) -> dict:
     `tomllib` is stdlib from python 3.11 and the hosted floor is 3.10, so importing it died in
     Layer C0 on the first hosted run of the reader this one grew from. The declaration uses one
     small shape and this reads exactly that: `[table]` and `[[array of tables]]` headers;
-    `key = value` on ONE line, the value a string, an integer or an array of strings; a `'''`
+    `key = value` on ONE line, the value a string, an integer, a boolean or an array of strings; a `'''`
     literal string whose lines run to the closing `'''` (the newline right after the opening
     delimiter is not part of it, as TOML says); `#` comments on lines of their own. Anything else
     is refused by line number rather than skipped, so the file cannot grow a shape this reader
@@ -223,13 +223,15 @@ def read_decl_toml(text: str) -> dict:
                 value = json.loads(rest)
             except ValueError:
                 raise ValueError(
-                    f"line {number}: value is not a one-line string, integer or string array"
+                    f"line {number}: value is not a one-line string, integer, boolean or string array"
                 ) from None
-            if isinstance(value, bool) or not (
-                isinstance(value, (str, int))
+            # `true` and `false` are spelled alike in TOML and JSON; a bool is an int to Python, so it
+            # is named first and on purpose.
+            if not (
+                isinstance(value, (bool, str, int))
                 or (isinstance(value, list) and all(isinstance(x, str) for x in value))
             ):
-                raise ValueError(f"line {number}: value is not a string, integer or string array")
+                raise ValueError(f"line {number}: value is not a string, integer, boolean or string array")
         if key in table:
             raise ValueError(f"line {number}: key `{key}` is set twice")
         table[key] = value
@@ -264,7 +266,8 @@ def decl_of(data: dict) -> dict:
         "platforms": list(data["platform"]),
         "artifacts": list(data["artifact"]),
         "roles": list(data["role"]),
-        "runtime_features": list(data["runtime_feature"]),
+        "assessed_packages": list(data["assessed_package"]),
+        "package_features": list(data["package_feature"]),
         "parity": list(data["parity"]),
     }
 
@@ -275,14 +278,15 @@ def validate_decl(data: dict) -> list[str]:
         out.append(f"schema_version is {data.get('schema_version')!r}, this reader is {SCHEMA_VERSION}")
     if not isinstance(data.get("catalog_version"), int):
         out.append("catalog_version is not an integer")
-    for kind in ("base", "capability", "limit", "os", "platform", "artifact", "role", "runtime_feature",
-                 "parity"):
+    for kind in ("base", "capability", "limit", "os", "platform", "artifact", "role", "assessed_package",
+                 "package_feature", "parity"):
         if kind not in data:
             out.append(f"the declaration has no `{kind}`")
     if out:
         return out
     out += validate_os(data)
-    out += validate_runtime_features(data)
+    out += validate_assessed_packages(data)
+    out += validate_package_features(data)
     out += validate_parity(data)
     out += validate_caps(data)
     out += validate_platforms(data)
@@ -469,15 +473,19 @@ OS_FACILITIES = {
     "entropy": "draw cryptographic random bytes from the operating system (getrandom, /dev/urandom)",
     "wall-clock": "read the calendar time (CLOCK_REALTIME, SystemTime); it is never set, and a "
                   "wrong reading makes certificate validity and timestamps wrong",
-    "interface-list": "list the network interfaces and their addresses (getifaddrs, "
-                      "GetAdaptersAddresses)",
+    "interface-list": "list the network interfaces and their addresses, or look one up by name or "
+                      "index (getifaddrs, if_nametoindex, GetAdaptersAddresses)",
 }
-# The packages whose features are assessed for the facilities they ask of the operating system
-# (`[[runtime_feature]]`): the runtime that owns every socket, thread and file read. The core and
-# the codecs take no facility of their own (they are `no_std`-capable and are handed time, entropy
-# and a link), and a third-party crate's needs are the runtime's, which names the crate it pulls.
-ASSESSED_PACKAGES = ("wz-runtime-tokio",)
-RUNTIME_FEATURE_KEYS = {"package", "feature", "os_needs", "help"}
+# The packages assessed for the facilities their code asks of the operating system
+# (`[[assessed_package]]`), declared rather than written here so the set is data the entry and the
+# facility oracle read alike. A package's `os_needs` is what its own code may ask for: whatever its
+# features when `by_feature` is true, and then each feature of it a build enables has a
+# `[[package_feature]]` row for what that feature adds; under any of its features when it is false,
+# for a package whose features only forward to others. The core and the codecs take no facility of
+# their own (they are `no_std`-capable and are handed time, entropy and a link), and a third-party
+# crate's needs are those of the assessed package that pulls it, whose row names the crate.
+ASSESSED_PACKAGE_KEYS = {"package", "by_feature", "os_needs", "help"}
+PACKAGE_FEATURE_KEYS = {"package", "feature", "os_needs", "help"}
 # What a consumer's placing path says it supports (`[[parity]]`), each held to what wz declares for it:
 # the capabilities of the graph and the assessed runtime features. A need that names neither is a row
 # that holds nothing; one that names a capability or feature wz no longer declares is a finding.
@@ -721,17 +729,43 @@ def validate_artifacts(data: dict) -> list[str]:
     return out
 
 
-def validate_runtime_features(data: dict) -> list[str]:
+def validate_assessed_packages(data: dict) -> list[str]:
     out: list[str] = []
     seen = set()
-    for r in data["runtime_feature"]:
-        who = f"runtime_feature {r.get('package')!r}/{r.get('feature')!r}"
-        for key in sorted(set(r) - RUNTIME_FEATURE_KEYS):
+    for p in data["assessed_package"]:
+        who = f"assessed_package {p.get('package')!r}"
+        for key in sorted(set(p) - ASSESSED_PACKAGE_KEYS):
             out.append(f"{who} has the unknown key `{key}`")
-        for key in sorted(RUNTIME_FEATURE_KEYS - set(r)):
+        for key in sorted(ASSESSED_PACKAGE_KEYS - set(p)):
             out.append(f"{who} has no `{key}`")
-        if r.get("package") not in ASSESSED_PACKAGES:
-            out.append(f"{who}: the package is not one that is assessed ({', '.join(ASSESSED_PACKAGES)})")
+        if p.get("package") in seen:
+            out.append(f"{who} is declared twice")
+        seen.add(p.get("package"))
+        if "by_feature" in p and not isinstance(p["by_feature"], bool):
+            out.append(f"{who}: `by_feature` is not true or false")
+        if "os_needs" in p:
+            out += facility_findings(who, p["os_needs"], "os_needs")
+    return out
+
+
+def by_feature_packages(decl_or_data: dict) -> set[str]:
+    """The assessed packages each of whose features is assessed on its own."""
+    rows = decl_or_data.get("assessed_packages", decl_or_data.get("assessed_package", []))
+    return {p["package"] for p in rows if p.get("by_feature") is True}
+
+
+def validate_package_features(data: dict) -> list[str]:
+    out: list[str] = []
+    seen = set()
+    split = by_feature_packages(data)
+    for r in data["package_feature"]:
+        who = f"package_feature {r.get('package')!r}/{r.get('feature')!r}"
+        for key in sorted(set(r) - PACKAGE_FEATURE_KEYS):
+            out.append(f"{who} has the unknown key `{key}`")
+        for key in sorted(PACKAGE_FEATURE_KEYS - set(r)):
+            out.append(f"{who} has no `{key}`")
+        if r.get("package") not in split:
+            out.append(f"{who}: the package is not one assessed by feature ({', '.join(sorted(split))})")
         if (r.get("package"), r.get("feature")) in seen:
             out.append(f"{who} is declared twice")
         seen.add((r.get("package"), r.get("feature")))
@@ -743,7 +777,7 @@ def validate_runtime_features(data: dict) -> list[str]:
 def validate_parity(data: dict) -> list[str]:
     out: list[str] = []
     caps = {c["id"] for c in data["capability"]}
-    rows = {(r["package"], r["feature"]) for r in data["runtime_feature"] if "package" in r and "feature" in r}
+    rows = {(r["package"], r["feature"]) for r in data["package_feature"] if "package" in r and "feature" in r}
     seen = set()
     for r in data["parity"]:
         who = f"parity {r.get('need')!r}"
@@ -765,35 +799,45 @@ def validate_parity(data: dict) -> list[str]:
                     out.append(f"{who} names the capability `{cid}`, which is not declared")
             for feature in r["runtime_features"]:
                 if ("wz-runtime-tokio", feature) not in rows:
-                    out.append(f"{who} names the runtime feature `{feature}`, which has no [[runtime_feature]] row")
+                    out.append(f"{who} names the runtime feature `{feature}`, which has no [[package_feature]] row")
     return out
 
 
-def runtime_feature_findings(decl: dict, features_of) -> list[str]:
+def package_feature_findings(decl: dict, features_of) -> list[str]:
     """Each assessed feature against the package's real `[features]`: a row for a feature that
     no longer exists is a finding, so an assessment cannot outlive what it assessed.
 
     `features_of(package)` returns the package's feature names, passed in so a test can drive it.
     """
     out = []
-    for r in decl["runtime_features"]:
+    for r in decl["package_features"]:
         if r["feature"] not in features_of(r["package"]):
-            out.append(f"runtime_feature {r['package']}/{r['feature']} is not a feature of {r['package']}")
+            out.append(f"package_feature {r['package']}/{r['feature']} is not a feature of {r['package']}")
     return out
 
 
-def resolve_runtime_needs(decl: dict, resolved: dict[str, list[str]]) -> tuple[list[str] | None, list[str]]:
-    """The facilities the resolved runtime features may ask for, and the enabled ones nobody assessed.
+def resolve_package_needs(decl: dict, resolved: dict[str, list[str]],
+                          own_package: str) -> tuple[list[str] | None, list[str]]:
+    """The facilities an executable's assessed packages may ask for, and the enabled features nobody
+    assessed.
 
-    `resolved` maps a package to the features cargo enabled in it. The answer is `None` (UNKNOWN,
-    never a pass) when any enabled feature of an assessed package has no row; otherwise the sorted
-    union of the base and of each feature's facilities. The second value lists the unassessed
-    features as `package/feature`, so a reader sees which part of the answer is missing.
+    `resolved` maps a package to the features cargo enabled in it, and `own_package` is the
+    executable's own package, which is in the build whatever cargo reported. Each assessed package in
+    the build adds its `os_needs`; one assessed by feature adds each enabled feature's row too. The
+    answer is `None` (UNKNOWN, never a pass) when an enabled feature of such a package has no row;
+    otherwise the sorted union with the base. The second value lists the unassessed features as
+    `package/feature`, so a reader sees which part of the answer is missing.
     """
-    rows = {(r["package"], r["feature"]): r["os_needs"] for r in decl["runtime_features"]}
+    rows = {(r["package"], r["feature"]): r["os_needs"] for r in decl["package_features"]}
     unassessed: list[str] = []
     needs = set(decl["os_base"])
-    for package in ASSESSED_PACKAGES:
+    for assessed in decl["assessed_packages"]:
+        package = assessed["package"]
+        if package not in resolved and package != own_package:
+            continue
+        needs |= set(assessed["os_needs"])
+        if not assessed["by_feature"]:
+            continue
         for feature in sorted(resolved.get(package, [])):
             if feature == "default":
                 continue
@@ -2180,14 +2224,15 @@ def cmd_check() -> int:
         findings += check_manifest(decl, abi, feats)
     # The platform rows against the compiler that builds for them. A compiler that is absent is a
     # finding and not a skip: a gate that cannot reach its input must not report green.
-    for package in ASSESSED_PACKAGES:
+    for assessed in decl["assessed_packages"]:
+        package = assessed["package"]
         try:
             manifest_names = set(manifest_features(ROOT / "crates" / package / "Cargo.toml"))
         except (KeyError, OSError) as exc:
             findings.append(f"{package}: {exc}")
             continue
-        findings += runtime_feature_findings(
-            {"runtime_features": [r for r in decl["runtime_features"] if r["package"] == package]},
+        findings += package_feature_findings(
+            {"package_features": [r for r in decl["package_features"] if r["package"] == package]},
             lambda _p, names=manifest_names: names)
     if shutil.which("rustc") is None:
         findings.append("rustc is absent, so the platform triples cannot be checked against it")
@@ -2253,7 +2298,19 @@ support = "built"
 os_provides = ["threads", "sockets-tcp", "sockets-udp", "entropy"]
 help = "A sample platform."
 
-[[runtime_feature]]
+[[assessed_package]]
+package = "wz-runtime-tokio"
+by_feature = true
+os_needs = []
+help = "A sample package, assessed by feature."
+
+[[assessed_package]]
+package = "wz-app"
+by_feature = false
+os_needs = ["wall-clock"]
+help = "A sample package, assessed whole."
+
+[[package_feature]]
 package = "wz-runtime-tokio"
 feature = "f1"
 os_needs = ["sockets-udp"]
@@ -2829,7 +2886,8 @@ def cmd_selftest() -> int:
                [row], {"t-1"}, lambda t: {"target_os": "linux", "target_env": "musl"})))
     # The assessed runtime features (docs/target-build-contract.md T9).
     expect("a runtime feature of a package nobody assesses is refused",
-           caps_refused('package = "wz-runtime-tokio"', 'package = "tokio"', "not one that is assessed"))
+           caps_refused('package = "wz-runtime-tokio"\nfeature = "f1"', 'package = "tokio"\nfeature = "f1"',
+                        "not one assessed by feature"))
     expect("a runtime feature naming a facility outside the vocabulary is refused",
            caps_refused('feature = "f1"\nos_needs = ["sockets-udp"]', 'feature = "f1"\nos_needs = ["gpu"]',
                         "not a facility"))
@@ -2838,17 +2896,29 @@ def cmd_selftest() -> int:
                         "has no `os_needs`"))
     expect("a runtime feature declared twice is refused",
            any("declared twice" in p for p in validate_decl(read_decl_toml(
-               SAMPLE + SAMPLE[SAMPLE.index("[[runtime_feature]]"):SAMPLE.index("[[artifact]]")]))))
-    expect("a declaration with no runtime feature is refused",
-           any("no `runtime_feature`" in p for p in validate_decl(read_decl_toml(
-               SAMPLE[: SAMPLE.index("[[runtime_feature]]")] + SAMPLE[SAMPLE.index("[[artifact]]"):]))))
+               SAMPLE + SAMPLE[SAMPLE.index("[[package_feature]]"):SAMPLE.index("[[artifact]]")]))))
+    expect("a declaration with no package feature is refused",
+           any("no `package_feature`" in p for p in validate_decl(read_decl_toml(
+               SAMPLE[: SAMPLE.index("[[package_feature]]")] + SAMPLE[SAMPLE.index("[[artifact]]"):]))))
+    expect("a declaration with no assessed package is refused",
+           any("no `assessed_package`" in p for p in validate_decl(read_decl_toml(
+               SAMPLE[: SAMPLE.index("[[assessed_package]]")] + SAMPLE[SAMPLE.index("[[package_feature]]"):]))))
+    expect("a feature row of a package assessed whole is refused",
+           caps_refused('package = "wz-runtime-tokio"\nfeature = "f1"', 'package = "wz-app"\nfeature = "f1"',
+                        "not one assessed by feature"))
+    expect("an assessed package declared twice is refused",
+           caps_refused('package = "wz-app"', 'package = "wz-runtime-tokio"', "declared twice"))
+    expect("an assessed package whose `by_feature` is not a boolean is refused",
+           caps_refused("by_feature = false", 'by_feature = "no"', "not true or false"))
+    expect("an assessed package with a facility outside the vocabulary is refused",
+           caps_refused('os_needs = ["wall-clock"]', 'os_needs = ["calendar"]', "not a facility"))
     # A consumer's placing path held to what wz declares.
     expect("a need naming a capability wz does not declare is refused",
            caps_refused('capabilities = ["a"]\nruntime_features = ["f1"]', 'capabilities = ["zz"]\nruntime_features = ["f1"]',
                         "which is not declared"))
     expect("a need naming a runtime feature nobody assessed is refused",
            caps_refused('capabilities = ["a"]\nruntime_features = ["f1"]', 'capabilities = ["a"]\nruntime_features = ["f9"]',
-                        "has no [[runtime_feature]] row"))
+                        "has no [[package_feature]] row"))
     expect("a need that names nothing holds nothing and is refused",
            caps_refused('capabilities = ["a"]\nruntime_features = ["f1"]', "capabilities = []\nruntime_features = []",
                         "holds nothing"))
@@ -2862,18 +2932,24 @@ def cmd_selftest() -> int:
                SAMPLE[: SAMPLE.index("[[parity]]")] + SAMPLE[SAMPLE.index("[[artifact]]"):]))))
     rdecl = decl_of(read_decl_toml(SAMPLE))
     expect("an assessed feature adds its facilities to the base",
-           resolve_runtime_needs(rdecl, {"wz-runtime-tokio": ["f1"]})
+           resolve_package_needs(rdecl, {"wz-runtime-tokio": ["f1"]}, "x")
            == (["entropy", "sockets-tcp", "sockets-udp", "threads"], []))
     expect("an enabled feature nobody assessed makes the answer unknown and is named",
-           resolve_runtime_needs(rdecl, {"wz-runtime-tokio": ["f1", "f2"]}) == (None, ["wz-runtime-tokio/f2"]))
+           resolve_package_needs(rdecl, {"wz-runtime-tokio": ["f1", "f2"]}, "x") == (None, ["wz-runtime-tokio/f2"]))
     expect("the default feature is not a facility and is skipped",
-           resolve_runtime_needs(rdecl, {"wz-runtime-tokio": ["default", "f1"]})[0] is not None)
+           resolve_package_needs(rdecl, {"wz-runtime-tokio": ["default", "f1"]}, "x")[0] is not None)
     expect("a package that is not assessed does not make the answer unknown",
-           resolve_runtime_needs(rdecl, {"tokio": ["rt"], "wz-runtime-tokio": ["f1"]})[1] == [])
+           resolve_package_needs(rdecl, {"tokio": ["rt"], "wz-runtime-tokio": ["f1"]}, "x")[1] == [])
+    expect("a package assessed whole adds its facilities whatever its features, and none is unassessed",
+           resolve_package_needs(rdecl, {"wz-app": ["anything"]}, "x")
+           == (["entropy", "sockets-tcp", "threads", "wall-clock"], []))
+    expect("the executable's own package is in the build when cargo names none of its features",
+           "wall-clock" in resolve_package_needs(rdecl, {}, "wz-app")[0]
+           and "wall-clock" not in resolve_package_needs(rdecl, {}, "x")[0])
     expect("a row for a feature the package lost is a finding",
-           any("not a feature of" in f for f in runtime_feature_findings(rdecl, lambda p: {"other"})))
+           any("not a feature of" in f for f in package_feature_findings(rdecl, lambda p: {"other"})))
     expect("a row for a feature the package has is clean",
-           runtime_feature_findings(rdecl, lambda p: {"f1"}) == [])
+           package_feature_findings(rdecl, lambda p: {"f1"}) == [])
     # The artifacts and their roles (docs/target-build-contract.md T8).
     expect("a role naming an artifact nobody declared is refused",
            caps_refused('artifact = "lib-a"', 'artifact = "nope"', "the artifact is not declared"))
@@ -3041,7 +3117,8 @@ def cmd_selftest() -> int:
     expect("a multi-line array is refused, not skipped", not refuses('a = [\n  "x",\n]\n'))
     expect("an inline table is refused", not refuses('a = { b = "c" }\n'))
     expect("a float is refused", not refuses("a = 1.5\n"))
-    expect("a boolean is refused", not refuses("a = true\n"))
+    expect("a boolean is read as TOML reads it", read_decl_toml("a = true\nb = false\n") == {"a": True, "b": False})
+    expect("a JSON null, which TOML has no spelling of, is refused", not refuses("a = null\n"))
     expect("a key set twice is refused", not refuses('a = "x"\na = "y"\n'))
     expect("an unclosed ''' string is refused", not refuses("a = '''\nx\n"))
     expect("a ''' string sharing its opening line is refused", not refuses("a = '''x\n'''\n"))

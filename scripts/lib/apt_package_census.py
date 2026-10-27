@@ -179,6 +179,8 @@ for _codec_package in ("libsnappy-dev", "liblz4-dev", "libzstd-dev", "zlib1g-dev
           "e2e-router-scale"])
 _add("cmake", "Builds the cached native RocksDB engine via the local composite action.",
      ["nondefault", "nondefault-builds", "nondefault-legs"])
+_add("strace", "Layer C1st's facility oracle reads each packaged artifact's runs through it "
+     "(scripts/lib/facility_trace.py --judge).", ["capi-c-arms"])
 
 
 # bindgen, which is where libclang is consumed. 25.2 MB of a 32.3 MB job, and

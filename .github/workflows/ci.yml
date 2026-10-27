@@ -6007,6 +6007,12 @@ jobs:
           WZ_C1CE_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer C1ce
 
+      - name: Install strace for the facility oracle
+        # Layer C1st judges each packaged artifact's runs against its manifest's `requires` and
+        # `may_require` (scripts/lib/facility_trace.py --judge), which reads the runs through
+        # strace; the judgement fails rather than skips without it.
+        run: bash scripts/lib/apt-install.sh strace
+
       - name: Layer C1st — every shipped artifact carries its ABI stamp
         # `docs/target-build-contract.md` T6. In THIS job because it builds the release profile
         # of the zenoh-c drop-in, which the C1cc legs above already warmed; the pico C ABI library
