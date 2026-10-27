@@ -3340,6 +3340,30 @@ pub mod common {
         digits.parse().ok()
     }
 
+    /// The ports of the first `count` announcements of `needle`, in the order the
+    /// router wrote them, or `None` until all `count` are readable.
+    ///
+    /// [`parse_announced_tcp_port`]'s torn-read rule holds for each: an announcement
+    /// whose digit run reaches the end of the capture is not yet readable, so a
+    /// half-written last line holds the whole answer back instead of yielding a
+    /// truncated port.
+    pub fn parse_announced_tcp_ports(
+        captured: &str,
+        needle: &str,
+        count: usize,
+    ) -> Option<Vec<u16>> {
+        let mut ports = Vec::with_capacity(count);
+        // The pieces after the first are what follow an announcement, one each.
+        for rest in captured.split(needle).skip(1).take(count) {
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            if digits.is_empty() || digits.len() == rest.len() {
+                return None;
+            }
+            ports.push(digits.parse().ok()?);
+        }
+        (ports.len() == count).then_some(ports)
+    }
+
     /// The ONE line of a capture that carries `needle`.
     ///
     /// [`wait_for_substring`] hands back the WHOLE captured buffer — not the
@@ -5866,25 +5890,32 @@ pub mod common {
     /// it — like the compression oracle, and unlike the unixpipe / vsock ones
     /// which needed variant builds.
     ///
-    /// The un-configured [`spawn_zenohd_on_ephemeral_tcp`] is this helper's
-    /// TWIN: the SAME wz `--max-links 2` peer dialed twice against it lands ONE
-    /// link and its second dial is refused, which is what makes the two-link
-    /// assertion a discriminator rather than a tautology.
-    pub fn spawn_zenohd_multilink_on_ephemeral_tcp(
-        max_links: usize,
+    /// It listens on TWO tcp ports, and the ports are the point. A node dials each
+    /// endpoint it is given once and an endpoint written twice is one peer (decision
+    /// D5 of `docs/session-lifecycle-intent.md`), so the two links of an aggregation
+    /// are the node's dials of two of the router's endpoints, as upstream's are;
+    /// the pair is returned in the order zenohd announced it. `max_links` of `None`
+    /// leaves the router's budget at its default of 1, which makes this helper its
+    /// own TWIN: the SAME wz `--max-links 2` peer dialing the SAME two endpoints
+    /// lands ONE link and its second dial is refused, which is what makes the
+    /// two-link assertion a discriminator rather than a tautology.
+    pub fn spawn_zenohd_on_two_ephemeral_tcp(
+        max_links: Option<usize>,
         mut mk_probe_stderr: impl FnMut() -> File,
-    ) -> (ChildGuard, u16) {
-        let cfg = format!("transport/unicast/max_links:{max_links}");
-        let (guard, port) = spawn_zenohd_dialer_on_ephemeral_tcp_with_cfgs(
+    ) -> (ChildGuard, [u16; 2]) {
+        let cfg = max_links.map(|n| format!("transport/unicast/max_links:{n}"));
+        let cfgs: Vec<&str> = cfg.as_deref().into_iter().collect();
+        let (guard, ports) = spawn_zenohd_on_ephemeral_tcp_listeners(
             &zenohd_binary(),
-            "zenohd (reference router, multilink)",
+            "zenohd (reference router, two listeners)",
             None,
-            &[],
+            &["tcp/127.0.0.1:0".to_string()],
             None,
-            &[cfg.as_str()],
+            &cfgs,
+            2,
         );
-        wait_for_zenohd_handshake_ready(&format!("127.0.0.1:{port}"), &mut mk_probe_stderr);
-        (guard, port)
+        wait_for_zenohd_handshake_ready(&format!("127.0.0.1:{}", ports[0]), &mut mk_probe_stderr);
+        (guard, [ports[0], ports[1]])
     }
 
     /// R311y374 — spawn a zenohd that DIALS a wz `ws/...` acceptor
@@ -6101,6 +6132,37 @@ pub mod common {
         config_path: Option<&str>,
         extra_cfgs: &[&str],
     ) -> (ChildGuard, u16) {
+        let (guard, ports) = spawn_zenohd_on_ephemeral_tcp_listeners(
+            zenohd_bin,
+            label,
+            dial_locator,
+            extra_listens,
+            config_path,
+            extra_cfgs,
+            1,
+        );
+        (guard, ports[0])
+    }
+
+    /// [`spawn_zenohd_dialer_on_ephemeral_tcp_with_cfgs`] for a router that listens on
+    /// `listeners` tcp ports the kernel chose, returning every one of them in the order
+    /// zenohd announced them. The body of the one-port form, which delegates here with
+    /// `1`: `extra_listens` must add the other `listeners - 1` loopback listeners
+    /// (`tcp/127.0.0.1:0`), because the count is what the discovery waits for.
+    ///
+    /// Two ports exist for the legs whose subject is a node reached at TWO endpoints:
+    /// a node dials each endpoint it is given once and an endpoint written twice is
+    /// one (decision D5 of `docs/session-lifecycle-intent.md`), so two links to one
+    /// router come from two of its listeners, as upstream's do.
+    pub fn spawn_zenohd_on_ephemeral_tcp_listeners(
+        zenohd_bin: &std::path::Path,
+        label: &'static str,
+        dial_locator: Option<&str>,
+        extra_listens: &[String],
+        config_path: Option<&str>,
+        extra_cfgs: &[&str],
+        listeners: usize,
+    ) -> (ChildGuard, Vec<u16>) {
         use super::common::ZENOHD_LISTENER_LINE as LISTEN_LINE;
 
         let (writer, mut reader) = zenohd_stdout_capture();
@@ -6160,12 +6222,12 @@ pub mod common {
         // LIVENESS-AWARE: a zenohd that dies at startup (bad --config, unreadable
         // trust anchor) reports its real ExitStatus here in milliseconds instead of
         // costing the full budget and leaving the caller to guess the cause.
-        let port = wait_for_capture_alive(
+        let ports = wait_for_capture_alive(
             guard.child_mut(),
             &mut reader,
             ZENOHD_TCP_ACCEPT_BUDGET,
             "announcing its bound tcp listener",
-            |captured| parse_announced_tcp_port(captured, LISTEN_LINE),
+            |captured| parse_announced_tcp_ports(captured, LISTEN_LINE, listeners),
         )
         .unwrap_or_else(|e| {
             panic!(
@@ -6178,11 +6240,14 @@ pub mod common {
                  `common::ZENOHD_LISTENER_LINE` before re-spelling anything)"
             )
         });
-        if let Err(e) = wait_for_tcp_accept_alive(guard.child_mut(), port, ZENOHD_TCP_ACCEPT_BUDGET)
-        {
-            panic!("{label}: {e}");
+        for &port in &ports {
+            if let Err(e) =
+                wait_for_tcp_accept_alive(guard.child_mut(), port, ZENOHD_TCP_ACCEPT_BUDGET)
+            {
+                panic!("{label}: {e}");
+            }
         }
-        (guard, port)
+        (guard, ports)
     }
 
     /// R311y428 — spawn a zenohd that ANSWERS multicast SCOUTs, listening on an
@@ -8576,6 +8641,37 @@ mod tests {
             parse_announced_tcp_port(&format!("INFO {NEEDLE}70000\n"), NEEDLE),
             None,
             "a port outside u16 must not parse"
+        );
+    }
+
+    /// The several-listener form returns the ports in announcement order, waits for
+    /// every one, and keeps the torn-read rule for each: a router that has written
+    /// one of two lines, or half of the second, has not answered yet.
+    #[test]
+    fn parse_announced_tcp_ports_waits_for_every_listener_and_keeps_the_order() {
+        use super::common::{parse_announced_tcp_ports, ZENOHD_LISTENER_LINE as NEEDLE};
+
+        let two = format!("INFO {NEEDLE}41000\nINFO {NEEDLE}42000\n");
+        assert_eq!(
+            parse_announced_tcp_ports(&two, NEEDLE, 2),
+            Some(vec![41000, 42000])
+        );
+        assert_eq!(
+            parse_announced_tcp_ports(&two, NEEDLE, 1),
+            Some(vec![41000]),
+            "asking for fewer reads the first ones"
+        );
+        let one = format!("INFO {NEEDLE}41000\n");
+        assert_eq!(
+            parse_announced_tcp_ports(&one, NEEDLE, 2),
+            None,
+            "one announcement of two is not an answer"
+        );
+        let torn = format!("INFO {NEEDLE}41000\nINFO {NEEDLE}420");
+        assert_eq!(
+            parse_announced_tcp_ports(&torn, NEEDLE, 2),
+            None,
+            "a second port cut mid-digits must not be read as 420"
         );
     }
 

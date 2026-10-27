@@ -43,13 +43,16 @@
 //!
 //! ## The two legs
 //!
-//!   1. the PROOF. zenohd runs `transport/unicast/max_links:2`; wz runs as a
-//!      linkstate `--peer` with `--max-links 2` and the SAME dial target listed
-//!      twice, so it opens two TCP links to one zid. zenoh reports ONE session
-//!      for wz carrying TWO links.
+//!   1. the PROOF. zenohd runs `transport/unicast/max_links:2` and listens on
+//!      TWO tcp ports; wz runs as a linkstate `--peer` with `--max-links 2` and
+//!      both endpoints as its connect list, so it opens two TCP links to one
+//!      zid. (The same endpoint written twice would be one peer, as upstream's
+//!      is: two links come from two endpoints.) zenoh reports ONE session for
+//!      wz carrying TWO links.
 //!   2. the TWIN. The SAME wz argv against a STOCK zenohd (`max_links` not
-//!      configured; the knob defaults to 1). zenoh reports ONE session for wz
-//!      carrying ONE link, and wz's second dial is refused outright. This is
+//!      configured; the knob defaults to 1) listening on two ports as well.
+//!      zenoh reports ONE session for wz carrying ONE link, and wz's second
+//!      dial is refused outright. This is
 //!      what makes leg 1 a discriminator instead of a tautology: the count
 //!      zenoh reports tracks the ROUTER's budget, so it cannot be a wz-side
 //!      fiction, and it cannot be a hardcoded 2.
@@ -77,8 +80,8 @@ use std::time::Duration;
 
 use wz_integration_tests::common::{
     demo_log_filter, line_with, parse_zenoh_admin_sessions, spawn_on_ephemeral_port,
-    spawn_zenohd_multilink_on_ephemeral_tcp, spawn_zenohd_on_ephemeral_tcp, wait_for_substring,
-    wz_ap_demo_binary, ChildGuard, ZenohSession,
+    spawn_zenohd_on_two_ephemeral_tcp, wait_for_substring, wz_ap_demo_binary, ChildGuard,
+    ZenohSession,
 };
 
 /// The wz peer's PINNED routing zid, as passed to `--zid`.
@@ -154,20 +157,22 @@ fn zenohd_admin_report(port: u16) -> String {
 /// difference between the proof and its twin is which zenohd the port belongs
 /// to, so the twin is a twin by construction rather than by two copies kept in
 /// step by hand.
-fn aggregate_two_dials_against(port: u16) -> (Vec<ZenohSession>, Option<String>) {
+fn aggregate_two_dials_against(ports: [u16; 2]) -> (Vec<ZenohSession>, Option<String>) {
     let demo = wz_ap_demo_binary();
-    let target = format!("127.0.0.1:{port}");
+    let targets = ports.map(|port| format!("127.0.0.1:{port}"));
     let stderr = tempfile::tempfile().expect("tempfile for wz peer stderr");
     let (mut peer, mut reader, _peer_port) = spawn_on_ephemeral_port(
         &demo,
         &[
             "--peer",
             "127.0.0.1:0",
-            // The same target LISTED TWICE is what makes the peer open two
-            // physical links to one zid; `--max-links 2` is what lets the
-            // second one be a JOIN rather than a fresh session.
+            // TWO ENDPOINTS of one router are what make the peer open two
+            // physical links to one zid, as upstream's do: an endpoint written
+            // twice is one peer, so the same target listed twice would dial
+            // once. `--max-links 2` is what lets the second link be a JOIN
+            // rather than a fresh session.
             "--connect",
-            &format!("{target},{target}"),
+            &targets.join(","),
             "--max-links",
             "2",
             "--zid",
@@ -184,9 +189,18 @@ fn aggregate_two_dials_against(port: u16) -> (Vec<ZenohSession>, Option<String>)
     // dials race, so either can be the survivor — measured: the twin came up on
     // `face 1 UP` with `face 0 FAILED`, which a `face 0 UP` needle reads as a dead
     // node. Naming the address also stops a face to some OTHER peer from passing
-    // this off as readiness.
-    let face_needle = format!(" UP (peer {target}");
-    let face_up = wait_for_substring(&mut reader, &face_needle, Duration::from_secs(20));
+    // this off as readiness; here it is either of the router's two endpoints.
+    let face_up = wait_for_substring(&mut reader, " UP (peer 127.0.0.1:", Duration::from_secs(20))
+        .and_then(|captured| {
+            if targets
+                .iter()
+                .any(|target| captured.contains(&format!(" UP (peer {target}")))
+            {
+                Ok(captured)
+            } else {
+                Err(captured)
+            }
+        });
     // The wz-side aggregation claim, captured but NOT asserted on here — the
     // caller decides what it means, and in the twin its ABSENCE is expected.
     let aggregated = wait_for_substring(&mut reader, WZ_AGGREGATED_NEEDLE, Duration::from_secs(10))
@@ -195,7 +209,7 @@ fn aggregate_two_dials_against(port: u16) -> (Vec<ZenohSession>, Option<String>)
 
     let sessions = face_up
         .as_ref()
-        .map(|_| parse_zenoh_admin_sessions(&zenohd_admin_report(port)))
+        .map(|_| parse_zenoh_admin_sessions(&zenohd_admin_report(ports[0])))
         .unwrap_or_default();
 
     let _ = peer.child_mut().kill();
@@ -205,7 +219,7 @@ fn aggregate_two_dials_against(port: u16) -> (Vec<ZenohSession>, Option<String>)
     // which.
     if let Err(captured) = &face_up {
         panic!(
-            "the wz peer never brought a face up against zenohd on 127.0.0.1:{port}\n\
+            "the wz peer never brought a face up against zenohd on {targets:?}\n\
              --- captured wz peer stderr ---\n{captured}"
         );
     }
@@ -242,10 +256,10 @@ fn the_peer_session(sessions: &[ZenohSession]) -> &ZenohSession {
 #[test]
 #[ignore = "binary-dep e2e: needs zenohd + wz-ap-demo[+routing-peer,transport-multilink]; runs via --ignored"]
 fn zenohd_aggregates_two_wz_links_into_one_session() {
-    let (zenohd, port) = spawn_zenohd_multilink_on_ephemeral_tcp(2, || {
+    let (zenohd, ports) = spawn_zenohd_on_two_ephemeral_tcp(Some(2), || {
         tempfile::tempfile().expect("tempfile for zenohd readiness probe stderr")
     });
-    let (sessions, aggregated) = aggregate_two_dials_against(port);
+    let (sessions, aggregated) = aggregate_two_dials_against(ports);
     let mut zenohd = zenohd;
     let _ = zenohd.child_mut().kill();
     let _ = zenohd.child_mut().wait();
@@ -289,10 +303,10 @@ fn zenohd_aggregates_two_wz_links_into_one_session() {
 #[test]
 #[ignore = "binary-dep e2e: needs zenohd + wz-ap-demo[+routing-peer,transport-multilink]; runs via --ignored"]
 fn stock_zenohd_refuses_the_second_link_and_reports_one() {
-    let (zenohd, port) = spawn_zenohd_on_ephemeral_tcp(|| {
+    let (zenohd, ports) = spawn_zenohd_on_two_ephemeral_tcp(None, || {
         tempfile::tempfile().expect("tempfile for zenohd readiness probe stderr")
     });
-    let (sessions, aggregated) = aggregate_two_dials_against(port);
+    let (sessions, aggregated) = aggregate_two_dials_against(ports);
     let mut zenohd = zenohd;
     let _ = zenohd.child_mut().kill();
     let _ = zenohd.child_mut().wait();
