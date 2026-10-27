@@ -60,6 +60,8 @@ mod prelude {
     pub(crate) use alloc::vec::Vec;
 }
 
+#[cfg(feature = "listen")]
+mod admission_gate;
 mod engine;
 #[cfg(feature = "scout")]
 pub mod scout;

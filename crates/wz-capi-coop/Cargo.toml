@@ -200,6 +200,9 @@ query = [
 # The tests run the engine against a router stand-in over the host's UDP sockets: a session that
 # accepts, which the engine itself never is, and holds a queryable a get asks.
 wz-runtime-posix = { path = "../wz-runtime-posix" }
+# The in-memory network, for a test of what one link gives the session that no socket's timing
+# decides (`admission_gate`).
+wz-session-mcu = { path = "../wz-session-mcu", default-features = false, features = ["test-support"] }
 # The advanced subscriber's host, which the tests run on this engine, and the publisher's cache
 # the stand-in answers the host's gets from.
 wz-ext-pubsub = { path = "../wz-ext-pubsub", features = ["engine-host"] }

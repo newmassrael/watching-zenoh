@@ -43,6 +43,8 @@ use crate::prelude::*;
 
 // The operating system the engine runs on: its mutex, its threads and its sleep are `std`'s on a
 // host and the kernel's on an MCU (`docs/upstream-parity.md` section 5a, E1).
+#[cfg(feature = "listen")]
+use crate::admission_gate::{AdmissionGate, Admitted};
 use wz_capi_port::os::{self, JoinHandle, Mutex, MutexGuard, ThreadId};
 use wz_capi_port::sync::Lock;
 use wz_capi_port::{
@@ -484,6 +486,10 @@ struct Wire<C: ClockSource + 'static> {
     task: CoopLocalJoinHandle<DriverOutcome>,
     link: Rc<dyn SessionDatagramLink>,
     readiness: Option<Arc<dyn LinkReadiness>>,
+    /// Opened by the face table's admission of the link (`admit`); until then the link gives the
+    /// session nothing past its handshake.
+    #[cfg(feature = "listen")]
+    admitted: Admitted,
     /// The link's generation, which the queries it carries are answered under (`query`).
     #[cfg(feature = "queryable")]
     generation: u64,
@@ -809,6 +815,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             }
         }
         let readiness = pump.readiness().map(Arc::from);
+        // The link gives the session nothing between its handshake and the face table's decision
+        // (`admit`), so a link that is refused has put nothing in the tables.
+        #[cfg(feature = "listen")]
+        let admitted = Admitted::default();
+        #[cfg(feature = "listen")]
+        let link: Rc<dyn SessionDatagramLink> =
+            Rc::new(AdmissionGate::new(pump, actions.clone(), admitted.clone()));
+        #[cfg(not(feature = "listen"))]
         let link = Rc::new(pump);
         #[cfg(feature = "queryable")]
         let generation = self.plane.generation.fetch_add(1, Ordering::AcqRel) + 1;
@@ -840,6 +854,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             task,
             link,
             readiness,
+            #[cfg(feature = "listen")]
+            admitted,
             #[cfg(feature = "queryable")]
             generation,
         })
@@ -1087,6 +1103,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// The link of the face at `at` is `wire`, up: what the session holds is declared over it from
     /// here on, and the watchers of the faces are told it came up.
     fn bring_up(&mut self, at: usize, wire: Wire<C>, now_us: u64) {
+        #[cfg(feature = "listen")]
+        wire.admitted.grant();
         self.begin_replay(at, &wire.actions, now_us / 1000);
         let snapshot = self.face_of(&wire.actions);
         self.faces[at].link = Link::Up(wire);

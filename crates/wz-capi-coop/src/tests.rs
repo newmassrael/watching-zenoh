@@ -54,7 +54,7 @@ const ADVANCED_PUBLISHER_KEY: &str = "demo/data/@adv/pub/2/7/_";
 
 type Engine = CoopEngine<PosixLinks, PosixClock>;
 
-fn params(whatami: WhatAmI, zid: u8) -> SessionInitParams {
+pub(crate) fn params(whatami: WhatAmI, zid: u8) -> SessionInitParams {
     SessionInitParams {
         whatami,
         zid: vec![zid; 4],
