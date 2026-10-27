@@ -37,7 +37,9 @@ use crate::wire::RequestOwned;
 
 #[cfg(feature = "alloc")]
 use crate::ext_nodeid;
-use crate::query_mode::{QueryTarget, TARGET_EXT_HEADER};
+use crate::query_mode::QueryTarget;
+#[cfg(feature = "alloc")]
+use crate::query_mode::TARGET_EXT_HEADER;
 
 /// Read the routing-context source `node_id` from a Request's `ext_nodeid`
 /// extension. Returns `0` when absent — zenoh's self-originated DEFAULT, so a
@@ -85,10 +87,18 @@ pub(crate) fn read_target_in<E: crate::ext_view::ExtEntryView>(
 
 /// [`read_target_in`] over the entries a chain yields, by reference or by value (a chain walked
 /// where its frame lies).
+#[cfg(feature = "alloc")]
 pub(crate) fn read_target_of<E: crate::ext_view::ExtEntryView>(
     exts: impl IntoIterator<Item = E>,
 ) -> Option<QueryTarget> {
-    crate::ext_nodeid::read_z64_of(exts, TARGET_EXT_HEADER).and_then(QueryTarget::from_wire_byte)
+    target_of_raw(crate::ext_nodeid::read_z64_of(exts, TARGET_EXT_HEADER))
+}
+
+/// The target an `ext_target` entry's integer says, or `None` when the chain held none: the one
+/// rule every reader of the extension maps its answer by, whether it walked the chain for this
+/// extension alone ([`read_target_of`]) or for several at once.
+pub(crate) fn target_of_raw(raw: Option<u64>) -> Option<QueryTarget> {
+    raw.and_then(QueryTarget::from_wire_byte)
 }
 
 /// The Request `ext_timeout` extension id — zenoh-pico's

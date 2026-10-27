@@ -138,6 +138,31 @@ pub fn read_z64_of<E: crate::ext_view::ExtEntryView>(
         .find_map(|ext| ext.zint())
 }
 
+/// [`read_z64_of`] for two identities in ONE walk of the chain: what each would answer asked
+/// alone. A chain walked where its frame lies decodes every entry again at every walk, so a
+/// reader that wants two extensions of the same chain asks once.
+pub fn read_two_z64_of<E: crate::ext_view::ExtEntryView>(
+    exts: impl IntoIterator<Item = E>,
+    first: u8,
+    second: u8,
+) -> (Option<u64>, Option<u64>) {
+    let (want_first, want_second) = (ext_eid(first), ext_eid(second));
+    let (mut found_first, mut found_second) = (None, None);
+    for ext in exts {
+        let eid = ext.eid();
+        if found_first.is_none() && eid == want_first {
+            found_first = ext.zint();
+        }
+        if found_second.is_none() && eid == want_second {
+            found_second = ext.zint();
+        }
+        if found_first.is_some() && found_second.is_some() {
+            break;
+        }
+    }
+    (found_first, found_second)
+}
+
 /// Insert / replace / remove a `Z64`-bodied extension in a chain, by the
 /// extension's IDENTITY — the generic chain EDIT the per-extension routing-context
 /// setters share ([`set_source`], the Push hop-limit). `value == None` REMOVES any
@@ -282,6 +307,41 @@ mod tests {
             assert_eq!(list.len(), 2, "{header:#04x} kept, node id appended");
             assert_eq!(list[0].header, header | EXT_FLAG_Z);
             assert_eq!(read_source(exts.as_ref()), 9);
+        }
+    }
+
+    /// Two identities read in one walk answer what each answers read alone, over chains that
+    /// hold neither, one, both in either order, the same identity twice (the first with an
+    /// integer body wins) and an entry that shares only the id.
+    #[test]
+    fn two_identities_in_one_walk_are_what_two_walks_answer() {
+        let (first, second) = (NODEID_EXT_HEADER, 0x01 | EXT_ENC_Z64);
+        let zint = |header: u8, value: u64| -> ExtEntryOwned {
+            ExtEntryOwned {
+                header,
+                body: ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint { value }),
+            }
+        };
+        let chains: [Vec<ExtEntryOwned>; 7] = [
+            vec![],
+            vec![zint(first, 4)],
+            vec![zint(second, 9)],
+            vec![zint(first, 4), zint(second, 9)],
+            vec![zint(second, 9), zint(first, 4)],
+            vec![
+                zint(first, 4),
+                zint(first, 5),
+                zint(second, 9),
+                zint(second, 8),
+            ],
+            vec![zint(first | 0x10, 4), zint(second, 9)],
+        ];
+        for chain in &chains {
+            assert_eq!(
+                read_two_z64_of(chain, first, second),
+                (read_z64_of(chain, first), read_z64_of(chain, second)),
+                "{chain:?}"
+            );
         }
     }
 

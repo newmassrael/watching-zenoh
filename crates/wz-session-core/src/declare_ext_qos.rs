@@ -95,10 +95,7 @@ use wz_codecs::ext_zint::ExtZint;
 #[cfg(feature = "alloc")]
 use wz_codecs::interest::InterestOwned;
 
-#[cfg(any(
-    feature = "alloc",
-    all(feature = "codec-request", feature = "storage-profile")
-))]
+#[cfg(feature = "alloc")]
 use crate::ext_nodeid;
 use crate::ext_nodeid::EXT_ENC_Z64;
 use crate::qos::{CongestionControl, Priority};
@@ -201,15 +198,22 @@ pub(crate) fn read_qos_in<E: crate::ext_view::ExtEntryView>(exts: Option<&[E]>) 
 
 /// [`read_qos_in`] over the entries a chain yields, by reference or by value (a chain walked where
 /// its frame lies).
+#[cfg(feature = "alloc")]
+pub(crate) fn read_qos_of<E: crate::ext_view::ExtEntryView>(
+    exts: impl IntoIterator<Item = E>,
+) -> QosLevel {
+    qos_of_raw(ext_nodeid::read_z64_of(exts, QOS_EXT_HEADER))
+}
+
+/// The QoS an `ext_qos` entry's integer says, or the default when the chain held none: the one
+/// rule every reader of the extension maps its answer by, whether it walked the chain for this
+/// extension alone ([`read_qos_of`]) or for several at once.
 #[cfg(any(
     feature = "alloc",
     all(feature = "codec-request", feature = "storage-profile")
 ))]
-pub(crate) fn read_qos_of<E: crate::ext_view::ExtEntryView>(
-    exts: impl IntoIterator<Item = E>,
-) -> QosLevel {
-    ext_nodeid::read_z64_of(exts, QOS_EXT_HEADER)
-        .map(|v| QosLevel::from_raw(v as u8))
+pub(crate) fn qos_of_raw(raw: Option<u64>) -> QosLevel {
+    raw.map(|v| QosLevel::from_raw(v as u8))
         .unwrap_or(QosLevel::DEFAULT)
 }
 

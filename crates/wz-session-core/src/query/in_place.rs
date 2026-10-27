@@ -56,6 +56,27 @@ enum Fallback {
     KeyexprPastBound,
 }
 
+/// The target and the QoS a Request's extension chain carries, each by the rule the owned path
+/// reads it by (`read_target_of`, `read_qos_of`), in one walk of the chain: a chain read where
+/// its frame lies decodes every entry again at every walk, and the Request used to be walked
+/// once for the target, once for the QoS of the replies and once more for the QoS of the Final.
+fn read_envelope_extensions(
+    request: &RequestView<'_>,
+) -> (
+    Option<crate::query_mode::QueryTarget>,
+    crate::sample::QosLevel,
+) {
+    let (target, qos) = crate::ext_nodeid::read_two_z64_of(
+        walked(request.extensions.as_ref()),
+        crate::query_mode::TARGET_EXT_HEADER,
+        crate::declare_ext_qos::QOS_EXT_HEADER,
+    );
+    (
+        crate::request_routing_context::target_of_raw(target),
+        crate::declare_ext_qos::qos_of_raw(qos),
+    )
+}
+
 /// Whether a Query's chain carries its value as a list of slices: the shape the
 /// owned path un-swaps before routing (`QueryableRegistry::unswap_query_value`
 /// reads the first value entry that has slices).
@@ -136,15 +157,20 @@ impl<C: QuerySink, P: crate::bounded::Storage> QueryableRegistry<C, P> {
             pending_final_rids.refuse_request();
             return;
         }
-        match self.dispatch_lent(request, spaces, pending_replies) {
+        // The target and the QoS come off the Request's chain in one walk, and the QoS the
+        // terminator carries is the one the replies inherit.
+        let (target, qos) = read_envelope_extensions(request);
+        let envelope = QueryEnvelope {
+            rid: request.rid,
+            target,
+            qos,
+        };
+        match self.dispatch_lent(request, spaces, envelope, pending_replies) {
             Ok(outcome) => {
                 if outcome.dispatched {
                     // The terminator carries the query's QoS, read by the rule
                     // the owned path reads it by.
-                    pending_final_rids.owe(
-                        request.rid,
-                        crate::declare_ext_qos::read_qos_of(walked(request.extensions.as_ref())),
-                    );
+                    pending_final_rids.owe(request.rid, qos);
                 }
             }
             #[cfg(feature = "alloc")]
@@ -157,10 +183,7 @@ impl<C: QuerySink, P: crate::bounded::Storage> QueryableRegistry<C, P> {
             // query ends with no reply, where a refused one would be left to time out.
             #[cfg(not(feature = "alloc"))]
             Err(Fallback::SlicedValue | Fallback::KeyexprPastBound) => {
-                pending_final_rids.owe(
-                    request.rid,
-                    crate::declare_ext_qos::read_qos_of(walked(request.extensions.as_ref())),
-                );
+                pending_final_rids.owe(request.rid, qos);
             }
         }
     }
@@ -171,6 +194,7 @@ impl<C: QuerySink, P: crate::bounded::Storage> QueryableRegistry<C, P> {
         &mut self,
         request: &RequestView<'_>,
         spaces: MappingSpaces<'_>,
+        envelope: QueryEnvelope,
         replies: &mut ReplyStage,
     ) -> Result<DispatchOutcome, Fallback> {
         // Only the Query body arm reaches the table.
@@ -187,12 +211,6 @@ impl<C: QuerySink, P: crate::bounded::Storage> QueryableRegistry<C, P> {
             // never reaches the table and owes nothing, as on the owned path.
             Ok(None) => return Ok(DispatchOutcome::NOT_DISPATCHED),
             Err(KeyexprPastBound) => return Err(Fallback::KeyexprPastBound),
-        };
-        let outer = request.extensions.as_ref();
-        let envelope = QueryEnvelope {
-            rid: request.rid,
-            target: crate::request_routing_context::read_target_of(walked(outer)),
-            qos: crate::declare_ext_qos::read_qos_of(walked(outer)),
         };
         let matched =
             self.fire_projection(envelope, keyexpr, lent_projection(query), replies, true);
