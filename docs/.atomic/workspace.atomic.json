@@ -294738,6 +294738,42 @@
         "Layer Z beyond the family notices could not be read: the notice gate ended the layer at its start, so 103 guarded legs did not run in the hosted run of round 3809; the next hosted run says whether any of them is red."
       ]
     },
+    "Round 3813": {
+      "decision_summary": "Two items carried since round 3809, paid. First, three tests of the engine of the C ABIs (the plain put behind a write filter, on a declared key, and the node that states a policy) failed under --all-features because they assumed a lane the build does not have: with transport-stats and routing-namespace a plain put is not sent from borrowed bytes, and plain_put_params answers None by design. The build's one answer is now a constant of the session core, SENDS_PLAIN_PUTS, bound to the function by a test, and the three tests read it: a build with the lane runs them, a build without it asserts that it says so. Second, a liveliness get had no test of its timeout: the peer's reading thread is held inside a callback, so its final never comes, and the get ends with Err Timeout encoded as a string and then its channel closes, as upstream's does; a timeout of nothing is instant. Three faults injected, none missed.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/publish_options.rs: SENDS_PLAIN_PUTS, the cfg condition of plain_put_params as a constant, and a test that binds the two.",
+        "crates/wz-capi-core/src/faces.rs: plain_params asserts the build's answer against the constant; the three plain-put tests return after that assertion in a build without the lane.",
+        "crates/wz-zenoh/src/api/session.rs: a_get_that_a_peer_does_not_end_is_ended_by_its_timeout_with_an_error_reply (a peer held in a callback, a 400 ms timeout and a timeout of nothing, the error reply and the closed channel)."
+      ],
+      "verification_bullets": [
+        "wz-capi-core lib tests pass with --all-features (120, the three that failed among them) and with the defaults (119); the session core test that binds the constant passes with both; clippy with warnings denied is clean for wz-capi-core and wz-session-core over all targets, and for zenoh in both feature sets; the zenoh unit tests pass with all features (111) and the defaults; rustfmt is clean.",
+        "Three faults in the get's timeout, each seen as the test failing and not as a compile error: the timeout raised to a minute, the floor of one millisecond removed, and the holding callback made to return; the source is identical to its copy after the restore.",
+        "Not run here: the hosted run."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Next in order: Z5, scouting, which decides whether the port gains it or the crate reaches it through the engine; upstream's scout sends at once and then at 1, 2, 4 and 8 seconds and every 8, and hands each Hello to its callback as it arrives until the scout is dropped, where the drive both C ABIs share runs one budgeted window and delivers after it, in reverse; then Z6a, Z6b and Z6c."
+      ],
+      "publishable_decision_summary": "Two items carried since round 3809, paid. First, three tests of the engine of the C ABIs (the plain put behind a write filter, on a declared key, and the node that states a policy) failed under --all-features because they assumed a lane the build does not have: with transport-stats and routing-namespace a plain put is not sent from borrowed bytes, and plain_put_params answers None by design. The build's one answer is now a constant of the session core, SENDS_PLAIN_PUTS, bound to the function by a test, and the three tests read it: a build with the lane runs them, a build without it asserts that it says so. Second, a liveliness get had no test of its timeout: the peer's reading thread is held inside a callback, so its final never comes, and the get ends with Err Timeout encoded as a string and then its channel closes, as upstream's does; a timeout of nothing is instant. Three faults injected, none missed.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/publish_options.rs: SENDS_PLAIN_PUTS, the cfg condition of plain_put_params as a constant, and a test that binds the two.",
+        "crates/wz-capi-core/src/faces.rs: plain_params asserts the build's answer against the constant; the three plain-put tests return after that assertion in a build without the lane.",
+        "crates/wz-zenoh/src/api/session.rs: a_get_that_a_peer_does_not_end_is_ended_by_its_timeout_with_an_error_reply (a peer held in a callback, a 400 ms timeout and a timeout of nothing, the error reply and the closed channel)."
+      ],
+      "publishable_verification_bullets": [
+        "wz-capi-core lib tests pass with --all-features (120, the three that failed among them) and with the defaults (119); the session core test that binds the constant passes with both; clippy with warnings denied is clean for wz-capi-core and wz-session-core over all targets, and for zenoh in both feature sets; the zenoh unit tests pass with all features (111) and the defaults; rustfmt is clean.",
+        "Three faults in the get's timeout, each seen as the test failing and not as a compile error: the timeout raised to a minute, the floor of one millisecond removed, and the holding callback made to return; the source is identical to its copy after the restore.",
+        "Not run here: the hosted run."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next in order: Z5, scouting, which decides whether the port gains it or the crate reaches it through the engine; upstream's scout sends at once and then at 1, 2, 4 and 8 seconds and every 8, and hands each Hello to its callback as it arrives until the scout is dropped, where the drive both C ABIs share runs one budgeted window and delivers after it, in reverse; then Z6a, Z6b and Z6c."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
