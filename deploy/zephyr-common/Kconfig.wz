@@ -97,6 +97,33 @@ config WZ_CODE_IN_RAM
 	  An experiment with a measurement attached to it where it is turned on (the overlay that
 	  turns it on states the numbers): off by default.
 
+config WZ_POLL_PATH_IN_ITCM
+	bool "Run the code the receive thread polls through from the core's ITCM"
+	depends on CPU_CORTEX_M7
+	select CODE_DATA_RELOCATION
+	help
+	  The driver's receive thread polls the MAC without sleeping (CONFIG_WZ_ZETH_RX_POLL_INTERVAL_US=0),
+	  so between two frames most of the core's time goes to a loop of a few kernel files (the mutex,
+	  the scheduler's yield, the timeout list, the system timer, the MPU's per-thread reconfiguration)
+	  and the driver's own. A program-counter profile of a GET on the T2G kit puts about 60 percent of
+	  the samples there, and the code a GET runs through is some 30 KB against an instruction cache of
+	  16 KB, so which of its lines the cache holds, and the answer's time with it, depended on where
+	  the linker happened to put each function: the same node answered in 361, 388 and 494 us in three
+	  builds that differ only in unrelated code size.
+
+	  With this on, those files are linked into the ITCM (16 KB, no wait state, not cached), loaded
+	  from flash at boot. The loop no longer takes cache lines from the answer's path, and the time
+	  of the loop itself does not depend on the cache.
+
+	  MEASURED on the T2G kit (Cortex-M7, 350 MHz), the batching client, 4,000 GETs a run, median
+	  with the cache alone and with this on, in three builds that differ only in unrelated code
+	  (the commit before, one commit on, two commits on):
+	    cache alone 388, 361 and 494 us (133 us apart)
+	    ITCM        333, 319 and 361 us (42 us apart), the last with the files' unused functions
+	                dropped (NOKEEP), 330 us
+	  The 5,448 bytes in the ITCM cost 340 bytes of flash over the image without it. Without
+	  NOKEEP, which the linker script otherwise forces off, the cost was 1,532.
+
 config WZ_OS
 	bool "The kernel answers the engine's operating system (wz_os_*)"
 	select DYNAMIC_THREAD

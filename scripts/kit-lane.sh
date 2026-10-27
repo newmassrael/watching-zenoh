@@ -525,7 +525,18 @@ start_and_reset() {
     local ready_before
     ready_before="$(count_lines "$READY_TAG")"
     GETTER_BEFORE="$(count_lines 'ZEPHYR-WZ-GET done')"
-    if timeout 60 "$KIT_PROGTOOLS/openocd/bin/openocd" -s "$KIT_PROGTOOLS/openocd/scripts" \
+    if [[ -n "${KIT_PROFILE_OUT:-}" ]]; then
+        # A profile run: the debugger that resets the kit stays attached and samples the program counter
+        # of the M7_0 core (DWT_PCSR) for as long as the probe of `hold_the_run` is asking, so the
+        # functions the GET path runs through can be counted (scripts/lib/pc_profile.py). The tool
+        # perturbs the run (the row of the budget is not held to it), so a profile is never a verdict.
+        PROFILE_FLAG="$OUT/profile.go" PROFILE_OUT="$KIT_PROFILE_OUT" \
+            setsid "$KIT_PROGTOOLS/openocd/bin/openocd" -s "$KIT_PROGTOOLS/openocd/scripts" \
+            -f interface/kitprog3.cfg -f target/infineon/cyt4bf.cfg \
+            -f "$ROOT/scripts/lib/pc_sample.tcl" >"$OUT/reset.log" 2>&1 </dev/null &
+        PIDS+=("$!")
+        ok "$key" "the kit was reset and is sampled while the probe asks ($OUT/reset.log -> $KIT_PROFILE_OUT)"
+    elif timeout 60 "$KIT_PROGTOOLS/openocd/bin/openocd" -s "$KIT_PROGTOOLS/openocd/scripts" \
         -f interface/kitprog3.cfg -f target/infineon/cyt4bf.cfg -c "init" -c "reset run" -c "shutdown" \
         >"$OUT/reset.log" 2>&1; then
         ok "$key" "the kit was reset ($OUT/reset.log)"
@@ -558,7 +569,13 @@ hold_the_run() {
     local results=() node_id
     node_id="$(ready_node_id)"
     if [[ "$KIND" == answer || "$KIND" == verify ]]; then
-        if python3 -I "$ROOT/scripts/lib/kit_rest_probe.py" "$REST_PORT" "$node_id" "$OUT/rest.json" 2000 >"$OUT/probe.log" 2>&1; then
+        local asks=2000
+        if [[ -n "${KIT_PROFILE_OUT:-}" ]]; then
+            asks="${KIT_PROFILE_QUERIES:-20000}"
+            : >"$OUT/profile.go"
+        fi
+        if python3 -I "$ROOT/scripts/lib/kit_rest_probe.py" "$REST_PORT" "$node_id" "$OUT/rest.json" "$asks" >"$OUT/probe.log" 2>&1; then
+            rm -f "$OUT/profile.go"
             ok "$key" "the host asked the kit's two documents 2,000 times each ($OUT/probe.log)"
             results=(--result "$OUT/rest.json")
         else

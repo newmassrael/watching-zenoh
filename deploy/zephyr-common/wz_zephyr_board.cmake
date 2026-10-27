@@ -196,6 +196,26 @@ function(wz_zephyr_rust_app)
   endif()
 endfunction()
 
+# CONFIG_WZ_POLL_PATH_IN_ITCM: the files a receive thread that polls without sleeping spends its time
+# in, linked into the ITCM (see the symbol's help for the profile that names them). Whole files, as
+# Zephyr's relocation takes them; the driver's own file is the app's, so it is named by its path in
+# the app's source tree.
+if(CONFIG_WZ_POLL_PATH_IN_ITCM)
+  zephyr_code_relocate(
+    FILES
+      ${ZEPHYR_BASE}/kernel/mutex.c
+      ${ZEPHYR_BASE}/kernel/timeout.c
+      ${ZEPHYR_BASE}/kernel/sched.c
+      ${ZEPHYR_BASE}/kernel/scheduler.c
+      ${ZEPHYR_BASE}/arch/arm/core/mpu/arm_core_mpu.c
+      ${ZEPHYR_BASE}/drivers/timer/cortex_m_systick.c
+    LOCATION ITCM_TEXT
+    # Without it the linker script keeps every function of these files, the unused ones too:
+    # measured, the image grew by 1,532 bytes for it.
+    NOKEEP
+  )
+endif()
+
 # CONFIG_WZ_MEMORY_REPORT: the kernel heap's peak and every thread's stack, said the same way by
 # every image a compare run holds to another, whatever its program (wz_memory_report.c). It is
 # not a Rust image's alone, so it is added here and not in wz_zephyr_rust_app.

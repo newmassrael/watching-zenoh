@@ -267,6 +267,10 @@ IMAGES = (
     # carries `chain_misses` once more and the chain is not a bound on this image. The path that
     # sets the reading is not the one the pin shortened, and the reader cannot follow it; it was
     # not identified.
+    #
+    # 6,492 bytes in the build that writes the numbers and the console lines without `core::fmt`
+    # (the zid hex and the locator through `TextOut`, the lines as `LogPart`s): the chain fell 32
+    # bytes and the kit's reading, 6,600, fell 48.
     Image(
         key="zephyr-client-fixed-get",
         elf=None,
@@ -274,7 +278,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=6524,
+        peak=6492,
     ),
     # The fixed client over the secure channel (`overlays/t2g_client_tls.conf`, decision D9):
     # the dial completes a TLS 1.3 handshake in Mbed TLS before the session sees a byte, and every
