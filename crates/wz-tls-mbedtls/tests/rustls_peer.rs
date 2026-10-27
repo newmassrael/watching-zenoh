@@ -191,10 +191,36 @@ fn a_router_that_pins_another_certificate_refuses_the_device() {
     let stranger = RouterIdentity::generate();
     let (port, served) = listen(router_config(&router, stranger.cert.der()));
 
-    assert!(matches!(
-        dial(device).dial(LOOPBACK, port),
-        Err(LinkOpenError::Refused)
-    ));
+    // TLS 1.3 completes the CLIENT's handshake once it has sent its Finished, and the router's
+    // verdict on the client's certificate follows it: the refusal reaches the device before the dial
+    // returns (the dial is refused) or just after (the dial returns and the session ends at its
+    // first read). Which of the two it sees depends on the scheduling of the two ends, so the test
+    // holds what does not: the device is never left with a session that carries data.
+    match dial(device).dial(LOOPBACK, port) {
+        Err(error) => assert!(
+            matches!(error, LinkOpenError::Refused),
+            "the dial of a refused device fails as a refusal"
+        ),
+        Ok(stream) => {
+            let mut buf = [0u8; 16];
+            let mut ended = false;
+            for _ in 0..100 {
+                stream.wait_readable(100);
+                match stream.try_read(&mut buf) {
+                    Ok(Some(0)) | Err(_) => {
+                        ended = true;
+                        break;
+                    }
+                    Ok(Some(_)) => panic!("data from a router that refused the device"),
+                    Ok(None) => {}
+                }
+            }
+            assert!(
+                ended,
+                "the session of a device the router refused ends at its first read"
+            );
+        }
+    }
     assert!(
         served.join().expect("the router's thread").is_err(),
         "the router refused the handshake"
