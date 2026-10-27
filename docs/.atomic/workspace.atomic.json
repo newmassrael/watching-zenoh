@@ -292800,6 +292800,38 @@
         "Step C leaves: the fixed in-band query does not serve close, reset and status keys, so no Zephyr image has the verbs; step D splits lifecycle-verbs into one capability per verb and writes the capability document; who may close, reset and read the status of a fixed image is the image owner's and none does by default. The tls client image's worst chain rose 168 bytes at the slot node's latest-sample commit and more after it, not isolated. The four-in-flight stack peak of the asking client was not re-measured. The hosted runs holding rounds 3697, 3715 and 3749 were not read."
       ]
     },
+    "Round 3765": {
+      "decision_summary": "Open-debt item 824 is closed. The claim was that the routing-router atom did not carry the pin's router: a star concentrator announced the Peer value, and the feature layering ran backwards. Steps 2 and 3 landed in round 2886 (the router run-mode is the router hat; routing-router pulls the hat). Step 4, the disposition of the star forwarder, was done by round 2912, which deleted it and its route table; routing-routes now gates no code of its own. Step 5 was measured: routing-failover, routing-static-routes and scouting-gossip gate no code, and the three presets that carry them all carry routing-router already, so no preset got heavier. The atom stays PARTIAL for item 751 step 8, not for this item. The facade's comment on routing-routes still described the retired forwarder; it is corrected. No hosted run holds a verdict for this head.",
+      "changes_bullets": [
+        "crates/wz/Cargo.toml: the comment above routing-routes now says R2912 retired the single-hop forwarder and that the atom gates no code of its own. No feature edge or code changed. The debt register marks item 824 closed at this round."
+      ],
+      "verification_bullets": [
+        "On the build host with the demo built at --features routing-routes: wz_router_multi_peer ran 1 test, 1 passed; wz_router_forward ran 2 tests, 2 passed (--ignored, 0 filtered out). Read from the tree: no cfg in any crate gates on routing-failover, routing-static-routes or scouting-gossip, and preset-ap-router, preset-ap-full and preset-zenoh-cpp each list routing-router beside them. reason_review_pin_gate OK, prose_feature_gate --check OK, debt_plane_census passes after the register edit."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "carry_forward_bullets": [
+        "Item 751 step 8 is what keeps routing-router PARTIAL: the router's peer region still keeps a second link-state net where the pin's router hat keeps one.",
+        "The five foreign lanes of the router E2E (pico, zenohd, the zenoh examples) have no hosted verdict in this item's history; read the first completed run that holds this round and re-open 824 if one is red because of the router run-mode.",
+        "Comments in scripts/run-ci.sh at Layers E3 and E5 still describe a NoOpForwarder and a RouteTable that no longer exist; they were not touched."
+      ],
+      "publishable_decision_summary": "Open-debt item 824 is closed. The claim was that the routing-router atom did not carry the pin's router: a star concentrator announced the Peer value, and the feature layering ran backwards. Steps 2 and 3 landed in round 2886 (the router run-mode is the router hat; routing-router pulls the hat). Step 4, the disposition of the star forwarder, was done by round 2912, which deleted it and its route table; routing-routes now gates no code of its own. Step 5 was measured: routing-failover, routing-static-routes and scouting-gossip gate no code, and the three presets that carry them all carry routing-router already, so no preset got heavier. The atom stays PARTIAL for item 751 step 8, not for this item. The facade's comment on routing-routes still described the retired forwarder; it is corrected. No hosted run holds a verdict for this head.",
+      "publishable_changes_bullets": [
+        "crates/wz/Cargo.toml: the comment above routing-routes now says R2912 retired the single-hop forwarder and that the atom gates no code of its own. No feature edge or code changed. The debt register marks item 824 closed at this round."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host with the demo built at --features routing-routes: wz_router_multi_peer ran 1 test, 1 passed; wz_router_forward ran 2 tests, 2 passed (--ignored, 0 filtered out). Read from the tree: no cfg in any crate gates on routing-failover, routing-static-routes or scouting-gossip, and preset-ap-router, preset-ap-full and preset-zenoh-cpp each list routing-router beside them. reason_review_pin_gate OK, prose_feature_gate --check OK, debt_plane_census passes after the register edit."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Item 751 step 8 is what keeps routing-router PARTIAL: the router's peer region still keeps a second link-state net where the pin's router hat keeps one.",
+        "The five foreign lanes of the router E2E (pico, zenohd, the zenoh examples) have no hosted verdict in this item's history; read the first completed run that holds this round and re-open 824 if one is red because of the router run-mode.",
+        "Comments in scripts/run-ci.sh at Layers E3 and E5 still describe a NoOpForwarder and a RouteTable that no longer exist; they were not touched."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
