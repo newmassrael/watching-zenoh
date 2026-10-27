@@ -353,12 +353,16 @@ CASES: tuple[Case, ...] = (
               "3,790,610 without it"),
     Case("capic-client", "wz-capi-c", "libwz_capi_c.so", "", 3_000_000,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST)),
-    Case("capic-client-small", "wz-capi-c", "libwz_capi_c.so", "", 1_847_000,
+    Case("capic-client-small", "wz-capi-c", "libwz_capi_c.so", "", 1_883_000,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
          profile="capi-small",
          note="the capic-client build with panics aborting: 1,797,992 measured against "
               "capic-client's 2,172,515 (-17.2%). 1,839,572 on hosted CI on 2026-10-27 (head "
-              "`f4bdeaee5`), over the earlier budget of 1,834,000 by 5,572"),
+              "`f4bdeaee5`), over the earlier budget of 1,834,000 by 5,572. 1,875,160 on hosted "
+              "CI (run 40482567212, head `36f037a6b`) and 1,874,448 on pc2: +35,588 over "
+              "`f4bdeaee5` while no pico lane moved, so it is the C ABI's own growth in "
+              "between (the accept bounds, `dc42cd9a7`, and the lifecycle verbs served on the "
+              "fixed node, `c0e98be2d` to `bcb8c1c57`) and not a build that changed"),
     Case("capic-scout", "wz-capi-c", "libwz_capi_c.so", "scout", 3_275_000,
          forbid=(ACCEPT, RESPONDER, GOSSIP, CLOCK, ADVANCED, MULTICAST),
          require=(SCOUTING, UDP)),
