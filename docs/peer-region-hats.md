@@ -362,6 +362,21 @@ peer graded against it by `the_region_hat_peer_answers_interests_and_tokens_as_t
   remote interest. `LinkstateForwarder`'s token plane is partial and does not,
   across one node or across three links (the network gate allows the same one
   difference and requires it to occur).
+- **A client's token interest is brokered to the peers, with
+  `routing-interest-pending-gc`.** The peer's token table does not hold the mesh
+  tier (`dump_interest_tokens`), so `LinkstateForwarder` asks its peers as well as
+  its gateways, answers the client with the tokens it holds, owes the final until
+  the peers have answered, and withdraws the copy when the client ends its
+  interest. The pin's peer hat holds the mesh tier and sends a current-and-future
+  interest on only to the faces whose remote bound is south
+  (`zenoh/src/net/routing/hat/peer/interests.rs` @ `.filter(|f| f.remote_bound.is_south())`),
+  which a peer of this node is not, so the region-hat peer closes the interest at
+  once and carries nothing. What the client receives is the same but for the
+  final's place; the nodes carry more to get there. This reason exists only in a
+  build with both `routing-token-tables` and `routing-interest-pending-gc`: the
+  gates were red on hosted CI in the one build that has both (the 83-feature leg
+  of Layer C1bnl) and green in the two builds the previous step ran. Both gates
+  allow it there and require it to occur, and in no other build.
 
 No defect was found in the region-hat peer in this step, and no forwarder code
 changed.
