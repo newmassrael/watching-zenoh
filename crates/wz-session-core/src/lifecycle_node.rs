@@ -101,6 +101,15 @@ pub enum Generation {
 /// of generations live with the host, which this crate cannot name. Each method is one effect or
 /// one read, and none checks a permit or spells a zid: that is the function's, written once.
 pub trait LifecycleNode {
+    /// Whether the node has `verb` at all: whether the build compiled it in. A verb the node does
+    /// not bind is served by no transport and listed in no capability document, and a node that
+    /// does not bind a verb permits none of it ([`Self::permits`]), so it is refused by name if it
+    /// is asked anyway. Not a permit: a node that binds a verb still refuses a caller it does not
+    /// permit.
+    fn binds(&self, _verb: Verb) -> bool {
+        true
+    }
+
     /// Whether the node permits `verb`. Asked first, so a node that does not permit it is never
     /// asked anything else.
     fn permits(&self, verb: Verb) -> bool;

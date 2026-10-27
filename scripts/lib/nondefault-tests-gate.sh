@@ -827,6 +827,9 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         codec-push,\
         codec-response,\
         codec-response-final,\
+        lifecycle-close,\
+        lifecycle-reset,\
+        lifecycle-status,\
         lifecycle-verbs,\
         liveliness-token,\
         pubsub-put,\

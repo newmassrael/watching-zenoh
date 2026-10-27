@@ -625,9 +625,10 @@ fn serve_verbs<const BODY: usize, N: wz_session_core::lifecycle_node::LifecycleN
     whatami: &str,
     node: &N,
 ) {
-    use wz_session_core::lifecycle_node::{lifecycle_verdict, Command};
-    use wz_session_core::lifecycle_wire::{write_verbs_json, CLOSE_VERB, RESET_VERB, STATUS_VERB};
-    // The capability document says what the node KNOWS, not whether this caller may use it.
+    use wz_session_core::lifecycle_node::{lifecycle_verdict, Command, Verb};
+    use wz_session_core::lifecycle_wire::{CLOSE_VERB, RESET_VERB, STATUS_VERB};
+    // The capability document says what the node KNOWS, not whether this caller may use it: the
+    // verbs the build compiled in, in the order the heap profile lists them.
     let _ = arena.serve_leg(
         query,
         out,
@@ -635,7 +636,22 @@ fn serve_verbs<const BODY: usize, N: wz_session_core::lifecycle_node::LifecycleN
         whatami,
         VERBS_TAIL,
         AdminLegEncoding::Json,
-        |body| write_verbs_json(body, true),
+        |body| {
+            let mut bound: [&str; 4] = [""; 4];
+            let mut count = 0;
+            for (verb, word) in [
+                (Verb::Close, CLOSE_VERB),
+                (Verb::Reset, RESET_VERB),
+                (Verb::Status, STATUS_VERB),
+                (Verb::Open, OPEN_VERB),
+            ] {
+                if node.binds(verb) {
+                    bound[count] = word;
+                    count += 1;
+                }
+            }
+            write_verb_list(body, &bound[..count]);
+        },
     );
     let key = query.keyexpr();
     let Some(parsed) = VerbKey::parse(key) else {
@@ -645,16 +661,24 @@ fn serve_verbs<const BODY: usize, N: wz_session_core::lifecycle_node::LifecycleN
         return;
     }
     let peer = parsed.peer_zid;
-    let command = match parsed.verb {
-        OPEN_VERB => Command::Open { peer },
-        CLOSE_VERB => Command::Close { peer },
-        RESET_VERB => Command::Reset {
-            peer,
-            generation: parsed.generation.unwrap_or(""),
-        },
-        STATUS_VERB => Command::Status { peer },
+    // A verb the build did not compile in is no query of this node's: nothing is replied, as for a
+    // node that binds no opener.
+    let (verb, command) = match parsed.verb {
+        OPEN_VERB => (Verb::Open, Command::Open { peer }),
+        CLOSE_VERB => (Verb::Close, Command::Close { peer }),
+        RESET_VERB => (
+            Verb::Reset,
+            Command::Reset {
+                peer,
+                generation: parsed.generation.unwrap_or(""),
+            },
+        ),
+        STATUS_VERB => (Verb::Status, Command::Status { peer }),
         _ => return,
     };
+    if !node.binds(verb) {
+        return;
+    }
     // The key's own tail, `session/<verb>/..`: it follows `@/<zid>/<whatami>/`, which the parse has
     // just held to name this node. A reply the arena refuses is counted there; the verb has
     // happened either way, as the heap profile's reply says.

@@ -678,6 +678,14 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 # by an image or a host node that binds the verbs (`host-slot-node
                 # --features control`), never added to by a library caller.
                 "lifecycle-verbs",
+                # The verbs that machinery serves, each a capability of the build: `reset` gates
+                # `NodeDesk::take_generation` and `ConnectManager::reset_node` (and the record of
+                # generations), `status` gates `NodeDesk::read_machines` and the test seam,
+                # selected by an image that binds the verb and never added to by a library
+                # caller. `close` gates no item, only the bodies of `NodeDesk` and the manager's
+                # tick through `cfg!`, so the census has nothing of it to grade.
+                "lifecycle-reset",
+                "lifecycle-status",
                 "session-slot",
                 "test-support",
                 "transport-multicast",
@@ -1141,6 +1149,8 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
             "codec-response",
             "codec-response-final",
             "dial",
+            "lifecycle-reset",
+            "lifecycle-status",
             "lifecycle-verbs",
             "liveliness-token",
             "query-get",

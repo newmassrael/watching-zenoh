@@ -1268,9 +1268,9 @@ being skipped. The rows:
 3. Step C (built in part, 6.8): the fixed-memory store gains the typed
    requests, the link mirror and the generation record; the control port
    gains the commands; the rows run on the fixed node and on the process.
-4. Step D (built in part, 6.9): the fixed in-band query serves the verbs
-   (`Verbs`), and the capability document lists them. The capability per
-   verb is not built: one feature binds all three.
+4. Step D (built, 6.9 and 6.10): the fixed in-band query serves the verbs
+   (`Verbs`), the capability document lists the ones bound, and each verb is
+   a capability of the build.
 
 ### 6.5 Decisions (owner, 2026-10-26)
 
@@ -1451,8 +1451,35 @@ carries none of its code.
   peer with nothing held twice, with room in the record and with it full.
   Both patterns and the capability document have tests of their own.
 
-Not built: the capability per verb. `lifecycle-verbs` is one feature and
-`Verbs` lists all four; an image that wants only `status` would need the
-split of the store's flags and the permit by verb. No Zephyr image binds
-`Verbs` yet, and who may close, reset and read the status of a fixed image
-is still the image owner's.
+### 6.10 Step D, the capability per verb
+
+A verb is a capability of the build (`docs/build-configuration.md` C2): an image
+takes the ones it needs and pays for those. `lifecycle-close`,
+`lifecycle-reset` and `lifecycle-status` each turn on `lifecycle-verbs`, which
+is the machinery they share (the store's entries for requests made outside
+the loop, the mirror of each node's links, `NodeDesk`, `StoreNode`,
+`LifecyclePermits`) and binds no verb by itself; a build names the verbs and
+not it. What each gates:
+
+- `reset`: the record of generations, `NodeDesk::take_generation` (without
+  it a node has no place for any, `NoRoom`) and `ConnectManager::reset_node`.
+- `status`: the mirror of each machine's state, `NodeDesk::read_machines` and
+  the links read.
+- `close`: the withdrawal and the reopen, and the manager's carrying out of a
+  close. A close and a reset share the ordering of sessions closed, so
+  either turns it on.
+
+`LifecycleNode` gains `binds(verb)`: whether the build compiled the verb in.
+`StoreNode` answers it from the features, and it permits only what it binds. A
+transport serves only the bound verbs: the in-band query lists exactly them in
+the capability document and gives a key of an unbound verb no reply, as for a
+node with no opener; the function refuses an unbound verb it is asked anyway
+by its own name. Held by tests that run for any subset (`binding` in
+`admin_open_query`), and by a compile and clippy check of all nine subsets
+(none, the machinery alone, each verb, each pair, all three).
+
+Not built: a Zephyr image that binds `Verbs`, and who may close, reset and read
+the status of a fixed image, which is still the image owner's. The cost of
+binding one verb alone, against all three, is not measured, since no image
+binds any: the next image that does should record its chain and flash for the
+verbs it takes.

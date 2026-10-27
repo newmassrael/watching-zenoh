@@ -51,15 +51,27 @@ alloc = [
 # crate that wants a stack-neutral peer. Never in a production build.
 test-support = ["wz-session-core/lifecycle-contract"]
 
-# lifecycle-verbs -- the fixed-memory node serves close, reset and status beside open (decision D7 of
-# docs/session-lifecycle-intent.md, step 8): the store keeps the typed requests, the node's links and
-# the state of its machines and the record of generations, the manager carries a close or a reset out
-# at its next tick, and `StoreNode` is the node `lifecycle_verdict` decides on. Off, which every image
-# is until it binds a verb, none of that is compiled and the manager is what it was: the unbound
-# image keeps its flash and the stack of its tick (measured: +352 bytes of chain and +1,988 of flash
-# on the Zephyr client when this code was not gated). One feature for the three verbs; a build that
-# wants one of them alone splits it in step D.
+# The fixed-memory node serves close, reset and status beside open (decision D7 of
+# docs/session-lifecycle-intent.md, step 8). Off, which every image is until it binds a verb, none of
+# it is compiled and the manager is what it was: the unbound image keeps its flash and the stack of
+# its tick (measured: +352 bytes of chain and +1,988 of flash on the Zephyr client when this code was
+# not gated). A verb is a capability of the build (docs/build-configuration.md C2): an image takes the
+# ones it needs and pays for those.
+#
+# lifecycle-verbs -- the machinery the verbs share, which each verb below turns on and which binds no
+# verb by itself: the store's entries for requests made outside the loop, the mirror of each node's
+# links, `NodeDesk`, `StoreNode` and `LifecyclePermits`. A build names the verbs and not this.
 lifecycle-verbs = ["wz-session-core/storage-profile"]
+# lifecycle-close -- `close`: the node leaves the intent, its session is hung up, and it is dialled
+# no more; an open after it is taken again once it has run.
+lifecycle-close = ["lifecycle-verbs"]
+# lifecycle-reset -- `reset <generation>`: the session is ended once per generation and the intent is
+# kept, so the machine dials again; the record of generations (the size of the room, never evicting)
+# and `ConnectManager::reset_node`.
+lifecycle-reset = ["lifecycle-verbs"]
+# lifecycle-status -- `status`: the links of the node and the state of its machine, mirrored at each
+# tick and read without the loop.
+lifecycle-status = ["lifecycle-verbs"]
 
 # Fixed-memory step S5 — the shell on the per-session slot profile
 # (`wz-runtime-coop`'s `session-slot`). The application layer is generic over the

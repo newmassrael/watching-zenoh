@@ -345,10 +345,128 @@ fn the_in_band_query_conforms_to_the_contract_every_transport_is_held_to() {
     }
 }
 
+/// What a node binds of the verbs is what its build names (decision D7; a verb is a capability of
+/// the build): this holds for any subset of `lifecycle-close`, `lifecycle-reset` and
+/// `lifecycle-status`, so a build of one verb runs it too. The capability document lists the verbs
+/// bound and no other, a key of a verb not bound gets no reply, and the function refuses an unbound
+/// verb by its own name and orders nothing.
+#[cfg(all(feature = "lifecycle-verbs", feature = "test-support"))]
+mod binding {
+    use super::*;
+    use wz_session_core::lifecycle_node::{lifecycle_verdict, Command, LifecycleNode, Verb};
+    use wz_session_core::text_out::FixedText;
+    use wz_session_mcu::admin_fixed::Verbs;
+    use wz_session_mcu::connect_manager::{LifecyclePermits, PeerStore, StoreNode};
+
+    /// Every verb is permitted, so that a refusal is for want of a binding and for nothing else.
+    struct Yes;
+
+    impl LifecyclePermits for Yes {
+        fn permits(&self, _verb: Verb) -> bool {
+            true
+        }
+    }
+
+    const BOUND: [(Verb, &str, bool); 4] = [
+        (Verb::Close, "close", cfg!(feature = "lifecycle-close")),
+        (Verb::Reset, "reset", cfg!(feature = "lifecycle-reset")),
+        (Verb::Status, "status", cfg!(feature = "lifecycle-status")),
+        (Verb::Open, "open", true),
+    ];
+
+    fn node() -> &'static Verbs<StoreNode<Yes>> {
+        let store: &'static PeerStore = Box::leak(Box::new(PeerStore::new()));
+        Box::leak(Box::new(Verbs(StoreNode::new(store, Yes))))
+    }
+
+    #[test]
+    fn a_node_binds_exactly_the_verbs_its_build_names_and_refuses_the_rest_by_name() {
+        let node = &node().0;
+        for (verb, name, bound) in BOUND {
+            assert_eq!(node.binds(verb), bound, "{name}");
+            assert_eq!(
+                node.permits(verb),
+                bound,
+                "{name}: a bound verb is permitted by Yes"
+            );
+        }
+        let refused = |reason: RefusedReason| {
+            format!(
+                "{{\"verdict\":\"refused\",\"reason\":\"{}\"}}",
+                reason.words()
+            )
+        };
+        for (command, bound, reason) in [
+            (
+                Command::Close { peer: "1f" },
+                cfg!(feature = "lifecycle-close"),
+                RefusedReason::NotPermitted,
+            ),
+            (
+                Command::Reset {
+                    peer: "1f",
+                    generation: "1",
+                },
+                cfg!(feature = "lifecycle-reset"),
+                RefusedReason::ResetNotPermitted,
+            ),
+            (
+                Command::Status { peer: "1f" },
+                cfg!(feature = "lifecycle-status"),
+                RefusedReason::StatusNotPermitted,
+            ),
+        ] {
+            let mut out = FixedText::<256>::new();
+            lifecycle_verdict(node, command, &mut out);
+            assert_eq!(
+                out.prefix() == refused(reason),
+                !bound,
+                "{command:?}: {}",
+                out.prefix()
+            );
+        }
+    }
+
+    #[test]
+    fn the_capability_document_lists_exactly_the_bound_verbs_and_an_unbound_verb_gets_no_reply() {
+        let node = node();
+        let key = "@/a1b2/peer/session/verbs";
+        let names: Vec<String> = BOUND
+            .iter()
+            .filter(|(_, _, bound)| *bound)
+            .map(|(_, name, _)| format!("\"{name}\""))
+            .collect();
+        let (replies, allocations) = ask(node, key);
+        assert_eq!(allocations, 0);
+        assert_eq!(
+            replies,
+            vec![(
+                key.to_string(),
+                format!("{{\"verbs\":[{}]}}", names.join(","))
+            )]
+        );
+
+        for (_, name, bound) in BOUND {
+            let key = match name {
+                "reset" => "@/a1b2/peer/session/reset/1/1f".to_string(),
+                other => format!("@/a1b2/peer/session/{other}/1f"),
+            };
+            let (replies, _) = ask(node, &key);
+            let answered = replies.iter().any(|(reply_key, _)| *reply_key == key);
+            assert_eq!(answered, bound, "{name}");
+        }
+    }
+}
+
 /// The node that binds all four verbs in band (`lifecycle-verbs`), over a store of its own: the
 /// table of `close`, `reset` and `status` that every transport is held to (decision D7), asked as
 /// GETs on the node's own keys, each with the heap not touched.
-#[cfg(all(feature = "lifecycle-verbs", feature = "test-support"))]
+#[cfg(all(
+    feature = "lifecycle-close",
+    feature = "lifecycle-reset",
+    feature = "lifecycle-status",
+    feature = "test-support"
+))]
 mod verbs {
     use super::*;
     use std::sync::atomic::AtomicU32;

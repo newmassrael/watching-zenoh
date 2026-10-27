@@ -400,6 +400,10 @@ impl NodeDesk {
     /// Take the node out of the intent: it is dialled no more once the manager's next tick has
     /// hung its session up. A node the node does not know is nothing to take it out of.
     pub fn withdraw(&self, zid: &DirectoryZid) {
+        // Only a close takes a node out of the intent; a build without it never reaches this.
+        if !cfg!(feature = "lifecycle-close") {
+            return;
+        }
         self.store.with(|t| {
             if let Some(p) = t.pending_of_known(zid) {
                 p.withdraw = true;
@@ -412,6 +416,13 @@ impl NodeDesk {
     /// session already ordered closed (by a close or a reset not yet carried out) is counted as
     /// that, so asking again says so.
     pub fn order_close(&self, zid: &DirectoryZid) -> CloseOrder {
+        // A close and a reset order sessions closed; a build with neither orders nothing.
+        if !cfg!(any(
+            feature = "lifecycle-close",
+            feature = "lifecycle-reset"
+        )) {
+            return CloseOrder::default();
+        }
         self.store.with(|t| {
             let links = t.held_node(zid).map_or(0, |node| node.links);
             let Some(p) = t.pending_of_known(zid) else {
@@ -432,7 +443,15 @@ impl NodeDesk {
         })
     }
 
+    /// Take `generation` as the latest of the peer `zid`, unless one as late was taken. A build
+    /// without `reset` keeps no record, so it has no place for any.
+    #[cfg(not(feature = "lifecycle-reset"))]
+    pub fn take_generation(&self, _zid: &DirectoryZid, _generation: u64) -> Generation {
+        Generation::NoRoom
+    }
+
     /// Take `generation` as the latest of the peer `zid`, unless one as late was taken.
+    #[cfg(feature = "lifecycle-reset")]
     pub fn take_generation(&self, zid: &DirectoryZid, generation: u64) -> Generation {
         self.store.with(|t| {
             if let Some(entry) = t.generations.iter_mut().find(|(peer, _)| peer == zid) {
@@ -451,6 +470,9 @@ impl NodeDesk {
 
     /// The links of the node `zid`, by whether a close was ordered for them.
     pub fn links(&self, zid: &DirectoryZid) -> SessionLinks {
+        if !cfg!(feature = "lifecycle-status") {
+            return SessionLinks::default();
+        }
         self.store.with(|t| {
             let links = t.held_node(zid).map_or(0, |node| node.links);
             let closing = t.pending_at(zid).is_some_and(|at| t.requests[at].closing);
@@ -469,7 +491,16 @@ impl NodeDesk {
     }
 
     /// Lend `read` the machine of the node `zid` if the node holds it in its intent: one row, or
+    /// none for a node it does not hold or one a close has taken out of the intent. A build
+    /// without `status` mirrors no state, so it lends none.
+    #[cfg(not(feature = "lifecycle-status"))]
+    pub fn read_machines(&self, _zid: &DirectoryZid, read: &mut dyn FnMut(&[MachineReport<'_>])) {
+        read(&[]);
+    }
+
+    /// Lend `read` the machine of the node `zid` if the node holds it in its intent: one row, or
     /// none for a node it does not hold or one a close has taken out of the intent.
+    #[cfg(feature = "lifecycle-status")]
     pub fn read_machines(&self, zid: &DirectoryZid, read: &mut dyn FnMut(&[MachineReport<'_>])) {
         let row = self.store.with(|t| {
             let leaving = t.pending_at(zid).is_some_and(|at| t.requests[at].withdraw);
@@ -523,8 +554,19 @@ impl<P: LifecyclePermits> StoreNode<P> {
 
 #[cfg(feature = "lifecycle-verbs")]
 impl<P: LifecyclePermits> LifecycleNode for StoreNode<P> {
+    /// The verbs the build compiled in: `open` whenever the machinery is, and each of the others
+    /// by its own feature.
+    fn binds(&self, verb: Verb) -> bool {
+        match verb {
+            Verb::Open => true,
+            Verb::Close => cfg!(feature = "lifecycle-close"),
+            Verb::Reset => cfg!(feature = "lifecycle-reset"),
+            Verb::Status => cfg!(feature = "lifecycle-status"),
+        }
+    }
+
     fn permits(&self, verb: Verb) -> bool {
-        self.permits.permits(verb)
+        self.binds(verb) && self.permits.permits(verb)
     }
 
     fn open(&self, peer: &Zid) -> OpenOutcome {
@@ -680,7 +722,7 @@ struct Tables {
     /// was built with. It never grows past that and never evicts, since evicting a peer's entry
     /// would let a retransmission of its reset close the session once more: a peer with no entry
     /// and no place for one is refused, and the sender learns why (`Generation::NoRoom`).
-    #[cfg(feature = "lifecycle-verbs")]
+    #[cfg(feature = "lifecycle-reset")]
     generations: FixedVec<(DirectoryZid, u64), MAX_PEER_NODES>,
     /// Whether the manager's dialer holds a session to the node it dials for
     /// ([`Dialer::VERIFIES_NODES`]), written when the manager is made. `false` before: a store
@@ -707,7 +749,7 @@ struct HeldNode {
     #[cfg(feature = "lifecycle-verbs")]
     links: u32,
     /// The state of the node's machine, as of the manager's last tick.
-    #[cfg(feature = "lifecycle-verbs")]
+    #[cfg(feature = "lifecycle-status")]
     state: PeerConnectionState,
 }
 
@@ -847,7 +889,7 @@ impl PeerStore {
                 now_ms: 0,
                 held: FixedVec::new(),
                 requests: FixedVec::new(),
-                #[cfg(feature = "lifecycle-verbs")]
+                #[cfg(feature = "lifecycle-reset")]
                 generations: FixedVec::new(),
                 verifies_nodes: false,
                 classify: None,
@@ -861,7 +903,7 @@ impl PeerStore {
     }
 }
 
-#[cfg(all(feature = "lifecycle-verbs", feature = "test-support"))]
+#[cfg(all(feature = "lifecycle-status", feature = "test-support"))]
 impl PeerStore {
     /// Put a node in the mirror the way the manager's tick leaves it, with `links` sessions and its
     /// machine in `state`: the world an adapter of the conformance table puts the store in without a
@@ -1270,7 +1312,8 @@ impl<D: Dialer> ConnectManager<D> {
             let Some(asked) = next else {
                 return;
             };
-            if asked.withdraw {
+            // Only a close sets `withdraw`, and only a reset sets `closing` without it.
+            if cfg!(feature = "lifecycle-close") && asked.withdraw {
                 self.close_node(&asked.zid, now_ms);
                 if asked.reopen {
                     let _ = self.open_node(asked.zid, now_ms);
@@ -1280,6 +1323,7 @@ impl<D: Dialer> ConnectManager<D> {
             if asked.open {
                 let _ = self.open_node(asked.zid, now_ms);
             }
+            #[cfg(feature = "lifecycle-reset")]
             if asked.closing {
                 self.reset_node(&asked.zid, now_ms);
             }
@@ -1311,6 +1355,7 @@ impl<D: Dialer> ConnectManager<D> {
                     let node = HeldNode {
                         zid: *zid,
                         links: u32::from(row.held.is_some()),
+                        #[cfg(feature = "lifecycle-status")]
                         state: t
                             .planner
                             .state(&row.key)
@@ -1424,7 +1469,7 @@ impl<D: Dialer> ConnectManager<D> {
     /// End the session the node `zid` holds and keep the node in the intent (decision D6: a
     /// lifecycle `reset`): its machine is told the dial was lost, and dials again after its wait.
     /// A node with no session is unchanged.
-    #[cfg(feature = "lifecycle-verbs")]
+    #[cfg(feature = "lifecycle-reset")]
     pub fn reset_node(&mut self, zid: &DirectoryZid, now_ms: u64) {
         let key = Key::Node(*zid);
         if let Some(held) = self.row_mut(&key).and_then(|row| row.held.take()) {
@@ -2578,8 +2623,12 @@ mod tests {
         std::assert_eq!(m.dialer().dials_for.borrow().len(), 2);
     }
 
-    /// The tests of the verbs the fixed node serves, compiled with them (`lifecycle-verbs`).
-    #[cfg(feature = "lifecycle-verbs")]
+    /// The tests of the verbs the fixed node serves, compiled with all three of them.
+    #[cfg(all(
+        feature = "lifecycle-close",
+        feature = "lifecycle-reset",
+        feature = "lifecycle-status"
+    ))]
     mod lifecycle_verbs {
         use super::*;
 
