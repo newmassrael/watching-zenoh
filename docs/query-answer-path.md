@@ -155,12 +155,21 @@ agree to 0.1 us, and kept because it measured better:
 | the plain reply written where it lies (C1's first half) | 0ffca234d | 48.4 | +380 B |
 | the Request's target and QoS in one walk (L1, interim) | 639c1e26f | 46.2 | -40 B |
 | a reply keyed as its query admitted from the facts | 76c5802f3 | 44.0 | +88 B |
+| the plain reply stored in one window of the slot (C1) | 3ad0036ec | 42.0 | +688 B |
 
 Single-threaded pico on the same instrument: 45.6 us. The three gaps of the software round trip,
-fixed against pico: rx to recvfrom 30.4 against 33.1, recvfrom to sendto 44.0 against 45.6, sendto
-to the wire 44.7 against 45.7; rx to tx 119.1 against 124.3. The matrix (run 20261027T224704) reads
-the fixed client's turnaround at the wire 0.2016 ms against pico's 0.2054, ratio 0.981, interval
-0.957 to 1.015: a TIE, where the run before read 1.062, a LOSS.
+fixed against pico: rx to recvfrom 30.4 against 33.1, recvfrom to sendto 42.0 against 45.6, sendto
+to the wire 44.8 against 45.7; rx to tx 117.1 against 124.3. The matrix (run 20261028T005644, twelve
+boots of each image) reads the fixed client's turnaround at the wire 0.1910 ms against pico's
+0.1969, ratio 0.970, interval 0.970 to 0.974: a WIN, where the run before the answer path read
+1.062, a LOSS. The same build at six boots read 0.981 with an interval that held 1 (a TIE): the
+effect was the same and the interval was too wide to say so.
+
+The window path was first written with a second, byte-at-a-time plain writer beside it, for the
+buffers that hand out no window; it read 41.4 us. Taking it out (the generic encoder is the
+fallback, and a vector now hands out a window) read 42.0 us and saved 392 bytes of text, with no
+changed instruction on the path the kit takes: the 0.6 us is where the linker put things, and the
+simpler of the two was kept.
 
 Three things the work found that the design had not said:
 
@@ -174,10 +183,11 @@ Three things the work found that the design had not said:
   nothing the stamps could see beyond 216 bytes of text; the second (`bool::then_some` on a chain
   of eight entries) changed no time at all.
 
-Not done: the encoder is still reached through two layers of dynamic dispatch, one per byte
-written (7.9 us for about a hundred bytes); the Request's decode (9.2 us) is the generated
-codec's; the handler still stages its reply and the drain reads it back. Each is a request to the
-codec generator or the larger change of section 4 (L3), and the order of section 5 stands.
+Not done: the Request's decode (9.2 us) is the generated codec's, and the handler still stages its
+reply and the drain reads it back. The first is a request to the codec generator, which should emit
+a length and a store-in-a-window form of each encoder (what the plain reply does by hand) and a
+fold over a list's entries; the second is the larger change of section 4 (L3). The text of the fixed
+image is 176,352 bytes against pico's 145,364, a LOSS of 1.21 that this work widened by about 2.4 KB.
 
 ## 6. Not decided here
 
