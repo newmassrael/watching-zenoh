@@ -47,6 +47,48 @@ pub trait TextOut: fmt::Write {
     fn push(&mut self, c: char) {
         let _ = self.write_char(c);
     }
+
+    /// Append `n` in decimal, as `{n}` prints it, without going through `core::fmt`: the
+    /// formatting machinery (`Formatter::pad`, `pad_integral`, `fmt::write`) is some 1.6 KB of
+    /// code that an image with no other formatting caller would not carry.
+    fn push_u64(&mut self, n: u64) {
+        let mut digits = [0u8; 20];
+        let mut at = digits.len();
+        let mut rest = n;
+        loop {
+            at -= 1;
+            digits[at] = b'0' + (rest % 10) as u8;
+            rest /= 10;
+            if rest == 0 {
+                break;
+            }
+        }
+        // The bytes are ASCII digits, so they are valid text.
+        if let Ok(text) = core::str::from_utf8(&digits[at..]) {
+            self.push_str(text);
+        }
+    }
+
+    /// Append `n` in lowercase hexadecimal with no leading zeros, as `{n:x}` prints it, without
+    /// going through `core::fmt`.
+    fn push_hex_u128(&mut self, n: u128) {
+        const DIGITS: &[u8; 16] = b"0123456789abcdef";
+        let mut nibbles = [0u8; 32];
+        let mut at = nibbles.len();
+        let mut rest = n;
+        loop {
+            at -= 1;
+            nibbles[at] = DIGITS[(rest & 0xf) as usize];
+            rest >>= 4;
+            if rest == 0 {
+                break;
+            }
+        }
+        // The bytes are ASCII hex digits, so they are valid text.
+        if let Ok(text) = core::str::from_utf8(&nibbles[at..]) {
+            self.push_str(text);
+        }
+    }
 }
 
 #[cfg(feature = "alloc")]
@@ -176,6 +218,37 @@ impl<const N: usize> TextOut for FixedText<N> {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_number_writers_print_what_the_formatter_prints() {
+        for n in [0u64, 1, 9, 10, 99, 100, 65_535, 4_294_967_295, u64::MAX] {
+            let mut t: FixedText<24> = FixedText::new();
+            t.push_u64(n);
+            assert_eq!(
+                t.finish(),
+                Ok(alloc::format!("{n}").as_str()),
+                "decimal {n}"
+            );
+        }
+        for n in [0u128, 1, 0xf, 0x10, 0xabcd, u64::MAX as u128, u128::MAX] {
+            let mut t: FixedText<40> = FixedText::new();
+            t.push_hex_u128(n);
+            assert_eq!(t.finish(), Ok(alloc::format!("{n:x}").as_str()), "hex {n}");
+        }
+    }
+
+    #[test]
+    fn a_number_that_does_not_fit_is_refused_and_counted_like_any_text() {
+        let mut t: FixedText<3> = FixedText::new();
+        t.push_u64(12_345);
+        assert_eq!(
+            t.finish(),
+            Err(Overflow {
+                needed: 5,
+                capacity: 3
+            })
+        );
+    }
 
     #[test]
     fn a_document_that_fits_is_the_text_and_a_document_of_exactly_n_bytes_fits() {

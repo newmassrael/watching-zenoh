@@ -23,7 +23,7 @@
 
 use core::cell::{Cell, OnceCell, RefCell};
 use core::ffi::c_int;
-use core::fmt::{Debug, Write};
+use core::fmt::Debug;
 
 // The heap profile's forms (`Vec`, `HeapTx`) exist only in the heap profile: under `session-slot`
 // the crate does not link `alloc` at all, which `lib.rs` keeps so that a use creeping back into the
@@ -49,6 +49,7 @@ use wz_session_core::link::{
 };
 use wz_session_core::qos::Priority;
 use wz_session_core::reliability::Reliability;
+use wz_session_core::text_out::{FixedText, TextOut};
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::link_storage::HeapTx;
@@ -139,11 +140,20 @@ pub trait DatagramSocket: Sized {
 
 /// `udp/a.b.c.d:port`, zenoh's rendering of a UDP locator, written into fixed text: the longest
 /// one, `udp/255.255.255.255:65535`, is 25 bytes of the [`MAX_LOCATOR_LEN`] the text has.
-fn udp_locator(addr: [u8; 4], port: u16) -> heapless::String<MAX_LOCATOR_LEN> {
-    let [a, b, c, d] = addr;
-    let mut text = heapless::String::new();
-    // Cannot fail: the longest rendering is shorter than the text's capacity.
-    let _ = write!(text, "udp/{a}.{b}.{c}.{d}:{port}");
+///
+/// Written with [`TextOut::push_u64`] and not `write!`, so the link does not pull in `core::fmt`.
+/// The longest rendering is shorter than the text's capacity, so the sink never refuses.
+fn udp_locator(addr: [u8; 4], port: u16) -> FixedText<MAX_LOCATOR_LEN> {
+    let mut text = FixedText::new();
+    text.push_str("udp/");
+    for (at, octet) in addr.into_iter().enumerate() {
+        if at > 0 {
+            text.push('.');
+        }
+        text.push_u64(u64::from(octet));
+    }
+    text.push(':');
+    text.push_u64(u64::from(port));
     text
 }
 
@@ -347,8 +357,8 @@ impl<S: DatagramSocket, B: AsMut<[u8]>, T: TxStore> UdpDriver<S, B, T> {
         if self.endpoints.get().is_none() {
             let (addr, port) = self.socket.local();
             let _ = self.endpoints.set(LinkEndpoints::new(
-                udp_locator(addr, port).as_str(),
-                udp_locator(peer.0, peer.1).as_str(),
+                udp_locator(addr, port).prefix(),
+                udp_locator(peer.0, peer.1).prefix(),
             ));
         }
     }
@@ -697,6 +707,23 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::vec::Vec;
+
+    #[test]
+    fn a_udp_locator_is_what_zenoh_prints_for_it() {
+        for (addr, port) in [
+            ([0, 0, 0, 0], 0),
+            ([10, 0, 0, 1], 7447),
+            ([192, 168, 1, 50], 80),
+            ([255, 255, 255, 255], 65535),
+        ] {
+            let [a, b, c, d] = addr;
+            let text = udp_locator(addr, port);
+            assert_eq!(
+                text.finish(),
+                Ok(std::format!("udp/{a}.{b}.{c}.{d}:{port}").as_str())
+            );
+        }
+    }
 
     /// A datagram the test queues for the driver to receive: its bytes and its source.
     type Datagram = (Vec<u8>, [u8; 4], u16);

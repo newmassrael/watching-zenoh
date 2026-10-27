@@ -577,7 +577,7 @@ impl NodeIdentity {
     /// The zenoh id in its hex form, in fixed text.
     pub fn zid_hex(&self) -> FixedText<33> {
         let mut text: FixedText<33> = FixedText::new();
-        let _ = write_zenoh_hex(self.zid(), &mut text);
+        write_zenoh_hex(self.zid(), &mut text);
         text
     }
 
@@ -1231,7 +1231,7 @@ mod tests {
     fn the_zid_hex_is_zenoh_s_form() {
         let identity = NodeIdentity::new(&[0x01, 0xab], [0u8; SIGNING_KEY_BYTES]).unwrap();
         let mut expected: FixedText<33> = FixedText::new();
-        let _ = write_zenoh_hex(&[0x01, 0xab], &mut expected);
+        write_zenoh_hex(&[0x01, 0xab], &mut expected);
         assert_eq!(identity.zid_hex().prefix(), expected.prefix());
         assert!(!identity.zid_hex().prefix().is_empty());
     }

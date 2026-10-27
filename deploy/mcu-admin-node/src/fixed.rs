@@ -256,7 +256,7 @@ pub fn run() -> ! {
 
     // The zid in the zenoh hex form, in fixed text.
     let mut zid_text: FixedText<33> = FixedText::new();
-    let _ = write_zenoh_hex(&ZID, &mut zid_text);
+    write_zenoh_hex(&ZID, &mut zid_text);
     let zid_hex = zid_text.prefix();
 
     // The application's registrations, on the observer every session of the node

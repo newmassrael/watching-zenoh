@@ -7259,7 +7259,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let mut zid_hex: FixedText<32> = FixedText::new();
         R::with_mutex_mut(&self.remote_peer_zid, |slot| {
             if let Some(zid) = slot.as_deref() {
-                let _ = crate::zid_hex::write_zenoh_hex(zid, &mut zid_hex);
+                crate::zid_hex::write_zenoh_hex(zid, &mut zid_hex);
             }
         });
         let role = self.peer_whatami_wire().and_then(crate::WhatAmI::from_wire);

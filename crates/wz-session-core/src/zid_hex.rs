@@ -12,6 +12,7 @@
 //! zid needs the identical recipe, so it lives here and `storage_replication`
 //! re-exports it (keeping every existing call site + cross-impl test intact).
 
+use crate::text_out::TextOut;
 #[cfg(feature = "alloc")]
 use alloc::string::String;
 #[cfg(feature = "alloc")]
@@ -84,9 +85,13 @@ pub fn zid_to_zenoh_hex(zid: &[u8]) -> String {
 /// The recipe is the one above, `u128` printed as big-endian hex; `{:x}` prints no
 /// leading zeros, which is what stripping the one pad zero of `{:02x}` leaves, so the
 /// two give the same text for every id (`the_writer_prints_what_the_string_form_does`).
-pub fn write_zenoh_hex(zid: &[u8], out: &mut dyn core::fmt::Write) -> core::fmt::Result {
+///
+/// It writes through [`TextOut::push_hex_u128`] and not through `write!`, so the image of a node
+/// that renders no other formatted text does not carry `core::fmt`; a sink that is full records
+/// the refusal itself ([`crate::text_out::FixedText::overflow`]).
+pub fn write_zenoh_hex(zid: &[u8], out: &mut dyn TextOut) {
     let id = u128::from_le_bytes(zid_to_le_array(zid));
-    write!(out, "{id:x}")
+    out.push_hex_u128(id);
 }
 
 /// The inverse of [`zid_to_zenoh_hex`]: parse the lowercase hex back to the
@@ -167,7 +172,7 @@ mod tests {
         zids.push(vec![0x01, 0x00]);
         for zid in zids {
             let mut written = String::new();
-            write_zenoh_hex(&zid, &mut written).expect("a String takes it");
+            write_zenoh_hex(&zid, &mut written);
             assert_eq!(written, zid_to_zenoh_hex(&zid), "{zid:?}");
         }
     }
