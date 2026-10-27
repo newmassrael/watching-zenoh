@@ -1805,9 +1805,36 @@ impl SharedSession {
     /// staged, and its `notify_one` permit is stored either way, so neither
     /// order can lose a delivery; draining first makes the very first poll
     /// deliver instead of waiting for a second event.
+    ///
+    /// ## Queries that wait on the local plane
+    ///
+    /// A get whose leg is the local plane waits on it for as long as the queryable holds the
+    /// query it was handed, and a queryable may hold one past the call that delivered it (the
+    /// Rust API's does). Such a get ends at its deadline like any other, with the timeout reply
+    /// and then its final, and the faces are not there to say when: this arm sweeps the plane's
+    /// own pending table and sleeps until the earliest deadline in it, as a face's drive does for
+    /// its own. A plane with no get pending has no deadline, and sleeps on the wake alone.
     pub async fn drive_local_plane(&self) {
         loop {
             self.drain_local_plane();
+            #[cfg(feature = "query")]
+            {
+                if self.local.sweep_expired_queries_staged() > 0 {
+                    self.drain_local_plane();
+                }
+                if let Some(due) = self.local.next_reply_deadline_ms() {
+                    use wz_runtime_core::TimeSource as _;
+                    let wait = due.saturating_sub(self.local.clock().now_monotonic_ms());
+                    // The wake or the deadline, whichever comes first; a wake that is not the
+                    // deadline sweeps nothing and sleeps again.
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_millis(wait),
+                        self.local_wake.notified(),
+                    )
+                    .await;
+                    continue;
+                }
+            }
             self.local_wake.notified().await;
         }
     }
