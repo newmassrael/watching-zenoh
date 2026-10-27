@@ -215,7 +215,10 @@ infers the same value.
 A busier network's own protocols are in the corpus too, from real
 implementations in containers: DHCP between twelve clients and a server, NTP
 between six clients and a server, LLMNR and WS-Discovery between a file server
-and four askers. No flow of them reads `yes`.
+and four askers. No flow of them reads `yes`. HTTP/1.1 and TLS 1.2 and 1.3
+(34 connections each, python's server and OpenSSL 3) are in too: the reader
+frames no unit of them and loses no framing, so all 68 flows stay `undecided`
+with nothing weighed and the weights do not move.
 
 Still to come for step 2: further zenoh versions and links on the zenoh side.
 

@@ -305,6 +305,13 @@ const EXPECTED: &[(&str, Tally, Tally)] = &[
     ("busylan-dhcp.pcap", (0, 21, 2), (0, 21, 2)),
     ("busylan-ntp.pcap", (0, 0, 94), (0, 0, 94)),
     ("busylan-wsd.pcap", (0, 8, 0), (0, 8, 0)),
+    // Structured TCP, the first stream protocols besides MQTT (2026-10-27):
+    // HTTP/1.1, plain and over TLS 1.2 and 1.3, 34 connections each. The
+    // reader frames no unit of them and loses no framing (neither is weighed),
+    // so all 68 flows are `undecided` with nothing weighed, which is why they
+    // add no count to the weights.
+    ("stack-http.pcap", (0, 0, 34), (0, 0, 34)),
+    ("stack-tls.pcap", (0, 0, 34), (0, 0, 34)),
 ];
 
 #[test]

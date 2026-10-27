@@ -65,10 +65,12 @@ The original captures are not kept anywhere.
 | `busylan-dhcp.pcap` | other | DHCPv4 | dnsmasq 2.90 and twelve udhcpc clients, containers |
 | `busylan-ntp.pcap` | other | NTP | a chrony 4.3 server and six clients, containers |
 | `busylan-wsd.pcap` | other | LLMNR, WS-Discovery | wsdd2 1.8.7 and four askers, containers |
+| `stack-http.pcap` | other | HTTP/1.1 | python 3.12 http.server, keep-alive and short connections, containers |
+| `stack-tls.pcap` | other | TLS 1.2 and 1.3 | the same behind OpenSSL 3, containers |
 
 ## What it does not hold yet
 
-Structured TCP such as HTTP and TLS, and on the zenoh side versions other than
+On the zenoh side versions other than
 1.10.1 and 1.5.0 and links other than loopback, an emulated lossy one and one
 office Wi-Fi link.
 Each is added the same way: captured from the real

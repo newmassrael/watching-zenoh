@@ -388,7 +388,7 @@ pub mod model {
         }
 
         /// The null protocols.
-        pub const NULL: [Member; 11] = [
+        pub const NULL: [Member; 13] = [
             Member {
                 file: "lan-dns.pcap",
                 units: [26, 32, 320],
@@ -442,6 +442,18 @@ pub mod model {
             Member {
                 file: "busylan-wsd.pcap",
                 units: [5, 12, 155],
+                framing: [0, 0],
+            },
+            // No unit framed and no framing lost: a member that shows no
+            // observation of a check is not counted for it.
+            Member {
+                file: "stack-http.pcap",
+                units: [0, 0, 0],
+                framing: [0, 0],
+            },
+            Member {
+                file: "stack-tls.pcap",
+                units: [0, 0, 0],
                 framing: [0, 0],
             },
         ];
