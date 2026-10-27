@@ -1384,7 +1384,7 @@ pub fn encode_responder_ext_body(zid: &[u8], eid: u32) -> Vec<u8> {
 
 /// The responder a `Response` names: the read twin of [`encode_responder_ext_body`], over the
 /// bytes the ZBuf extension carries (`network_eid::RESPONDER`), as upstream reads them
-/// (`commons/zenoh-codec/src/network/mod.rs` @ `for EntityGlobalIdType<{ ID }>`).
+/// (`commons/zenoh-codec/src/network/mod.rs` @ `RCodec<(ext::EntityGlobalIdType<{ ID }>, bool), &mut R>`).
 ///
 /// `None` for a body that is cut short or whose entity id does not fit the 32 bits an entity
 /// id has: a Response whose responder cannot be read is read as one that names none, as
