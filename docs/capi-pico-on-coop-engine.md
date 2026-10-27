@@ -701,10 +701,49 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
   client that goes takes its face and the other goes on. A connection past `max_faces`, one past
   `accept_pending` and one that never speaks are each closed, with a control that the same
   connection is kept inside the bound.
-- **L4. The ABI.** pico's `z_open(listen)` and `mode=peer` on the cooperative engine: the feature
-  `peer` stops selecting the tokio engine. Proof: Layer C1co's legs with the full build's
-  `hold_a_listener` as a client of the cooperative listener, the pico interop against the real
-  zenoh-pico for both roles, and a size-gate case for a cooperative peer.
+- **L4. The ABI. Done.** pico's `z_open(listen)` and `mode=peer` run on the cooperative engine.
+  Each decision of the step:
+  - `peer` selects no engine (`peer = ["scout", "wz-capi-core?/peer", "wz-capi-coop?/listen"]`):
+    the tokio engine accepts what the runtime has and the cooperative engine the `tcp/` links its
+    stack listens on. What only the tokio engine has (a multicast group, `tls/`, `quic/`, `ws/`,
+    serial, gossip) selects it by its own feature, so a build with `peer` and `engine-coop` and
+    none of those is the cooperative peer. A `listen` that names a group is answered as a build
+    without the multicast transport answers it.
+  - `open_on_coop` hands the config's `listen` to the engine, with the handshake bound pico's
+    `Z_TRANSPORT_ACCEPT_TIMEOUT` and the other bounds upstream's, as the tokio open states them.
+    A config with a listen is a peer whatever its `mode`, as pico forces it. A listener is open
+    once it is bound. A config that listens and dials opens on its dial and has a face for each
+    link, and the one face for each remote zid is L5's.
+  - The pico tests that reach the tokio engine's own types (a runtime of their own, a
+    `wz-capi-core` session as the far end) name `engine-tokio` beside `peer`; the rest are the
+    ABI's alone and now run on either engine. On the cooperative one they found what no test of
+    the engine alone had: two sessions of one program, one that sends more than its socket holds
+    and one that listens, **waited on each other for good**. The runtime's host lock was one lock
+    of the process, held through the session's transmit queue while its bytes were written, and
+    a write on a full socket waits for the peer's read task, which needed the same lock. On a host
+    each value the runtime lends the session now has a lock of its own (`HostMutex`, entered and
+    left out of line, as the process section is), so a wait inside one stops what uses that value
+    and nothing else (`cs::tests::a_wait_inside_one_cell_does_not_stop_another_cell_or_the_section`).
+    The runtime's own cells (timers, tasks, joins) do no I/O and stay on the process's section; an
+    MCU image is unchanged. Every cooperative case of the size gate read about 4,000 bytes less.
+  - One test of the oversize put asserted the tokio sender's refusal as if it were the ABI's. A
+    cooperative put of any size returns `Z_OK`, as zenoh-pico's does (its sender fragments a
+    message of any size), so the assertion is the tokio engine's and the session's recovery is
+    both engines'.
+
+  The proof: the pico suite on the cooperative peer (79 tests with the client's planes, 92 with
+  every plane), Layer C1co with a cooperative listener as well as the tokio one (each engine's
+  client, with the answering end and without it, and the advanced plane, against each listener),
+  the size case `pico-peer-coop` (1,057,120 bytes on pc2, 2.54 times the same pico; the gate
+  requires the listening role in it and forbids it in the eight client cases), and the interop
+  against the real zenoh-pico: upstream's own `z_pub`, `z_sub` and `z_get` dial the
+  `hold_a_listener` node of each engine (`wz-integration-tests`'
+  `pico_dials_a_wz_listener`, three tests, in Layer C1co), so the cooperative acceptor's
+  handshake, what it receives and what it publishes and its answer to a query are read by a
+  foreign implementation.
+  Not done: the drop-in legs of Layer E (upstream's C programs compiled against the cooperative
+  cdylib), which run the tokio build, and a foreign pico that LISTENS for a cooperative peer to
+  dial (the dial role is L1 and L2's, held by C1co against the tokio listener).
 - **L5. Both roles at once.** A peer that listens and dials: the dial role's face and the
   accepted ones in one table, one face for each remote zid as the tokio registry keeps (a node
   the session is already linked to is not given a second face).
