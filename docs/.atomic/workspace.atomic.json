@@ -293680,6 +293680,36 @@
         "The measured records stay unsplit until they are re-recorded on their SDK hosts, which is the next step."
       ]
     },
+    "Round 3787": {
+      "decision_summary": "Open-debt item 751, step (b), step 4 of docs/peer-region-hats.md, the query plane: the differential gate of step 3 carries queries. Three scenes and four steps (Queryable, Query, Reply, Final) are added; a reply answers the last Request the node forwarded to that face, because each forwarder numbers the queries it relays, and the Response and ResponseFinal a querier receives are compared with the querier's own request id, which both planes must restore. Link-state mode: equal with no change to the forwarder, the tree rule of step 3 already carries the query route, the reply and the final; with the query rule put back to the pin's face-based form the gate fails on the first peer-to-peer query. Gossip mode: the same single difference as for subscriptions, now covering a DeclareQueryable re-advertised at the recompute; a peer-to-peer query is forwarded by neither plane, the pin's rule. The scenes must deliver answers in both modes, more in link-state.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward/peer_differential_tests.rs: the Queryable, Query, Reply and Final steps, the Seen kinds for a queryable, a request, a response and a final, three query scenes, the explained recompute difference widened to queryables, and the answers-delivered check. docs/peer-region-hats.md: section 8. No test function is added and no forwarder code changes, so the eight router_forward count guards are unchanged."
+      ],
+      "verification_bullets": [
+        "On pc2 the three gate tests pass over the eight scenes; the mcast-faces arm of router_forward prints 264, the number its guard holds, so the guards are unchanged; clippy with -D warnings is clean under all features and under the defaults; rustfmt, the citation gate and the debt census pass. Control: with mesh_query_block put back to the face-based form the link-state test fails, the first failing step being the first peer-to-peer query (the Request is forwarded by LinkstateForwarder and the region-hat peer sends the querier a final). Not run: the hosted run and the peer E2E files that need a foreign binary."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Item 751 step (b) continues at step 5, the token and interest planes, then step 6, the node surfaces listed in section 5 of the note. Not covered by the gate in steps 3 and 4: query targets and consolidation, a query's timeout, an error reply, the pending table across a recompute, priorities and reliability, a three-hop tree. The owner question of step 3 stands: a ROUTER node's south peer region relays nothing between link-state peers."
+      ],
+      "publishable_decision_summary": "Open-debt item 751, step (b), step 4 of docs/peer-region-hats.md, the query plane: the differential gate of step 3 carries queries. Three scenes and four steps (Queryable, Query, Reply, Final) are added; a reply answers the last Request the node forwarded to that face, because each forwarder numbers the queries it relays, and the Response and ResponseFinal a querier receives are compared with the querier's own request id, which both planes must restore. Link-state mode: equal with no change to the forwarder, the tree rule of step 3 already carries the query route, the reply and the final; with the query rule put back to the pin's face-based form the gate fails on the first peer-to-peer query. Gossip mode: the same single difference as for subscriptions, now covering a DeclareQueryable re-advertised at the recompute; a peer-to-peer query is forwarded by neither plane, the pin's rule. The scenes must deliver answers in both modes, more in link-state.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward/peer_differential_tests.rs: the Queryable, Query, Reply and Final steps, the Seen kinds for a queryable, a request, a response and a final, three query scenes, the explained recompute difference widened to queryables, and the answers-delivered check. docs/peer-region-hats.md: section 8. No test function is added and no forwarder code changes, so the eight router_forward count guards are unchanged."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2 the three gate tests pass over the eight scenes; the mcast-faces arm of router_forward prints 264, the number its guard holds, so the guards are unchanged; clippy with -D warnings is clean under all features and under the defaults; rustfmt, the citation gate and the debt census pass. Control: with mesh_query_block put back to the face-based form the link-state test fails, the first failing step being the first peer-to-peer query (the Request is forwarded by LinkstateForwarder and the region-hat peer sends the querier a final). Not run: the hosted run and the peer E2E files that need a foreign binary."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Item 751 step (b) continues at step 5, the token and interest planes, then step 6, the node surfaces listed in section 5 of the note. Not covered by the gate in steps 3 and 4: query targets and consolidation, a query's timeout, an error reply, the pending table across a recompute, priorities and reliability, a three-hop tree. The owner question of step 3 stands: a ROUTER node's south peer region relays nothing between link-state peers."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
