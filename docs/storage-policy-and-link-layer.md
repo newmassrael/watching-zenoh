@@ -840,6 +840,61 @@ neither the revision nor the projects), the script's provisioning steps are a co
 workflow's that nothing holds equal to it, the lab file and the router are the host's, and the CM0+
 launcher is checked against the hash a person recorded.
 
+## 5.8 The fixed client without core::fmt, and the GET that follows the cache (2026-10-27)
+
+The fixed client needs about 31 KB less text to tie single-threaded pico (1.212 times at the
+last matrix). The formatting machinery was 3,842 bytes of its image (`Formatter::pad`,
+`pad_integral`, `fmt::write`, the four integer `Display` impls, `LowerHex`, the `write_char` and
+`write_str` shims). Nothing in the client needs a formatter: the console lines are a few words and
+numbers.
+
+- **The numbers are written by the text sink.** `TextOut` has `push_u64` and `push_hex_u128`; the
+  zid, the UDP locator and every console line go through them. A console line is a slice of
+  `LogPart` (`Str`, `U64`, `Hex32`), which `NodePort::log` takes in place of `fmt::Arguments`.
+  Tests hold each writer equal to what the formatter prints for the same value, and the lines the
+  scripts read (`stack: peak N of M bytes`, `session established, peer `, `READY`) are the same
+  bytes as before. The one line whose text changed is the declared-peer failure, which no longer
+  carries a `Debug` spelling of the refusal (`peer <index>, <reason>`).
+- **What it bought, in the kit image:** text 176,192 to 173,808 bytes, the formatting code 3,842
+  to 742 (`from_utf8` and the slice-error path stay: the protocol and key-expression slicing
+  use them), and the stack gate holds. The same change in the get image moved its chain 6,524
+  to 6,492 and its reading 6,648 to 6,600.
+- **The first build grew.** The old `log_args` path stayed linked through the MAC's lines and text
+  went up 456 bytes; every MAC line became parts and the growth turned into the figure above.
+
+**The batching client's GET followed the instruction cache, not the code.** After the console
+lines moved, the batching image's GET median read 494 us against 361 us the build before and a
+row of 361 +/- 30%. With the instruction cache off the three builds read 610, 600 and 593 us, so
+the logic is the same; with it on they read 388, 361 and 494. The GET path touches about 930
+distinct 32-byte lines (29.8 KB) and the cache is 16 KB, so where the linker puts the functions
+decides how many of them evict each other. A PC sample through the debug port (`DWT_PCSR`,
+about 500 a second, `scripts/lib/pc_sample.tcl` read by `scripts/lib/pc_profile.py`, started by
+`KIT_PROFILE_OUT=<dir> scripts/kit-lane.sh`) put about 60% of the samples in the receive
+thread's polling loop, which polls without sleeping for wz and pico alike
+(`CONFIG_WZ_ZETH_RX_POLL_INTERVAL_US=0`): the MPU reconfiguration on each context switch
+13.6%, `k_mutex_unlock` 6.3%, `k_uptime_ticks` 6.1%, `rx_ready` 5.6%, `z_sched_yield` 5.5%,
+`k_mutex_lock` 4.9%.
+
+- **Rejected: the whole image in RAM** (`WZ_CODE_IN_RAM`): 401 us, no gain, and it costs SRAM.
+- **`CONFIG_WZ_POLL_PATH_IN_ITCM`** links the kernel files that loop runs (`mutex.c`,
+  `timeout.c`, `sched.c`, `scheduler.c`, the ARM MPU file and the SysTick timer driver) into the
+  board's 16 KB ITCM through Zephyr's code relocation, so they leave the cache's contest. The
+  option is on for the wz images and the pico compare image alike, so both sides of the
+  comparison poll through the same memory. Without `NOKEEP` the relocation kept unused functions
+  (+1,532 bytes of flash); with it the cost is +340 bytes.
+- **Batching GET median, cache on:** the three builds 388, 361, 494 us before; 333, 319, 361 with
+  the option and 330 (quartiles 285 and 343) with `NOKEEP`. The spread between builds fell from
+  133 to 42 us. What is left is likely the Rust half of the loop (`wz_zeth_receive`, `rx_ready`,
+  `poll_link`), which is not in the ITCM; placing single functions would need a linker section
+  of the node's own.
+- **After it, the fixed and batching images read inside their rows twice;** the get image reads a
+  stack peak 6,600 against a row of 6,648 +/- 16, which is lower, and the row moved with it.
+
+Not covered: the pico compare image has the option in its `prj.conf` but was not rebuilt or run
+with it, so `deploy/upstream_parity.json` still holds the matrix taken without it; the TLS image
+built with the option and was not run; the batching row (361) is above what the image now measures
+(about 330) and was left; the getter's median was not re-measured.
+
 ## 6. Open
 
 - The Zephyr kernel keeps a heap of its own (network buffers, POSIX objects).
