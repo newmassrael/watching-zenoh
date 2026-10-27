@@ -167,7 +167,50 @@ admin `linkstatepeers_net_node_count` over it) answer the north graph. That is
 the pin's meaning of a peer hat, and no router-shaped caller breaks on it; it
 does mean step 6 must not read those accessors as "the south peers" for a peer.
 
-## 7. Open
+## 7. Step 3, publish and subscribe, as landed
+
+`router_forward/peer_differential_tests.rs` plays the same scene into
+`LinkstateForwarder` and into the region-hat peer through `FaceForwarder` and
+compares what each sent each face after each step, decoded (a declaration's id
+and a sequence number are not compared). Five scenes: two peers; a peer, a router
+and a client; faces that come up after a subscription; a subscription withdrawn
+and a face gone; a client that puts. Each runs in both modes. The population is
+these scenes and not the peer E2E files the plan named: those need a foreign
+binary and are read on hosted CI, where this gate runs offline in under a second.
+
+- **Gossip, the pin's mode: equal data, two differences, both the pin's.**
+  `LinkstateForwarder` sends a new link its own entry and every node it knows,
+  where the pin sends the linked neighbours the graph holds, zid only, and
+  never self (`zenoh/src/net/protocol/network.rs` @ `// Send all nodes linkstate on new link`);
+  the region-hat peer sends the pin's list, graded by its own test. And
+  `LinkstateForwarder` re-advertises a declaration to a tree child at the next
+  recompute although it told the face at face-up; the pin's peer hat has no
+  tree. Both are listed in `explained` with the rule, and the test fails when a
+  listed difference stops occurring.
+- **Link-state, wz's extension: equal data and equal topology, no allowed
+  difference.** Getting there took two rules in the region-hat peer, both for a
+  PEER node whose hat net is full link-state and for no other hat: the hat
+  relays inside its region along the tree (`face_based`, six rule sites that
+  were `is_peer_hat`), and it does not replay declarations at face-up
+  (`replay_declarations_to_new_face`), because the replay answers a remote that
+  does not speak link-state and a subsystem running the extension has none
+  (R2896: "a mode has to be the same across a subsystem"), so the replay
+  beside the recompute sent each declaration twice. Each was found by the gate
+  failing without it.
+- **The pin has no link-state peer mode at all.** `routing.peer.mode` is
+  "deprecated and has no effect" in 1.10.1
+  (`commons/zenoh-config/src/lib.rs` @ `are deprecated and have no effect`),
+  and the peer hat sends to an owned face
+  only what came from another region (`zenoh/src/net/routing/hat/peer/pubsub.rs`
+  @ `if ctx.subs.is_some() && self.region() != *src_region {`). So the
+  extension is wz's, graded against `LinkstateForwarder` and nothing else, as
+  the owner accepted on 2026-08-31: its external witness count is zero.
+
+What the gate does not cover and step 3 therefore does not claim: priorities
+and reliability channels, ids and aliases, attachments and timestamps, a
+three-hop tree, and every plane other than publish and subscribe.
+
+## 8. Open
 
 - The size of step 1's list is unknown until it is made, and the number of
   rounds after it follows from it. The router's own program ran from round 2865

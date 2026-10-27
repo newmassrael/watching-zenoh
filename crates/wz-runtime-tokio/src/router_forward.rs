@@ -446,6 +446,8 @@ use wz_session_core::wire::{PushOwned, PushOwnedVariant, RequestOwned, ResponseO
 mod egress;
 #[cfg(test)]
 mod egress_tests;
+#[cfg(test)]
+mod peer_differential_tests;
 mod shed;
 #[cfg(test)]
 mod shed_tests;
@@ -2545,6 +2547,37 @@ impl Tables {
         &self.mesh(NORTH_REGION).net
     }
 
+    /// Whether `region`'s hat registers and offers only what its own faces hold
+    /// and relays nothing between them: the pin's PEER hat, whose data route
+    /// sends to an owned face only a message from ANOTHER region
+    /// (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `if ctx.subs.is_some() && self.region() != *src_region {`).
+    ///
+    /// The one exception is wz's link-state peer extension
+    /// (`routing/peer/mode: linkstate`, kept on the owner's decision of
+    /// 2026-08-31): a PEER NODE that runs it relays inside its region along the
+    /// spanning tree of a full link-state graph, as a router hat does. The
+    /// pin 1.10.1 has no such mode (`routing.peer.mode` is "deprecated and has
+    /// no effect", `commons/zenoh-config/src/lib.rs` @ `are deprecated and have no effect`),
+    /// so this is the wz extension and nothing the pin grades.
+    ///
+    /// A ROUTER node's south peer region stays face-based with the extension
+    /// on: R2896 turns the flag on there so the router follows its peers'
+    /// topology exchange, not to relay between them.
+    fn face_based(&self, region: Region) -> bool {
+        is_peer_hat(region, self.node_mode) && !self.runs_linkstate_peers(region)
+    }
+
+    /// Whether `region`'s hat is a peer hat running wz's link-state peer
+    /// extension: a peer node whose hat net is full link-state. See
+    /// [`face_based`](Self::face_based).
+    fn runs_linkstate_peers(&self, region: Region) -> bool {
+        self.node_mode == WhatAmI::Peer
+            && is_peer_hat(region, self.node_mode)
+            && self
+                .mesh_hat(region)
+                .is_some_and(|hat| hat.net.full_linkstate())
+    }
+
     /// The graph of every region the pin's PEER hat serves, in region order: one
     /// on the `auto` preset, one per subregion of a custom partition, none for a
     /// partition with no subregion.
@@ -2898,10 +2931,12 @@ impl RouterForwarder {
     /// (`zenoh/src/net/routing/gateway.rs` @ `GatewaySouthConf::Preset(GatewayPresetConf::Auto) => match mode {`),
     /// with its faces placed by [`region_of`] at node mode Peer.
     ///
-    /// Only the placement is built (`docs/peer-region-hats.md`, step 2): no
-    /// plane has been checked against `LinkstateForwarder` for a peer yet, so
-    /// the constructor is not public. Step 3 moves the data plane over, held
-    /// equal by a differential gate, and makes this the door `run_peer` uses.
+    /// Not public (`docs/peer-region-hats.md`): the publish and subscribe plane
+    /// is held equal to `LinkstateForwarder` by a differential gate (step 3),
+    /// but the query, token and interest planes and the node's own surfaces are
+    /// not (steps 4 to 6), so a host that built one would get a peer that
+    /// answers part of what a peer answers. Step 7 makes this the door
+    /// `run_peer` uses.
     #[cfg(test)]
     fn peer(self_zid: Zid) -> Self {
         Self::build(
@@ -4627,7 +4662,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         sourced: &Sourced,
         build: impl Fn(&str) -> Result<DeclareOwned, CodecError>,
     ) {
-        if is_peer_hat(tier, self.tables.node_mode) {
+        if self.tables.face_based(tier) {
             return;
         }
         let Some(out_node_id) = sourced.out_node_id else {
@@ -6130,7 +6165,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `if ctx.subs.is_some() && self.region() != *src_region {`).
         // The peers of one region reach each other over their own links, which
         // gossip autoconnect makes direct; the router does not relay between them.
-        if is_peer_hat(tier, self.tables.node_mode) {
+        if self.tables.face_based(tier) {
             return;
         }
         let Some(hat) = self.mesh_hat(tier) else {
@@ -6447,14 +6482,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // `tick_re_advertises_a_native_sub_to_a_late_joining_child` stayed green
         // under a rule it contradicts. The self cross-tier re-advertise at the end
         // is the `other_info` case and stays.
-        if !is_peer_hat(tier, self.tables.node_mode) {
+        if !self.tables.face_based(tier) {
             self.re_advertise_natives_into(tier, &new_children);
         }
         // R2890 (751 rule 8c) — a peer-hat region has no tree to take a delta of;
         // a peer that joins it is told self's derived declarations when its FACE
         // registers (`replay_declarations_to_new_face`), the pin's
         // `new_transport_unicast_face` repropagation.
-        if is_peer_hat(tier, self.tables.node_mode) {
+        if self.tables.face_based(tier) {
             return;
         }
         // C2: also re-advertise self's DERIVED cross-tier subs (from client_subs)
@@ -7217,7 +7252,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // propagates to its OWNED faces, every face the region holds, not along
         // a tree. The south net keeps no full link-state, so a tree there would
         // name no child at all.
-        if is_peer_hat(tier, self.tables.node_mode) {
+        if self.tables.face_based(tier) {
             let Ok(declare) = build(keyexpr) else {
                 return;
             };
@@ -7870,7 +7905,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             // `forward_push_tier`: that hat offers its own faces' queryables only
             // to a query from another region
             // (`zenoh/src/net/routing/hat/peer/queries.rs` @ `if self.region() != *src_region {`).
-            if is_peer_hat(block_tier, self.tables.node_mode) {
+            if self.tables.face_based(block_tier) {
                 return None;
             }
             let (source_zid, out_node_id) = within?;
@@ -8464,6 +8499,15 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// keys a publisher's write filter on `(decl_id, peer)`, so whether a
     /// first push at id 0 is enough for every consumer is not established here.
     fn replay_declarations_to_new_face(&self, face: FaceId, tier: Region) {
+        // Not in a hat running wz's link-state peer extension: the replay
+        // answers a remote that does not speak link-state (a zenoh-pico peer in
+        // peer-to-peer mode), and a subsystem running the extension has none,
+        // because "a mode has to be the same across a subsystem" (R2896). The
+        // remote there is told by the tree re-advertise at the next recompute,
+        // and a replay beside it would send the same declaration twice.
+        if self.tables.runs_linkstate_peers(tier) {
+            return;
+        }
         for keyexpr in self.derived_cross_tier_subs_into(tier) {
             match build_declare_subscriber(0, 0, Some(&keyexpr)) {
                 Ok(decl) => {

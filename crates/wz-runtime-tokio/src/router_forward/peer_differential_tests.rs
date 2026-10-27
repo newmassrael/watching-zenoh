@@ -1,0 +1,611 @@
+// SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+//! A peer node on the region-hat forwarder held equal to `LinkstateForwarder`
+//! (`docs/peer-region-hats.md`, step 3).
+//!
+//! The same scene, a list of faces coming up and messages arriving on them, is
+//! played into both forwarders through the one seam they share
+//! ([`FaceForwarder`]), and what each sent to each face after each step is
+//! compared. The comparison is over decoded messages, not bytes: a sequence
+//! number, a declaration id or the order of two messages a single step sent
+//! to different faces says nothing about routing, and the same message sent
+//! twice is a difference. What a scene is compared on is stated by [`Seen`].
+//!
+//! A difference this gate finds is one of three things, and each is written
+//! down where it is found: a defect of the region-hat forwarder at node mode
+//! Peer (fixed), a defect of `LinkstateForwarder` (reported and fixed there),
+//! or a difference the pin itself makes (recorded as such, with the citation,
+//! and the scene is graded against the pin's rule instead).
+
+use super::*;
+use crate::linkstate_forward::LinkstateForwarder;
+use crate::runtime_impl::TokioRuntime;
+use crate::test_fixtures::{recording_actions, RecordingLinkDriver};
+use sce_forge_runtime::codec::SceBytes;
+use std::collections::BTreeMap;
+use wz_codecs::linkstate::LinkstateOwned;
+use wz_codecs::linkstate_link::LinkstateLink;
+use wz_runtime_core::runtime::Runtime;
+use wz_session_core::declare_build::build_declare_subscriber;
+use wz_session_core::wireexpr_resolve::id_and_suffix;
+
+fn zid(b: u8) -> Zid {
+    Zid::from_slice(&[b, b, b, b])
+}
+
+/// The 2-bit INIT wire form of a remote's role.
+#[derive(Clone, Copy, Debug)]
+enum Wire {
+    Router = 0b00,
+    Peer = 0b01,
+    Client = 0b10,
+}
+
+/// What a node sent, reduced to what routing decides. Everything the two
+/// forwarders legitimately number or order differently is left out.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Seen {
+    /// A `Push` and the payload of its `Put`, `None` for a `Del`.
+    Push {
+        keyexpr: String,
+        payload: Option<Vec<u8>>,
+    },
+    /// A `DeclareSubscriber` and the keyexpr it names.
+    DeclareSubscriber { keyexpr: String },
+    /// A `DeclareFinal`.
+    DeclareFinal,
+    /// An `UndeclareSubscriber`.
+    UndeclareSubscriber,
+    /// A link-state list, as the (zid, sorted link zids) of each entry that
+    /// names its node, so the psid numbering is not compared.
+    LinkState {
+        entries: usize,
+        nodes: Vec<(Vec<u8>, Vec<Vec<u8>>)>,
+    },
+    /// Anything else, by the name of its kind, so that a kind one node sends
+    /// and the other does not is a difference and its contents are not.
+    Other(&'static str),
+}
+
+/// One thing that happens to the node under test.
+#[derive(Clone, Debug)]
+enum Step {
+    /// A face comes up: id, the remote's zid byte, its role.
+    Up(u64, u8, Wire),
+    /// The neighbour on a face advertises a link back to the node, which forms
+    /// the edge in the graph.
+    LinkBack(u64, u8, u64),
+    /// A `DeclareSubscriber` arrives on a face.
+    Subscribe(u64, &'static str),
+    /// The `UndeclareSubscriber` of the same keyexpr arrives on a face.
+    Unsubscribe(u64, &'static str),
+    /// A `Put` arrives on a face.
+    Put(u64, &'static str, &'static [u8]),
+    /// A face goes down.
+    Down(u64),
+    /// The periodic tick.
+    Tick,
+}
+
+/// A node under test: the forwarder and what has been recorded on each face.
+struct Node {
+    fwd: Box<dyn FaceForwarder>,
+    sinks: BTreeMap<u64, Arc<RecordingLinkDriver>>,
+    /// How many frames of each face were already read.
+    read: BTreeMap<u64, usize>,
+    self_zid: u8,
+}
+
+impl Node {
+    fn new(fwd: Box<dyn FaceForwarder>, self_zid: u8) -> Self {
+        Self {
+            fwd,
+            sinks: BTreeMap::new(),
+            read: BTreeMap::new(),
+            self_zid,
+        }
+    }
+
+    /// Apply `step` and return what each face was sent by it.
+    fn apply(&mut self, step: &Step) -> BTreeMap<u64, Vec<Seen>> {
+        match step {
+            Step::Up(id, zid_byte, wire) => {
+                let (actions, sink) = recording_actions();
+                TokioRuntime::with_mutex_mut(&actions.remote_peer_zid, |s| {
+                    *s = Some(zid(*zid_byte).as_slice().to_vec())
+                });
+                TokioRuntime::with_mutex_mut(&actions.peer_whatami, |s| *s = Some(*wire as u8));
+                self.fwd.register(FaceId(*id), &actions);
+                self.sinks.insert(*id, sink);
+                self.read.insert(*id, 0);
+            }
+            Step::LinkBack(id, neighbour, sn) => {
+                let oam = build_linkstate_oam_owned(&list(vec![
+                    entry(0, 1, self.self_zid, &[]),
+                    entry(1, *sn, *neighbour, &[0]),
+                ]))
+                .expect("build oam");
+                self.deliver(*id, NetworkMessage::Oam(oam));
+            }
+            Step::Subscribe(id, keyexpr) => {
+                let declare = build_declare_subscriber(0, 0, Some(keyexpr)).expect("declare");
+                self.deliver(*id, NetworkMessage::Declare(Box::new(declare)));
+            }
+            Step::Unsubscribe(id, keyexpr) => {
+                let undeclare =
+                    wz_session_core::declare_build::build_undeclare_subscriber_with_keyexpr(
+                        keyexpr,
+                    )
+                    .expect("undeclare");
+                self.deliver(*id, NetworkMessage::Declare(Box::new(undeclare)));
+            }
+            Step::Put(id, keyexpr, payload) => {
+                let push = wz_session_core::push_build::build_push_literal(keyexpr, payload)
+                    .expect("push");
+                self.deliver(*id, NetworkMessage::Push(Box::new(push)));
+            }
+            Step::Down(id) => self.fwd.deregister(FaceId(*id)),
+            Step::Tick => self.fwd.tick(),
+        }
+        self.drain()
+    }
+
+    fn deliver(&self, id: u64, message: NetworkMessage) {
+        let outcome = DriverLoopOutcome::FramePayload {
+            priority: Priority::DEFAULT,
+            reliable: true,
+            sn: 0,
+            messages: vec![message],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        self.fwd.forward(FaceId(id), IterationEvent::Poll(&outcome));
+    }
+
+    /// What every face was sent since the last call, sorted so that the order
+    /// of two messages in one step is not compared.
+    fn drain(&mut self) -> BTreeMap<u64, Vec<Seen>> {
+        let mut out = BTreeMap::new();
+        for (id, sink) in &self.sinks {
+            let from = self.read[id];
+            let total = sink.frame_count();
+            let mut seen: Vec<Seen> = (from..total)
+                .flat_map(|i| decode(&sink.frame_bytes(i)))
+                .collect();
+            seen.sort();
+            if !seen.is_empty() {
+                out.insert(*id, seen);
+            }
+            self.read.insert(*id, total);
+        }
+        out
+    }
+}
+
+fn decode(frame: &[u8]) -> Vec<Seen> {
+    use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+    let Ok(InboundFrame::Frame { payload, .. }) = parse_inbound(frame) else {
+        return vec![Seen::Other("non-frame")];
+    };
+    parse_frame_payload(&payload)
+        .expect("a frame payload")
+        .iter()
+        .map(seen_of)
+        .collect()
+}
+
+fn seen_of(message: &NetworkMessage) -> Seen {
+    match message {
+        NetworkMessage::Push(push) => {
+            let (id, suffix) = id_and_suffix(&push.keyexpr.body);
+            assert_eq!(id, 0, "the scenes use literal key expressions");
+            let payload = match &push.body {
+                PushOwnedVariant::CodecZenohMsgPut(put) => {
+                    wz_session_core::put_payload::inline_bytes(put).map(<[u8]>::to_vec)
+                }
+                _ => None,
+            };
+            Seen::Push {
+                keyexpr: suffix.unwrap_or_default().to_owned(),
+                payload,
+            }
+        }
+        NetworkMessage::Declare(declare) => match &declare.body {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(sub) => {
+                let (id, suffix) = id_and_suffix(&sub.keyexpr.body);
+                assert_eq!(id, 0, "the scenes use literal key expressions");
+                Seen::DeclareSubscriber {
+                    keyexpr: suffix.unwrap_or_default().to_owned(),
+                }
+            }
+            DeclareOwnedVariant::CodecZenohDeclFinal(_) => Seen::DeclareFinal,
+            DeclareOwnedVariant::CodecZenohUndeclSubscriber(_) => Seen::UndeclareSubscriber,
+            _ => Seen::Other("declare"),
+        },
+        NetworkMessage::Oam(oam) => match try_parse_linkstate_oam(oam) {
+            LinkstateOam::Decoded(list) => Seen::LinkState {
+                entries: list.link_states.len(),
+                nodes: link_state_by_zid(&list.link_states),
+            },
+            _ => Seen::Other("oam"),
+        },
+        _ => Seen::Other("network-message"),
+    }
+}
+
+/// A list's entries keyed by the zid they name, each with the zids it links
+/// to, resolved through the psids the same list names.
+fn link_state_by_zid(entries: &[LinkstateOwned]) -> Vec<(Vec<u8>, Vec<Vec<u8>>)> {
+    let zid_of: BTreeMap<u64, Vec<u8>> = entries
+        .iter()
+        .filter_map(|e| Some((e.psid, e.zid.as_ref()?.as_slice().to_vec())))
+        .collect();
+    let mut out: Vec<(Vec<u8>, Vec<Vec<u8>>)> = entries
+        .iter()
+        .filter_map(|e| {
+            let me = e.zid.as_ref()?.as_slice().to_vec();
+            let mut links: Vec<Vec<u8>> = e
+                .links
+                .iter()
+                .filter_map(|l| zid_of.get(&l.psid).cloned())
+                .collect();
+            links.sort();
+            Some((me, links))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+fn entry(psid: u64, sn: u64, node: u8, links: &[u64]) -> LinkstateOwned {
+    const OPT_P: u8 = 0x01;
+    const OPT_W: u8 = 0x02;
+    LinkstateOwned {
+        options: OPT_P | OPT_W,
+        psid,
+        sn,
+        zid_len: Some(4),
+        zid: Some(SceBytes::from_slice(zid(node).as_slice()).unwrap()),
+        whatami: Some(2),
+        num_locators: None,
+        locators: None,
+        links_len: links.len() as u64,
+        links: links.iter().map(|&psid| LinkstateLink { psid }).collect(),
+        weights: None,
+    }
+}
+
+fn list(entries: Vec<LinkstateOwned>) -> LinkstateListOwned {
+    LinkstateListOwned {
+        num_link_states: entries.len() as u64,
+        link_states: entries,
+    }
+}
+
+/// The peer routing mode both nodes are held to: zenoh's `routing.peer.mode`,
+/// `peer_to_peer` (gossip, the default) or `linkstate`.
+#[derive(Clone, Copy, Debug)]
+enum Mode {
+    Gossip,
+    LinkState,
+}
+
+/// The two nodes a scene is played into, both at node zid byte `self_zid` and
+/// both in `mode`.
+fn both(self_zid: u8, mode: Mode) -> (Node, Node) {
+    let full = matches!(mode, Mode::LinkState);
+    let linkstate = LinkstateForwarder::new(zid(self_zid), WhatAmI::Peer);
+    linkstate.set_full_linkstate(full);
+    let hat = RouterForwarder::peer(zid(self_zid));
+    hat.on_tables_mut().set_peer_region_full_linkstate(full);
+    (
+        Node::new(Box::new(linkstate), self_zid),
+        Node::new(Box::new(hat), self_zid),
+    )
+}
+
+/// What a step sent, split into the data plane and the link-state list, which
+/// are graded by different rules.
+type Sent = BTreeMap<u64, Vec<Seen>>;
+
+fn split(sent: Sent) -> (Sent, Sent) {
+    let mut data = Sent::new();
+    let mut topology = Sent::new();
+    for (face, seen) in sent {
+        for s in seen {
+            let into = if matches!(s, Seen::LinkState { .. }) {
+                &mut topology
+            } else {
+                &mut data
+            };
+            into.entry(face).or_default().push(s);
+        }
+    }
+    (data, topology)
+}
+
+/// One step on which the two nodes sent different things.
+#[derive(Debug)]
+struct Divergence {
+    step: Step,
+    plane: &'static str,
+    linkstate: Sent,
+    region_hat: Sent,
+}
+
+/// Play `scene` into both nodes in `mode` and return every step on which they
+/// sent something different, per plane. Empty means equal.
+fn diverge(scene: &[Step], self_zid: u8, mode: Mode) -> Vec<Divergence> {
+    let (mut old, mut new) = both(self_zid, mode);
+    let mut out = Vec::new();
+    for step in scene {
+        let (old_data, old_topology) = split(old.apply(step));
+        let (new_data, new_topology) = split(new.apply(step));
+        for (plane, a, b) in [
+            ("data", old_data, new_data),
+            ("topology", old_topology, new_topology),
+        ] {
+            if a != b {
+                out.push(Divergence {
+                    step: step.clone(),
+                    plane,
+                    linkstate: a,
+                    region_hat: b,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Two peers 0xAA and 0xBB meet this node 0x01; 0xBB subscribes to `demo/**`;
+/// 0xAA puts on `demo/data`.
+fn two_peers_one_subscribes() -> Vec<Step> {
+    vec![
+        Step::Up(0, 0xAA, Wire::Peer),
+        Step::Up(1, 0xBB, Wire::Peer),
+        Step::LinkBack(0, 0xAA, 5),
+        Step::LinkBack(1, 0xBB, 5),
+        Step::Tick,
+        Step::Subscribe(1, "demo/**"),
+        Step::Put(0, "demo/data", b"payload"),
+    ]
+}
+
+/// A peer, a router and a client meet this node; the router and the client
+/// subscribe; the peer puts.
+fn a_peer_a_router_and_a_client() -> Vec<Step> {
+    vec![
+        Step::Up(0, 0xAA, Wire::Peer),
+        Step::Up(1, 0xDD, Wire::Router),
+        Step::Up(2, 0xCC, Wire::Client),
+        Step::LinkBack(0, 0xAA, 5),
+        Step::LinkBack(1, 0xDD, 5),
+        Step::Tick,
+        Step::Subscribe(1, "demo/**"),
+        Step::Subscribe(2, "demo/data"),
+        Step::Put(0, "demo/data", b"payload"),
+    ]
+}
+
+/// A client subscribes first, a peer comes up afterwards and a router after it:
+/// what a late face is told, and what reaches the client when the router puts.
+fn faces_that_come_up_after_a_subscription() -> Vec<Step> {
+    vec![
+        Step::Up(0, 0xCC, Wire::Client),
+        Step::Subscribe(0, "demo/**"),
+        Step::Up(1, 0xAA, Wire::Peer),
+        Step::LinkBack(1, 0xAA, 5),
+        Step::Up(2, 0xDD, Wire::Router),
+        Step::LinkBack(2, 0xDD, 5),
+        Step::Tick,
+        Step::Put(2, "demo/late", b"from the router"),
+        Step::Put(1, "demo/late", b"from the peer"),
+    ]
+}
+
+/// A subscription is withdrawn and a face goes away: nothing more is sent to
+/// either.
+fn a_subscription_withdrawn_and_a_face_gone() -> Vec<Step> {
+    vec![
+        Step::Up(0, 0xAA, Wire::Peer),
+        Step::Up(1, 0xCC, Wire::Client),
+        Step::Up(2, 0xCD, Wire::Client),
+        Step::LinkBack(0, 0xAA, 5),
+        Step::Tick,
+        Step::Subscribe(1, "demo/data"),
+        Step::Subscribe(2, "demo/data"),
+        Step::Put(0, "demo/data", b"both"),
+        Step::Unsubscribe(1, "demo/data"),
+        Step::Put(0, "demo/data", b"one"),
+        Step::Down(2),
+        Step::Put(0, "demo/data", b"none"),
+    ]
+}
+
+/// A client puts, with a peer, a router and another client subscribed: where a
+/// Put from a node's own client goes.
+fn a_client_puts() -> Vec<Step> {
+    vec![
+        Step::Up(0, 0xCC, Wire::Client),
+        Step::Up(1, 0xAA, Wire::Peer),
+        Step::Up(2, 0xDD, Wire::Router),
+        Step::Up(3, 0xCD, Wire::Client),
+        Step::LinkBack(1, 0xAA, 5),
+        Step::LinkBack(2, 0xDD, 5),
+        Step::Tick,
+        Step::Subscribe(1, "demo/**"),
+        Step::Subscribe(2, "demo/**"),
+        Step::Subscribe(3, "demo/**"),
+        Step::Put(0, "demo/data", b"from a client"),
+    ]
+}
+
+fn scenes() -> Vec<(&'static str, Vec<Step>)> {
+    vec![
+        ("two peers", two_peers_one_subscribes()),
+        (
+            "a peer, a router and a client",
+            a_peer_a_router_and_a_client(),
+        ),
+        (
+            "faces after a subscription",
+            faces_that_come_up_after_a_subscription(),
+        ),
+        (
+            "withdrawn and gone",
+            a_subscription_withdrawn_and_a_face_gone(),
+        ),
+        ("a client puts", a_client_puts()),
+    ]
+}
+
+/// How many data messages (anything but a link-state list) the region-hat
+/// peer sent over all scenes in `mode`: a gate whose scenes send nothing
+/// compares nothing.
+fn data_messages_sent(mode: Mode) -> usize {
+    scenes()
+        .iter()
+        .map(|(_, scene)| {
+            let (_, mut node) = both(0x01, mode);
+            scene
+                .iter()
+                .map(|step| {
+                    split(node.apply(step))
+                        .0
+                        .values()
+                        .map(Vec::len)
+                        .sum::<usize>()
+                })
+                .sum::<usize>()
+        })
+        .sum()
+}
+
+/// The two reasons the gate lets the planes differ in gossip mode, each a place
+/// where `LinkstateForwarder` leaves the pin and the region-hat peer follows it.
+const FACE_UP_LIST: &str = "face-up link-state list";
+const TREE_READVERTISE: &str = "re-advertise to a tree child";
+
+/// Why `d` is not a failure, or `None` when it is one. Link-state mode has no
+/// allowed difference: the extension is wz's, so there is no pin to be right.
+fn explained(mode: Mode, d: &Divergence) -> Option<&'static str> {
+    if !matches!(mode, Mode::Gossip) {
+        return None;
+    }
+    match (d.plane, &d.step) {
+        // The pin's gossip `add_link` sends a new link the entries of the nodes
+        // the graph holds AND that are linked neighbours, zid only
+        // (`zenoh/src/net/protocol/network.rs` @ `// Send all nodes linkstate on new link`),
+        // which never includes self; `LinkstateForwarder` sends its own entry
+        // and every node it knows. The list the region-hat peer sends is graded
+        // against the pin by
+        // `a_gossip_peer_tells_a_new_link_the_neighbours_it_knows_and_not_itself`.
+        ("topology", Step::Up(..)) => Some(FACE_UP_LIST),
+        // The pin's peer hat has no tree, so a recompute tells no child
+        // anything (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `if ctx.subs.is_some() && self.region() != *src_region {`
+        // for the rule that a peer hat offers its faces nothing from its own
+        // region). `LinkstateForwarder` re-advertises a declaration it already
+        // told the face at face-up when the tick recomputes its tree.
+        ("data", Step::Tick)
+            if d.region_hat.is_empty()
+                && d.linkstate
+                    .values()
+                    .flatten()
+                    .all(|s| matches!(s, Seen::DeclareSubscriber { .. })) =>
+        {
+            Some(TREE_READVERTISE)
+        }
+        _ => None,
+    }
+}
+
+/// Every step of every scene in `mode` whose difference `explained` does not
+/// explain, and the set of reasons that did explain one.
+fn unexplained(mode: Mode) -> (Vec<String>, std::collections::BTreeSet<&'static str>) {
+    let mut failures = Vec::new();
+    let mut reasons = std::collections::BTreeSet::new();
+    for (name, scene) in scenes() {
+        for d in diverge(&scene, 0x01, mode) {
+            match explained(mode, &d) {
+                Some(reason) => {
+                    reasons.insert(reason);
+                }
+                None => failures.push(format!(
+                    "{mode:?} / {name} / {:?} / {}\n  linkstate:  {:?}\n  region-hat: {:?}",
+                    d.step, d.plane, d.linkstate, d.region_hat
+                )),
+            }
+        }
+    }
+    (failures, reasons)
+}
+
+/// In the pin's mode (gossip) the two peer planes send the same data and the
+/// same topology but for two differences, both explained by the pin, and both
+/// of which must still occur: a reason no scene reaches any more is stale.
+#[test]
+fn in_gossip_mode_the_two_peer_planes_differ_only_where_the_pin_says() {
+    let (failures, reasons) = unexplained(Mode::Gossip);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert_eq!(
+        reasons,
+        [FACE_UP_LIST, TREE_READVERTISE].into_iter().collect(),
+        "each allowed difference must be one a scene produces"
+    );
+    assert!(
+        data_messages_sent(Mode::Gossip) >= 8,
+        "the scenes must send something for the comparison to mean anything"
+    );
+}
+
+/// What the pin's gossip peer tells a new link (`zenoh/src/net/protocol/network.rs`
+/// @ `// Send all nodes linkstate on new link`): the entries of the nodes its
+/// graph holds that are linked neighbours, by zid, and never its own. The
+/// first link finds the graph empty of neighbours, so it is told nothing; a
+/// neighbour whose own entry has arrived is named to the next link.
+#[test]
+fn a_gossip_peer_tells_a_new_link_the_neighbours_it_knows_and_not_itself() {
+    let scene = [
+        Step::Up(0, 0xAA, Wire::Peer),
+        Step::LinkBack(0, 0xAA, 5),
+        Step::Up(1, 0xBB, Wire::Peer),
+    ];
+    let (_, mut node) = both(0x01, Mode::Gossip);
+    let told: Vec<Sent> = scene.iter().map(|s| split(node.apply(s)).1).collect();
+    let nodes_told = |sent: &Sent, face: u64| -> Vec<Vec<u8>> {
+        match sent.get(&face).map(Vec::as_slice) {
+            Some([Seen::LinkState { nodes, .. }]) => nodes.iter().map(|(z, _)| z.clone()).collect(),
+            other => panic!("one link-state list for face {face}, got {other:?}"),
+        }
+    };
+    assert_eq!(
+        nodes_told(&told[0], 0),
+        Vec::<Vec<u8>>::new(),
+        "the first link: no neighbour is in the graph yet, and self is never named"
+    );
+    assert_eq!(
+        nodes_told(&told[2], 1),
+        vec![zid(0xAA).as_slice().to_vec()],
+        "the second link is told the neighbour whose entry arrived, and only it"
+    );
+}
+
+/// In wz's link-state extension the two planes send the same data AND the same
+/// topology: the region-hat peer relays inside its region along the tree, as
+/// `LinkstateForwarder` does.
+#[test]
+fn in_link_state_mode_the_two_peer_planes_send_the_same_data_and_topology() {
+    let (failures, reasons) = unexplained(Mode::LinkState);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert!(
+        reasons.is_empty(),
+        "link-state mode has no allowed difference"
+    );
+    assert!(
+        data_messages_sent(Mode::LinkState) > data_messages_sent(Mode::Gossip),
+        "the extension relays between peers, which gossip does not: \
+         a scene set that sends as much in both would not exercise the tree"
+    );
+}
