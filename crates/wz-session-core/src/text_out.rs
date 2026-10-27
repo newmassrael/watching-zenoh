@@ -294,16 +294,12 @@ mod tests {
         for n in [0u64, 1, 9, 10, 99, 100, 65_535, 4_294_967_295, u64::MAX] {
             let mut t: FixedText<24> = FixedText::new();
             t.push_u64(n);
-            assert_eq!(
-                t.finish(),
-                Ok(alloc::format!("{n}").as_str()),
-                "decimal {n}"
-            );
+            assert_eq!(t.finish(), Ok(std::format!("{n}").as_str()), "decimal {n}");
         }
         for n in [0u128, 1, 0xf, 0x10, 0xabcd, u64::MAX as u128, u128::MAX] {
             let mut t: FixedText<40> = FixedText::new();
             t.push_hex_u128(n);
-            assert_eq!(t.finish(), Ok(alloc::format!("{n:x}").as_str()), "hex {n}");
+            assert_eq!(t.finish(), Ok(std::format!("{n:x}").as_str()), "hex {n}");
         }
     }
 
@@ -322,7 +318,7 @@ mod tests {
         );
         assert_eq!(
             t.finish(),
-            Ok(alloc::format!("stack: peak {} of {} bytes", 3524, 32768).as_str())
+            Ok(std::format!("stack: peak {} of {} bytes", 3524, 32768).as_str())
         );
     }
 
@@ -331,7 +327,7 @@ mod tests {
         for n in [0u32, 1, 0xf, 0x10, 0x2000_0000, 0xdead_beef, u32::MAX] {
             let mut t: FixedText<16> = FixedText::new();
             write_parts(&mut t, &[LogPart::Hex32(n)]);
-            assert_eq!(t.finish(), Ok(alloc::format!("{n:#010x}").as_str()), "{n}");
+            assert_eq!(t.finish(), Ok(std::format!("{n:#010x}").as_str()), "{n}");
         }
     }
 
