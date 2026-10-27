@@ -3508,6 +3508,7 @@ dependencies = [
  "tracing",
  "uhlc",
  "wz-capi-core",
+ "wz-capi-port",
  "wz-runtime-tokio",
  "zenoh-buffers 1.10.1",
  "zenoh-codec 1.10.1",

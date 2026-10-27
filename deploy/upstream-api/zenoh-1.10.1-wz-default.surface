@@ -3,6 +3,7 @@
 # toolchain: nightly-2026-06-07
 # format_version: 57
 enum zenoh::qos::Priority
+enum zenoh::query::ReplyKeyExpr
 enum zenoh::sample::Locality
 enum zenoh::sample::SampleKind
 fn zenoh::bytes::Encoding::default() -> Self ; const ; in impl zenoh::bytes::Encoding
@@ -101,6 +102,35 @@ fn zenoh::pubsub::SubscriberBuilder::background(Self) -> zenoh::pubsub::Subscrib
 fn zenoh::pubsub::SubscriberBuilder::callback<F>(Self, F) -> zenoh::pubsub::SubscriberBuilder<'0, '1, zenoh::handlers::Callback<zenoh::sample::Sample>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::Fn(zenoh::sample::Sample) ; in impl<'0, '1> zenoh::pubsub::SubscriberBuilder<'0, '1, zenoh::handlers::DefaultHandler>
 fn zenoh::pubsub::SubscriberBuilder::callback_mut<F>(Self, F) -> zenoh::pubsub::SubscriberBuilder<'0, '1, zenoh::handlers::Callback<zenoh::sample::Sample>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::FnMut(zenoh::sample::Sample) ; in impl<'0, '1> zenoh::pubsub::SubscriberBuilder<'0, '1, zenoh::handlers::DefaultHandler>
 fn zenoh::pubsub::SubscriberBuilder::with<Handler>(Self, Handler) -> zenoh::pubsub::SubscriberBuilder<'0, '1, Handler> where Handler: zenoh::handlers::IntoHandler<zenoh::sample::Sample> ; in impl<'0, '1> zenoh::pubsub::SubscriberBuilder<'0, '1, zenoh::handlers::DefaultHandler>
+fn zenoh::query::Query::accepts_replies(&Self) -> zenoh::query::ReplyKeyExpr ; in impl zenoh::query::Query
+fn zenoh::query::Query::attachment(&Self) -> core::option::Option<&zenoh::bytes::ZBytes> ; in impl zenoh::query::Query
+fn zenoh::query::Query::attachment_mut(&mut Self) -> core::option::Option<&mut zenoh::bytes::ZBytes> ; in impl zenoh::query::Query
+fn zenoh::query::Query::encoding(&Self) -> core::option::Option<&zenoh::bytes::Encoding> ; in impl zenoh::query::Query
+fn zenoh::query::Query::key_expr(&Self) -> &zenoh::key_expr::KeyExpr<'static> ; in impl zenoh::query::Query
+fn zenoh::query::Query::parameters(&Self) -> &zenoh::query::Parameters<'static> ; in impl zenoh::query::Query
+fn zenoh::query::Query::payload(&Self) -> core::option::Option<&zenoh::bytes::ZBytes> ; in impl zenoh::query::Query
+fn zenoh::query::Query::payload_mut(&mut Self) -> core::option::Option<&mut zenoh::bytes::ZBytes> ; in impl zenoh::query::Query
+fn zenoh::query::Query::reply<'0, TryIntoKeyExpr, IntoZBytes>(&Self, TryIntoKeyExpr, IntoZBytes) -> zenoh::query::ReplyBuilder<'_, '0, zenoh::query::ReplyBuilderPut> where <TryIntoKeyExpr as core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>>>::Error: core::convert::Into<zenoh::Error>, IntoZBytes: core::convert::Into<zenoh::bytes::ZBytes>, TryIntoKeyExpr: core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>> ; in impl zenoh::query::Query
+fn zenoh::query::Query::reply_del<'0, TryIntoKeyExpr>(&Self, TryIntoKeyExpr) -> zenoh::query::ReplyBuilder<'_, '0, zenoh::query::ReplyBuilderDelete> where <TryIntoKeyExpr as core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>>>::Error: core::convert::Into<zenoh::Error>, TryIntoKeyExpr: core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>> ; in impl zenoh::query::Query
+fn zenoh::query::Query::reply_err<IntoZBytes>(&Self, IntoZBytes) -> zenoh::query::ReplyErrBuilder<'_> where IntoZBytes: core::convert::Into<zenoh::bytes::ZBytes> ; in impl zenoh::query::Query
+fn zenoh::query::Query::selector(&Self) -> zenoh::query::Selector<'_> ; in impl zenoh::query::Query
+fn zenoh::query::Queryable::handler(&Self) -> &Handler ; in impl<Handler> zenoh::query::Queryable<Handler>
+fn zenoh::query::Queryable::handler_mut(&mut Self) -> &mut Handler ; in impl<Handler> zenoh::query::Queryable<Handler>
+fn zenoh::query::Queryable::key_expr(&Self) -> &zenoh::key_expr::KeyExpr<'static> ; in impl<Handler> zenoh::query::Queryable<Handler>
+fn zenoh::query::Queryable::undeclare(Self) -> zenoh::query::QueryableUndeclaration<Handler> where Handler: core::marker::Send ; in impl<Handler> zenoh::query::Queryable<Handler>
+fn zenoh::query::QueryableBuilder::allowed_origin(Self, zenoh::sample::Locality) -> Self ; in impl<Handler, const BACKGROUND: bool> zenoh::query::QueryableBuilder<'_, '_, Handler, BACKGROUND>
+fn zenoh::query::QueryableBuilder::background(Self) -> zenoh::query::QueryableBuilder<'0, '1, zenoh::handlers::Callback<zenoh::query::Query>, true> ; in impl<'0, '1> zenoh::query::QueryableBuilder<'0, '1, zenoh::handlers::Callback<zenoh::query::Query>>
+fn zenoh::query::QueryableBuilder::callback<F>(Self, F) -> zenoh::query::QueryableBuilder<'0, '1, zenoh::handlers::Callback<zenoh::query::Query>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::Fn(zenoh::query::Query) ; in impl<'0, '1> zenoh::query::QueryableBuilder<'0, '1, zenoh::handlers::DefaultHandler>
+fn zenoh::query::QueryableBuilder::callback_mut<F>(Self, F) -> zenoh::query::QueryableBuilder<'0, '1, zenoh::handlers::Callback<zenoh::query::Query>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::FnMut(zenoh::query::Query) ; in impl<'0, '1> zenoh::query::QueryableBuilder<'0, '1, zenoh::handlers::DefaultHandler>
+fn zenoh::query::QueryableBuilder::complete(Self, bool) -> Self ; in impl<Handler, const BACKGROUND: bool> zenoh::query::QueryableBuilder<'_, '_, Handler, BACKGROUND>
+fn zenoh::query::QueryableBuilder::with<Handler>(Self, Handler) -> zenoh::query::QueryableBuilder<'0, '1, Handler> where Handler: zenoh::handlers::IntoHandler<zenoh::query::Query> ; in impl<'0, '1> zenoh::query::QueryableBuilder<'0, '1, zenoh::handlers::DefaultHandler>
+fn zenoh::query::ReplyBuilder::attachment<U: core::convert::Into<zenoh::bytes::OptionZBytes>>(Self, U) -> Self ; in impl<T> zenoh::query::ReplyBuilder<'_, '_, T>
+fn zenoh::query::ReplyBuilder::congestion_control(Self, zenoh::qos::CongestionControl) -> Self ; in impl<T> zenoh::query::ReplyBuilder<'_, '_, T>
+fn zenoh::query::ReplyBuilder::encoding<T: core::convert::Into<zenoh::bytes::Encoding>>(Self, T) -> Self ; in impl zenoh::query::ReplyBuilder<'_, '_, zenoh::query::ReplyBuilderPut>
+fn zenoh::query::ReplyBuilder::express(Self, bool) -> Self ; in impl<T> zenoh::query::ReplyBuilder<'_, '_, T>
+fn zenoh::query::ReplyBuilder::priority(Self, zenoh::qos::Priority) -> Self ; in impl<T> zenoh::query::ReplyBuilder<'_, '_, T>
+fn zenoh::query::ReplyBuilder::timestamp<U: core::convert::Into<core::option::Option<zenoh::time::Timestamp>>>(Self, U) -> Self ; in impl<T> zenoh::query::ReplyBuilder<'_, '_, T>
+fn zenoh::query::ReplyErrBuilder::encoding<T: core::convert::Into<zenoh::bytes::Encoding>>(Self, T) -> Self ; in impl zenoh::query::ReplyErrBuilder<'_>
 fn zenoh::query::Selector::borrowed(&'0 zenoh::key_expr::KeyExpr<'0>, &'0 zenoh::query::Parameters<'0>) -> Self ; in impl<'0> zenoh::query::Selector<'0>
 fn zenoh::query::Selector::into_owned(Self) -> zenoh::query::Selector<'static> ; in impl<'0> zenoh::query::Selector<'0>
 fn zenoh::query::Selector::key_expr(&Self) -> &zenoh::key_expr::KeyExpr<'0> ; in impl<'0> zenoh::query::Selector<'0>
@@ -131,6 +161,7 @@ fn zenoh::sample::SampleBuilder::timestamp<U: core::convert::Into<core::option::
 fn zenoh::session::Session::close(&Self) -> zenoh::session::CloseBuilder<Self> ; in impl zenoh::session::Session
 fn zenoh::session::Session::declare_keyexpr<'0, '1: '0, TryIntoKeyExpr>(&'0 Self, TryIntoKeyExpr) -> impl '0 + zenoh::Resolve<zenoh::Result<zenoh::key_expr::KeyExpr<'1>>> where <TryIntoKeyExpr as core::convert::TryInto<zenoh::key_expr::KeyExpr<'1>>>::Error: core::convert::Into<zenoh::Error>, TryIntoKeyExpr: core::convert::TryInto<zenoh::key_expr::KeyExpr<'1>> ; in impl zenoh::session::Session
 fn zenoh::session::Session::declare_publisher<'0, TryIntoKeyExpr>(&Self, TryIntoKeyExpr) -> zenoh::pubsub::PublisherBuilder<'_, '0> where <TryIntoKeyExpr as core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>>>::Error: core::convert::Into<zenoh::Error>, TryIntoKeyExpr: core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>> ; in impl zenoh::session::Session
+fn zenoh::session::Session::declare_queryable<'0, TryIntoKeyExpr>(&Self, TryIntoKeyExpr) -> zenoh::query::QueryableBuilder<'_, '0, zenoh::handlers::DefaultHandler> where <TryIntoKeyExpr as core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>>>::Error: core::convert::Into<zenoh::Error>, TryIntoKeyExpr: core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>> ; in impl zenoh::session::Session
 fn zenoh::session::Session::declare_subscriber<'0, TryIntoKeyExpr>(&Self, TryIntoKeyExpr) -> zenoh::pubsub::SubscriberBuilder<'_, '0, zenoh::handlers::DefaultHandler> where <TryIntoKeyExpr as core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>>>::Error: core::convert::Into<zenoh::Error>, TryIntoKeyExpr: core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>> ; in impl zenoh::session::Session
 fn zenoh::session::Session::delete<'0, '1: '0, TryIntoKeyExpr>(&'0 Self, TryIntoKeyExpr) -> zenoh::session::SessionDeleteBuilder<'0, '1> where <TryIntoKeyExpr as core::convert::TryInto<zenoh::key_expr::KeyExpr<'1>>>::Error: core::convert::Into<zenoh::Error>, TryIntoKeyExpr: core::convert::TryInto<zenoh::key_expr::KeyExpr<'1>> ; in impl zenoh::session::Session
 fn zenoh::session::Session::info(&Self) -> zenoh::session::SessionInfo ; in impl zenoh::session::Session
@@ -155,6 +186,8 @@ impl core::clone::Clone for zenoh::pubsub::PublicationBuilderDelete
 impl core::clone::Clone for zenoh::pubsub::PublicationBuilderPut
 impl core::clone::Clone for zenoh::pubsub::PublisherBuilder
 impl core::clone::Clone for zenoh::qos::Priority
+impl core::clone::Clone for zenoh::query::Query
+impl core::clone::Clone for zenoh::query::ReplyKeyExpr
 impl core::clone::Clone for zenoh::query::Selector
 impl core::clone::Clone for zenoh::sample::Locality
 impl core::clone::Clone for zenoh::sample::Sample
@@ -170,6 +203,7 @@ impl core::cmp::Eq for zenoh::bytes::OptionZBytes
 impl core::cmp::Eq for zenoh::bytes::ZBytes
 impl core::cmp::Eq for zenoh::key_expr::KeyExpr
 impl core::cmp::Eq for zenoh::qos::Priority
+impl core::cmp::Eq for zenoh::query::ReplyKeyExpr
 impl core::cmp::Eq for zenoh::query::Selector
 impl core::cmp::Eq for zenoh::sample::Locality
 impl core::cmp::Eq for zenoh::sample::SampleKind
@@ -178,6 +212,7 @@ impl core::cmp::PartialEq for zenoh::bytes::OptionZBytes
 impl core::cmp::PartialEq for zenoh::bytes::ZBytes
 impl core::cmp::PartialEq for zenoh::key_expr::KeyExpr
 impl core::cmp::PartialEq for zenoh::qos::Priority
+impl core::cmp::PartialEq for zenoh::query::ReplyKeyExpr
 impl core::cmp::PartialEq for zenoh::query::Selector
 impl core::cmp::PartialEq for zenoh::sample::Locality
 impl core::cmp::PartialEq for zenoh::sample::SampleKind
@@ -218,6 +253,7 @@ impl core::default::Default for zenoh::handlers::DefaultHandler
 impl core::default::Default for zenoh::handlers::RingChannel
 impl core::default::Default for zenoh::handlers::fifo::FifoChannel
 impl core::default::Default for zenoh::qos::Priority
+impl core::default::Default for zenoh::query::ReplyKeyExpr
 impl core::default::Default for zenoh::sample::Locality
 impl core::default::Default for zenoh::sample::SampleKind
 impl core::error::Error for zenoh::session::SessionClosedError
@@ -253,6 +289,15 @@ impl core::fmt::Debug for zenoh::pubsub::Subscriber
 impl core::fmt::Debug for zenoh::pubsub::SubscriberBuilder
 impl core::fmt::Debug for zenoh::pubsub::SubscriberUndeclaration
 impl core::fmt::Debug for zenoh::qos::Priority
+impl core::fmt::Debug for zenoh::query::Query
+impl core::fmt::Debug for zenoh::query::Queryable
+impl core::fmt::Debug for zenoh::query::QueryableBuilder
+impl core::fmt::Debug for zenoh::query::QueryableUndeclaration
+impl core::fmt::Debug for zenoh::query::ReplyBuilder
+impl core::fmt::Debug for zenoh::query::ReplyBuilderDelete
+impl core::fmt::Debug for zenoh::query::ReplyBuilderPut
+impl core::fmt::Debug for zenoh::query::ReplyErrBuilder
+impl core::fmt::Debug for zenoh::query::ReplyKeyExpr
 impl core::fmt::Debug for zenoh::query::Selector
 impl core::fmt::Debug for zenoh::sample::Locality
 impl core::fmt::Debug for zenoh::sample::Sample
@@ -273,6 +318,7 @@ impl core::fmt::Debug for zenoh::session::ZenohIdBuilder
 impl core::fmt::Display for zenoh::bytes::Encoding
 impl core::fmt::Display for zenoh::config::Config
 impl core::fmt::Display for zenoh::key_expr::KeyExpr
+impl core::fmt::Display for zenoh::query::Query
 impl core::fmt::Display for zenoh::query::Selector
 impl core::fmt::Display for zenoh::sample::SampleKind
 impl core::fmt::Display for zenoh::session::SessionClosedError
@@ -283,6 +329,10 @@ impl core::future::into_future::IntoFuture for zenoh::pubsub::PublisherBuilder
 impl core::future::into_future::IntoFuture for zenoh::pubsub::PublisherUndeclaration
 impl core::future::into_future::IntoFuture for zenoh::pubsub::SubscriberBuilder
 impl core::future::into_future::IntoFuture for zenoh::pubsub::SubscriberUndeclaration
+impl core::future::into_future::IntoFuture for zenoh::query::QueryableBuilder
+impl core::future::into_future::IntoFuture for zenoh::query::QueryableUndeclaration
+impl core::future::into_future::IntoFuture for zenoh::query::ReplyBuilder
+impl core::future::into_future::IntoFuture for zenoh::query::ReplyErrBuilder
 impl core::future::into_future::IntoFuture for zenoh::session::CloseBuilder
 impl core::future::into_future::IntoFuture for zenoh::session::OpenBuilder
 impl core::future::into_future::IntoFuture for zenoh::session::PeersZenohIdBuilder
@@ -291,6 +341,7 @@ impl core::future::into_future::IntoFuture for zenoh::session::ZenohIdBuilder
 impl core::hash::Hash for zenoh::bytes::Encoding
 impl core::hash::Hash for zenoh::key_expr::KeyExpr
 impl core::hash::Hash for zenoh::qos::Priority
+impl core::hash::Hash for zenoh::query::ReplyKeyExpr
 impl core::iter::traits::collect::IntoIterator for &zenoh::handlers::fifo::FifoChannelHandler
 impl core::iter::traits::collect::IntoIterator for zenoh::handlers::fifo::FifoChannelHandler
 impl core::iter::traits::exact_size::ExactSizeIterator for zenoh::handlers::fifo::Drain
@@ -300,12 +351,14 @@ impl core::iter::traits::iterator::Iterator for zenoh::handlers::fifo::IntoIter
 impl core::iter::traits::iterator::Iterator for zenoh::handlers::fifo::Iter
 impl core::iter::traits::iterator::Iterator for zenoh::handlers::fifo::TryIter
 impl core::marker::Copy for zenoh::qos::Priority
+impl core::marker::Copy for zenoh::query::ReplyKeyExpr
 impl core::marker::Copy for zenoh::sample::Locality
 impl core::marker::Copy for zenoh::sample::SampleKind
 impl core::marker::StructuralPartialEq for zenoh::bytes::Encoding
 impl core::marker::StructuralPartialEq for zenoh::bytes::OptionZBytes
 impl core::marker::StructuralPartialEq for zenoh::bytes::ZBytes
 impl core::marker::StructuralPartialEq for zenoh::qos::Priority
+impl core::marker::StructuralPartialEq for zenoh::query::ReplyKeyExpr
 impl core::marker::StructuralPartialEq for zenoh::query::Selector
 impl core::marker::StructuralPartialEq for zenoh::sample::Locality
 impl core::marker::StructuralPartialEq for zenoh::sample::SampleKind
@@ -313,10 +366,13 @@ impl core::ops::arith::Div for &zenoh::key_expr::KeyExpr
 impl core::ops::arith::Div for zenoh::key_expr::KeyExpr
 impl core::ops::deref::Deref for zenoh::key_expr::KeyExpr
 impl core::ops::deref::Deref for zenoh::pubsub::Subscriber
+impl core::ops::deref::Deref for zenoh::query::Queryable
 impl core::ops::deref::DerefMut for zenoh::pubsub::Subscriber
+impl core::ops::deref::DerefMut for zenoh::query::Queryable
 impl core::ops::drop::Drop for zenoh::handlers::CallbackDrop
 impl core::ops::drop::Drop for zenoh::pubsub::Publisher
 impl core::ops::drop::Drop for zenoh::pubsub::Subscriber
+impl core::ops::drop::Drop for zenoh::query::Queryable
 impl core::ops::drop::Drop for zenoh::session::Session
 impl core::panic::unwind_safe::RefUnwindSafe for zenoh::key_expr::KeyExpr
 impl core::panic::unwind_safe::UnwindSafe for zenoh::key_expr::KeyExpr
@@ -330,6 +386,7 @@ impl futures_sink::Sink for zenoh::pubsub::Publisher
 impl serde_core::de::Deserialize for zenoh::config::Config
 impl serde_core::de::Deserialize for zenoh::key_expr::KeyExpr
 impl serde_core::de::Deserialize for zenoh::qos::Priority
+impl serde_core::de::Deserialize for zenoh::query::ReplyKeyExpr
 impl serde_core::de::Deserialize for zenoh::sample::Locality
 impl serde_core::de::Deserialize for zenoh::sample::SampleKind
 impl serde_core::ser::Serialize for zenoh::config::Config
@@ -345,6 +402,10 @@ impl zenoh::Resolvable for zenoh::pubsub::PublisherBuilder
 impl zenoh::Resolvable for zenoh::pubsub::PublisherUndeclaration
 impl zenoh::Resolvable for zenoh::pubsub::SubscriberBuilder
 impl zenoh::Resolvable for zenoh::pubsub::SubscriberUndeclaration
+impl zenoh::Resolvable for zenoh::query::QueryableBuilder
+impl zenoh::Resolvable for zenoh::query::QueryableUndeclaration
+impl zenoh::Resolvable for zenoh::query::ReplyBuilder
+impl zenoh::Resolvable for zenoh::query::ReplyErrBuilder
 impl zenoh::Resolvable for zenoh::session::CloseBuilder
 impl zenoh::Resolvable for zenoh::session::OpenBuilder
 impl zenoh::Resolvable for zenoh::session::PeersZenohIdBuilder
@@ -356,6 +417,10 @@ impl zenoh::Wait for zenoh::pubsub::PublisherBuilder
 impl zenoh::Wait for zenoh::pubsub::PublisherUndeclaration
 impl zenoh::Wait for zenoh::pubsub::SubscriberBuilder
 impl zenoh::Wait for zenoh::pubsub::SubscriberUndeclaration
+impl zenoh::Wait for zenoh::query::QueryableBuilder
+impl zenoh::Wait for zenoh::query::QueryableUndeclaration
+impl zenoh::Wait for zenoh::query::ReplyBuilder
+impl zenoh::Wait for zenoh::query::ReplyErrBuilder
 impl zenoh::Wait for zenoh::session::CloseBuilder
 impl zenoh::Wait for zenoh::session::OpenBuilder
 impl zenoh::Wait for zenoh::session::PeersZenohIdBuilder
@@ -436,6 +501,14 @@ struct zenoh::pubsub::PublisherUndeclaration
 struct zenoh::pubsub::Subscriber
 struct zenoh::pubsub::SubscriberBuilder
 struct zenoh::pubsub::SubscriberUndeclaration
+struct zenoh::query::Query
+struct zenoh::query::Queryable
+struct zenoh::query::QueryableBuilder
+struct zenoh::query::QueryableUndeclaration
+struct zenoh::query::ReplyBuilder
+struct zenoh::query::ReplyBuilderDelete
+struct zenoh::query::ReplyBuilderPut
+struct zenoh::query::ReplyErrBuilder
 struct zenoh::query::Selector
 struct zenoh::sample::Sample
 struct zenoh::sample::SampleBuilder

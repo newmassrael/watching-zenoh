@@ -244,9 +244,19 @@ pub mod query {
     #[zenoh_macros::unstable]
     pub use zenoh_util::time_range::{TimeBound, TimeExpr, TimeRange};
 
-    pub use crate::api::selector::Selector;
+    #[zenoh_macros::internal]
+    pub use crate::api::queryable::ReplySample;
     #[zenoh_macros::unstable]
     pub use crate::api::selector::ZenohParameters;
+    pub use crate::api::{
+        builders::{
+            queryable::QueryableBuilder,
+            reply::{ReplyBuilder, ReplyBuilderDelete, ReplyBuilderPut, ReplyErrBuilder},
+        },
+        query::ReplyKeyExpr,
+        queryable::{Query, Queryable, QueryableUndeclaration},
+        selector::Selector,
+    };
 }
 
 /// # Sample primitives

@@ -40,6 +40,8 @@ pub(crate) mod encoding;
 pub(crate) mod handlers;
 pub(crate) mod info;
 pub(crate) mod publisher;
+pub(crate) mod query;
+pub(crate) mod queryable;
 // R3706: the sample's remaining user, the reply, is slice Z3; until it lands the constructor from a
 // frame (`from_push`) has no caller.
 #[allow(dead_code)]

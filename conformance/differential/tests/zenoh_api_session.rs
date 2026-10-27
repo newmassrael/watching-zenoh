@@ -305,6 +305,104 @@ mod observer {
         }
     }
 
+    /// What a reply says, as one line: who answered, and every field of the answer that crosses a
+    /// link.
+    fn describe_reply(reply: &up_zenoh::query::Reply) -> String {
+        let replier = reply.replier_id().map(|id| id.zid().to_string());
+        match reply.result() {
+            Ok(sample) => format!("ok replier={replier:?} {}", describe(sample, false)),
+            Err(error) => format!(
+                "err replier={replier:?} {} encoding={}",
+                error
+                    .payload()
+                    .try_to_string()
+                    .map_or_else(|_| "(not text)".to_owned(), |s| s.to_string()),
+                error.encoding()
+            ),
+        }
+    }
+
+    /// The lines of the replies of a get, sorted, once the get is over.
+    fn collect<E: std::fmt::Display>(
+        label: &str,
+        asked: Result<up_zenoh::handlers::FifoChannelHandler<up_zenoh::query::Reply>, E>,
+    ) -> Vec<String> {
+        let mut lines = match asked {
+            Ok(replies) => replies.iter().map(|reply| describe_reply(&reply)).collect(),
+            Err(error) => vec![format!("the get failed: {error}")],
+        };
+        lines.sort();
+        let mut out = vec![format!("{label}: {} reply(ies)", lines.len())];
+        out.extend(lines.into_iter().map(|line| format!("{label}: {line}")));
+        out
+    }
+
+    /// An upstream node that dials the node of `port` and asks it queries of every shape, once the
+    /// node answers a probe, keeping what comes back as text.
+    pub fn asks(id: &str, port: u16) -> Result<Vec<String>, String> {
+        use up_zenoh::{
+            bytes::Encoding,
+            query::{QueryTarget, ReplyKeyExpr},
+            qos::{CongestionControl, Priority},
+        };
+        let session = open(id, "peer", None, Some(port))?;
+        let wait = Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut ready = false;
+        while !ready && Instant::now() < deadline {
+            ready = session
+                .get("demo/q/ready")
+                .timeout(Duration::from_secs(1))
+                .wait()
+                .map(|replies| replies.iter().count() > 0)
+                .unwrap_or(false);
+        }
+        let mut out = vec![format!("queryable known: {ready}")];
+        out.extend(collect("plain", session.get("demo/q/plain?a=1;b=2").timeout(wait).wait()));
+        out.extend(collect(
+            "with a body",
+            session
+                .get("demo/q/body")
+                .payload("body")
+                .encoding(Encoding::TEXT_PLAIN)
+                .attachment("att")
+                .timeout(wait)
+                .wait(),
+        ));
+        out.extend(collect(
+            "every form of reply",
+            session.get("demo/q/forms/**").target(QueryTarget::All).timeout(wait).wait(),
+        ));
+        out.extend(collect(
+            "disjoint reply refused",
+            session.get("demo/q/far").timeout(Duration::from_secs(2)).wait(),
+        ));
+        out.extend(collect(
+            "disjoint reply accepted",
+            session
+                .get("demo/q/far")
+                .accept_replies(ReplyKeyExpr::Any)
+                .timeout(wait)
+                .wait(),
+        ));
+        out.extend(collect("answered late", session.get("demo/q/held").timeout(wait).wait()));
+        out.extend(collect(
+            "with options",
+            session
+                .get("demo/q/options")
+                .priority(Priority::RealTime)
+                .congestion_control(CongestionControl::Block)
+                .express(true)
+                .timeout(wait)
+                .wait(),
+        ));
+        out.extend(collect(
+            "nobody to answer",
+            session.get("demo/elsewhere/none").timeout(Duration::from_secs(2)).wait(),
+        ));
+        Ok(out)
+    }
+
     /// [`seen`] once the session sees `count` transports, or after five seconds.
     pub fn seen_with(session: &Session, count: usize) -> String {
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -713,6 +811,121 @@ macro_rules! session_cases {
                 out.push(format!("delete after close: {}", text(plain.delete().wait())));
                 out.push(format!("declare after close: {}", text(subject.declare_publisher("demo/after").wait().map(|_| ()))));
                 out.push(format!("undeclare after close: {}", text(plain.undeclare().wait())));
+                out
+            }
+
+            /// A queryable declared on a session that an upstream node asks over a link: what the
+            /// queryable saw of each query, how each reply it made came out, and what the asker
+            /// received of them.
+            pub fn queryables() -> Vec<String> {
+                use $z::internal::traits::{
+                    EncodingBuilderTrait, QoSBuilderTrait, SampleBuilderTrait, TimestampBuilderTrait,
+                };
+                let port = free_port();
+                let subject = $z::open(config(&format!(
+                    r#"{{ id: "5a0012", mode: "peer",
+                          listen: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                          scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                )))
+                .wait()
+                .expect("opens");
+                let saw = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+                let record = saw.clone();
+                let queryable = subject
+                    .declare_queryable("demo/q/**")
+                    .complete(true)
+                    .callback(move |query| {
+                        let key = query.key_expr().as_str().to_owned();
+                        if key == "demo/q/ready" {
+                            query.reply("demo/q/ready", "ready").wait().expect("replies");
+                            return;
+                        }
+                        let body_of = |bytes: Option<&$z::bytes::ZBytes>| {
+                            bytes.map(|b| b.try_to_string().map(|s| s.into_owned()).unwrap_or_default())
+                        };
+                        record.lock().unwrap().push(format!(
+                            "saw {} | key {key} | parameters {} | payload {:?} | encoding {:?} | \
+                             attachment {:?} | priority {:?} congestion {:?} express {} | source {:?} | \
+                             accepts {:?}",
+                            query.selector(),
+                            query.parameters(),
+                            body_of(query.payload()),
+                            query.encoding().map(|e| e.to_string()),
+                            body_of(query.attachment()),
+                            query.priority(),
+                            query.congestion_control(),
+                            query.express(),
+                            query.source_info().map(|i| (format!("{:?}", i.source_id()), i.source_sn())),
+                            query.accepts_replies(),
+                        ));
+                        let outcome = |label: &str, result: Result<(), _>| {
+                            record.lock().unwrap().push(format!("reply {label}: {}", text(result)));
+                        };
+                        match key.as_str() {
+                            "demo/q/plain" => outcome("plain", query.reply("demo/q/plain", "r1").wait()),
+                            "demo/q/body" => {
+                                let body = body_of(query.payload()).unwrap_or_default();
+                                outcome(
+                                    "echo",
+                                    query
+                                        .reply("demo/q/body", body)
+                                        .encoding($z::bytes::Encoding::APPLICATION_JSON)
+                                        .wait(),
+                                );
+                            }
+                            "demo/q/forms/**" => {
+                                let id = $z::time::TimestampId::try_from(&[0xab_u8, 0xcd][..]).expect("an id");
+                                let at = $z::time::Timestamp::new($z::time::NTP64(0x1234_5678_9abc_def0), id);
+                                outcome(
+                                    "put with every setting",
+                                    query
+                                        .reply("demo/q/forms/a", "pa")
+                                        .encoding($z::bytes::Encoding::TEXT_PLAIN.with_schema("s"))
+                                        .attachment("with")
+                                        .timestamp(at)
+                                        .express(true)
+                                        .source_info($z::sample::SourceInfo::new(
+                                            $z::session::EntityGlobalId::new("c0ffee".parse().expect("an id"), 7),
+                                            41,
+                                        ))
+                                        .wait(),
+                                );
+                                outcome("delete", query.reply_del("demo/q/forms/b").attachment("gone").timestamp(at).wait());
+                                outcome(
+                                    "error",
+                                    query
+                                        .reply_err("broken")
+                                        .encoding($z::bytes::Encoding::TEXT_PLAIN)
+                                        .wait(),
+                                );
+                            }
+                            "demo/q/far" => {
+                                outcome("disjoint", query.reply("demo/other/key", "far").wait());
+                            }
+                            "demo/q/held" => {
+                                let late = query.clone();
+                                std::thread::spawn(move || {
+                                    std::thread::sleep(Duration::from_millis(200));
+                                    let _ = late.reply("demo/q/held", "late").wait();
+                                });
+                            }
+                            "demo/q/options" => {
+                                outcome("options", query.reply("demo/q/options", "o").express(false).wait())
+                            }
+                            _ => {}
+                        }
+                    })
+                    .wait()
+                    .expect("declares");
+                let mut out = observer::asks("b00012", port).expect("the asker opens");
+                out.extend(saw.lock().unwrap().iter().cloned());
+                out.push(format!("queryable key: {}", queryable.key_expr()));
+                subject.close().wait().expect("closes");
+                out.push(format!(
+                    "declare after close: {}",
+                    text(subject.declare_queryable("demo/after").wait().map(|_| ()))
+                ));
+                out.push(format!("undeclare after close: {}", text(queryable.undeclare().wait())));
                 out
             }
 
@@ -1324,6 +1537,20 @@ fn what_a_publisher_publishes_is_what_an_upstream_subscriber_receives() {
         "{u:#?}"
     );
     compare("publishers", &u, &w);
+}
+
+#[test]
+fn what_a_queryable_answers_is_what_an_upstream_node_receives() {
+    // The log of upstream's nodes, for a run that is asked for it with `RUST_LOG`.
+    up_zenoh::try_init_log_from_env();
+    let (u, w) = (up::queryables(), wz::queryables());
+    assert!(u.iter().any(|l| l == "queryable known: true"), "{u:#?}");
+    assert!(u.iter().any(|l| l == "plain: 1 reply(ies)"), "{u:#?}");
+    assert!(u.iter().any(|l| l == "every form of reply: 3 reply(ies)"), "{u:#?}");
+    assert!(u.iter().any(|l| l == "disjoint reply accepted: 1 reply(ies)"), "{u:#?}");
+    assert!(u.iter().any(|l| l == "disjoint reply refused: 0 reply(ies)"), "{u:#?}");
+    assert!(u.iter().any(|l| l == "answered late: 1 reply(ies)"), "{u:#?}");
+    compare("queryables", &u, &w);
 }
 
 #[test]
