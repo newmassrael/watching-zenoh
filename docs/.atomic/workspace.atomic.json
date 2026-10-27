@@ -293600,6 +293600,36 @@
         "The hosted result of this push is read per job at the start of the next round; the size red of the capability cost gate named in round 3776 is still not of this family."
       ]
     },
+    "Round 3785": {
+      "decision_summary": "Open-debt item 751, step (b), step 3 of docs/peer-region-hats.md, publish and subscribe only: a differential gate holds the region-hat peer equal to LinkstateForwarder. The same scene (five of them, each in gossip and in link-state mode) is played into both through FaceForwarder and the decoded messages each sent each face after each step are compared. Gossip is the pin's mode: equal data, two differences, both LinkstateForwarder leaving the pin (a new link is sent its own entry and every node, not the linked neighbours by zid; a recompute re-advertises to a tree child the face-up already told), listed with the rule and required to still occur. Link-state is wz's extension, which pin 1.10.1 does not have (routing.peer.mode has no effect): equal data and topology, no allowed difference. It took two rules for a peer node running the extension: the hat relays inside its region by tree (face_based), and does not replay at face-up. The constructor stays test-only until steps 4 to 6.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward/peer_differential_tests.rs: the gate, its scenes, the explained-difference list and the pin-graded face-up test. crates/wz-runtime-tokio/src/router_forward.rs: face_based and runs_linkstate_peers (six sites that were is_peer_hat), the face-up replay skipped in a link-state peer hat, the peer constructor's doc. scripts/run-ci.sh: all eight C1AY router_forward guards move by three (239 241 264 244 247 286 239 241). docs/peer-region-hats.md: section 7. A router node's behaviour is untouched: both rules ask for node mode Peer."
+      ],
+      "verification_bullets": [
+        "On pc2 the three gate tests pass. The gate failed without each rule, observed before the rule was written: with the peer hat always face-based the link-state scenes diverged on every relayed subscription and Put (4 steps); with the face-up replay kept the link-state scene sent each declaration twice. All eight router_forward arms were run and each printed its old number plus 3; routing_region prints 12; clippy with -D warnings is clean under all features and under the defaults; rustfmt is clean; the debt census exits 0. Not run: the peer E2E files that need a foreign binary, and the hosted run."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Item 751 step (b) continues at step 4, the query plane, with the same gate extended by Query, Reply and ResponseFinal steps, then step 5 (tokens and interests) and step 6 (the node surfaces listed in section 5 of the note). Not covered by step 3: priorities and reliability, ids and aliases, a three-hop tree, and LinkstateForwarder's two gossip-mode deviations from the pin, which are recorded rather than fixed because that plane retires at step 7. Open for the owner: the link-state extension on a ROUTER node's south peer region still relays nothing between its peers (R2896 turned the flag on there for topology only); if a deployment of link-state peers behind a router needs the router to relay, that is a decision, not a gap this gate can find."
+      ],
+      "publishable_decision_summary": "Open-debt item 751, step (b), step 3 of docs/peer-region-hats.md, publish and subscribe only: a differential gate holds the region-hat peer equal to LinkstateForwarder. The same scene (five of them, each in gossip and in link-state mode) is played into both through FaceForwarder and the decoded messages each sent each face after each step are compared. Gossip is the pin's mode: equal data, two differences, both LinkstateForwarder leaving the pin (a new link is sent its own entry and every node, not the linked neighbours by zid; a recompute re-advertises to a tree child the face-up already told), listed with the rule and required to still occur. Link-state is wz's extension, which pin 1.10.1 does not have (routing.peer.mode has no effect): equal data and topology, no allowed difference. It took two rules for a peer node running the extension: the hat relays inside its region by tree (face_based), and does not replay at face-up. The constructor stays test-only until steps 4 to 6.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward/peer_differential_tests.rs: the gate, its scenes, the explained-difference list and the pin-graded face-up test. crates/wz-runtime-tokio/src/router_forward.rs: face_based and runs_linkstate_peers (six sites that were is_peer_hat), the face-up replay skipped in a link-state peer hat, the peer constructor's doc. scripts/run-ci.sh: all eight C1AY router_forward guards move by three (239 241 264 244 247 286 239 241). docs/peer-region-hats.md: section 7. A router node's behaviour is untouched: both rules ask for node mode Peer."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2 the three gate tests pass. The gate failed without each rule, observed before the rule was written: with the peer hat always face-based the link-state scenes diverged on every relayed subscription and Put (4 steps); with the face-up replay kept the link-state scene sent each declaration twice. All eight router_forward arms were run and each printed its old number plus 3; routing_region prints 12; clippy with -D warnings is clean under all features and under the defaults; rustfmt is clean; the debt census exits 0. Not run: the peer E2E files that need a foreign binary, and the hosted run."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Item 751 step (b) continues at step 4, the query plane, with the same gate extended by Query, Reply and ResponseFinal steps, then step 5 (tokens and interests) and step 6 (the node surfaces listed in section 5 of the note). Not covered by step 3: priorities and reliability, ids and aliases, a three-hop tree, and LinkstateForwarder's two gossip-mode deviations from the pin, which are recorded rather than fixed because that plane retires at step 7. Open for the owner: the link-state extension on a ROUTER node's south peer region still relays nothing between its peers (R2896 turned the flag on there for topology only); if a deployment of link-state peers behind a router needs the router to relay, that is a decision, not a gap this gate can find."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
