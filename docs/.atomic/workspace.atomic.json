@@ -294306,6 +294306,40 @@
         "A round that lands while a sweep runs can move the ledger; the hosted settle job is what judges the tree that lands."
       ]
     },
+    "Round 3803": {
+      "decision_summary": "The two carries of the doors are paid. A run that asks for a facility never showed it cannot go on without it, so requires was held to runs only from below. The witness shim now refuses what it brackets (WZ_FACILITY_DENY: the interface listing and lookups with EACCES, name resolution with EAI_FAIL) and a scenario names what it denies; the run is held to its configuration's door, failing by itself when requires names the refused facility and going on when it does not. Each library dials by host name without the resolver and by address without the listing, and the zenoh-c peer joins its #iface=lo group without the listing. pico's door no longer reads the engine to decide what the build has: the TLS files follow the TLS backend and the group rule follows is_group_endpoint, so a build graph that changes stops at compile time instead of answering wrongly.",
+      "changes_bullets": [
+        "scripts/lib/facility_witness_shim.c: WZ_FACILITY_DENY, the bracketed calls refused after their scope is marked.",
+        "scripts/lib/facility_trace.py: DENIABLE, Scenario.deny, judge holds a denied run to its door (fails when required, goes on otherwise); denial_corpus for capi-c and capi-pico, a denied #iface=lo group run in the zenoh-c corpus; the probe exits 3 on a refused listing or resolution; selftest cases for both directions and for the shim.",
+        "crates/wz-capi-pico/src/device_requires.rs: TLS material resolved under the TLS backend features, the group rule under the features is_group_endpoint exists in.",
+        "docs/target-build-contract.md T9: the denial runs and what they hold."
+      ],
+      "verification_bullets": [
+        "Here: facility_trace.py --selftest OK, the traced arms included: for each of interface-list and name-resolution, a probe denied it still asks for it and exits 3, and one denied only wall-clock exits 0; the judge cases for both directions pass. On pc2: wz-capi-pico device_requires tests (4) and clippy -D warnings over all targets in the default build and with engine-coop,link-udp,unstable-api. Layer C1st pass: the six denial runs agree with their doors. Denied the resolver, a dial by host name failed by itself in both libraries, as their requires names name-resolution. Denied the interface listing, a dial by address in both libraries and the zenoh-c peer on its #iface=lo group went on, as neither requires names interface-list. Every other run agrees as before."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "The raw Ethernet endpoint's interface-list requirement is held by reading only: a reth run needs CAP_NET_RAW, which no build machine grants a scenario, and its index lookup is an ioctl the shim does not refuse."
+      ],
+      "publishable_decision_summary": "The two carries of the doors are paid. A run that asks for a facility never showed it cannot go on without it, so requires was held to runs only from below. The witness shim now refuses what it brackets (WZ_FACILITY_DENY: the interface listing and lookups with EACCES, name resolution with EAI_FAIL) and a scenario names what it denies; the run is held to its configuration's door, failing by itself when requires names the refused facility and going on when it does not. Each library dials by host name without the resolver and by address without the listing, and the zenoh-c peer joins its #iface=lo group without the listing. pico's door no longer reads the engine to decide what the build has: the TLS files follow the TLS backend and the group rule follows is_group_endpoint, so a build graph that changes stops at compile time instead of answering wrongly.",
+      "publishable_changes_bullets": [
+        "scripts/lib/facility_witness_shim.c: WZ_FACILITY_DENY, the bracketed calls refused after their scope is marked.",
+        "scripts/lib/facility_trace.py: DENIABLE, Scenario.deny, judge holds a denied run to its door (fails when required, goes on otherwise); denial_corpus for capi-c and capi-pico, a denied #iface=lo group run in the zenoh-c corpus; the probe exits 3 on a refused listing or resolution; selftest cases for both directions and for the shim.",
+        "crates/wz-capi-pico/src/device_requires.rs: TLS material resolved under the TLS backend features, the group rule under the features is_group_endpoint exists in.",
+        "docs/target-build-contract.md T9: the denial runs and what they hold."
+      ],
+      "publishable_verification_bullets": [
+        "Here: facility_trace.py --selftest OK, the traced arms included: for each of interface-list and name-resolution, a probe denied it still asks for it and exits 3, and one denied only wall-clock exits 0; the judge cases for both directions pass. On pc2: wz-capi-pico device_requires tests (4) and clippy -D warnings over all targets in the default build and with engine-coop,link-udp,unstable-api. Layer C1st pass: the six denial runs agree with their doors. Denied the resolver, a dial by host name failed by itself in both libraries, as their requires names name-resolution. Denied the interface listing, a dial by address in both libraries and the zenoh-c peer on its #iface=lo group went on, as neither requires names interface-list. Every other run agrees as before."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The raw Ethernet endpoint's interface-list requirement is held by reading only: a reth run needs CAP_NET_RAW, which no build machine grants a scenario, and its index lookup is an ioctl the shim does not refuse."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
