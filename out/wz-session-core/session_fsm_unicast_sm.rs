@@ -1,5 +1,5 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: a1025b1d9432dd8aa7925cfb0c07a43fa513ecd4f03f4f852b36b1d799da15d4
+// source-hash: 75318a94ca3106b6b498433ac2b782350bed6574726b2a188d2a74ec882f82e5
 
 
 // SPDX-License-Identifier: AGPL-3.0-only WITH LicenseRef-SCE-Linking-Exception OR LicenseRef-SCE-Commercial
@@ -82,8 +82,8 @@ use sce_rust_runtime::{Engine, StatePolicy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum SessionFsmUnicastState {
-    Accepting,
-    AwaitingInitSyn,
+    #[cfg(feature = "session-unicast-accept")] Accepting,
+    #[cfg(feature = "session-unicast-accept")] AwaitingInitSyn,
     Closed,
     Closing,
     Established,
@@ -93,9 +93,9 @@ pub enum SessionFsmUnicastState {
     Init,
     LinkOpening,
     Opening,
-    SentInitAck,
+    #[cfg(feature = "session-unicast-accept")] SentInitAck,
     SentInitSyn,
-    SentOpenAck,
+    #[cfg(feature = "session-unicast-accept")] SentOpenAck,
 }
 
 // ======================================================================
@@ -104,21 +104,21 @@ pub enum SessionFsmUnicastState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SessionFsmUnicastEvent {
-    AcceptingInactivityTimeout,
+    #[cfg(feature = "session-unicast-accept")] AcceptingInactivityTimeout,
     ClosingTimeout,
     EstablishmentExtRejected,
     FramingError,
-    InboundStart,
+    #[cfg(feature = "session-unicast-accept")] InboundStart,
     InitAckReceived,
     InitAckTimeout,
-    InitSynReceived,
+    #[cfg(feature = "session-unicast-accept")] InitSynReceived,
     LeaseExpired,
     LinkLost,
     LinkOpenTimeout,
     LinkOpened,
     OpenAckReceived,
     OpenAckTimeout,
-    OpenSynReceived,
+    #[cfg(feature = "session-unicast-accept")] OpenSynReceived,
     OutboundStart,
     PeerClose,
     SessionClose,
@@ -156,21 +156,21 @@ impl SessionFsmUnicastEvent {
     /// several machines glob-re-exported into one module never collide
     /// on the name.
     pub const EXTERNALLY_DRIVABLE_EVENTS: &'static [SessionFsmUnicastEvent] = &[
-        SessionFsmUnicastEvent::AcceptingInactivityTimeout,
+        #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastEvent::AcceptingInactivityTimeout,
         SessionFsmUnicastEvent::ClosingTimeout,
         SessionFsmUnicastEvent::EstablishmentExtRejected,
         SessionFsmUnicastEvent::FramingError,
-        SessionFsmUnicastEvent::InboundStart,
+        #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastEvent::InboundStart,
         SessionFsmUnicastEvent::InitAckReceived,
         SessionFsmUnicastEvent::InitAckTimeout,
-        SessionFsmUnicastEvent::InitSynReceived,
+        #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastEvent::InitSynReceived,
         SessionFsmUnicastEvent::LeaseExpired,
         SessionFsmUnicastEvent::LinkLost,
         SessionFsmUnicastEvent::LinkOpenTimeout,
         SessionFsmUnicastEvent::LinkOpened,
         SessionFsmUnicastEvent::OpenAckReceived,
         SessionFsmUnicastEvent::OpenAckTimeout,
-        SessionFsmUnicastEvent::OpenSynReceived,
+        #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastEvent::OpenSynReceived,
         SessionFsmUnicastEvent::OutboundStart,
         SessionFsmUnicastEvent::PeerClose,
         SessionFsmUnicastEvent::SessionClose,
@@ -190,9 +190,9 @@ pub trait SessionFsmUnicastActions {
     fn record_established_at(&mut self);
     fn release_link(&mut self);
     fn send_close_frame_with_reason(&mut self);
-    fn send_init_ack_with_cookie(&mut self);
+    #[cfg(feature = "session-unicast-accept")] fn send_init_ack_with_cookie(&mut self);
     fn send_init_syn(&mut self);
-    fn send_open_ack(&mut self);
+    #[cfg(feature = "session-unicast-accept")] fn send_open_ack(&mut self);
     fn send_open_syn(&mut self);
     fn set_close_reason_expired(&mut self);
     fn set_close_reason_generic(&mut self);
@@ -411,11 +411,11 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
 
     fn get_parent(state: Self::State) -> Option<Self::State> {
         match state {
-            SessionFsmUnicastState::AwaitingInitSyn => Some(SessionFsmUnicastState::Accepting),
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::AwaitingInitSyn => Some(SessionFsmUnicastState::Accepting),
             SessionFsmUnicastState::GotInitAck => Some(SessionFsmUnicastState::Opening),
-            SessionFsmUnicastState::SentInitAck => Some(SessionFsmUnicastState::Accepting),
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::SentInitAck => Some(SessionFsmUnicastState::Accepting),
             SessionFsmUnicastState::SentInitSyn => Some(SessionFsmUnicastState::Opening),
-            SessionFsmUnicastState::SentOpenAck => Some(SessionFsmUnicastState::Accepting),
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::SentOpenAck => Some(SessionFsmUnicastState::Accepting),
             _ => None,
         }
     }
@@ -424,7 +424,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
     // an initial transition. A <parallel> is not compound.
     fn is_compound_state(state: Self::State) -> bool {
         match state {
-            SessionFsmUnicastState::Accepting => true,
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::Accepting => true,
             SessionFsmUnicastState::Opening => true,
             _ => false,
         }
@@ -435,7 +435,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
     // children, in document order — for a <parallel>, its regions.
     fn get_child_states(state: Self::State) -> &'static [Self::State] {
         match state {
-            SessionFsmUnicastState::Accepting => &[SessionFsmUnicastState::AwaitingInitSyn, SessionFsmUnicastState::SentInitAck, SessionFsmUnicastState::SentOpenAck],
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::Accepting => &[SessionFsmUnicastState::AwaitingInitSyn, SessionFsmUnicastState::SentInitAck, SessionFsmUnicastState::SentOpenAck],
             SessionFsmUnicastState::Opening => &[SessionFsmUnicastState::SentInitSyn, SessionFsmUnicastState::GotInitAck],
             _ => &[],
         }
@@ -445,7 +445,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
     // the engine's entry procedures dereference a <history> among them.
     fn get_initial_targets(state: Self::State) -> &'static [::sce_rust_runtime::EntryTarget<Self::State, Self::History>] {
         match state {
-            SessionFsmUnicastState::Accepting => &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::AwaitingInitSyn)],
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::Accepting => &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::AwaitingInitSyn)],
             SessionFsmUnicastState::Opening => &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::SentInitSyn)],
             _ => &[],
         }
@@ -470,8 +470,8 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
 
     fn get_document_order(state: Self::State) -> u32 {
         match state {
-            SessionFsmUnicastState::Accepting => 5,
-            SessionFsmUnicastState::AwaitingInitSyn => 6,
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::Accepting => 5,
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::AwaitingInitSyn => 6,
             SessionFsmUnicastState::Closed => 11,
             SessionFsmUnicastState::Closing => 10,
             SessionFsmUnicastState::Established => 9,
@@ -479,29 +479,29 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             SessionFsmUnicastState::Init => 0,
             SessionFsmUnicastState::LinkOpening => 1,
             SessionFsmUnicastState::Opening => 2,
-            SessionFsmUnicastState::SentInitAck => 7,
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::SentInitAck => 7,
             SessionFsmUnicastState::SentInitSyn => 3,
-            SessionFsmUnicastState::SentOpenAck => 8,
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::SentOpenAck => 8,
         }
     }
 
     fn get_event_name(event: Self::Event) -> &'static str {
         match event {
-            SessionFsmUnicastEvent::AcceptingInactivityTimeout => "accepting.inactivity_timeout",
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastEvent::AcceptingInactivityTimeout => "accepting.inactivity_timeout",
             SessionFsmUnicastEvent::ClosingTimeout => "closing.timeout",
             SessionFsmUnicastEvent::EstablishmentExtRejected => "establishment.ext_rejected",
             SessionFsmUnicastEvent::FramingError => "framing.error",
-            SessionFsmUnicastEvent::InboundStart => "inbound.start",
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastEvent::InboundStart => "inbound.start",
             SessionFsmUnicastEvent::InitAckReceived => "init_ack.received",
             SessionFsmUnicastEvent::InitAckTimeout => "init_ack.timeout",
-            SessionFsmUnicastEvent::InitSynReceived => "init_syn.received",
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastEvent::InitSynReceived => "init_syn.received",
             SessionFsmUnicastEvent::LeaseExpired => "lease.expired",
             SessionFsmUnicastEvent::LinkLost => "link.lost",
             SessionFsmUnicastEvent::LinkOpenTimeout => "link.open_timeout",
             SessionFsmUnicastEvent::LinkOpened => "link.opened",
             SessionFsmUnicastEvent::OpenAckReceived => "open_ack.received",
             SessionFsmUnicastEvent::OpenAckTimeout => "open_ack.timeout",
-            SessionFsmUnicastEvent::OpenSynReceived => "open_syn.received",
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastEvent::OpenSynReceived => "open_syn.received",
             SessionFsmUnicastEvent::OutboundStart => "outbound.start",
             SessionFsmUnicastEvent::PeerClose => "peer.close",
             SessionFsmUnicastEvent::SessionClose => "session.close",
@@ -512,21 +512,21 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
 
     fn get_event_from_name(name: &str) -> Option<Self::Event> {
         match name {
-            "accepting.inactivity_timeout" => Some(SessionFsmUnicastEvent::AcceptingInactivityTimeout),
+            #[cfg(feature = "session-unicast-accept")] "accepting.inactivity_timeout" => Some(SessionFsmUnicastEvent::AcceptingInactivityTimeout),
             "closing.timeout" => Some(SessionFsmUnicastEvent::ClosingTimeout),
             "establishment.ext_rejected" => Some(SessionFsmUnicastEvent::EstablishmentExtRejected),
             "framing.error" => Some(SessionFsmUnicastEvent::FramingError),
-            "inbound.start" => Some(SessionFsmUnicastEvent::InboundStart),
+            #[cfg(feature = "session-unicast-accept")] "inbound.start" => Some(SessionFsmUnicastEvent::InboundStart),
             "init_ack.received" => Some(SessionFsmUnicastEvent::InitAckReceived),
             "init_ack.timeout" => Some(SessionFsmUnicastEvent::InitAckTimeout),
-            "init_syn.received" => Some(SessionFsmUnicastEvent::InitSynReceived),
+            #[cfg(feature = "session-unicast-accept")] "init_syn.received" => Some(SessionFsmUnicastEvent::InitSynReceived),
             "lease.expired" => Some(SessionFsmUnicastEvent::LeaseExpired),
             "link.lost" => Some(SessionFsmUnicastEvent::LinkLost),
             "link.open_timeout" => Some(SessionFsmUnicastEvent::LinkOpenTimeout),
             "link.opened" => Some(SessionFsmUnicastEvent::LinkOpened),
             "open_ack.received" => Some(SessionFsmUnicastEvent::OpenAckReceived),
             "open_ack.timeout" => Some(SessionFsmUnicastEvent::OpenAckTimeout),
-            "open_syn.received" => Some(SessionFsmUnicastEvent::OpenSynReceived),
+            #[cfg(feature = "session-unicast-accept")] "open_syn.received" => Some(SessionFsmUnicastEvent::OpenSynReceived),
             "outbound.start" => Some(SessionFsmUnicastEvent::OutboundStart),
             "peer.close" => Some(SessionFsmUnicastEvent::PeerClose),
             "session.close" => Some(SessionFsmUnicastEvent::SessionClose),
@@ -537,8 +537,8 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
 
     fn get_state_name(state: Self::State) -> &'static str {
         match state {
-            SessionFsmUnicastState::Accepting => "Accepting",
-            SessionFsmUnicastState::AwaitingInitSyn => "AwaitingInitSyn",
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::Accepting => "Accepting",
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::AwaitingInitSyn => "AwaitingInitSyn",
             SessionFsmUnicastState::Closed => "Closed",
             SessionFsmUnicastState::Closing => "Closing",
             SessionFsmUnicastState::Established => "Established",
@@ -546,9 +546,9 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             SessionFsmUnicastState::Init => "Init",
             SessionFsmUnicastState::LinkOpening => "LinkOpening",
             SessionFsmUnicastState::Opening => "Opening",
-            SessionFsmUnicastState::SentInitAck => "SentInitAck",
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::SentInitAck => "SentInitAck",
             SessionFsmUnicastState::SentInitSyn => "SentInitSyn",
-            SessionFsmUnicastState::SentOpenAck => "SentOpenAck",
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::SentOpenAck => "SentOpenAck",
         }
     }
 
@@ -557,8 +557,8 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
     // recorded configuration back into the slice `enter_at` takes.
     fn get_state_from_name(name: &str) -> Option<Self::State> {
         match name {
-            "Accepting" => Some(SessionFsmUnicastState::Accepting),
-            "AwaitingInitSyn" => Some(SessionFsmUnicastState::AwaitingInitSyn),
+            #[cfg(feature = "session-unicast-accept")] "Accepting" => Some(SessionFsmUnicastState::Accepting),
+            #[cfg(feature = "session-unicast-accept")] "AwaitingInitSyn" => Some(SessionFsmUnicastState::AwaitingInitSyn),
             "Closed" => Some(SessionFsmUnicastState::Closed),
             "Closing" => Some(SessionFsmUnicastState::Closing),
             "Established" => Some(SessionFsmUnicastState::Established),
@@ -566,9 +566,9 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             "Init" => Some(SessionFsmUnicastState::Init),
             "LinkOpening" => Some(SessionFsmUnicastState::LinkOpening),
             "Opening" => Some(SessionFsmUnicastState::Opening),
-            "SentInitAck" => Some(SessionFsmUnicastState::SentInitAck),
+            #[cfg(feature = "session-unicast-accept")] "SentInitAck" => Some(SessionFsmUnicastState::SentInitAck),
             "SentInitSyn" => Some(SessionFsmUnicastState::SentInitSyn),
-            "SentOpenAck" => Some(SessionFsmUnicastState::SentOpenAck),
+            #[cfg(feature = "session-unicast-accept")] "SentOpenAck" => Some(SessionFsmUnicastState::SentOpenAck),
             _ => None,
         }
     }
@@ -602,7 +602,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
     fn execute_entry_actions(&mut self, state: Self::State, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
         match state {
             SessionFsmUnicastState::Closed => {
-                // SCE-MAP: session_fsm_unicast.scxml:234 :: Closed :: _state_body
+                // SCE-MAP: session_fsm_unicast.scxml:235 :: Closed :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -613,9 +613,9 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             // W3C SCXML G.7: <sce:action name="free_pool_slots">
             self.actions.free_pool_slots();
                 }
-            }
+            },
             SessionFsmUnicastState::Closing => {
-                // SCE-MAP: session_fsm_unicast.scxml:226 :: Closing :: _state_body
+                // SCE-MAP: session_fsm_unicast.scxml:227 :: Closing :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -623,9 +623,9 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             // W3C SCXML G.7: <sce:action name="send_close_frame_with_reason">
             self.actions.send_close_frame_with_reason();
                 }
-            }
+            },
             SessionFsmUnicastState::Established => {
-                // SCE-MAP: session_fsm_unicast.scxml:199 :: Established :: _state_body
+                // SCE-MAP: session_fsm_unicast.scxml:200 :: Established :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -642,9 +642,9 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             // W3C SCXML G.7: <sce:action name="start_keepalive_worker">
             self.actions.start_keepalive_worker();
                 }
-            }
+            },
             SessionFsmUnicastState::GotInitAck => {
-                // SCE-MAP: session_fsm_unicast.scxml:145 :: GotInitAck :: _state_body
+                // SCE-MAP: session_fsm_unicast.scxml:146 :: GotInitAck :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -652,9 +652,9 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             // W3C SCXML G.7: <sce:action name="send_open_syn">
             self.actions.send_open_syn();
                 }
-            }
+            },
             SessionFsmUnicastState::LinkOpening => {
-                // SCE-MAP: session_fsm_unicast.scxml:118 :: LinkOpening :: _state_body
+                // SCE-MAP: session_fsm_unicast.scxml:119 :: LinkOpening :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -662,9 +662,9 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             // W3C SCXML G.7: <sce:action name="link_driver_open">
             self.actions.link_driver_open();
                 }
-            }
-            SessionFsmUnicastState::SentInitAck => {
-                // SCE-MAP: session_fsm_unicast.scxml:176 :: SentInitAck :: _state_body
+            },
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::SentInitAck => {
+                // SCE-MAP: session_fsm_unicast.scxml:177 :: SentInitAck :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -672,9 +672,9 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             // W3C SCXML G.7: <sce:action name="send_init_ack_with_cookie">
             self.actions.send_init_ack_with_cookie();
                 }
-            }
+            },
             SessionFsmUnicastState::SentInitSyn => {
-                // SCE-MAP: session_fsm_unicast.scxml:136 :: SentInitSyn :: _state_body
+                // SCE-MAP: session_fsm_unicast.scxml:137 :: SentInitSyn :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -682,9 +682,9 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             // W3C SCXML G.7: <sce:action name="send_init_syn">
             self.actions.send_init_syn();
                 }
-            }
-            SessionFsmUnicastState::SentOpenAck => {
-                // SCE-MAP: session_fsm_unicast.scxml:182 :: SentOpenAck :: _state_body
+            },
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::SentOpenAck => {
+                // SCE-MAP: session_fsm_unicast.scxml:183 :: SentOpenAck :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -692,8 +692,8 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             // W3C SCXML G.7: <sce:action name="send_open_ack">
             self.actions.send_open_ack();
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 
@@ -717,7 +717,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
         // own handler is true: the deactivation is the LAST step here.
         match state {
             SessionFsmUnicastState::Established => {
-                // SCE-MAP: session_fsm_unicast.scxml:199 :: Established :: _state_body
+                // SCE-MAP: session_fsm_unicast.scxml:200 :: Established :: _state_body
                 // W3C SCXML 3.9: onexit block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.9: error stops block)
                 'action_block: {
@@ -750,7 +750,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
         engine: &mut sce_rust_runtime::Engine<Self>,
     ) -> Option<::sce_rust_runtime::EnabledTransition<Self::State, Self::History>> {
         match state {
-            SessionFsmUnicastState::Accepting => {
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::Accepting => {
                 if event == SessionFsmUnicastEvent::AcceptingInactivityTimeout {
                     {
                         return Some(::sce_rust_runtime::EnabledTransition {
@@ -807,8 +807,8 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                     }
                 }
                 None
-            }
-            SessionFsmUnicastState::AwaitingInitSyn => {
+            },
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::AwaitingInitSyn => {
                 if event == SessionFsmUnicastEvent::InitSynReceived {
                     {
                         return Some(::sce_rust_runtime::EnabledTransition {
@@ -821,7 +821,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                     }
                 }
                 None
-            }
+            },
             SessionFsmUnicastState::Closing => {
                 if event == SessionFsmUnicastEvent::ClosingTimeout {
                     {
@@ -846,7 +846,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                     }
                 }
                 None
-            }
+            },
             SessionFsmUnicastState::Established => {
                 if event == SessionFsmUnicastEvent::SessionClose {
                     {
@@ -915,7 +915,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                     }
                 }
                 None
-            }
+            },
             SessionFsmUnicastState::GotInitAck => {
                 if event == SessionFsmUnicastEvent::OpenAckReceived {
                     {
@@ -940,7 +940,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                     }
                 }
                 None
-            }
+            },
             SessionFsmUnicastState::Init => {
                 if event == SessionFsmUnicastEvent::OutboundStart {
                     {
@@ -953,7 +953,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                         });
                     }
                 }
-                if event == SessionFsmUnicastEvent::InboundStart {
+                #[cfg(feature = "session-unicast-accept")] if event == SessionFsmUnicastEvent::InboundStart {
                     {
                         return Some(::sce_rust_runtime::EnabledTransition {
                             source: state,
@@ -965,7 +965,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                     }
                 }
                 None
-            }
+            },
             SessionFsmUnicastState::LinkOpening => {
                 if event == SessionFsmUnicastEvent::LinkOpened {
                     {
@@ -1001,7 +1001,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                     }
                 }
                 None
-            }
+            },
             SessionFsmUnicastState::Opening => {
                 if event == SessionFsmUnicastEvent::FramingError {
                     {
@@ -1048,8 +1048,8 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                     }
                 }
                 None
-            }
-            SessionFsmUnicastState::SentInitAck => {
+            },
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::SentInitAck => {
                 if event == SessionFsmUnicastEvent::OpenSynReceived {
                     {
                         return Some(::sce_rust_runtime::EnabledTransition {
@@ -1062,7 +1062,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                     }
                 }
                 None
-            }
+            },
             SessionFsmUnicastState::SentInitSyn => {
                 if event == SessionFsmUnicastEvent::InitAckReceived {
                     {
@@ -1087,8 +1087,8 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                     }
                 }
                 None
-            }
-            SessionFsmUnicastState::SentOpenAck => {
+            },
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::SentOpenAck => {
                 if event == SessionFsmUnicastEvent::Null {
                     {
                         return Some(::sce_rust_runtime::EnabledTransition {
@@ -1101,7 +1101,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                     }
                 }
                 None
-            }
+            },
             _ => None,
         }
     }
@@ -1117,10 +1117,10 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
         engine: &mut sce_rust_runtime::Engine<Self>,
     ) {
         match source {
-            SessionFsmUnicastState::Accepting => {
+            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::Accepting => {
                 match transition_index {
                     1 => {
-                        // SCE-MAP: session_fsm_unicast.scxml:189 :: Accepting :: _transition_1
+                        // SCE-MAP: session_fsm_unicast.scxml:190 :: Accepting :: _transition_1
                         // W3C SCXML 3.13: Transition 1 actions
                         // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                         'action_block: {
@@ -1130,7 +1130,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                         }
                     }
                     2 => {
-                        // SCE-MAP: session_fsm_unicast.scxml:192 :: Accepting :: _transition_2
+                        // SCE-MAP: session_fsm_unicast.scxml:193 :: Accepting :: _transition_2
                         // W3C SCXML 3.13: Transition 2 actions
                         // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                         'action_block: {
@@ -1141,11 +1141,11 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                     }
                     _ => {}
                 }
-            }
+            },
             SessionFsmUnicastState::Established => {
                 match transition_index {
                     0 => {
-                        // SCE-MAP: session_fsm_unicast.scxml:210 :: Established :: _transition_0
+                        // SCE-MAP: session_fsm_unicast.scxml:211 :: Established :: _transition_0
                         // W3C SCXML 3.13: Transition 0 actions
                         // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                         'action_block: {
@@ -1155,7 +1155,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                         }
                     }
                     1 => {
-                        // SCE-MAP: session_fsm_unicast.scxml:213 :: Established :: _transition_1
+                        // SCE-MAP: session_fsm_unicast.scxml:214 :: Established :: _transition_1
                         // W3C SCXML 3.13: Transition 1 actions
                         // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                         'action_block: {
@@ -1165,7 +1165,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                         }
                     }
                     2 => {
-                        // SCE-MAP: session_fsm_unicast.scxml:216 :: Established :: _transition_2
+                        // SCE-MAP: session_fsm_unicast.scxml:217 :: Established :: _transition_2
                         // W3C SCXML 3.13: Transition 2 actions
                         // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                         'action_block: {
@@ -1175,7 +1175,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                         }
                     }
                     3 => {
-                        // SCE-MAP: session_fsm_unicast.scxml:219 :: Established :: _transition_3
+                        // SCE-MAP: session_fsm_unicast.scxml:220 :: Established :: _transition_3
                         // W3C SCXML 3.13: Transition 3 actions
                         // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                         'action_block: {
@@ -1186,11 +1186,11 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                     }
                     _ => {}
                 }
-            }
+            },
             SessionFsmUnicastState::GotInitAck => {
                 match transition_index {
                     1 => {
-                        // SCE-MAP: session_fsm_unicast.scxml:150 :: GotInitAck :: _transition_1
+                        // SCE-MAP: session_fsm_unicast.scxml:151 :: GotInitAck :: _transition_1
                         // W3C SCXML 3.13: Transition 1 actions
                         // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                         'action_block: {
@@ -1201,11 +1201,11 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                     }
                     _ => {}
                 }
-            }
+            },
             SessionFsmUnicastState::LinkOpening => {
                 match transition_index {
                     1 => {
-                        // SCE-MAP: session_fsm_unicast.scxml:123 :: LinkOpening :: _transition_1
+                        // SCE-MAP: session_fsm_unicast.scxml:124 :: LinkOpening :: _transition_1
                         // W3C SCXML 3.13: Transition 1 actions
                         // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                         'action_block: {
@@ -1216,11 +1216,11 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                     }
                     _ => {}
                 }
-            }
+            },
             SessionFsmUnicastState::Opening => {
                 match transition_index {
                     0 => {
-                        // SCE-MAP: session_fsm_unicast.scxml:154 :: Opening :: _transition_0
+                        // SCE-MAP: session_fsm_unicast.scxml:155 :: Opening :: _transition_0
                         // W3C SCXML 3.13: Transition 0 actions
                         // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                         'action_block: {
@@ -1230,7 +1230,7 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                         }
                     }
                     1 => {
-                        // SCE-MAP: session_fsm_unicast.scxml:157 :: Opening :: _transition_1
+                        // SCE-MAP: session_fsm_unicast.scxml:158 :: Opening :: _transition_1
                         // W3C SCXML 3.13: Transition 1 actions
                         // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                         'action_block: {
@@ -1241,11 +1241,11 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                     }
                     _ => {}
                 }
-            }
+            },
             SessionFsmUnicastState::SentInitSyn => {
                 match transition_index {
                     1 => {
-                        // SCE-MAP: session_fsm_unicast.scxml:141 :: SentInitSyn :: _transition_1
+                        // SCE-MAP: session_fsm_unicast.scxml:142 :: SentInitSyn :: _transition_1
                         // W3C SCXML 3.13: Transition 1 actions
                         // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                         'action_block: {
@@ -1256,8 +1256,8 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
                     }
                     _ => {}
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 

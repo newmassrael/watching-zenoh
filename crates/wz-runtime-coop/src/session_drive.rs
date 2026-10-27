@@ -409,7 +409,9 @@ impl SessionRole {
     /// the dialer did.
     fn activation(self) -> &'static [SessionFsmUnicastEvent] {
         match self {
-            SessionRole::Acceptor => &[SessionFsmUnicastEvent::InboundStart],
+            // The core states which events start an acceptor in this build: none in one without
+            // `session-unicast-accept`, where the machine has no accepting role.
+            SessionRole::Acceptor => wz_session_core::drive::acceptor_activation(),
             SessionRole::Initiator => &[
                 SessionFsmUnicastEvent::OutboundStart,
                 SessionFsmUnicastEvent::LinkOpened,

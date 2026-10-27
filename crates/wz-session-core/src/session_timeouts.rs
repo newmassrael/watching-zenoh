@@ -115,13 +115,18 @@ pub fn handshake_deadline_for(
         S::LinkOpening => (S::LinkOpening, timeouts.link_open_ms, E::LinkOpenTimeout),
         S::SentInitSyn => (S::SentInitSyn, timeouts.init_ack_ms, E::InitAckTimeout),
         S::GotInitAck => (S::GotInitAck, timeouts.open_ack_ms, E::OpenAckTimeout),
+        // The accepting role's states and its deadline event exist in a build with
+        // `session-unicast-accept` only (the session machine states that gate).
+        #[cfg(feature = "session-unicast-accept")]
         S::AwaitingInitSyn | S::SentInitAck | S::SentOpenAck => (
             S::Accepting,
             timeouts.accepting_inactivity_ms,
             E::AcceptingInactivityTimeout,
         ),
         S::Closing => (S::Closing, timeouts.closing_ms, E::ClosingTimeout),
-        S::Init | S::Opening | S::Accepting | S::Established | S::Closed => return None,
+        #[cfg(feature = "session-unicast-accept")]
+        S::Accepting => return None,
+        S::Init | S::Opening | S::Established | S::Closed => return None,
     };
     Some(HandshakeDeadline {
         arming_key,
@@ -226,6 +231,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "session-unicast-accept")]
     #[test]
     fn accepting_children_share_the_parent_arming_key() {
         // The whole-handshake bound is armed once on accept entry: all
@@ -244,9 +250,12 @@ mod tests {
     #[test]
     fn no_handshake_deadline_states_return_none() {
         let t = SessionTimeouts::spec_defaults();
-        for state in [S::Init, S::Opening, S::Accepting, S::Established, S::Closed] {
+        for state in [S::Init, S::Opening, S::Established, S::Closed] {
             assert!(handshake_deadline_for(state, &t).is_none());
         }
+        // The compound accepting parent is never the current leaf, and has no deadline of its own.
+        #[cfg(feature = "session-unicast-accept")]
+        assert!(handshake_deadline_for(S::Accepting, &t).is_none());
     }
 
     #[test]
@@ -269,6 +278,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "session-unicast-accept")]
     #[test]
     fn tracker_accepting_children_keep_one_stamp() {
         let mut tr = HandshakeDeadlineTracker::new(SessionTimeouts::spec_defaults());

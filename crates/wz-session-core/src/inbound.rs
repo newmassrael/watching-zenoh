@@ -1329,12 +1329,19 @@ pub fn inbound_to_fsm_event(
         return Some(E::FramingError);
     }
     match frame {
-        #[cfg(feature = "codec-init-body")]
+        #[cfg(all(feature = "codec-init-body", feature = "session-unicast-accept"))]
         InboundFrame::Init { is_ack: false, .. } => Some(E::InitSynReceived),
+        // A build without the accepting role has no event for a peer's InitSyn or OpenSyn (the
+        // session machine states that gate): they are not triggers of its machine, and the drive
+        // loop drops them silently, as it drops any frame it will not admit.
+        #[cfg(all(feature = "codec-init-body", not(feature = "session-unicast-accept")))]
+        InboundFrame::Init { is_ack: false, .. } => None,
         #[cfg(feature = "codec-init-body")]
         InboundFrame::Init { is_ack: true, .. } => Some(E::InitAckReceived),
-        #[cfg(feature = "codec-open-body")]
+        #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
         InboundFrame::Open { is_ack: false, .. } => Some(E::OpenSynReceived),
+        #[cfg(all(feature = "codec-open-body", not(feature = "session-unicast-accept")))]
+        InboundFrame::Open { is_ack: false, .. } => None,
         #[cfg(feature = "codec-open-body")]
         InboundFrame::Open { is_ack: true, .. } => Some(E::OpenAckReceived),
         #[cfg(feature = "codec-close")]

@@ -109,10 +109,11 @@
        initial="Init">
 
   <sce:session-role kind="accept-side"/>
+  <sce:import kind="feature-model" src="../features/wz-session-core.scxml" as="features"/>
 
   <state id="Init">
     <transition event="outbound.start" target="LinkOpening"/>
-    <transition event="inbound.start" target="Accepting"/>
+    <transition event="inbound.start" target="Accepting" sce:requires="session-unicast-accept"/>
   </state>
 
   <state id="LinkOpening">
@@ -169,7 +170,7 @@
     transitions are admission-gated by the dispatcher (see the header
     "Accept-side admission guards"), not by a native cond.
   -->
-  <state id="Accepting" initial="AwaitingInitSyn">
+  <state id="Accepting" initial="AwaitingInitSyn" sce:requires="session-unicast-accept">
     <state id="AwaitingInitSyn">
       <transition event="init_syn.received" target="SentInitAck"/>
     </state>

@@ -14578,18 +14578,22 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 ///
 /// A duty body is compiled out with the feature it needs: the InitSyn and
 /// OpenSyn emits without `session-unicast-open` or their body codecs, the
-/// InitAck and OpenAck emits without `session-unicast-accept` or theirs, the
 /// Close frame without `codec-close`, the keepalive worker without
 /// `transport-keepalive`. None of those actions is out of the machine's
-/// reach in such a build (either role can be started on any build, and every
-/// `Established` and `Closing` entry runs them), so a build missing one of
-/// the features runs a machine whose duty does nothing, and says so:
+/// reach in such a build (the initiating role can be started on any build,
+/// and every `Established` and `Closing` entry runs them), so a build missing
+/// one of the features runs a machine whose duty does nothing, and says so:
 /// `Simulates`. The binding's `REALIZATION` is this value, and
 /// [`crate::drive::new_session_engine`] picks the policy constructor from
 /// it.
+///
+/// The accepting role is not in that list: its states, events and the two
+/// InitAck and OpenAck actions are the machine's own `session-unicast-accept`
+/// gate, so a build without the feature has no such duty to leave undone, and
+/// a build with it needs the codecs of the two messages (`codec-init-body`,
+/// `codec-open-body`, which the list holds for the initiating role as well).
 pub const SESSION_HOST_REALIZATION: ::sce_rust_runtime::ActionRealization = if cfg!(all(
     feature = "session-unicast-open",
-    feature = "session-unicast-accept",
     feature = "codec-init-body",
     feature = "codec-open-body",
     feature = "codec-close",
@@ -14881,10 +14885,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         }
     }
 
+    // The method exists in a build with `session-unicast-accept` only: the session machine states
+    // the gate on its `Accepting` state, so the generated trait has no such method without it
+    // (an initiator-only deploy cannot listen, and no longer carries the method either).
+    #[cfg(feature = "session-unicast-accept")]
     #[inline(never)]
     fn send_init_ack_with_cookie(&mut self) {
-        // R311cd — session-unicast-accept gates the accept-side (Acceptor)
-        // wire emit. cfg-off: no-op (initiator-only deploy cannot listen).
+        // R311cd — the accept-side (Acceptor) wire emit; `codec-init-body` is its codec.
         #[cfg(all(feature = "codec-init-body", feature = "session-unicast-accept"))]
         {
             let a = &self.inner;
@@ -15099,6 +15106,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         }
     }
 
+    // Present with `session-unicast-accept` only, as `send_init_ack_with_cookie` is.
+    #[cfg(feature = "session-unicast-accept")]
     #[inline(never)]
     fn send_open_ack(&mut self) {
         #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
@@ -15547,13 +15556,6 @@ mod duty_realization_tests {
             ActionRealization::Simulates,
             "send_init_syn and send_open_syn emit nothing without session-unicast-open"
         );
-        #[cfg(not(feature = "session-unicast-accept"))]
-        assert_eq!(
-            SESSION_HOST_REALIZATION,
-            ActionRealization::Simulates,
-            "send_init_ack_with_cookie and send_open_ack emit nothing without \
-             session-unicast-accept"
-        );
         #[cfg(not(feature = "codec-init-body"))]
         assert_eq!(
             SESSION_HOST_REALIZATION,
@@ -15580,7 +15582,6 @@ mod duty_realization_tests {
         );
         #[cfg(all(
             feature = "session-unicast-open",
-            feature = "session-unicast-accept",
             feature = "codec-init-body",
             feature = "codec-open-body",
             feature = "codec-close",
@@ -15589,7 +15590,8 @@ mod duty_realization_tests {
         assert_eq!(
             SESSION_HOST_REALIZATION,
             ActionRealization::Performs,
-            "every duty body performs in this build"
+            "every duty body performs in this build, with the accepting role or without it: \
+             the machine of a build without `session-unicast-accept` holds no accept duty"
         );
     }
 }

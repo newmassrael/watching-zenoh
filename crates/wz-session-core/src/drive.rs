@@ -585,17 +585,17 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                 // trust-class matrix). Engine-free successor of the
                 // retired Lua `cond="cookie_valid()"` transition guard.
                 let admit = match event {
+                    // A build with no accept side has neither event (the session machine states
+                    // that gate), no cookie to verify and no handshake to admit: a peer's InitSyn
+                    // or OpenSyn maps to no event there, and `None` below drops it. Naming
+                    // `cookie_valid` only under the accept feature is also what leaves the cookie
+                    // decoder and its HMAC out of an initiator-only image.
+                    #[cfg(feature = "session-unicast-accept")]
                     E::InitSynReceived => {
                         actions.half_open_cap_available() && actions.accept_rate_token()
                     }
                     #[cfg(feature = "session-unicast-accept")]
                     E::OpenSynReceived => actions.cookie_valid(),
-                    // A build with no accept side has no cookie to verify and no handshake to
-                    // admit: an OpenSyn is denied silently, like every inadmissible frame here.
-                    // Naming `cookie_valid` only under the accept feature is also what leaves
-                    // the cookie decoder and its HMAC out of an initiator-only image.
-                    #[cfg(not(feature = "session-unicast-accept"))]
-                    E::OpenSynReceived => false,
                     // R2782 — the initiator's twin: an OpenAck is admitted
                     // only while one is awaited. A replay after
                     // `Established` was measured to reset the RX baseline.
@@ -614,7 +614,7 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                 // the courtesy of saying why. Scoped to the state that awaits
                 // an InitSyn, as the InitAck checks above are scoped to the one
                 // that awaits an InitAck.
-                #[cfg(feature = "codec-init-body")]
+                #[cfg(all(feature = "codec-init-body", feature = "session-unicast-accept"))]
                 if let InboundFrame::Init {
                     is_ack: false,
                     body,
@@ -1115,10 +1115,17 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                         markers,
                     }
                 }
+                // A build with no accepting role has no event for a peer's InitSyn or OpenSyn: it
+                // does not negotiate with the peer, and drops the frame silently, as it drops any
+                // frame the admission refuses (no Close frame: anti-amplification).
+                #[cfg(all(feature = "codec-init-body", not(feature = "session-unicast-accept")))]
+                InboundFrame::Init { is_ack: false, .. } => DriverLoopOutcome::SideEffectOnly,
                 #[cfg(feature = "codec-init-body")]
                 InboundFrame::Init { .. } => {
                     unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
                 }
+                #[cfg(all(feature = "codec-open-body", not(feature = "session-unicast-accept")))]
+                InboundFrame::Open { is_ack: false, .. } => DriverLoopOutcome::SideEffectOnly,
                 #[cfg(feature = "codec-open-body")]
                 InboundFrame::Open { .. } => {
                     unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
@@ -2913,6 +2920,24 @@ pub fn new_session_engine_in<'s, R: SessionRuntime, T: TimeSource>(
 ) -> &'s mut SessionEngine<R, T> {
     let binding = SessionActionsBinding::new(actions.clone());
     Engine::new_in_place(slot, PolicyConstructor::<BINDING_PERFORMS>.build(binding))
+}
+
+/// The events that start the session machine in its accepting role: `inbound.start` in a build with
+/// `session-unicast-accept`, and none without it, where the machine has no accepting role to
+/// start (the feature gates that role's states and events in `session_fsm_unicast.scxml`). A
+/// caller that activates an acceptor in such a build gets a machine that stays in `Init`.
+///
+/// The one place the answer is stated, so a runtime that starts sessions does not guess the
+/// feature state of this crate from its own manifest.
+pub fn acceptor_activation() -> &'static [crate::session_fsm_unicast::SessionFsmUnicastEvent] {
+    #[cfg(feature = "session-unicast-accept")]
+    {
+        &[crate::session_fsm_unicast::SessionFsmUnicastEvent::InboundStart]
+    }
+    #[cfg(not(feature = "session-unicast-accept"))]
+    {
+        &[]
+    }
 }
 
 /// [`SESSION_HOST_REALIZATION`] as the constructor choice it makes.
