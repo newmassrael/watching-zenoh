@@ -160,7 +160,7 @@ CASES: tuple[Case, ...] = (
     # thread or tokio is linked. Its links dial UDP in every build, so it is compared with the
     # pico that pico-client-udp is (`link-udp` names that here; it adds nothing to this build).
     Case("pico-client-coop", "wz-capi-pico", "libwz_capi_pico.so", "engine-coop,link-udp",
-         932_700,
+         940_400,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -206,12 +206,19 @@ CASES: tuple[Case, ...] = (
               "about 1,000. 931,511 on pc2 after the policy that states the width of the sequence "
               "numbers (`1549a936f`) read the width where the handshake had a literal: 1,444 more "
               "in this case (the next seven cases read +1,200 to +1,500), and every cooperative "
-              "budget keeps about 1,200 over its reading since"),
+              "budget keeps about 1,200 over its reading since. 934,883 on pc2 on 2026-10-27, "
+              "2,183 over the old budget of 932,700, the day the listening role came: the "
+              "engine's shared entropy, the handshake run in either role and the wait on "
+              "several links are in a build that listens to nothing, with the main of that day "
+              "merged; the two are not measured apart. The budget follows the hosted reading, "
+              "which reads 3,300 to 4,400 over pc2, so it is moved to the pc2 reading and "
+              "5,500, an estimate the first hosted run replaces; the listening build's own "
+              "text is a case of the step that gives pico a listener"),
     # The cooperative client with the unstable API, which the reference pico of the test lanes is
     # built with (`-DZ_FEATURE_UNSTABLE_API`): entity global ids, source info, cancellation
     # tokens. Nothing of it is the engine's, so it costs the ABI's own code and no engine's.
     Case("pico-client-coop-unstable", "wz-capi-pico", "libwz_capi_pico.so",
-         "engine-coop,link-udp,unstable-api", 936_000,
+         "engine-coop,link-udp,unstable-api", 943_700,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -219,12 +226,14 @@ CASES: tuple[Case, ...] = (
               "891,491, 2.21 times the same pico (404,880), and 448 exports against its 441. "
               "916,041 on pc2 on 2026-10-26 against 902,337 before the slot observer "
               "(+13,704, as pico-client-coop's). 933,285 on pc2 on 2026-10-27 against 916,041 "
-              "before the table of faces (+17,244, as pico-client-coop's)"),
+              "before the table of faces (+17,244, as pico-client-coop's). 938,109 on pc2 on "
+              "2026-10-27, 2,109 over the old budget of 936,000; moved as pico-client-coop's, "
+              "to the pc2 reading and 5,500"),
     # The cooperative client that delivers a put to its own subscribers
     # (`Z_FEATURE_LOCAL_SUBSCRIBER`), which the reference pico of the test lanes is not built with
     # but a program that publishes and subscribes on one session needs.
     Case("pico-client-coop-local", "wz-capi-pico", "libwz_capi_pico.so",
-         "engine-coop,link-udp,local-subscriber", 940_500,
+         "engine-coop,link-udp,local-subscriber", 948_200,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -232,12 +241,13 @@ CASES: tuple[Case, ...] = (
               "measured against its 891,519, 2.22 times the same pico (405,414). 919,291 on pc2 "
               "on 2026-10-26 against 905,671 before the slot observer (+13,620, as "
               "pico-client-coop's). 937,779 on pc2 on 2026-10-27 against 919,291 before the "
-              "table of faces (+18,488)"),
+              "table of faces (+18,488). 942,603 on pc2 on 2026-10-27, 2,103 over the old "
+              "budget of 940,500; moved as pico-client-coop's, to the pc2 reading and 5,500"),
     # The cooperative client with the connectivity plane (`Z_FEATURE_CONNECTIVITY`): the listing
     # of its transports and links and the listeners that hear them come and go. The engine reports
     # its faces whatever the build, so the plane's own cost is the ABI's.
     Case("pico-client-coop-connectivity", "wz-capi-pico", "libwz_capi_pico.so",
-         "engine-coop,link-udp,unstable-api,connectivity", 1_005_500,
+         "engine-coop,link-udp,unstable-api,connectivity", 1_013_400,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, MULTICAST,
                  TOKIO_ENGINE),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE, CONNECTIVITY),
@@ -245,12 +255,14 @@ CASES: tuple[Case, ...] = (
               "950,729 measured against the unstable build's 882,019, 2.16 times the same pico "
               "(439,791), and 563 exports against its 448. 985,013 on pc2 on 2026-10-26 "
               "against 971,165 before the slot observer (+13,848, as pico-client-coop's). "
-              "1,002,849 on pc2 on 2026-10-27 against 985,013 before the table of faces (+17,836)"),
+              "1,002,849 on pc2 on 2026-10-27 against 985,013 before the table of faces (+17,836). 1,007,877 on pc2 on 2026-10-27, 2,377 over "
+              "the old budget of 1,005,500; moved as pico-client-coop's, to the pc2 reading "
+              "and 5,500"),
     # The cooperative client with pico's admin space (`Z_FEATURE_ADMIN_SPACE`): the queryable that
     # answers `@/<zid>/pico/**`, which needs the answering end and, for the peers it lists, the
     # engine's faces. It lists no connectivity listener, so that plane's exports stay out.
     Case("pico-client-coop-admin-space", "wz-capi-pico", "libwz_capi_pico.so",
-         "engine-coop,link-udp,admin-space", 1_166_000,
+         "engine-coop,link-udp,admin-space", 1_169_400,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -268,11 +280,14 @@ CASES: tuple[Case, ...] = (
               "is not yet attributed. 1,157,649 on pc2 on 2026-10-27 against 1,139,989 before the "
               "table of faces (+17,660, as pico-client-coop's). 1,160,937 on hosted CI on "
               "2026-10-27 (head `f4bdeaee5`), which reads about 3,300 over pc2 as the earlier "
-              "hosted figures did; the budget follows the hosted reading, which is the gate's"),
+              "hosted figures did; the budget follows the hosted reading, which is the gate's. "
+              "1,163,845 on pc2 on 2026-10-27 with the listening role (pico-client-coop's "
+              "note), +6,196 over the reading before it; moved to the pc2 reading and 5,500, "
+              "an estimate the first hosted run replaces"),
     # The cooperative client that asks and answers queries: the requesting end and the answering
     # end, which is what the next case adds its loopback leg to.
     Case("pico-client-coop-query", "wz-capi-pico", "libwz_capi_pico.so",
-         "engine-coop,link-udp,query,queryable", 1_216_000,
+         "engine-coop,link-udp,query,queryable", 1_219_300,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -284,11 +299,13 @@ CASES: tuple[Case, ...] = (
               "on 2026-10-27 against 1,186,508 before the table of faces (+21,092: a get is one "
               "leg for each face and one for the session's own queryables, issued in two loops). "
               "1,210,960 on hosted CI on 2026-10-27 (head `f4bdeaee5`), the hosted reading the "
-              "budget follows"),
+              "budget follows. 1,213,796 on pc2 on 2026-10-27 with the listening role "
+              "(pico-client-coop's note), +6,196 over the reading before it; moved to the pc2 "
+              "reading and 5,500, an estimate the first hosted run replaces"),
     # The same, with a get delivered to the session's own queryables
     # (`Z_FEATURE_LOCAL_QUERYABLE`), which a program that asks its own queryable needs.
     Case("pico-client-coop-local-queryable", "wz-capi-pico", "libwz_capi_pico.so",
-         "engine-coop,link-udp,query,queryable,local-queryable", 1_233_000,
+         "engine-coop,link-udp,query,queryable,local-queryable", 1_235_900,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -298,11 +315,14 @@ CASES: tuple[Case, ...] = (
               "on 2026-10-26 against 1,176,860 before the slot observer (+22,716). 1,224,096 on "
               "2026-10-27 against 1,199,576 before the table of faces (+24,520: the session's own "
               "leg is a leg of its own). 1,227,456 on hosted CI on 2026-10-27 (head "
-              "`f4bdeaee5`), the hosted reading the budget follows"),
+              "`f4bdeaee5`), the hosted reading the budget follows. 1,230,320 on pc2 on "
+              "2026-10-27 with the listening role (pico-client-coop's note), +6,224 over the "
+              "reading before it; moved to the pc2 reading and 5,500, an estimate the first "
+              "hosted run replaces"),
     # The cooperative client that scouts (`Z_FEATURE_SCOUTING`): `z_scout`, and the lookup `z_open`
     # runs when its config names no locator, over the engine's own window and no tokio engine.
     Case("pico-client-coop-scout", "wz-capi-pico", "libwz_capi_pico.so",
-         "engine-coop,link-udp,scout", 1_021_000,
+         "engine-coop,link-udp,scout", 1_024_900,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE, COOP_SCOUT),
@@ -315,7 +335,9 @@ CASES: tuple[Case, ...] = (
               "as pico-client-coop's, whose note holds the symbol diff of this very build). "
               "1,012,138 on pc2 on 2026-10-27 against 994,918 before the table of faces (+17,220). "
               "1,016,562 on hosted CI on 2026-10-27 (head `f4bdeaee5`), the hosted reading the "
-              "budget follows"),
+              "budget follows. 1,019,354 on pc2 on 2026-10-27 with the listening role "
+              "(pico-client-coop's note), +7,216 over the reading before it; moved to the pc2 "
+              "reading and 5,500, an estimate the first hosted run replaces"),
     Case("pico-peer", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",peer", 2_946_000,
          forbid=(GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY, MULTICAST),
          require=(ACCEPT, RESPONDER, SCOUTING, UDP, SINGLE_THREADED),
