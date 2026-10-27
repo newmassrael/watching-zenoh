@@ -161,19 +161,6 @@ references.
 
 ## Auto-kickoff trigger
 
-사용자가 첫 메시지로 `/load`, `시작`, `이어가자`, `kickoff` 중 하나만
-입력하면 아래 5단계를 그대로 수행한다:
-
-1. Mnemosyne concept 6종 적재 (overview → anti-patterns →
-   atomic-store → frozen-ledger → tier-rules → workflow) — 이번 세션에
-   아직 안 읽은 것만
-2. `validate_workspace` 로 베이스라인 (T1 orphan / atomic ledger
-   entries·sections / style) 캡처
-3. 가장 최근 atomic changelog entry 조회 후 `carry_forward` 복원 —
-   `mnemosyne-cli query` / `query_section` 으로 latest impact_refs 추적
-4. `git status` + `git log --oneline -5` 로 미푸시 commit + 최근 활동 확인
-5. SCE 상태가 작업에 필요하면 SCE 소스를 직접 read (경로는 머신-로컬 —
-   `vendor/sce` 또는 agent memory 에서 확인)
-
-실행 시 "kickoff 시작" 만 짧게 알리고 중간 단계별 verbose 보고는 생략.
-종료 후 carry 우선순위 + 다음 단계 제안.
+사용자가 첫 메시지로 `/kickoff`, `시작`, `이어가자`, `kickoff` 중 하나만
+입력하면 `kickoff` 스킬(`.claude/skills/kickoff/SKILL.md`)을 그대로 수행한다.
+절차는 그 스킬에만 있다.

@@ -117,8 +117,12 @@ docs/GENERATED.md
 # unusable shape; matching the entries instead makes it work.
 .claude/*
 # The build-machine declaration is a REPOSITORY fact and lives at the root as
-# `bx.toml`, so nothing under `.claude/` is re-included. (Until 2026-10-17 it
-# was the file under `.claude/`, kept tracked by a negation here.)
+# `bx.toml`. (Until 2026-10-17 it was the file under `.claude/`, kept tracked by
+# a negation here.)
+# Project skills ARE re-included: a procedure every session of this repository
+# follows (the session kickoff) is repository knowledge, and a tracked skill is
+# present in every worktree, which an untracked one is not.
+!.claude/skills/
 
 # Activity logs (local working notes; outside mnemosyne workspace).
 # Cross-session handoff lives in the atomic changelog (audit-traced);
