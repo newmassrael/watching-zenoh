@@ -1316,6 +1316,11 @@ const INTEREST_ANSWER_DECLARATIONS: &str = "a current interest answered with the
 const ROUTER_INTEREST_REFUSED: &str = "an interest from a router refused";
 #[cfg(feature = "routing-token-tables")]
 const TOKEN_TO_INTERESTED_CLIENT: &str = "a token pushed to a client that asked for tokens";
+#[cfg(all(
+    feature = "routing-token-tables",
+    feature = "routing-interest-pending-gc"
+))]
+const TOKEN_INTEREST_BROKERED: &str = "a client's token interest brokered to the peers";
 
 /// The reasons each mode must still produce: one no scene reaches any more is
 /// stale, and a stale allowance is a hole.
@@ -1326,6 +1331,11 @@ fn expected_reasons(mode: Mode) -> std::collections::BTreeSet<&'static str> {
             .collect();
     #[cfg(feature = "routing-token-tables")]
     reasons.insert(TOKEN_TO_INTERESTED_CLIENT);
+    #[cfg(all(
+        feature = "routing-token-tables",
+        feature = "routing-interest-pending-gc"
+    ))]
+    reasons.insert(TOKEN_INTEREST_BROKERED);
     if matches!(mode, Mode::Gossip) {
         reasons.insert(FACE_UP_LIST);
         reasons.insert(TREE_READVERTISE);
@@ -1370,13 +1380,70 @@ fn explained(mode: Mode, d: &Divergence) -> Option<&'static str> {
     }
 }
 
+/// A client's current-and-future token interest that `LinkstateForwarder` brokers to the peers
+/// while the region-hat peer does not.
+///
+/// This peer's token table does not carry the mesh tier (see `dump_interest_tokens`), so with
+/// `routing-interest-pending-gc` it asks its peers as well as its gateways, answers the client
+/// with the tokens it holds and owes the client's final until the peers have answered. The
+/// pin's peer hat holds the mesh tier and answers from its own table: it sends a current-and-future
+/// interest on only to the faces whose remote bound is south
+/// (`zenoh/src/net/routing/hat/peer/interests.rs` @ `.filter(|f| f.remote_bound.is_south())`),
+/// which the peers of this node are not, and closes the interest with the final at once. So the
+/// difference is exactly: a copy of the interest on another face, and the asker's answer the same
+/// but for the final.
+#[cfg(all(
+    feature = "routing-token-tables",
+    feature = "routing-interest-pending-gc"
+))]
+fn token_interest_brokered(
+    d: &Divergence,
+    face: u64,
+    kinds: &InterestKinds,
+) -> Option<&'static str> {
+    let is_final = |s: &Seen| matches!(s, Seen::DeclareFinal { .. });
+    let copied_to_another_face = d.linkstate.iter().any(|(other, seen)| {
+        *other != face
+            && !seen.is_empty()
+            && seen.iter().all(|s| matches!(s, Seen::Interest { .. }))
+    });
+    let told_the_asker: Vec<&Seen> = d
+        .linkstate
+        .get(&face)
+        .map(|seen| seen.iter().collect())
+        .unwrap_or_default();
+    let region_hat_told: Vec<&Seen> = d
+        .region_hat
+        .get(&face)
+        .map(|seen| seen.iter().filter(|s| !is_final(s)).collect())
+        .unwrap_or_default();
+    let region_hat_closed = d
+        .region_hat
+        .get(&face)
+        .is_some_and(|seen| seen.iter().any(is_final));
+    (*kinds == InterestKinds::TOKENS
+        && copied_to_another_face
+        && region_hat_closed
+        && d.region_hat.keys().all(|f| *f == face)
+        && told_the_asker == region_hat_told)
+        .then_some(TOKEN_INTEREST_BROKERED)
+}
+
+#[cfg(not(all(
+    feature = "routing-token-tables",
+    feature = "routing-interest-pending-gc"
+)))]
+fn token_interest_brokered(_: &Divergence, _: u64, _: &InterestKinds) -> Option<&'static str> {
+    None
+}
+
 /// The differences in the interest and token planes, in either mode.
 fn explained_interest_or_token(d: &Divergence) -> Option<&'static str> {
     if d.plane != "data" {
         return None;
     }
     match &d.step {
-        Step::Interest(face, ..) => {
+        Step::Interest(face, _, kinds, ..) => {
             let asked = d.linkstate.get(face).map(Vec::as_slice);
             let region_hat = d.region_hat.get(face).map(Vec::as_slice);
             let only_a_final =
@@ -1405,8 +1472,20 @@ fn explained_interest_or_token(d: &Divergence) -> Option<&'static str> {
             {
                 return Some(INTEREST_ANSWER_DECLARATIONS);
             }
-            None
+            token_interest_brokered(d, *face, kinds)
         }
+        // The copy of a brokered interest is withdrawn from the peers when its asker ends it.
+        #[cfg(all(
+            feature = "routing-token-tables",
+            feature = "routing-interest-pending-gc"
+        ))]
+        Step::InterestFinal(..) => (d.region_hat.is_empty()
+            && !d.linkstate.is_empty()
+            && d.linkstate
+                .values()
+                .flatten()
+                .all(|s| matches!(s, Seen::InterestFinal)))
+        .then_some(TOKEN_INTEREST_BROKERED),
         #[cfg(feature = "routing-token-tables")]
         Step::Token(..) | Step::Untoken(..) => {
             // A token declared or withdrawn at a peer reaches a client that asked

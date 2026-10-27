@@ -734,13 +734,15 @@ fn scenes() -> Vec<Scene> {
 /// received something different, or the nodes carried a different number of
 /// data messages to do it.
 ///
-/// Returned with how many of the differences are the ONE the pin explains, a
-/// token pushed to an end point that asked for tokens (see
-/// [`is_a_token_pushed_to_an_interested_client`]); every other difference is a
-/// failure.
-fn differences(mode: Mode) -> (Vec<String>, usize) {
+/// Returned with how many of the differences are each of the two the pin explains,
+/// a token pushed to an end point that asked for tokens (see
+/// [`is_a_token_pushed_to_an_interested_client`]) and a token interest brokered
+/// to the peers (see [`is_an_interest_brokered_to_the_peers`]); every other
+/// difference is a failure.
+fn differences(mode: Mode) -> (Vec<String>, usize, usize) {
     let mut out = Vec::new();
     let mut explained = 0;
+    let mut brokered = 0;
     for scene in scenes() {
         let old = run(Plane::LinkstateForwarder, mode, &scene.nodes, &scene.script);
         let new = run(Plane::RegionHat, mode, &scene.nodes, &scene.script);
@@ -752,13 +754,17 @@ fn differences(mode: Mode) -> (Vec<String>, usize) {
                 explained += 1;
                 continue;
             }
+            if is_an_interest_brokered_to_the_peers(&scene.script[n], a, b) {
+                brokered += 1;
+                continue;
+            }
             out.push(format!(
                 "{mode:?} / {} / step {n} {:?}\n  linkstate:  {a:?}\n  region-hat: {b:?}",
                 scene.name, scene.script[n]
             ));
         }
     }
-    (out, explained)
+    (out, explained, brokered)
 }
 
 /// The one difference the network gate allows, and the same one the one-node gate
@@ -788,6 +794,31 @@ fn is_a_token_pushed_to_an_interested_client(_: &NetStep, _: &Outcome, _: &Outco
     false
 }
 
+/// The second difference the network gate allows, and the one the one-node gate does
+/// (`TOKEN_INTEREST_BROKERED`): with `routing-interest-pending-gc`, `LinkstateForwarder` carries
+/// a client's token interest on to its peers, and its withdrawal after it, because its token table
+/// does not hold the mesh tier. The pin's peer hat does, and sends a current-and-future interest
+/// on only to the faces whose remote bound is south
+/// (`zenoh/src/net/routing/hat/peer/interests.rs` @ `.filter(|f| f.remote_bound.is_south())`).
+/// What the end points received is the same; the nodes carried more messages to do it.
+#[cfg(all(
+    feature = "routing-token-tables",
+    feature = "routing-interest-pending-gc"
+))]
+fn is_an_interest_brokered_to_the_peers(step: &NetStep, a: &Outcome, b: &Outcome) -> bool {
+    matches!(step, NetStep::Interest(..) | NetStep::InterestFinal(..))
+        && a.received == b.received
+        && a.carried > b.carried
+}
+
+#[cfg(not(all(
+    feature = "routing-token-tables",
+    feature = "routing-interest-pending-gc"
+)))]
+fn is_an_interest_brokered_to_the_peers(_: &NetStep, _: &Outcome, _: &Outcome) -> bool {
+    false
+}
+
 /// How many messages of the kind `wanted` the end points of `scene` received on
 /// the region-hat plane over the whole script.
 fn received(mode: Mode, scene: &Scene, wanted: impl Fn(&Seen) -> bool) -> usize {
@@ -800,11 +831,20 @@ fn received(mode: Mode, scene: &Scene, wanted: impl Fn(&Seen) -> bool) -> usize 
 
 #[test]
 fn in_gossip_mode_a_network_of_either_plane_delivers_the_same() {
-    let (differing, explained) = differences(Mode::Gossip);
+    let (differing, explained, brokered) = differences(Mode::Gossip);
     assert!(differing.is_empty(), "{}", differing.join("\n"));
     assert_eq!(
         explained, 0,
         "gossip carries no token across a link to explain"
+    );
+    assert_eq!(
+        brokered > 0,
+        cfg!(all(
+            feature = "routing-token-tables",
+            feature = "routing-interest-pending-gc"
+        )),
+        "the brokered interest occurs exactly when the forwarder brokers one, \
+         and a stale allowance is a hole"
     );
     // Equal is not the whole claim: the pin's peer hat sends a message across
     // one link and relays none between two peers, so gossip delivers across a
@@ -837,12 +877,21 @@ fn in_gossip_mode_a_network_of_either_plane_delivers_the_same() {
 
 #[test]
 fn in_link_state_mode_a_network_of_either_plane_delivers_the_same() {
-    let (differing, explained) = differences(Mode::LinkState);
+    let (differing, explained, brokered) = differences(Mode::LinkState);
     assert!(differing.is_empty(), "{}", differing.join("\n"));
     assert_eq!(
         explained > 0,
         cfg!(feature = "routing-token-tables"),
         "the allowed token difference occurs exactly when the token plane is built, \
+         and a stale allowance is a hole"
+    );
+    assert_eq!(
+        brokered > 0,
+        cfg!(all(
+            feature = "routing-token-tables",
+            feature = "routing-interest-pending-gc"
+        )),
+        "the brokered interest occurs exactly when the forwarder brokers one, \
          and a stale allowance is a hole"
     );
     let is_put = |s: &Seen| matches!(s, Seen::Push { .. });
