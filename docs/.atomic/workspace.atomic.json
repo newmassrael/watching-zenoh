@@ -294856,6 +294856,48 @@
         "Next in order: Z6a, information (info().links(), transports() and the link and transport event listeners), then Z6b, the timestamp stack, and Z6c, the rest of the unstable arm."
       ]
     },
+    "Round 3816": {
+      "decision_summary": "The raw Ethernet requirement is held to runs. A reth socket takes CAP_NET_RAW, which no build machine gives a run on its own network, so a raw link's runs are each on a network of their own: bubblewrap puts the run in a new user and network namespace, loopback only, and grants CAP_NET_RAW over that namespace alone with every other capability dropped. Not granting it is how a run is refused raw-ethernet, a refusal by withholding the capability beside the shim's refusals. The shim now brackets the interface ioctls (SIOCGIF*) and can refuse them, so a raw link can be denied the index request it binds by. The build is a registered profile, host-peer-raweth (zenoh-pico's defaults, peer role, raweth transport, unstable API), packaged by Layer C1st and judged on its own runs. The shim's marks no longer overwrite the errno the bracketed call left.",
+      "changes_bullets": [
+        "scripts/lib/facility_witness_shim.c: ioctl interposed, the SIOCGIF* requests bracketed as interface-list and refusable; mark() keeps the caller's errno.",
+        "scripts/lib/facility_trace.py: SHIM_DENIABLE and CAPABILITY_DENIABLE (raw-ethernet by CAP_NET_RAW); own_network() and Scenario.own_network; observe() takes a runner, stop_tracee finds strace below it; raw_link_corpus (a reth group on lo: granted, denied the interface request, without the capability) under PROFILE_SCENARIOS host-peer-raweth; bwrap is a required tool; probe arms and selftest cases for the ioctl, its denial, the capability both ways and a stopped run in a namespace.",
+        "configs/profiles/host-peer-raweth.conf: the registered profile the raw link runs build from.",
+        "scripts/run-ci.sh Layer C1st: packages, verifies and judges the host-peer-raweth profile.",
+        ".github/workflows/ci.yml and scripts/lib/apt_package_census.py: bubblewrap installed beside strace for C1st.",
+        "docs/target-build-contract.md T9: the raw link runs and how a capability is withheld.",
+        "crates/wz-capi-core/src/faces.rs: the two plain-put tests that bailed out on plain_params returning None (refused by silent_skip_gate, red on origin) write the no-lane case out as the third test does: assert the build says it has no lane, then return; with the lane, plain_params(..).expect(..).",
+        "scripts/lib/abi_stamp_gate.py: EXPECTED capi-c revision 7, the pin the capi-c revision move left at 6 (Layer C1st red on origin: the artifact says 7, the gate pinned 6)."
+      ],
+      "verification_bullets": [
+        "Every build machine (pc2, pc3, pc5, hkl001, hkl002; Ubuntu 24.04, apparmor_restrict_unprivileged_userns=1) refused a capability inside bwrap's namespace (bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted). On the owner's choice the bwrap AppArmor profile (userns for /usr/bin/bwrap alone, the form Ubuntu 25.04 ships) was installed and loaded on all five; afterwards CapEff in the namespace reads 0x2000 (CAP_NET_RAW alone) on each. On pc2: facility_trace.py --selftest OK, including the interface ioctl witness, its denial (exit 3), a raw socket refused without CAP_NET_RAW and opened with it, and a stopped run in a namespace. Layer C1st pass (400s, 41 judgement lines, none refuted): the host-peer-raweth package verifies, and the pico peer alone in a reth/ group on lo, given CAP_NET_RAW, exits 0 having asked for entropy, interface-list, raw-ethernet and threads; denied the interface request it exits 1; without the capability it exits 1 at the socket, before any interface request. The same three agreed on this workstation. abi-stamp OK for capi-c at revision 7 in debug and release. wz-capi-core plain_put tests: 2 ran and passed in the default build (lane present) and 2 with transport-stats (no lane); clippy -D warnings over all targets clean. Static gates 121: 120 at rc 0 and silent_skip_gate, red on origin, at rc 0 after the faces.rs change. apt_package_census rc 0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "None from this round. The build machines' bwrap AppArmor profile is machine state outside the tree: a machine enrolled later needs it, and Layer C1st names the refusal on one that lacks it."
+      ],
+      "publishable_decision_summary": "The raw Ethernet requirement is held to runs. A reth socket takes CAP_NET_RAW, which no build machine gives a run on its own network, so a raw link's runs are each on a network of their own: bubblewrap puts the run in a new user and network namespace, loopback only, and grants CAP_NET_RAW over that namespace alone with every other capability dropped. Not granting it is how a run is refused raw-ethernet, a refusal by withholding the capability beside the shim's refusals. The shim now brackets the interface ioctls (SIOCGIF*) and can refuse them, so a raw link can be denied the index request it binds by. The build is a registered profile, host-peer-raweth (zenoh-pico's defaults, peer role, raweth transport, unstable API), packaged by Layer C1st and judged on its own runs. The shim's marks no longer overwrite the errno the bracketed call left.",
+      "publishable_changes_bullets": [
+        "scripts/lib/facility_witness_shim.c: ioctl interposed, the SIOCGIF* requests bracketed as interface-list and refusable; mark() keeps the caller's errno.",
+        "scripts/lib/facility_trace.py: SHIM_DENIABLE and CAPABILITY_DENIABLE (raw-ethernet by CAP_NET_RAW); own_network() and Scenario.own_network; observe() takes a runner, stop_tracee finds strace below it; raw_link_corpus (a reth group on lo: granted, denied the interface request, without the capability) under PROFILE_SCENARIOS host-peer-raweth; bwrap is a required tool; probe arms and selftest cases for the ioctl, its denial, the capability both ways and a stopped run in a namespace.",
+        "configs/profiles/host-peer-raweth.conf: the registered profile the raw link runs build from.",
+        "scripts/run-ci.sh Layer C1st: packages, verifies and judges the host-peer-raweth profile.",
+        ".github/workflows/ci.yml and scripts/lib/apt_package_census.py: bubblewrap installed beside strace for C1st.",
+        "docs/target-build-contract.md T9: the raw link runs and how a capability is withheld.",
+        "crates/wz-capi-core/src/faces.rs: the two plain-put tests that bailed out on plain_params returning None (refused by silent_skip_gate, red on origin) write the no-lane case out as the third test does: assert the build says it has no lane, then return; with the lane, plain_params(..).expect(..).",
+        "scripts/lib/abi_stamp_gate.py: EXPECTED capi-c revision 7, the pin the capi-c revision move left at 6 (Layer C1st red on origin: the artifact says 7, the gate pinned 6)."
+      ],
+      "publishable_verification_bullets": [
+        "Every build machine (pc2, pc3, pc5, hkl001, hkl002; Ubuntu 24.04, apparmor_restrict_unprivileged_userns=1) refused a capability inside bwrap's namespace (bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted). On the owner's choice the bwrap AppArmor profile (userns for /usr/bin/bwrap alone, the form Ubuntu 25.04 ships) was installed and loaded on all five; afterwards CapEff in the namespace reads 0x2000 (CAP_NET_RAW alone) on each. On pc2: facility_trace.py --selftest OK, including the interface ioctl witness, its denial (exit 3), a raw socket refused without CAP_NET_RAW and opened with it, and a stopped run in a namespace. Layer C1st pass (400s, 41 judgement lines, none refuted): the host-peer-raweth package verifies, and the pico peer alone in a reth/ group on lo, given CAP_NET_RAW, exits 0 having asked for entropy, interface-list, raw-ethernet and threads; denied the interface request it exits 1; without the capability it exits 1 at the socket, before any interface request. The same three agreed on this workstation. abi-stamp OK for capi-c at revision 7 in debug and release. wz-capi-core plain_put tests: 2 ran and passed in the default build (lane present) and 2 with transport-stats (no lane); clippy -D warnings over all targets clean. Static gates 121: 120 at rc 0 and silent_skip_gate, red on origin, at rc 0 after the faces.rs change. apt_package_census rc 0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "None from this round. The build machines' bwrap AppArmor profile is machine state outside the tree: a machine enrolled later needs it, and Layer C1st names the refusal on one that lacks it."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
