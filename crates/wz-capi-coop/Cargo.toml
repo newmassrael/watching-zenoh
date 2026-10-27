@@ -152,7 +152,9 @@ local-subscriber = []
 # stack's (`SessionLinks::open_listener`); a stack that gives none answers the endpoint as
 # unsupported. Off, which is pico's client build, the engine is the dial role alone and its text
 # has no acceptor, no table of ports and no wait on one (the capability-cost gate measures it).
-listen = []
+# The session machine compiles its accepting role only under `session-unicast-accept`, so the
+# feature asks the runtime for it: without that an acceptor would start on no event.
+listen = ["wz-runtime-coop/session-unicast-accept"]
 # Delivery of the session's own get to the session's own queryables (`Z_FEATURE_LOCAL_QUERYABLE`):
 # a get reaches the queryables of the session that made it, after it has gone out on the link,
 # and a querier's write filter or matching listener that counts the session's own entities counts
