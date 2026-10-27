@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 
-use wz_runtime_tokio::accept_loop::AcceptBounds;
+use wz_runtime_tokio::accept_bounds::AcceptBounds;
 #[cfg(feature = "scout")]
 use wz_runtime_tokio::accept_loop::DialIntent;
 #[cfg(feature = "peer")]

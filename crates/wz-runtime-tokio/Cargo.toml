@@ -1087,7 +1087,10 @@ transport-link-udp-reliable = ["transport-link-quic", "transport-link-udp", "dep
 # The loop forwards a held face's requests, so it reads the request codec (`RequestOwned`);
 # it named none of it until a build that stopped getting it from the query plane (R3397: the
 # node clock, which had brought that plane in) failed to compile with `peer` alone.
-routing-accept = ["transport-link-tcp", "transport-unicast", "codec-request", "dep:futures-util"]
+#
+# The accept loop opens the sessions it accepts, which is the machine's accept path
+# (`session-unicast-accept`), so the loop cannot be built without it.
+routing-accept = ["transport-link-tcp", "transport-unicast", "session-unicast-accept", "codec-request", "dep:futures-util"]
 # R2912 — the routes a node computes: data and query routes per source, cached
 # until a table they read changes (`route_cache`, the mesh forwarders' route
 # cores). Upstream computes and caches them inside every hat, which is why this

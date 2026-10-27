@@ -5537,6 +5537,7 @@ pub(crate) async fn initiator_open(
 /// `max_iters` / `tick_interval_ms` carry the same meaning as on
 /// [`connect_and_open_session`] (test-determinism poll bound + SCE-scheduler
 /// pump cadence; production passes `None` + [`DEFAULT_OPEN_TICK_MS`]).
+#[cfg(feature = "session-unicast-accept")]
 pub async fn accept_and_open_session(
     accepted: DialedLink,
     params: SessionInitParams,
@@ -5576,7 +5577,7 @@ pub async fn accept_and_open_session(
 /// draws too — `prng.gen()` per method, inside
 /// its accept path. The freshness is still enforced by construction: a caller
 /// cannot reach an InitAck without passing the draw.
-#[cfg(feature = "session-extauth")]
+#[cfg(all(feature = "session-extauth", feature = "session-unicast-accept"))]
 pub async fn accept_and_open_session_with_auth(
     accepted: DialedLink,
     params: SessionInitParams,
@@ -5620,7 +5621,7 @@ pub async fn accept_and_open_session_with_auth(
 /// the accept side on `qos: bool` would have made an aggregating node reflect
 /// QoS and nothing else — the asymmetry item 517 records for the single-session
 /// acceptor, re-introduced here on purpose.
-#[cfg(feature = "transport-multilink")]
+#[cfg(all(feature = "transport-multilink", feature = "session-unicast-accept"))]
 #[allow(clippy::too_many_arguments)]
 pub async fn accept_and_open_session_with_multilink(
     accepted: DialedLink,
@@ -5648,7 +5649,7 @@ pub async fn accept_and_open_session_with_multilink(
 /// Item 751 — [`accept_and_open_session_with_multilink`] with the caller's own
 /// staging run after the link's, the accept-side twin of
 /// `initiate_multilink_with_staging`.
-#[cfg(feature = "transport-multilink")]
+#[cfg(all(feature = "transport-multilink", feature = "session-unicast-accept"))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn accept_multilink_with_staging<S>(
     accepted: DialedLink,
@@ -5693,7 +5694,7 @@ where
 /// inbound InitSyn before the InitAck is emitted), so the established session
 /// uses the lean no-Frame data path. The accept-side counterpart of
 /// [`connect_and_open_session_with_lowlatency`].
-#[cfg(feature = "transport-lowlatency")]
+#[cfg(all(feature = "transport-lowlatency", feature = "session-unicast-accept"))]
 pub async fn accept_and_open_session_with_lowlatency(
     accepted: DialedLink,
     params: SessionInitParams,
@@ -5724,6 +5725,7 @@ pub async fn accept_and_open_session_with_lowlatency(
 /// can only offer one capability at a time cannot reflect a peer that offered
 /// two, and the composed session degrades to whichever single capability the
 /// wrapper happened to name.
+#[cfg(feature = "session-unicast-accept")]
 pub async fn accept_and_open_session_with_offer(
     accepted: DialedLink,
     params: SessionInitParams,
@@ -5758,6 +5760,7 @@ pub async fn accept_and_open_session_with_offer(
 /// `timeouts` are the handshake deadlines, the node's accept bound among them: see
 /// `accept_open_offering`.
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "session-unicast-accept")]
 pub async fn accept_and_open_session_with_staging<S>(
     accepted: DialedLink,
     params: SessionInitParams,
@@ -5804,6 +5807,7 @@ where
 /// is left of `transport/unicast/accept_timeout` after the link's own handshake, and the
 /// entry points that state none are the §2.5 baseline.
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "session-unicast-accept")]
 async fn accept_open_offering<S>(
     accepted: DialedLink,
     params: SessionInitParams,
@@ -5865,7 +5869,7 @@ where
 /// inbound InitSyn before the InitAck is emitted), so the established session
 /// negotiates `is_qos` on only when BOTH sides offered. The accept-side
 /// counterpart of [`connect_and_open_session_with_qos`].
-#[cfg(feature = "transport-qos")]
+#[cfg(all(feature = "transport-qos", feature = "session-unicast-accept"))]
 pub async fn accept_and_open_session_with_qos(
     accepted: DialedLink,
     params: SessionInitParams,
@@ -5889,7 +5893,7 @@ pub async fn accept_and_open_session_with_qos(
 /// InitAck iff the peer's InitSyn offered it (the `&=` merge), so the established
 /// session lz4-wraps every batch. The accept-side counterpart of
 /// [`connect_and_open_session_with_compression`].
-#[cfg(feature = "session-extcompression")]
+#[cfg(all(feature = "session-extcompression", feature = "session-unicast-accept"))]
 pub async fn accept_and_open_session_with_compression(
     accepted: DialedLink,
     params: SessionInitParams,
@@ -5912,7 +5916,7 @@ pub async fn accept_and_open_session_with_compression(
 /// namespace on the ACCEPT side. The accept-side counterpart of
 /// [`connect_and_open_session_with_namespace`]; the namespace is LOCAL (each
 /// participant configures its own), never reflected from the peer.
-#[cfg(feature = "routing-namespace")]
+#[cfg(all(feature = "routing-namespace", feature = "session-unicast-accept"))]
 pub async fn accept_and_open_session_with_namespace(
     accepted: DialedLink,
     params: SessionInitParams,

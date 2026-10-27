@@ -30,7 +30,7 @@
 //! in: a document that would be refused for two reasons reports the earlier. The order is held by
 //! the characterization table in `wz-capi-c` (`tests/open_refusals.rs`).
 
-use wz_runtime_tokio::accept_loop::AcceptBounds;
+use wz_runtime_tokio::accept_bounds::AcceptBounds;
 use wz_runtime_tokio::node_clock::TimestampingEnabled;
 use wz_runtime_tokio::policy::{SessionPolicy, SnResolution};
 use wz_runtime_tokio::retry_period::RetryPolicy;

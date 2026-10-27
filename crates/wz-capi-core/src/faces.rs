@@ -1626,7 +1626,7 @@ impl SharedSession {
                     sn_resolution: wz_runtime_tokio::policy::SnResolution::default(),
                 },
                 rx: wz_runtime_tokio::session_glue::LinkRxConf::default(),
-                accept: wz_runtime_tokio::accept_loop::AcceptBounds::default(),
+                accept: wz_runtime_tokio::accept_bounds::AcceptBounds::default(),
             },
         )?;
         let actions = new_session_actions(driver, params, clock);

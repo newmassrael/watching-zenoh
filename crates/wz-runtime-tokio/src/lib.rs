@@ -2249,6 +2249,11 @@ pub mod storage_gc_service;
 // (nor pays for `futures-util`).
 #[cfg(feature = "routing-accept")]
 pub mod accept_loop;
+
+/// What an accepting node gives an inbound link before its handshake is complete (upstream's
+/// `accept_timeout` and `accept_pending`): plain configuration data that the C interfaces carry
+/// for every role, so it is not behind `routing-accept` with the loop that reads it.
+pub mod accept_bounds;
 /// Decision D5 of `docs/session-lifecycle-intent.md` — the peers a face loop is
 /// told to hold, a node by its zid or a configured endpoint by its locator,
 /// each driven by its connection machine: a planner that performs the

@@ -1635,7 +1635,7 @@ mod mandatory_ext_tests {
     /// visible as a CHANGED event rather than as `None` becoming `Some`: an
     /// InitSyn that would have been `InitSynReceived` is a framing error when
     /// it carries an extension it marks mandatory and nothing defines.
-    #[cfg(feature = "codec-init-body")]
+    #[cfg(all(feature = "codec-init-body", feature = "session-unicast-accept"))]
     #[test]
     fn the_rule_overrides_the_handshake_projection_too() {
         // version, cbyte (zid_len-1 = 0, whatami peer), the 1-byte zid, then
@@ -2133,7 +2133,12 @@ mod frame_qos_identity_tests {
 // region name as a mandatory ZBuf, through as a KNOWN extension; the decode now
 // reads every chain and the participant seam judges it, as for every other
 // transport message.
-#[cfg(all(test, feature = "codec-init-body", feature = "session-unicast"))]
+#[cfg(all(
+    test,
+    feature = "codec-init-body",
+    feature = "session-unicast",
+    feature = "session-unicast-accept"
+))]
 mod init_mandatory_identity_tests {
     use super::*;
 

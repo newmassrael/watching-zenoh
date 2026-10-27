@@ -2457,56 +2457,11 @@ impl std::fmt::Debug for SessionCeiling {
     }
 }
 
-/// How much an accepting node gives an inbound link before the handshake is complete, and how
-/// many it gives at once: upstream's `transport/unicast/accept_timeout` and `accept_pending`,
-/// which its manager keeps side by side (`io/zenoh-transport/src/unicast/manager.rs` @
-/// `pub accept_timeout: Duration,` and `pub accept_pending: usize,`).
-///
-/// The timeout is ONE bound over the whole accept, as upstream wraps its accept in a single
-/// `tokio::time::timeout`: the link's own handshake (the ws or tls server side) spends from it,
-/// and the session handshake is given what is left. The pending count is the accepts whose
-/// handshake has not finished; one past it is closed at once, with nothing said to the peer
-/// (`handle_new_link_unicast`: "Closing link for preventing potential DoS").
-///
-/// `Default` is upstream's, ten seconds and a hundred. zenoh-pico bounds its accept at one second
-/// (`Z_TRANSPORT_ACCEPT_TIMEOUT`), which is also the §2.5 baseline of the session machine: an
-/// interface standing for it states that ([`Self::with_timeout_ms`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AcceptBounds {
-    /// How long an accepted link may take to complete its whole handshake, in milliseconds.
-    pub timeout_ms: u64,
-    /// How many accepted links may be mid-handshake at once.
-    pub pending: usize,
-}
-
+// How much an accepting node gives an inbound link before its handshake is complete lives in
+// `accept_bounds`, which every build has (the C interfaces carry it for every role); the loop
+// that reads it re-exports it, so a path through this module still names it.
+pub use crate::accept_bounds::AcceptBounds;
 pub use crate::config::{ACCEPT_PENDING, ACCEPT_TIMEOUT_MS};
-
-impl Default for AcceptBounds {
-    fn default() -> Self {
-        Self {
-            timeout_ms: ACCEPT_TIMEOUT_MS,
-            pending: ACCEPT_PENDING,
-        }
-    }
-}
-
-impl AcceptBounds {
-    /// These bounds with another accept timeout, in milliseconds.
-    pub const fn with_timeout_ms(self, timeout_ms: u64) -> Self {
-        Self { timeout_ms, ..self }
-    }
-
-    /// The deadlines of the session handshake of an accept that has already spent
-    /// `spent_ms` of the bound on the link's own handshake: the §2.5 baseline, with the
-    /// `Accepting` window the rest of the bound, and never nothing, so the drive finds the
-    /// deadline elapsed rather than waiting for ever on a zero.
-    pub fn timeouts_after(&self, spent_ms: u64) -> SessionTimeouts {
-        SessionTimeouts {
-            accepting_inactivity_ms: self.timeout_ms.saturating_sub(spent_ms).max(1),
-            ..SessionTimeouts::spec_defaults()
-        }
-    }
-}
 
 pub struct FaceSources {
     /// The bound listeners for inbound peers (accept source), each scheme-keyed
