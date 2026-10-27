@@ -449,6 +449,23 @@ Each lands whole with its surface lines, tests and faults in one round.
     declaration with) and the engine's table is read by unit tests only, because upstream shows no
     such table. 3 of the default lines and the same of each other arm, 5 injected faults, none
     missed.
+  - **Z2b (landed).** `Session::put` and `Session::delete`, with the publication builder and every
+    setter it has (encoding, attachment, timestamp, source info, quality of service, locality,
+    reliability), and `PublisherBuilder` as the struct the builder holds; what needs a
+    `Publisher` waits for Z2d. One `Publication` value is what the engines are handed, so the
+    conversion to the engine's options is the whole of an engine's part (`publish_options`,
+    `wire_key`). A key declared on the session goes on the wire as its declaration and what
+    follows it. Left out on purpose: the timestamp instrumentation of a message is refused by
+    name until Z6b has a model for it, and the `qos/publication` overrides of the configuration
+    stay refused at open. The differential has an upstream subscriber on a real link receive what
+    each side publishes, 14 operations (13 delivered, one only to the session, one refused), and
+    a second test where the session holds a clock. A declared key is kept until the samples are
+    seen: its retraction travels at the control priority, which a link serves before the data
+    priority, so a retraction sent right behind a put may overtake it, in upstream's pipeline as
+    in the engine's (the engine's barrier before a control message hands the earlier frames to the
+    link's writer, which then picks by priority; it does not hold the control frame behind them).
+    That is the engine's, not this slice's, and is carried. 32 of the default lines and 36 and 36
+    of the other two arms, 8 injected faults, none missed.
 - **Z3. Queries.** `get`, `declare_queryable`, `Query`, `Reply`, `declare_querier`, consolidation,
   targets, timeouts. (The cancellation token is already in, Z0b; the builders of `get` that take
   it join here.)
