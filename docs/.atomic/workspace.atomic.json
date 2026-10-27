@@ -293520,6 +293520,38 @@
         "The measured records stay unsplit until they are re-recorded on their SDK hosts (owner approval per host); the import check will then also run on the cross builds."
       ]
     },
+    "Round 3783": {
+      "decision_summary": "The E7s router data-plane scaling lane red repaid. Its router-hat opens up to 2048 sessions that the client processes start together, so every handshake is mid-flight at once; since the accept bounds (upstream's accept_pending and accept_timeout) the accept loop closes the links past a hundred at once, as upstream's router does, and the lane saw 1033 of 2048 come up. The demo router now takes --accept-pending and --accept-timeout-ms (RouterHatOpts, upstream's defaults when absent), and the scaling test names a count that holds its whole population, saying that it measures the data plane and not that bound. Run on the build host the lane passes: six tests in 334 seconds. Two more pins of the close-ingress reason moved after re-reading the clauses that cite OutOfBand and zenoh_hex_to_zid, both unchanged by the commits that moved their files.",
+      "changes_bullets": [
+        "crates/wz-ap-demo: args.rs parse_accept_bounds (--accept-pending, --accept-timeout-ms), RouterHatOpts.accept, main.rs reads it, the router-hat runner uses it in place of the default.",
+        "crates/wz-integration-tests/tests/wz_router_hat_data_plane_scaling.rs: the router is started with --accept-pending equal to its session bound, with a comment saying why.",
+        "docs/reason-review-pins.md: session_actions and zid_hex rows of session-close-ingress moved to R3782."
+      ],
+      "verification_bullets": [
+        "On the build host: the E7s lane as run-ci runs it (release build of the demo with preset-ap-client and router-hat-router, then the scaling tests ignored-included, one thread): 6 passed in 334 s; cargo check of wz-ap-demo with all features over its binaries. The reason pin gate after the rows moved, and the census. Not run locally: the demo's own tests of the new flag parse, clippy of wz-ap-demo."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "The demo peer mode (--peer) still takes upstream's accept bounds with no flag; a lane that connects a burst to a peer would need the same two flags there. The hosted run of the tip after this round is the next read: its failures are attributed per job."
+      ],
+      "publishable_decision_summary": "The E7s router data-plane scaling lane red repaid. Its router-hat opens up to 2048 sessions that the client processes start together, so every handshake is mid-flight at once; since the accept bounds (upstream's accept_pending and accept_timeout) the accept loop closes the links past a hundred at once, as upstream's router does, and the lane saw 1033 of 2048 come up. The demo router now takes --accept-pending and --accept-timeout-ms (RouterHatOpts, upstream's defaults when absent), and the scaling test names a count that holds its whole population, saying that it measures the data plane and not that bound. Run on the build host the lane passes: six tests in 334 seconds. Two more pins of the close-ingress reason moved after re-reading the clauses that cite OutOfBand and zenoh_hex_to_zid, both unchanged by the commits that moved their files.",
+      "publishable_changes_bullets": [
+        "crates/wz-ap-demo: args.rs parse_accept_bounds (--accept-pending, --accept-timeout-ms), RouterHatOpts.accept, main.rs reads it, the router-hat runner uses it in place of the default.",
+        "crates/wz-integration-tests/tests/wz_router_hat_data_plane_scaling.rs: the router is started with --accept-pending equal to its session bound, with a comment saying why.",
+        "docs/reason-review-pins.md: session_actions and zid_hex rows of session-close-ingress moved to R3782."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host: the E7s lane as run-ci runs it (release build of the demo with preset-ap-client and router-hat-router, then the scaling tests ignored-included, one thread): 6 passed in 334 s; cargo check of wz-ap-demo with all features over its binaries. The reason pin gate after the rows moved, and the census. Not run locally: the demo's own tests of the new flag parse, clippy of wz-ap-demo."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The demo peer mode (--peer) still takes upstream's accept bounds with no flag; a lane that connects a burst to a peer would need the same two flags there. The hosted run of the tip after this round is the next read: its failures are attributed per job."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
