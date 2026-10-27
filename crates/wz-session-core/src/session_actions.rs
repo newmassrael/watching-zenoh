@@ -2526,6 +2526,105 @@ enum DispatchStage {
     Probe,
 }
 
+/// The declaration a session with no allocator sends, as the arguments of the writer of
+/// [`crate::lent_control`] that makes it. [`SessionLinkActions::dispatch_declare_lent`] takes one
+/// of these, so the five kinds share one dispatch and one encoder.
+#[cfg(all(
+    not(feature = "alloc"),
+    any(
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "liveliness-token"
+    )
+))]
+enum LentDeclaration<'a> {
+    /// The close of an interest's answer.
+    #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
+    FinalReply { interest_id: u64 },
+    /// A subscriber declared in answer to an interest.
+    #[cfg(feature = "declare-subscriber")]
+    SubscriberReply {
+        interest_id: u64,
+        subscriber_id: u64,
+        keyexpr: &'a str,
+    },
+    #[cfg(feature = "declare-subscriber")]
+    Subscriber {
+        id: u64,
+        mapping_id: u64,
+        suffix: Option<&'a str>,
+    },
+    #[cfg(feature = "declare-queryable")]
+    Queryable {
+        id: u64,
+        mapping_id: u64,
+        suffix: Option<&'a str>,
+        complete: bool,
+    },
+    #[cfg(feature = "declare-token")]
+    Token {
+        id: u64,
+        mapping_id: u64,
+        suffix: Option<&'a str>,
+    },
+}
+
+#[cfg(all(
+    not(feature = "alloc"),
+    any(
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "liveliness-token"
+    )
+))]
+impl<'a> LentDeclaration<'a> {
+    /// The declaration, borrowing the text the arguments borrow.
+    fn declare(&self) -> wz_codecs::declare::Declare<'a> {
+        match *self {
+            #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
+            Self::FinalReply { interest_id } => {
+                crate::lent_control::declare_final_reply(interest_id)
+            }
+            #[cfg(feature = "declare-subscriber")]
+            Self::SubscriberReply {
+                interest_id,
+                subscriber_id,
+                keyexpr,
+            } => crate::lent_control::declare_subscriber_reply_with_id(
+                interest_id,
+                subscriber_id,
+                keyexpr,
+            ),
+            #[cfg(feature = "declare-subscriber")]
+            Self::Subscriber {
+                id,
+                mapping_id,
+                suffix,
+            } => crate::lent_control::declare_subscriber(id, mapping_id, suffix),
+            #[cfg(feature = "declare-queryable")]
+            Self::Queryable {
+                id,
+                mapping_id,
+                suffix,
+                complete,
+            } => crate::lent_control::declare_queryable(
+                id,
+                mapping_id,
+                suffix,
+                crate::queryable_info::QueryableInfo::local(complete),
+            ),
+            #[cfg(feature = "declare-token")]
+            Self::Token {
+                id,
+                mapping_id,
+                suffix,
+            } => crate::lent_control::declare_token(id, mapping_id, suffix),
+        }
+    }
+}
+
 /// What [`SessionLinkActions::try_send_network_message_qos`] did not send, and whose it still is.
 #[cfg(any(
     feature = "codec-push",
@@ -3033,9 +3132,7 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
         not(feature = "alloc")
     ))]
     fn send_declare_final_reply(&self, interest_id: u64) {
-        let _ = self.dispatch_declare_lent(|sink| {
-            crate::lent_control::declare_final_reply(interest_id).encode(sink)
-        });
+        let _ = self.dispatch_declare_lent(&LentDeclaration::FinalReply { interest_id });
     }
     #[cfg(all(
         any(feature = "liveliness-token", feature = "declare-subscriber"),
@@ -3057,13 +3154,10 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
         if keyexpr.len() > crate::caps::MAX_KEYEXPR_BYTES {
             return;
         }
-        let _ = self.dispatch_declare_lent(|sink| {
-            crate::lent_control::declare_subscriber_reply_with_id(
-                interest_id,
-                subscriber_id,
-                keyexpr,
-            )
-            .encode(sink)
+        let _ = self.dispatch_declare_lent(&LentDeclaration::SubscriberReply {
+            interest_id,
+            subscriber_id,
+            keyexpr,
         });
     }
     #[cfg(all(feature = "declare-subscriber", feature = "alloc"))]
@@ -11102,6 +11196,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the same (`Priority::Control`, the declare QoS, the `Declare` stats label);
     /// only the body's source differs. Always reliable, as `dispatch_declare`'s
     /// callers pass it.
+    ///
+    /// The declaration arrives as the arguments of its writer ([`LentDeclaration`]), so
+    /// the encoder handed to the dispatch is one closure type for every caller: a closure
+    /// of each caller's own type would give the dispatch one copy per caller. The
+    /// `Declare` itself is built inside that closure, below the dispatch, and not by the
+    /// caller: a caller that held it would carry its size in its own frame.
     #[cfg(all(
         not(feature = "alloc"),
         any(
@@ -11111,17 +11211,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "liveliness-token"
         )
     ))]
-    fn dispatch_declare_lent<P>(&self, encode_body: P) -> Result<(), SendWireError>
-    where
-        P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
-    {
+    fn dispatch_declare_lent(&self, what: &LentDeclaration<'_>) -> Result<(), SendWireError> {
         self.dispatch_network_message(
             Priority::Control,
             /*reliable=*/ true,
             crate::declare_ext_qos::QOS_DECLARE,
             wz_codecs::declare::Declare::MAX_ENCODED_BYTES,
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
-            encode_body,
+            |sink| what.declare().encode(sink),
         )
     }
 
@@ -11967,13 +12064,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(all(feature = "declare-subscriber", not(feature = "alloc")))]
         {
             Self::check_outbound_declared_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
-            self.dispatch_declare_lent(|sink| {
-                crate::lent_control::declare_subscriber(
-                    subscriber_id,
-                    keyexpr_mapping_id,
-                    keyexpr_suffix,
-                )
-                .encode(sink)
+            self.dispatch_declare_lent(&LentDeclaration::Subscriber {
+                id: subscriber_id,
+                mapping_id: keyexpr_mapping_id,
+                suffix: keyexpr_suffix,
             })
             .map_err(SendDeclareError::from)
         }
@@ -12039,14 +12133,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(all(feature = "declare-queryable", not(feature = "alloc")))]
         {
             Self::check_outbound_declared_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
-            self.dispatch_declare_lent(|sink| {
-                crate::lent_control::declare_queryable(
-                    queryable_id,
-                    keyexpr_mapping_id,
-                    keyexpr_suffix,
-                    crate::queryable_info::QueryableInfo::local(complete),
-                )
-                .encode(sink)
+            self.dispatch_declare_lent(&LentDeclaration::Queryable {
+                id: queryable_id,
+                mapping_id: keyexpr_mapping_id,
+                suffix: keyexpr_suffix,
+                complete,
             })
             .map_err(SendDeclareError::from)
         }
@@ -12124,9 +12215,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(all(feature = "declare-token", not(feature = "alloc")))]
         {
             Self::check_outbound_declared_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
-            self.dispatch_declare_lent(|sink| {
-                crate::lent_control::declare_token(token_id, keyexpr_mapping_id, keyexpr_suffix)
-                    .encode(sink)
+            self.dispatch_declare_lent(&LentDeclaration::Token {
+                id: token_id,
+                mapping_id: keyexpr_mapping_id,
+                suffix: keyexpr_suffix,
             })
             .map_err(SendDeclareError::from)
         }
