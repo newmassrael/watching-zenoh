@@ -890,10 +890,18 @@ thread's polling loop, which polls without sleeping for wz and pico alike
 - **After it, the fixed and batching images read inside their rows twice;** the get image reads a
   stack peak 6,600 against a row of 6,648 +/- 16, which is lower, and the row moved with it.
 
-Not covered: the pico compare image has the option in its `prj.conf` but was not rebuilt or run
-with it, so `deploy/upstream_parity.json` still holds the matrix taken without it; the TLS image
-built with the option and was not run; the batching row (361) is above what the image now measures
-(about 330) and was left; the getter's median was not re-measured.
+**The matrix taken again with the option on both sides** (run 20261027T201540, 4 images, 6 boots,
+`deploy/upstream_parity.json`) against the single-threaded pico image: the fixed client's text
+ratio went 1.2124 to 1.2053 (175,240 against 145,388 bytes; the fixed client lost 2,040 bytes and
+pico's image 832 with the option), the heap client's 1.6378 to 1.6465, and no verdict changed.
+The turnaround at the wire did not follow the GET figures above: the fixed client's median stayed
+0.213 ms (0.2129 before), pico's single-threaded image fell from 0.2041 to 0.2010 ms, so the
+ratio went 1.0432 to 1.0623 (interval 1.028 to 1.073), still a LOSS and further from a tie. The
+option gives the wz images a steadier GET and no turnaround at the wire, and pico's image gains where the wz one does not. The
+text gap that is left is about 30 KB.
+
+Not covered: the TLS image built with the option and was not run; the batching row (361) is above
+what the image now measures (about 330) and was left; the getter's median was not re-measured.
 
 ## 6. Open
 
