@@ -294898,6 +294898,44 @@
         "None from this round. The build machines' bwrap AppArmor profile is machine state outside the tree: a machine enrolled later needs it, and Layer C1st names the refusal on one that lacks it."
       ]
     },
+    "Round 3817": {
+      "decision_summary": "A flake of an older slice, found by round 3815 and carried by it, is explained and mended: a callback of a GET that asks a GET of the queryable that answered it, and waits, failed once in about twenty runs of the same tree. When the drive task took the handler's job, the thread that asked had already finalised and handed the GET's Final to the job's hold; the job released that hold from inside its own call and drained what it staged right there, so the requester's callbacks ran inside the call of the queryable's cell, and the nested GET found the cell mid-call, which parks a call behind the one running. The hold is now released by staging the Final, which the loop that runs the job takes once the job has returned; a hold dropped any other way releases and drains as before. The test has a second thread drain the plane while each ask's final callback asks the same queryable again and waits: it fails without the change (asks 19, 20, 21) and passes with it.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session/held_query.rs: release_query_final_in with a flag for whether the fires it stages are run before it returns, release_query_final_staged, and HandlerJobHold::release_within_job (the hold is settled, and its drop releases nothing a second time).",
+        "crates/wz-runtime-tokio/src/session/queryable.rs: the deferred job releases its hold with release_within_job at its end, after the replies are delivered.",
+        "crates/wz-runtime-tokio/src/session/tests.rs: a_callback_may_ask_the_queryable_that_answered_it_while_another_thread_drains_the_plane."
+      ],
+      "verification_bullets": [
+        "Found by a repeat of the top crate's own test in one process (the nested GET failed at the 23rd, 19th and 7th round of three runs), then by marking each drain with the thread and whether it ran inside a cell's call and from the release of a hold: every normal round drained the staged fires after the handler's job returned, and the failing round drained them from the release, inside the call. The marks and the repeat were removed and the files restored from the commit before the change.",
+        "The new test fails with the change taken out (asks 19, 20 and 21 did not end) and passes with it. The library tests of wz-runtime-tokio pass with the defaults and with the 83 features of the C1bnl leg, clippy with warnings denied is clean in both, rustfmt is clean, the unit tests of zenoh with all features passed three runs in a row, and the tests of the capi core and of the pico and C ABIs pass.",
+        "Not run here: the hosted run."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "The release made by the user's own drop of a held query still drains inline, and a callback that drops the last holder and then waits for the GET to end is served by it; the same cell rule would park a nested call of that queryable made from the drained callbacks, which no test asks. It is the only other place a requester's callbacks can run inside a handler's call.",
+        "Next in order: Z6a, information (info().links(), transports() and the link and transport event listeners), then Z6b and Z6c."
+      ],
+      "publishable_decision_summary": "A flake of an older slice, found by round 3815 and carried by it, is explained and mended: a callback of a GET that asks a GET of the queryable that answered it, and waits, failed once in about twenty runs of the same tree. When the drive task took the handler's job, the thread that asked had already finalised and handed the GET's Final to the job's hold; the job released that hold from inside its own call and drained what it staged right there, so the requester's callbacks ran inside the call of the queryable's cell, and the nested GET found the cell mid-call, which parks a call behind the one running. The hold is now released by staging the Final, which the loop that runs the job takes once the job has returned; a hold dropped any other way releases and drains as before. The test has a second thread drain the plane while each ask's final callback asks the same queryable again and waits: it fails without the change (asks 19, 20, 21) and passes with it.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session/held_query.rs: release_query_final_in with a flag for whether the fires it stages are run before it returns, release_query_final_staged, and HandlerJobHold::release_within_job (the hold is settled, and its drop releases nothing a second time).",
+        "crates/wz-runtime-tokio/src/session/queryable.rs: the deferred job releases its hold with release_within_job at its end, after the replies are delivered.",
+        "crates/wz-runtime-tokio/src/session/tests.rs: a_callback_may_ask_the_queryable_that_answered_it_while_another_thread_drains_the_plane."
+      ],
+      "publishable_verification_bullets": [
+        "Found by a repeat of the top crate's own test in one process (the nested GET failed at the 23rd, 19th and 7th round of three runs), then by marking each drain with the thread and whether it ran inside a cell's call and from the release of a hold: every normal round drained the staged fires after the handler's job returned, and the failing round drained them from the release, inside the call. The marks and the repeat were removed and the files restored from the commit before the change.",
+        "The new test fails with the change taken out (asks 19, 20 and 21 did not end) and passes with it. The library tests of wz-runtime-tokio pass with the defaults and with the 83 features of the C1bnl leg, clippy with warnings denied is clean in both, rustfmt is clean, the unit tests of zenoh with all features passed three runs in a row, and the tests of the capi core and of the pico and C ABIs pass.",
+        "Not run here: the hosted run."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The release made by the user's own drop of a held query still drains inline, and a callback that drops the last holder and then waits for the GET to end is served by it; the same cell rule would park a nested call of that queryable made from the drained callbacks, which no test asks. It is the only other place a requester's callbacks can run inside a handler's call.",
+        "Next in order: Z6a, information (info().links(), transports() and the link and transport event listeners), then Z6b and Z6c."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
