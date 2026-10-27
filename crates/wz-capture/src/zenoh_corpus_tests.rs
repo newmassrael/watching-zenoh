@@ -158,7 +158,7 @@ fn floor_readings(d: &Dissection) -> Vec<String> {
         };
         match r.at_least {
             Some(n) => alloc::format!("{basis}>={n}"),
-            None => alloc::format!("{basis}"),
+            None => String::from(basis),
         }
     };
     let both = |s: &wz_session_core::passive::PassiveSession| {
