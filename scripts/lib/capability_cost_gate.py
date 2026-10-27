@@ -364,7 +364,7 @@ CASES: tuple[Case, ...] = (
     # listens on a `tcp/` endpoint and takes each inbound link as a face of its session
     # (`docs/capi-pico-on-coop-engine.md`, step L4).
     Case("pico-peer-coop", "wz-capi-pico", "libwz_capi_pico.so",
-         "engine-coop,link-udp,peer", 1_069_100,
+         "engine-coop,link-udp,peer", 1_069_900,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE, COOP_SCOUT, COOP_LISTEN),
@@ -376,7 +376,9 @@ CASES: tuple[Case, ...] = (
               "peers' commits of 2026-10-27 joined, and 1,063,560 with the session holding one "
               "face for each remote zid (the admission, the displacement and the dial role "
               "standing by, which only a build that listens carries): +5,360, and the budget "
-              "moved to that reading and 5,500"),
+              "moved to that reading and 5,500. 1,064,448 with the gate that gives a link's "
+              "session nothing between its handshake and the decision (+888), the budget "
+              "moved to that reading and 5,500 again"),
     Case("pico-peer", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",peer", 2_946_000,
          forbid=(GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY, MULTICAST),
          require=(ACCEPT, RESPONDER, SCOUTING, UDP, SINGLE_THREADED),
