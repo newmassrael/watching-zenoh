@@ -128,6 +128,9 @@ enum Step {
     Advance(u64),
     /// The queryable on a face ends the last `Request` forwarded to it.
     Final(u64),
+    /// The queryable on a face answers the request it has just ended, which is
+    /// a reply that loses the race to its own final.
+    ReplyAfterFinal(u64, &'static str, &'static [u8]),
     /// A face goes down.
     Down(u64),
     /// The periodic tick.
@@ -159,6 +162,9 @@ struct Node {
     /// `Reply` and `Final` steps do nothing, and that shows as a difference on
     /// the `Query` step when only one of two nodes forwarded the request.
     last_request: BTreeMap<u64, u64>,
+    /// The request id each face last ended with a `Final`, for a reply that
+    /// arrives after it.
+    ended_request: BTreeMap<u64, u64>,
     self_zid: u8,
 }
 
@@ -170,6 +176,7 @@ impl Node {
             sinks: BTreeMap::new(),
             read: BTreeMap::new(),
             last_request: BTreeMap::new(),
+            ended_request: BTreeMap::new(),
             self_zid,
         }
     }
@@ -269,11 +276,21 @@ impl Node {
             }
             Step::Final(id) => {
                 if let Some(rid) = self.last_request.remove(id) {
+                    self.ended_request.insert(*id, rid);
                     let end = wz_session_core::response_final_build::build_response_final(
                         rid,
                         wz_session_core::sample::QosLevel::DEFAULT,
                     );
                     self.deliver(*id, NetworkMessage::ResponseFinal(end));
+                }
+            }
+            Step::ReplyAfterFinal(id, keyexpr, payload) => {
+                if let Some(rid) = self.ended_request.get(id).copied() {
+                    let response = wz_session_core::response_build::build_response_reply_literal(
+                        rid, keyexpr, payload,
+                    )
+                    .expect("response");
+                    self.deliver(*id, NetworkMessage::Response(Box::new(response)));
                 }
             }
             Step::Down(id) => self.fwd.deregister(FaceId(*id)),
@@ -810,8 +827,114 @@ fn a_query_open_across_a_recompute() -> Vec<Step> {
     ]
 }
 
+/// A querier asks for a timeout shorter than the default: the clock moves past
+/// it and not past the default, so only a relay that honours the carried
+/// deadline ends the query (`ext_timeout.unwrap_or(queries_default_timeout)`).
+fn a_timeout_shorter_than_the_default() -> Vec<Step> {
+    vec![
+        Step::Up(0, 0xAA, Wire::Peer),
+        Step::Up(1, 0xC1, Wire::Client),
+        Step::LinkBack(0, 0xAA, 5),
+        Step::Tick,
+        Step::Queryable(1, "demo/s", true),
+        Step::Tick,
+        Step::QueryWith(
+            0,
+            51,
+            "demo/s",
+            Asked {
+                timeout_ms: Some(2_000),
+                ..Asked::default()
+            },
+        ),
+        Step::Advance(1_000),
+        Step::Tick,
+        Step::Advance(2_000),
+        Step::Tick,
+        Step::Reply(1, "demo/s", b"late"),
+        Step::Final(1),
+    ]
+}
+
+/// A queryable answers one keyexpr twice, under each consolidation mode: what
+/// the querier receives says whether a relay consolidates on its own.
+fn two_replies_under_each_consolidation_mode() -> Vec<Step> {
+    let mut scene = vec![
+        Step::Up(0, 0xAA, Wire::Peer),
+        Step::Up(1, 0xC1, Wire::Client),
+        Step::LinkBack(0, 0xAA, 5),
+        Step::Tick,
+        Step::Queryable(1, "demo/k", true),
+        Step::Tick,
+    ];
+    for (n, mode) in [
+        ConsolidationMode::None,
+        ConsolidationMode::Monotonic,
+        ConsolidationMode::Latest,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        scene.extend([
+            Step::QueryWith(
+                0,
+                60 + n as u64,
+                "demo/k",
+                Asked {
+                    consolidation: Some(mode),
+                    ..Asked::default()
+                },
+            ),
+            Step::Reply(1, "demo/k", b"v1"),
+            Step::Reply(1, "demo/k", b"v2"),
+            Step::Final(1),
+        ]);
+    }
+    scene
+}
+
+/// Two queryables of one keyexpr whose finals and replies arrive in each order,
+/// and replies that arrive after their own final: the querier's final waits for
+/// every branch, and a reply that lost its race is dropped.
+fn finals_and_replies_in_every_order() -> Vec<Step> {
+    vec![
+        Step::Up(0, 0xAA, Wire::Peer),
+        Step::Up(1, 0xC1, Wire::Client),
+        Step::Up(2, 0xC2, Wire::Client),
+        Step::LinkBack(0, 0xAA, 5),
+        Step::Tick,
+        Step::Queryable(1, "demo/o", true),
+        Step::Queryable(2, "demo/o", true),
+        Step::Tick,
+        Step::Query(0, 71, "demo/o"),
+        Step::Final(1),
+        Step::Reply(2, "demo/o", b"only"),
+        Step::Final(2),
+        Step::ReplyAfterFinal(2, "demo/o", b"too late"),
+        Step::ReplyAfterFinal(1, "demo/o", b"too late too"),
+        Step::Query(0, 72, "demo/o"),
+        Step::Reply(1, "demo/o", b"a"),
+        Step::Reply(2, "demo/o", b"b"),
+        Step::Final(2),
+        Step::Final(1),
+        Step::ReplyAfterFinal(1, "demo/o", b"after both"),
+    ]
+}
+
 fn scenes() -> Vec<(&'static str, Vec<Step>)> {
     vec![
+        (
+            "a timeout shorter than the default",
+            a_timeout_shorter_than_the_default(),
+        ),
+        (
+            "two replies under each consolidation mode",
+            two_replies_under_each_consolidation_mode(),
+        ),
+        (
+            "finals and replies in every order",
+            finals_and_replies_in_every_order(),
+        ),
         ("what a querier asks for", what_a_querier_asks_for()),
         (
             "an error reply and a timeout",
@@ -938,6 +1061,25 @@ fn assert_the_query_scenes_exercise_what_they_claim(mode: Mode) {
             requests_with(
                 |s| matches!(s, Seen::Response { payload: Some(p), .. } if p == b"across"),
             ),
+        ),
+        (
+            "the relay ending a query at the timeout the querier carried",
+            requests_with(
+                |s| matches!(s, Seen::ResponseErr { request_id: 51, payload, .. } if payload == b"Timeout"),
+            ),
+        ),
+        (
+            "both replies of a consolidated query reaching its querier",
+            requests_with(
+                |s| matches!(s, Seen::Response { request_id: 60..=62, payload: Some(p), .. } if p == b"v1" || p == b"v2"),
+            ),
+        ),
+        (
+            "an answer after one branch ended and the querier's final after both",
+            requests_with(|s| {
+                matches!(s, Seen::Response { request_id: 71, payload: Some(p), .. } if p == b"only")
+                    || matches!(s, Seen::ResponseFinal { request_id: 71 })
+            }),
         ),
     ];
     for (what, n) in counted {

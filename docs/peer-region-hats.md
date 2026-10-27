@@ -256,11 +256,28 @@ counted in what was sent (a `Request` carrying each target and the timeout, an
 `Err` reply, the `Err("Timeout")`, a reply across a recompute), so a scene that
 stopped producing one fails rather than passes equal over nothing.
 
-Not covered: a timeout a querier carries that is shorter than the default
-firing a relay's sweep (the scene moves the clock past the default only; the
-carried timeout is compared as forwarded), whether a relay consolidates replies
-itself (only that the mode reaches the queryable is compared), and a
-`ResponseFinal` that races its last reply.
+A third pass paid what the second one still listed, which had no reason to be
+left (three more scenes, and a `ReplyAfterFinal` step for a reply that loses
+the race to its own final):
+
+- **A timeout shorter than the default.** A querier carries 2,000 ms and the
+  clock moves 3,000 ms, so only a relay that arms its deadline from the carried
+  value ends the query (`ext_timeout.unwrap_or(queries_default_timeout)`): both
+  planes send the querier `Err("Timeout")` and the final under the querier's
+  own id, and drop the reply that comes after.
+- **Consolidation.** A queryable answers one keyexpr twice under each mode and
+  both replies reach the querier in both planes: neither plane consolidates at
+  the relay, the querier does.
+- **Final and reply in every order.** One of two branches ends with no answer,
+  the other answers, and the querier's final comes only after both; the finals
+  in the opposite order; a reply after its own final is dropped. Equal.
+
+No difference and no defect, and each is counted in what was sent (the
+`Err("Timeout")` under the carried deadline, both replies of a consolidated
+query, the answer after one branch ended and the final after both).
+
+Not covered in the query plane: a query forwarded across more than one hop of a
+tree, which needs the three-hop scene the publish plane lacks too.
 
 ## 9. Open
 
