@@ -85,7 +85,12 @@ wz-workload = { path = "../wz-workload" }
 # preset-ap-client default forcibly turning it back on. Production
 # `cargo run -p wz-ap-demo` still gets the full preset because this
 # crate's own `default = ["preset-ap-client"]` below re-enables it.
-wz = { path = "../wz", default-features = false }
+#
+# R3802 — `runtime-tokio` is named HERE, not left to a preset: the binary uses
+# `wz::runtime_tokio` and `wz::runtime_core` unconditionally, so a build without
+# a preset failed with several hundred unresolved paths instead of compiling.
+# Every footprint list already names it, so no measured build changes.
+wz = { path = "../wz", default-features = false, features = ["runtime-tokio"] }
 # gc-3 carry #2 — the LIVE application machine (sensor_monitor statechart +
 # temp/reset switchboard + generated value injector). Optional + pulled only by
 # the `switchboard` feature so the footprint measurement

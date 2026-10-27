@@ -291,6 +291,22 @@ DEFERRED: dict[str, str] = {
         "already grades one by one. Running it here would pay that population "
         "twice and report it in a shape nobody reads at push time."
     ),
+    "doc_feature_sets.py": (
+        "R3802 -- it names configurations; the verdict on them is a `cargo "
+        "doc` of each, which the hook does not build. It reads the sources "
+        "for the `feature = \"x\"` names a reduced configuration is told "
+        "apart by, and a round that adds one changes which configurations "
+        "exist, so its answer is only graded by documenting them. Layers "
+        "C1bz and C1bzr run its --selftest and then that `cargo doc`."
+    ),
+    "reduced_docs_gate.py": (
+        "R3802 -- it BUILDS its subject. Layer C1bzr documents every crate "
+        "in each reduced configuration: 531 `cargo doc` runs, MEASURED at "
+        "3552s on the build host with one free core, against a 62-member "
+        "block costing 68.4-74.8s. Hosted CI owns it as six shards and a "
+        "settle job; it reads the source only at the place rustc points to, "
+        "to tell a `compile_error!` guard from a defect."
+    ),
 }
 
 

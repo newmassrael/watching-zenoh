@@ -175,10 +175,10 @@ for _codec_package in ("libsnappy-dev", "liblz4-dev", "libzstd-dev", "zlib1g-dev
     _add(_codec_package, "The cached RocksDB engine's five compression codecs.",
          ["ci", "nondefault", "nondefault-builds", "nondefault-legs", "dissect", "interop",
           "feature-gates",
-          "transport-modes", "capi-c-arms", "e2e-demo", "e2e-demo-pico",
+          "transport-modes", "reduced-docs", "capi-c-arms", "e2e-demo", "e2e-demo-pico",
           "e2e-router-scale"])
 _add("cmake", "Builds the cached native RocksDB engine via the local composite action.",
-     ["nondefault", "nondefault-builds", "nondefault-legs"])
+     ["nondefault", "nondefault-builds", "nondefault-legs", "reduced-docs"])
 _add("strace", "Layer C1st's facility oracle reads each packaged artifact's runs through it "
      "(scripts/lib/facility_trace.py --judge).", ["capi-c-arms"])
 
@@ -241,6 +241,9 @@ _add(
         # non-default test table build the same members at the same features
         # `nondefault` does, so whatever this row says reaches it too.
         "nondefault-legs",
+        # Layer C1bzr's shards: `cargo doc` of every member in its reduced
+        # configurations runs the same build scripts `nondefault` compiles.
+        "reduced-docs",
         # R2525 — Layer C0 + C1cf's own job, peeled off `ci` for item 590's
         # budget. C1cf builds EVERY workspace member with default features OFF,
         # so every reason on this row that reaches a member reaches it. ⚠ It
@@ -298,6 +301,9 @@ _add(
         # non-default test table build the same members at the same features
         # `nondefault` does, so whatever this row says reaches it too.
         "nondefault-legs",
+        # Layer C1bzr's shards: `cargo doc` of every member in its reduced
+        # configurations runs the same build scripts `nondefault` compiles.
+        "reduced-docs",
         # R2525 — Layer C0 + C1cf's own job, peeled off `ci` for item 590's
         # budget. C1cf builds EVERY workspace member with default features OFF,
         # so every reason on this row that reaches a member reaches it. ⚠ It
@@ -358,6 +364,9 @@ _add(
         # non-default test table build the same members at the same features
         # `nondefault` does, so whatever this row says reaches it too.
         "nondefault-legs",
+        # Layer C1bzr's shards: `cargo doc` of every member in its reduced
+        # configurations runs the same build scripts `nondefault` compiles.
+        "reduced-docs",
         # R2525 — Layer C0 + C1cf's own job, peeled off `ci` for item 590's
         # budget. C1cf builds EVERY workspace member with default features OFF,
         # so every reason on this row that reaches a member reaches it. ⚠ It
@@ -565,6 +574,9 @@ _add(
         # non-default test table build the same members at the same features
         # `nondefault` does, so whatever this row says reaches it too.
         "nondefault-legs",
+        # Layer C1bzr's shards: `cargo doc` of every member in its reduced
+        # configurations runs the same build scripts `nondefault` compiles.
+        "reduced-docs",
         # R2525 — Layer C0 + C1cf's own job, peeled off `ci` for item 590's
         # budget. C1cf builds EVERY workspace member with default features OFF,
         # so every reason on this row that reaches a member reaches it. ⚠ It

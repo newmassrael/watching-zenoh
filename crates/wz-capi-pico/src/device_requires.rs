@@ -8,7 +8,7 @@
 //! (docs/build-configuration.md, decision C10), and part of the unstable surface: a build without
 //! `unstable-api` (the size-measured client builds) carries none of it.
 //!
-//! It reads the config as [`z_open`](crate::session::z_open) does ([`open_config`], the TLS
+//! It reads the config as [`z_open`](crate::session::z_open) does (`open_config`, the TLS
 //! material, pico's group rule) into the engine-neutral facts of `wz_session_core::facilities`, and
 //! refuses what `z_open` refuses, with the same code. pico's open makes one attempt at its one
 //! locator and fails when it cannot dial or bind it, and scouts only when neither locator is

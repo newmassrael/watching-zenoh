@@ -5656,6 +5656,151 @@ jobs:
       - name: Layer C1by — the replay engine (R311y700)
         run: bash scripts/run-ci.sh --layer C1by
 
+  # ─────────────────────────────────────────────────────────────────
+  # Layer C1bzr — the docs resolve in the REDUCED configurations, C1bz's other direction.
+  #
+  # C1bz documents each crate in its largest configurations, where a link to an item behind a
+  # feature always resolves. Rounds 3751 and 3756 fixed three links in wz-session-mcu that broke
+  # only without one feature, found by hand. This lane documents every largest set without one
+  # feature (`doc_feature_sets.py --reduced`), several hundred `cargo doc` runs, and holds the
+  # findings to `scripts/lib/reduced_docs_ledger.txt` in both directions.
+  #
+  # WHY A MATRIX AND A SETTLE JOB. Measured on pc2 (one unsharded sweep of the whole workspace):
+  # 531 configurations, 3552 s wall at 3050 s of CPU, so the runs are close to serial and a runner's
+  # clock is their sum. Split six ways each shard carries about a sixth. A shard can only say "nothing above the
+  # ledger"; whether a ledger line went stale needs every shard's findings, so each shard uploads
+  # its file and `reduced-docs-settle` reads all six, refusing a set that is not one complete
+  # partition. The shard count is `WZ_DOCS_SHARDS` here and the `shard` list; change both.
+  reduced-docs:
+    name: reduced-configuration docs (Layer C1bzr, shard ${{ matrix.shard }}/6)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
+    env:
+      WZ_DOCS_SHARDS: "6"
+      WZ_DOCS_SHARD: ${{ matrix.shard }}
+    steps:
+      - name: Budget stamp — start this job's own clock
+        # Same reason the `ci` job stamps: `timeout-minutes` measures from when
+        # the job is CREATED, and the margin gate needs elapsed RUN time.
+        run: date +%s > "$RUNNER_TEMP/wz_job_start"
+
+      - name: Free runner disk space (headroom for the reduced feature sets)
+        # Every configuration is a distinct feature set, so a distinct set of checked
+        # dependencies in `crates/target`: the reason the `nondefault` job prunes.
+        run: |
+          echo "=== free space BEFORE prune ==="
+          df -h /
+          prune() {
+            local started=$SECONDS
+            "$@" || true
+            echo "prune: $* took $((SECONDS - started))s"
+          }
+          prune sudo rm -rf /usr/share/dotnet &
+          prune sudo rm -rf /usr/local/lib/android &
+          prune sudo rm -rf /opt/ghc &
+          prune sudo rm -rf /usr/local/share/boost &
+          prune sudo rm -rf /opt/hostedtoolcache/CodeQL &
+          prune sudo docker image prune --all --force &
+          wait
+          echo "=== free space AFTER prune ==="
+          df -h /
+
+      - name: Checkout (with submodules)
+        # `recursive` is load-bearing: `cargo doc` runs every build script of the
+        # documented crates, and those resolve vendor/sce and cc-build vendor/lwip.
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        # See the `verdict-legs` copy for the measurement and for why RESTORE
+        # and SAVE are split.
+        id: apt-archives
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
+
+      - name: Install system dependencies
+        # The `nondefault` job's set: this lane documents every member, as that one
+        # compiles every member, so the same build scripts run (bindgen for lwip-sys
+        # and librocksdb-sys, cmake for zenoh-pico-sys). No `libxml2-dev`: no `xtask`.
+        run: |
+          bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
+            cmake libclang-dev clang perl pkg-config
+
+      - name: Save apt archives
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: bash scripts/lib/rust-toolchain-pinned.sh
+
+      - name: Cache Cargo registry + build artifacts
+        # A READER of the `ci` job's entry (class `rust-ci`), as `nondefault` is: the
+        # configurations differ per run of the lane and per shard, so a private entry
+        # would hold little the next run asks for.
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          add-job-id-key: "false"
+          save-if: "false"
+          workspaces: crates -> target
+
+      - name: Reuse the RocksDB native engine across feature sets
+        uses: ./.github/actions/rocksdb-engine
+
+      - name: Layer C1bzr — the docs resolve without each feature (this shard)
+        run: bash scripts/run-ci.sh --layer C1bzr
+
+      - name: Hand this shard's findings to the settle job
+        # `always()`: a shard that found something above the ledger still measured,
+        # and the settle job needs every shard's file to judge the other direction.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: c1bzr-shard-${{ matrix.shard }}
+          path: crates/target/c1bzr/shard-${{ matrix.shard }}.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Budget margin — this job's own clock
+        # The floor is 20, as `nondefault`'s: a job holding one lane that falls under a
+        # fifth of its budget should hand the budget back (fewer shards).
+        if: always()
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 20 '${{ job.status }}'
+
+  reduced-docs-settle:
+    name: reduced-configuration docs, every shard together (Layer C1bzr settle)
+    needs: reduced-docs
+    # `always()`: a shard that went red above the ledger still wrote its file, and a
+    # shard that wrote none must fail HERE, by name, rather than skip this job.
+    if: always()
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout (the gate and its ledger)
+        uses: actions/checkout@v4
+
+      - name: Collect every shard's findings
+        uses: actions/download-artifact@v4
+        with:
+          pattern: c1bzr-shard-*
+          merge-multiple: true
+          path: c1bzr
+
+      - name: Settle the shards against the ledger, both directions
+        run: python3 scripts/lib/reduced_docs_gate.py settle c1bzr/shard-*.json
+
   capi-c-arms:
     name: §5.27 api-compat-c — the ABI arms and the second oracle (C1ce + arms gate)
     runs-on: ubuntu-22.04

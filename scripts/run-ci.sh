@@ -13841,18 +13841,68 @@ layer_c1bz_docs_resolve() {
 # whose sets leave a feature in none of them; that refusal fails the lane here and is not read as
 # a count, because "could not decide what to measure" must never print as "measured clean".
 _c1bz_count_findings() {
-    local crate=$1 sets arg n total=0
+    local crate=$1 sets label n total=0
+    local -a args
     sets="$(python3 scripts/lib/doc_feature_sets.py "$crate")" || {
         echo "  C1bz FAIL: $crate declares documentation sets that do not hold together" >&2
         return 1
     }
-    while IFS= read -r arg; do
-        [[ -n "$arg" ]] || continue
-        n="$( (cd crates && cargo doc -p "$crate" --no-deps --quiet "$arg" 2>&1) |
-            grep -E '^error' | grep -cvE '^error: could not document' || true)"
+    # One `<label> <cargo argument>...` line per set.
+    while read -r label args_line; do
+        [[ -n "$label" ]] || continue
+        read -r -a args <<<"$args_line"
+        n="$(_c1bz_doc_errors "$crate" "${args[@]}" | grep -c . || true)"
         total=$((total + n))
     done <<<"$sets"
     echo "$total"
+}
+
+# The rustdoc findings of one `cargo doc` of `$1` under the cargo arguments that follow, one
+# per line. EVERY error, not one kind (R311y711's lesson above); the trailing `could not
+# document <crate>` summary is one line per failing crate rather than a finding.
+_c1bz_doc_errors() {
+    local crate=$1
+    shift
+    (cd crates && cargo doc -p "$crate" --no-deps --quiet "$@" 2>&1) |
+        grep -E '^error' | grep -vE '^error: could not document' || true
+}
+
+# ── Layer C1bzr: the docs resolve in the SMALLER configurations too.
+#
+# C1bz documents a crate in its LARGEST configurations, and a doc link can only break in a
+# smaller one: a link from an item that is compiled to an item that is not. Rounds 3751 and 3756
+# each fixed such a link in `wz-session-mcu`, all three found by hand because no lane built those
+# docs: `slot_active` linked `slot_querier` (gone without `query-get`), `slot_plane` linked
+# `slot_group` (gone without `transport-multicast`), and the crate root linked `connect_manager`
+# (gone without `dial`, which is how the DEFAULT build's docs failed).
+#
+# The configurations are `doc_feature_sets.py --reduced`'s: each largest set without one feature
+# it holds, one per distinct set of items the crate compiles. Why giving up one feature, and not
+# turning one on, is the family that finds the class, and what it does not reach, is that
+# script's docstring. What a finding is, the ledger it is held to in both directions, and the
+# shards are `reduced_docs_gate.py`'s.
+#
+# Unsharded (a local run) this lane measures every configuration and settles them itself. Hosted
+# CI runs it once per shard (`WZ_DOCS_SHARD` of `WZ_DOCS_SHARDS`); each shard judges only the
+# rising direction, and a job after them settles the shards' files together. `WZ_C1BZ_ONLY`
+# narrows it to those crates, as it narrows C1bz, and a narrowed run cannot settle either.
+layer_c1bzr_reduced_docs_resolve() {
+    local shards="${WZ_DOCS_SHARDS:-1}" shard="${WZ_DOCS_SHARD:-0}" out
+    local -a only=()
+    _c1bz_check_subset || return 1
+    python3 scripts/lib/doc_feature_sets.py --selftest || return 1
+    python3 scripts/lib/reduced_docs_gate.py --selftest || return 1
+    [[ -n "${WZ_C1BZ_ONLY:-}" ]] && only=(--only "$WZ_C1BZ_ONLY")
+    mkdir -p crates/target/c1bzr || return 1
+    out="crates/target/c1bzr/shard-$shard.json"
+    python3 scripts/lib/reduced_docs_gate.py measure --out "$out" \
+        --shard "$shard" --shards "$shards" "${only[@]}" || return 1
+    if [[ "$shards" != 1 || ${#only[@]} -gt 0 ]]; then
+        echo "  C1bzr (shard $shard of $shards${WZ_C1BZ_ONLY:+, subset}): no finding above the" \
+            "ledger — the stale-ledger direction needs every shard, settled together"
+        return 0
+    fi
+    python3 scripts/lib/reduced_docs_gate.py settle "$out"
 }
 
 # R311y792 — which crates C1bz measures. Every workspace member by default;
@@ -24778,6 +24828,7 @@ run_layer C1bs layer_c1bs_live_capture || overall=1
 run_layer C1bw layer_c1bw_analyze_cli || overall=1
 run_layer C1bx layer_c1bx_tls_record_oracle || overall=1
 run_layer C1bz layer_c1bz_docs_resolve || overall=1
+run_layer C1bzr layer_c1bzr_reduced_docs_resolve || overall=1
 run_layer C1w layer_c1w_cargo_test_routing_accept || overall=1
 run_layer C1bl layer_c1bl_cargo_test_router_failfast || overall=1
 run_layer C1bm layer_c1bm_cargo_test_pico_failfast || overall=1

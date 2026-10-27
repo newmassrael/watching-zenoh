@@ -1,0 +1,603 @@
+# Layer C1bzr's ledger: the doc findings its reduced configurations carry, held in both directions.
+# What a line means, and why it is checked both ways, is `reduced_docs_gate.py`'s docstring.
+# One line per finding: crate<TAB>path<TAB>count<TAB>message. Lower or drop a line in the commit
+# that fixes what it counts; `reduced_docs_gate.py ledger --write <shard files>` writes what was
+# measured under these lines. A `refused:` line is a `compile_error!` guard, the crate's design and
+# not debt: it moves with a guard or a feature set, in the commit that moves either.
+wz	wz-runtime-coop/src/lib.rs	1	refused: wz-runtime-coop: `runtime` (and `session-unicast`, which implies it) needs a form of the task pool: `alloc` for the heap form, `session-slot` for the static one
+wz	wz-session-mcu/src/admin_node.rs	1	error[E0432]: unresolved import `crate::app_layer::dispatch_to`: no `dispatch_to` in `app_layer`
+wz-ap-demo	wz-ap-demo/src/args.rs	1	error: unresolved link to `bind_volume_configs`: no item named `bind_volume_configs` in scope
+wz-ap-demo	wz-ap-demo/src/args.rs	1	error: unresolved link to `config_keys_the_demo_drops`: no item named `config_keys_the_demo_drops` in scope
+wz-ap-demo	wz-ap-demo/src/main.rs	1	error: unresolved link to `run_router_hat_mode`: no item named `run_router_hat_mode` in scope
+wz-ap-demo	wz-ap-demo/src/runner.rs	1	error: unresolved link to `AcceptCertPaths`: no item named `AcceptCertPaths` in scope
+wz-ap-demo	wz-ap-demo/src/runner.rs	1	error: unresolved link to `PeerOpts::metadata`: no item named `PeerOpts` in scope
+wz-ap-demo	wz-ap-demo/src/runner.rs	1	error: unresolved link to `PeerOpts::scout_listen`: the struct `PeerOpts` has no field or associated item named `scout_listen`
+wz-ap-demo	wz-ap-demo/src/runner.rs	1	error: unresolved link to `RouterHatOpts`: no item named `RouterHatOpts` in scope
+wz-ap-demo	wz-ap-demo/src/runner.rs	1	error: unresolved link to `drive_phase`: no item named `drive_phase` in scope
+wz-ap-demo	wz-ap-demo/src/runner.rs	2	error: unresolved link to `run_peer`: no item named `run_peer` in scope
+wz-ap-demo	wz-ap-demo/src/runner.rs	1	error: unresolved link to `run_router_hat_until`: no item named `run_router_hat_until` in scope
+wz-ap-demo	wz-ap-demo/src/runner.rs	1	error: unresolved link to `run_router_hat`: no item named `run_router_hat` in scope
+wz-ap-demo	wz-ap-demo/src/runner.rs	1	error: unresolved link to `scout_for_peer_locator`: no item named `scout_for_peer_locator` in scope
+wz-ap-demo	wz-ap-demo/src/runner.rs	1	error: unresolved link to `spawn_scouting_responder`: no item named `spawn_scouting_responder` in scope
+wz-ap-demo	wz-ap-demo/src/runner.rs	1	error[E0432]: unresolved import `wz::runtime_tokio::reconnect_scout`: could not find `reconnect_scout` in `runtime_tokio`
+wz-ap-demo	wz-ap-demo/src/runner.rs	1	error[E0432]: unresolved import `wz::runtime_tokio::reconnect`: could not find `reconnect` in `runtime_tokio`
+wz-ap-demo	wz-ap-demo/src/tasks.rs	1	error: unresolved link to `advanced_publisher_task`: no item named `advanced_publisher_task` in scope
+wz-capi-c	wz-capi-c/src/advanced.rs	1	error: public documentation for `ze_advanced_publisher_id` links to private item `z_entity_global_id_t::for_entity`: this item is private
+wz-capi-c	wz-capi-c/src/advanced.rs	1	error: public documentation for `ze_advanced_subscriber_declare_background_sample_miss_listener` links to private item `MissListenerState`: this item is private
+wz-capi-c	wz-capi-c/src/advanced.rs	2	error: redundant explicit link target: explicit target is redundant
+wz-capi-c	wz-capi-c/src/advanced.rs	1	error: unresolved link to `wz_runtime_tokio::advanced_publisher::AdvancedPublisher::delete`: the struct `AdvancedPublisher` has no field or associated item named `delete`
+wz-capi-c	wz-capi-c/src/bytes.rs	1	error: public documentation for `z_bytes_get_contiguous_view` links to private item `BytesState`: this item is private
+wz-capi-c	wz-capi-c/src/cancellation.rs	1	error: public documentation for `cancellation` links to private item `take_moved_cancellation_token`: this item is private
+wz-capi-c	wz-capi-c/src/matching.rs	1	error: public documentation for `ze_advanced_publisher_declare_background_matching_listener` links to private item `MatchingHold`: this item is private
+wz-capi-c	wz-capi-c/src/matching.rs	1	error: unresolved link to `z_querier_get_matching_status`: no item named `z_querier_get_matching_status` in scope
+wz-capi-c	wz-capi-c/src/query.rs	1	error: unresolved link to `z_sample_source_info`: no item named `z_sample_source_info` in scope
+wz-capi-c	wz-capi-c/src/session.rs	1	error: public documentation for `zc_get_last_error` links to private item `crate::ffi`: this item is private
+wz-capi-c	wz-capi-c/src/shm.rs	1	error: public documentation for `AttachedSegment` links to private item `PtrInSegment`: this item is private
+wz-capi-c	wz-capi-c/src/shm.rs	1	error: public documentation for `shm` links to private item `ForeignBackend`: this item is private
+wz-capi-c	wz-capi-c/src/shm.rs	1	error: public documentation for `z_shm_client_storage_new` links to private item `ShmClientState::protocol`: this item is private
+wz-capi-c	wz-capi-c/src/shm.rs	1	error: public documentation for `z_shm_mut_try_from_immut` links to private item `ShmChunk::may_write`: this item is private
+wz-capi-c	wz-capi-c/src/shm.rs	1	error: public documentation for `z_shm_provider_alloc_gc_defrag_aligned_async` links to private item `provider_alloc_async`: this item is private
+wz-capi-c	wz-capi-c/src/shm.rs	1	error: public documentation for `z_shm_provider_alloc_gc_defrag_async` links to private item `provider_alloc_async`: this item is private
+wz-capi-c	wz-capi-c/src/shm.rs	1	error: public documentation for `z_shm_provider_defragment` links to private item `Provider::available`: this item is private
+wz-capi-c	wz-capi-c/src/shm.rs	1	error: public documentation for `z_shm_provider_new` links to private item `ForeignBackend::serialise`: this item is private
+wz-capi-c	wz-capi-c/src/shm.rs	1	error: public documentation for `zc_context_t` links to private item `ForeignBackend`: this item is private
+wz-capi-c	wz-capi-c/src/shm.rs	1	error: public documentation for `zc_threadsafe_context_t` links to private item `Provider::is_threadsafe`: this item is private
+wz-capi-c	wz-capi-c/src/shm.rs	1	error: redundant explicit link target: explicit target is redundant
+wz-capi-c	wz-capi-c/src/string_array.rs	1	error: unresolved link to `crate::scout`: no item named `scout` in module `wz_capi_c`
+wz-capi-c	wz-capi-c/src/sub.rs	1	error: public documentation for `z_subscriber_id` links to private item `crate::entity::z_entity_global_id_t::for_entity`: this item is private
+wz-capi-coop	wz-capi-coop/src/engine.rs	1	error: unresolved link to `CoopEngine::listening`: the struct `CoopEngine` has no field or associated item named `listening`
+wz-capi-core	wz-capi-core/src/drive.rs	1	error: unresolved link to `Self::with_shm_clients`: the struct `OpenStance` has no field or associated item named `with_shm_clients`
+wz-capi-core	wz-capi-core/src/drive.rs	1	error: unresolved link to `SessionResources::gossip`: the struct `SessionResources` has no field or associated item named `gossip`
+wz-capi-core	wz-capi-core/src/drive.rs	1	error: unresolved link to `drive_bind_phase`: no item named `drive_bind_phase` in scope
+wz-capi-core	wz-capi-core/src/faces.rs	1	error: unresolved link to `CApiForwarder::forward`: no item named `CApiForwarder` in scope
+wz-capi-core	wz-capi-core/src/faces.rs	1	error: unresolved link to `CApiForwarder::next_extra_deadline_ms`: no item named `CApiForwarder` in scope
+wz-capi-core	wz-capi-core/src/scouting_node.rs	1	error: unresolved link to `crate::scouting_responder`: no item named `scouting_responder` in module `wz_capi_core`
+wz-capi-pico	wz-capi-pico/src/cancellation.rs	1	error: unresolved link to `crate::sync`: no item named `sync` in module `wz_capi_pico`
+wz-capi-pico	wz-capi-pico/src/get.rs	1	error: unresolved link to `crate::query`: no item named `query` in module `wz_capi_pico`
+wz-capi-pico	wz-capi-pico/src/matching.rs	1	error: unresolved link to `wz_capi_core::faces::SharedSession::declare_matching_listener`: no item named `wz_capi_core` in scope
+wz-capi-pico	wz-capi-pico/src/pubsub.rs	1	error: unresolved link to `crate::advanced::ze_advanced_publisher_options_t`: no item named `advanced` in module `wz_capi_pico`
+wz-capi-pico	wz-capi-pico/src/query.rs	1	error: unresolved link to `crate::pubsub::z_sample_source_info`: no item named `z_sample_source_info` in module `pubsub`
+wz-capi-pico	wz-capi-pico/src/session.rs	1	error: unresolved link to `SessionState`: no item named `SessionState` in scope
+wz-capi-pico	wz-capi-pico/src/string_array.rs	1	error: unresolved link to `crate::scout`: no item named `scout` in module `wz_capi_pico`
+wz-capi-pico	wz-capi-pico/src/whatami.rs	1	error: unresolved link to `crate::scout`: no item named `scout` in module `wz_capi_pico`
+wz-capi-port	wz-capi-port/src/cancellation.rs	1	error: unresolved link to `CancellationToken::cancel`: no item named `CancellationToken` in scope
+wz-capi-port	wz-capi-port/src/cancellation.rs	1	error: unresolved link to `CancellationToken::is_cancelled`: no item named `CancellationToken` in scope
+wz-capi-port	wz-capi-port/src/cancellation.rs	1	error: unresolved link to `CancellationToken::register`: no item named `CancellationToken` in scope
+wz-capi-port	wz-capi-port/src/cancellation.rs	2	error: unresolved link to `Registration`: no item named `Registration` in scope
+wz-capi-port	wz-capi-port/src/cancellation.rs	1	error: unresolved link to `register_fan`: no item named `register_fan` in scope
+wz-capture	wz-capture/src/fields_json.rs	4	error[E0425]: cannot find type `RowJudgement` in this scope: not found in this scope
+wz-codecs	wz-codecs/src/lib.rs	1	error: unresolved link to `FLAG_D_N`: no item named `FLAG_D_N` in scope
+wz-codecs-test-support	wz-codecs-test-support/src/lib.rs	1	error: unresolved link to `with_empty_inline_put`: no item named `with_empty_inline_put` in scope
+wz-ext-pubsub	wz-ext-pubsub/src/advanced_publisher.rs	1	error: unresolved link to `AdvancedPublisherOn::emit_heartbeat_once`: the struct `AdvancedPublisherOn` has no field or associated item named `emit_heartbeat_once`
+wz-ext-pubsub	wz-ext-pubsub/src/advanced_subscriber/options.rs	1	error: unresolved link to `Self::get_locality`: the struct `AdvancedSubscriberOptions` has no field or associated item named `get_locality`
+wz-ext-pubsub	wz-ext-pubsub/src/advanced_subscriber/options.rs	1	error: unresolved link to `Self::history`: the struct `AdvancedSubscriberOptions` has no field or associated item named `history`
+wz-ext-pubsub	wz-ext-pubsub/src/advanced_subscriber/options.rs	1	error: unresolved link to `Self::recovery`: the struct `AdvancedSubscriberOptions` has no field or associated item named `recovery`
+wz-ext-pubsub	wz-ext-pubsub/src/advanced_subscriber/state.rs	1	error: public documentation for `handle` links to private item `State::route_sample`: this item is private
+wz-ext-pubsub	wz-ext-pubsub/src/advanced_subscriber/state.rs	1	error: unresolved link to `RecoveryRequest`: no item named `RecoveryRequest` in scope
+wz-ext-pubsub	wz-ext-pubsub/src/advanced_subscriber/state.rs	1	error: unresolved link to `Self::with_history`: the struct `State` has no field or associated item named `with_history`
+wz-ext-pubsub	wz-ext-pubsub/src/advanced_subscriber/state.rs	1	error: unresolved link to `Self::with_retransmission`: the struct `State` has no field or associated item named `with_retransmission`
+wz-link-lwip	wz-link-lwip/src/lib.rs	1	error: unresolved link to `lwip_test_link`: no item named `lwip_test_link` in scope
+wz-link-lwip	wz-link-lwip/src/lib.rs	1	error: unresolved link to `session_rx_pool_mcu_minimal`: no item named `session_rx_pool_mcu_minimal` in scope
+wz-link-lwip	wz-link-lwip/src/lib.rs	2	error: unresolved link to `tx_pool`: no item named `tx_pool` in scope
+wz-link-lwip	wz-link-lwip/src/rx_sockets.rs	1	error: unresolved link to `crate::session_rx_pool_mcu_minimal`: no item named `session_rx_pool_mcu_minimal` in module `wz_link_lwip`
+wz-mcu-session-acceptor	wz-mcu-session-acceptor/src/lib.rs	1	error: public documentation for `run_acceptor_e2e_on` links to private item `DATA_FRAME_SN`: this item is private
+wz-mcu-session-acceptor	wz-mcu-session-acceptor/src/lib.rs	1	error: public documentation for `run_acceptor_e2e_on` links to private item `FRAG_SN_1`: this item is private
+wz-mcu-session-acceptor	wz-mcu-session-acceptor/src/lib.rs	1	error: unresolved link to `DataMode::FragmentChainOoo`: the enum `DataMode` has no variant or associated item named `FragmentChainOoo`
+wz-mcu-session-acceptor	wz-mcu-session-acceptor/src/lib.rs	1	error: unresolved link to `DataMode::FragmentChainStalled`: the enum `DataMode` has no variant or associated item named `FragmentChainStalled`
+wz-mcu-session-acceptor	wz-session-lwip/src/session_drive.rs	1	error[E0046]: not all trait items implemented, missing: `try_recv`: missing `try_recv` in implementation
+wz-node-time	wz-node-time/src/node_clock.rs	1	error: unresolved link to `NodeHlc::treat_timestamp`: the struct `NodeHlc` has no field or associated item named `treat_timestamp`
+wz-runtime-coop	wz-runtime-coop/src/executor.rs	1	error: public documentation for `executor_heap` links to private item `TaskSlot`: this item is private
+wz-runtime-coop	wz-runtime-coop/src/executor.rs	1	error: unresolved link to `SleepFuture::poll`: no item named `SleepFuture` in scope
+wz-runtime-coop	wz-runtime-coop/src/executor.rs	1	error: unresolved link to `run_until_idle`: no item named `run_until_idle` in scope
+wz-runtime-coop	wz-runtime-coop/src/group_transport.rs	1	error: unresolved link to `crate::session_drive::SessionDatagramLink`: no item named `session_drive` in module `wz_runtime_coop`
+wz-runtime-coop	wz-runtime-coop/src/join_handle.rs	1	error: unresolved link to `crate::CoopRuntime::spawn`: the struct `CoopRuntime` has no field or associated item named `spawn`
+wz-runtime-coop	wz-runtime-coop/src/lib.rs	2	error: unresolved link to `CoopRuntime::run_until_idle`: no item named `CoopRuntime` in scope
+wz-runtime-coop	wz-runtime-coop/src/lib.rs	2	error: unresolved link to `executor`: no item named `executor` in scope
+wz-runtime-coop	wz-runtime-coop/src/lib.rs	1	error: unresolved link to `join_handle::CoopJoinHandle`: no item named `join_handle` in scope
+wz-runtime-coop	wz-runtime-coop/src/lib.rs	2	error: unresolved link to `join_handle`: no item named `join_handle` in scope
+wz-runtime-coop	wz-runtime-coop/src/lib.rs	1	error: unresolved link to `runtime_impl::CoopRuntime`: no item named `runtime_impl` in scope
+wz-runtime-coop	wz-runtime-coop/src/lib.rs	1	error: unresolved link to `runtime_impl`: no item named `runtime_impl` in scope
+wz-runtime-coop	wz-runtime-coop/src/lib.rs	1	error: unresolved link to `time::ClockSource`: no item named `time` in scope
+wz-runtime-coop	wz-runtime-coop/src/lib.rs	1	error: unresolved link to `time::CoopTime`: no item named `time` in scope
+wz-runtime-coop	wz-runtime-coop/src/lib.rs	2	error: unresolved link to `time`: no item named `time` in scope
+wz-runtime-coop	wz-runtime-coop/src/lib.rs	1	error: unresolved link to `timer::TimerQueue`: no item named `timer` in scope
+wz-runtime-coop	wz-runtime-coop/src/lib.rs	1	error: unresolved link to `wz_runtime_core::Runtime`: no item named `wz_runtime_core` in scope
+wz-runtime-coop	wz-runtime-coop/src/reassembly_rx.rs	1	error: unresolved link to `crate::executor`: no item named `executor` in module `wz_runtime_coop`
+wz-runtime-coop	wz-runtime-coop/src/reassembly_rx.rs	1	error: unresolved link to `crate::time::ClockSource`: no item named `time` in module `wz_runtime_coop`
+wz-runtime-coop	wz-runtime-coop/src/session_drive.rs	1	error: redundant explicit link target: explicit target is redundant
+wz-runtime-coop	wz-runtime-coop/src/session_drive.rs	1	error: unresolved link to `PoolStorage::owned`: no item named `PoolStorage` in scope
+wz-runtime-coop	wz-runtime-coop/src/session_drive.rs	2	error: unresolved link to `Self::with_reassembly_arena`: the struct `SessionPump` has no field or associated item named `with_reassembly_arena`
+wz-runtime-coop	wz-runtime-coop/src/session_drive.rs	1	error: unresolved link to `SessionDatagramLink::try_recv`: the trait `SessionDatagramLink` has no associated item named `try_recv`
+wz-runtime-coop	wz-runtime-coop/src/session_runtime.rs	1	error: unresolved link to `EntropySource`: no item named `EntropySource` in scope
+wz-runtime-coop	wz-runtime-coop/src/udp_link.rs	1	error: unresolved link to `UdpStack`: no item named `UdpStack` in scope
+wz-runtime-posix	wz-runtime-posix/src/lib.rs	1	error: unresolved link to `slot`: no item named `slot` in scope
+wz-runtime-tokio	-	1	error: unresolved link to `crate::extauth_usrpwd_store`
+wz-runtime-tokio	-	1	error: unresolved link to `crate::udp_pipeline`
+wz-runtime-tokio	-	1	error: unresolved link to `crate::zenoh_config`
+wz-runtime-tokio	-	1	error: unresolved link to `query::QueryableRegistry`
+wz-runtime-tokio	-	1	error: unresolved link to `udp_pipeline`
+wz-runtime-tokio	wz-runtime-tokio/src/accept_loop.rs	1	error: unresolved link to `FaceForwarder::route_mcast_ingress`: the trait `FaceForwarder` has no associated item named `route_mcast_ingress`
+wz-runtime-tokio	wz-runtime-tokio/src/accept_loop.rs	1	error: unresolved link to `crate::linkstate_forward::LinkstateForwarder`: no item named `linkstate_forward` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/accept_loop.rs	1	error: unresolved link to `crate::multicast_glue::spawn_router_mcast_group`: no item named `multicast_glue` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/accept_loop.rs	1	error: unresolved link to `crate::multicast_glue::spawn_router_mcast_group`: no item named `spawn_router_mcast_group` in module `multicast_glue`
+wz-runtime-tokio	wz-runtime-tokio/src/accept_loop.rs	1	error: unresolved link to `crate::session::Session::next_reply_deadline_ms`: the struct `Session` has no field or associated item named `next_reply_deadline_ms`
+wz-runtime-tokio	wz-runtime-tokio/src/accept_loop.rs	3	error: unresolved link to `peer_loop`: no item named `peer_loop` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/advanced_cache.rs	1	error[E0432]: unresolved import `crate::session_glue`: could not find `session_glue` in the crate root
+wz-runtime-tokio	wz-runtime-tokio/src/advanced_cache.rs	1	error[E0432]: unresolved imports `crate::session::Queryable`, `crate::session::QueryableError`, `crate::session::QueryableOptions`, `crate::session::Unicast`: no `Queryable` in `session`, no `QueryableError` in `session`, no `QueryableOptions` in `session`, no `Unicast` in `session`
+wz-runtime-tokio	wz-runtime-tokio/src/advanced_publisher.rs	1	error[E0425]: cannot find type `MatchingListenerError` in module `crate::session`: not found in `crate::session`
+wz-runtime-tokio	wz-runtime-tokio/src/advanced_publisher.rs	1	error[E0425]: cannot find type `MatchingListener` in module `crate::session`: not found in `crate::session`
+wz-runtime-tokio	wz-runtime-tokio/src/advanced_publisher.rs	2	error[E0425]: cannot find type `MatchingStatus` in module `crate::session`: not found in `crate::session`
+wz-runtime-tokio	wz-runtime-tokio/src/advanced_publisher.rs	1	error[E0432]: unresolved import `crate::session_glue`: could not find `session_glue` in the crate root
+wz-runtime-tokio	wz-runtime-tokio/src/advanced_publisher.rs	1	error[E0432]: unresolved imports `crate::session::LivelinessAliasError`, `crate::session::LivelinessOptions`, `crate::session::LivelinessToken`, `crate::session::Publisher`, `crate::session::Queryable`, `crate::session::QueryableError`, `crate::session::Unicast`: no `LivelinessAliasError` in `session`, no `LivelinessOptions` in `session`, no `LivelinessToken` in `session`, no `Publisher` in `session`, no `Queryable` in `session`, no `QueryableError` in `session`, no `Unicast` in `session`
+wz-runtime-tokio	wz-runtime-tokio/src/advanced_subscriber.rs	1	error: unresolved link to `RecoveryConfig::heartbeat`: no item named `RecoveryConfig` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/advanced_subscriber.rs	1	error: unresolved link to `RecoveryConfig::periodic_queries`: no item named `RecoveryConfig` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/advanced_subscriber.rs	1	error: unresolved link to `crate::advanced_publisher::AdvancedPublisherError`: no item named `advanced_publisher` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/advanced_subscriber.rs	1	error: unresolved link to `crate::advanced_publisher::AdvancedPublisher`: no item named `advanced_publisher` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/advanced_subscriber.rs	2	error[E0405]: cannot find trait `BufferedWork` in module `crate::session`: not found in `crate::session`
+wz-runtime-tokio	wz-runtime-tokio/src/advanced_subscriber.rs	2	error[E0425]: cannot find type `BufferedDrainStage` in module `crate::session`: not found in `crate::session`
+wz-runtime-tokio	wz-runtime-tokio/src/advanced_subscriber.rs	3	error[E0425]: cannot find type `LivelinessAliasError` in module `crate::session`: not found in `crate::session`
+wz-runtime-tokio	wz-runtime-tokio/src/advanced_subscriber.rs	2	error[E0425]: cannot find type `LivelinessSubscriberAliasError` in module `crate::session`: not found in `crate::session`
+wz-runtime-tokio	wz-runtime-tokio/src/advanced_subscriber.rs	2	error[E0425]: cannot find type `LivelinessSubscriberOptions` in module `crate::session`: not found in `crate::session`
+wz-runtime-tokio	wz-runtime-tokio/src/advanced_subscriber.rs	4	error[E0425]: cannot find type `LivelinessSubscriber` in module `crate::session`: not found in `crate::session`
+wz-runtime-tokio	wz-runtime-tokio/src/advanced_subscriber.rs	2	error[E0425]: cannot find type `LivelinessToken` in module `crate::session`: not found in `crate::session`
+wz-runtime-tokio	wz-runtime-tokio/src/advanced_subscriber.rs	1	error[E0425]: cannot find type `OwnedLivelinessSample` in module `crate::session`
+wz-runtime-tokio	wz-runtime-tokio/src/advanced_subscriber.rs	1	error[E0432]: unresolved import `crate::session::QueryOptions`: no `QueryOptions` in `session`
+wz-runtime-tokio	wz-runtime-tokio/src/advanced_subscriber.rs	1	error[E0432]: unresolved import `crate::session_glue`: could not find `session_glue` in the crate root
+wz-runtime-tokio	wz-runtime-tokio/src/advanced_subscriber.rs	1	error[E0432]: unresolved imports `crate::session::LivelinessSubscriberAliasError`, `crate::session::LivelinessSubscriberOptions`: no `LivelinessSubscriberAliasError` in `session`, no `LivelinessSubscriberOptions` in `session`
+wz-runtime-tokio	wz-runtime-tokio/src/advanced_subscriber.rs	1	error[E0432]: unresolved imports `crate::session::SubscribeAliasError`, `crate::session::SubscribeError`, `crate::session::Unicast`: no `SubscribeAliasError` in `session`, no `SubscribeError` in `session`, no `Unicast` in `session`
+wz-runtime-tokio	wz-runtime-tokio/src/config.rs	3	error: unresolved link to `InterceptorConfig`: no item named `InterceptorConfig` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/config.rs	1	error: unresolved link to `InterceptorSink`: no item named `InterceptorSink` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/config.rs	1	error: unresolved link to `Self::max_links`: the struct `WzConfig` has no field or associated item named `max_links`
+wz-runtime-tokio	wz-runtime-tokio/src/config.rs	2	error: unresolved link to `Self::reconfigure_interceptors`: the struct `WzConfig` has no field or associated item named `reconfigure_interceptors`
+wz-runtime-tokio	wz-runtime-tokio/src/config.rs	1	error: unresolved link to `Self::with_admin_permissions`: the struct `WzConfig` has no field or associated item named `with_admin_permissions`
+wz-runtime-tokio	wz-runtime-tokio/src/config.rs	2	error: unresolved link to `Self::with_interceptors`: the struct `WzConfig` has no field or associated item named `with_interceptors`
+wz-runtime-tokio	wz-runtime-tokio/src/config.rs	2	error: unresolved link to `Self::with_max_links`: the struct `WzConfig` has no field or associated item named `with_max_links`
+wz-runtime-tokio	wz-runtime-tokio/src/config.rs	1	error: unresolved link to `WzConfig::reconfigure_interceptors`: the struct `WzConfig` has no field or associated item named `reconfigure_interceptors`
+wz-runtime-tokio	wz-runtime-tokio/src/config.rs	1	error: unresolved link to `crate::accept_loop::FaceSources`: no item named `accept_loop` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/config.rs	1	error: unresolved link to `crate::admin_write_permit`: no item named `admin_write_permit` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/config.rs	1	error: unresolved link to `crate::linkstate_forward::LinkstateForwarder`: no item named `linkstate_forward` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/config.rs	1	error: unresolved link to `crate::reconnect::ReconnectPolicy`: no item named `reconnect` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/declare.rs	1	error: unresolved link to `LivelinessRegistry`: no item named `LivelinessRegistry` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/declare.rs	1	error: unresolved link to `RemoteQueryableRegistry`: no item named `RemoteQueryableRegistry` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/declare.rs	1	error: unresolved link to `RemoteSubscriberRegistry`: no item named `RemoteSubscriberRegistry` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/dynamic_volume.rs	1	error: unresolved link to `crate::filesystem_storage::FilesystemVolume`: no item named `filesystem_storage` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/frame_arena.rs	1	error: unresolved link to `crate::zenoh_config`: no item named `zenoh_config` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/future_interest.rs	1	error: unresolved link to `crate::router_forward`: no item named `router_forward` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/group.rs	1	error[E0432]: unresolved import `crate::session_glue`: could not find `session_glue` in the crate root
+wz-runtime-tokio	wz-runtime-tokio/src/group.rs	1	error[E0432]: unresolved imports `crate::session::QueryOptions`, `crate::session::Queryable`, `crate::session::QueryableError`, `crate::session::QueryableOptions`, `crate::session::SubscribeError`, `crate::session::Unicast`: no `QueryOptions` in `session`, no `Queryable` in `session`, no `QueryableError` in `session`, no `QueryableOptions` in `session`, no `SubscribeError` in `session`, no `Unicast` in `session`
+wz-runtime-tokio	wz-runtime-tokio/src/interceptor/document.rs	1	error: unresolved link to `crate::interceptor::downsampling::DownsamplingRule`: no item named `downsampling` in module `interceptor`
+wz-runtime-tokio	wz-runtime-tokio/src/interceptor/document.rs	1	error: unresolved link to `crate::interceptor::low_pass::LowPassRule`: no item named `low_pass` in module `interceptor`
+wz-runtime-tokio	wz-runtime-tokio/src/interceptor/mod.rs	1	error: unresolved link to `AclFlow`: no item named `AclFlow` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/interceptor/mod.rs	2	error: unresolved link to `Self::with_acl`: the struct `InterceptorConfig` has no field or associated item named `with_acl`
+wz-runtime-tokio	wz-runtime-tokio/src/interceptor/mod.rs	2	error: unresolved link to `access_control`: no item named `access_control` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/interceptor/mod.rs	1	error: unresolved link to `crate::linkstate_forward::LinkstateForwarder::interceptor_dropped`: no item named `linkstate_forward` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/interceptor/mod.rs	1	error: unresolved link to `crate::linkstate_forward::LinkstateForwarder`: no item named `linkstate_forward` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/interceptor/mod.rs	1	error: unresolved link to `wz_access_control`: no item named `wz_access_control` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/lib.rs	2	error: unresolved link to `admin_write_permit`: no item named `admin_write_permit` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/lib.rs	1	error: unresolved link to `config::accepts_config_key`: no item named `accepts_config_key` in module `config`
+wz-runtime-tokio	wz-runtime-tokio/src/lib.rs	1	error: unresolved link to `linkstate_forward::LinkstateForwarder::publish_qos`: no item named `linkstate_forward` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/lib.rs	1	error: unresolved link to `multicast_glue::drive_multicast_session`: no item named `multicast_glue` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/lib.rs	1	error: unresolved link to `storage_manager_service::RuntimeStorageManager`: no item named `storage_manager_service` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/lib.rs	1	error: unresolved link to `storage_service`: no item named `storage_service` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/link_pipeline.rs	2	error: unresolved link to `crate::accept_loop`: no item named `accept_loop` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/link_pipeline.rs	1	error: unresolved link to `crate::tls_pipeline::TlsReadDriver`: no item named `tls_pipeline` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/link_pipeline.rs	1	error: unresolved link to `crate::tls_pipeline`: no item named `tls_pipeline` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/link_ring_fd.rs	1	error: unresolved link to `crate::unixpipe_pipeline::FifoReadEnd`: no item named `unixpipe_pipeline` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/link_ring_fd.rs	1	error: unresolved link to `crate::vsock_pipeline::VsockReadHalf`: no item named `vsock_pipeline` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/linkstate_forward.rs	1	error: unresolved link to `LinkstateNetView`: no item named `LinkstateNetView` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/linkstate_interest.rs	1	error: unresolved link to `crate::router_forward::RouterForwarder::mesh_subs_seen`: no item named `router_forward` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/linkstate_interest.rs	1	error: unresolved link to `crate::router_forward::RouterForwarder::queryables_seen`: no item named `router_forward` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/multicast_glue.rs	1	error: unresolved link to `crate::UdpDriver::bind_multicast_link`: no item named `UdpDriver` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/multicast_glue.rs	2	error: unresolved link to `crate::router_forward::RouterForwarder::attach_mcast_group`: no item named `router_forward` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/multicast_glue.rs	2	error: unresolved link to `crate::router_forward::RouterForwarder::attach_mcast_group`: the struct `RouterForwarder` has no field or associated item named `attach_mcast_group`
+wz-runtime-tokio	wz-runtime-tokio/src/multicast_glue.rs	2	error: unresolved link to `crate::scouting_glue`: no item named `scouting_glue` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/multicast_pipeline.rs	1	error: unresolved link to `Self::attach_pooled`: the struct `MulticastTxTap` has no field or associated item named `attach_pooled`
+wz-runtime-tokio	wz-runtime-tokio/src/query.rs	1	error: unresolved link to `response_final_for`: no item named `response_final_for` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/quic_datagram_pipeline.rs	2	error: unresolved link to `crate::udp_pipeline::UDP_LINK_MTU`: no item named `udp_pipeline` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/quic_datagram_pipeline.rs	1	error: unresolved link to `crate::udp_pipeline::UdpWriteDriver`: no item named `udp_pipeline` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/quic_datagram_pipeline.rs	1	error: unresolved link to `crate::udp_pipeline`: no item named `udp_pipeline` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/quic_datagram_pipeline.rs	1	error: unresolved link to `crate::ws_pipeline`: no item named `ws_pipeline` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/quic_pipeline.rs	1	error: unresolved link to `crate::accept_loop`: no item named `accept_loop` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/quic_pipeline.rs	1	error: unresolved link to `crate::tls_pipeline`: no item named `tls_pipeline` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/quic_pipeline.rs	1	error: unresolved link to `crate::udp_pipeline::bind_udp_demux`: no item named `udp_pipeline` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/quic_pipeline.rs	1	error: unresolved link to `crate::ws_pipeline`: no item named `ws_pipeline` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/reassembly.rs	1	error: unresolved link to `crate::multicast_glue::drive_multicast_session`: no item named `multicast_glue` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/reconnect.rs	1	error: unresolved link to `crate::reconnect_scout::ScoutedGroup`: no item named `reconnect_scout` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/router_forward.rs	1	error: unresolved link to `LinkstateNetView`: no item named `LinkstateNetView` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/runtime_impl.rs	1	error[E0046]: not all trait items implemented, missing: `ActionsHandle`, `wrap_actions`: missing `ActionsHandle`, `wrap_actions` in implementation
+wz-runtime-tokio	wz-runtime-tokio/src/scouting_autoconnect.rs	2	error: unresolved link to `crate::scouting_responder`: no item named `scouting_responder` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/scouting_fanout.rs	2	error: unresolved link to `crate::scouting_responder::bind_reply_sockets`: no item named `scouting_responder` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/serial_pipeline.rs	1	error: unresolved link to `crate::udp_pipeline`: no item named `udp_pipeline` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/session/admin_space.rs	1	error: unresolved link to `WzConfig::remove_by_key`: the struct `WzConfig` has no field or associated item named `remove_by_key`
+wz-runtime-tokio	wz-runtime-tokio/src/session/admin_space.rs	1	error: unresolved link to `WzConfig::set_by_key`: the struct `WzConfig` has no field or associated item named `set_by_key`
+wz-runtime-tokio	wz-runtime-tokio/src/session/liveliness.rs	1	error: unresolved link to `crate::declare::LivelinessSubscriberRegistry`: no item named `LivelinessSubscriberRegistry` in module `declare`
+wz-runtime-tokio	wz-runtime-tokio/src/session/mod.rs	1	error: unresolved link to `InboundReply`: no item named `InboundReply` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/session/mod.rs	1	error: unresolved link to `PublishOptions::with_priority`: the struct `PublishOptions` has no field or associated item named `with_priority`
+wz-runtime-tokio	wz-runtime-tokio/src/session/mod.rs	1	error: unresolved link to `Self::announce_keyexpr`: the struct `Session` has no field or associated item named `announce_keyexpr`
+wz-runtime-tokio	wz-runtime-tokio/src/session/mod.rs	1	error: unresolved link to `Self::declare_adminspace_config_writer`: the struct `Session` has no field or associated item named `declare_adminspace_config_writer`
+wz-runtime-tokio	wz-runtime-tokio/src/session/mod.rs	1	error: unresolved link to `Self::hold_query`: the struct `Session` has no field or associated item named `hold_query`
+wz-runtime-tokio	wz-runtime-tokio/src/session/mod.rs	1	error: unresolved link to `Self::next_reply_deadline_ms`: the struct `Session` has no field or associated item named `next_reply_deadline_ms`
+wz-runtime-tokio	wz-runtime-tokio/src/session/mod.rs	4	error: unresolved link to `Self::send_network_message`: the struct `Session` has no field or associated item named `send_network_message`
+wz-runtime-tokio	wz-runtime-tokio/src/session/mod.rs	1	error: unresolved link to `Self::sweep_expired_queries_staged`: the struct `Session` has no field or associated item named `sweep_expired_queries_staged`
+wz-runtime-tokio	wz-runtime-tokio/src/session/mod.rs	1	error: unresolved link to `Self::sweep_expired_queries`: the struct `Session` has no field or associated item named `sweep_expired_queries`
+wz-runtime-tokio	wz-runtime-tokio/src/session/mod.rs	1	error: unresolved link to `Session::announce`: the struct `Session` has no field or associated item named `announce`
+wz-runtime-tokio	wz-runtime-tokio/src/session/mod.rs	1	error: unresolved link to `Session::ask`: the struct `Session` has no field or associated item named `ask`
+wz-runtime-tokio	wz-runtime-tokio/src/session/mod.rs	1	error: unresolved link to `Session::retract`: the struct `Session` has no field or associated item named `retract`
+wz-runtime-tokio	wz-runtime-tokio/src/session/mod.rs	1	error: unresolved link to `TokioMulticastSession`: no item named `TokioMulticastSession` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/session/mod.rs	1	error: unresolved link to `TransportState::alloc_request_id`: the trait `TransportState` has no associated item named `alloc_request_id`
+wz-runtime-tokio	wz-runtime-tokio/src/session/mod.rs	1	error: unresolved link to `crate::declare::LivelinessSubscriberRegistry`: no item named `LivelinessSubscriberRegistry` in module `declare`
+wz-runtime-tokio	wz-runtime-tokio/src/session/mod.rs	1	error: unresolved link to `crate::multicast_glue::MulticastReplySink`: no item named `multicast_glue` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/session/mod.rs	1	error: unresolved link to `crate::multicast_glue::drive_multicast_session`: no item named `multicast_glue` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/session/mod.rs	1	error: unresolved link to `crate::query::QueryableRegistry::dispatch_request`: no item named `QueryableRegistry` in module `query`
+wz-runtime-tokio	wz-runtime-tokio/src/session/mod.rs	2	error: unresolved link to `crate::query::QueryableRegistry::local_query`: no item named `QueryableRegistry` in module `query`
+wz-runtime-tokio	wz-runtime-tokio/src/session/mod.rs	1	error: unresolved link to `crate::reply::ReplyRegistry::dispatch_response_final`: the struct `ReplyRegistry` has no field or associated item named `dispatch_response_final`
+wz-runtime-tokio	wz-runtime-tokio/src/session/mod.rs	1	error[E0425]: cannot find type `QueryOptions` in this scope: not found in this scope
+wz-runtime-tokio	wz-runtime-tokio/src/session/mod.rs	1	error[E0425]: cannot find type `Unicast` in this scope: not found in this scope
+wz-runtime-tokio	wz-runtime-tokio/src/session/publisher.rs	2	error: unresolved link to `crate::declare::RemoteSubscriberRegistry::has_matching`: no item named `RemoteSubscriberRegistry` in module `declare`
+wz-runtime-tokio	wz-runtime-tokio/src/session/publisher.rs	1	error: unresolved link to `wz_session_core::declare::matching::MatchingWatchList::register`: no item named `matching` in module `declare`
+wz-runtime-tokio	wz-runtime-tokio/src/session/querier.rs	3	error: unresolved link to `DEFAULT_QUERY_TIMEOUT_MS`: no item named `DEFAULT_QUERY_TIMEOUT_MS` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/session/querier.rs	1	error: unresolved link to `Session::liveliness_get_with_channel`: the struct `Session` has no field or associated item named `liveliness_get_with_channel`
+wz-runtime-tokio	wz-runtime-tokio/src/session/querier.rs	1	error: unresolved link to `Session::sweep_expired_liveliness_gets`: the struct `Session` has no field or associated item named `sweep_expired_liveliness_gets`
+wz-runtime-tokio	wz-runtime-tokio/src/session/querier.rs	2	error: unresolved link to `crate::declare::RemoteQueryableRegistry::has_matching`: no item named `RemoteQueryableRegistry` in module `declare`
+wz-runtime-tokio	wz-runtime-tokio/src/session/querier.rs	1	error: unresolved link to `crate::declare::RemoteQueryableRegistry`: no item named `RemoteQueryableRegistry` in module `declare`
+wz-runtime-tokio	wz-runtime-tokio/src/session/querier.rs	1	error: unresolved link to `wz_session_core::declare::matching::MatchingWatchList::register`: no item named `matching` in module `declare`
+wz-runtime-tokio	wz-runtime-tokio/src/session/queryable.rs	1	error: unresolved link to `NodeStamp`: no item named `NodeStamp` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/session/queryable.rs	1	error: unresolved link to `Session::queryable_stamp`: the struct `Session` has no field or associated item named `queryable_stamp`
+wz-runtime-tokio	wz-runtime-tokio/src/session/queryable.rs	1	error: unresolved link to `crate::query::QueryableRegistry::local_query`: no item named `QueryableRegistry` in module `query`
+wz-runtime-tokio	wz-runtime-tokio/src/session/queryable.rs	1	error: unresolved link to `crate::query::QueryableRegistry::register_with_locality`: no item named `QueryableRegistry` in module `query`
+wz-runtime-tokio	wz-runtime-tokio/src/session/transport.rs	1	error: unresolved link to `MulticastTxItem`: no item named `MulticastTxItem` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/session/transport.rs	1	error: unresolved link to `Multicast`: no item named `Multicast` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/session/transport.rs	1	error: unresolved link to `Self::acl_group_link`: the trait `TransportState` has no associated item named `acl_group_link`
+wz-runtime-tokio	wz-runtime-tokio/src/session/transport.rs	1	error: unresolved link to `super::Session::send_network_message`: the struct `Session` has no field or associated item named `send_network_message`
+wz-runtime-tokio	wz-runtime-tokio/src/session_glue.rs	1	error: unresolved link to `RequestQueryBuilder::consolidation`: no item named `RequestQueryBuilder` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/session_glue.rs	1	error: unresolved link to `RequestQueryBuilder::parameters`: no item named `RequestQueryBuilder` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/session_glue.rs	1	error: unresolved link to `RequestQueryBuilder::query_attachment`: no item named `RequestQueryBuilder` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/session_glue.rs	1	error: unresolved link to `RequestQueryBuilder::query_attachment`: the struct `RequestQueryBuilder` has no field or associated item named `query_attachment`
+wz-runtime-tokio	wz-runtime-tokio/src/session_glue.rs	1	error: unresolved link to `RequestQueryBuilder::query_source_info`: no item named `RequestQueryBuilder` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/session_glue.rs	1	error: unresolved link to `RequestQueryBuilder::query_source_info`: the struct `RequestQueryBuilder` has no field or associated item named `query_source_info`
+wz-runtime-tokio	wz-runtime-tokio/src/session_glue.rs	2	error: unresolved link to `RequestQueryBuilder::query_value`: no item named `RequestQueryBuilder` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/session_glue.rs	1	error: unresolved link to `RequestQueryBuilder::request_target`: no item named `RequestQueryBuilder` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/session_glue.rs	1	error: unresolved link to `RequestQueryBuilder::request_timeout_ms`: no item named `RequestQueryBuilder` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/session_glue.rs	1	error: unresolved link to `RequestQueryBuilder`: no item named `RequestQueryBuilder` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/session_glue.rs	1	error: unresolved link to `build_push_aliased`: no item named `build_push_aliased` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/session_glue.rs	1	error: unresolved link to `build_push_del_aliased`: no item named `build_push_del_aliased` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/session_glue.rs	1	error: unresolved link to `build_push_del_literal`: no item named `build_push_del_literal` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/session_glue.rs	1	error: unresolved link to `build_push_literal`: no item named `build_push_literal` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/session_glue.rs	1	error: unresolved link to `crate::scouting_glue::new_scouting_engine`: no item named `scouting_glue` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/session_open.rs	1	error: unresolved link to `BoundListener::Quic`: the enum `BoundListener` has no variant or associated item named `Quic`
+wz-runtime-tokio	wz-runtime-tokio/src/session_open.rs	2	error: unresolved link to `Self::Tls`: the enum `BoundListener` has no variant or associated item named `Tls`
+wz-runtime-tokio	wz-runtime-tokio/src/session_open.rs	2	error: unresolved link to `Self::Unixsock`: the enum `AcceptedLink` has no variant or associated item named `Unixsock`
+wz-runtime-tokio	wz-runtime-tokio/src/session_open.rs	1	error: unresolved link to `Self::Vsock`: the enum `AcceptedLink` has no variant or associated item named `Vsock`
+wz-runtime-tokio	wz-runtime-tokio/src/session_open.rs	1	error: unresolved link to `Self::tls`: the struct `AcceptConfig` has no field or associated item named `tls`
+wz-runtime-tokio	wz-runtime-tokio/src/session_open.rs	1	error: unresolved link to `Self::with_tls`: the struct `AcceptConfig` has no field or associated item named `with_tls`
+wz-runtime-tokio	wz-runtime-tokio/src/session_open.rs	1	error: unresolved link to `Self::with_tls`: the struct `DialConfig` has no field or associated item named `with_tls`
+wz-runtime-tokio	wz-runtime-tokio/src/session_open.rs	1	error: unresolved link to `TlsAcceptConfig::from_cert_key_pem`: no item named `TlsAcceptConfig` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/session_open.rs	1	error: unresolved link to `TlsAcceptConfig`: no item named `TlsAcceptConfig` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/session_open.rs	1	error: unresolved link to `TlsDialConfig::from_ca_pem`: no item named `TlsDialConfig` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/session_open.rs	1	error: unresolved link to `TlsDialConfig`: no item named `TlsDialConfig` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/session_open.rs	1	error: unresolved link to `accept_and_open_session_with_compression`: no item named `accept_and_open_session_with_compression` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/session_open.rs	1	error: unresolved link to `accept_and_open_session_with_lowlatency`: no item named `accept_and_open_session_with_lowlatency` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/session_open.rs	1	error: unresolved link to `accept_and_open_session_with_multilink`: no item named `accept_and_open_session_with_multilink` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/session_open.rs	1	error: unresolved link to `accept_and_open_session_with_namespace`: no item named `accept_and_open_session_with_namespace` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/session_open.rs	1	error: unresolved link to `accept_and_open_session_with_qos`: no item named `accept_and_open_session_with_qos` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/session_open.rs	5	error: unresolved link to `accept_and_open_session`: no item named `accept_and_open_session` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/session_open.rs	1	error: unresolved link to `connect_and_open_session_with_lowlatency`: no item named `connect_and_open_session_with_lowlatency` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/session_open.rs	1	error: unresolved link to `crate::accept_loop::AcceptEvent`: no item named `accept_loop` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/session_open.rs	1	error: unresolved link to `crate::accept_loop::Face`: no item named `accept_loop` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/session_open.rs	14	error: unresolved link to `crate::accept_loop`: no item named `accept_loop` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/session_open.rs	1	error: unresolved link to `crate::reconnect::ReconnectingSession`: no item named `reconnect` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/session_open.rs	1	error: unresolved link to `crate::reconnect::reconnect_endpoint`: no item named `reconnect` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/session_open.rs	1	error: unresolved link to `crate::serial_pipeline`: no item named `serial_pipeline` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/session_open.rs	1	error: unresolved link to `crate::udp_pipeline::UdpDemux`: no item named `udp_pipeline` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/session_open.rs	1	error: unresolved link to `crate::udp_pipeline`: no item named `udp_pipeline` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/session_open.rs	1	error: unresolved link to `dial_serial`: no item named `dial_serial` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/session_open.rs	1	error: unresolved link to `dial_udp`: no item named `dial_udp` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/session_open.rs	2	error: unresolved link to `open_session_static`: no item named `open_session_static` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/session_open.rs	2	error: unresolved link to `wire_udp_socket`: no item named `wire_udp_socket` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/shm_relay.rs	1	error[E0432]: unresolved import `crate::session_glue`: could not find `session_glue` in the crate root
+wz-runtime-tokio	wz-runtime-tokio/src/storage_gc_service.rs	1	error: unresolved link to `crate::storage_replication_service::DigestPublisher`: no item named `storage_replication_service` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/storage_manager_service.rs	1	error: unresolved link to `crate::filesystem_storage::FilesystemVolume::new`: no item named `filesystem_storage` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/storage_manager_service.rs	1	error: unresolved link to `crate::storage_manager_service::RuntimeStorageManager::stop_plugin`: the struct `RuntimeStorageManager` has no field or associated item named `stop_plugin`
+wz-runtime-tokio	wz-runtime-tokio/src/storage_manager_service.rs	1	error: unresolved link to `wz_session_core::adminspace::AdminConfigWrite::AddVolume`: no item named `adminspace` in module `wz_session_core`
+wz-runtime-tokio	wz-runtime-tokio/src/storage_service.rs	1	error: unresolved link to `crate::storage_gc_service`: no item named `storage_gc_service` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/storage_service.rs	1	error: unresolved link to `crate::storage_replication_service`: no item named `storage_replication_service` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/stream_link.rs	1	error: unresolved link to `crate::tls_pipeline::TlsReadDriver`: no item named `tls_pipeline` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/stream_link.rs	1	error: unresolved link to `crate::tls_pipeline`: no item named `tls_pipeline` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/tls_config.rs	1	error: unresolved link to `crate::session_open::TlsDialConfig::client_config`: no item named `TlsDialConfig` in module `session_open`
+wz-runtime-tokio	wz-runtime-tokio/src/tls_config.rs	1	error: unresolved link to `crate::tls_pipeline::accept_tls`: no item named `tls_pipeline` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/tls_config.rs	2	error: unresolved link to `crate::tls_pipeline`: no item named `tls_pipeline` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/tls_keylog.rs	3	error: unresolved link to `KeyLogFile`: no item named `KeyLogFile` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/unixpipe_pipeline.rs	1	error: unresolved link to `crate::udp_pipeline::UdpDemux`: no item named `udp_pipeline` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/unixpipe_pipeline.rs	1	error: unresolved link to `crate::udp_pipeline::bind_udp_demux`: no item named `udp_pipeline` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/unixpipe_pipeline.rs	1	error: unresolved link to `crate::unixsock_pipeline`: no item named `unixsock_pipeline` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/vsock_pipeline.rs	1	error: unresolved link to `crate::tls_pipeline::wire_tls_stream`: no item named `tls_pipeline` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/vsock_pipeline.rs	1	error: unresolved link to `crate::tls_pipeline`: no item named `tls_pipeline` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/vsock_pipeline.rs	1	error: unresolved link to `crate::unixsock_pipeline::bind_unixsock`: no item named `unixsock_pipeline` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/vsock_pipeline.rs	1	error: unresolved link to `crate::unixsock_pipeline`: no item named `unixsock_pipeline` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/vsock_pipeline.rs	1	error: unresolved link to `crate::uring_reactor::UringReactor::attach`: no item named `uring_reactor` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/writer_queue.rs	1	error: unresolved link to `outbound_channel_datagram`: no item named `outbound_channel_datagram` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/ws_pipeline.rs	1	error: unresolved link to `crate::udp_pipeline::UdpReadDriver`: no item named `udp_pipeline` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/ws_pipeline.rs	1	error: unresolved link to `crate::udp_pipeline::UdpWriteDriver`: no item named `udp_pipeline` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/zenoh_config.rs	1	error: unresolved link to `AclCompileError::BlankUsername`: no item named `AclCompileError` in scope
+wz-runtime-tokio	wz-runtime-tokio/src/zenoh_config.rs	1	error: unresolved link to `crate::config::WzConfig::remove_by_key`: the struct `WzConfig` has no field or associated item named `remove_by_key`
+wz-runtime-tokio	wz-runtime-tokio/src/zenoh_config.rs	1	error: unresolved link to `crate::extauth_usrpwd_store::UsrPwdStore::from_dictionary_file`: no item named `extauth_usrpwd_store` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/zenoh_config.rs	1	error: unresolved link to `crate::interceptor::downsampling::DownsamplingRule`: no item named `downsampling` in module `interceptor`
+wz-runtime-tokio	wz-runtime-tokio/src/zenoh_config.rs	1	error: unresolved link to `crate::interceptor::downsampling::DownsamplingRule`: no item named `interceptor` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/zenoh_config.rs	1	error: unresolved link to `crate::interceptor::low_pass::LowPassRule`: no item named `interceptor` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-runtime-tokio/src/zenoh_config.rs	1	error: unresolved link to `crate::interceptor::low_pass::LowPassRule`: no item named `low_pass` in module `interceptor`
+wz-runtime-tokio	wz-runtime-tokio/src/zero_copy.rs	1	error: unresolved link to `crate::uring`: no item named `uring` in module `wz_runtime_tokio`
+wz-runtime-tokio	wz-session-core/src/lib.rs	1	refused: wz-session-core: `session-close-ingress` (the session lifecycle verbs) needs `secure-channel`, a link that proves its peer's key inside a protected channel (decision D2 of docs/session-lifecycle-intent.md). On AP enable `transport-link-tls` or `transport-link-quic`; the fixed-memory profile has no such channel yet.
+wz-runtime-tokio	wz-session-core/src/pubsub.rs	1	error: unused import: `ATTACHMENT_EXT_ID_PUSH`
+wz-runtime-zephyr	wz-runtime-zephyr/src/lib.rs	1	error: unresolved link to `GlobalAlloc`: no item named `GlobalAlloc` in scope
+wz-runtime-zephyr	wz-runtime-zephyr/src/lib.rs	1	error: unresolved link to `zephyr_image`: no item named `zephyr_image` in scope
+wz-runtime-zephyr	wz-runtime-zephyr/src/net.rs	1	error: unresolved link to `board_zid`: no item named `board_zid` in scope
+wz-session-core	-	1	error: unresolved link to `crate::attachment`
+wz-session-core	-	1	error: unresolved link to `crate::declare_build`
+wz-session-core	-	1	error: unresolved link to `crate::declare_ext_keyexpr`
+wz-session-core	-	1	error: unresolved link to `crate::declare_routing_context`
+wz-session-core	-	1	error: unresolved link to `crate::drive::check_lease_deadline`
+wz-session-core	-	1	error: unresolved link to `crate::extcompression`
+wz-session-core	-	1	error: unresolved link to `crate::extlowlatency`
+wz-session-core	-	1	error: unresolved link to `crate::extshm`
+wz-session-core	-	1	error: unresolved link to `crate::inbound::inbound_to_fsm_event`
+wz-session-core	-	1	error: unresolved link to `crate::lent_control::NamedKeyexpr`
+wz-session-core	-	1	error: unresolved link to `crate::lent_response::ResponseWriter`
+wz-session-core	-	1	error: unresolved link to `crate::multicast_join`
+wz-session-core	-	1	error: unresolved link to `crate::push_routing_context`
+wz-session-core	-	1	error: unresolved link to `crate::queryable_info`
+wz-session-core	-	1	error: unresolved link to `crate::response_final_build`
+wz-session-core	-	1	error: unresolved link to `crate::rx_profile::RxShared`
+wz-session-core	-	1	error: unresolved link to `crate::session_slot`
+wz-session-core	-	1	error: unresolved link to `crate::stats::TransportStats::inc_rx_network`
+wz-session-core	-	1	error: unresolved link to `crate::stats::TransportStats`
+wz-session-core	-	1	error: unresolved link to `declare_routing_context`
+wz-session-core	-	1	error: unresolved link to `extfragment`
+wz-session-core	-	1	error: unresolved link to `multicast_join`
+wz-session-core	-	1	error: unresolved link to `push_routing_context`
+wz-session-core	wz-session-core/src/adminspace.rs	1	error: unresolved link to `Self::ALL`: the enum `AdminEntityKind` has no variant or associated item named `ALL`
+wz-session-core	wz-session-core/src/adminspace.rs	1	error: unresolved link to `Self::to_storage_config`: the enum `AdminConfigWrite` has no variant or associated item named `to_storage_config`
+wz-session-core	wz-session-core/src/adminspace.rs	2	error: unresolved link to `crate::storage_config::StorageConfig::volume_cfg`: no item named `storage_config` in module `wz_session_core`
+wz-session-core	wz-session-core/src/auth_dispatch.rs	1	error: unresolved link to `crate::extmultilink::MultiLinkDispatch::captured_peer_pubkey`: no item named `extmultilink` in module `wz_session_core`
+wz-session-core	wz-session-core/src/auth_dispatch.rs	2	error: unresolved link to `crate::session_actions::SessionLinkActions`: no item named `session_actions` in module `wz_session_core`
+wz-session-core	wz-session-core/src/caps.rs	1	error: unresolved link to `crate::declaration_sync::DeclarationSync`: no item named `declaration_sync` in module `wz_session_core`
+wz-session-core	wz-session-core/src/caps.rs	1	error: unresolved link to `crate::declare::liveliness_get::LivelinessGetRegistry`: no item named `liveliness_get` in module `declare`
+wz-session-core	wz-session-core/src/caps.rs	1	error: unresolved link to `crate::declare::local_token::DeclResponseItem`: no item named `local_token` in module `declare`
+wz-session-core	wz-session-core/src/caps.rs	1	error: unresolved link to `crate::declare::local_token::LocalTokenRegistry`: no item named `local_token` in module `declare`
+wz-session-core	wz-session-core/src/caps.rs	1	error: unresolved link to `crate::pubsub::SubInterestRefusals`: no item named `SubInterestRefusals` in module `pubsub`
+wz-session-core	wz-session-core/src/caps.rs	2	error: unresolved link to `crate::scout_static::synth_static_locators`: no item named `scout_static` in module `wz_session_core`
+wz-session-core	wz-session-core/src/close_reason.rs	1	error: unresolved link to `crate::extmultilink::CLOSE_REASON_MAX_LINKS`: no item named `extmultilink` in module `wz_session_core`
+wz-session-core	wz-session-core/src/compression.rs	1	error: unresolved link to `crate::drive::dispatch_link_event`: no item named `drive` in module `wz_session_core`
+wz-session-core	wz-session-core/src/declare/liveliness.rs	1	error: unresolved link to `Self::dispatch_declare`: the struct `LivelinessRegistry` has no field or associated item named `dispatch_declare`
+wz-session-core	wz-session-core/src/declare/liveliness_get.rs	2	error: unresolved link to `crate::declare::local_token::LocalTokenRegistry`: no item named `local_token` in module `declare`
+wz-session-core	wz-session-core/src/declare/liveliness_subscriber.rs	2	error: unresolved link to `Self::dispatch_declare`: the struct `LivelinessSubscriberTable` has no field or associated item named `dispatch_declare`
+wz-session-core	wz-session-core/src/declare/matching.rs	1	error: unresolved link to `crate::deferred_fire`: no item named `deferred_fire` in module `wz_session_core`
+wz-session-core	wz-session-core/src/declare/queryable.rs	1	error: unresolved link to `Self::dispatch_declare`: the struct `RemoteQueryableTable` has no field or associated item named `dispatch_declare`
+wz-session-core	wz-session-core/src/declare/queryable.rs	1	error: unresolved link to `crate::declare::subscriber::RemoteSubscriberRegistry::dispatch_declare`: the struct `RemoteSubscriberRegistry` has no field or associated item named `dispatch_declare`
+wz-session-core	wz-session-core/src/declare/subscriber.rs	1	error: unresolved link to `BorrowedDecl`: no item named `BorrowedDecl` in scope
+wz-session-core	wz-session-core/src/declare/subscriber.rs	1	error: unresolved link to `Self::dispatch_declare_with_local`: the struct `RemoteSubscriberTable` has no field or associated item named `dispatch_declare_with_local`
+wz-session-core	wz-session-core/src/declare/subscriber.rs	1	error: unresolved link to `Self::dispatch_declare`: the struct `RemoteSubscriberTable` has no field or associated item named `dispatch_declare`
+wz-session-core	wz-session-core/src/drive.rs	1	error: unresolved link to `check_requested_close`: no item named `check_requested_close` in scope
+wz-session-core	wz-session-core/src/drive.rs	3	error: unresolved link to `dispatch_datagram_reassembling`: no item named `dispatch_datagram_reassembling` in scope
+wz-session-core	wz-session-core/src/driver_loop.rs	1	error: unresolved link to `Self::push`: the struct `InPlaceRecord` has no field or associated item named `push`
+wz-session-core	wz-session-core/src/driver_loop.rs	1	error: unresolved link to `Self::request`: the struct `InPlaceRecord` has no field or associated item named `request`
+wz-session-core	wz-session-core/src/driver_loop.rs	1	error: unresolved link to `Self::response`: the struct `InPlaceRecord` has no field or associated item named `response`
+wz-session-core	wz-session-core/src/driver_loop.rs	2	error: unresolved link to `crate::drive::report_outcome_reassembling`: no item named `drive` in module `wz_session_core`
+wz-session-core	wz-session-core/src/driver_loop.rs	1	error: unresolved link to `crate::drive::report_outcome_reassembling`: no item named `report_outcome_reassembling` in module `drive`
+wz-session-core	wz-session-core/src/driver_loop.rs	1	error: unresolved link to `crate::multicast_dispatch::ingest_multicast_fragment`: no item named `multicast_dispatch` in module `wz_session_core`
+wz-session-core	wz-session-core/src/driver_loop.rs	1	error: unresolved link to `crate::session_actions::SessionLinkActions::expect_peer_zid`: no item named `session_actions` in module `wz_session_core`
+wz-session-core	wz-session-core/src/driver_loop.rs	1	error: unresolved link to `crate::session_actions::SessionLinkActions::set_app_wake_deadline_ms`: no item named `session_actions` in module `wz_session_core`
+wz-session-core	wz-session-core/src/driver_loop.rs	1	error: unresolved link to `crate::session_actions::SessionLinkActions::set_plain_put_lane`: no item named `session_actions` in module `wz_session_core`
+wz-session-core	wz-session-core/src/ext_header.rs	1	error: unresolved link to `crate::attachment::ATTACHMENT_EXT_ID_PUSH`: no item named `attachment` in module `wz_session_core`
+wz-session-core	wz-session-core/src/extlowlatency.rs	1	error: unresolved link to `crate::extauth`: no item named `extauth` in module `wz_session_core`
+wz-session-core	wz-session-core/src/extpatch.rs	1	error: unresolved link to `crate::drive`: no item named `drive` in module `wz_session_core`
+wz-session-core	wz-session-core/src/extpatch.rs	1	error: unresolved link to `crate::extcompression`: no item named `extcompression` in module `wz_session_core`
+wz-session-core	wz-session-core/src/extpatch.rs	1	error: unresolved link to `crate::extfragment`: no item named `extfragment` in module `wz_session_core`
+wz-session-core	wz-session-core/src/extpatch.rs	1	error: unresolved link to `crate::extlowlatency`: no item named `extlowlatency` in module `wz_session_core`
+wz-session-core	wz-session-core/src/extpatch.rs	2	error: unresolved link to `crate::session_actions::default_init_patch_ext_entry`: no item named `session_actions` in module `wz_session_core`
+wz-session-core	wz-session-core/src/extpatch.rs	1	error: unresolved link to `crate::session_actions`: no item named `session_actions` in module `wz_session_core`
+wz-session-core	wz-session-core/src/extqos.rs	1	error: unresolved link to `crate::extlowlatency`: no item named `extlowlatency` in module `wz_session_core`
+wz-session-core	wz-session-core/src/extshm.rs	1	error: unresolved link to `ShmAuthenticator::open_peer_protocols`: no item named `ShmAuthenticator` in scope
+wz-session-core	wz-session-core/src/frame_encode.rs	1	error: unresolved link to `crate::multicast_dispatch::ingest_multicast_fragment`: no item named `ingest_multicast_fragment` in module `multicast_dispatch`
+wz-session-core	wz-session-core/src/frame_encode.rs	1	error: unresolved link to `crate::multicast_dispatch::ingest_multicast_fragment`: no item named `multicast_dispatch` in module `wz_session_core`
+wz-session-core	wz-session-core/src/frame_encode.rs	1	error: unresolved link to `crate::multicast_tx::multicast_tx_emit`: no item named `multicast_tx` in module `wz_session_core`
+wz-session-core	wz-session-core/src/frame_encode.rs	1	error: unresolved link to `crate::session_actions::SessionCore::fragment_tx_budget`: no item named `session_actions` in module `wz_session_core`
+wz-session-core	wz-session-core/src/frame_encode.rs	1	error: unresolved link to `crate::session_actions`: no item named `session_actions` in module `wz_session_core`
+wz-session-core	wz-session-core/src/frame_encode.rs	2	error: unresolved link to `encode_frame_with_declare`: no item named `encode_frame_with_declare` in scope
+wz-session-core	wz-session-core/src/frame_encode.rs	2	error: unresolved link to `encode_frame_with_push`: no item named `encode_frame_with_push` in scope
+wz-session-core	wz-session-core/src/handshake_encode.rs	1	error: unresolved link to `crate::multicast_rx`: no item named `multicast_rx` in module `wz_session_core`
+wz-session-core	wz-session-core/src/handshake_encode.rs	1	error: unresolved link to `crate::session_actions::SessionLinkActions::send_close_with_reason`: no item named `session_actions` in module `wz_session_core`
+wz-session-core	wz-session-core/src/handshake_encode.rs	1	error: unresolved link to `encode_init_into`: no item named `encode_init_into` in scope
+wz-session-core	wz-session-core/src/inbound.rs	2	error: unresolved link to `InboundFrame::Frame`: the enum `InboundFrame` has no variant or associated item named `Frame`
+wz-session-core	wz-session-core/src/inbound.rs	1	error: unresolved link to `Self::Frame`: the enum `InboundFrame` has no variant or associated item named `Frame`
+wz-session-core	wz-session-core/src/inbound.rs	1	error: unresolved link to `Self::Open`: the enum `InboundFrame` has no variant or associated item named `Open`
+wz-session-core	wz-session-core/src/inbound.rs	1	error: unresolved link to `crate::drive`: no item named `drive` in module `wz_session_core`
+wz-session-core	wz-session-core/src/inbound.rs	2	error: unresolved link to `inbound_to_fsm_event`: no item named `inbound_to_fsm_event` in scope
+wz-session-core	wz-session-core/src/join_decode.rs	1	error: unresolved link to `crate::multicast_dispatch::MulticastDispatcher::ingest_join`: no item named `multicast_dispatch` in module `wz_session_core`
+wz-session-core	wz-session-core/src/join_decode.rs	1	error: unresolved link to `crate::multicast_join::validate_join`: no item named `multicast_join` in module `wz_session_core`
+wz-session-core	wz-session-core/src/keyexpr_match.rs	1	error: unresolved link to `crate::keyexpr_prefix::NonWildKeyExpr::new`: no item named `keyexpr_prefix` in module `wz_session_core`
+wz-session-core	wz-session-core/src/keyexpr_match.rs	2	error: unresolved link to `keyexpr_includes_patterns`: no item named `keyexpr_includes_patterns` in scope
+wz-session-core	wz-session-core/src/keyexpr_match.rs	2	error: unresolved link to `keyexpr_includes_target`: no item named `keyexpr_includes_target` in scope
+wz-session-core	wz-session-core/src/keyexpr_prefix.rs	1	error: unresolved link to `crate::namespace`: no item named `namespace` in module `wz_session_core`
+wz-session-core	wz-session-core/src/keyexpr_prefix.rs	2	error: unresolved link to `crate::storage_strip_prefix`: no item named `storage_strip_prefix` in module `wz_session_core`
+wz-session-core	wz-session-core/src/lease.rs	1	error: unresolved link to `crate::drive::check_keepalive_deadline`: no item named `check_keepalive_deadline` in module `drive`
+wz-session-core	wz-session-core/src/lease.rs	1	error: unresolved link to `crate::drive::check_keepalive_deadline`: no item named `drive` in module `wz_session_core`
+wz-session-core	wz-session-core/src/lease.rs	1	error: unresolved link to `crate::session_actions::SessionLinkActions::send_keep_alive`: no item named `session_actions` in module `wz_session_core`
+wz-session-core	wz-session-core/src/lib.rs	1	error: unresolved link to `reassembly_slot`: no item named `reassembly_slot` in scope
+wz-session-core	wz-session-core/src/lib.rs	1	error: unresolved link to `session_fsm_unicast`: no item named `session_fsm_unicast` in scope
+wz-session-core	wz-session-core/src/lib.rs	1	refused: wz-session-core: `session-close-ingress` (the session lifecycle verbs) needs `secure-channel`, a link that proves its peer's key inside a protected channel (decision D2 of docs/session-lifecycle-intent.md). On AP enable `transport-link-tls` or `transport-link-quic`; the fixed-memory profile has no such channel yet.
+wz-session-core	wz-session-core/src/lifecycle_contract.rs	3	error: redundant explicit link target: explicit target is redundant
+wz-session-core	wz-session-core/src/lifecycle_node.rs	3	error: redundant explicit link target: explicit target is redundant
+wz-session-core	wz-session-core/src/lifecycle_wire.rs	1	error: unresolved link to `crate::peer_connection::PeerConnectionState::in_intent`: no item named `peer_connection` in module `wz_session_core`
+wz-session-core	wz-session-core/src/lifecycle_wire.rs	1	error: unresolved link to `crate::peer_table::StateWords`: no item named `peer_table` in module `wz_session_core`
+wz-session-core	wz-session-core/src/link.rs	1	error: unresolved link to `Self::ActionsHandle`: the trait `SessionRuntime` has no associated item named `ActionsHandle`
+wz-session-core	wz-session-core/src/link.rs	1	error: unresolved link to `crate::adminspace::AdminLink`: no item named `adminspace` in module `wz_session_core`
+wz-session-core	wz-session-core/src/link.rs	1	error: unresolved link to `crate::session_actions::LinkState`: no item named `session_actions` in module `wz_session_core`
+wz-session-core	wz-session-core/src/link.rs	1	error: unresolved link to `crate::session_actions::SessionCore`: no item named `session_actions` in module `wz_session_core`
+wz-session-core	wz-session-core/src/link.rs	1	error: unresolved link to `crate::session_actions::SessionLinkActions::batch_envelope_bytes`: no item named `session_actions` in module `wz_session_core`
+wz-session-core	wz-session-core/src/link.rs	2	error: unresolved link to `crate::session_actions::SessionLinkActions::peer_identity_verified`: no item named `session_actions` in module `wz_session_core`
+wz-session-core	wz-session-core/src/link.rs	2	error: unresolved link to `crate::session_actions::SessionLinkActions`: no item named `session_actions` in module `wz_session_core`
+wz-session-core	wz-session-core/src/locator.rs	2	error: unresolved link to `crate::reconnect`: no item named `reconnect` in module `wz_session_core`
+wz-session-core	wz-session-core/src/locator.rs	1	error: unresolved link to `crate::scout_static`: no item named `scout_static` in module `wz_session_core`
+wz-session-core	wz-session-core/src/metadata.rs	1	error: unresolved link to `crate::query_value_ext`: no item named `query_value_ext` in module `wz_session_core`
+wz-session-core	wz-session-core/src/metadata.rs	1	error: unresolved link to `crate::request_build::RequestQueryBuilder::query_value`: no item named `request_build` in module `wz_session_core`
+wz-session-core	wz-session-core/src/metadata.rs	1	error: unresolved link to `crate::request_build::RequestQueryBuilder::query_value`: the struct `RequestQueryBuilder` has no field or associated item named `query_value`
+wz-session-core	wz-session-core/src/metadata.rs	1	error: unresolved link to `crate::request_build::RequestQueryBuilder::request_qos_typed`: no item named `request_build` in module `wz_session_core`
+wz-session-core	wz-session-core/src/multicast_dispatch.rs	1	error: unresolved link to `Self::apply_namespace_ingress`: the struct `MulticastDispatcher` has no field or associated item named `apply_namespace_ingress`
+wz-session-core	wz-session-core/src/multicast_dispatch.rs	2	error: unresolved link to `Self::set_namespace`: the struct `MulticastDispatcher` has no field or associated item named `set_namespace`
+wz-session-core	wz-session-core/src/multicast_dispatch.rs	1	error: unresolved link to `crate::drive::report_outcome_reassembling`: no item named `drive` in module `wz_session_core`
+wz-session-core	wz-session-core/src/multicast_dispatch.rs	1	error: unresolved link to `crate::multicast_join::decode_join_patch`: no item named `multicast_join` in module `wz_session_core`
+wz-session-core	wz-session-core/src/multicast_dispatch.rs	1	error: unresolved link to `crate::multicast_join::validate_join`: no item named `multicast_join` in module `wz_session_core`
+wz-session-core	wz-session-core/src/multicast_dispatch.rs	3	error: unresolved link to `crate::multicast_rx`: no item named `multicast_rx` in module `wz_session_core`
+wz-session-core	wz-session-core/src/multicast_dispatch.rs	1	error: unresolved link to `crate::reassembly_dispatch::ReassemblyConfig`: no item named `reassembly_dispatch` in module `wz_session_core`
+wz-session-core	wz-session-core/src/multicast_dispatch.rs	1	error: unresolved link to `crate::reassembly_dispatch`: no item named `reassembly_dispatch` in module `wz_session_core`
+wz-session-core	wz-session-core/src/multicast_dispatch.rs	2	error: unresolved link to `multicast_chain_key`: no item named `multicast_chain_key` in scope
+wz-session-core	wz-session-core/src/multicast_join.rs	1	error: unresolved link to `decode_join_qos`: no item named `decode_join_qos` in scope
+wz-session-core	wz-session-core/src/multicast_params.rs	1	error: unresolved link to `crate::multicast_dispatch::MulticastConfig::lease_ms`: no item named `multicast_dispatch` in module `wz_session_core`
+wz-session-core	wz-session-core/src/multicast_reply_sink.rs	1	error: unresolved link to `crate::multicast_rx`: no item named `multicast_rx` in module `wz_session_core`
+wz-session-core	wz-session-core/src/multicast_rx.rs	1	error: unresolved link to `dispatch_multicast_inbound_reassembling`: no item named `dispatch_multicast_inbound_reassembling` in scope
+wz-session-core	wz-session-core/src/multicast_tx.rs	2	error: unresolved link to `crate::multicast_rx::dispatch_multicast_inbound`: no item named `multicast_rx` in module `wz_session_core`
+wz-session-core	wz-session-core/src/namespace.rs	1	error: unresolved link to `apply_egress_declare`: no item named `apply_egress_declare` in scope
+wz-session-core	wz-session-core/src/namespace.rs	2	error: unresolved link to `apply_egress_multicast_item`: no item named `apply_egress_multicast_item` in scope
+wz-session-core	wz-session-core/src/namespace.rs	1	error: unresolved link to `apply_egress_push`: no item named `apply_egress_push` in scope
+wz-session-core	wz-session-core/src/namespace.rs	1	error: unresolved link to `apply_egress_response`: no item named `apply_egress_response` in scope
+wz-session-core	wz-session-core/src/namespace.rs	1	error: unresolved link to `crate::multicast_tx::MulticastTxItem`: no item named `multicast_tx` in module `wz_session_core`
+wz-session-core	wz-session-core/src/namespace.rs	4	error: unresolved link to `crate::session_actions`: no item named `session_actions` in module `wz_session_core`
+wz-session-core	wz-session-core/src/network_message.rs	1	error: public documentation for `RecordBuf` links to private item `try_for_each_record`: this item is private
+wz-session-core	wz-session-core/src/observer.rs	1	error: unresolved link to `Self::liveliness`: the struct `ApplicationLayerObserver` has no field or associated item named `liveliness`
+wz-session-core	wz-session-core/src/passive.rs	1	error: unresolved link to `Carried::FragmentWithoutResolution`: the enum `Carried` has no variant or associated item named `FragmentWithoutResolution`
+wz-session-core	wz-session-core/src/passive.rs	2	error: unresolved link to `Self::with_reassembly_window`: the struct `PassiveSession` has no field or associated item named `with_reassembly_window`
+wz-session-core	wz-session-core/src/passive.rs	1	error: unresolved link to `crate::compression`: no item named `compression` in module `wz_session_core`
+wz-session-core	wz-session-core/src/passive.rs	2	error: unresolved link to `crate::extfragment`: no item named `extfragment` in module `wz_session_core`
+wz-session-core	wz-session-core/src/passive.rs	1	error: unresolved link to `crate::inbound::inbound_to_fsm_event`: no item named `inbound_to_fsm_event` in module `inbound`
+wz-session-core	wz-session-core/src/passive.rs	1	error: unresolved link to `crate::reassembly_dispatch::ReassemblyDispatcher::sweep_counting`: no item named `reassembly_dispatch` in module `wz_session_core`
+wz-session-core	wz-session-core/src/passive.rs	1	error: unresolved link to `crate::session_actions::SessionLinkActions`: no item named `session_actions` in module `wz_session_core`
+wz-session-core	wz-session-core/src/passive.rs	1	error: unresolved link to `crate::session_fsm_unicast`: no item named `session_fsm_unicast` in module `wz_session_core`
+wz-session-core	wz-session-core/src/pubsub.rs	2	error: unresolved link to `SubscriberPeer::reconcile`: the struct `SubscriberPeer` has no field or associated item named `reconcile`
+wz-session-core	wz-session-core/src/query.rs	1	error: unresolved link to `QueryReply::into_response_shm`: the enum `QueryReply` has no variant or associated item named `into_response_shm`
+wz-session-core	wz-session-core/src/query.rs	7	error: unresolved link to `QueryReply::into_response`: the enum `QueryReply` has no variant or associated item named `into_response`
+wz-session-core	wz-session-core/src/query.rs	1	error: unresolved link to `QueryResponder::send_reply`: no item named `QueryResponder` in scope
+wz-session-core	wz-session-core/src/query.rs	1	error: unresolved link to `QueryResponder::with_responder`: no item named `QueryResponder` in scope
+wz-session-core	wz-session-core/src/query.rs	2	error: unresolved link to `QueryResponder`: no item named `QueryResponder` in scope
+wz-session-core	wz-session-core/src/query.rs	1	error: unresolved link to `ResponseFinal`: no item named `ResponseFinal` in scope
+wz-session-core	wz-session-core/src/query.rs	2	error: unresolved link to `ResponseReplyBuilder`: no item named `ResponseReplyBuilder` in scope
+wz-session-core	wz-session-core/src/query.rs	1	error: unresolved link to `Self::into_response`: the enum `QueryReply` has no variant or associated item named `into_response`
+wz-session-core	wz-session-core/src/query.rs	1	error: unresolved link to `Self::send_err`: the struct `QueryResponder` has no field or associated item named `send_err`
+wz-session-core	wz-session-core/src/query.rs	1	error: unresolved link to `crate::pubsub::SubscriberRegistry::respond_to_subscriber_interest_borrowed`: the struct `SubscriberRegistry` has no field or associated item named `respond_to_subscriber_interest_borrowed`
+wz-session-core	wz-session-core/src/query.rs	2	error: unresolved link to `crate::response_build::ResponseErrBuilder::encoding`: no item named `response_build` in module `wz_session_core`
+wz-session-core	wz-session-core/src/query.rs	1	error: unresolved link to `crate::response_build::ResponseErrBuilder::responder`: no item named `response_build` in module `wz_session_core`
+wz-session-core	wz-session-core/src/query.rs	1	error: unresolved link to `crate::response_build::ResponseErrBuilder`: no item named `response_build` in module `wz_session_core`
+wz-session-core	wz-session-core/src/query.rs	2	error: unresolved link to `crate::response_build::ResponseReplyBuilder::attachment`: no item named `response_build` in module `wz_session_core`
+wz-session-core	wz-session-core/src/query.rs	1	error: unresolved link to `crate::response_build::ResponseReplyBuilder::encoding`: no item named `response_build` in module `wz_session_core`
+wz-session-core	wz-session-core/src/query.rs	3	error: unresolved link to `crate::response_build::ResponseReplyBuilder::source_info`: no item named `response_build` in module `wz_session_core`
+wz-session-core	wz-session-core/src/query.rs	1	error: unresolved link to `crate::response_build::ResponseReplyBuilder::timestamp`: no item named `response_build` in module `wz_session_core`
+wz-session-core	wz-session-core/src/query.rs	2	error: unresolved link to `crate::response_build::ResponseReplyBuilder`: no item named `response_build` in module `wz_session_core`
+wz-session-core	wz-session-core/src/query_mode.rs	1	error: unresolved link to `crate::request_routing_context::read_request_target`: no item named `request_routing_context` in module `wz_session_core`
+wz-session-core	wz-session-core/src/query_options.rs	1	error: unresolved link to `QueryOptions::effective_accept_replies`: the struct `QueryOptions` has no field or associated item named `effective_accept_replies`
+wz-session-core	wz-session-core/src/query_options.rs	3	error: unresolved link to `QueryOptions::effective_timeout_ms`: the struct `QueryOptions` has no field or associated item named `effective_timeout_ms`
+wz-session-core	wz-session-core/src/query_options.rs	2	error: unresolved link to `QueryOptions::query_metadata`: the struct `QueryOptions` has no field or associated item named `query_metadata`
+wz-session-core	wz-session-core/src/query_options.rs	1	error: unresolved link to `Self::effective_consolidation`: the struct `QueryOptions` has no field or associated item named `effective_consolidation`
+wz-session-core	wz-session-core/src/query_options.rs	1	error: unresolved link to `Self::effective_target`: the struct `QueryOptions` has no field or associated item named `effective_target`
+wz-session-core	wz-session-core/src/query_sink.rs	1	error: unresolved link to `crate::link::RxBytes::is_shared_memory`: the struct `RxBytes` has no field or associated item named `is_shared_memory`
+wz-session-core	wz-session-core/src/query_sink.rs	2	error: unresolved link to `crate::query::QueryResponder`: no item named `QueryResponder` in module `query`
+wz-session-core	wz-session-core/src/query_value_ext.rs	1	error: unresolved link to `crate::attachment::ATTACHMENT_EXT_ID_QUERY`: no item named `attachment` in module `wz_session_core`
+wz-session-core	wz-session-core/src/query_value_ext.rs	1	error: unresolved link to `crate::attachment::decode_attachment_ext`: no item named `attachment` in module `wz_session_core`
+wz-session-core	wz-session-core/src/query_value_ext.rs	1	error: unresolved link to `crate::attachment::encode_attachment_ext`: no item named `attachment` in module `wz_session_core`
+wz-session-core	wz-session-core/src/query_value_ext.rs	1	error: unresolved link to `crate::attachment`: no item named `attachment` in module `wz_session_core`
+wz-session-core	wz-session-core/src/reassembly_dispatch.rs	1	error: unresolved link to `ChainBytes::Lent`: the enum `ChainBytes` has no variant or associated item named `Lent`
+wz-session-core	wz-session-core/src/reassembly_dispatch.rs	2	error: unresolved link to `ChainStaging::lend`: the trait `ChainStaging` has no associated item named `lend`
+wz-session-core	wz-session-core/src/reassembly_dispatch.rs	1	error: unresolved link to `crate::multicast_dispatch::multicast_chain_key`: no item named `multicast_dispatch` in module `wz_session_core`
+wz-session-core	wz-session-core/src/reassembly_dispatch.rs	1	error: unresolved link to `crate::multicast_rx::sweep_multicast_reassembling`: no item named `multicast_rx` in module `wz_session_core`
+wz-session-core	wz-session-core/src/reassembly_dispatch.rs	1	error: unresolved link to `crate::session_timeouts::SessionTimeouts`: no item named `session_timeouts` in module `wz_session_core`
+wz-session-core	wz-session-core/src/reassembly_dispatch.rs	2	error: unresolved link to `crate::session_timeouts`: no item named `session_timeouts` in module `wz_session_core`
+wz-session-core	wz-session-core/src/reply.rs	2	error: unresolved link to `QueryReply`: no item named `QueryReply` in scope
+wz-session-core	wz-session-core/src/reply.rs	3	error: unresolved link to `Self::dispatch_response_final`: the struct `ReplyRegistry` has no field or associated item named `dispatch_response_final`
+wz-session-core	wz-session-core/src/reply.rs	3	error: unresolved link to `Self::dispatch_response`: the struct `ReplyRegistry` has no field or associated item named `dispatch_response`
+wz-session-core	wz-session-core/src/reply.rs	1	error: unresolved link to `crate::query::QueryableRegistry::dispatch_iteration_event`: the struct `QueryableRegistry` has no field or associated item named `dispatch_iteration_event`
+wz-session-core	wz-session-core/src/reply.rs	1	error: unresolved link to `crate::query::QueryableRegistry::dispatch_request`: the struct `QueryableRegistry` has no field or associated item named `dispatch_request`
+wz-session-core	wz-session-core/src/reply.rs	1	error: unresolved link to `crate::query::QueryableRegistry::local_query`: the struct `QueryableRegistry` has no field or associated item named `local_query`
+wz-session-core	wz-session-core/src/request_build.rs	1	error: unresolved link to `crate::push_build::set_push_keyexpr_literal`: no item named `push_build` in module `wz_session_core`
+wz-session-core	wz-session-core/src/request_build.rs	1	error: unresolved link to `crate::response_build`: no item named `response_build` in module `wz_session_core`
+wz-session-core	wz-session-core/src/response_build.rs	1	error: unresolved link to `crate::attachment::ATTACHMENT_EXT_ID_DEL`: no item named `attachment` in module `wz_session_core`
+wz-session-core	wz-session-core/src/response_build.rs	1	error: unresolved link to `crate::push_build::set_push_keyexpr_literal`: no item named `push_build` in module `wz_session_core`
+wz-session-core	wz-session-core/src/response_build.rs	1	error: unresolved link to `crate::request_build::set_request_keyexpr_literal`: no item named `request_build` in module `wz_session_core`
+wz-session-core	wz-session-core/src/response_final_build.rs	1	error: unresolved link to `crate::query::QueryResponder::new`: no item named `QueryResponder` in module `query`
+wz-session-core	wz-session-core/src/response_sink.rs	1	error: unresolved link to `Self::send_declare_final_reply`: the trait `DeclareReplySink` has no associated item named `send_declare_final_reply`
+wz-session-core	wz-session-core/src/response_sink.rs	2	error: unresolved link to `Self::send_declare_subscriber_reply`: the trait `DeclareReplySink` has no associated item named `send_declare_subscriber_reply`
+wz-session-core	wz-session-core/src/response_sink.rs	1	error: unresolved link to `Self::send_declare_token_reply`: the trait `DeclareReplySink` has no associated item named `send_declare_token_reply`
+wz-session-core	wz-session-core/src/sample.rs	1	error: unresolved link to `crate::request_build::RequestQueryBuilder::request_qos_typed`: no item named `request_build` in module `wz_session_core`
+wz-session-core	wz-session-core/src/send_wire_error.rs	1	error: unresolved link to `crate::frame_encode::build_fragment_drop_wire`: no item named `build_fragment_drop_wire` in module `frame_encode`
+wz-session-core	wz-session-core/src/send_wire_error.rs	1	error: unresolved link to `crate::session_actions::SessionLinkActions::set_fragment_tx_budget`: no item named `session_actions` in module `wz_session_core`
+wz-session-core	wz-session-core/src/send_wire_error.rs	1	error: unresolved link to `crate::session_actions::SessionLinkActions::set_fragment_tx_budget`: the struct `SessionLinkActions` has no field or associated item named `set_fragment_tx_budget`
+wz-session-core	wz-session-core/src/send_wire_error.rs	1	error: unresolved link to `crate::session_actions::SessionLinkActions::set_max_reassembly_bytes`: no item named `session_actions` in module `wz_session_core`
+wz-session-core	wz-session-core/src/send_wire_error.rs	1	error: unresolved link to `crate::session_actions::SessionLinkActions::set_max_reassembly_bytes`: the struct `SessionLinkActions` has no field or associated item named `set_max_reassembly_bytes`
+wz-session-core	wz-session-core/src/send_wire_error.rs	1	error: unresolved link to `crate::session_actions::SessionLinkActions::tx_refusals`: no item named `session_actions` in module `wz_session_core`
+wz-session-core	wz-session-core/src/send_wire_error.rs	1	error[E0433]: cannot find `link` in `crate`: could not find `link` in the crate root
+wz-session-core	wz-session-core/src/session_actions.rs	1	error: public documentation for `send_plain_put_qos` links to private item `Self::dispatch_network_message`: this item is private
+wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `DeclarationCache::generation`: no item named `DeclarationCache` in scope
+wz-session-core	wz-session-core/src/session_actions.rs	2	error: unresolved link to `DeclareOwned`: no item named `DeclareOwned` in scope
+wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `RequestQueryBuilder`: no item named `RequestQueryBuilder` in scope
+wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `Self::admin_links`: the struct `SessionLinkActions` has no field or associated item named `admin_links`
+wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `Self::admin_session`: the struct `SessionLinkActions` has no field or associated item named `admin_session`
+wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `Self::compresses_batches`: the struct `SessionLinkActions` has no field or associated item named `compresses_batches`
+wz-session-core	wz-session-core/src/session_actions.rs	3	error: unresolved link to `Self::declare_token_recorded`: the struct `SessionLinkActions` has no field or associated item named `declare_token_recorded`
+wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `Self::fragment_tx_budget`: the struct `SessionCore` has no field or associated item named `fragment_tx_budget`
+wz-session-core	wz-session-core/src/session_actions.rs	2	error: unresolved link to `Self::is_qos`: the struct `SessionLinkActions` has no field or associated item named `is_qos`
+wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `Self::prepare_declare_subscriber`: the struct `SessionLinkActions` has no field or associated item named `prepare_declare_subscriber`
+wz-session-core	wz-session-core/src/session_actions.rs	2	error: unresolved link to `Self::prepare_declare_token`: the struct `SessionLinkActions` has no field or associated item named `prepare_declare_token`
+wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `Self::prune_liveliness_get_interest`: the struct `SessionLinkActions` has no field or associated item named `prune_liveliness_get_interest`
+wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `Self::session_stats_registry`: the struct `SessionLinkActions` has no field or associated item named `session_stats_registry`
+wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `Self::set_link_priority_range`: the struct `SessionLinkActions` has no field or associated item named `set_link_priority_range`
+wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `Self::set_lowlatency_offer`: the struct `SessionLinkActions` has no field or associated item named `set_lowlatency_offer`
+wz-session-core	wz-session-core/src/session_actions.rs	2	error: unresolved link to `Self::set_qos_offer`: the struct `SessionLinkActions` has no field or associated item named `set_qos_offer`
+wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `Self::with_admin_session`: the struct `SessionLinkActions` has no field or associated item named `with_admin_session`
+wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `SessionLinkActions::negotiate_qos_link_against_peer`: the struct `SessionLinkActions` has no field or associated item named `negotiate_qos_link_against_peer`
+wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `build_declare_queryable`: no item named `build_declare_queryable` in scope
+wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `build_undeclare_subscriber_on_wire`: no item named `build_undeclare_subscriber_on_wire` in scope
+wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `check_outbound_keyexpr_pico_safe`: no item named `check_outbound_keyexpr_pico_safe` in scope
+wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `crate::compression::BATCH_HEADER_BYTES`: no item named `compression` in module `wz_session_core`
+wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `crate::drive::check_keepalive_deadline`: no item named `check_keepalive_deadline` in module `drive`
+wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `crate::drive::check_requested_close`: no item named `check_requested_close` in module `drive`
+wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `crate::drive::dispatch_datagram`: no item named `dispatch_datagram` in module `drive`
+wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `crate::drive::keepalive_wake_deadline`: no item named `keepalive_wake_deadline` in module `drive`
+wz-session-core	wz-session-core/src/session_actions.rs	1	error: unresolved link to `crate::extshm::ShmTxHandoff`: no item named `extshm` in module `wz_session_core`
+wz-session-core	wz-session-core/src/session_actions.rs	1	error[E0425]: cannot find type `Box` in this scope: not found in this scope
+wz-session-core	wz-session-core/src/session_actions.rs	1	error[E0425]: cannot find type `DeclareOwned` in this scope: not found in this scope
+wz-session-core	wz-session-core/src/slot_observer.rs	1	error[E0405]: cannot find trait `EventInjector` in this scope: not found in this scope
+wz-session-core	wz-session-core/src/slot_observer.rs	1	error[E0425]: cannot find type `BoxedDeclSink` in module `crate::decl_sink`: not found in `crate::decl_sink`
+wz-session-core	wz-session-core/src/slot_observer.rs	1	error[E0425]: cannot find type `BoxedLivelinessSampleSink` in module `crate::declare::liveliness_sample`
+wz-session-core	wz-session-core/src/slot_observer.rs	1	error[E0425]: cannot find type `BoxedUndeclSink` in module `crate::decl_sink`
+wz-session-core	wz-session-core/src/slot_observer.rs	1	error[E0425]: cannot find type `LivelinessRegistry` in this scope
+wz-session-core	wz-session-core/src/slot_observer.rs	1	error[E0425]: cannot find type `LivelinessSubscriberTable` in this scope
+wz-session-core	wz-session-core/src/slot_observer.rs	1	error[E0425]: cannot find type `LocalTokenRegistry` in this scope: not found in this scope
+wz-session-core	wz-session-core/src/slot_observer.rs	1	error[E0425]: cannot find type `SwitchboardRegistry` in this scope: not found in this scope
+wz-session-core	wz-session-core/src/sn.rs	1	error: unresolved link to `crate::multicast_tx::multicast_tx_emit`: no item named `multicast_tx` in module `wz_session_core`
+wz-session-core	wz-session-core/src/sn.rs	3	error: unresolved link to `crate::session_actions::FrameTxConduits`: no item named `session_actions` in module `wz_session_core`
+wz-session-core	wz-session-core/src/source_info_ext.rs	1	error: unresolved link to `crate::attachment::encode_attachment_ext`: no item named `attachment` in module `wz_session_core`
+wz-session-core	wz-session-core/src/source_info_ext.rs	1	error: unresolved link to `crate::response_build`: no item named `response_build` in module `wz_session_core`
+wz-session-core	wz-session-core/src/stats.rs	1	error: unresolved link to `TransportStats::inc_rx_network`: no item named `TransportStats` in scope
+wz-session-core	wz-session-core/src/stats.rs	2	error: unresolved link to `TransportStats::inc_tx_drop`: no item named `TransportStats` in scope
+wz-session-core	wz-session-core/src/stats.rs	1	error: unresolved link to `TransportStats`: no item named `TransportStats` in scope
+wz-session-core	wz-session-core/src/stats.rs	1	error: unresolved link to `crate::extshm`: no item named `extshm` in module `wz_session_core`
+wz-session-core	wz-session-core/src/storage_backend.rs	1	error: unresolved link to `crate::storage_history::HistoryStorage`: no item named `storage_history` in module `wz_session_core`
+wz-session-core	wz-session-core/src/storage_backend.rs	2	error: unresolved link to `crate::storage_strip_prefix`: no item named `storage_strip_prefix` in module `wz_session_core`
+wz-session-core	wz-session-core/src/storage_state.rs	1	error: unresolved link to `Self::answer_alignment_query`: the struct `StorageState` has no field or associated item named `answer_alignment_query`
+wz-session-core	wz-session-core/src/storage_state.rs	1	error: unresolved link to `Self::replication_events`: the struct `StorageState` has no field or associated item named `replication_events`
+wz-session-core	wz-session-core/src/storage_state.rs	1	error: unresolved link to `StorageState::process_alignment_reply`: the struct `StorageState` has no field or associated item named `process_alignment_reply`
+wz-session-core	wz-session-core/src/storage_state.rs	1	error: unresolved link to `StorageState::replication_digest`: the struct `StorageState` has no field or associated item named `replication_digest`
+wz-session-core	wz-session-core/src/storage_state.rs	1	error: unresolved link to `StorageState::replication_events`: the struct `StorageState` has no field or associated item named `replication_events`
+wz-session-core	wz-session-core/src/storage_state.rs	1	error: unresolved link to `crate::storage_aligner::EventMetadata`: no item named `storage_aligner` in module `wz_session_core`
+wz-session-core	wz-session-core/src/storage_strip_prefix.rs	1	error: unresolved link to `crate::storage_backend::StorageBackend::put`: no item named `storage_backend` in module `wz_session_core`
+wz-session-core	wz-session-core/src/storage_strip_prefix.rs	1	error: unresolved link to `crate::storage_state::StorageState`: no item named `storage_state` in module `wz_session_core`
+wz-session-core	wz-session-core/src/switchboard.rs	1	error: unresolved link to `SwitchboardRegistry::dispatch`: no item named `SwitchboardRegistry` in scope
+wz-session-core	wz-session-core/src/switchboard.rs	2	error: unresolved link to `SwitchboardRegistry`: no item named `SwitchboardRegistry` in scope
+wz-session-core	wz-session-core/src/wire.rs	1	error: unresolved link to `PushOwned`: no item named `PushOwned` in scope
+wz-session-lwip	wz-session-mcu/src/admin_host.rs	1	error[E0599]: no method named `push_str` found for struct `FixedText<N>` in the current scope
+wz-session-mcu	wz-session-mcu/src/connect_manager.rs	1	error: public documentation for `new` links to private item `Self::in_store`: this item is private
+wz-session-mcu	wz-session-mcu/src/get_mailbox.rs	1	error: unresolved link to `crate::app_layer::SlotDispatch::drain_mailbox`: no item named `SlotDispatch` in module `app_layer`
+wz-session-mcu	wz-session-mcu/src/get_mailbox.rs	1	error: unresolved link to `crate::app_layer::SlotDispatch::get`: no item named `SlotDispatch` in module `app_layer`
+wz-session-mcu	wz-session-mcu/src/get_mailbox.rs	1	error: unresolved link to `crate::slot_client::SlotClientNode::wake`: no item named `slot_client` in module `wz_session_mcu`
+wz-session-mcu	wz-session-mcu/src/group_drive.rs	1	error: unresolved link to `MulticastReplyEnqueue`: no item named `MulticastReplyEnqueue` in scope
+wz-session-mcu	wz-session-mcu/src/group_drive.rs	1	error: unresolved link to `MulticastReplyQueue::pop`: no item named `MulticastReplyQueue` in scope
+wz-session-mcu	wz-session-mcu/src/group_drive.rs	1	error: unresolved link to `MulticastReplyQueue`: no item named `MulticastReplyQueue` in scope
+zenoh-protocol	wz-zenoh-buffers/src/bbuf.rs	1	error[E0425]: cannot find function `thread_rng` in crate `rand`: not found in `rand`
+zenoh-protocol	wz-zenoh-buffers/src/zslice.rs	1	error[E0425]: cannot find function `thread_rng` in crate `rand`: not found in `rand`

@@ -19,6 +19,7 @@
         "ci.yml:interop",
         "ci.yml:feature-gates",
         "ci.yml:transport-modes",
+        "ci.yml:reduced-docs",
         "ci.yml:capi-c-arms",
         "ci.yml:e2e-demo",
         "ci.yml:e2e-demo-pico",
@@ -92,6 +93,7 @@
         "ci.yml:adminspace-lanes",
         "ci.yml:transport-modes",
         "ci.yml:isolated-crates",
+        "ci.yml:reduced-docs",
         "ci.yml:capi-c-arms",
         "ci.yml:e2e-demo",
         "ci.yml:e2e-demo-pico",
@@ -127,7 +129,8 @@
         "ci.yml:pico-client-only",
         "ci.yml:routing-adminspace",
         "ci.yml:adminspace-lanes",
-        "ci.yml:transport-modes"
+        "ci.yml:transport-modes",
+        "ci.yml:reduced-docs"
       ],
       "budget_mb": 700,
       "measured_mb": 659,

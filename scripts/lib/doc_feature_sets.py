@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R3768 (no register item) -- which feature configurations Layer C1bz documents a crate under.
+"""R3768 (no register item) -- which feature configurations Layers C1bz and C1bzr document a crate
+under. The reduced configurations (C1bzr) are R3802's.
 
 THE PROBLEM. C1bz documents a crate with every feature on, because a module behind a feature that
 is off is not compiled and its doc links are never checked. That is right for a crate whose
@@ -30,8 +31,34 @@ and not named is a hole, and one named but held by a set is a stale entry.
 A crate with no `[package.metadata.wz-docs]` is documented once, under `--all-features`, which is
 what the lane always did.
 
+THE OTHER DIRECTION. Those sets are the LARGEST configurations, and a doc link can only break in a
+smaller one: a link from an item that is compiled to an item that is not. `slot_plane`'s docs
+linked `slot_group`, which needs `transport-multicast`; the crate root's linked `connect_manager`,
+which needs `dial`. Both resolved with every feature on and failed in a build without that one.
+
+The REDUCED configurations find that class by giving up one feature at a time. For every set
+above and every feature `g` it holds, the set without `g` (and without what reaches `g`, by the
+same rule) is a configuration in which every item whose cfg does not need `g` is still compiled
+and every item that needs `g` is gone. A link from the first kind to the second fails there and
+nowhere else, whatever else the referring item's cfg asks for, because everything else is on.
+That is what makes giving one up the right family rather than turning one on: a build with one
+feature over a bare crate does not compile a referrer gated on two.
+
+A configuration matters only through what it changes, so two that compile the same items of the
+crate are one. Which items the crate compiles depends on the features its own sources and build
+script name (`feature = "x"`, `CARGO_FEATURE_X`), so a configuration is identified by that set,
+and one with the identity of a largest set measures nothing the largest set has not. The scan
+over-reads (a name in a comment counts), which costs a build and never a configuration.
+
+What this does not reach, stated: a link into a DEPENDENCY's item that a forwarded feature
+(`dep/x`) gates, when the crate names no cfg of its own on that feature. Telling those apart
+would make a forwarded feature part of the identity, and measured when this was written that is
+1188 configurations across the workspace instead of 525, `wz` alone 587 instead of 25. The links a dependency's own
+docs carry are measured in the dependency; the residue is a crate's links INTO it.
+
 Usage:
-    doc_feature_sets.py <crate>      one line per set, each a single cargo argument
+    doc_feature_sets.py <crate>            one line per largest set: `<label> <cargo argument>...`
+    doc_feature_sets.py --reduced <crate>  the same, one line per reduced configuration
     doc_feature_sets.py --selftest
 Exit: 0 sets printed; 1 usage or the workspace could not be read; 2 the manifest is wrong.
 """
@@ -39,12 +66,18 @@ Exit: 0 sets printed; 1 usage or the workspace could not be read; 2 the manifest
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 ALL_FEATURES = "--all-features"
+NO_DEFAULT_FEATURES = "--no-default-features"
 METADATA_KEY = "wz-docs"
+# The cargo targets `cargo doc` documents.
+DOCUMENTED_KINDS = {"lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro", "bin"}
+CFG_FEATURE = re.compile(r'feature\s*=\s*"([^"]+)"')
+BUILD_SCRIPT_FEATURE = re.compile(r"CARGO_FEATURE_([A-Z0-9_]+)")
 
 
 class ManifestError(Exception):
@@ -123,12 +156,88 @@ def documentation_sets(package: dict) -> list[tuple[str, list[str]]]:
     return sets
 
 
-def cargo_arguments(package: dict) -> list[str]:
-    """One cargo argument per documentation of the crate."""
+def largest_sets(package: dict) -> list[tuple[str, list[str]]]:
+    """The declared sets, or the one set of every feature when the crate declares none."""
+    return documentation_sets(package) or [("all", list(package["features"]))]
+
+
+def features_argument(members: list[str]) -> list[str]:
+    """Cargo arguments that enable exactly `members`.
+
+    `--no-default-features`, because `default` is a feature like any other here: a set that gives
+    it up (it reaches a given-up feature) must not get it back from cargo.
+    """
+    return [NO_DEFAULT_FEATURES, f"--features={','.join(members)}"]
+
+
+def cargo_arguments(package: dict) -> list[tuple[str, list[str]]]:
+    """`[(label, cargo arguments)]`, one per largest configuration of the crate."""
     sets = documentation_sets(package)
     if not sets:
-        return [ALL_FEATURES]
-    return [f"--features={','.join(members)}" for _, members in sets]
+        return [("all", [ALL_FEATURES])]
+    return [(name, features_argument(members)) for name, members in sets]
+
+
+def documented_sources(package: dict) -> list[Path]:
+    """The Rust sources of the targets `cargo doc` documents, and the build script."""
+    files: set[Path] = set()
+    for target in package["targets"]:
+        src = Path(target["src_path"])
+        if "custom-build" in target["kind"]:
+            files.add(src)
+        elif DOCUMENTED_KINDS & set(target["kind"]):
+            files.update(src.parent.rglob("*.rs"))
+    return sorted(files)
+
+
+def named_features(features: dict[str, list[str]], texts: list[str]) -> set[str]:
+    """The features of `features` that the source `texts` name, as a cfg or as a build script's
+    `CARGO_FEATURE_` variable."""
+    by_env = {name.upper().replace("-", "_"): name for name in features}
+    named: set[str] = set()
+    for text in texts:
+        named.update(n for n in CFG_FEATURE.findall(text) if n in features)
+        named.update(by_env[n] for n in BUILD_SCRIPT_FEATURE.findall(text) if n in by_env)
+    return named
+
+
+def reduced_sets(
+    package: dict, named: set[str]
+) -> list[tuple[str, list[str]]]:
+    """Every largest set without one feature it holds, one per distinct compiled crate.
+
+    `named` is what decides which items the crate compiles; a reduced set whose named features are
+    those of a largest set, or of a reduced set already listed, is dropped.
+    """
+    features: dict[str, list[str]] = package["features"]
+    largest = largest_sets(package)
+
+    def identity(members: list[str]) -> frozenset[str]:
+        return frozenset(named.intersection(members))
+
+    seen = {identity(members) for _, members in largest}
+    reduced: list[tuple[str, list[str]]] = []
+    for set_name, members in largest:
+        for given_up in members:
+            if given_up not in named:
+                continue
+            kept = [f for f in members if given_up not in implied_features(features, f)]
+            key = identity(kept)
+            if key in seen:
+                continue
+            seen.add(key)
+            reduced.append((f"{set_name}-without-{given_up}", kept))
+    return reduced
+
+
+def reduced_arguments(package: dict) -> list[tuple[str, list[str]]]:
+    """`[(label, cargo arguments)]`, one per reduced configuration of the crate."""
+    texts = [
+        path.read_text(encoding="utf-8", errors="replace")
+        for path in documented_sources(package)
+    ]
+    named = named_features(package["features"], texts)
+    return [(name, features_argument(kept)) for name, kept in reduced_sets(package, named)]
 
 
 def workspace_package(crate: str) -> dict:
@@ -207,10 +316,65 @@ def selftest() -> int:
         raise AssertionError("a stale refused entry was accepted")
     config["refused"] = ["mixed-preset"]
     arguments = cargo_arguments(package)
-    assert all(a.startswith("--features=") for a in arguments), arguments
+    assert [label for label, _ in arguments] == ["ap", "mcu"], arguments
+    assert all(
+        args[0] == NO_DEFAULT_FEATURES and args[1].startswith("--features=")
+        for _, args in arguments
+    ), arguments
 
     # No metadata is one build with every feature, as before.
-    assert cargo_arguments({"features": features}) == [ALL_FEATURES]
+    assert cargo_arguments({"features": features}) == [("all", [ALL_FEATURES])]
+
+    # The reduced configurations. `slot` and `group` are named by the sources, `group` needs
+    # `slot`, and `preset` and `forward` are named by none.
+    reduce = {
+        "default": ["slot"],
+        "slot": [],
+        "group": ["slot"],
+        "preset": ["group"],
+        "forward": ["dep:x", "x/feat"],
+    }
+    texts = [
+        '#[cfg(feature = "slot")] mod a;',
+        '#[cfg(all(feature = "group", not(feature = "nope")))] mod b;',
+    ]
+    named = named_features(reduce, texts)
+    assert named == {"slot", "group"}, named
+    # A build script's variable names the feature it spells.
+    assert named_features(reduce, ['env::var("CARGO_FEATURE_FORWARD")']) == {"forward"}
+
+    lone = {"features": reduce}
+    sets = reduced_sets(lone, named)
+    assert [label for label, _ in sets] == ["all-without-slot", "all-without-group"], sets
+    # Giving up `slot` gives up everything that reaches it, `default` included, and cargo is
+    # told so: `default` must not come back.
+    without_slot = dict(sets)["all-without-slot"]
+    assert without_slot == ["forward"], without_slot
+    assert features_argument(without_slot) == [NO_DEFAULT_FEATURES, "--features=forward"]
+    assert dict(sets)["all-without-group"] == ["default", "slot", "forward"], sets
+    # A feature the sources do not name compiles no other item; with no name at all there is
+    # nothing to give up.
+    assert reduced_sets(lone, set()) == []
+
+    # Two largest sets whose reduced forms compile the same items are measured once, and a
+    # reduced form equal to a largest set is not measured again.
+    twin = {
+        "features": {"a": [], "b": [], "c": []},
+        "metadata": {
+            METADATA_KEY: {
+                "feature-sets": [
+                    {"name": "no-a", "except": ["a"]},
+                    {"name": "no-b", "except": ["b"]},
+                ]
+            }
+        },
+    }
+    labels = [label for label, _ in reduced_sets(twin, {"a", "b", "c"})]
+    assert labels == ["no-a-without-b", "no-a-without-c", "no-b-without-c"], labels
+    labels = [label for label, _ in reduced_sets(twin, {"a", "b"})]
+    assert labels == ["no-a-without-b"], labels
+    # `no-b` without `a` compiles what `no-a` compiles when only `a` is named.
+    assert reduced_sets(twin, {"a"}) == [], reduced_sets(twin, {"a"})
 
     # A set that gives up a feature the crate lacks, an unnamed set and a repeated one are refused.
     for bad in (
@@ -234,12 +398,16 @@ def selftest() -> int:
 def main(argv: list[str]) -> int:
     if argv == ["--selftest"]:
         return selftest()
+    configurations = cargo_arguments
+    if argv[:1] == ["--reduced"]:
+        configurations = reduced_arguments
+        argv = argv[1:]
     if len(argv) != 1 or argv[0].startswith("-"):
         print(__doc__, file=sys.stderr)
         return 1
     try:
-        for argument in cargo_arguments(workspace_package(argv[0])):
-            print(argument)
+        for label, arguments in configurations(workspace_package(argv[0])):
+            print(" ".join([label, *arguments]))
     except ManifestError as error:
         print(f"doc-feature-sets: {argv[0]}: {error}", file=sys.stderr)
         return 2
