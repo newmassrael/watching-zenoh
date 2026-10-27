@@ -671,6 +671,13 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 # `group` (the feature an image selects) is a forward of the three and gates
                 # nothing. Selected by an image (`host-slot-node --features multicast`).
                 "codec-push",
+                # The fixed node's close, reset and status (`NodeDesk`, `StoreNode`,
+                # `LifecyclePermits` and `ConnectManager::reset_node` in `connect_manager`,
+                # and the flags, mirror and record of generations behind them in its store).
+                # Items of one module behind a feature, not a crate-root `pub mod`, selected
+                # by an image or a host node that binds the verbs (`host-slot-node
+                # --features control`), never added to by a library caller.
+                "lifecycle-verbs",
                 "session-slot",
                 "test-support",
                 "transport-multicast",
@@ -1134,6 +1141,7 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
             "codec-response",
             "codec-response-final",
             "dial",
+            "lifecycle-verbs",
             "liveliness-token",
             "query-get",
             "session-slot",

@@ -11500,24 +11500,30 @@ layer_c1m_session_lwip() {
     # verbs of a node that binds only open to refusals by name, and `whoami`): TWO in every leg that
     # runs the crate's own tests, 17 -> 19, 18 -> 20, 45 -> 47, 21 -> 23, 55 -> 57. The connect
     # manager's store gains the typed requests, the record of generations and the node's lifecycle
-    # verbs, and four tests in the three legs that compile it: the fixed node held to the table of
-    # every verb, a reset that dials again and a close that does not, the order of requests made
-    # outside the loop, and the record of generations: 47 -> 51, 57 -> 61, peer nodes 22 -> 26.
+    # verbs behind the feature `lifecycle-verbs` (an image that binds none keeps its flash and the
+    # stack of its tick: measured +352 and +1,988 bytes on the Zephyr client without the gate, and
+    # none with it), so the four tests of those verbs run in a leg of their own after "peer nodes":
+    # the fixed node held to the table of every verb, a reset that dials again and a close that does
+    # not, the order of requests made outside the loop, and the record of generations (26).
     _runci_guarded_test "C1m mcu default" 19 \
         cargo test -p wz-session-mcu --quiet || return 1
     _runci_guarded_test "C1m mcu unicast app layer" 20 \
         cargo test -p wz-session-mcu \
         --features query-queryable,codec-response,codec-response-final,pubsub-put \
         --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace-write" 51 \
+    _runci_guarded_test "C1m mcu adminspace-write" 47 \
         cargo test -p wz-session-mcu --features adminspace-write --quiet || return 1
-    _runci_guarded_test "C1m mcu peer nodes" 26 \
+    _runci_guarded_test "C1m mcu peer nodes" 22 \
         env WZ_LIMIT_MAX_PEER_NODES=2 \
         cargo test -p wz-session-mcu --features adminspace-write --lib connect_manager \
         --quiet || return 1
+    _runci_guarded_test "C1m mcu lifecycle verbs" 26 \
+        env WZ_LIMIT_MAX_PEER_NODES=2 \
+        cargo test -p wz-session-mcu --features adminspace-write,lifecycle-verbs --lib \
+        connect_manager --quiet || return 1
     _runci_guarded_test "C1m mcu adminspace-core" 23 \
         cargo test -p wz-session-mcu --features adminspace-core --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace read+write" 61 \
+    _runci_guarded_test "C1m mcu adminspace read+write" 57 \
         cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
     # The fixed-memory client node's shared mechanism (`slot_node`, compiled only on the slot profile
     # with the client core): no leg above selects both, so its tests ran in none until this one. 28 =

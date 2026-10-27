@@ -1265,9 +1265,10 @@ being skipped. The rows:
    profile implements it; the rows for the three verbs run on the heap
    adapter. This proves the function on the profile that already has every
    effect.
-3. Step C: the fixed-memory store gains the typed requests, the link mirror
-   and the generation record; the control port gains the three commands;
-   the rows run on the process adapter and on the fixed in-band adapter.
+3. Step C (built in part, 6.8): the fixed-memory store gains the typed
+   requests, the link mirror and the generation record; the control port
+   gains the commands; the rows run on the fixed node and on the process.
+   The fixed in-band query does not serve the new verbs yet.
 4. Step D: the capabilities and the capability document.
 
 ### 6.5 Decisions (owner, 2026-10-26)
@@ -1358,3 +1359,65 @@ differs by profile, and the table says so by name: a reset for a peer the
 node holds nothing of is `not_found` and then `duplicate` on the heap
 profile, and `NoRoom` on a fixed node with no room for that peer. The heap
 adapter (`lifecycle_query` tests) conforms to all nine.
+
+### 6.8 Step C, built in part
+
+What the fixed-memory node holds for the verbs is in the store of its
+connect manager (`PeerStore`), and `StoreNode` is the `LifecycleNode` over
+it, so `lifecycle_verdict` decides on the fixed node what it decides on the
+heap node. What was built and how it differs from the sketch of 6.2:
+
+- **Behind the feature `lifecycle-verbs` of `wz-session-mcu`.** Measured on
+  the Zephyr client images (`kit-lane.sh build`, stack gate on the ELF), the
+  first version, with nothing gated, cost an image that binds no verb 352
+  bytes of worst chain (6,956 to 7,308) and 1,988 bytes of flash. The
+  feature takes the flags, the mirror's links and states, the record of
+  generations, `reset_node`, `NodeDesk`, `StoreNode` and the permits out; with
+  it off the chain is 6,956, 6,956, 7,108 and 7,448 bytes on the four client
+  images, the parent's exactly, and the text is 4 bytes smaller. It is one
+  feature for the three verbs; the split per verb is step D. The host node
+  turns it on with its `control` feature.
+- **One entry per node, not a queue.** A request made outside the loop
+  becomes flags on the node's entry (`open`, `withdraw`, `closing`,
+  `reopen`), and the manager's next tick carries them out in that order. The
+  table is the size of the room the node was built with (`MAX_PEER_NODES`),
+  because an entry exists only for a node that is held or was asked for, and
+  those are counted against that room: no request is lost for want of a
+  place. A close of a node that is not known makes no entry and answers
+  `not_found`; an open after a close is taken again once the close has run.
+- **The link mirror is `(zid, links, state)`.** A node row holds one session,
+  so `links` is 0 or 1; a session an endpoint's dial reached is the
+  endpoint's row and is not counted for a node. While a close or a reset is
+  ordered and not yet carried out, the link counts as `closing`; a close
+  takes the machine's row out of the status (the intent has left), a reset
+  keeps it.
+- **A reset is a verb of the manager** (`reset_node`): the session is hung
+  up and told to the planner as down (`face_down` if it was up, a failed dial
+  if it was not), so the machine waits and dials again. A test holds that it
+  dials again after its wait and that a close does not.
+- **The generation record is bounded and does not evict** (6.5): one place per
+  peer up to the room, `NoRoom` for a peer outside it, and a peer already in
+  it keeps its answer. The default build (`MAX_PEER_NODES` is 0) has no
+  place, so every reset is refused by name, which the host process shows.
+- **Permits per verb.** `LifecyclePermits` answers per `Verb`; `WritePermit`
+  is the permit of a node whose only authority is the configuration's write
+  permit, and it permits `open` and nothing else. Who may close, reset and
+  read the status of a fixed node is stated by the image that binds those
+  verbs, and none does by default.
+- **The control port reads five commands** (`open`, `close`, `reset <peer>
+  <generation>`, `status`, `whoami`) and answers `whoami` with the node's zid
+  as the host spells it, `{"zid":"..."}`, when the host knows it. The host
+  node answers all of them over its standard input; a node that binds only
+  open (`OpeningOnly`) refuses the other three by name.
+- **The table's cases on the fixed node.** `SessionCase` says which cases a
+  node that holds one session per peer can be put in
+  (`reachable_with_one_link_per_peer`); the two with two links to one peer
+  are not run on it. A new case with one link says the same of a close, a
+  repeated close and the status after them. The reset of a peer with nothing
+  held is run twice on the fixed node, with room in the record and with it
+  full.
+
+Not built: the fixed in-band query does not serve `close`, `reset` and
+`status` keys yet, so no Zephyr image has the verbs and the capability
+document lists none of them (step D). The count of links a node reached
+through an endpoint holds is not kept per node.
