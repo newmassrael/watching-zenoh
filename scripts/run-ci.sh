@@ -10795,47 +10795,69 @@ layer_c1cs_capability_cost() {
 # liveliness token the node sees while it hears the node's, asks it which tokens are alive, and
 # delivers its own puts and gets to its own subscribers and queryables, and lists the node as its
 # one transport and hears it leave (`crates/wz-capi-pico/tests/client_only_dials_a_listener.rs`). Such a build cannot listen, so
-# the node is the FULL build's `hold_a_listener` example, run as a process. A feature set is one
-# per build, so this takes two invocations, which no row of the non-default test table (built
-# on the default features) can spell.
+# the node is the `hold_a_listener` example of a build that does, run as a process, and it is
+# run twice: the full build's (the tokio engine) and the cooperative engine's (`engine-coop` with
+# `peer`, step L4 of `docs/capi-pico-on-coop-engine.md`), so each engine's client is held against
+# each engine's listener. A feature set is one per build, so this takes several invocations,
+# which no row of the non-default test table (built on the default features) can spell.
 #
-# Four legs against a listener: either engine, with the answering end and without it. The legs without it are
+# Four legs against each listener: either engine, with the answering end and without it. The legs without it are
 # not a repeat: a querier still has to hear the listener's queryable there, and the tokio
 # engine's requesting end did not until the round that added this lane. The count is exact
 # per leg, so a test the build stops compiling is a failure and not a smaller pass.
 layer_c1co_pico_client_dials_a_listener() {
+    # The node is the example of a build that listens, once on each engine: the tokio engine's
+    # (the default build) and the cooperative engine's (`engine-coop` with `peer`, and the
+    # multi-threaded arm so its read task accepts). Each build replaces the example in the
+    # target directory, so each is kept under a name of its own.
+    local examples="$PWD/crates/target/debug/examples"
     (cd crates && cargo build -p wz-capi-pico --example hold_a_listener) || return 1
-    local listener="$PWD/crates/target/debug/examples/hold_a_listener"
-    local engine answering expect admin
-    for engine in engine-coop engine-tokio; do
-        for answering in ",queryable" ""; do
-            # The admin space is a queryable, so it joins the legs that have the answering end.
-            if [[ -n "$answering" ]]; then
-                expect=11
-                admin=",admin-space"
-            else
-                expect=8
-                admin=""
-            fi
-            _runci_guarded_test "C1co ${engine}${answering}" "$expect" \
+    cp "$examples/hold_a_listener" "$examples/hold_a_listener-tokio" || return 1
+    (cd crates && cargo build -p wz-capi-pico --no-default-features \
+        --features engine-coop,peer,multi-thread,link-udp,query,queryable,liveliness \
+        --example hold_a_listener) || return 1
+    cp "$examples/hold_a_listener" "$examples/hold_a_listener-coop" || return 1
+    # The real zenoh-pico dials each listener too: upstream's own `z_pub`, `z_sub` and `z_get`
+    # against the node, so the accepting side's handshake is read by a foreign implementation
+    # and not only by this tree's codec (`crates/wz-integration-tests/tests/pico_dials_a_wz_listener.rs`).
+    bash scripts/build-zenoh-pico-cli.sh || return 1
+    local listener_engine listener engine answering expect admin
+    for listener_engine in tokio coop; do
+        listener="$examples/hold_a_listener-${listener_engine}"
+        _runci_guarded_test "C1co zenoh-pico dials a ${listener_engine} listener" 3 \
+            env WZ_PICO_LISTENER_BIN="$listener" \
+            cargo test -p wz-integration-tests --test pico_dials_a_wz_listener \
+            -- --ignored || return 1
+        for engine in engine-coop engine-tokio; do
+            for answering in ",queryable" ""; do
+                # The admin space is a queryable, so it joins the legs that have the answering end.
+                if [[ -n "$answering" ]]; then
+                    expect=11
+                    admin=",admin-space"
+                else
+                    expect=8
+                    admin=""
+                fi
+                _runci_guarded_test "C1co ${engine}${answering} on a ${listener_engine} listener" "$expect" \
+                    env WZ_PICO_LISTENER_BIN="$listener" \
+                    cargo test -p wz-capi-pico --no-default-features \
+                    --features "${engine},link-udp,query${answering}${admin},liveliness-get,unstable-api,connectivity,local-subscriber,local-queryable" \
+                    --test client_only_dials_a_listener || return 1
+            done
+        done
+        # Two legs of the advanced plane, one per engine. The plane's rules are the neutral
+        # `wz-ext-pubsub`'s, hosted over the engine's port, so the same advanced publisher and
+        # subscriber run on either; a subscriber declared after the publisher put is handed the
+        # publisher's cache and then its live puts, in order (`mod advanced` of the same test).
+        # The count is MEASURED on each engine (11, the build with the liveliness and local
+        # switches and no admin space), and exact, as the legs above are.
+        for engine in engine-coop engine-tokio; do
+            _runci_guarded_test "C1co ${engine} advanced on a ${listener_engine} listener" 11 \
                 env WZ_PICO_LISTENER_BIN="$listener" \
                 cargo test -p wz-capi-pico --no-default-features \
-                --features "${engine},link-udp,query${answering}${admin},liveliness-get,unstable-api,connectivity,local-subscriber,local-queryable" \
+                --features "${engine},link-udp,query,queryable,liveliness,liveliness-get,advanced,unstable-api,connectivity,local-subscriber,local-queryable" \
                 --test client_only_dials_a_listener || return 1
         done
-    done
-    # Two legs of the advanced plane, one per engine. The plane's rules are the neutral
-    # `wz-ext-pubsub`'s, hosted over the engine's port, so the same advanced publisher and
-    # subscriber run on either; a subscriber declared after the publisher put is handed the
-    # publisher's cache and then its live puts, in order (`mod advanced` of the same test). The
-    # count is MEASURED on each engine (11, the build with the liveliness and local switches and
-    # no admin space), and exact, as the legs above are.
-    for engine in engine-coop engine-tokio; do
-        _runci_guarded_test "C1co ${engine} advanced" 11 \
-            env WZ_PICO_LISTENER_BIN="$listener" \
-            cargo test -p wz-capi-pico --no-default-features \
-            --features "${engine},link-udp,query,queryable,liveliness,liveliness-get,advanced,unstable-api,connectivity,local-subscriber,local-queryable" \
-            --test client_only_dials_a_listener || return 1
     done
     # A fifth leg: the cooperative client that scouts. A `z_open` that names no locator looks for
     # one over the engine's own window, and finds nobody on a group nobody answers, which the
