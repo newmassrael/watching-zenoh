@@ -293178,6 +293178,40 @@
         "The hosted result of this push is read per job at the start of the next round; the reds that the carry of round 3740 names as not of this family were not re-checked here."
       ]
     },
+    "Round 3775": {
+      "decision_summary": "Hosted reds repaid that the accept-path gating left. The generated session machine gates the accept events (AcceptingInactivityTimeout, InboundStart, InitSynReceived, OpenSynReceived) by session-unicast-accept, and code that names them was not gated. Seven builds failed: wz-capi-core without default features (AcceptBounds was named through accept_loop, which needs routing-accept), wz-runtime-tokio's accept-open functions in session_open.rs, two wz-session-core unit tests in inbound.rs, and the jobs built on them. AcceptBounds is plain data that the C interfaces carry for every role, so it moves to its own module, accept_bounds, which every build has; accept_loop re-exports it and every old path still names it. The accept-open functions carry session-unicast-accept, routing-accept now implies it (the loop opens the sessions it accepts), and the two tests carry it. Two pins of the close-ingress reason moved after re-reading the clauses that cite plan_endpoint and ConnectReconcile.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio: new accept_bounds module (AcceptBounds, its Default and timeouts_after), declared in lib.rs without a feature; accept_loop re-exports it; session_open.rs accept-open functions gain session-unicast-accept; Cargo.toml routing-accept implies session-unicast-accept.",
+        "crates/wz-capi-core: drive.rs, faces.rs and open_plan.rs name AcceptBounds through accept_bounds.",
+        "crates/wz-session-core/src/inbound.rs: two unit tests carry session-unicast-accept.",
+        "docs/reason-review-pins.md: two rows of session-close-ingress moved to R3775."
+      ],
+      "verification_bullets": [
+        "On the build host, the commands the hosted jobs failed on, at the repaired tree: wz-session-core --features session-extshm,dissect --lib (shm tests), wz-session-core with session-unicast-accept and codec-init-body (inbound tests), wz-runtime-tokio --features routing-accept,transport-link-ws --lib accept_loop, wz-runtime-tokio lib at default features and with transport-unicast alone, cargo build -p wz-capi-pico, and wz-capi-core with no default features over all targets: all pass. Clippy with -D warnings in the same configurations for the three crates. The reason pin gate after the pins moved, and the census. The batch of the remaining gates (feature model, citation anchors, count guard) was stopped by the machine's memory pressure and not rerun. Read in the hosted run before this: the wz-capture tests and the slot size record that failed there pass at the tip; the E7s admission scaling panic at wz_router_hat_data_plane_scaling.rs:536 was not reproduced."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Not repaired, to read in the next hosted run of this tip: the E7s router-hat scaling panics (wz_router_hat_admission_when_overloaded_and_short_of_cpu, wz_router_hat_cost_per_message_against_subscribers_and_churn at line 536 of the scaling test), whether a pure scheduling failure under load or a regression; and the validate + verify + test job, whose failure line was not found. Whether the feature model, citation anchor and count guard gates hold for this round was not checked locally (memory)."
+      ],
+      "publishable_decision_summary": "Hosted reds repaid that the accept-path gating left. The generated session machine gates the accept events (AcceptingInactivityTimeout, InboundStart, InitSynReceived, OpenSynReceived) by session-unicast-accept, and code that names them was not gated. Seven builds failed: wz-capi-core without default features (AcceptBounds was named through accept_loop, which needs routing-accept), wz-runtime-tokio's accept-open functions in session_open.rs, two wz-session-core unit tests in inbound.rs, and the jobs built on them. AcceptBounds is plain data that the C interfaces carry for every role, so it moves to its own module, accept_bounds, which every build has; accept_loop re-exports it and every old path still names it. The accept-open functions carry session-unicast-accept, routing-accept now implies it (the loop opens the sessions it accepts), and the two tests carry it. Two pins of the close-ingress reason moved after re-reading the clauses that cite plan_endpoint and ConnectReconcile.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio: new accept_bounds module (AcceptBounds, its Default and timeouts_after), declared in lib.rs without a feature; accept_loop re-exports it; session_open.rs accept-open functions gain session-unicast-accept; Cargo.toml routing-accept implies session-unicast-accept.",
+        "crates/wz-capi-core: drive.rs, faces.rs and open_plan.rs name AcceptBounds through accept_bounds.",
+        "crates/wz-session-core/src/inbound.rs: two unit tests carry session-unicast-accept.",
+        "docs/reason-review-pins.md: two rows of session-close-ingress moved to R3775."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host, the commands the hosted jobs failed on, at the repaired tree: wz-session-core --features session-extshm,dissect --lib (shm tests), wz-session-core with session-unicast-accept and codec-init-body (inbound tests), wz-runtime-tokio --features routing-accept,transport-link-ws --lib accept_loop, wz-runtime-tokio lib at default features and with transport-unicast alone, cargo build -p wz-capi-pico, and wz-capi-core with no default features over all targets: all pass. Clippy with -D warnings in the same configurations for the three crates. The reason pin gate after the pins moved, and the census. The batch of the remaining gates (feature model, citation anchors, count guard) was stopped by the machine's memory pressure and not rerun. Read in the hosted run before this: the wz-capture tests and the slot size record that failed there pass at the tip; the E7s admission scaling panic at wz_router_hat_data_plane_scaling.rs:536 was not reproduced."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Not repaired, to read in the next hosted run of this tip: the E7s router-hat scaling panics (wz_router_hat_admission_when_overloaded_and_short_of_cpu, wz_router_hat_cost_per_message_against_subscribers_and_churn at line 536 of the scaling test), whether a pure scheduling failure under load or a regression; and the validate + verify + test job, whose failure line was not found. Whether the feature model, citation anchor and count guard gates hold for this round was not checked locally (memory)."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
