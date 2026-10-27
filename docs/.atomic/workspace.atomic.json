@@ -294814,6 +294814,48 @@
         "The codec generator requests (an encoder that gives its length and stores into a window; a fold over a list's entries) were sent to the SCE session, which asks for the cost of the generated XParts encoder against the hand-written plain reply and of one iterator walk against the hand fold before it drafts the ADR; neither is measured yet."
       ]
     },
+    "Round 3815": {
+      "decision_summary": "Z5 of the seam note, scouting, landed, and the surface of zenoh falls from 18, 131 and 135 lines of its three arms to 2, 115 and 119: scout with its builder (callback, callback_mut, with), Scout with stop, the scouting module with Hello, and the root re-export. Decision: the crate reaches the engine and the port gains nothing, because a scout is no session's and needs only a configuration; D1 stands. The engine already ran upstream's cadence for a session that looks for its peers, and it is now one drive for both: ScoutLink::scout_each hands each Hello to its caller as the window gathers it, ScoutingPlan::for_scout reads the group and not whether multicast scouting is enabled, and ScoutStream is joined by its drop. One difference is recorded: the engine's Scout announces an id where upstream's announces none. Eight faults, none missed. Two review pins move: the differential, and session_actions.rs, left behind by another session's refactor; the cited anchor is untouched.",
+      "changes_bullets": [
+        "crates/wz-capi-core/src/scouting_node.rs: ScoutLink::scout_each and Delivery (the cadence loop, handing each Hello over once, of the roles asked for, as it arrives), autoconnect on top of it, ScoutingPlan::for_scout, ScoutLink::bind_for_scout over a shared sockets function, ScoutStream; two tests of the plan and of the hand-over.",
+        "crates/wz-zenoh/src/api/scouting.rs and crates/wz-zenoh/src/api/builders/scouting.rs (upstream's types and builder, the notice kept), the scouting module and the scout re-export in crates/wz-zenoh/src/lib.rs, start_scout in crates/wz-zenoh/src/api/session.rs (the tokio engine's, and a build with no engine refuses), and seven unit tests.",
+        "conformance/differential/tests/zenoh_api_session.rs: scoutings for each side and the test that compares them; scripts/run-ci.sh: the session differential counts 19.",
+        "deploy/upstream-api (three wz surfaces) and scripts/lib/rust_api_surface.py: the ratchet of zenoh moves to 2, 115 and 119. docs/zenoh-api-on-the-engine.md: Z5. docs/reason-review-pins.md: the differential and session_actions.rs."
+      ],
+      "verification_bullets": [
+        "rustfmt is clean; clippy with warnings denied passes for zenoh over all targets with the defaults and with all features, for the capi core with all features, and for the C and pico ABIs; the surface gate passes at 2, 115 and 119 with 0 extra; the unit tests of zenoh pass with the defaults and, on two reruns, with all features; the capi core lib tests pass with the defaults and with all features; the C ABI test of the session's own autoconnect passes on the new drive; the session differential passes whole (19 tests), the scouting one with equal transcripts.",
+        "Eight faults, each seen as a test failing and none as a compile error after one redo: the role filter, the count of what was handed over, the doubling of the windows, the check of whether scouting is enabled, the stop on drop, the roles asked for, the locators, and the mapping of the roles; the sources are identical to their copies after the restores.",
+        "One run of the all-features unit tests failed in a test of an older slice, a callback that asks a get and waits for it, with a nested get that did not end in five seconds; two reruns of the same tree passed. Not mended here: see the carry.",
+        "Not run here: the hosted run."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "A flake of an older slice, found by this round and not caused by it: a_callback_may_ask_a_get_and_wait_for_its_replies failed once in four runs of the same tree, on the nested get of the callback of a get, which ran on the drive thread and did not end in five seconds. It is the question of D4 (a callback that waits for a get) under the drive thread instead of the caller, and it is the next item before Z6a.",
+        "Next in order: Z6a, information (info().links(), transports() and the link and transport event listeners), then Z6b, the timestamp stack, and Z6c, the rest of the unstable arm."
+      ],
+      "publishable_decision_summary": "Z5 of the seam note, scouting, landed, and the surface of zenoh falls from 18, 131 and 135 lines of its three arms to 2, 115 and 119: scout with its builder (callback, callback_mut, with), Scout with stop, the scouting module with Hello, and the root re-export. Decision: the crate reaches the engine and the port gains nothing, because a scout is no session's and needs only a configuration; D1 stands. The engine already ran upstream's cadence for a session that looks for its peers, and it is now one drive for both: ScoutLink::scout_each hands each Hello to its caller as the window gathers it, ScoutingPlan::for_scout reads the group and not whether multicast scouting is enabled, and ScoutStream is joined by its drop. One difference is recorded: the engine's Scout announces an id where upstream's announces none. Eight faults, none missed. Two review pins move: the differential, and session_actions.rs, left behind by another session's refactor; the cited anchor is untouched.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-core/src/scouting_node.rs: ScoutLink::scout_each and Delivery (the cadence loop, handing each Hello over once, of the roles asked for, as it arrives), autoconnect on top of it, ScoutingPlan::for_scout, ScoutLink::bind_for_scout over a shared sockets function, ScoutStream; two tests of the plan and of the hand-over.",
+        "crates/wz-zenoh/src/api/scouting.rs and crates/wz-zenoh/src/api/builders/scouting.rs (upstream's types and builder, the notice kept), the scouting module and the scout re-export in crates/wz-zenoh/src/lib.rs, start_scout in crates/wz-zenoh/src/api/session.rs (the tokio engine's, and a build with no engine refuses), and seven unit tests.",
+        "conformance/differential/tests/zenoh_api_session.rs: scoutings for each side and the test that compares them; scripts/run-ci.sh: the session differential counts 19.",
+        "deploy/upstream-api (three wz surfaces) and scripts/lib/rust_api_surface.py: the ratchet of zenoh moves to 2, 115 and 119. docs/zenoh-api-on-the-engine.md: Z5. docs/reason-review-pins.md: the differential and session_actions.rs."
+      ],
+      "publishable_verification_bullets": [
+        "rustfmt is clean; clippy with warnings denied passes for zenoh over all targets with the defaults and with all features, for the capi core with all features, and for the C and pico ABIs; the surface gate passes at 2, 115 and 119 with 0 extra; the unit tests of zenoh pass with the defaults and, on two reruns, with all features; the capi core lib tests pass with the defaults and with all features; the C ABI test of the session's own autoconnect passes on the new drive; the session differential passes whole (19 tests), the scouting one with equal transcripts.",
+        "Eight faults, each seen as a test failing and none as a compile error after one redo: the role filter, the count of what was handed over, the doubling of the windows, the check of whether scouting is enabled, the stop on drop, the roles asked for, the locators, and the mapping of the roles; the sources are identical to their copies after the restores.",
+        "One run of the all-features unit tests failed in a test of an older slice, a callback that asks a get and waits for it, with a nested get that did not end in five seconds; two reruns of the same tree passed. Not mended here: see the carry.",
+        "Not run here: the hosted run."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A flake of an older slice, found by this round and not caused by it: a_callback_may_ask_a_get_and_wait_for_its_replies failed once in four runs of the same tree, on the nested get of the callback of a get, which ran on the drive thread and did not end in five seconds. It is the question of D4 (a callback that waits for a get) under the drive thread instead of the caller, and it is the next item before Z6a.",
+        "Next in order: Z6a, information (info().links(), transports() and the link and transport event listeners), then Z6b, the timestamp stack, and Z6c, the rest of the unstable arm."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
