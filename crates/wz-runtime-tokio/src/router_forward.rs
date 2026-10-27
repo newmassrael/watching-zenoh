@@ -448,6 +448,8 @@ mod egress;
 mod egress_tests;
 #[cfg(test)]
 mod peer_differential_tests;
+#[cfg(test)]
+mod peer_network_tests;
 mod shed;
 #[cfg(test)]
 mod shed_tests;
@@ -8513,6 +8515,20 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // remote there is told by the tree re-advertise at the next recompute,
         // and a replay beside it would send the same declaration twice.
         if self.tables.runs_linkstate_peers(tier) {
+            return;
+        }
+        // Nor to a CLIENT face, in any node mode: the pin's broker hat, which
+        // owns it, re-propagates nothing to a new face, "the broker hat is never
+        // the north hat, thus there are no interests to re-propagate"
+        // (`zenoh/src/net/routing/hat/broker/mod.rs` @ `// 1. The broker hat is never the north hat, thus there are no interests to re-propagate`).
+        // A client asks, with an Interest, and is answered by it; zenoh-pico in
+        // client mode does send one (`_z_add_interest` writes on the wire for a
+        // client). The token plane below already leaves a client out on the same
+        // evidence; the subscriber and queryable planes had not. Found by the
+        // network gate (`peer_network_tests`): a client attached after a
+        // subscription was told it unasked by the region-hat peer and by no one
+        // in the pin.
+        if is_leaf(tier, self.tables.node_mode) {
             return;
         }
         for keyexpr in self.derived_cross_tier_subs_into(tier) {

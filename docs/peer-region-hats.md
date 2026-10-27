@@ -279,7 +279,49 @@ query, the answer after one branch ended and the final after both).
 Not covered in the query plane: a query forwarded across more than one hop of a
 tree, which needs the three-hop scene the publish plane lacks too.
 
-## 9. Open
+## 9. The network gate
+
+The one-node gate scripts what arrives on each face, so it cannot see what only
+a network does. `router_forward/peer_network_tests.rs` builds the same topology
+from `LinkstateForwarder` nodes and from region-hat peers and wires the nodes to
+each other with a deterministic frame pump: what a node sent on a face is
+delivered, in order, to the face at the far end until nothing is in flight; then
+every node ticks and the pump runs again until a tick sends nothing. Nothing is
+handed over: a link-state graph has to be exchanged, a subscription has to be
+flooded, a query's answer has to find its way back. What is compared is what
+the END POINTS (clients attached to a node) received after each step, with the
+duplicates a multiset keeps, and a pump that does not settle is a failure of its
+own, so loop freedom is graded by the same run that grades delivery.
+
+Nine scenes: two nodes; a chain of four (a Put and a query across three links);
+a star; a ring of four (two paths, a flood that can go round); a diamond; a chain
+that grows (a node and its publisher join after the subscription); a line
+published from the middle; a subscription withdrawn across three links; a ring
+that loses a link (the tree is recomputed and the next Put goes the other way,
+then the last way is cut); queries along a line.
+
+- **Link-state: equal in every scene, and exactly once.** Every Put reaches each
+  subscriber once across three links, through a hub, round a ring, along two
+  equal paths and after a cut; a query along a line is answered and sent exactly
+  one final.
+- **Gossip: equal, and the equal is meaningful.** A Put crosses one link and
+  never a second, in both planes, which is the pin's peer hat (the rule of
+  section 7), counted rather than assumed.
+- **A defect, found by the gate and fixed in the region-hat forwarder.** A client
+  attached AFTER a subscription was told it, unasked, by the region-hat peer and
+  by nothing in the pin: the pin's broker hat, which owns a client face, "is
+  never the north hat, thus there are no interests to re-propagate"
+  (`zenoh/src/net/routing/hat/broker/mod.rs` @ `// 1. The broker hat is never the north hat, thus there are no interests to re-propagate`),
+  and a client asks with an Interest, as zenoh-pico in client mode does. The
+  token plane already left a client out of the face-up replay on that evidence;
+  the subscriber and queryable planes had not. The replay now skips a client
+  face. This is a rule of the broker hat and so applies to a ROUTER node too,
+  where it was the same deviation: it is a change to the router's behaviour, made
+  because the pin is the oracle there as here, and the 266 router tests (264
+  and the two of this gate) pass with it; the router's end-to-end legs that need
+  a pico or a stock zenohd are read on hosted CI.
+
+## 10. Open
 
 - The size of step 1's list is unknown until it is made, and the number of
   rounds after it follows from it. The router's own program ran from round 2865

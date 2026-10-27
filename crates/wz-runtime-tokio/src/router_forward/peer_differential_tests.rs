@@ -33,13 +33,13 @@ use wz_session_core::query_mode::ConsolidationMode;
 use wz_session_core::request_build::RequestQueryBuilder;
 use wz_session_core::wireexpr_resolve::id_and_suffix;
 
-fn zid(b: u8) -> Zid {
+pub(super) fn zid(b: u8) -> Zid {
     Zid::from_slice(&[b, b, b, b])
 }
 
 /// The 2-bit INIT wire form of a remote's role.
 #[derive(Clone, Copy, Debug)]
-enum Wire {
+pub(super) enum Wire {
     Router = 0b00,
     Peer = 0b01,
     Client = 0b10,
@@ -48,7 +48,7 @@ enum Wire {
 /// What a node sent, reduced to what routing decides. Everything the two
 /// forwarders legitimately number or order differently is left out.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Seen {
+pub(super) enum Seen {
     /// A `Push` and the payload of its `Put`, `None` for a `Del`.
     Push {
         keyexpr: String,
@@ -338,7 +338,7 @@ impl Node {
 }
 
 /// What a frame carried and, for a `Request`, the request id it was sent with.
-fn decode(frame: &[u8]) -> Vec<(Seen, Option<u64>)> {
+pub(super) fn decode(frame: &[u8]) -> Vec<(Seen, Option<u64>)> {
     use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
     let Ok(InboundFrame::Frame { payload, .. }) = parse_inbound(frame) else {
         return vec![(Seen::Other("non-frame"), None)];
@@ -503,7 +503,7 @@ fn list(entries: Vec<LinkstateOwned>) -> LinkstateListOwned {
 /// The peer routing mode both nodes are held to: zenoh's `routing.peer.mode`,
 /// `peer_to_peer` (gossip, the default) or `linkstate`.
 #[derive(Clone, Copy, Debug)]
-enum Mode {
+pub(super) enum Mode {
     Gossip,
     LinkState,
 }
@@ -511,27 +511,51 @@ enum Mode {
 /// The two nodes a scene is played into, both at node zid byte `self_zid` and
 /// both in `mode`.
 fn both(self_zid: u8, mode: Mode) -> (Node, Node) {
-    let full = matches!(mode, Mode::LinkState);
-    // Each node reads its own clock, which a scene moves by the same amount in
-    // both with `Step::Advance`.
     let began = Instant::now();
-    let clock = || {
-        let moved = Arc::new(AtomicU64::new(0));
-        let read = Arc::clone(&moved);
-        let now: Box<dyn Fn() -> Instant + Send + Sync> =
-            Box::new(move || began + Duration::from_millis(read.load(Ordering::SeqCst)));
-        (moved, now)
-    };
-    let (moved_old, now_old) = clock();
-    let linkstate = LinkstateForwarder::with_clock(zid(self_zid), WhatAmI::Peer, now_old);
-    linkstate.set_full_linkstate(full);
-    let (moved_new, now_new) = clock();
-    let hat = RouterForwarder::peer_with_clock(zid(self_zid), now_new);
-    hat.on_tables_mut().set_peer_region_full_linkstate(full);
+    let (old, moved_old) = make(Plane::LinkstateForwarder, self_zid, mode, began);
+    let (new, moved_new) = make(Plane::RegionHat, self_zid, mode, began);
     (
-        Node::new(Box::new(linkstate), moved_old, self_zid),
-        Node::new(Box::new(hat), moved_new, self_zid),
+        Node::new(old, moved_old, self_zid),
+        Node::new(new, moved_new, self_zid),
     )
+}
+
+/// The two peer planes the gate holds equal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Plane {
+    /// The single-net peer forwarder, which retires at step 7.
+    LinkstateForwarder,
+    /// The region-hat forwarder at node mode Peer.
+    RegionHat,
+}
+
+/// One forwarder of `plane` at node zid byte `self_zid` in `mode`, and the handle
+/// that moves its clock. A node reads its own clock, which a scene moves by the
+/// same amount in both planes; `began` is the instant every clock starts from.
+pub(super) fn make(
+    plane: Plane,
+    self_zid: u8,
+    mode: Mode,
+    began: Instant,
+) -> (Box<dyn FaceForwarder>, Arc<AtomicU64>) {
+    let full = matches!(mode, Mode::LinkState);
+    let moved = Arc::new(AtomicU64::new(0));
+    let read = Arc::clone(&moved);
+    let now: Box<dyn Fn() -> Instant + Send + Sync> =
+        Box::new(move || began + Duration::from_millis(read.load(Ordering::SeqCst)));
+    let forwarder: Box<dyn FaceForwarder> = match plane {
+        Plane::LinkstateForwarder => {
+            let linkstate = LinkstateForwarder::with_clock(zid(self_zid), WhatAmI::Peer, now);
+            linkstate.set_full_linkstate(full);
+            Box::new(linkstate)
+        }
+        Plane::RegionHat => {
+            let hat = RouterForwarder::peer_with_clock(zid(self_zid), now);
+            hat.on_tables_mut().set_peer_region_full_linkstate(full);
+            Box::new(hat)
+        }
+    };
+    (forwarder, moved)
 }
 
 /// What a step sent, split into the data plane and the link-state list, which
