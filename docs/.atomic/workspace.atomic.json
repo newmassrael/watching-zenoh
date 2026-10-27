@@ -293312,6 +293312,36 @@
         "Deriving requires from a node's configuration document (not only a declared node) is the next step the consumer named, and is not started."
       ]
     },
+    "Round 3778": {
+      "decision_summary": "Open-debt item 751, step (b), step 1 of docs/peer-region-hats.md: the region-hat forwarder holds its node mode as a value. Tables carries node_mode, the three hat predicates (is_leaf, is_peer_hat, is_router_hat) take it and ask hat_kind(region, node_mode), and the nets, the face placement, the partition's hats and the node clock read it. Every public constructor still passes the router, so no router behaviour moves; the proof is the unchanged router and region tests. ROUTERS_REGION becomes NORTH_REGION and routers_net() becomes north_net(), because both exist on every node and only what they hold depends on the mode. The public admin names keep theirs (step 6). The step also lists, from the code, the 31 public methods LinkstateForwarder has and RouterForwarder does not, in four kinds, so the later steps are sized by a list.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward.rs: Tables.node_mode, the predicates and Hat::for_region and MeshHat::new take the node mode, RouterForwarder::build takes it, NORTH_REGION and north_net replace the router-named ones, and the tests pass the router explicitly. docs/peer-region-hats.md: section 5 records what step 1 landed and the list of surfaces only LinkstateForwarder has. No other file changes."
+      ],
+      "verification_bullets": [
+        "On pc2, with routing-router-hat and router-multicast-faces: 258 router_forward tests and 12 routing_region tests pass, the same counts as before the change. Clippy with -D warnings is clean on wz-runtime-tokio under all features, under those two features and under the defaults (the only warnings are the ring dependency's). cargo doc with all features reports 0 errors. rustfmt is clean. The debt census exits 0. The hosted run was not read; this round pushes and continues."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Item 751 step (b) continues at step 2: a peer constructor and the peer's regions (node mode Peer, north peer hat, south client regions, faces placed by region_of). Until then nothing builds a forwarder with a mode other than Router, so the Peer arms of the predicates are unexercised by any forwarder test. mcast_ingress_region still names the router: the multicast ingress stays a router-only plane until step 6. The public admin names routers_net_view and routers_net_node_count keep their names and move in step 6. The size of the later steps follows the list in section 5 of the design note."
+      ],
+      "publishable_decision_summary": "Open-debt item 751, step (b), step 1 of docs/peer-region-hats.md: the region-hat forwarder holds its node mode as a value. Tables carries node_mode, the three hat predicates (is_leaf, is_peer_hat, is_router_hat) take it and ask hat_kind(region, node_mode), and the nets, the face placement, the partition's hats and the node clock read it. Every public constructor still passes the router, so no router behaviour moves; the proof is the unchanged router and region tests. ROUTERS_REGION becomes NORTH_REGION and routers_net() becomes north_net(), because both exist on every node and only what they hold depends on the mode. The public admin names keep theirs (step 6). The step also lists, from the code, the 31 public methods LinkstateForwarder has and RouterForwarder does not, in four kinds, so the later steps are sized by a list.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward.rs: Tables.node_mode, the predicates and Hat::for_region and MeshHat::new take the node mode, RouterForwarder::build takes it, NORTH_REGION and north_net replace the router-named ones, and the tests pass the router explicitly. docs/peer-region-hats.md: section 5 records what step 1 landed and the list of surfaces only LinkstateForwarder has. No other file changes."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2, with routing-router-hat and router-multicast-faces: 258 router_forward tests and 12 routing_region tests pass, the same counts as before the change. Clippy with -D warnings is clean on wz-runtime-tokio under all features, under those two features and under the defaults (the only warnings are the ring dependency's). cargo doc with all features reports 0 errors. rustfmt is clean. The debt census exits 0. The hosted run was not read; this round pushes and continues."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Item 751 step (b) continues at step 2: a peer constructor and the peer's regions (node mode Peer, north peer hat, south client regions, faces placed by region_of). Until then nothing builds a forwarder with a mode other than Router, so the Peer arms of the predicates are unexercised by any forwarder test. mcast_ingress_region still names the router: the multicast ingress stays a router-only plane until step 6. The public admin names routers_net_view and routers_net_node_count keep their names and move in step 6. The size of the later steps follows the list in section 5 of the design note."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
