@@ -16,6 +16,14 @@
       }
     },
     {
+      "path": "synthetic/host-unsplit-bound",
+      "origin": "synthetic",
+      "platform": "linux-x86_64-glibc",
+      "expect": {
+        "verdict": "valid"
+      }
+    },
+    {
       "path": "synthetic/android-bundled-runtime",
       "origin": "synthetic",
       "platform": "android-arm64",
@@ -59,6 +67,36 @@
         "verdict": "invalid",
         "level": "shape",
         "finding": "keys"
+      }
+    },
+    {
+      "path": "synthetic/shape-requires-also-may",
+      "origin": "synthetic",
+      "platform": "linux-x86_64-glibc",
+      "expect": {
+        "verdict": "invalid",
+        "level": "shape",
+        "finding": "in both requires and may_require"
+      }
+    },
+    {
+      "path": "synthetic/shape-requires-not-the-bound",
+      "origin": "synthetic",
+      "platform": "linux-x86_64-glibc",
+      "expect": {
+        "verdict": "invalid",
+        "level": "shape",
+        "finding": "is not requires and may_require"
+      }
+    },
+    {
+      "path": "synthetic/shape-split-and-unsplit",
+      "origin": "synthetic",
+      "platform": "linux-x86_64-glibc",
+      "expect": {
+        "verdict": "invalid",
+        "level": "shape",
+        "finding": "split the bound in one and not"
       }
     },
     {

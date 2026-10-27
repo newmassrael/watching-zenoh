@@ -234,12 +234,12 @@ that turns floors into "this device may run it" is the consumer's.
 **T9. Device requirements are derived from the declaration, not measured.** A
 capability's `os_needs` (a key of its own: `requires` is the axis condition of C6) is
 the set of operating-system facilities it MAY ask for, from a closed vocabulary
-(`threads`, `sockets-tcp`, `sockets-udp`, `multicast`, `raw-ethernet`,
-`unix-sockets`, `filesystem`, `entropy`, `wall-clock`). It is an upper bound: a device
+(`OS_FACILITIES` in `scripts/lib/wz_config.py`, each with its meaning; the table below).
+It is an upper bound: a device
 that lacks one is told which capability to turn off, and it does not say a given
 configuration uses it (a TLS plane reads certificate files when its keys name files and
 not when they hold the PEM inline). `[os] base` is what every host build asks for
-(`threads`, `sockets-tcp`, `entropy`). Every capability states `os_needs`, an empty
+(`threads`, `sockets-tcp`, `entropy`, `interface-list`). Every capability states `os_needs`, an empty
 list when it asks for nothing beyond the base: a capability nobody assessed has no
 entry and `--check` refuses it. The manifest lists the union for the resolved
 capability set (`os_needs_of`), and `platform_gaps` names what a platform lacks and
@@ -268,6 +268,49 @@ assessed: any runtime feature outside those 54 (the TLS, QUIC, WebSocket, serial
 storage and access-control planes), whose first use in an executable's build is an
 `unassessed_features` entry until its row is written. A row is an upper bound read from
 the feature's declaration and the modules it gates, not a measurement of a run.
+
+The bound is split in two keys beside it. `requires` is what every run asks for and
+cannot go on without, whatever its configuration: a device that measurably lacks one
+cannot run the artifact. `may_require` is the rest of the bound: what some
+configuration asks for. The two are disjoint and `device_requires` is their union, which
+the entry holds for every manifest it reads (`requires_findings`). `requires` is a lower
+bound: a facility in it is certain, and one outside it is not proved optional, so a
+consumer that blocks on `requires` and warns on `may_require` never blocks a run that
+could start. For a host build `requires` is `[os] always` (`threads`, `entropy`: the
+runtime is a multi-threaded tokio pool, and every handshake draws from `getrandom`);
+`sockets-tcp` and `interface-list` are in `may_require`, since a configuration with no
+TCP endpoint opens no TCP socket and a failed interface listing leaves a link open with
+its interface set indeterminate. When an enabled feature is unassessed, `requires` is
+still known (it is asked by the runtime before any feature is reached, and a feature
+can only add to the bound), and `may_require` and `device_requires` are both `null` with
+`unassessed_features` naming why. A node built from a declaration (5b) is configured at
+build time, so its split is exact rather than bounded: it requires `entropy` (it draws
+its signing key at start and stops without one) and each endpoint's socket, and a group
+may list the interfaces (only when routing has none for the group). It starts no thread,
+reads no calendar time and reads no file, so the host build's base is not its own.
+
+A manifest written before the split (schema 1 has no number for it) carries neither key,
+in every artifact; a reader takes its whole `device_requires` as `may_require`. The
+measured records under `deploy/fixtures/manifests/measured/` are of that form, and an
+entry writes the split one.
+
+| Facility | What the artifact's process asks the operating system to let it do |
+| --- | --- |
+| `threads` | start more threads of execution in the process (POSIX threads) |
+| `sockets-tcp` | open TCP sockets, to dial and to listen |
+| `sockets-udp` | open UDP sockets, to send and receive datagrams |
+| `multicast` | join an IP multicast group on a UDP socket and send to the group |
+| `raw-ethernet` | open a raw link-layer socket on an interface (Linux `AF_PACKET`), with the privilege it needs (`CAP_NET_RAW`) |
+| `unix-sockets` | open Unix domain stream sockets by a file system path |
+| `filesystem` | read files by path, and write them for a plane that stores data |
+| `entropy` | draw cryptographic random bytes from the operating system (`getrandom`, `/dev/urandom`) |
+| `wall-clock` | read the calendar time (`CLOCK_REALTIME`, `SystemTime`); it is never set, and a wrong reading makes certificate validity and timestamps wrong |
+| `interface-list` | list the network interfaces and their addresses (`getifaddrs`, `GetAdaptersAddresses`) |
+
+A device provides a facility when an unprivileged process of the artifact may do it
+there, so a facility that needs a privilege includes the privilege. The two encrypted
+links (`transport_tls`, `transport_quic`) ask for `wall-clock`: rustls checks a peer
+certificate's validity against the current time.
 
 **T10. A refusal writes no manifest.** The entry exits non-zero with the reason on
 stderr and removes a partial output directory. The consumer's tool never meets a
@@ -361,7 +404,10 @@ keys, their order and their values are the entry's own output.
                            "local_subscriber": false, "local_queryable": false } },
       "provides": [ { "role": "pico-library" } ],
       "features": ["advanced", "...", "unstable-api"],
-      "device_requires": ["entropy", "multicast", "sockets-tcp", "sockets-udp", "threads", "wall-clock"]
+      "device_requires": ["entropy", "interface-list", "multicast", "sockets-tcp", "sockets-udp",
+                          "threads", "wall-clock"],
+      "requires": ["entropy", "threads"],
+      "may_require": ["interface-list", "multicast", "sockets-tcp", "sockets-udp", "wall-clock"]
     },
     { "id": "capi-c", "name": "libwz_capi_c.so", "...": "the same keys; provides zenoh-c-dropin,
       abi layout { unstable_api: true, shared_memory: false }, revision 6" },
@@ -378,6 +424,8 @@ keys, their order and their values are the entry's own output.
       "features": ["..."],
       "resolved_features": { "wz-runtime-tokio": ["codec-close", "...", "transport-unicast"] },
       "device_requires": ["entropy", "interface-list", "multicast", "sockets-tcp", "sockets-udp", "threads"],
+      "requires": ["entropy", "threads"],
+      "may_require": ["interface-list", "multicast", "sockets-tcp", "sockets-udp"],
       "unassessed_features": []
     }
   ]

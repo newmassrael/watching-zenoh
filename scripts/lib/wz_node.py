@@ -376,6 +376,15 @@ TARGETS = {
         # the dialled one and `accepts` more, which is the size of its session table.
         "endpoint_limits": {"dial": 1, "listen": 1, "multicast": 1, "peer": 4},
         "schemes": ("tcp", "udp", "tls"),
+        # What the node asks of the device whatever it declares (docs/target-build-contract.md T9):
+        # the posix runtime under it is one thread that keeps a monotonic clock, and the node draws
+        # its signing key from `getrandom` at start and stops when it cannot (`NO_ENTROPY`). It
+        # starts no thread, reads no calendar time (its TLS certificate's validity is a fixed span,
+        # `wz_tls.c`) and reads no file, so the host build's `[os] base` is not this node's.
+        "os_always": ("entropy",),
+        # What a group may ask for besides its socket: the interfaces are listed only when routing
+        # has no interface for the group (`multicast_interface` of wz-runtime-posix).
+        "group_may": ("interface-list",),
         # A group is UDP: a member's datagrams are the group's, with no connection to hold.
         "multicast_schemes": ("udp",),
         # The members of the group the node tracks at once, each a row of its peer table.
@@ -1110,8 +1119,8 @@ def resolve(name: str, decl: dict, directory: pathlib.Path = NODES) -> dict:
 
     `features` are the cargo features the node is built with (`tls` exactly when its endpoint is
     `tls/`, which the node's own `const` assertion holds again), `limits` the budgets it states as
-    the environment the build reads, and `facilities` what its endpoints ask of the device beyond
-    the base every executable asks.
+    the environment the build reads, `facilities` what its endpoints ask of the device, and
+    `requires` and `may_require` what the node asks of it on every run and on some (T9).
     """
     data = load(name, decl, directory)
     sha = digest(name, directory)
@@ -1161,9 +1170,16 @@ def view_of(name: str, data: dict, sha: str, generated: pathlib.Path, decl: dict
         # A group is a UDP socket that has joined it: the socket option is a facility of its own.
         facilities.add("multicast")
     facilities = sorted(facilities)
-    unknown = [f for f in facilities if f not in wz_config.OS_FACILITIES]
+    # The node's configuration is the declaration, so what it asks for at start is known: the
+    # target's own needs and every endpoint's socket. A group's interface listing is the one
+    # facility a run may or may not ask for.
+    target = TARGETS[data["node"]["target"]]
+    requires = sorted(set(target["os_always"]) | set(facilities))
+    grouped = any(ep["role"] == "multicast" for ep in data["endpoint"])
+    may_require = sorted(set(target["group_may"]) - set(requires)) if grouped else []
+    unknown = [f for f in requires + may_require if f not in wz_config.OS_FACILITIES]
     if unknown:
-        raise ValueError(f"{name}: the facilities {', '.join(unknown)} that its endpoints ask for are not "
+        raise ValueError(f"{name}: the facilities {', '.join(unknown)} that it asks for are not "
                          "in the facility vocabulary of scripts/lib/wz_config.py")
     return {
         "id": name,
@@ -1174,6 +1190,8 @@ def view_of(name: str, data: dict, sha: str, generated: pathlib.Path, decl: dict
         "limits": dict(line.split("=", 1) for line in env_lines(data, decl)),
         "policies": dict(line.split("=", 1) for line in policy_lines(data, decl)),
         "facilities": facilities,
+        "requires": requires,
+        "may_require": may_require,
     }
 
 
@@ -1445,6 +1463,10 @@ document_bytes = 8
            and "GROUP_ADDR" not in rs)
     expect("a group is a feature of the build",
            features_of(wz_config.read_decl_toml(group_node)) == ["declared", "multicast"])
+    grouped_view = view_of("n", wz_config.read_decl_toml(group_node), sha, pathlib.Path("n.rs"), decl)
+    expect("a member of a group requires entropy and the group's socket, and may list the interfaces",
+           grouped_view["requires"] == ["entropy", "multicast", "sockets-udp"]
+           and grouped_view["may_require"] == ["interface-list"])
     expect("a group's publisher puts at a rate and under any arrival process",
            problems(group_node.replace("period_ms = 200", 'rate_per_s = "20"\narrivals = "poisson"\n'
                                        "arrival_seed = 1")) == [])
@@ -1838,6 +1860,8 @@ document_bytes = 8
         expect("a node resolves to the digest of its file", view["declaration_sha256"] == digest("n", directory))
         expect("a tcp node is built with the declared feature alone and asks for a tcp socket",
                view["features"] == ["declared"] and view["facilities"] == ["sockets-tcp"])
+        expect("a tcp node requires entropy and its socket, and no thread, on every run, and nothing more",
+               view["requires"] == ["entropy", "sockets-tcp"] and view["may_require"] == [])
         expect("a stated budget is the environment of the build", view["limits"] == {"WZ_LIMIT_MAX_QUERYABLES": "2"})
         expect("a node that states no policy is built with upstream's", view["policies"] == {})
         (directory / "n.toml").write_text(
@@ -1863,7 +1887,9 @@ document_bytes = 8
                tls["features"] == ["declared", "tls"] and tls["facilities"] == ["sockets-tcp"])
         (directory / "n.toml").write_text(SAMPLE.replace("tcp/", "udp/"), encoding="utf-8")
         write(decl, directory)
-        expect("a udp node asks for a datagram socket", resolve("n", decl, directory)["facilities"] == ["sockets-udp"])
+        udp = resolve("n", decl, directory)
+        expect("a udp node asks for a datagram socket and requires no stream socket",
+               udp["facilities"] == ["sockets-udp"] and udp["requires"] == ["entropy", "sockets-udp"])
         (directory / "n.toml").write_text(SAMPLE, encoding="utf-8")
         write(decl, directory)
         (directory / "generated" / "gone.rs").write_text("", encoding="utf-8")

@@ -94,8 +94,17 @@ c = []
 # runtime lists the machine's network interfaces (POSIX `getifaddrs`, `GetAdaptersAddresses` on
 # Windows) to honour a locator's `#iface=` and the interface rules of access control. A platform
 # whose C library lacks it cannot run a host build at all, which is why it is not a capability.
+#
+# `always` is the part of the base that every run of a host build asks for and cannot go on
+# without, whatever its configuration: the manifest's `requires` (T9). `threads` because the
+# runtime pool is a multi-threaded tokio runtime and fails to build without them
+# (`runtime_pool.rs`), `entropy` because every session's handshake draws from `getrandom`
+# (`session_glue.rs` `OsEntropy`). The rest of the base is asked for only by some configurations:
+# a node with no TCP endpoint opens no TCP socket, and a failed interface listing leaves a link's
+# interface set indeterminate and the link open (`interface_names_for`).
 [os]
 base = ["threads", "sockets-tcp", "entropy", "interface-list"]
+always = ["threads", "entropy"]
 
 # ─── Platforms (docs/target-build-contract.md T3) ─────────────────────────────────────────────
 #
@@ -938,11 +947,15 @@ help = "pico's multi-threaded C ABI (task doors, host sync, blocking channels); 
 # is; the pico ABI forwards its links under names of its own and has none of these. The switches
 # zenoh-c leaves off (serial, unixpipe, vsock, stats) are features of the two manifests and not
 # capabilities here, because a capability is on in every default build.
+#
+# Both encrypted links read the wall clock: rustls checks a peer certificate's validity against
+# the current time (`tls_config.rs`, the `now: UnixTime` of every verifier), and `stream_link.rs`
+# sleeps until the certificate expires.
 
 [[capability]]
 id = "transport_tls"
 kconfig = "WZ_CAP_TRANSPORT_TLS"
-os_needs = ["filesystem"]
+os_needs = ["filesystem", "wall-clock"]
 upstream_on = ["zenoh", "zenoh-c"]
 abis = ["core", "c"]
 implies = []
@@ -951,7 +964,7 @@ help = "The tls/ link, dial and accept, with the certificate material of transpo
 [[capability]]
 id = "transport_quic"
 kconfig = "WZ_CAP_TRANSPORT_QUIC"
-os_needs = ["sockets-udp", "filesystem"]
+os_needs = ["sockets-udp", "filesystem", "wall-clock"]
 upstream_on = ["zenoh", "zenoh-c"]
 abis = ["core", "c"]
 implies = []

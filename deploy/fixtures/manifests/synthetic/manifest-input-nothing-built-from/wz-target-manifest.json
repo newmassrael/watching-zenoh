@@ -99,10 +99,13 @@
       },
       "device_requires": [
         "entropy",
-        "interface-list",
-        "sockets-tcp",
-        "threads"
+        "sockets-tcp"
       ],
+      "requires": [
+        "entropy",
+        "sockets-tcp"
+      ],
+      "may_require": [],
       "unassessed_features": []
     }
   ]

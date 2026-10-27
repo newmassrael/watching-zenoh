@@ -131,6 +131,16 @@
         "sockets-udp",
         "threads"
       ],
+      "requires": [
+        "entropy",
+        "threads"
+      ],
+      "may_require": [
+        "interface-list",
+        "multicast",
+        "sockets-tcp",
+        "sockets-udp"
+      ],
       "unassessed_features": []
     }
   ]

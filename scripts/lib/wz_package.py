@@ -104,7 +104,12 @@ BUILT_FROM_KEYS = ["commit", "tree_clean"]
 PLATFORM_KEYS = ["id", "triple", "os", "libc", "network_stack", "support", "strongest_green_lane"]
 TOOLCHAIN_KEYS = ["rustc", "cc", "sdk"]
 ARTIFACT_KEYS = ["id", "name", "kind", "path", "sha256", "size", "elf", "abi", "provides", "features",
-                 "resolved_features", "device_requires", "unassessed_features"]
+                 "resolved_features", "device_requires", "requires", "may_require", "unassessed_features"]
+# What an entry wrote before `requires` and `may_require` were added within schema 1 (T9): the same
+# keys without the two, a bound that is not split. A reader takes the whole of such a
+# `device_requires` as what a run may ask; the manifests recorded from builds before the split are
+# of this form, and an entry writes the other.
+UNSPLIT_ARTIFACT_KEYS = [k for k in ARTIFACT_KEYS if k not in ("requires", "may_require")]
 ELF_KEYS = ["class", "machine", "linking", "interpreter", "soname", "runpath", "rpath", "needed", "os_floor"]
 FLOOR_KEYS = ["glibc", "android_api_note", "symbol_version_tags"]
 
@@ -260,15 +265,53 @@ def node_of_file(row: dict, measured: dict, features: list[str], declarations: d
     return view
 
 
-def node_requires(decl: dict, platform: dict, row: dict, node: dict) -> list[str]:
-    """What a node asks of a device: the base every executable asks for, and the sockets its
-    endpoints' schemes use. A facility the platform lacks is a refusal naming the node."""
-    asked = sorted(set(decl["os_base"]) | set(node["facilities"]))
+def node_requires(platform: dict, row: dict, node: dict) -> tuple[list[str], list[str]]:
+    """What a node asks of a device, on every run and on some: its target's own needs and the
+    sockets its endpoints' schemes use, and what a group may list (`wz_node.view_of`). A facility
+    the platform lacks is a refusal naming the node."""
+    asked = sorted(set(node["requires"]) | set(node["may_require"]))
     lacking = [f for f in asked if f not in platform["os_provides"]]
     if lacking:
         raise Refusal(f"{row['id']} (the node `{node['id']}`) asks for {', '.join(lacking)}, which platform "
                       f"{platform['id']} does not provide")
-    return asked
+    return node["requires"], node["may_require"]
+
+
+def split_requires(decl: dict, upper: list[str] | None) -> tuple[list[str], list[str] | None]:
+    """A host build's facilities as `requires` (the `[os] always` every run asks for and cannot go
+    on without) and `may_require` (the rest of the upper bound `upper`, `None` when it is UNKNOWN).
+
+    `requires` is known whatever is unassessed: an unassessed feature can only add to what a run
+    may ask, and `always` is asked by the runtime before any feature is reached.
+    """
+    requires = sorted(decl["os_always"])
+    return requires, (None if upper is None else sorted(set(upper) - set(requires)))
+
+
+def requires_findings(where: str, art: dict) -> list[str]:
+    """What breaks the three lists' invariant (T9): `requires` is a list, `may_require` a list
+    disjoint from it or `None`, `device_requires` their union or `None` exactly with
+    `may_require`, and `unassessed_features` non-empty exactly when they are `None`."""
+    req, may, union, unassessed = (art["requires"], art["may_require"], art["device_requires"],
+                                   art["unassessed_features"])
+    if not isinstance(req, list) or req != sorted(set(req)):
+        return [f"{where}: requires is not a sorted list of distinct facilities"]
+    if may is None or union is None:
+        if may is not None or union is not None:
+            return [f"{where}: one of may_require and device_requires is null and the other is not"]
+        if not unassessed:
+            return [f"{where}: may_require is unknown and no unassessed feature says why"]
+        return []
+    out = []
+    if not isinstance(may, list) or may != sorted(set(may)):
+        out.append(f"{where}: may_require is not a sorted list of distinct facilities")
+    elif set(req) & set(may):
+        out.append(f"{where}: {sorted(set(req) & set(may))} are in both requires and may_require")
+    elif union != sorted(set(req) | set(may)):
+        out.append(f"{where}: device_requires {union} is not requires and may_require together")
+    if unassessed:
+        out.append(f"{where}: device_requires is known and unassessed_features is not empty")
+    return out
 
 
 def artifact_entry(decl: dict, platform: dict, row: dict, relpath: str, blob: bytes, features: list[str],
@@ -289,11 +332,14 @@ def artifact_entry(decl: dict, platform: dict, row: dict, relpath: str, blob: by
     kept = {p: sorted(set((resolved or {}).get(p, []))) for p in wz_config.ASSESSED_PACKAGES}
     if row.get("input") == "node":
         node = node_of_file(row, measured, features, declarations or {})
-        requires, unassessed = node_requires(decl, platform, row, node), []
-    elif row["kind"] == "executable":
-        requires, unassessed = runtime_requires(decl, platform, row, kept)
+        required, may, unassessed = *node_requires(platform, row, node), []
     else:
-        requires, unassessed = device_requires(decl, platform, row, features), []
+        if row["kind"] == "executable":
+            upper, unassessed = runtime_requires(decl, platform, row, kept)
+        else:
+            upper, unassessed = device_requires(decl, platform, row, features), []
+        required, may = split_requires(decl, upper)
+    union = None if may is None else sorted(set(required) | set(may))
     return {
         "id": row["id"],
         "name": pathlib.PurePosixPath(relpath).name,
@@ -306,7 +352,9 @@ def artifact_entry(decl: dict, platform: dict, row: dict, relpath: str, blob: by
         "provides": provides_of(decl, row, features, measured),
         "features": features,
         "resolved_features": kept,
-        "device_requires": requires,
+        "device_requires": union,
+        "requires": required,
+        "may_require": may,
         "unassessed_features": unassessed,
     }
 
@@ -547,10 +595,17 @@ def shape_findings(manifest: object) -> list[str]:
     if not isinstance(manifest["artifacts"], list) or not manifest["artifacts"]:
         out.append("artifacts is not a non-empty list")
         return out
+    forms = set()
     for i, art in enumerate(manifest["artifacts"]):
-        if keys(f"artifacts[{i}]", art, ARTIFACT_KEYS):
+        split = not isinstance(art, dict) or list(art) != UNSPLIT_ARTIFACT_KEYS
+        forms.add(split)
+        if keys(f"artifacts[{i}]", art, ARTIFACT_KEYS if split else UNSPLIT_ARTIFACT_KEYS):
             if keys(f"artifacts[{i}].elf", art["elf"], ELF_KEYS):
                 keys(f"artifacts[{i}].elf.os_floor", art["elf"]["os_floor"], FLOOR_KEYS)
+            if split:
+                out.extend(requires_findings(f"artifacts[{i}]", art))
+    if len(forms) > 1:
+        out.append("the artifacts split the bound in one and not in another: one entry wrote the manifest")
     return out
 
 
@@ -668,7 +723,7 @@ def verify_dir(out: pathlib.Path, decl: dict, resolver=None) -> list[str]:
         except (Refusal, elf_facts.ElfError) as err:
             findings.append(f"{who}: re-measuring {art['path']}: {err}")
             continue
-        for key in ARTIFACT_KEYS:
+        for key in (ARTIFACT_KEYS if "requires" in art else UNSPLIT_ARTIFACT_KEYS):
             if again[key] != art[key]:
                 findings.append(f"{who}: {key} is {art[key]!r} in the manifest and {again[key]!r} "
                                 f"read from {art['path']} now")
@@ -1242,6 +1297,9 @@ def _fixture_packages(decl: dict) -> dict[str, tuple[str, dict, dict[str, bytes]
                               ["zenoh-config"], resolved)]
     out["host-library-and-executable"] = (host["id"], assemble(decl, host, FIXTURE_BUILT_FROM, toolchain, entries),
                                           files)
+    # The same package as an entry before the split wrote it: valid, its bound not split.
+    unsplit = [{k: v for k, v in e.items() if k in UNSPLIT_ARTIFACT_KEYS} for e in entries]
+    out["host-unsplit-bound"] = (host["id"], assemble(decl, host, FIXTURE_BUILT_FROM, toolchain, unsplit), files)
 
     android = plats["android-arm64"]
     runtime = android["bundle_from_sdk"][0]
@@ -1281,6 +1339,12 @@ FIXTURE_DAMAGES = [
      lambda m, f: m.__setitem__("schema", 99)),
     ("shape-artifact-key-missing", "host-library-and-executable", "shape", "keys",
      lambda m, f: m["artifacts"][0].pop("sha256")),
+    ("shape-requires-also-may", "host-library-and-executable", "shape", "in both requires and may_require",
+     lambda m, f: m["artifacts"][0]["may_require"].insert(0, "entropy")),
+    ("shape-requires-not-the-bound", "host-library-and-executable", "shape", "is not requires and may_require",
+     lambda m, f: m["artifacts"][0]["device_requires"].remove("sockets-udp")),
+    ("shape-split-and-unsplit", "host-library-and-executable", "shape", "split the bound in one and not",
+     lambda m, f: [m["artifacts"][1].pop(k) for k in ("requires", "may_require")]),
     ("manifest-path-leaves-directory", "host-library-and-executable", "manifest", "relative path",
      lambda m, f: m["artifacts"][0].__setitem__("path", "../libwz_capi_pico.so")),
     ("manifest-bundled-nothing-needs", "android-bundled-runtime", "manifest", "nothing in the package needs it",
@@ -1516,11 +1580,35 @@ def _selftest() -> int:
                demo_entry["device_requires"]
                == ["entropy", "interface-list", "multicast", "sockets-tcp", "sockets-udp", "threads"]
                and demo_entry["unassessed_features"] == [])
+        expect("what every run asks for is required, and the rest of the bound may be asked",
+               all(e["requires"] == ["entropy", "threads"]
+                   and e["may_require"] == ["interface-list", "multicast", "sockets-tcp", "sockets-udp"]
+                   for e in entries))
         unknown = artifact_entry(decl, platform, demo, "bin/wz-ap-demo", demo_blob, demo_features,
                                  {"wz-runtime-tokio": [*demo_resolved["wz-runtime-tokio"], "transport-link-ws"]})
         expect("an enabled runtime feature nobody assessed makes it unknown and is named",
                unknown["device_requires"] is None
                and unknown["unassessed_features"] == ["wz-runtime-tokio/transport-link-ws"])
+        expect("an unassessed feature leaves what every run requires known, and what it may ask unknown",
+               unknown["requires"] == ["entropy", "threads"] and unknown["may_require"] is None)
+        expect("the shape of an unknown entry keeps the invariant", requires_findings("u", unknown) == [])
+
+        def broken(**changed) -> list[str]:
+            return requires_findings("e", {**demo_entry, **changed})
+
+        expect("a facility in both requires and may_require is a finding",
+               "in both" in " ".join(broken(may_require=["entropy", *demo_entry["may_require"]])))
+        expect("a device_requires that is not the two together is a finding",
+               "not requires and may_require together" in " ".join(broken(device_requires=["threads"])))
+        expect("a null on one side of the bound and not the other is a finding",
+               "one of may_require" in " ".join(broken(may_require=None, unassessed_features=["p/f"])))
+        expect("an unknown bound with no unassessed feature is a finding",
+               "no unassessed feature" in " ".join(broken(may_require=None, device_requires=None)))
+        expect("a known bound with an unassessed feature is a finding",
+               "is not empty" in " ".join(broken(unassessed_features=["p/f"])))
+        expect("a manifest whose entry breaks the invariant has a shape finding",
+               any("in both" in f for f in shape_findings(
+                   {**manifest, "artifacts": [{**demo_entry, "requires": ["entropy", "sockets-tcp", "threads"]}]})))
         bare = artifact_entry(decl, platform, demo, "bin/wz-ap-demo", demo_blob, demo_features)
         expect("an executable with no resolved runtime features asks only for the base",
                bare["device_requires"] == sorted(decl["os_base"]))
@@ -1609,9 +1697,9 @@ def _selftest() -> int:
     described = node_entry(node_file())
     expect("a node's role carries its id and the declaration's digest, read from the file",
            described["provides"] == [{"role": "declared-node", **node_lists}])
-    expect("a node asks for the base and the sockets its endpoint uses, and nothing is unassessed",
-           described["device_requires"] == sorted(set(decl["os_base"]) | {"sockets-tcp"})
-           and described["unassessed_features"] == [])
+    expect("a node asks for entropy and the socket its endpoint uses on every run, and nothing more",
+           described["requires"] == described["device_requires"] == ["entropy", "sockets-tcp"]
+           and described["may_require"] == [] and described["unassessed_features"] == [])
 
     def node_package(where: pathlib.Path, resolved: dict, blob: bytes) -> pathlib.Path:
         """A package of one node file and the declaration it was built from, as `package` writes it."""

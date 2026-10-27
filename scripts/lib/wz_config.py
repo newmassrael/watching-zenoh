@@ -260,6 +260,7 @@ def decl_of(data: dict) -> dict:
         "rules": list(data.get("cargo_rule", [])),
         "switches": list(data.get("upstream_switch", [])),
         "os_base": list(data["os"]["base"]),
+        "os_always": list(data["os"]["always"]),
         "platforms": list(data["platform"]),
         "artifacts": list(data["artifact"]),
         "roles": list(data["role"]),
@@ -449,20 +450,28 @@ def validate_caps(data: dict) -> list[str]:
 # set it MAY ask for: an upper bound, so a device that lacks one is told which capability to turn
 # off; it does not say that a given configuration uses it (a TLS plane reads certificate files when
 # its keys name files, and not when they hold the PEM inline). `[os] base` is what every host
-# build asks for whatever its capabilities. A platform's `os_provides` is what its operating
-# system gives; a platform that does not state it is UNASSESSED, never read as "provides all".
-OS_FACILITIES = (
-    "threads",
-    "sockets-tcp",
-    "sockets-udp",
-    "multicast",
-    "raw-ethernet",
-    "unix-sockets",
-    "filesystem",
-    "entropy",
-    "wall-clock",
-    "interface-list",
-)
+# build asks for whatever its capabilities, and `[os] always` the part of it that every run asks
+# for and cannot go on without. A platform's `os_provides` is what its operating system gives; a
+# platform that does not state it is UNASSESSED, never read as "provides all".
+#
+# Each facility with what it means: what the artifact's process asks the operating system to let
+# it do. A device provides a facility when an unprivileged process of the artifact may do it there,
+# so a facility that needs a privilege includes that privilege.
+OS_FACILITIES = {
+    "threads": "start more threads of execution in the process (POSIX threads)",
+    "sockets-tcp": "open TCP sockets, to dial and to listen",
+    "sockets-udp": "open UDP sockets, to send and receive datagrams",
+    "multicast": "join an IP multicast group on a UDP socket and send to the group",
+    "raw-ethernet": "open a raw link-layer socket on an interface (Linux AF_PACKET), with the "
+                    "privilege it needs (CAP_NET_RAW)",
+    "unix-sockets": "open Unix domain stream sockets by a file system path",
+    "filesystem": "read files by path, and write them for a plane that stores data",
+    "entropy": "draw cryptographic random bytes from the operating system (getrandom, /dev/urandom)",
+    "wall-clock": "read the calendar time (CLOCK_REALTIME, SystemTime); it is never set, and a "
+                  "wrong reading makes certificate validity and timestamps wrong",
+    "interface-list": "list the network interfaces and their addresses (getifaddrs, "
+                      "GetAdaptersAddresses)",
+}
 # The packages whose features are assessed for the facilities they ask of the operating system
 # (`[[runtime_feature]]`): the runtime that owns every socket, thread and file read. The core and
 # the codecs take no facility of their own (they are `no_std`-capable and are handed time, entropy
@@ -523,7 +532,14 @@ def validate_os(data: dict) -> list[str]:
     out = facility_findings("[os]", base, "`base`")
     if isinstance(base, list) and not base:
         out.append("[os]: `base` is empty, and a host build always asks for threads, sockets and entropy")
-    extra = set(data["os"]) - {"base"}
+    always = data["os"].get("always")
+    if always is None:
+        out.append("[os] has no `always` (the part of the base every run asks for; T9)")
+    else:
+        out += facility_findings("[os]", always, "`always`")
+        if isinstance(always, list) and isinstance(base, list):
+            out += [f"[os]: `always` names `{f}`, which is not in `base`" for f in always if f not in base]
+    extra = set(data["os"]) - {"base", "always"}
     if extra:
         out.append(f"[os] has the unknown key(s) {', '.join(sorted(extra))}")
     return out
@@ -2215,6 +2231,7 @@ c = []
 
 [os]
 base = ["threads", "sockets-tcp", "entropy"]
+always = ["threads", "entropy"]
 
 [[capability]]
 id = "a"
@@ -2683,6 +2700,15 @@ def cmd_selftest() -> int:
            validate_decl(read_decl_toml(SAMPLE.replace('os_needs = ["sockets-udp"]', "os_needs = []"))) == [])
     expect("an empty [os] base is refused", caps_refused('base = ["threads", "sockets-tcp", "entropy"]',
                                                         "base = []", "`base` is empty"))
+    expect("an [os] with no `always` is refused",
+           caps_refused('always = ["threads", "entropy"]\n', "", "has no `always`"))
+    expect("an `always` facility outside the base is refused",
+           caps_refused('always = ["threads", "entropy"]', 'always = ["threads", "wall-clock"]',
+                        "`always` names `wall-clock`, which is not in `base`"))
+    expect("an `always` facility outside the vocabulary is refused",
+           caps_refused('always = ["threads", "entropy"]', 'always = ["threadz"]', "not a facility"))
+    expect("every facility of the vocabulary says what it means, in one line",
+           all(isinstance(m, str) and m and "\n" not in m for m in OS_FACILITIES.values()))
     expect("a platform needs every required key",
            caps_refused('lane = "none"\n', "", "has no `lane`"))
     expect("a platform with an unknown key is refused",
