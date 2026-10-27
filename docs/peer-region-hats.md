@@ -99,7 +99,52 @@ over it one at a time, and the retirement last.
    moved, `--gateway-south` is accepted on `--peer`, and the config key moves
    to honoured with the census pins in that commit.
 
-## 5. Open
+## 5. Step 1, as landed
+
+The forwarder's node mode is a value now. `Tables` holds `node_mode`; the
+constructor takes it (`RouterForwarder::build`), every public constructor
+still passes `WhatAmI::Router`, and nothing reads a router out of a constant:
+
+- `is_leaf`, `is_peer_hat` and `is_router_hat` take the node mode and ask
+  `hat_kind(region, node_mode)`; every production call passes
+  `self.tables.node_mode`. Outside the tests, `WhatAmI::Router` is still named
+  by the two public constructors and by `mcast_ingress_region`, the multicast
+  ingress, which stays a router-only plane until step 6.
+- A hat's net is seeded with the node's own mode (`MeshHat::new`), the face
+  placement reads it (`place_face`), a partition builds its hats from it
+  (`with_south_partition`) and the node clock gates on it.
+- `ROUTERS_REGION` is `NORTH_REGION` and `routers_net()` is `north_net()`:
+  the region and its graph exist on every node, and what they hold depends on
+  the mode. The public admin names (`routers_net_view`,
+  `routers_net_node_count`) keep their names; they are step 6.
+
+The router tests are the proof that nothing moved: 258 router tests and 12
+region tests pass unchanged in count.
+
+What the list of surfaces measured. Public methods of `LinkstateForwarder`
+with no namesake on `RouterForwarder` (61 against 63; 31 are absent), in four
+kinds:
+
+- Node as a publisher and subscriber: `publish`, `publish_delete`,
+  `publish_qos`, `propagate`, `declare_subscription`, `undeclare_subscription`,
+  `declare_queryable`, `undeclare_queryable`. The router hosts through
+  `register_local_subscriber` and `register_local_queryable` and has no
+  publisher entry; step 6 decides whether the peer's hosted entries move
+  onto those two or the router gains the publisher.
+- Net policy and gossip: `set_gossip_target`, `set_self_locators`,
+  `set_full_linkstate`, `with_trees_delay`, `ingest_inbound_linkstate`. The
+  router has `set_peer_region_full_linkstate`, `set_gossip_multihop` and
+  `node_locators`; the gossip target and the self locators have no router
+  twin yet.
+- Interest garbage collection (`routing-interest-pending-gc`):
+  `set_interest_timeout`, `pending_interests_len`, `interests_timed_out`.
+- Witnesses the tests read: `dot`, `edge_count`, `node_count`, `recomputes`,
+  `route_successors_hex`, `tree_children_of`, `net_view`, `client_qabls_seen`,
+  `interested`, `interested_queryables`, `publisher_sources`,
+  `querier_sources`, `queryable_sources`, `subscriber_sources`,
+  `token_sources`. Each moves with the test that reads it.
+
+## 6. Open
 
 - The size of step 1's list is unknown until it is made, and the number of
   rounds after it follows from it. The router's own program ran from round 2865
