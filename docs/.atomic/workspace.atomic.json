@@ -292442,6 +292442,62 @@
         "No gate builds wz-session-mcu's documentation under reduced features; C1bz measures all features only, so a link to a gated module can come back unseen."
       ]
     },
+    "Round 3757": {
+      "decision_summary": "Step L2 of the listening role: the cooperative engine holds its links as a table of faces. Core holds a Face (id, link, replay cursor) for each link, the dial role's first at DIAL_FACE (1 << 62, as wz-capi-core keeps it) and never removed, and the registry holds the matching FaceTables (the peer's tables and the session's pending gets). What a declaration, a publish, a plain put, a batch and a keep-alive do reaches every face that is up; a get is one leg for each face and one for the session's own queryables; a write filter and a matching listener count every face's peer, which needed slot_observer's dispatch and link-loss flush to read the other faces (OtherPeers, monomorphic, none for a slot image). A query is answered to the face it came in on: the query plane named the link by the one dialled last, right for one link and wrong for two, so a face now says its generation as its frame is dispatched. Another face comes from CoopEngine::attach_face and goes with its link.",
+      "changes_bullets": [
+        "crates/wz-capi-coop/src/engine.rs, engine/registry.rs, engine/replay.rs, engine/get.rs, engine/query.rs: the face table (Face, FaceTables, attach_face, faces_up), a replay cursor and announce/retract for each face, the get and liveliness get as one leg for each face, the query plane's arriving generation.",
+        "crates/wz-session-core/src/slot_observer.rs: OtherPeers, dispatch_event_among and flush_declarations_on_link_loss_among (the old calls pass NoOtherPeers).",
+        "crates/wz-capi-coop/src/tests/face_table.rs (new, 4 tests on two routers); the expectations of the default-destination get tests (two legs with local-queryable, one with remote only); scripts/lib/nondefault-tests-gate.sh: the leg's count (60).",
+        "scripts/lib/capability_cost_gate.py: the eight cooperative budgets and notes. docs/capi-pico-on-coop-engine.md: step L2 done, with its decisions."
+      ],
+      "verification_bullets": [
+        "wz-capi-coop with every plane on: 60 passed (56 before, 4 new). Clippy with -D warnings and all targets on the default build, on each of the feature sets query,queryable / +liveliness,liveliness-get / local-subscriber / query / connectivity / ticker / scout, on every plane, on --no-default-features and on thumbv7em-none-eabi. Subsets found two defects the full set hid (a constant and a test-only field gated wider than their users) and the no_std prelude for Vec, all fixed.",
+        "A test of the cooperative engine's own failed once in about twelve runs after the last rebase: the late-publisher control asserted that a cache nobody announced is not asked, and the host sends its startup get and its Interest after the subscription, so a router that took the cache first answered the get. The test now waits for the router to have seen both before it holds the cache; nine runs after, and the whole suite three times, passed.",
+        "wz-session-core slot_observer: heap tests 4, fixed-backing tests, unit tests and clippy in both backings, and wz-session-mcu clippy, all passed after the generic OtherPeers.",
+        "The cooperative legs of Layer C1co against the full build's listener, on the tree rebased over origin: answering 11, asking only 8, advanced 11, scout 1.",
+        "Size on pc2, the eight cooperative cases before and at this step: 912,823 to 930,067; 916,041 to 933,285; 919,291 to 937,779; 985,013 to 1,002,849; 1,139,989 to 1,157,649; 1,186,508 to 1,207,600; 1,199,576 to 1,224,096; 994,918 to 1,012,138 (+17,220 to +24,520). The policy that states the sequence-number width then added about 1,440 bytes to each case (the client 930,067 to 931,511) and put three over their budgets; every budget keeps about 1,200 over its reading. The gate passes. A trait object for the other faces cost 1,224 less and was refused for the generic.",
+        "The hook's gate array plus the surface gates: 118 of 119; reason_review_pin_gate is red for atom session-close-ingress on five files this round does not touch (the session drives, drive.rs, session_actions.rs, session_glue.rs, lwip), changed by the keep-alive field and the doc round; their owner's session is gone from the session list, so the pins are not re-read here.",
+        "Not done: the hosted run that holds these commits has not finished."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "carry_forward_bullets": [
+        "L3 of the listening role (the acceptor: the face table takes a face when the accept side yields a link, tcp first, UDP by source-address demultiplexing after; read waits on every link's readiness, measured against the bounded look L2 makes) is next. engine.rs is this session's.",
+        "Re-read the five stale pins of atom session-close-ingress against the five files and move them; the reason's owner is not reachable, so ask the sessions that remain who owns it.",
+        "Attribute the 9,000 to 11,000 bytes the query-answering cooperative builds grew beyond the client's at step L1 (symbol diff of the query case before and after).",
+        "SubscriberPeer::reconcile had no caller before step L1: ask who owns the slot node whether a subscription registered after a peer's interest is meant not to be announced there.",
+        "Read C1cs, C1cc, C1ce, C1co and C1aq to C1av from the first hosted run that finishes and holds steps L1 and L2.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine; the differential of the typed tokio host against the port's host."
+      ],
+      "publishable_decision_summary": "Step L2 of the listening role: the cooperative engine holds its links as a table of faces. Core holds a Face (id, link, replay cursor) for each link, the dial role's first at DIAL_FACE (1 << 62, as wz-capi-core keeps it) and never removed, and the registry holds the matching FaceTables (the peer's tables and the session's pending gets). What a declaration, a publish, a plain put, a batch and a keep-alive do reaches every face that is up; a get is one leg for each face and one for the session's own queryables; a write filter and a matching listener count every face's peer, which needed slot_observer's dispatch and link-loss flush to read the other faces (OtherPeers, monomorphic, none for a slot image). A query is answered to the face it came in on: the query plane named the link by the one dialled last, right for one link and wrong for two, so a face now says its generation as its frame is dispatched. Another face comes from CoopEngine::attach_face and goes with its link.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-coop/src/engine.rs, engine/registry.rs, engine/replay.rs, engine/get.rs, engine/query.rs: the face table (Face, FaceTables, attach_face, faces_up), a replay cursor and announce/retract for each face, the get and liveliness get as one leg for each face, the query plane's arriving generation.",
+        "crates/wz-session-core/src/slot_observer.rs: OtherPeers, dispatch_event_among and flush_declarations_on_link_loss_among (the old calls pass NoOtherPeers).",
+        "crates/wz-capi-coop/src/tests/face_table.rs (new, 4 tests on two routers); the expectations of the default-destination get tests (two legs with local-queryable, one with remote only); scripts/lib/nondefault-tests-gate.sh: the leg's count (60).",
+        "scripts/lib/capability_cost_gate.py: the eight cooperative budgets and notes. docs/capi-pico-on-coop-engine.md: step L2 done, with its decisions."
+      ],
+      "publishable_verification_bullets": [
+        "wz-capi-coop with every plane on: 60 passed (56 before, 4 new). Clippy with -D warnings and all targets on the default build, on each of the feature sets query,queryable / +liveliness,liveliness-get / local-subscriber / query / connectivity / ticker / scout, on every plane, on --no-default-features and on thumbv7em-none-eabi. Subsets found two defects the full set hid (a constant and a test-only field gated wider than their users) and the no_std prelude for Vec, all fixed.",
+        "A test of the cooperative engine's own failed once in about twelve runs after the last rebase: the late-publisher control asserted that a cache nobody announced is not asked, and the host sends its startup get and its Interest after the subscription, so a router that took the cache first answered the get. The test now waits for the router to have seen both before it holds the cache; nine runs after, and the whole suite three times, passed.",
+        "wz-session-core slot_observer: heap tests 4, fixed-backing tests, unit tests and clippy in both backings, and wz-session-mcu clippy, all passed after the generic OtherPeers.",
+        "The cooperative legs of Layer C1co against the full build's listener, on the tree rebased over origin: answering 11, asking only 8, advanced 11, scout 1.",
+        "Size on pc2, the eight cooperative cases before and at this step: 912,823 to 930,067; 916,041 to 933,285; 919,291 to 937,779; 985,013 to 1,002,849; 1,139,989 to 1,157,649; 1,186,508 to 1,207,600; 1,199,576 to 1,224,096; 994,918 to 1,012,138 (+17,220 to +24,520). The policy that states the sequence-number width then added about 1,440 bytes to each case (the client 930,067 to 931,511) and put three over their budgets; every budget keeps about 1,200 over its reading. The gate passes. A trait object for the other faces cost 1,224 less and was refused for the generic.",
+        "The hook's gate array plus the surface gates: 118 of 119; reason_review_pin_gate is red for atom session-close-ingress on five files this round does not touch (the session drives, drive.rs, session_actions.rs, session_glue.rs, lwip), changed by the keep-alive field and the doc round; their owner's session is gone from the session list, so the pins are not re-read here.",
+        "Not done: the hosted run that holds these commits has not finished."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "publishable_carry_forward_bullets": [
+        "L3 of the listening role (the acceptor: the face table takes a face when the accept side yields a link, tcp first, UDP by source-address demultiplexing after; read waits on every link's readiness, measured against the bounded look L2 makes) is next. engine.rs is this session's.",
+        "Re-read the five stale pins of atom session-close-ingress against the five files and move them; the reason's owner is not reachable, so ask the sessions that remain who owns it.",
+        "Attribute the 9,000 to 11,000 bytes the query-answering cooperative builds grew beyond the client's at step L1 (symbol diff of the query case before and after).",
+        "SubscriberPeer::reconcile had no caller before step L1: ask who owns the slot node whether a subscription registered after a peer's interest is meant not to be announced there.",
+        "Read C1cs, C1cc, C1ce, C1co and C1aq to C1av from the first hosted run that finishes and holds steps L1 and L2.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine; the differential of the typed tokio host against the port's host."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
