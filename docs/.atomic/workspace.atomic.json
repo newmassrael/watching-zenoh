@@ -294006,6 +294006,40 @@
         "Still open: attribute the 9,000 to 11,000 bytes the query-answering cooperative builds grew beyond the client's at step L1; ask who owns the slot node whether SubscriberPeer::reconcile should announce a subscription registered after a peer's interest; wait_declarations_stable and a synced query on the cooperative engine; the differential of the typed tokio host against the port's host."
       ]
     },
+    "Round 3796": {
+      "decision_summary": "An #iface= on an IP endpoint no longer puts interface-list in requires; it stays in may_require. requires is a lower bound, what a run cannot go on without, and neither use of #iface= is that. A unicast link hands the name to the kernel with SO_BINDTODEVICE and makes no interface listing. A group looks a named interface up in the listing, but when the listing cannot be made at all it warns and joins on the kernel's default interface (wz-host-net multicast_iface_selector_v4 and _v6); an IPv4 address literal is not looked up. The derivation claimed more than a run needs for every reader (zenoh-c, pico, ap-demo), including ap-demo's scouting responder with an interface. A raw Ethernet endpoint keeps interface-list in requires: its socket is bound by the index SIOCGIFINDEX returns, and the open fails without it.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/facilities.rs: ip_link takes no socket options and puts interface-list in the loose set only, with the reason.",
+        "Tests: wz-capi-core open_facilities (an #iface= dial requires its socket, interface-list may), wz-capi-pico device_requires (a listened #iface= group, whole JSON), wz-ap-demo sessions_facilities (a group and a scouting responder with an interface).",
+        "scripts/lib/facility_trace.py: the zenoh-c corpus gains a peer alone on a group named by its interface.",
+        "docs/target-build-contract.md T9: the #iface= rule and why raw Ethernet differs."
+      ],
+      "verification_bullets": [
+        "On pc2: cargo test of wz-session-core, wz-capi-core, wz-capi-pico and wz-ap-demo with scouting-responder, filtered to facilities and device_requires, 24 tests passed by the log's count, the changed ones named there; clippy -D warnings over all targets of wz-session-core. Layer C1st pass with a new corpus run, a zenoh-c peer alone on udp/224.0.0.224 with #iface=lo and scouting off: it asked for entropy, interface-list, multicast, sockets-udp and threads, which agrees with its door (requires entropy, multicast, sockets-udp, threads; may_require interface-list) and with the build's bound. Here: cargo fmt, and the hook's 121 static gates with the citation resolve, all rc 0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "A run cannot show that interface-list is not required for #iface=, since a run that lists the interfaces asks for it either way; the rule rests on reading wz-host-net (the selector's Undetermined arm). A run on a device that refuses the listing would be the witness."
+      ],
+      "publishable_decision_summary": "An #iface= on an IP endpoint no longer puts interface-list in requires; it stays in may_require. requires is a lower bound, what a run cannot go on without, and neither use of #iface= is that. A unicast link hands the name to the kernel with SO_BINDTODEVICE and makes no interface listing. A group looks a named interface up in the listing, but when the listing cannot be made at all it warns and joins on the kernel's default interface (wz-host-net multicast_iface_selector_v4 and _v6); an IPv4 address literal is not looked up. The derivation claimed more than a run needs for every reader (zenoh-c, pico, ap-demo), including ap-demo's scouting responder with an interface. A raw Ethernet endpoint keeps interface-list in requires: its socket is bound by the index SIOCGIFINDEX returns, and the open fails without it.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/facilities.rs: ip_link takes no socket options and puts interface-list in the loose set only, with the reason.",
+        "Tests: wz-capi-core open_facilities (an #iface= dial requires its socket, interface-list may), wz-capi-pico device_requires (a listened #iface= group, whole JSON), wz-ap-demo sessions_facilities (a group and a scouting responder with an interface).",
+        "scripts/lib/facility_trace.py: the zenoh-c corpus gains a peer alone on a group named by its interface.",
+        "docs/target-build-contract.md T9: the #iface= rule and why raw Ethernet differs."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2: cargo test of wz-session-core, wz-capi-core, wz-capi-pico and wz-ap-demo with scouting-responder, filtered to facilities and device_requires, 24 tests passed by the log's count, the changed ones named there; clippy -D warnings over all targets of wz-session-core. Layer C1st pass with a new corpus run, a zenoh-c peer alone on udp/224.0.0.224 with #iface=lo and scouting off: it asked for entropy, interface-list, multicast, sockets-udp and threads, which agrees with its door (requires entropy, multicast, sockets-udp, threads; may_require interface-list) and with the build's bound. Here: cargo fmt, and the hook's 121 static gates with the citation resolve, all rc 0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A run cannot show that interface-list is not required for #iface=, since a run that lists the interfaces asks for it either way; the rule rests on reading wz-host-net (the selector's Undetermined arm). A run on a device that refuses the listing would be the witness."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
