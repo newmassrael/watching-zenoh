@@ -26,11 +26,11 @@ use wz::runtime_coop::ClockSource;
 use wz::runtime_core::EthernetMac;
 use wz::runtime_zephyr::glue::{delay_us, log, log_parts};
 use wz::runtime_zephyr::ZephyrClock;
-use wz_session_core::text_out::LogPart;
-use LogPart::{Str, U64};
 use wz_eth_mac_cyt4bf::{
     Config, Cyt4bfBoard, Cyt4bfMac, DmaArea, LinkError, LinkEvent, LinkMode, LinkState, RefClock,
 };
+use wz_session_core::text_out::LogPart;
+use LogPart::{Str, U64};
 
 #[cfg(feature = "net-lwip-mac")]
 use crate::net_lwip::BoardMac;
@@ -235,10 +235,9 @@ impl T2gMac {
     pub fn poll_link(&mut self, now_ms: u64) {
         match self.inner.service_link(now_ms) {
             LinkEvent::Steady => {}
-            LinkEvent::Up(mode) => log_parts(&[
-                Str("zephyr-admin-node: link up, "),
-                Str(describe(mode)),
-            ]),
+            LinkEvent::Up(mode) => {
+                log_parts(&[Str("zephyr-admin-node: link up, "), Str(describe(mode))])
+            }
             LinkEvent::Down => log(c"zephyr-admin-node: link down"),
         }
         #[cfg(feature = "tx-pool")]
@@ -559,10 +558,7 @@ pub fn open(
     let outcome = inner.bring_up_link(link_wait_ms.saturating_mul(1000));
     stage(&[Str("link bring-up returned")]);
     match outcome {
-        Ok(mode) => log_parts(&[
-            Str("zephyr-admin-node: link up, "),
-            Str(describe(mode)),
-        ]),
+        Ok(mode) => log_parts(&[Str("zephyr-admin-node: link up, "), Str(describe(mode))]),
         Err(LinkError::NoLink) => {
             log(c"zephyr-admin-node: no link yet; the node starts and waits for one")
         }

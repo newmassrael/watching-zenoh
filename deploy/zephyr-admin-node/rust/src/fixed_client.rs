@@ -43,7 +43,6 @@ use wz_runtime_coop::{CoopRuntime, CoopTime};
 use wz_session_core::entropy::EntropySource;
 use wz_session_core::session_slot::SessionSlots;
 use wz_session_core::text_out::LogPart;
-use LogPart::{Str, U64};
 use wz_session_mcu::slot_client::Listening;
 #[cfg(not(feature = "get"))]
 use wz_session_mcu::slot_node::Answering;
@@ -52,6 +51,7 @@ use wz_session_mcu::slot_node::{
     ClientNode, Declared, Document, Entities, NodeIdentity, NodePort, NodeStorage,
     SIGNING_KEY_BYTES,
 };
+use LogPart::{Str, U64};
 
 use crate::{
     BATCH_SIZE, CONFIG_BODY, CONFIG_KEY, ENDPOINTS, IDLE_SLEEP_US, NODE_ID, STACK_CHECK_MS,
