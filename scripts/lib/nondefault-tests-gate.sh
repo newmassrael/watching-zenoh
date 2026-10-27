@@ -846,10 +846,15 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # is a selector that drops the tests built on `Rc` handles, so the row is its own.
     # `test-support` carries the lifecycle contract's table, which
     # `tests/admin_open_query.rs` holds the in-band open query to (D7): the file
-    # compiles on exactly this profile, so no row above reaches that test.
+    # compiles on exactly this profile, so no row above reaches that test. The three lifecycle verbs
+    # add the in-band table of close, reset and status and the tests of what a build binds, which
+    # exist only with all three beside the slot profile.
     "wz-session-mcu|hook|\
         adminspace-core,\
         adminspace-write,\
+        lifecycle-close,\
+        lifecycle-reset,\
+        lifecycle-status,\
         session-slot,\
         test-support\
         |"
