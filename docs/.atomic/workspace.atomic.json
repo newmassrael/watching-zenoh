@@ -292326,6 +292326,54 @@
         "Open-debt item 925 and the sequence-number resolution policy remain the next items of this track."
       ]
     },
+    "Round 3754": {
+      "decision_summary": "The policy sn-resolution enters, by the rule of one policy at a time: the width of the sequence numbers the C interfaces advertise, in a unicast InitSyn and in a group's Join. Upstream departed from: zenoh's Resolution default and zenoh-pico's Z_SN_RESOLUTION are 32 bits and there is no setting for another. Choices bits-32 (the default, upstream's), bits-8, bits-16, bits-64. It exists because a peer built with another width refuses wz in a group: pico refuses a Join whose resolution differs from its own (multicast/rx.c), so a wz node was unheard by it. A unicast session already takes the smaller of the two widths, which the negotiation code held. The request-id width is not part of it. The pico ABI on both engines, the zenoh-c ABI and the pico group profile read the one value, SessionPolicy::sn_resolution, so a width is stated once, in the build, with WZ_POLICY_SN_RESOLUTION or its Kconfig symbol.",
+      "changes_bullets": [
+        "deploy/wz-config.toml: [[policy]] sn-resolution (choice, default bits-32, since 2) with the upstream behaviour it departs from and its help; policy_generated.rs and Kconfig.policies regenerated.",
+        "wz-session-core policy.rs: SnResolution::wire_code and WIDTHS, with the pico citation of the fixed 0x02.",
+        "wz-capi-core: LinkTx, OpenStance, OpenPlan carry sn_resolution; init_params writes it as seq_num_res; the zenoh-c group profile takes it for the Join.",
+        "wz-capi-pico: both engines' stance read the policy; the group profile is a function of the width (pico_group), the build's width in PICO_GROUP. wz-capi-coop: CoopConfig gains sn_resolution.",
+        "Tests: every width reaches the wire in the unicast InitSyn (read off a bare listener), in the zenoh-c Join profile and in the pico Join profile; the pico ABI's InitSyn test names the width its build was made with."
+      ],
+      "verification_bullets": [
+        "On a build host: the wz-capi-pico InitSyn test run as FOUR builds, none stated then bits-8, bits-16 and bits-64, each printing the width it was built with, each reading the matching resolution byte off the wire; the request-id nibble stays pico's 32 bits in all four. An unset build run after the stated ones returned to bits-32, so the environment is read at build and not remembered.",
+        "wz-capi-core lib (108 passed, with the three new), clippy -D warnings of wz-capi-core and wz-capi-pico: pass on the final tree. wz-session-core policy tests, wz-capi-pico lib, wz-capi-coop, cargo check with all targets of wz-capi-c, wz-capi-pico and wz-capi-coop, clippy of wz-session-core and wz-capi-coop: pass one run earlier, before the last two edits, which touched test code only. clippy::doc-lazy-continuation is allowed in those runs: it fails on main in files this round does not touch, and its owner has the repair.",
+        "wz_config --check (8 policies, 12 generated files current), upstream_switch_map, config_key_fixture_gate, prose_named_identifier_gate, prose_feature_gate, store_reason_citation_gate, count_guard_lint: pass. The check that no crate reads WZ_POLICY_* itself refused two test reads first; both were removed and the tests ask the policy type.",
+        "Not measured: a wz node against a real zenoh-pico built with another width; the tests hold the byte, not the peer."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "The tokio router and the demo do not read the policy: their handshake parameters still write 32 bits. Give them the same value when a deployment needs a router in such a group.",
+        "A width below the peer's runs the narrower ring; a 8-bit ring wraps after 128 frames in flight. Measure a wz pico session at bits-8 against a pico peer built so.",
+        "Open-debt item 925 (the accepting side's handshake bound and concurrent accepts) is the next item of this track; ask the session that holds the accept loop first."
+      ],
+      "publishable_decision_summary": "The policy sn-resolution enters, by the rule of one policy at a time: the width of the sequence numbers the C interfaces advertise, in a unicast InitSyn and in a group's Join. Upstream departed from: zenoh's Resolution default and zenoh-pico's Z_SN_RESOLUTION are 32 bits and there is no setting for another. Choices bits-32 (the default, upstream's), bits-8, bits-16, bits-64. It exists because a peer built with another width refuses wz in a group: pico refuses a Join whose resolution differs from its own (multicast/rx.c), so a wz node was unheard by it. A unicast session already takes the smaller of the two widths, which the negotiation code held. The request-id width is not part of it. The pico ABI on both engines, the zenoh-c ABI and the pico group profile read the one value, SessionPolicy::sn_resolution, so a width is stated once, in the build, with WZ_POLICY_SN_RESOLUTION or its Kconfig symbol.",
+      "publishable_changes_bullets": [
+        "deploy/wz-config.toml: [[policy]] sn-resolution (choice, default bits-32, since 2) with the upstream behaviour it departs from and its help; policy_generated.rs and Kconfig.policies regenerated.",
+        "wz-session-core policy.rs: SnResolution::wire_code and WIDTHS, with the pico citation of the fixed 0x02.",
+        "wz-capi-core: LinkTx, OpenStance, OpenPlan carry sn_resolution; init_params writes it as seq_num_res; the zenoh-c group profile takes it for the Join.",
+        "wz-capi-pico: both engines' stance read the policy; the group profile is a function of the width (pico_group), the build's width in PICO_GROUP. wz-capi-coop: CoopConfig gains sn_resolution.",
+        "Tests: every width reaches the wire in the unicast InitSyn (read off a bare listener), in the zenoh-c Join profile and in the pico Join profile; the pico ABI's InitSyn test names the width its build was made with."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: the wz-capi-pico InitSyn test run as FOUR builds, none stated then bits-8, bits-16 and bits-64, each printing the width it was built with, each reading the matching resolution byte off the wire; the request-id nibble stays pico's 32 bits in all four. An unset build run after the stated ones returned to bits-32, so the environment is read at build and not remembered.",
+        "wz-capi-core lib (108 passed, with the three new), clippy -D warnings of wz-capi-core and wz-capi-pico: pass on the final tree. wz-session-core policy tests, wz-capi-pico lib, wz-capi-coop, cargo check with all targets of wz-capi-c, wz-capi-pico and wz-capi-coop, clippy of wz-session-core and wz-capi-coop: pass one run earlier, before the last two edits, which touched test code only. clippy::doc-lazy-continuation is allowed in those runs: it fails on main in files this round does not touch, and its owner has the repair.",
+        "wz_config --check (8 policies, 12 generated files current), upstream_switch_map, config_key_fixture_gate, prose_named_identifier_gate, prose_feature_gate, store_reason_citation_gate, count_guard_lint: pass. The check that no crate reads WZ_POLICY_* itself refused two test reads first; both were removed and the tests ask the policy type.",
+        "Not measured: a wz node against a real zenoh-pico built with another width; the tests hold the byte, not the peer."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The tokio router and the demo do not read the policy: their handshake parameters still write 32 bits. Give them the same value when a deployment needs a router in such a group.",
+        "A width below the peer's runs the narrower ring; a 8-bit ring wraps after 128 frames in flight. Measure a wz pico session at bits-8 against a pico peer built so.",
+        "Open-debt item 925 (the accepting side's handshake bound and concurrent accepts) is the next item of this track; ask the session that holds the accept loop first."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
