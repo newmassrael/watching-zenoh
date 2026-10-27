@@ -840,10 +840,14 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # node's admin GET at zero allocations through its own queryable, status and
     # host, and the refusals of a leg, a status row and an identity. `session-slot`
     # is a selector that drops the tests built on `Rc` handles, so the row is its own.
+    # `test-support` carries the lifecycle contract's table, which
+    # `tests/admin_open_query.rs` holds the in-band open query to (D7): the file
+    # compiles on exactly this profile, so no row above reaches that test.
     "wz-session-mcu|hook|\
         adminspace-core,\
         adminspace-write,\
-        session-slot\
+        session-slot,\
+        test-support\
         |"
     # The client node on the slot profile written once for every platform
     # (`slot_node`): its round watch, its identity and handshake, and the
@@ -1117,6 +1121,13 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     "zenoh-keyexpr|hook|\
         internal,\
         unstable|"
+    # ── zenoh-config, the configuration crate of the family ──
+    #
+    # `unstable` is the feature that reads a configuration file in TOML (`Config::from_file` refuses
+    # a `.toml` without it), so the one test of that reader, `tests::test_toml_config_format`, is
+    # behind it and no default-feature build runs it. The crate's tests take a few milliseconds and
+    # touch the temp directory only, so the leg is `hook` and its filter is empty.
+    "zenoh-config|hook|unstable|"
     # ── the top crate `zenoh`, which carries upstream's feature names (docs/zenoh-api-on-the-engine.md) ──
     #
     # `unstable` gates the cancellation token, the priority conversions and the selector accessors

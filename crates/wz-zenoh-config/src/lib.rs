@@ -2060,12 +2060,22 @@ impl fmt::Display for GenericConfig {
 
 #[cfg(test)]
 mod tests {
+    // What the TOML test alone uses is gated with it, so a build without `unstable` has no
+    // unused import.
+    #[cfg(feature = "unstable")]
     use std::{env, fs::File, io::Write, str::FromStr, time::SystemTime};
 
+    #[cfg(feature = "unstable")]
     use zenoh_protocol::core::{EndPoint, WhatAmI};
 
-    use crate::{Config, ModeDependentValue, ZenohId};
+    use crate::Config;
+    #[cfg(feature = "unstable")]
+    use crate::{ModeDependentValue, ZenohId};
 
+    // The TOML reader is `unstable` (`Config::from_file` refuses a `.toml` without it, as
+    // upstream's does), and upstream's test is ungated only because its workspace builds with
+    // `unstable` on: here the crate is built alone, so the test says what it needs.
+    #[cfg(feature = "unstable")]
     #[test]
     fn test_toml_config_format() {
         const FILE_CONTENTS: &str = r#"
