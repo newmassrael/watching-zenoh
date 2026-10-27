@@ -292498,6 +292498,44 @@
         "Still open: wait_declarations_stable and a synced query on the cooperative engine; the differential of the typed tokio host against the port's host."
       ]
     },
+    "Round 3758": {
+      "decision_summary": "The zenoh verdict's corpus gains its first real link: a router and clients on two machines over an office Wi-Fi, five captures (TCP from before the first Init, TCP with 3000-byte samples that span segments, TCP joined mid-session, UDP, and zenoh-pico over TCP). Every new flow reads yes and none reads conflicting under the new floors. The measured weights are recomputed on the larger zenoh population: 3062 units, 268 framing directions, 264 cookie echoes, 264 Init pairs and 528 version headers, all with no failure, so the failure bounds fall a little and the violation weights grow a little more negative (cookie differing -6426 to -6470, residual unit -9881 to -9998, another version -7416 to -7460). The Init-roles and cookie-fidelity confirmations move by one millibit. The SN break rate stays an assumed link tolerance, now also held by a real link.",
+      "changes_bullets": [
+        "`captures/corpus/`: `link-tcp-full`, `link-tcp-large`, `link-tcp-midsession`, `link-udp-full` and `link-pico-tcp`, listed in `corpus.json5`; the README table and pending sentence follow; the corpus holds 26 files, all fixed points of the anonymiser.",
+        "`zenoh_evidence.rs`: `measured::ZENOH_UNITS`, `ZENOH_FRAMING`, `ZENOH_COOKIE`, `ZENOH_ROLES`, `ZENOH_VERSIONS` and the weights computed from them; `zenoh_corpus_tests.rs` pins the five tallies.",
+        "The header example, the session-table tests and the design note 6.2 follow the new weights."
+      ],
+      "verification_bullets": [
+        "Measured: all ten flows of the five files read yes (2 per file), no zenoh flow of the corpus reads conflicting for its batch size or SN ring, and the SN steps stay 744 followed and 6 broken, as before.",
+        "wz-capture 1609 tests, wz-capi-dissect with its C consumer pass; clippy -D warnings on wz-capture. The pre-push static gate array passed but `reason_review_pin_gate`, which fails on the tip of main for the `session-close-ingress` pins of files this round did not touch."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "A busier LAN's DHCP, NTP, LLMNR and WS-Discovery from real implementations in containers are still to capture and enter the corpus with their measured counts; the container image has to be built by the owner.",
+        "Zenoh versions other than 1.10.1 and 1.5.0, and links other than loopback, one emulated lossy link and one Wi-Fi link, are still to measure."
+      ],
+      "publishable_decision_summary": "The zenoh verdict's corpus gains its first real link: a router and clients on two machines over an office Wi-Fi, five captures (TCP from before the first Init, TCP with 3000-byte samples that span segments, TCP joined mid-session, UDP, and zenoh-pico over TCP). Every new flow reads yes and none reads conflicting under the new floors. The measured weights are recomputed on the larger zenoh population: 3062 units, 268 framing directions, 264 cookie echoes, 264 Init pairs and 528 version headers, all with no failure, so the failure bounds fall a little and the violation weights grow a little more negative (cookie differing -6426 to -6470, residual unit -9881 to -9998, another version -7416 to -7460). The Init-roles and cookie-fidelity confirmations move by one millibit. The SN break rate stays an assumed link tolerance, now also held by a real link.",
+      "publishable_changes_bullets": [
+        "`captures/corpus/`: `link-tcp-full`, `link-tcp-large`, `link-tcp-midsession`, `link-udp-full` and `link-pico-tcp`, listed in `corpus.json5`; the README table and pending sentence follow; the corpus holds 26 files, all fixed points of the anonymiser.",
+        "`zenoh_evidence.rs`: `measured::ZENOH_UNITS`, `ZENOH_FRAMING`, `ZENOH_COOKIE`, `ZENOH_ROLES`, `ZENOH_VERSIONS` and the weights computed from them; `zenoh_corpus_tests.rs` pins the five tallies.",
+        "The header example, the session-table tests and the design note 6.2 follow the new weights."
+      ],
+      "publishable_verification_bullets": [
+        "Measured: all ten flows of the five files read yes (2 per file), no zenoh flow of the corpus reads conflicting for its batch size or SN ring, and the SN steps stay 744 followed and 6 broken, as before.",
+        "wz-capture 1609 tests, wz-capi-dissect with its C consumer pass; clippy -D warnings on wz-capture. The pre-push static gate array passed but `reason_review_pin_gate`, which fails on the tip of main for the `session-close-ingress` pins of files this round did not touch."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A busier LAN's DHCP, NTP, LLMNR and WS-Discovery from real implementations in containers are still to capture and enter the corpus with their measured counts; the container image has to be built by the owner.",
+        "Zenoh versions other than 1.10.1 and 1.5.0, and links other than loopback, one emulated lossy link and one Wi-Fi link, are still to measure."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
