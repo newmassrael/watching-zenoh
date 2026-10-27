@@ -170,6 +170,20 @@ impl<const TICK_HZ: u32> ClockSource for ZephyrClock<TICK_HZ> {
         // SAFETY: `sys_clock_tick_get` reads the kernel tick counter and has no
         // preconditions; it is safe to call from thread context at any time.
         let ticks = unsafe { sys_clock_tick_get() } as u64;
+        ticks_to_us::<TICK_HZ>(ticks)
+    }
+}
+
+/// `ticks` at `TICK_HZ` in microseconds. A rate that divides a million (every
+/// rate a board runs: 100, 1000, 10000) is one multiplication by a constant;
+/// the 64-bit division stays only for a rate that does not, because on a
+/// 32-bit core it is a library call of about a hundred cycles that the polling
+/// loop would pay at every turn.
+#[inline(always)]
+const fn ticks_to_us<const TICK_HZ: u32>(ticks: u64) -> u64 {
+    if 1_000_000 % TICK_HZ as u64 == 0 {
+        ticks * (1_000_000 / TICK_HZ as u64)
+    } else {
         ticks * 1_000_000 / TICK_HZ as u64
     }
 }
@@ -721,6 +735,20 @@ mod tests {
             u64::from(u32::MAX) * 100_000,
             "a tick count past 32 bits converts without wrapping"
         );
+    }
+
+    #[test]
+    fn a_rate_that_divides_a_million_converts_as_the_division_does() {
+        for ticks in [0, 1, 7, 1234, u64::from(u32::MAX), u64::from(u32::MAX) * 10] {
+            assert_eq!(ticks_to_us::<10_000>(ticks), ticks * 1_000_000 / 10_000);
+            assert_eq!(ticks_to_us::<100>(ticks), ticks * 1_000_000 / 100);
+            assert_eq!(ticks_to_us::<1_000_000>(ticks), ticks);
+            assert_eq!(
+                ticks_to_us::<7>(ticks),
+                ticks * 1_000_000 / 7,
+                "a rate that does not divide keeps the division"
+            );
+        }
     }
 
     /// The entropy seam hands the board the whole buffer, and a board that
