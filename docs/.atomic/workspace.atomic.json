@@ -294386,6 +294386,42 @@
         "The hosted result of this push is read per job at the start of the next round; the size red of the capability cost gate named in round 3776 is still not of this family."
       ]
     },
+    "Round 3805": {
+      "decision_summary": "The reason the zenoh verdict's reader frames no unit of HTTP or TLS streams is now read from the code and measured: the flow's framing is decided from its first bytes, and a flow that opens with `GET ` or `HTTP` is read as a WebSocket carrier, one that opens with a TLS ClientHello as an encrypted one, so neither reaches the stream reader whatever the size of what follows (bodies of 25000 and 70000 bytes measured the same: no unit, no framing). A connection that opens with another method does reach it, and takes `PO`, `PU` or `HE` for a length prefix. A new capture of such connections (python's http.server answering POST, PUT and HEAD, bodies up to 30000 bytes, 28 connections) leaves all 28 flows undecided and loses the framing of every one of its 50 stream directions, the null side's first framing observation beside MQTT's. It is measured into the weights: a held framing now weighs +4088 yes and +6978 no, from +4819 and +7393, and a lost one -6491 and -6480.",
+      "changes_bullets": [
+        "`captures/corpus/`: `stack-http-post`, listed in `corpus.json5` and the README table; the corpus holds 32 files, all fixed points of the anonymiser.",
+        "`zenoh_evidence.rs`: one member of `measured::NULL` with framing [0, 50], the two framing weights and their doc comments; `zenoh_corpus_tests.rs` pins the tally at 28 undecided flows.",
+        "Design note 6.1 says which openings reach the stream reader, and the weight table and the null bounds of 6.2 follow."
+      ],
+      "verification_bullets": [
+        "Measured: a first probe of GET and TLS captures with 25000 and 70000-byte bodies read 0 units and 0 framings (not kept, the corpus pins the smaller pair); the POST, PUT and HEAD capture reads (0 yes, 0 no, 28 undecided), units 0, framing held 0 and lost 50. wz-capture 1609 tests pass (6 ignored), wz-capi-dissect 227 and its C consumer 4 pass, clippy -D warnings on wz-capture is clean, and the corpus verifies as 32 fixed points.",
+        "The pre-push static gate array was run whole on the tree: all 120 pass, including the two the feature-set documentation lane had left red."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "Zenoh versions other than 1.10.1 and 1.5.0, and links other than loopback, one emulated lossy link and one Wi-Fi link, are still to measure; the null framing rests on two protocols (MQTT, and HTTP opening with another method), and the stream reader still decides on a WebSocket opening by its first four bytes alone."
+      ],
+      "publishable_decision_summary": "The reason the zenoh verdict's reader frames no unit of HTTP or TLS streams is now read from the code and measured: the flow's framing is decided from its first bytes, and a flow that opens with `GET ` or `HTTP` is read as a WebSocket carrier, one that opens with a TLS ClientHello as an encrypted one, so neither reaches the stream reader whatever the size of what follows (bodies of 25000 and 70000 bytes measured the same: no unit, no framing). A connection that opens with another method does reach it, and takes `PO`, `PU` or `HE` for a length prefix. A new capture of such connections (python's http.server answering POST, PUT and HEAD, bodies up to 30000 bytes, 28 connections) leaves all 28 flows undecided and loses the framing of every one of its 50 stream directions, the null side's first framing observation beside MQTT's. It is measured into the weights: a held framing now weighs +4088 yes and +6978 no, from +4819 and +7393, and a lost one -6491 and -6480.",
+      "publishable_changes_bullets": [
+        "`captures/corpus/`: `stack-http-post`, listed in `corpus.json5` and the README table; the corpus holds 32 files, all fixed points of the anonymiser.",
+        "`zenoh_evidence.rs`: one member of `measured::NULL` with framing [0, 50], the two framing weights and their doc comments; `zenoh_corpus_tests.rs` pins the tally at 28 undecided flows.",
+        "Design note 6.1 says which openings reach the stream reader, and the weight table and the null bounds of 6.2 follow."
+      ],
+      "publishable_verification_bullets": [
+        "Measured: a first probe of GET and TLS captures with 25000 and 70000-byte bodies read 0 units and 0 framings (not kept, the corpus pins the smaller pair); the POST, PUT and HEAD capture reads (0 yes, 0 no, 28 undecided), units 0, framing held 0 and lost 50. wz-capture 1609 tests pass (6 ignored), wz-capi-dissect 227 and its C consumer 4 pass, clippy -D warnings on wz-capture is clean, and the corpus verifies as 32 fixed points.",
+        "The pre-push static gate array was run whole on the tree: all 120 pass, including the two the feature-set documentation lane had left red."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Zenoh versions other than 1.10.1 and 1.5.0, and links other than loopback, one emulated lossy link and one Wi-Fi link, are still to measure; the null framing rests on two protocols (MQTT, and HTTP opening with another method), and the stream reader still decides on a WebSocket opening by its first four bytes alone."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
