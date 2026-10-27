@@ -2,7 +2,7 @@
   "schema": 1,
   "catalog_version": 2,
   "built_from": {
-    "commit": "79b900170f77f7e155e59508fe4f0cf7faaf3b21",
+    "commit": "b6b7cedb653f7f78a9931b92f7cfd668f576dc93",
     "tree_clean": true
   },
   "platform": {
@@ -39,8 +39,8 @@
       "name": "libwz_capi_pico.so",
       "kind": "shared-library",
       "path": "lib/libwz_capi_pico.so",
-      "sha256": "c45ad29ce9ca74034fc5c4c5c731c1033582b3dedc372474aaa31fdcdcf83868",
-      "size": 5760072,
+      "sha256": "b12ef9fae21cf721dfcd46e0deb66132737fa95968aeaf98ba9143fd221d56e6",
+      "size": 5519184,
       "elf": {
         "class": 64,
         "machine": "aarch64",
@@ -201,15 +201,47 @@
           "transport-multicast",
           "transport-unicast",
           "zenoh-config"
+        ],
+        "wz-capi-pico": [
+          "advanced",
+          "connectivity",
+          "default",
+          "engine-tokio",
+          "gossip",
+          "link-udp",
+          "liveliness",
+          "liveliness-get",
+          "multi-thread",
+          "multicast-transport",
+          "peer",
+          "query",
+          "queryable",
+          "rx-busy-poll",
+          "scout",
+          "serial-drive-own-thread",
+          "unstable-api"
         ]
       },
       "device_requires": [
         "entropy",
         "interface-list",
         "multicast",
+        "name-resolution",
         "sockets-tcp",
         "sockets-udp",
         "threads",
+        "wall-clock"
+      ],
+      "requires": [
+        "entropy",
+        "threads"
+      ],
+      "may_require": [
+        "interface-list",
+        "multicast",
+        "name-resolution",
+        "sockets-tcp",
+        "sockets-udp",
         "wall-clock"
       ],
       "unassessed_features": []
@@ -219,8 +251,8 @@
       "name": "libwz_capi_c.so",
       "kind": "shared-library",
       "path": "lib/libwz_capi_c.so",
-      "sha256": "765d1d26f04ebfe9f4c22b332c3c5f6773b7e401fff903a6a880f884b4565021",
-      "size": 11737416,
+      "sha256": "ef3c65b1543dcc02792ad66fe0bd7388e962d5e4f313ba7fc9d8ca88230d3761",
+      "size": 11742152,
       "elf": {
         "class": 64,
         "machine": "aarch64",
@@ -414,9 +446,24 @@
         "filesystem",
         "interface-list",
         "multicast",
+        "name-resolution",
         "sockets-tcp",
         "sockets-udp",
         "threads",
+        "unix-sockets",
+        "wall-clock"
+      ],
+      "requires": [
+        "entropy",
+        "threads"
+      ],
+      "may_require": [
+        "filesystem",
+        "interface-list",
+        "multicast",
+        "name-resolution",
+        "sockets-tcp",
+        "sockets-udp",
         "unix-sockets",
         "wall-clock"
       ],
@@ -427,8 +474,8 @@
       "name": "wz-ap-demo",
       "kind": "executable",
       "path": "bin/wz-ap-demo",
-      "sha256": "7724bc71145d831b3cefbafbd6c110aba4d4658b1cfde38e0d84db5b94271e2a",
-      "size": 4956248,
+      "sha256": "be2dfac0840fca8b34ef101364799c71699c1a665ff4bf45b5869478ab729d62",
+      "size": 5021648,
       "elf": {
         "class": 64,
         "machine": "aarch64",
@@ -494,7 +541,8 @@
             "liveliness_subscribe",
             "liveliness_get",
             "pull",
-            "forward"
+            "forward",
+            "replay"
           ]
         }
       ],
@@ -560,15 +608,37 @@
           "transport-link-tcp",
           "transport-link-udp",
           "transport-unicast"
+        ],
+        "wz-ap-demo": [
+          "default",
+          "preset-ap-client",
+          "query-consolidation",
+          "switchboard"
         ]
       },
       "device_requires": [
         "entropy",
+        "filesystem",
         "interface-list",
         "multicast",
+        "name-resolution",
         "sockets-tcp",
         "sockets-udp",
+        "threads",
+        "wall-clock"
+      ],
+      "requires": [
+        "entropy",
         "threads"
+      ],
+      "may_require": [
+        "filesystem",
+        "interface-list",
+        "multicast",
+        "name-resolution",
+        "sockets-tcp",
+        "sockets-udp",
+        "wall-clock"
       ],
       "unassessed_features": []
     }
