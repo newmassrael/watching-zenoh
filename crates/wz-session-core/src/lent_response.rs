@@ -306,7 +306,7 @@ impl<'a> ResponseWriter<'a> {
     /// Building the codec's `Response` for the reply nearly every query gets moves a record that
     /// holds a chain of eight extension entries inline at every level, encodes it through the
     /// generic variant walk and writes it a byte at a time through a trait object; the bytes of
-    /// the window are the same ([`Self::encode_generic`] is the reference the tests hold this
+    /// the window are the same (`Self::encode_generic` is the reference the tests hold this
     /// path to), and the time of the two on the kit is in `docs/query-answer-path.md`.
     pub fn encode_tx<B: crate::tx_buf::TxBuf + ?Sized>(
         &self,

@@ -37,6 +37,7 @@ use core::ops::Deref;
 
 #[cfg(any(feature = "alloc", feature = "session-slot"))]
 use wz_runtime_coop::{ClockSource, CoopRuntime, CoopTime};
+#[cfg(any(feature = "alloc", feature = "session-slot"))]
 use wz_session_core::driver_loop::IterationEvent;
 #[cfg(feature = "alloc")]
 use wz_session_core::observer::ApplicationLayerObserver;

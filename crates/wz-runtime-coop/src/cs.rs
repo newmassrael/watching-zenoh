@@ -23,7 +23,7 @@
 //! The one exception is what the runtime lends the session (`Runtime::Mutex`, `Runtime::RwLock`).
 //! The session runs I/O inside those, and a host's process-wide lock held through a blocking
 //! write stops every session of the program, so on a host each such value has a lock of its own
-//! ([`HostMutex`], [`crate::sync`]); the crate's own cells (the timers, the tasks, the joins) do
+//! (`HostMutex`, which only a `host-lock` build has, and [`crate::sync`]); the crate's own cells (the timers, the tasks, the joins) do
 //! no I/O and stay on the process's section.
 
 pub use critical_section::{CriticalSection, Mutex};

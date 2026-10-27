@@ -622,7 +622,7 @@ fn text_is_a_key(text: &str) -> bool {
 }
 
 /// What is true of a key's text, read in one pass and kept: whether it holds a wildcard, and
-/// whether it is a key the matchers accept ([`text_is_a_key`]'s rule).
+/// whether it is a key the matchers accept (`text_is_a_key`'s rule).
 ///
 /// A key that does not change between questions is asked about once. A queryable's pattern is
 /// fixed from its declaration and a query's key is fixed from its decode, and every match
