@@ -292912,6 +292912,38 @@
         "The tls image and the heap client were not re-measured on the kit beyond the matrix run."
       ]
     },
+    "Round 3768": {
+      "decision_summary": "D7 step 8, D in part: the fixed-memory node serves close, reset and status in band, beside open, through the same function (lifecycle_verdict) as every other transport. VerbKey (lifecycle_wire, no allocator) reads the four verb keys, a reset's generation included, and a wildcard in any naming chunk is no target. InBand is the trait the admin queryable is typed by: any NodeOpening binds open only, as before, and Verbs<N> around a LifecycleNode binds all four, so an image that does not name it carries none of the code; the capability document lists close, reset, status, open. The in-band queries are held to the same table as the heap profile and the process, with zero heap allocations per GET (admin_open_query, feature lifecycle-verbs, a new CI leg of eight tests). Measured: the four unbound Zephyr client images have the same worst chain and size as the parent, to the byte.",
+      "changes_bullets": [
+        "crates/wz-session-core: lifecycle_wire gains VerbKey and its test.",
+        "crates/wz-session-mcu: admin_fixed gains the InBand trait (blanket for NodeOpening, Verbs<N> for any LifecycleNode, serve_verbs); the admin queryable and its sink types are typed by InBand; connect_manager gains PeerStore::seed_node_for_test (lifecycle-verbs with test-support); tests/admin_open_query.rs gains the verbs module.",
+        "scripts/run-ci.sh: leg C1m admin verbs query (8). docs/session-lifecycle-intent.md: section 6.9."
+      ],
+      "verification_bullets": [
+        "On the build host: admin_open_query with lifecycle-verbs and a node built for two peers by their zid (8 tests: the table of every verb the fixed node can be put in, asked as GETs at zero heap allocations; patterns; the capability document); the same file without the feature (6 tests); clippy with -D warnings for wz-session-mcu with the feature on and off, and wz-session-core; the fixed-memory MCU admin image builds. Kit lane build and stack gate on the four Zephyr client images before and after: chains 6956, 6956, 7108 and 7448 bytes and sizes identical. The reason pin, census, feature model and gate diagnostic gates after the rebase."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Step D leaves the capability per verb: lifecycle-verbs is one feature and Verbs lists all four, so an image that wants only status needs the store's flags and the permit split by verb. No Zephyr image binds Verbs yet, and who may close, reset and read the status of a fixed image is still the image owner's. The hosted runs holding rounds 3697, 3715, 3749 and 3764 were not read: each was cancelled by a later push."
+      ],
+      "publishable_decision_summary": "D7 step 8, D in part: the fixed-memory node serves close, reset and status in band, beside open, through the same function (lifecycle_verdict) as every other transport. VerbKey (lifecycle_wire, no allocator) reads the four verb keys, a reset's generation included, and a wildcard in any naming chunk is no target. InBand is the trait the admin queryable is typed by: any NodeOpening binds open only, as before, and Verbs<N> around a LifecycleNode binds all four, so an image that does not name it carries none of the code; the capability document lists close, reset, status, open. The in-band queries are held to the same table as the heap profile and the process, with zero heap allocations per GET (admin_open_query, feature lifecycle-verbs, a new CI leg of eight tests). Measured: the four unbound Zephyr client images have the same worst chain and size as the parent, to the byte.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core: lifecycle_wire gains VerbKey and its test.",
+        "crates/wz-session-mcu: admin_fixed gains the InBand trait (blanket for NodeOpening, Verbs<N> for any LifecycleNode, serve_verbs); the admin queryable and its sink types are typed by InBand; connect_manager gains PeerStore::seed_node_for_test (lifecycle-verbs with test-support); tests/admin_open_query.rs gains the verbs module.",
+        "scripts/run-ci.sh: leg C1m admin verbs query (8). docs/session-lifecycle-intent.md: section 6.9."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host: admin_open_query with lifecycle-verbs and a node built for two peers by their zid (8 tests: the table of every verb the fixed node can be put in, asked as GETs at zero heap allocations; patterns; the capability document); the same file without the feature (6 tests); clippy with -D warnings for wz-session-mcu with the feature on and off, and wz-session-core; the fixed-memory MCU admin image builds. Kit lane build and stack gate on the four Zephyr client images before and after: chains 6956, 6956, 7108 and 7448 bytes and sizes identical. The reason pin, census, feature model and gate diagnostic gates after the rebase."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step D leaves the capability per verb: lifecycle-verbs is one feature and Verbs lists all four, so an image that wants only status needs the store's flags and the permit split by verb. No Zephyr image binds Verbs yet, and who may close, reset and read the status of a fixed image is still the image owner's. The hosted runs holding rounds 3697, 3715, 3749 and 3764 were not read: each was cancelled by a later push."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
