@@ -100,6 +100,7 @@
 use crate::atomic::{Arc, AtomicBool, Ordering};
 #[cfg(not(feature = "session-slot"))]
 use alloc::boxed::Box;
+#[cfg(not(feature = "session-slot"))]
 use core::cell::RefCell;
 use core::future::Future;
 #[cfg(not(feature = "session-slot"))]
@@ -530,10 +531,7 @@ impl<C: ClockSource> Runtime for CoopRuntime<C> {
     where
         T: Send + 'static,
     {
-        crate::cs::with(|cs| {
-            let mut borrow = mutex.borrow(cs).borrow_mut();
-            f(&mut *borrow)
-        })
+        crate::sync::with(mutex, f)
     }
 
     // R311di-pre-e — construction-side Mutex/RwLock helpers. MCU profile
@@ -550,14 +548,14 @@ impl<C: ClockSource> Runtime for CoopRuntime<C> {
     where
         T: Send + 'static,
     {
-        Mutex::new(RefCell::new(value))
+        crate::sync::new(value)
     }
 
     fn new_rwlock<T>(value: T) -> Self::RwLock<T>
     where
         T: Send + Sync + 'static,
     {
-        Mutex::new(RefCell::new(value))
+        crate::sync::new(value)
     }
 }
 

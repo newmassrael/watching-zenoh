@@ -70,6 +70,7 @@
 //! per-runtime alias surface keeps both flavours composable through a
 //! cfg switch at the consumer's import line.
 
+#[cfg(not(feature = "host-lock"))]
 use core::cell::RefCell;
 
 /// MCU-profile mutual-exclusion lock alias (R311w option (a),
@@ -88,7 +89,42 @@ use core::cell::RefCell;
 /// avoided in favour of this alias so a future
 /// `wz-runtime-embassy::sync::Mutex` (or another MCU profile flavour)
 /// can substitute without call-site churn.
+#[cfg(not(feature = "host-lock"))]
 pub type Mutex<T> = critical_section::Mutex<RefCell<T>>;
+
+/// On a host (`host-lock`) the lock is the value's own ([`crate::cs::HostMutex`]), because the
+/// session runs I/O inside it and a lock of the whole process held through a blocking write
+/// would stop every other session of the program.
+#[cfg(feature = "host-lock")]
+pub type Mutex<T> = crate::cs::HostMutex<T>;
+
+/// A value in a new [`Mutex`] of this profile.
+#[cfg(feature = "runtime")]
+#[inline]
+pub(crate) fn new<T>(value: T) -> Mutex<T> {
+    #[cfg(not(feature = "host-lock"))]
+    {
+        critical_section::Mutex::new(RefCell::new(value))
+    }
+    #[cfg(feature = "host-lock")]
+    {
+        crate::cs::HostMutex::new(value)
+    }
+}
+
+/// Run `f` on the value of `mutex` with it locked.
+#[cfg(feature = "runtime")]
+#[inline]
+pub(crate) fn with<T, U>(mutex: &Mutex<T>, f: impl FnOnce(&mut T) -> U) -> U {
+    #[cfg(not(feature = "host-lock"))]
+    {
+        crate::cs::with(|cs| f(&mut *mutex.borrow(cs).borrow_mut()))
+    }
+    #[cfg(feature = "host-lock")]
+    {
+        mutex.with(f)
+    }
+}
 
 /// MCU-profile reader-writer lock alias (R311w option (a)).
 ///
@@ -98,4 +134,4 @@ pub type Mutex<T> = critical_section::Mutex<RefCell<T>>;
 /// trait-level bound difference (`T: Send + Sync` for `RwLock` vs
 /// `T: Send` for `Mutex`) is preserved at the call-site contract;
 /// the alias body is the same primitive.
-pub type RwLock<T> = critical_section::Mutex<RefCell<T>>;
+pub type RwLock<T> = Mutex<T>;

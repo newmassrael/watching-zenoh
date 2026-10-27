@@ -521,9 +521,14 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # and the session-drive modules) is present without the heap, so it sits
         # behind its own name and `alloc` adds the heap forms; the sites are `pub
         # mod`s and re-exports, the shape the sites above have.
+        # Step L4 of `docs/capi-pico-on-coop-engine.md` -- `host-lock` joins: the
+        # host's critical section and the lock of each value the runtime lends the
+        # session. It gates `cs::HostMutex`, a `pub use` inside `pub mod cs` and so
+        # not at the crate root, the shape `rx-in-place`'s sites have.
         frozenset(
             {
                 "alloc",
+                "host-lock",
                 "reassembly",
                 "runtime",
                 "rx-in-place",
@@ -1106,6 +1111,7 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
     "wz-runtime-coop": frozenset(
         {
             "alloc",
+            "host-lock",
             "reassembly",
             "runtime",
             "rx-in-place",
