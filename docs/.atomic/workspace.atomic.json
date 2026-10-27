@@ -294660,6 +294660,46 @@
         "Read the hosted run of this round and of the one before at the start of the next: C1co builds the pico CLI and runs stdbuf there for the first time."
       ]
     },
+    "Round 3811": {
+      "decision_summary": "Repayment of the red hosted run of round 3809 (run 40551486881, twenty jobs), read from each job's log. The cause that broke the most lanes (Layer C1m, Qz, the QEMU images, C1ay's build) was a build of wz-session-core with no allocator naming response_build, a module only an allocator compiles: the responder extension's reader allocates nothing, so it now lives in reply and response_build re-exports it. Layer E's --ignored sweep adopted the three tests of mine that need the hold_a_listener example and panicked; they carry the token held_listener, and the helper they call joins the scope gate and the A4 binary map. The capi-c ABI pin moves to revision 7 for the device requirement door, the count guards follow the tests that were added, two family notices follow the pin, and the cost budgets follow the first hosted reading. Not repaid: the four peer-gate liveliness tests of wz-runtime-tokio, held by another session.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/reply.rs, response_build.rs: decode_responder_ext_body in reply, re-exported by response_build. crates/wz-runtime-coop/src/cs.rs, wz-session-core keyexpr_match.rs and lent_response.rs, wz-session-mcu app_layer.rs: the doc links and the import Layer C1bzr named.",
+        "crates/wz-integration-tests/tests/pico_dials_a_wz_listener.rs (tests renamed with held_listener, wz_held_listener_binary), scripts/lib/layer_e_oracle_scope_gate.py, scripts/lib/crossimpl_corpus.py, scripts/run-ci.sh: the sweep token, the helper in the gate and in the binary map, and the counts of check_sessions_binary (5) and keyexpr_match (12, 23, 23).",
+        "crates/wz-capi-c abi.rs, wz_capi_c.h and scripts/lib/capi_c_abi_pin.py: revision 7 with wz_capi_c_config_device_requires. crates/wz-zenoh liveliness.rs and querier.rs: the notices. scripts/lib/capability_cost_gate.py: three coop budgets, the export pins of pico-default (803) and capic-default (836), capic-default and capic-client-small budgets. docs/hosted-red-acks.md: the row."
+      ],
+      "verification_bullets": [
+        "On pc2: host-slot-node control_channel (the command Layer C1m failed on) passes; Layer C1ch passes with the pin at revision 7; the three keyexpr_match arms read 12, 23 and 23; the layer E scope gate, the family notice gate with --resolve, the count-guard lint and the cost gate's selftest pass; rustdoc no longer reports the three links. Layer C1co passes for the change of the admission gate before it.",
+        "Not run here: Layer C1m itself (the lwip build script fails on pc2 for lack of the submodule), Layer C1cs (the budgets are the readings of the hosted run of 3809 and 3,500), Layer A4 and Layer Q. A check of wz-session-core with session-slot and codec-response alone failed on judge_chain (gated on session-unicast); that is a different configuration from the ones that failed hosted, and it is carried."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "carry_forward_bullets": [
+        "The four peer_differential / peer_network liveliness tests of wz-runtime-tokio (Layer C1bnl) are red on the linkstate plane against the region-hat plane: for an Interest on tokens the first sends no DeclareFinal where the second does. They belong to the session that holds the peer gate.",
+        "network_message.rs gates judge_chain on a union that omits session-slot with codec-response and without session-unicast, while judge_response_chains is gated on codec-response alone: a build with session-slot and codec-response and no session-unicast does not compile. Whether an image builds that is not read.",
+        "Layer Z was read only to its first error (the family notices); the legs behind it ran 1 of 104 and may carry their own red. Layer C0mut was cancelled.",
+        "capic-client-small grew 46,683 bytes with the device requirement door (hosted readings of 490e99863 and 23c300730); the door's owner may narrow what it links into a client build."
+      ],
+      "publishable_decision_summary": "Repayment of the red hosted run of round 3809 (run 40551486881, twenty jobs), read from each job's log. The cause that broke the most lanes (Layer C1m, Qz, the QEMU images, C1ay's build) was a build of wz-session-core with no allocator naming response_build, a module only an allocator compiles: the responder extension's reader allocates nothing, so it now lives in reply and response_build re-exports it. Layer E's --ignored sweep adopted the three tests of mine that need the hold_a_listener example and panicked; they carry the token held_listener, and the helper they call joins the scope gate and the A4 binary map. The capi-c ABI pin moves to revision 7 for the device requirement door, the count guards follow the tests that were added, two family notices follow the pin, and the cost budgets follow the first hosted reading. Not repaid: the four peer-gate liveliness tests of wz-runtime-tokio, held by another session.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/reply.rs, response_build.rs: decode_responder_ext_body in reply, re-exported by response_build. crates/wz-runtime-coop/src/cs.rs, wz-session-core keyexpr_match.rs and lent_response.rs, wz-session-mcu app_layer.rs: the doc links and the import Layer C1bzr named.",
+        "crates/wz-integration-tests/tests/pico_dials_a_wz_listener.rs (tests renamed with held_listener, wz_held_listener_binary), scripts/lib/layer_e_oracle_scope_gate.py, scripts/lib/crossimpl_corpus.py, scripts/run-ci.sh: the sweep token, the helper in the gate and in the binary map, and the counts of check_sessions_binary (5) and keyexpr_match (12, 23, 23).",
+        "crates/wz-capi-c abi.rs, wz_capi_c.h and scripts/lib/capi_c_abi_pin.py: revision 7 with wz_capi_c_config_device_requires. crates/wz-zenoh liveliness.rs and querier.rs: the notices. scripts/lib/capability_cost_gate.py: three coop budgets, the export pins of pico-default (803) and capic-default (836), capic-default and capic-client-small budgets. docs/hosted-red-acks.md: the row."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2: host-slot-node control_channel (the command Layer C1m failed on) passes; Layer C1ch passes with the pin at revision 7; the three keyexpr_match arms read 12, 23 and 23; the layer E scope gate, the family notice gate with --resolve, the count-guard lint and the cost gate's selftest pass; rustdoc no longer reports the three links. Layer C1co passes for the change of the admission gate before it.",
+        "Not run here: Layer C1m itself (the lwip build script fails on pc2 for lack of the submodule), Layer C1cs (the budgets are the readings of the hosted run of 3809 and 3,500), Layer A4 and Layer Q. A check of wz-session-core with session-slot and codec-response alone failed on judge_chain (gated on session-unicast); that is a different configuration from the ones that failed hosted, and it is carried."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The four peer_differential / peer_network liveliness tests of wz-runtime-tokio (Layer C1bnl) are red on the linkstate plane against the region-hat plane: for an Interest on tokens the first sends no DeclareFinal where the second does. They belong to the session that holds the peer gate.",
+        "network_message.rs gates judge_chain on a union that omits session-slot with codec-response and without session-unicast, while judge_response_chains is gated on codec-response alone: a build with session-slot and codec-response and no session-unicast does not compile. Whether an image builds that is not read.",
+        "Layer Z was read only to its first error (the family notices); the legs behind it ran 1 of 104 and may carry their own red. Layer C0mut was cancelled.",
+        "capic-client-small grew 46,683 bytes with the device requirement door (hosted readings of 490e99863 and 23c300730); the door's owner may narrow what it links into a client build."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
