@@ -294260,6 +294260,52 @@
         "Item 751 step (b) continues at step 6, the node surfaces listed in section 5 of the note (hosted subscribers and queryables and their redelivery queues, the gossip target, the self locators, autoconnect, the lifecycle directory, the interest garbage collection), each moved or declared absent with its reason, then step 7, the retirement of LinkstateForwarder. Open and stated, not decided: the answer to a current subscriber Interest from a north peer is a choice between the dispatcher's release behaviour, which the region-hat peer follows, and the final alone, which the pin's own assertion implies; a deployment of wz peers that sends one should be read. The owner question of step 3 stands: a ROUTER node's south peer region relays nothing between link-state peers."
       ]
     },
+    "Round 3802": {
+      "decision_summary": "Layer C1bzr documents every crate in its reduced configurations: each largest set without one feature the crate names in a cfg, and without every feature that implies it, deduplicated by the named features a configuration holds. A link that resolves with all features on and breaks without one, which rounds 3751 and 3756 found by hand, is now measured. Findings are counted by (crate, file, message) and held to scripts/lib/reduced_docs_ledger.txt in both directions; hosted CI runs six shards and a settle job that needs every shard. A configuration a compile_error! guard turns away is recorded as that guard alone, read from the source at the place rustc points to. wz-ap-demo now names runtime-tokio on its wz dependency, which its code uses unconditionally. This pays round 3756's carry.",
+      "changes_bullets": [
+        "scripts/lib/doc_feature_sets.py: --reduced lists the leave-one-out configurations; explicit feature lists now pass --no-default-features.",
+        "scripts/lib/reduced_docs_gate.py (new): measure, settle and ledger [--write]; compile_error! refusals; shard partition check.",
+        "scripts/lib/reduced_docs_ledger.txt (new): 597 findings at 741 places over 532 configurations, 3 of them refusals.",
+        "scripts/run-ci.sh: Layer C1bzr; .github/workflows/ci.yml: reduced-docs (6 shards) and reduced-docs-settle.",
+        ".github/cache-classes.json, apt_package_census.py, round_fed_gate_reach.py: the new job and the two DEFERRED rows.",
+        "crates/wz-ap-demo/Cargo.toml: wz with runtime-tokio; crates/wz-workload/src/mutation.rs: alloc-only items named as code; wz-capi-pico device_requires.rs: open_config named as code."
+      ],
+      "verification_bullets": [
+        "On the build machine six concurrent shards documented all 532 configurations of the tree after round 3793; settled together they match the ledger, less the device_requires line its owner's round removes.",
+        "Layer C1bzr narrowed to wz-ap-demo and wz-workload (42 configurations) and Layer C1bz narrowed to the same crates pass after the fixes.",
+        "Both selftests pass, and the cache-save, cache-budget, apt census, gate-provenance, unwired-lane, round-fed-reach and job-budget gates pass."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The ledger carries the other crates' findings, most of them in wz-session-core and wz-runtime-tokio; each is lowered in the commit that fixes it.",
+        "Whether six shards fit the 30-minute job is the first hosted run's to say; the job's budget margin reports it.",
+        "A round that lands while a sweep runs can move the ledger; the hosted settle job is what judges the tree that lands."
+      ],
+      "publishable_decision_summary": "Layer C1bzr documents every crate in its reduced configurations: each largest set without one feature the crate names in a cfg, and without every feature that implies it, deduplicated by the named features a configuration holds. A link that resolves with all features on and breaks without one, which rounds 3751 and 3756 found by hand, is now measured. Findings are counted by (crate, file, message) and held to scripts/lib/reduced_docs_ledger.txt in both directions; hosted CI runs six shards and a settle job that needs every shard. A configuration a compile_error! guard turns away is recorded as that guard alone, read from the source at the place rustc points to. wz-ap-demo now names runtime-tokio on its wz dependency, which its code uses unconditionally. This pays round 3756's carry.",
+      "publishable_changes_bullets": [
+        "scripts/lib/doc_feature_sets.py: --reduced lists the leave-one-out configurations; explicit feature lists now pass --no-default-features.",
+        "scripts/lib/reduced_docs_gate.py (new): measure, settle and ledger [--write]; compile_error! refusals; shard partition check.",
+        "scripts/lib/reduced_docs_ledger.txt (new): 597 findings at 741 places over 532 configurations, 3 of them refusals.",
+        "scripts/run-ci.sh: Layer C1bzr; .github/workflows/ci.yml: reduced-docs (6 shards) and reduced-docs-settle.",
+        ".github/cache-classes.json, apt_package_census.py, round_fed_gate_reach.py: the new job and the two DEFERRED rows.",
+        "crates/wz-ap-demo/Cargo.toml: wz with runtime-tokio; crates/wz-workload/src/mutation.rs: alloc-only items named as code; wz-capi-pico device_requires.rs: open_config named as code."
+      ],
+      "publishable_verification_bullets": [
+        "On the build machine six concurrent shards documented all 532 configurations of the tree after round 3793; settled together they match the ledger, less the device_requires line its owner's round removes.",
+        "Layer C1bzr narrowed to wz-ap-demo and wz-workload (42 configurations) and Layer C1bz narrowed to the same crates pass after the fixes.",
+        "Both selftests pass, and the cache-save, cache-budget, apt census, gate-provenance, unwired-lane, round-fed-reach and job-budget gates pass."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The ledger carries the other crates' findings, most of them in wz-session-core and wz-runtime-tokio; each is lowered in the commit that fixes it.",
+        "Whether six shards fit the 30-minute job is the first hosted run's to say; the job's budget margin reports it.",
+        "A round that lands while a sweep runs can move the ledger; the hosted settle job is what judges the tree that lands."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
