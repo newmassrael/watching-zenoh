@@ -854,21 +854,23 @@ mod tests {
 
     #[test]
     fn a_key_the_engine_does_not_act_on_is_refused_by_its_name_unless_it_is_the_default() {
-        // `transport/unicast/accept_timeout` is upstream's (10 s by default) and this engine's
-        // handshake does not read it: stating another value asks for what will not happen.
-        let error = open(peer_with("transport/unicast/accept_timeout", "1234"))
+        // `transport/unicast/open_timeout` is upstream's (10 s by default) and this engine's
+        // handshake does not read it: stating another value asks for what will not happen. (The
+        // key is one the engine does not act on; the example moves to the next one when the
+        // engine comes to act on this one, as it did for `accept_timeout`.)
+        let error = open(peer_with("transport/unicast/open_timeout", "1234"))
             .wait()
             .expect_err("an unmapped key with a value of its own");
         let text = error.to_string();
         assert!(
-            text.contains("`transport/unicast/accept_timeout` = 1234"),
+            text.contains("`transport/unicast/open_timeout` = 1234"),
             "{text}"
         );
         // CONTROL: the same key at its default is no instruction, and the session opens.
         let default = Config::default()
-            .get_json("transport/unicast/accept_timeout")
+            .get_json("transport/unicast/open_timeout")
             .expect("a default");
-        open(peer_with("transport/unicast/accept_timeout", &default))
+        open(peer_with("transport/unicast/open_timeout", &default))
             .wait()
             .expect("the default of an unmapped key opens");
     }
