@@ -2893,6 +2893,25 @@ impl RouterForwarder {
         )
     }
 
+    /// A forwarder for a PEER node: the same hats the pin builds for a peer, which
+    /// is the peer hat in `North` and a broker hat for the clients south of it
+    /// (`zenoh/src/net/routing/gateway.rs` @ `GatewaySouthConf::Preset(GatewayPresetConf::Auto) => match mode {`),
+    /// with its faces placed by [`region_of`] at node mode Peer.
+    ///
+    /// Only the placement is built (`docs/peer-region-hats.md`, step 2): no
+    /// plane has been checked against `LinkstateForwarder` for a peer yet, so
+    /// the constructor is not public. Step 3 moves the data plane over, held
+    /// equal by a differential gate, and makes this the door `run_peer` uses.
+    #[cfg(test)]
+    fn peer(self_zid: Zid) -> Self {
+        Self::build(
+            WhatAmI::Peer,
+            self_zid,
+            Box::new(Instant::now),
+            crate::node_clock::TimestampingEnabled::default(),
+        )
+    }
+
     /// The inner constructor every public constructor funnels through, so the
     /// field initialiser lives ONCE (only the monotonic clock and the
     /// `timestamping.enabled` map vary).
@@ -9996,6 +10015,136 @@ mod tests {
         assert_eq!(fwd.on_tables().tables.faces[&FaceId(0)].link, None);
         assert_eq!(fwd.on_tables().north_net().node_count(), 1);
         assert_eq!(fwd.on_tables().linkstatepeers_net().node_count(), 1);
+    }
+
+    // ── item 751, step (b): a peer node on this forwarder ──
+
+    /// A peer's hats are the pin's for a peer on the `auto` preset: the peer hat
+    /// in `North`, a broker hat for the clients south of it and for `Local`, and
+    /// no peer region at all (a peer holds its peers in `North`, which a router
+    /// holds south). The population is `auto_regions`, not a list.
+    #[test]
+    fn a_peer_node_builds_the_hats_the_pin_builds_for_a_peer() {
+        let fwd = RouterForwarder::peer(zid(0x01));
+        let on = fwd.on_tables();
+        assert_eq!(on.tables.node_mode, WhatAmI::Peer);
+        let mut built: Vec<Region> = on.tables.hats.regions().collect();
+        let mut want = crate::routing_region::auto_regions(WhatAmI::Peer);
+        assert!(!want.is_empty(), "no region derived, so nothing was graded");
+        built.sort_by_key(|r| r.to_string());
+        want.sort_by_key(|r| r.to_string());
+        assert_eq!(built, want);
+        let mut named = vec![NORTH_REGION, CLIENTS_REGION, Region::Local];
+        named.sort_by_key(|r| r.to_string());
+        assert_eq!(built, named, "north, the clients' region and local only");
+        assert!(
+            on.mesh_hat(NORTH_REGION).is_some(),
+            "the peer hat is a mesh"
+        );
+        assert!(on.broker_hat(CLIENTS_REGION).is_some());
+        assert!(on.broker_hat(Region::Local).is_some());
+        assert!(
+            on.tables.hats.get(&PEERS_REGION).is_none(),
+            "a peer has no south peer region"
+        );
+        // The first region a PEER hat serves is `North` itself here, so the
+        // peers' graph is the north graph (self alone) and not an absent one.
+        assert_eq!(on.linkstatepeers_net_node_count(), 1);
+        assert!(std::ptr::eq(
+            on.first_peers_net().expect("a peer hat serves north"),
+            on.north_net()
+        ));
+        assert!(is_peer_hat(NORTH_REGION, WhatAmI::Peer));
+        assert!(!is_router_hat(NORTH_REGION, WhatAmI::Peer));
+        assert!(
+            !on.north_net().full_linkstate(),
+            "the peer hat runs gossip unless link-state mode is asked for"
+        );
+    }
+
+    /// Where a peer places a remote, which is the pin's `compute_region_of` at
+    /// node mode Peer: a router and a peer are both `North` (the router's bound
+    /// toward it is south, the peer's north), a client is south in the clients'
+    /// region. A router node places the same three remotes in `North`, the peers'
+    /// south region and the clients' south region, so the two tables differ at the
+    /// peer, which is what makes the node mode load-bearing.
+    #[test]
+    fn a_peer_node_places_a_router_and_a_peer_north_and_a_client_south() {
+        let fwd = RouterForwarder::peer(zid(0x01));
+        let (router, _r) = face(zid(0xA1), WIRE_ROUTER);
+        let (peer, _p) = face(zid(0xA2), WIRE_PEER);
+        let (client, _c) = face(zid(0xA3), WIRE_CLIENT);
+        for face in [&router, &peer, &client] {
+            assert_eq!(fwd.refuses_face(face), None, "every mode is served");
+        }
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &peer);
+        fwd.register(FaceId(2), &client);
+        let on = fwd.on_tables();
+        let tier = |id| on.tables.faces[&FaceId(id)].tier;
+        assert_eq!(tier(0), NORTH_REGION);
+        assert_eq!(tier(1), NORTH_REGION);
+        assert_eq!(tier(2), CLIENTS_REGION);
+        assert!(on.tables.faces[&FaceId(0)].link.is_some());
+        assert!(on.tables.faces[&FaceId(1)].link.is_some());
+        assert_eq!(on.tables.faces[&FaceId(2)].link, None, "a client is a leaf");
+        let net = on.north_net();
+        assert!(
+            net.next_hop(&zid(0x01), &zid(0xA1)).is_some(),
+            "the router's link is in the peer hat's graph"
+        );
+        assert!(
+            net.next_hop(&zid(0x01), &zid(0xA2)).is_some(),
+            "so is the peer's"
+        );
+
+        // The control: a router node places the same peer in its south peer
+        // region, so it is the node mode and not the remote that moved it.
+        assert_eq!(
+            wz_session_core::extbound::region_of(WhatAmI::Router, WhatAmI::Peer, None),
+            Some(PEERS_REGION)
+        );
+        assert_eq!(
+            wz_session_core::extbound::region_of(WhatAmI::Peer, WhatAmI::Peer, None),
+            Some(NORTH_REGION)
+        );
+    }
+
+    /// A partition on a peer builds three hats per subregion whatever the node's
+    /// own mode, kinds read off the hat table at node mode Peer, and the rules
+    /// place a remote by its own mode: a peer the rules name lands in the
+    /// subregion's peer region and one they do not in `North`.
+    #[test]
+    fn a_peer_node_with_a_subregion_places_the_remote_the_rules_name_south() {
+        use wz_session_core::region_partition::{RegionFilter, SouthSubregion};
+        let partition = SouthPartition::Custom(vec![SouthSubregion {
+            filters: Some(vec![RegionFilter {
+                zids: Some(vec![zid(0xAA).as_slice().to_vec()]),
+                ..RegionFilter::default()
+            }]),
+        }]);
+        let fwd = RouterForwarder::peer(zid(0x05)).with_south_partition(partition.clone());
+        let sub0 = |mode| Region::South { id: 0, mode };
+        {
+            let on = fwd.on_tables();
+            let mut built: Vec<Region> = on.tables.hats.regions().collect();
+            let mut want = crate::routing_region::regions_of(WhatAmI::Peer, &partition);
+            built.sort_by_key(|r| r.to_string());
+            want.sort_by_key(|r| r.to_string());
+            assert_eq!(built, want);
+            assert!(on.broker_hat(sub0(WhatAmI::Client)).is_some());
+            assert!(is_peer_hat(sub0(WhatAmI::Peer), WhatAmI::Peer));
+            assert!(on.mesh_hat(sub0(WhatAmI::Peer)).is_some());
+            assert!(is_router_hat(sub0(WhatAmI::Router), WhatAmI::Peer));
+            assert!(on.mesh_hat(sub0(WhatAmI::Router)).is_some());
+        }
+        let (named, _a) = face(zid(0xAA), WIRE_PEER);
+        let (other, _b) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &named);
+        fwd.register(FaceId(1), &other);
+        let on = fwd.on_tables();
+        assert_eq!(on.tables.faces[&FaceId(0)].tier, sub0(WhatAmI::Peer));
+        assert_eq!(on.tables.faces[&FaceId(1)].tier, NORTH_REGION);
     }
 
     #[test]

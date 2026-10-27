@@ -144,7 +144,30 @@ kinds:
   `querier_sources`, `queryable_sources`, `subscriber_sources`,
   `token_sources`. Each moves with the test that reads it.
 
-## 6. Open
+## 6. Step 2, as landed
+
+`RouterForwarder::peer` builds the forwarder at node mode Peer. It is
+test-only: no plane has been held equal to `LinkstateForwarder` for a peer, so
+nothing outside the tests can reach a peer forwarder yet. Three placement
+tests are the step's evidence:
+
+- the hats are `auto_regions(Peer)` exactly: the peer hat in `North`, a broker
+  hat for the clients' south region and for `Local`, no south peer region;
+  the north net runs gossip, not full link-state;
+- a router and a peer remote are placed in `North` (each gets a link in the
+  peer hat's graph) and a client in the clients' region with no link, where a
+  router node would put the same peer in its south peer region;
+- with a `gateway/south` subregion, the hats are `regions_of(Peer, partition)`
+  and the rules place a named peer in `South { id, Peer }`, an unnamed one in
+  `North`.
+
+What the tests showed: on a peer node `North` IS the first peer-hat region, so
+the accessors that answer "the first peers region" (`first_peers_net`, and the
+admin `linkstatepeers_net_node_count` over it) answer the north graph. That is
+the pin's meaning of a peer hat, and no router-shaped caller breaks on it; it
+does mean step 6 must not read those accessors as "the south peers" for a peer.
+
+## 7. Open
 
 - The size of step 1's list is unknown until it is made, and the number of
   rounds after it follows from it. The router's own program ran from round 2865
