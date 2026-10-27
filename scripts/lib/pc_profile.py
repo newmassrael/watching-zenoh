@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""Where the time of a GET went, from the program-counter samples of a profile run.
+"""R3781 (no register item) -- where the time of a GET went, from the program-counter samples of a profile run.
 
     python3 pc_profile.py <elf> <samples file> [--top N] [--patterns]
 
