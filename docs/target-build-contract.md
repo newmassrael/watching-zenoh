@@ -355,9 +355,11 @@ among its runs. The pico library and `wz-ap-demo` open through other readers tha
 `OpenPlan`, and have no configuration door until they read through the same plan.
 
 A manifest written before the split (schema 1 has no number for it) carries neither key,
-in every artifact; a reader takes its whole `device_requires` as `may_require`. The
-measured records under `deploy/fixtures/manifests/measured/` are of that form, and an
-entry writes the split one.
+in every artifact; a reader takes its whole `device_requires` as `may_require`. Such a
+manifest is still valid, since packages built before the split exist; an entry writes the
+split form, and the measured records under `deploy/fixtures/manifests/measured/` were all
+recorded again from builds in it (rounds 3787, 3788 and the QNX round after them), the
+synthetic `host-unsplit-bound` standing for the older form.
 
 | Facility | What the artifact's process asks the operating system to let it do |
 | --- | --- |

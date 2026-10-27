@@ -107,8 +107,9 @@ ARTIFACT_KEYS = ["id", "name", "kind", "path", "sha256", "size", "elf", "abi", "
                  "resolved_features", "device_requires", "requires", "may_require", "unassessed_features"]
 # What an entry wrote before `requires` and `may_require` were added within schema 1 (T9): the same
 # keys without the two, a bound that is not split. A reader takes the whole of such a
-# `device_requires` as what a run may ask; the manifests recorded from builds before the split are
-# of this form, and an entry writes the other.
+# `device_requires` as what a run may ask. A package built before the split is of this form, and an
+# entry writes the other; the synthetic `host-unsplit-bound` fixture holds the form now that every
+# measured record has been recorded again in the split one.
 UNSPLIT_ARTIFACT_KEYS = [k for k in ARTIFACT_KEYS if k not in ("requires", "may_require")]
 ELF_KEYS = ["class", "machine", "linking", "interpreter", "soname", "runpath", "rpath", "needed", "os_floor"]
 FLOOR_KEYS = ["glibc", "android_api_note", "symbol_version_tags"]
