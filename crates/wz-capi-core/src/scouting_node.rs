@@ -173,7 +173,7 @@ impl ScoutingPlan {
     }
 
     /// The plan of a scout a program asks for, as upstream's `scout(what, config)` reads its
-    /// config (`zenoh/src/api/scouting.rs` @ `.multicast.address()`): the group, the interface and
+    /// config (`zenoh/src/api/scouting.rs` @ `zenoh_config::defaults::scouting::multicast::address`): the group, the interface and
     /// the hop limit the config states or zenoh's default for each, and NOTHING ELSE of it.
     /// Whether the config enables multicast scouting is a session's question, which `scout` does
     /// not ask; and a scout has no delay, no timeout, no tie-break and no role to answer for.

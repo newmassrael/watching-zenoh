@@ -950,7 +950,7 @@ mod tokio_engine {
     /// returns is dropped.
     ///
     /// Upstream's `scout` reads only the scouting group of its configuration
-    /// (`zenoh/src/api/scouting.rs` @ `.multicast.address()`): the node it would be is not
+    /// (`zenoh/src/api/scouting.rs` @ `zenoh_config::defaults::scouting::multicast::address`): the node it would be is not
     /// asked, so the engine is given the document as a peer's, which changes nothing it reads.
     /// A Hello that names no role, an id of no length or no locator that parses is a Hello that
     /// cannot be told in this crate's words, and is left out as one that does not decode is.
