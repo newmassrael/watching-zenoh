@@ -5202,9 +5202,13 @@ mod matching_aggregate_tests {
         let mapping = shared
             .declare_keyexpr("wz/plain/target".to_owned())
             .expect("the first alias id is not exhausted");
-        let Some(params) = plain_params(&PublishOptions::put()) else {
+        if !wz_session_core::publish_options::SENDS_PLAIN_PUTS {
+            // No plain lane in this build: what the test holds here is that the build says so.
+            assert!(plain_params(&PublishOptions::put()).is_none());
             return;
-        };
+        }
+        let params =
+            plain_params(&PublishOptions::put()).expect("a build with the lane sends plain puts");
 
         // Nobody here wants it: the lane answers, and the answer is the general publish's.
         assert!(
@@ -5325,10 +5329,13 @@ mod matching_aggregate_tests {
         let mapping = shared
             .declare_keyexpr("wz/plain/filtered".to_owned())
             .expect("the first alias id is not exhausted");
-        let Some(params) = plain_params(&PublishOptions::put().with_locality(Locality::Remote))
-        else {
+        let options = PublishOptions::put().with_locality(Locality::Remote);
+        if !wz_session_core::publish_options::SENDS_PLAIN_PUTS {
+            // No plain lane in this build: what the test holds here is that the build says so.
+            assert!(plain_params(&options).is_none());
             return;
-        };
+        }
+        let params = plain_params(&options).expect("a build with the lane sends plain puts");
         let filter = shared.declare_write_filter(
             FilterPlane::Subscribers,
             "wz/plain/filtered".to_owned(),
