@@ -7166,8 +7166,10 @@ mod tests {
     }
 
     /// A session whose Init pair stated a 7-bit ring and a batch of 100 bytes,
-    /// the InitAck carrying a cookie of 200 bytes: longer than the batch, and
-    /// a unit no sender of the session's batches could have written.
+    /// the InitAck carrying a cookie of 120 bytes: longer than the batch, and
+    /// a unit no sender of the session's batches could have written. The
+    /// cookie stays under the 128 bytes an inline-storage build holds, so
+    /// every feature set reads the same InitAck.
     fn stating_session() -> PassiveSession {
         let mut s = PassiveSession::new();
         s.push(
@@ -7176,7 +7178,7 @@ mod tests {
         );
         s.push(
             Direction::B,
-            &framed(&init_wire_stating(true, 0, 100, 200), 2),
+            &framed(&init_wire_stating(true, 0, 100, 120), 2),
         );
         s.next_frame(Direction::A).expect("init syn");
         s.next_frame(Direction::B).expect("init ack");
@@ -7184,7 +7186,7 @@ mod tests {
     }
 
     /// The floors a session's bytes put under its parameters. An Init is sent
-    /// before the batch is agreed, so the 200-byte InitAck above counts for
+    /// before the batch is agreed, so the 120-byte cookie above counts for
     /// nothing, and the handshake's own values stand until a data unit shows
     /// more.
     #[test]
