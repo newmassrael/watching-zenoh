@@ -329,5 +329,15 @@
       taken: "2026-10-27",
       packets: 697,
     },
+    {
+      file: "stack-http-post.pcap",
+      hypothesis: "other",
+      scope: "own",
+      protocol: "http/1.1 over tcp, connections that open with POST, PUT or HEAD",
+      source: "python 3.12 http.server answering GET, HEAD, POST and PUT; four clients whose connection opens with POST or PUT and carries a 30000-byte body, a 30000-byte reply and a HEAD, and a fifth that opens twenty-four connections for one small POST, PUT or HEAD each",
+      capture: "the bridge of a docker network of its own, from before the server started",
+      taken: "2026-10-28",
+      packets: 500,
+    },
   ],
 }

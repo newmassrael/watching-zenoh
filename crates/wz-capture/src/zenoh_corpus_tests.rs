@@ -312,6 +312,7 @@ const EXPECTED: &[(&str, Tally, Tally)] = &[
     // add no count to the weights.
     ("stack-http.pcap", (0, 0, 34), (0, 0, 34)),
     ("stack-tls.pcap", (0, 0, 34), (0, 0, 34)),
+    ("stack-http-post.pcap", (0, 0, 28), (0, 0, 28)),
 ];
 
 #[test]

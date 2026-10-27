@@ -352,17 +352,18 @@ pub mod model {
 
     /// A stream direction, captured from its start, that framed a unit before
     /// it lost its framing. Zenoh: one less the bound of 0 lost in 268; `yes`:
-    /// MQTT's bound, 0 held in 84; `no`: MQTT's smoothed share.
+    /// the bound of 0 held in 50, the HTTP connections that open with another
+    /// method than GET; `no`: the smoothed shares of that and MQTT, averaged.
     pub const FRAMING_HELD: Weight = Weight {
-        yes: 4_819,
-        no: 7_393,
+        yes: 4_088,
+        no: 6_978,
     };
 
     /// A stream direction, captured from its start, that lost its framing
     /// before it framed a unit: bytes that are not zenoh's framing.
     pub const FRAMING_LOST: Weight = Weight {
         yes: -6_491,
-        no: -6_483,
+        no: -6_480,
     };
 
     /// The counts of `captures/corpus/` the measured weights are computed
@@ -388,7 +389,7 @@ pub mod model {
         }
 
         /// The null protocols.
-        pub const NULL: [Member; 13] = [
+        pub const NULL: [Member; 14] = [
             Member {
                 file: "lan-dns.pcap",
                 units: [26, 32, 320],
@@ -445,7 +446,10 @@ pub mod model {
                 framing: [0, 0],
             },
             // No unit framed and no framing lost: a member that shows no
-            // observation of a check is not counted for it.
+            // observation of a check is not counted for it. A flow whose
+            // first bytes are `GET ` or `HTTP` is read as a WebSocket carrier
+            // and one that opens with a TLS ClientHello as an encrypted one,
+            // neither by the stream reader.
             Member {
                 file: "stack-http.pcap",
                 units: [0, 0, 0],
@@ -455,6 +459,15 @@ pub mod model {
                 file: "stack-tls.pcap",
                 units: [0, 0, 0],
                 framing: [0, 0],
+            },
+            // Connections that open with another method reach the stream
+            // reader, which takes `PO`, `PU` or `HE` for a length prefix: no
+            // unit is framed and every one of the 50 directions loses its
+            // framing.
+            Member {
+                file: "stack-http-post.pcap",
+                units: [0, 0, 0],
+                framing: [0, 50],
             },
         ];
 

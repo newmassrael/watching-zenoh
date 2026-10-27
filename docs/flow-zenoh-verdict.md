@@ -216,9 +216,18 @@ A busier network's own protocols are in the corpus too, from real
 implementations in containers: DHCP between twelve clients and a server, NTP
 between six clients and a server, LLMNR and WS-Discovery between a file server
 and four askers. No flow of them reads `yes`. HTTP/1.1 and TLS 1.2 and 1.3
-(34 connections each, python's server and OpenSSL 3) are in too: the reader
-frames no unit of them and loses no framing, so all 68 flows stay `undecided`
-with nothing weighed and the weights do not move.
+(34 connections each, python's server and OpenSSL 3) are in too, and the
+reader frames no unit of them and loses no framing: the stream reader never
+sees them. A flow whose first bytes are `GET ` or `HTTP` is read as a
+WebSocket carrier (`ws::http_upgrade_verdict`) and one that opens with a TLS
+ClientHello as an encrypted one, whatever the size of what follows (bodies of
+25000 and 70000 bytes measured the same), so all 68 flows stay `undecided`
+with nothing weighed. A connection that opens with another method does reach
+the stream reader, which takes `PO`, `PU` or `HE` for a length prefix: 28
+such connections (POST, PUT and HEAD, bodies up to 30000 bytes) stay
+`undecided`, and each of the 50 directions captured from its start loses its
+framing before it frames a unit. That is the first framing the null side
+observed beside MQTT's, and it moves the weights of a held framing.
 
 Still to come for step 2: further zenoh versions and links on the zenoh side.
 
@@ -250,7 +259,8 @@ the weights by `model_weights_are_their_stated_probabilities`):
   samples, joined mid-session, UDP, and zenoh-pico);
 - the `yes` sum's null chance of an outcome is the largest such upper bound
   over the null protocols (a unit read whole: mDNS, 13 of 36 units, bound
-  0.51; a framing held: MQTT, 0 of 84 directions, bound 0.035);
+  0.51; a framing held: HTTP opening with POST, PUT or HEAD, 0 of 50
+  directions, bound 0.058);
 - the `no` sum's is the average over the null protocols of each one's
   Jeffreys estimate, `(k + 1/2) / (n + K/2)`, a proper distribution.
 
@@ -259,8 +269,8 @@ the weights by `model_weights_are_their_stated_probabilities`):
 | unit read whole | +964 | +3858 | +2603 |
 | unit residual | -9998 | -8406 | -6745 |
 | unit undecoded | -9998 | -9260 | -7000 |
-| stream framing held | +4819 | +7393 | (none) |
-| stream framing lost | -6491 | -6483 | (none) |
+| stream framing held | +4088 | +6978 | (none) |
+| stream framing lost | -6491 | -6480 | (none) |
 | cookie matched (8 bytes) | +63984 | +63984 | +63999 |
 | cookie differing | -6470 | -6470 | -10000 |
 | Inits of opposite kinds | +984 | +984 | +999 |
