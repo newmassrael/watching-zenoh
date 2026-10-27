@@ -183,8 +183,9 @@ original reproduced by naming it. Three things follow from it:
   channels, `key_expr` and `selector`, `sample` with the quality of service, and the opening and
   closing of a session (`open`, `Session`, `close`, `is_closed`, `zid`, `id`, `info`, `declare_keyexpr`, `undeclare`,
   the `put` and `delete` of a session with their builder, `declare_subscriber` with its
-  five handlers, and `declare_publisher` with the publisher): 455 of 709
-  default lines present, 579 of 965 with `unstable` and 635 of 1,025 with `unstable` and
+  five handlers, `declare_publisher` with the publisher, and `declare_queryable` with the
+  query and the builders of a reply): 528 of 709
+  default lines present, 659 of 965 with `unstable` and 715 of 1,025 with `unstable` and
   `shared-memory`; the seam over the engine is
   `docs/zenoh-api-on-the-engine.md`).
   Behaviour is held beside the surface by Layer E18 (`conformance/`): a differential test of each

@@ -523,7 +523,36 @@ Each lands whole with its surface lines, tests and faults in one round.
     for the filter).
 - **Z3. Queries.** `get`, `declare_queryable`, `Query`, `Reply`, `declare_querier`, consolidation,
   targets, timeouts. (The cancellation token is already in, Z0b; the builders of `get` that take
-  it join here.)
+  it join here.) Cut in three, each landing whole: **Z3a** `declare_queryable` with `Queryable`,
+  `Query` and the builders of a reply, over `declare_queryable_on_wire` and the held query of the
+  port; **Z3b** `get` with `Reply`, the consolidation, the target, the timeout and the builders
+  that take the cancellation token, over `get_on_wire`; **Z3c** `declare_querier` with `Querier`
+  (its matching status is Z4's). Z2 asked the port for no addition, and the decision of D1 is
+  taken again at the end of Z3 from the list of additions Z3 asks for.
+  - **Z3a (landed).** `Session::declare_queryable` with its builder (`callback`, `callback_mut`,
+    `with`, `background`, `complete`, `allowed_origin`), `Queryable`, its undeclaration, `Query` with
+    every accessor and the builders of a reply (`reply`, `reply_del`, `reply_err`, with the
+    encoding, attachment, timestamp, source information and express setters), and
+    `ReplyKeyExpr`. The engine is handed a `QueryableDeclaration` and mints one callback per face;
+    each makes a `Query` that holds the engine's hold on the request, as a closure that answers
+    with a reply in this crate's types (`Answer`) and lets go of the hold when it drops. So a
+    query may be answered after its callback has returned, from any thread, and it is over, its
+    final goes out, with the last copy of it: a unit test holds that. The reply names the
+    session and the queryable as its responder, which the engine does not do by itself, and
+    refuses a key that does not meet the query's unless the query accepts any, in upstream's
+    words. A session lists its queryables and lets go of them at close, which ends the channel of
+    one, as a subscriber's does. The port gained no operation: `declare_queryable_on_wire` and
+    the held query were there, and the crate names the port's crate beside the engine's, for the
+    held query is not re-exported. One observation, not settled: a query for a key two queryables
+    of one session are declared on is delivered to one of them, with the target `All` as with the
+    default, and the unit tests declare theirs on different keys; whether upstream delivers to
+    both is to be read before Z3b. Left out: the timestamp stack of a query (Z6b), the request,
+    target and consolidation of a get (Z3b). The differential has an upstream node ask the
+    queryable of each side eight queries over a link (the parameters, a body with its encoding
+    and attachment, every form of reply, a disjoint reply refused and accepted, an answer given
+    late from another thread, the options of a query, and nobody to answer) and the transcripts,
+    the queryable's and the asker's, are equal. 73 of the default lines and 80 and 80 of the other
+    two arms, 8 injected faults, none missed.
 - **Z4. Liveliness and matching.**
 - **Z5. Scouting.** Scouting is not in the port; it is the slice that decides whether the port
   gains it or the crate reaches it through the engine, and it contradicts "names no runtime" unless
