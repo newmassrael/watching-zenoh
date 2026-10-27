@@ -234,8 +234,8 @@ pub mod key_expr {
 /// # Query/reply primitives
 ///
 /// This module provides the query/reply API of Zenoh. Of it, the selector, its parameters and the
-/// time range they carry are here; the rest of the module arrives with the slices that give a
-/// query, a queryable and a reply a body.
+/// time range they carry, the queryable, the get and its replies are here; the querier arrives
+/// with slice Z3c.
 ///
 /// The selector syntax is a key expression followed by a question mark and the list of parameters in
 /// the format "name=value" separated by ';'. For example `key/expression?param1=value1;param2=value2`.
@@ -253,7 +253,9 @@ pub mod query {
             queryable::QueryableBuilder,
             reply::{ReplyBuilder, ReplyBuilderDelete, ReplyBuilderPut, ReplyErrBuilder},
         },
-        query::ReplyKeyExpr,
+        query::{
+            ConsolidationMode, QueryConsolidation, QueryTarget, Reply, ReplyError, ReplyKeyExpr,
+        },
         queryable::{Query, Queryable, QueryableUndeclaration},
         selector::Selector,
     };
@@ -485,13 +487,13 @@ pub mod session {
     #[zenoh_macros::unstable]
     pub use zenoh_protocol::core::EntityId;
 
-    // Of upstream's module the builder of a get, the link and transport events and `WeakSession`
-    // arrive with the slices Z3 and Z6a.
+    // Of upstream's module the link and transport events and `WeakSession` arrive with slice Z6a.
     pub use crate::api::{
         builders::{
             close::CloseBuilder,
             info::{PeersZenohIdBuilder, RoutersZenohIdBuilder, ZenohIdBuilder},
             publisher::{SessionDeleteBuilder, SessionPutBuilder},
+            query::SessionGetBuilder,
             session::OpenBuilder,
         },
         info::SessionInfo,

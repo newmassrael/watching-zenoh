@@ -543,16 +543,52 @@ Each lands whole with its surface lines, tests and faults in one round.
     words. A session lists its queryables and lets go of them at close, which ends the channel of
     one, as a subscriber's does. The port gained no operation: `declare_queryable_on_wire` and
     the held query were there, and the crate names the port's crate beside the engine's, for the
-    held query is not re-exported. One observation, not settled: a query for a key two queryables
-    of one session are declared on is delivered to one of them, with the target `All` as with the
-    default, and the unit tests declare theirs on different keys; whether upstream delivers to
-    both is to be read before Z3b. Left out: the timestamp stack of a query (Z6b), the request,
+    held query is not re-exported. One observation, read and settled in Z3b: two queryables of a
+    session on one key seemed to answer a query once. Both are handed it, as upstream hands a query
+    to every queryable of the session whose key meets it whatever the target (the target chooses
+    among peers, not among one's own); the single reply was the consolidation a get has by
+    default, which makes two replies on one key one, and a unit test counts the deliveries and
+    both consolidations. Left out: the timestamp stack of a query (Z6b), the request,
     target and consolidation of a get (Z3b). The differential has an upstream node ask the
     queryable of each side eight queries over a link (the parameters, a body with its encoding
     and attachment, every form of reply, a disjoint reply refused and accepted, an answer given
     late from another thread, the options of a query, and nobody to answer) and the transcripts,
     the queryable's and the asker's, are equal. 73 of the default lines and 80 and 80 of the other
     two arms, 8 injected faults, none missed.
+  - **Z3b (landed).** `Session::get` with `SessionGetBuilder` (`callback`, `callback_mut`, `with`,
+    `payload`, `target`, `consolidation`, `allowed_destination`, `timeout`, `accept_replies`, the
+    encoding, attachment, source information, quality-of-service and cancellation-token
+    builders), `Reply`, `ReplyError`, `QueryTarget`, `ConsolidationMode` and `QueryConsolidation`,
+    and `From<&Query> for Selector`. The engine is handed a `QueryRequest` and mints one callback
+    for each leg of the get (one to each peer and one to the session's own queryables); the legs
+    share the callback of the get, which is dropped with the last of them, and that is what ends the
+    channel of a handler. The session resolves `Auto` once, as upstream does (to `Latest`, or to
+    `None` for a time range), refuses a get on a closed session, and refuses a get that asks for
+    the timestamp stack (Z6b). A cancellation token is tied to the get through the port's fan: the
+    token's handler cancels every leg, and the token's wait ends when the callback is dropped. The
+    default timeout is the configuration's `queries_default_timeout`. D4 has the other half of its
+    test: a callback of a subscriber, of a queryable and of a get asks a get and waits for its
+    replies. Three things in the engine were wrong and are fixed, each found by a test of this
+    slice. A reply from a queryable of the session itself carried its error encoding as the id the
+    responder gave, where one received over a link carries the packed form; the loopback now packs
+    it. A get whose leg is the session's own queryables never expired, because only a face's drive
+    swept its pending table, and a queryable may hold a query past the call that delivered it; the
+    drive of the local plane now sweeps its own table and sleeps until its earliest deadline. And a
+    `Timeout` that upstream's routing sends for a query it forwarded names no key, which the
+    receive paths took for a reply they could not place and dropped; an error is not about a key,
+    so both paths now deliver it. The port gains two defaulted accessors on `ReplyView`,
+    `responder` and `qos`, with the same two fields on `InboundReply`, because the engine dropped
+    the responder and the quality of service of a response (upstream's `Reply::replier_id` and
+    the quality of service of a reply sample); that is the whole of Z3b's addition to the list D1
+    is taken again from. Left out: the querier (Z3c), the timestamp stack (Z6b). The differential
+    has a node of each side ask an upstream queryable 16 gets over a link (the parameters, a body
+    with its encoding, attachment and source information, every form of reply, the target, a
+    disjoint reply refused and accepted, an answer given late, a get never answered, the four
+    consolidations over three versions of one value, the options, nobody to answer, an invalid
+    selector and a get after close) and the transcripts are equal; the `Timeout` line says only
+    that the get ended with one, because upstream's two expiries (the asker's and the asked
+    node's routing) race and the asker is handed whichever is first. 51 of the default lines and 56
+    and 56 of the other two arms, 13 injected faults, none missed.
 - **Z4. Liveliness and matching.**
 - **Z5. Scouting.** Scouting is not in the port; it is the slice that decides whether the port
   gains it or the crate reaches it through the engine, and it contradicts "names no runtime" unless

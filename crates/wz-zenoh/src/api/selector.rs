@@ -13,9 +13,7 @@
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 // Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
-// src/api/selector.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). The conversion
-// `From<&Query> for Selector` is not here: it names the query of a queryable, and joins that type
-// in slice Z3 of docs/zenoh-api-on-the-engine.md.
+// src/api/selector.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
 
 //! [Selector](https://github.com/eclipse-zenoh/roadmap/tree/main/rfcs/ALL/Selectors) to issue queries
 use std::{borrow::Cow, convert::TryFrom, str::FromStr};
@@ -27,7 +25,7 @@ use zenoh_protocol::core::{
 #[cfg(feature = "unstable")]
 use ::{zenoh_result::ZResult, zenoh_util::time_range::TimeRange};
 
-use crate::api::key_expr::KeyExpr;
+use crate::api::{key_expr::KeyExpr, queryable::Query};
 
 /// A selector is the combination of a [`Key Expression`](crate::key_expr::KeyExpr), which defines the
 /// set of keys that are relevant to an operation, and a set of [`Parameters`](crate::query::Parameters),
@@ -264,6 +262,15 @@ impl<'a> TryFrom<&'a String> for Selector<'a> {
     type Error = zenoh_result::Error;
     fn try_from(s: &'a String) -> Result<Self, Self::Error> {
         Self::try_from(s.as_str())
+    }
+}
+
+impl<'a> From<&'a Query> for Selector<'a> {
+    fn from(q: &'a Query) -> Self {
+        Self {
+            key_expr: Cow::Borrowed(&q.inner.key_expr),
+            parameters: Cow::Borrowed(&q.inner.parameters),
+        }
     }
 }
 

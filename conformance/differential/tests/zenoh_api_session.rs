@@ -403,6 +403,133 @@ mod observer {
         Ok(out)
     }
 
+    /// An upstream node that dials `port` and answers the queries of `demo/g/**` in every form a
+    /// queryable has, keeping what each query said as text.
+    pub struct Answerer {
+        _session: Session,
+        _queryable: up_zenoh::query::Queryable<()>,
+        saw: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    /// An upstream node that dials the node of `port` and answers the queries it is asked.
+    pub fn answerer(id: &str, port: u16) -> Result<Answerer, String> {
+        use up_zenoh::internal::traits::{
+            EncodingBuilderTrait, QoSBuilderTrait, SampleBuilderTrait, TimestampBuilderTrait,
+        };
+        let session = open(id, "peer", None, Some(port))?;
+        let saw = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let record = saw.clone();
+        // The queries that are never answered: held until the node ends.
+        let held = std::sync::Arc::new(std::sync::Mutex::new(Vec::<up_zenoh::query::Query>::new()));
+        let queryable = session
+            .declare_queryable("demo/g/**")
+            .complete(true)
+            .callback(move |query| {
+                let key = query.key_expr().as_str().to_owned();
+                if key == "demo/g/ready" {
+                    query.reply("demo/g/ready", "ready").wait().expect("replies");
+                    return;
+                }
+                let body_of = |bytes: Option<&up_zenoh::bytes::ZBytes>| {
+                    bytes.map(|b| b.try_to_string().map(|s| s.into_owned()).unwrap_or_default())
+                };
+                record.lock().unwrap().push(format!(
+                    "saw {} | key {key} | parameters {} | payload {:?} | encoding {:?} | \
+                     attachment {:?} | priority {:?} congestion {:?} express {} | source {:?} | \
+                     accepts {:?}",
+                    query.selector(),
+                    query.parameters(),
+                    body_of(query.payload()),
+                    query.encoding().map(|e| e.to_string()),
+                    body_of(query.attachment()),
+                    query.priority(),
+                    query.congestion_control(),
+                    query.express(),
+                    query.source_info().map(|i| (format!("{:?}", i.source_id()), i.source_sn())),
+                    query.accepts_replies(),
+                ));
+                let at = |time: u64| {
+                    let id = up_zenoh::time::TimestampId::try_from(&[0xab_u8, 0xcd][..]).expect("an id");
+                    up_zenoh::time::Timestamp::new(up_zenoh::time::NTP64(time), id)
+                };
+                match key.as_str() {
+                    "demo/g/plain" => {
+                        query.reply("demo/g/plain", "r1").wait().expect("replies");
+                    }
+                    "demo/g/body" => {
+                        let body = body_of(query.payload()).unwrap_or_default();
+                        query
+                            .reply("demo/g/body", body)
+                            .encoding(up_zenoh::bytes::Encoding::APPLICATION_JSON)
+                            .wait()
+                            .expect("replies");
+                    }
+                    "demo/g/forms/**" => {
+                        query
+                            .reply("demo/g/forms/a", "pa")
+                            .encoding(up_zenoh::bytes::Encoding::TEXT_PLAIN.with_schema("s"))
+                            .attachment("with")
+                            .timestamp(at(0x1234_5678_9abc_def0))
+                            .express(true)
+                            .priority(up_zenoh::qos::Priority::DataHigh)
+                            .congestion_control(up_zenoh::qos::CongestionControl::Drop)
+                            .source_info(up_zenoh::sample::SourceInfo::new(
+                                up_zenoh::session::EntityGlobalId::new("c0ffee".parse().expect("an id"), 7),
+                                41,
+                            ))
+                            .wait()
+                            .expect("replies");
+                        query
+                            .reply_del("demo/g/forms/b")
+                            .attachment("gone")
+                            .timestamp(at(0x1234_5678_9abc_def0))
+                            .wait()
+                            .expect("replies");
+                        query
+                            .reply_err("broken")
+                            .encoding(up_zenoh::bytes::Encoding::TEXT_PLAIN)
+                            .wait()
+                            .expect("replies");
+                    }
+                    "demo/g/far" => {
+                        let _ = query.reply("demo/other/key", "far").wait();
+                    }
+                    "demo/g/held" => {
+                        let late = query.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(Duration::from_millis(200));
+                            let _ = late.reply("demo/g/held", "late").wait();
+                        });
+                    }
+                    "demo/g/silent" => held.lock().unwrap().push(query),
+                    // Two versions of one value, the newer first, and a third on another key.
+                    "demo/g/dup" => {
+                        query.reply("demo/g/dup", "new").timestamp(at(2_000_000_000)).wait().expect("replies");
+                        query.reply("demo/g/dup", "old").timestamp(at(1_000_000_000)).wait().expect("replies");
+                        query.reply("demo/g/dup", "bare").wait().expect("replies");
+                    }
+                    "demo/g/options" => {
+                        query.reply("demo/g/options", "o").express(false).wait().expect("replies");
+                    }
+                    _ => {}
+                }
+            })
+            .wait()
+            .map_err(|error| error.to_string())?;
+        Ok(Answerer {
+            _session: session,
+            _queryable: queryable,
+            saw,
+        })
+    }
+
+    impl Answerer {
+        /// What each query said, in the order they came.
+        pub fn lines(&self) -> Vec<String> {
+            self.saw.lock().unwrap().clone()
+        }
+    }
+
     /// [`seen`] once the session sees `count` transports, or after five seconds.
     pub fn seen_with(session: &Session, count: usize) -> String {
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -926,6 +1053,146 @@ macro_rules! session_cases {
                     text(subject.declare_queryable("demo/after").wait().map(|_| ()))
                 ));
                 out.push(format!("undeclare after close: {}", text(queryable.undeclare().wait())));
+                out
+            }
+
+            /// What a reply says, as one line: who answered, and every field of the answer that
+            /// crosses a link.
+            fn describe_reply(reply: &$z::query::Reply) -> String {
+                let replier = reply.replier_id().map(|id| id.zid().to_string());
+                match reply.result() {
+                    Ok(sample) => format!("ok replier={replier:?} {}", describe(sample)),
+                    // Two nodes expire a query in the time given it: the session that asked, with
+                    // an error of its own, and the node that was asked, which says so for the
+                    // query it forwarded (upstream's routing, with an error that names its zid and
+                    // has the default encoding). Whichever expires first is the one the asker is
+                    // handed, and it is not the same from one run to the next, so the line says
+                    // what is the same: that the get ended with a timeout.
+                    Err(error) if error.payload().try_to_string().is_ok_and(|s| s == "Timeout") => {
+                        "err Timeout".to_owned()
+                    }
+                    Err(error) => format!(
+                        "err replier={replier:?} {} encoding={}",
+                        error
+                            .payload()
+                            .try_to_string()
+                            .map_or_else(|_| "(not text)".to_owned(), |s| s.to_string()),
+                        error.encoding()
+                    ),
+                }
+            }
+
+            /// The lines of the replies of a get, sorted, once the get is over.
+            fn replies_of<E: std::fmt::Display>(
+                label: &str,
+                asked: Result<$z::handlers::FifoChannelHandler<$z::query::Reply>, E>,
+            ) -> Vec<String> {
+                let mut lines = match asked {
+                    Ok(replies) => replies.iter().map(|reply| describe_reply(&reply)).collect(),
+                    Err(error) => vec![format!("the get failed: {}", plain(&error.to_string()))],
+                };
+                lines.sort();
+                let mut out = vec![format!("{label}: {} reply(ies)", lines.len())];
+                out.extend(lines.into_iter().map(|line| format!("{label}: {line}")));
+                out
+            }
+
+            /// A node of this crate that asks an upstream queryable queries of every shape: what
+            /// each get received, and what the queryable saw of each query.
+            pub fn gets() -> Vec<String> {
+                use $z::{
+                    internal::traits::{EncodingBuilderTrait, QoSBuilderTrait, SampleBuilderTrait},
+                    query::{ConsolidationMode, QueryTarget, ReplyKeyExpr},
+                };
+                let port = free_port();
+                let subject = $z::open(peer("5a0030", port)).wait().expect("opens");
+                let answerer = observer::answerer("b00030", port).expect("the answerer opens");
+                let wait = Duration::from_secs(5);
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                let mut ready = false;
+                while !ready && std::time::Instant::now() < deadline {
+                    ready = subject
+                        .get("demo/g/ready")
+                        .timeout(Duration::from_secs(1))
+                        .wait()
+                        .map(|replies| replies.iter().count() > 0)
+                        .unwrap_or(false);
+                }
+                let mut out = vec![format!("queryable known: {ready}")];
+                out.extend(replies_of("plain", subject.get("demo/g/plain?a=1;b=2").timeout(wait).wait()));
+                out.extend(replies_of(
+                    "with a body",
+                    subject
+                        .get("demo/g/body")
+                        .payload("body")
+                        .encoding($z::bytes::Encoding::TEXT_PLAIN)
+                        .attachment("att")
+                        .source_info($z::sample::SourceInfo::new(
+                            $z::session::EntityGlobalId::new("c0ffee".parse().expect("an id"), 3),
+                            5,
+                        ))
+                        .timeout(wait)
+                        .wait(),
+                ));
+                out.extend(replies_of(
+                    "every form of reply",
+                    subject.get("demo/g/forms/**").target(QueryTarget::All).timeout(wait).wait(),
+                ));
+                out.extend(replies_of(
+                    "target all complete",
+                    subject.get("demo/g/plain").target(QueryTarget::AllComplete).timeout(wait).wait(),
+                ));
+                out.extend(replies_of(
+                    "disjoint reply refused",
+                    subject.get("demo/g/far").timeout(Duration::from_secs(2)).wait(),
+                ));
+                out.extend(replies_of(
+                    "disjoint reply accepted",
+                    subject.get("demo/g/far").accept_replies(ReplyKeyExpr::Any).timeout(wait).wait(),
+                ));
+                out.extend(replies_of("answered late", subject.get("demo/g/held").timeout(wait).wait()));
+                out.extend(replies_of(
+                    "never answered",
+                    subject.get("demo/g/silent").timeout(Duration::from_millis(500)).wait(),
+                ));
+                for (label, mode) in [
+                    ("auto", None),
+                    ("none", Some(ConsolidationMode::None)),
+                    ("monotonic", Some(ConsolidationMode::Monotonic)),
+                    ("latest", Some(ConsolidationMode::Latest)),
+                ] {
+                    let get = subject.get("demo/g/dup").timeout(wait);
+                    out.extend(replies_of(
+                        &format!("versions, consolidation {label}"),
+                        match mode {
+                            Some(mode) => get.consolidation(mode).wait(),
+                            None => get.wait(),
+                        },
+                    ));
+                }
+                out.extend(replies_of(
+                    "with options",
+                    subject
+                        .get("demo/g/options")
+                        .priority($z::qos::Priority::RealTime)
+                        .congestion_control($z::qos::CongestionControl::Block)
+                        .express(true)
+                        .timeout(wait)
+                        .wait(),
+                ));
+                out.extend(replies_of(
+                    "nobody to answer",
+                    subject.get("demo/elsewhere/none").timeout(Duration::from_secs(2)).wait(),
+                ));
+                out.extend(replies_of("an invalid selector", subject.get("demo//bad").wait()));
+                out.extend(
+                    answerer
+                        .lines()
+                        .into_iter()
+                        .map(|line| format!("the answerer {line}")),
+                );
+                subject.close().wait().expect("closes");
+                out.extend(replies_of("a get after close", subject.get("demo/g/plain").wait()));
                 out
             }
 
@@ -1551,6 +1818,21 @@ fn what_a_queryable_answers_is_what_an_upstream_node_receives() {
     assert!(u.iter().any(|l| l == "disjoint reply refused: 0 reply(ies)"), "{u:#?}");
     assert!(u.iter().any(|l| l == "answered late: 1 reply(ies)"), "{u:#?}");
     compare("queryables", &u, &w);
+}
+
+#[test]
+fn what_a_get_asks_is_what_an_upstream_queryable_receives_and_answers() {
+    // The log of upstream's nodes, for a run that is asked for it with `RUST_LOG`.
+    up_zenoh::try_init_log_from_env();
+    let (u, w) = (up::gets(), wz::gets());
+    assert!(u.iter().any(|l| l == "queryable known: true"), "{u:#?}");
+    assert!(u.iter().any(|l| l == "plain: 1 reply(ies)"), "{u:#?}");
+    assert!(u.iter().any(|l| l == "every form of reply: 3 reply(ies)"), "{u:#?}");
+    assert!(u.iter().any(|l| l == "disjoint reply accepted: 1 reply(ies)"), "{u:#?}");
+    assert!(u.iter().any(|l| l == "disjoint reply refused: 0 reply(ies)"), "{u:#?}");
+    assert!(u.iter().any(|l| l == "answered late: 1 reply(ies)"), "{u:#?}");
+    assert!(u.iter().any(|l| l == "never answered: 1 reply(ies)"), "{u:#?}");
+    compare("gets", &u, &w);
 }
 
 #[test]

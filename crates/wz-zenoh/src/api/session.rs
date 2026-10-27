@@ -29,6 +29,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -38,12 +39,17 @@ use zenoh_config::wrappers::ZenohId;
 use zenoh_core::{Resolve, ResolveClosure, Wait};
 #[cfg(feature = "unstable")]
 use zenoh_protocol::core::Reliability;
-use zenoh_protocol::core::{CongestionControl, EntityId, ExprId};
+use zenoh_protocol::core::{CongestionControl, EntityId, ExprId, Parameters};
+use zenoh_protocol::network::request::{self, ext::QueryTarget};
 use zenoh_result::ZResult;
 use zenoh_runtime::ZRuntime;
 
 #[cfg(feature = "unstable")]
+use crate::api::cancellation::CancellationToken;
+#[cfg(feature = "unstable")]
 use crate::api::sample::SourceInfo;
+#[cfg(feature = "unstable")]
+use crate::api::selector::ZenohParameters;
 #[cfg(feature = "unstable")]
 use crate::api::timestamp_stack::TimestampInstrumentation;
 use crate::api::{
@@ -53,6 +59,7 @@ use crate::api::{
             PublicationBuilderDelete, PublicationBuilderPut, PublisherBuilder,
             SessionDeleteBuilder, SessionPutBuilder,
         },
+        query::SessionGetBuilder,
         queryable::QueryableBuilder,
         session::OpenBuilder,
         subscriber::SubscriberBuilder,
@@ -65,8 +72,10 @@ use crate::api::{
     info::SessionInfo,
     key_expr::{KeyExpr, KeyExprUndeclaration, SessionAnchor, WireAnchor},
     publisher::Priority,
+    query::{ConsolidationMode, QueryConsolidation, Reply},
     queryable::Query,
-    sample::{Locality, Sample, SampleKind},
+    sample::{Locality, QoS, Sample, SampleKind},
+    selector::Selector,
     subscriber::SubscriberKind,
     Id,
 };
@@ -159,6 +168,36 @@ pub(crate) struct QueryableDeclaration<'a> {
     pub(crate) zid: ZenohId,
     /// The entity id of the queryable, which the replies say they come from.
     pub(crate) eid: Id,
+}
+
+/// What a get asks of the engine, in the types of this crate: the key as the wire names it, the
+/// settings of the query and what the replies are handed to.
+// A build with no engine has nothing that reads the fields.
+#[cfg_attr(not(feature = "engine-tokio"), allow(dead_code))]
+pub(crate) struct QueryRequest<'a> {
+    /// The key expression the query is for.
+    pub(crate) key: &'a str,
+    /// The declaration of a prefix of the key that the wire names it by, `0` when it names none.
+    pub(crate) scope: ExprId,
+    /// What follows the declared prefix, `None` when the declaration covers the whole key.
+    pub(crate) suffix: Option<String>,
+    /// The parameters of the selector, as the text they are sent in.
+    pub(crate) parameters: &'a str,
+    pub(crate) target: QueryTarget,
+    /// The consolidation, with `Auto` resolved as the session resolves it.
+    pub(crate) consolidation: ConsolidationMode,
+    pub(crate) qos: QoS,
+    pub(crate) destination: Locality,
+    pub(crate) timeout: Duration,
+    pub(crate) value: Option<(ZBytes, Encoding)>,
+    pub(crate) attachment: Option<ZBytes>,
+    #[cfg(feature = "unstable")]
+    pub(crate) source_info: Option<SourceInfo>,
+    /// What each reply is handed to; it is dropped when the last reply has been, which ends the
+    /// channel of a handler.
+    pub(crate) callback: Callback<Reply>,
+    #[cfg(feature = "unstable")]
+    pub(crate) cancellation_token: Option<CancellationToken>,
 }
 
 /// What a session is run by: the engine that holds its faces, its declarations and its clock.
@@ -418,6 +457,15 @@ impl Engine {
             Engine::Tokio(state) => state.shared.as_engine().undeclare_queryable(id),
         }
     }
+
+    /// Ask the query `request` says: to the queryables of the session itself and to every peer, as
+    /// its destination allows. The replies are handed to its callback, which is dropped once the
+    /// last of them has been, whether the query was answered, timed out or was cancelled.
+    fn query(&self, request: QueryRequest<'_>) -> ZResult<()> {
+        match self {
+            Engine::Tokio(state) => tokio_engine::ask(state.shared.engine_ref(), request),
+        }
+    }
 }
 
 #[cfg(not(feature = "engine-tokio"))]
@@ -477,6 +525,10 @@ impl Engine {
     fn undeclare_queryable(&self, _id: u64) {
         match *self {}
     }
+
+    fn query(&self, _request: QueryRequest<'_>) -> ZResult<()> {
+        match *self {}
+    }
 }
 
 /// The reading of a configuration for the tokio engine: its role, its endpoints, the document its
@@ -500,29 +552,37 @@ mod tokio_engine {
             locality::Locality as EngineLocality,
             qos::{CongestionControl as EngineCongestion, Priority as EnginePriority},
             query_sink::{QueryView, ReplyMeta, ReplyOut},
+            reply_sink::{ReplyKind, ReplyView},
             sample::{EncodingHint, QosLevel, SampleKind as EngineSampleKind, TimestampHint},
-            session::{InterestForm, PublishOptions},
+            session::{InterestForm, PublishOptions, QueryOptions},
+            session_glue::{ConsolidationMode as EngineConsolidation, QueryTarget as EngineTarget},
             sink::SampleView,
         },
     };
-    use wz_capi_port::{HeldQuery, QueryHolder, QueryableSink};
+    use wz_capi_port::cancellation::CancellableFan;
+    use wz_capi_port::{HeldQuery, QueryHolder, QueryableSink, ReplyCallback, SessionEngine};
     use zenoh_config::{wrappers::ZenohId, ExpandedConfig, ModeDependent};
-    use zenoh_protocol::core::{CongestionControl, EndPoints, ExprId, Parameters, WhatAmI};
+    use zenoh_protocol::{
+        core::{CongestionControl, EndPoints, ExprId, Parameters, WhatAmI},
+        network::request::ext::QueryTarget,
+        zenoh::query::ConsolidationMode,
+    };
     use zenoh_result::ZResult;
 
-    use super::{Arc, Publication};
-    #[cfg(feature = "unstable")]
-    use crate::api::sample::SourceInfo;
+    use super::{Arc, Publication, QueryRequest};
     use crate::api::{
         bytes::ZBytes,
         cancellation::SyncGroupNotifier,
         encoding::Encoding,
         handlers::Callback,
         key_expr::KeyExpr,
+        query::{Reply, ReplyError},
         queryable::{Answer, Query, QueryInner, Replier},
         sample::{Locality, QoS, Sample, SampleKind},
         Id,
     };
+    #[cfg(feature = "unstable")]
+    use crate::api::{cancellation::CancellationToken, sample::SourceInfo};
 
     /// The role of the engine that is the mode of the configuration.
     pub(super) fn role_of(mode: WhatAmI) -> EngineWhatAmI {
@@ -703,17 +763,22 @@ mod tokio_engine {
 
     /// The encoding a hint says; none is the default one.
     fn encoding_from(hint: Option<&EncodingHint>) -> Encoding {
-        hint.and_then(|hint| {
-            let id = u16::try_from(hint.packed_id >> 1).ok()?;
-            let schema = hint
-                .schema
-                .as_ref()
-                .filter(|_| hint.packed_id & 1 == 1)
-                .map(|schema| zenoh_buffers::ZSlice::from(schema.clone().into_bytes()));
-            Some(zenoh_protocol::core::Encoding { id, schema })
-        })
-        .map(Encoding::from)
-        .unwrap_or_default()
+        encoding_of_parts(hint.map(|hint| (hint.packed_id, hint.schema.as_deref())))
+    }
+
+    /// The encoding the parts of a hint say, as a view of a reply borrows them: the packed id and
+    /// the schema; none is the default one.
+    fn encoding_of_parts(parts: Option<(u32, Option<&str>)>) -> Encoding {
+        parts
+            .and_then(|(packed_id, schema)| {
+                let id = u16::try_from(packed_id >> 1).ok()?;
+                let schema = schema
+                    .filter(|_| packed_id & 1 == 1)
+                    .map(|schema| zenoh_buffers::ZSlice::from(schema.as_bytes().to_vec()));
+                Some(zenoh_protocol::core::Encoding { id, schema })
+            })
+            .map(Encoding::from)
+            .unwrap_or_default()
     }
 
     /// The engine's hint for `timestamp`.
@@ -1004,6 +1069,164 @@ mod tokio_engine {
         }
     }
 
+    /// Ask the query `request` says of `engine`, handing each reply to its callback.
+    ///
+    /// The engine asks for a callback of its own for each leg of the query (one to each peer it
+    /// reaches and one to the queryables of the session), so they share what the query holds: the
+    /// callback is dropped with the last of them, once every leg has ended, and that is what ends
+    /// the channel of a handler. A query that no leg was issued for ends at once.
+    pub(super) fn ask(engine: &dyn SessionEngine, request: QueryRequest<'_>) -> ZResult<()> {
+        let QueryRequest {
+            key,
+            scope,
+            suffix,
+            parameters,
+            target,
+            consolidation,
+            qos,
+            destination,
+            timeout,
+            value,
+            attachment,
+            #[cfg(feature = "unstable")]
+            source_info,
+            callback,
+            #[cfg(feature = "unstable")]
+            cancellation_token,
+        } = request;
+        // Only a query that can be cancelled changes its callback, to tell the token when it ends.
+        #[cfg_attr(not(feature = "unstable"), allow(unused_mut))]
+        let mut callback = callback;
+        #[cfg(feature = "unstable")]
+        let fan = cancellation_token
+            .map(|token| cancellable(token, &mut callback))
+            .transpose()?;
+        #[cfg(not(feature = "unstable"))]
+        let fan: Option<Arc<CancellableFan>> = None;
+        let wire = wire_key_of(scope, suffix);
+        let mut options = QueryOptions::get()
+            .with_allowed_destination(engine_locality(destination))
+            .with_consolidation(match consolidation {
+                ConsolidationMode::None => EngineConsolidation::None,
+                ConsolidationMode::Monotonic => EngineConsolidation::Monotonic,
+                // The session resolves `Auto` before it asks.
+                ConsolidationMode::Latest | ConsolidationMode::Auto => EngineConsolidation::Latest,
+            })
+            .with_qos(qos_level_of(qos))
+            // A timeout of nothing is an instant one upstream, and `0` for the engine is the
+            // default timeout: the shortest the engine can be told is a millisecond.
+            .with_timeout_ms(u32::try_from(timeout.as_millis().max(1)).unwrap_or(u32::MAX));
+        match target {
+            QueryTarget::BestMatching => {}
+            QueryTarget::All => options = options.with_target(EngineTarget::All),
+            QueryTarget::AllComplete => options = options.with_target(EngineTarget::AllComplete),
+        }
+        if !parameters.is_empty() {
+            options = options.with_parameters(parameters.as_bytes().to_vec());
+        }
+        if let Some((payload, encoding)) = &value {
+            options = options.with_payload(payload.to_bytes().into_owned());
+            if let Some(hint) = encoding_hint_of(encoding) {
+                options = options.with_encoding(hint);
+            }
+        }
+        if let Some(attachment) = &attachment {
+            options = options.with_attachment(attachment.to_bytes().into_owned());
+        }
+        #[cfg(feature = "unstable")]
+        if let Some(info) = &source_info {
+            options = options.with_source_info(source_info_hint_of(info));
+        }
+        let delivery = Arc::new(ReplyDelivery { callback });
+        let mut leg = move || -> ReplyCallback {
+            let delivery = Arc::clone(&delivery);
+            Box::new(move |view: &dyn ReplyView| match reply_of(view) {
+                Ok(reply) => delivery.callback.call(reply),
+                Err(error) => tracing::error!("a reply could not be delivered: {error}"),
+            })
+        };
+        let issued = engine.get_on_wire(key, &wire, &options, fan.as_deref(), &mut leg);
+        // The closure holds the delivery the legs share: what it let go of is the last hold, when
+        // no leg is left.
+        drop(leg);
+        match issued {
+            Some(_) => Ok(()),
+            None => Err(zerror!("this engine asks no queries").into()),
+        }
+    }
+
+    /// What the legs of a query are handed their replies to.
+    struct ReplyDelivery {
+        callback: Callback<Reply>,
+    }
+
+    /// Tie the query being made to `token`: cancelling the token cancels every leg of the query,
+    /// and cancelling a cancelled token is refused. The token's wait for the callbacks ends when
+    /// the callback is dropped, with the last leg.
+    #[cfg(feature = "unstable")]
+    fn cancellable(
+        token: CancellationToken,
+        callback: &mut Callback<Reply>,
+    ) -> ZResult<Arc<CancellableFan>> {
+        let fan = CancellableFan::new();
+        if let Some(notifier) = token.notifier() {
+            let on_cancel = {
+                let fan = Arc::clone(&fan);
+                move || {
+                    fan.cancel();
+                    Ok(())
+                }
+            };
+            if let Ok(handler_id) = token.add_on_cancel_handler(on_cancel) {
+                callback.set_on_drop(move || {
+                    token.remove_on_cancel_handler(handler_id);
+                    drop(notifier);
+                });
+                return Ok(fan);
+            }
+        }
+        bail!("Query was cancelled")
+    }
+
+    /// The reply the engine's view of a response is.
+    ///
+    /// As with a sample, the payload is copied out of the frame. The qualities a response does
+    /// not carry read as upstream reads them: the default quality of service, and no timestamp.
+    fn reply_of(view: &dyn ReplyView) -> ZResult<Reply> {
+        let result = match view.kind() {
+            ReplyKind::Err => Err(ReplyError::new(
+                ZBytes::from(view.payload().to_vec()),
+                encoding_of_parts(view.err_encoding()),
+            )),
+            kind => Ok(Sample {
+                key_expr: KeyExpr::try_from(view.keyexpr().to_owned())?,
+                payload: ZBytes::from(view.payload().to_vec()),
+                kind: match kind {
+                    ReplyKind::Del => SampleKind::Delete,
+                    _ => SampleKind::Put,
+                },
+                encoding: encoding_of_parts(view.put_encoding()),
+                timestamp: view.timestamp().and_then(timestamp_from),
+                qos: view.qos().map_or_else(QoS::default, qos_from),
+                #[cfg(feature = "unstable")]
+                reliability: zenoh_protocol::core::Reliability::Reliable,
+                #[cfg(feature = "unstable")]
+                source_info: view.source_info().and_then(source_info_from),
+                attachment: view.attachment().map(|bytes| ZBytes::from(bytes.to_vec())),
+                #[cfg(feature = "unstable")]
+                timestamp_stack: None,
+            }),
+        };
+        Ok(Reply {
+            result,
+            #[cfg(feature = "unstable")]
+            replier_id: view.responder().and_then(|(zid, eid)| {
+                let zid = zenoh_protocol::core::ZenohIdProto::try_from(zid).ok()?;
+                Some(zenoh_protocol::core::EntityGlobalIdProto { zid, eid })
+            }),
+        })
+    }
+
     /// A publication the engine refused.
     pub(super) fn publish_error(
         refusal: FanoutError,
@@ -1040,6 +1263,8 @@ pub(crate) struct SessionInner {
     engine: Engine,
     id: EntityId,
     zid: ZenohId,
+    /// How long a query waits for its replies when it does not say, from the configuration.
+    queries_default_timeout: Duration,
     /// The subscriptions declared on the session and not undeclared, which a close lets go of.
     subscriptions: std::sync::Mutex<Vec<Id>>,
     /// The publishers declared on the session and not undeclared, which a close lets go of.
@@ -1216,6 +1441,73 @@ impl SessionInner {
             attachment,
         })
     }
+
+    /// Hand a query to the engine. The session behind `self` is the anchor the key is named by.
+    #[allow(clippy::too_many_arguments)] // the arguments of upstream's function, kept as they are
+    fn query(
+        self: &Arc<Self>,
+        key_expr: &KeyExpr<'_>,
+        parameters: &Parameters<'_>,
+        target: QueryTarget,
+        consolidation: QueryConsolidation,
+        qos: QoS,
+        destination: Locality,
+        timeout: Duration,
+        value: Option<(ZBytes, Encoding)>,
+        attachment: Option<ZBytes>,
+        #[cfg(feature = "unstable")] source_info: Option<SourceInfo>,
+        callback: Callback<Reply>,
+        #[cfg(feature = "unstable")] cancellation_token: Option<CancellationToken>,
+        #[cfg(feature = "unstable")] timestamp_instrumentation: Option<TimestampInstrumentation>,
+    ) -> ZResult<()> {
+        tracing::trace!(
+            "get({}, {:?}, {:?})",
+            Selector::borrowed(key_expr, parameters),
+            target,
+            consolidation
+        );
+        if self.engine.is_closed() {
+            return Err(SessionClosedError.into());
+        }
+        // See `resolve_put`: a query that asks for its messages to be instrumented is refused, and
+        // not sent without.
+        #[cfg(feature = "unstable")]
+        if timestamp_instrumentation.is_some() {
+            bail!(
+                "the timestamp instrumentation of a query is not carried by this engine yet \
+                 (slice Z6b of docs/zenoh-api-on-the-engine.md)"
+            );
+        }
+        // `Auto` is resolved here, once, as upstream's session does: to `Latest`, or to `None` for
+        // a query that asks for a time range, whose replies are not versions of one value.
+        let consolidation = match consolidation.mode {
+            #[cfg(feature = "unstable")]
+            ConsolidationMode::Auto if parameters.time_range().is_some() => ConsolidationMode::None,
+            ConsolidationMode::Auto => ConsolidationMode::Latest,
+            mode => mode,
+        };
+        let anchor: SessionAnchor = self.clone();
+        let wire = key_expr.to_wire(&anchor);
+        let suffix = (!wire.suffix.is_empty()).then(|| wire.suffix.to_string());
+        self.engine.query(QueryRequest {
+            key: key_expr.as_str(),
+            scope: wire.scope,
+            suffix,
+            parameters: parameters.as_str(),
+            target,
+            consolidation,
+            qos,
+            destination,
+            timeout,
+            value,
+            attachment,
+            #[cfg(feature = "unstable")]
+            source_info,
+            callback,
+            #[cfg(feature = "unstable")]
+            cancellation_token,
+        })
+    }
 }
 
 impl fmt::Debug for SessionInner {
@@ -1290,11 +1582,18 @@ impl Session {
     pub(crate) fn open(config: Config) -> ZResult<Session> {
         let (engine, zid) = Engine::open(&config)?;
         let id = u32::try_from(engine.next_entity_id()).unwrap_or(u32::MAX);
+        let queries_default_timeout = Duration::from_millis(
+            config
+                .0
+                .queries_default_timeout()
+                .unwrap_or(zenoh_config::defaults::queries_default_timeout),
+        );
         Ok(Session(Arc::new(SessionInner {
             strong_counter: AtomicUsize::new(1),
             engine,
             id,
             zid,
+            queries_default_timeout,
             subscriptions: std::sync::Mutex::new(vec![]),
             publishers: std::sync::Mutex::new(vec![]),
             queryables: std::sync::Mutex::new(vec![]),
@@ -1901,6 +2200,102 @@ impl Session {
             #[cfg(feature = "unstable")]
             timestamp_instrumentation: None,
         }
+    }
+
+    /// Query data from the matching queryables in the system. This is a shortcut for declaring
+    /// a [`Querier`](crate::query::Querier) and calling `get` on it.
+    ///
+    /// Unless explicitly requested via [`accept_replies`](crate::session::SessionGetBuilder::accept_replies),
+    /// replies are guaranteed to have
+    /// key expressions that match the requested `selector`.
+    ///
+    /// # Arguments
+    ///
+    /// * `selector` - The selection of resources to query
+    ///
+    /// # Examples
+    /// ```
+    /// # #[tokio::main]
+    /// # async fn main() {
+    ///
+    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// let replies = session.get("key/expression").await.unwrap();
+    /// while let Ok(reply) = replies.recv_async().await {
+    ///     println!(">> Received {:?}", reply.result());
+    /// }
+    /// # }
+    /// ```
+    pub fn get<'a, 'b: 'a, TryIntoSelector>(
+        &'a self,
+        selector: TryIntoSelector,
+    ) -> SessionGetBuilder<'a, 'b, DefaultHandler>
+    where
+        TryIntoSelector: TryInto<Selector<'b>>,
+        <TryIntoSelector as TryInto<Selector<'b>>>::Error: Into<zenoh_result::Error>,
+    {
+        let selector = selector.try_into().map_err(Into::into);
+        let qos: QoS = request::ext::QoSType::REQUEST.into();
+        SessionGetBuilder {
+            session: self,
+            selector,
+            target: QueryTarget::DEFAULT,
+            consolidation: QueryConsolidation::DEFAULT,
+            qos: qos.into(),
+            destination: Locality::default(),
+            timeout: self.queries_default_timeout(),
+            value: None,
+            attachment: None,
+            handler: DefaultHandler::default(),
+            #[cfg(feature = "unstable")]
+            source_info: None,
+            #[cfg(feature = "unstable")]
+            cancellation_token: None,
+            #[cfg(feature = "unstable")]
+            timestamp_instrumentation: None,
+        }
+    }
+
+    /// How long a query waits for its replies when it does not say, as the configuration states.
+    pub(crate) fn queries_default_timeout(&self) -> Duration {
+        self.0.queries_default_timeout
+    }
+
+    /// Hand a query to the engine, with its replies going to `callback`.
+    #[allow(clippy::too_many_arguments)] // the arguments of upstream's function, kept as they are
+    pub(crate) fn query(
+        &self,
+        key_expr: &KeyExpr<'_>,
+        parameters: &Parameters<'_>,
+        target: QueryTarget,
+        consolidation: QueryConsolidation,
+        qos: QoS,
+        destination: Locality,
+        timeout: Duration,
+        value: Option<(ZBytes, Encoding)>,
+        attachment: Option<ZBytes>,
+        #[cfg(feature = "unstable")] source_info: Option<SourceInfo>,
+        callback: Callback<Reply>,
+        #[cfg(feature = "unstable")] cancellation_token: Option<CancellationToken>,
+        #[cfg(feature = "unstable")] timestamp_instrumentation: Option<TimestampInstrumentation>,
+    ) -> ZResult<()> {
+        self.0.query(
+            key_expr,
+            parameters,
+            target,
+            consolidation,
+            qos,
+            destination,
+            timeout,
+            value,
+            attachment,
+            #[cfg(feature = "unstable")]
+            source_info,
+            callback,
+            #[cfg(feature = "unstable")]
+            cancellation_token,
+            #[cfg(feature = "unstable")]
+            timestamp_instrumentation,
+        )
     }
 
     #[allow(clippy::too_many_arguments)] // the arguments of upstream's function, kept as they are
@@ -2944,7 +3339,11 @@ mod tests {
 
         use wz_capi_core::{
             faces::WireKey,
-            runtime::{reply_sink::ReplyView, session::QueryOptions, session_glue::QueryTarget},
+            runtime::{
+                reply_sink::ReplyView,
+                session::QueryOptions,
+                session_glue::{ConsolidationMode, QueryTarget},
+            },
         };
 
         use super::*;
@@ -3166,6 +3565,42 @@ mod tests {
         }
 
         #[test]
+        fn a_query_is_handed_to_every_queryable_it_meets_and_the_replies_are_consolidated() {
+            let session = open(peer("a1b2c6")).wait().expect("opens");
+            let handed = Arc::new(AtomicUsize::new(0));
+            let queryables: Vec<_> = (0..2)
+                .map(|_| {
+                    let handed = Arc::clone(&handed);
+                    session
+                        .declare_queryable("demo/shared")
+                        .callback(move |query| {
+                            handed.fetch_add(1, Ordering::SeqCst);
+                            query.reply("demo/shared", "same").wait().expect("replies");
+                        })
+                        .wait()
+                        .expect("declares")
+                })
+                .collect();
+            // Upstream hands a query to every queryable of the session whose key meets it, with
+            // whatever the target is (the target chooses among peers, not among one's own).
+            let consolidated = ask(&session, "demo/shared", local());
+            assert_eq!(handed.load(Ordering::SeqCst), 2);
+            // Two replies on one key are one after the consolidation a get has by default.
+            assert_eq!(consolidated, ["demo/shared Put same"]);
+            let unconsolidated = ask(
+                &session,
+                "demo/shared",
+                local().with_consolidation(ConsolidationMode::None),
+            );
+            assert_eq!(handed.load(Ordering::SeqCst), 4);
+            assert_eq!(
+                unconsolidated,
+                ["demo/shared Put same", "demo/shared Put same"]
+            );
+            drop(queryables);
+        }
+
+        #[test]
         fn a_closed_session_declares_nothing_and_lets_its_queryables_go() {
             let session = open(peer("a1b2c4")).wait().expect("opens");
             let queryable = session
@@ -3244,6 +3679,473 @@ mod tests {
             assert_eq!(background.load(Ordering::SeqCst), 1);
             assert_eq!(remote.load(Ordering::SeqCst), 0, "its own is not remote");
             assert_eq!(channel.key_expr().as_str(), "demo/handlers");
+        }
+    }
+
+    /// The get of a session: what it asks, what it is answered with, and how it ends.
+    mod getting {
+        use std::{sync::mpsc, time::Duration};
+
+        use super::*;
+        use crate::api::{
+            handlers::{FifoChannel, FifoChannelHandler},
+            query::{ConsolidationMode, QueryTarget, Reply, ReplyKeyExpr},
+        };
+
+        const WAIT: Duration = Duration::from_secs(5);
+
+        /// Everything a get is answered with, until it ends: the channel of its handler closes
+        /// with the last reply, and a get that does not end is a failure.
+        fn answers(replies: &FifoChannelHandler<Reply>) -> Vec<Reply> {
+            let mut all = vec![];
+            loop {
+                match replies.recv_timeout(WAIT) {
+                    Ok(Some(reply)) => all.push(reply),
+                    Ok(None) => panic!("the get did not end"),
+                    Err(_) => return all,
+                }
+            }
+        }
+
+        /// One reply, as a line.
+        fn describe(reply: &Reply) -> String {
+            match reply.result() {
+                Ok(sample) => format!(
+                    "{} {:?} {} {} {:?} {:?} {:?} {}",
+                    sample.key_expr(),
+                    sample.kind(),
+                    sample.payload().try_to_string().expect("a text"),
+                    sample.encoding(),
+                    sample
+                        .attachment()
+                        .map(|a| a.try_to_string().unwrap().into_owned()),
+                    sample.priority(),
+                    sample.congestion_control(),
+                    sample.express(),
+                ),
+                Err(error) => format!(
+                    "Err {} {}",
+                    error.payload().try_to_string().expect("a text"),
+                    error.encoding()
+                ),
+            }
+        }
+
+        fn lines(replies: &[Reply]) -> Vec<String> {
+            let mut lines: Vec<_> = replies.iter().map(describe).collect();
+            lines.sort();
+            lines
+        }
+
+        #[test]
+        fn a_get_is_answered_as_the_queryables_of_its_session_reply_and_ends_with_the_last_reply() {
+            let session = open(peer("a1b2d0")).wait().expect("opens");
+            let seen = Arc::new(std::sync::Mutex::new(vec![]));
+            let record = Arc::clone(&seen);
+            let queryable = session
+                .declare_queryable("demo/g/**")
+                .callback(move |query| {
+                    record.lock().unwrap().push(format!(
+                        "{} | {:?} | {:?}",
+                        query.selector(),
+                        query
+                            .payload()
+                            .map(|p| p.try_to_string().unwrap().into_owned()),
+                        query
+                            .attachment()
+                            .map(|a| a.try_to_string().unwrap().into_owned()),
+                    ));
+                    query.reply("demo/g/a", "one").wait().expect("replies");
+                    query
+                        .reply("demo/g/b", "two")
+                        .encoding(Encoding::TEXT_PLAIN)
+                        .attachment("x")
+                        .express(true)
+                        .wait()
+                        .expect("replies");
+                    query.reply_del("demo/g/c").wait().expect("replies");
+                    query
+                        .reply_err("broken")
+                        .encoding(Encoding::TEXT_PLAIN)
+                        .wait()
+                        .expect("replies");
+                })
+                .wait()
+                .expect("declares");
+            let replies = session
+                .get("demo/g/**?x=1")
+                .payload("body")
+                .attachment("att")
+                .wait()
+                .expect("asks");
+            let all = answers(&replies);
+            assert_eq!(
+                lines(&all),
+                [
+                    "Err broken text/plain",
+                    "demo/g/a Put one zenoh/bytes None Data Block false",
+                    "demo/g/b Put two text/plain Some(\"x\") Data Block true",
+                    "demo/g/c Delete  zenoh/bytes None Data Block false",
+                ]
+            );
+            assert_eq!(
+                *seen.lock().unwrap(),
+                ["demo/g/**?x=1 | Some(\"body\") | Some(\"att\")"]
+            );
+            #[cfg(feature = "unstable")]
+            for reply in &all {
+                assert_eq!(reply.replier_id(), Some(queryable.id()));
+            }
+            drop(queryable);
+        }
+
+        #[test]
+        fn the_replies_of_two_queryables_on_one_key_are_one_unless_the_get_asks_for_none() {
+            let session = open(peer("a1b2d1")).wait().expect("opens");
+            let _queryables: Vec<_> = (0..2)
+                .map(|_| {
+                    session
+                        .declare_queryable("demo/shared")
+                        .callback(|query| {
+                            query.reply("demo/shared", "same").wait().expect("replies");
+                        })
+                        .wait()
+                        .expect("declares")
+                })
+                .collect();
+            let consolidated = session.get("demo/shared").wait().expect("asks");
+            assert_eq!(
+                lines(&answers(&consolidated)),
+                ["demo/shared Put same zenoh/bytes None Data Block false"]
+            );
+            let unconsolidated = session
+                .get("demo/shared")
+                .consolidation(ConsolidationMode::None)
+                .wait()
+                .expect("asks");
+            assert_eq!(answers(&unconsolidated).len(), 2);
+        }
+
+        #[test]
+        fn a_target_of_all_complete_leaves_out_the_queryables_that_are_not() {
+            let session = open(peer("a1b2d2")).wait().expect("opens");
+            let handed = |complete: bool| {
+                let count = Arc::new(AtomicUsize::new(0));
+                let counted = Arc::clone(&count);
+                let queryable = session
+                    .declare_queryable("demo/t")
+                    .complete(complete)
+                    .callback(move |query| {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        query.reply("demo/t", "v").wait().expect("replies");
+                    })
+                    .wait()
+                    .expect("declares");
+                (count, queryable)
+            };
+            let (complete, _complete) = handed(true);
+            let (partial, _partial) = handed(false);
+            for target in [
+                QueryTarget::AllComplete,
+                QueryTarget::All,
+                QueryTarget::BestMatching,
+            ] {
+                let replies = session
+                    .get("demo/t")
+                    .target(target)
+                    .consolidation(ConsolidationMode::None)
+                    .wait()
+                    .expect("asks");
+                answers(&replies);
+            }
+            // Upstream hands a query to every queryable of the session whose key meets it, and
+            // the target takes out those that are not complete only for `AllComplete`.
+            assert_eq!(complete.load(Ordering::SeqCst), 3);
+            assert_eq!(partial.load(Ordering::SeqCst), 2);
+        }
+
+        #[test]
+        fn a_get_that_is_not_answered_in_time_ends_with_a_timeout_reply() {
+            let session = open(peer("a1b2d3")).wait().expect("opens");
+            let held = Arc::new(std::sync::Mutex::new(vec![]));
+            let keep = Arc::clone(&held);
+            let _queryable = session
+                .declare_queryable("demo/slow")
+                .callback(move |query| keep.lock().unwrap().push(query))
+                .wait()
+                .expect("declares");
+            let replies = session
+                .get("demo/slow")
+                .timeout(Duration::from_millis(200))
+                .wait()
+                .expect("asks");
+            let timeout = replies
+                .recv_timeout(WAIT)
+                .expect("the get is open")
+                .expect("the get timed out with a reply");
+            assert_eq!(describe(&timeout), "Err Timeout zenoh/string");
+            // The get is over with its timeout, although the queryable still holds the query: a
+            // reply to it now has nowhere to go.
+            assert!(answers(&replies).is_empty());
+            assert_eq!(held.lock().unwrap().len(), 1);
+        }
+
+        /// The same, with the queryable on another node: it is the face to that node that waits
+        /// for the answer, and expires it.
+        #[test]
+        fn a_get_that_a_remote_queryable_does_not_answer_ends_with_a_timeout_reply() {
+            let port = unautoselected_port();
+            let on = |id: &str, listen: &str, connect: &str| {
+                open(
+                    Config::from_json5(&format!(
+                        r#"{{ id: "{id}", mode: "peer",
+                              listen: {{ endpoints: [{listen}] }},
+                              connect: {{ endpoints: [{connect}] }},
+                              scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                    ))
+                    .expect("a configuration zenoh reads"),
+                )
+                .wait()
+                .expect("opens")
+            };
+            let getter = on("a1b2e0", &format!(r#""tcp/127.0.0.1:{port}""#), "");
+            let answerer = on("a1b2e1", "", &format!(r#""tcp/127.0.0.1:{port}""#));
+            let held = Arc::new(std::sync::Mutex::new(vec![]));
+            let keep = Arc::clone(&held);
+            let _queryable = answerer
+                .declare_queryable("demo/remote/**")
+                .callback(move |query| {
+                    if query.key_expr().as_str() == "demo/remote/ready" {
+                        query
+                            .reply("demo/remote/ready", "ready")
+                            .wait()
+                            .expect("replies");
+                    } else {
+                        keep.lock().unwrap().push(query);
+                    }
+                })
+                .wait()
+                .expect("declares");
+            let deadline = std::time::Instant::now() + WAIT;
+            while answers(&getter.get("demo/remote/ready").wait().expect("asks")).is_empty() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the link carries queries"
+                );
+            }
+            let replies = getter
+                .get("demo/remote/silent")
+                .timeout(Duration::from_millis(300))
+                .wait()
+                .expect("asks");
+            let timeout = replies
+                .recv_timeout(WAIT)
+                .expect("the get is open")
+                .expect("the get timed out with a reply");
+            assert!(timeout.result().is_err(), "{timeout:?}");
+            assert!(answers(&replies).is_empty());
+            assert_eq!(held.lock().unwrap().len(), 1);
+        }
+
+        #[test]
+        fn a_reply_on_another_key_reaches_a_get_only_when_it_accepts_any() {
+            let session = open(peer("a1b2d4")).wait().expect("opens");
+            let outcomes = Arc::new(std::sync::Mutex::new(vec![]));
+            let record = Arc::clone(&outcomes);
+            let _queryable = session
+                .declare_queryable("demo/disjoint/**")
+                .callback(move |query| {
+                    let outcome = query.reply("demo/other/key", "v").wait();
+                    record
+                        .lock()
+                        .unwrap()
+                        .push((query.accepts_replies(), outcome.is_ok()));
+                })
+                .wait()
+                .expect("declares");
+            let refused = session.get("demo/disjoint/**").wait().expect("asks");
+            assert!(answers(&refused).is_empty());
+            let accepted = session
+                .get("demo/disjoint/**")
+                .accept_replies(ReplyKeyExpr::Any)
+                .wait()
+                .expect("asks");
+            assert_eq!(
+                lines(&answers(&accepted)),
+                ["demo/other/key Put v zenoh/bytes None Data Block false"]
+            );
+            assert_eq!(
+                *outcomes.lock().unwrap(),
+                [
+                    (ReplyKeyExpr::MatchingQuery, false),
+                    (ReplyKeyExpr::Any, true)
+                ]
+            );
+        }
+
+        #[test]
+        fn every_kind_of_handler_and_callback_takes_the_replies_of_a_get() {
+            let session = open(peer("a1b2d5")).wait().expect("opens");
+            let _queryable = session
+                .declare_queryable("demo/h")
+                .callback(|query| query.reply("demo/h", "v").wait().expect("replies"))
+                .wait()
+                .expect("declares");
+            let fifo = session
+                .get("demo/h")
+                .with(FifoChannel::new(4))
+                .wait()
+                .expect("asks");
+            assert_eq!(answers(&fifo).len(), 1);
+            let (sender, received) = mpsc::channel();
+            session
+                .get("demo/h")
+                .callback(move |reply| sender.send(describe(&reply)).expect("listening"))
+                .wait()
+                .expect("asks");
+            // The channel of a callback ends with the get: its sender is dropped with the callback.
+            assert_eq!(
+                received.recv_timeout(WAIT),
+                Ok("demo/h Put v zenoh/bytes None Data Block false".to_owned())
+            );
+            assert_eq!(
+                received.recv_timeout(WAIT),
+                Err(mpsc::RecvTimeoutError::Disconnected)
+            );
+            let (sender, counted) = mpsc::channel();
+            session
+                .get("demo/h")
+                .callback_mut(move |_| sender.send(()).expect("listening"))
+                .wait()
+                .expect("asks");
+            assert_eq!(counted.recv_timeout(WAIT), Ok(()));
+            assert_eq!(
+                counted.recv_timeout(WAIT),
+                Err(mpsc::RecvTimeoutError::Disconnected)
+            );
+        }
+
+        #[test]
+        fn a_closed_session_asks_nothing() {
+            let session = open(peer("a1b2d6")).wait().expect("opens");
+            session.close().wait().expect("closes");
+            let error = session
+                .get("demo/closed")
+                .wait()
+                .expect_err("a closed session");
+            assert!(error.downcast_ref::<SessionClosedError>().is_some());
+        }
+
+        #[cfg(feature = "unstable")]
+        #[test]
+        fn cancelling_a_token_ends_the_gets_made_with_it_and_a_cancelled_token_refuses_new_ones() {
+            use crate::api::cancellation::CancellationToken;
+
+            let session = open(peer("a1b2d7")).wait().expect("opens");
+            let (asked_tx, asked) = mpsc::channel();
+            let held = Arc::new(std::sync::Mutex::new(vec![]));
+            let keep = Arc::clone(&held);
+            let _queryable = session
+                .declare_queryable("demo/cancel")
+                .callback(move |query| {
+                    keep.lock().unwrap().push(query);
+                    let _ = asked_tx.send(());
+                })
+                .wait()
+                .expect("declares");
+            let token = CancellationToken::default();
+            let replies = session
+                .get("demo/cancel")
+                .cancellation_token(token.clone())
+                .wait()
+                .expect("asks");
+            asked
+                .recv_timeout(WAIT)
+                .expect("the queryable has the query");
+            // The cancellation waits for the callback of the get to be let go of, so it is run
+            // where a failure to return is a failure of the test and not a hang.
+            let cancelling = token.clone();
+            let (cancelled_tx, cancelled) = mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = cancelled_tx.send(cancelling.cancel().wait());
+            });
+            cancelled
+                .recv_timeout(WAIT)
+                .expect("the cancellation returned")
+                .expect("cancels");
+            assert!(token.is_cancelled());
+            assert!(
+                answers(&replies).is_empty(),
+                "a cancelled get ends unanswered"
+            );
+            let error = session
+                .get("demo/cancel")
+                .cancellation_token(token)
+                .wait()
+                .expect_err("a cancelled token");
+            assert!(error.to_string().contains("Query was cancelled"));
+        }
+
+        /// Decision D4, the half that waits for a get: a callback may ask a get and wait for its
+        /// replies, in a subscriber's, in a queryable's and in the callback of a get.
+        #[test]
+        fn a_callback_may_ask_a_get_and_wait_for_its_replies() {
+            let session = open(peer("a1b2d8")).wait().expect("opens");
+            let _deep = session
+                .declare_queryable("demo/d4/deep")
+                .callback(|query| query.reply("demo/d4/deep", "deep").wait().expect("replies"))
+                .wait()
+                .expect("declares");
+            let in_queryable = session.clone();
+            let _middle = session
+                .declare_queryable("demo/d4/middle")
+                .callback(move |query| {
+                    let replies = in_queryable.get("demo/d4/deep").wait().expect("asks");
+                    for reply in answers(&replies) {
+                        let sample = reply.into_result().expect("a sample");
+                        query
+                            .reply("demo/d4/middle", sample.payload().clone())
+                            .wait()
+                            .expect("replies");
+                    }
+                })
+                .wait()
+                .expect("declares");
+            let (done_tx, done) = mpsc::channel::<ZResult<Vec<String>>>();
+            let in_subscriber = session.clone();
+            let _outer = session
+                .declare_subscriber("demo/d4/trigger")
+                .callback(move |_| {
+                    let outcome = (|| -> ZResult<Vec<String>> {
+                        let replies = in_subscriber.get("demo/d4/middle").wait()?;
+                        Ok(lines(&answers(&replies)))
+                    })();
+                    done_tx.send(outcome).expect("the test is listening");
+                })
+                .wait()
+                .expect("declares");
+            let publisher = session.clone();
+            std::thread::spawn(move || publisher.put("demo/d4/trigger", "v").wait());
+            let from_subscriber = done
+                .recv_timeout(WAIT)
+                .expect("the callback asked and came back")
+                .expect("the get worked");
+            assert_eq!(
+                from_subscriber,
+                ["demo/d4/middle Put deep zenoh/bytes None Data Block false"]
+            );
+            // The callback of a get asks another get and waits for it.
+            let in_reply = session.clone();
+            let (nested_tx, nested) = mpsc::channel::<usize>();
+            session
+                .get("demo/d4/deep")
+                .callback(move |_| {
+                    let replies = in_reply.get("demo/d4/middle").wait().expect("asks");
+                    nested_tx.send(answers(&replies).len()).expect("listening");
+                })
+                .wait()
+                .expect("asks");
+            assert_eq!(nested.recv_timeout(WAIT), Ok(1));
         }
     }
 
