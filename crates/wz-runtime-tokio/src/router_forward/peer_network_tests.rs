@@ -29,6 +29,7 @@ use crate::test_fixtures::{recording_actions, RecordingLinkDriver};
 use std::collections::BTreeMap;
 use wz_runtime_core::runtime::Runtime;
 use wz_session_core::declare_build::build_declare_subscriber;
+use wz_session_core::interest_build::InterestKinds;
 
 /// Frames a settle may move before it is called a loop. Every scene here moves
 /// a few hundred.
@@ -80,6 +81,17 @@ enum NetStep {
     Queryable(u8, &'static str, bool),
     /// An end point withdraws its subscription.
     Unsubscribe(u8, &'static str),
+    /// An end point sends an `Interest`: its id, the kinds, current, future and
+    /// the key it is restricted to.
+    Interest(u8, u64, InterestKinds, bool, bool, &'static str),
+    /// An end point ends an interest of its own.
+    InterestFinal(u8, u64),
+    /// An end point declares a liveliness token.
+    #[cfg(feature = "routing-token-tables")]
+    Token(u8, &'static str),
+    /// An end point withdraws a liveliness token.
+    #[cfg(feature = "routing-token-tables")]
+    Untoken(u8, &'static str),
     /// The link between two nodes goes down, both ends told.
     Cut(u8, u8),
     /// An end point queries, with its own request id.
@@ -97,6 +109,11 @@ struct Network {
     /// what a flood or a loop would multiply.
     carried: usize,
     moved: usize,
+    /// The declaration ids handed out so far; one per declaration, so that no end
+    /// point replaces what an earlier declaration of its own named.
+    declarations: u64,
+    /// The id each end point declared a key with, by kind, so a retraction names it.
+    declared: BTreeMap<(u8, &'static str, &'static str), u64>,
 }
 
 /// What one step made the end points receive, and how many data messages the
@@ -128,6 +145,8 @@ impl Network {
             endpoints: BTreeMap::new(),
             carried: 0,
             moved: 0,
+            declarations: 0,
+            declared: BTreeMap::new(),
         }
     }
 
@@ -234,6 +253,14 @@ impl Network {
         }
     }
 
+    /// The id `endpoint` declared `keyexpr` with as `kind`.
+    fn declared_id(&self, endpoint: u8, keyexpr: &'static str, kind: &'static str) -> u64 {
+        *self
+            .declared
+            .get(&(endpoint, keyexpr, kind))
+            .unwrap_or_else(|| panic!("end point {endpoint} never declared {kind} {keyexpr}"))
+    }
+
     fn inject(&mut self, endpoint: u8, message: NetworkMessage) {
         let Endpoint { node, face, .. } = self.endpoints[&endpoint];
         let outcome = DriverLoopOutcome::FramePayload {
@@ -279,15 +306,58 @@ impl Network {
                 );
             }
             NetStep::Subscribe(name, keyexpr) => {
-                let declare = build_declare_subscriber(0, 0, Some(keyexpr)).expect("declare");
+                self.declarations += 1;
+                self.declared
+                    .insert((*name, keyexpr, "subscriber"), self.declarations);
+                let declare =
+                    build_declare_subscriber(self.declarations, 0, Some(keyexpr)).expect("declare");
                 self.inject(*name, NetworkMessage::Declare(Box::new(declare)));
             }
             NetStep::Unsubscribe(name, keyexpr) => {
-                let undeclare =
-                    wz_session_core::declare_build::build_undeclare_subscriber_with_keyexpr(
-                        keyexpr,
-                    )
-                    .expect("undeclare");
+                // The retraction carries the id AND the key, as zenoh-pico sends it.
+                let declared = self.declared_id(*name, keyexpr, "subscriber");
+                let undeclare = wz_session_core::declare_build::build_undeclare_subscriber_on_wire(
+                    declared, 0, keyexpr,
+                )
+                .expect("undeclare");
+                self.inject(*name, NetworkMessage::Declare(Box::new(undeclare)));
+            }
+            NetStep::Interest(name, id, kinds, current, future, keyexpr) => {
+                let interest = wz_session_core::interest_build::build_interest_kinds(
+                    *id,
+                    *kinds,
+                    *current,
+                    *future,
+                    0,
+                    Some(keyexpr),
+                )
+                .expect("interest");
+                self.inject(*name, NetworkMessage::Interest(interest));
+            }
+            NetStep::InterestFinal(name, id) => {
+                let end = wz_session_core::interest_build::build_interest_final(*id);
+                self.inject(*name, NetworkMessage::Interest(end));
+            }
+            #[cfg(feature = "routing-token-tables")]
+            NetStep::Token(name, keyexpr) => {
+                self.declarations += 1;
+                self.declared
+                    .insert((*name, keyexpr, "token"), self.declarations);
+                let declare = wz_session_core::declare_build::build_declare_token(
+                    self.declarations,
+                    0,
+                    Some(keyexpr),
+                )
+                .expect("declare token");
+                self.inject(*name, NetworkMessage::Declare(Box::new(declare)));
+            }
+            #[cfg(feature = "routing-token-tables")]
+            NetStep::Untoken(name, keyexpr) => {
+                let declared = self.declared_id(*name, keyexpr, "token");
+                let undeclare = wz_session_core::declare_build::build_undeclare_token_on_wire(
+                    declared, 0, keyexpr,
+                )
+                .expect("undeclare token");
                 self.inject(*name, NetworkMessage::Declare(Box::new(undeclare)));
             }
             NetStep::Cut(a, b) => {
@@ -594,8 +664,55 @@ fn two_nodes() -> Scene {
     }
 }
 
+/// An interest across three links: the asker is answered with the subscription
+/// that exists at the far end, then with the ones that come, and not after it
+/// ends its interest.
+fn an_interest_across_a_chain() -> Scene {
+    Scene {
+        name: "an interest across a chain",
+        nodes: vec![1, 2, 3, 4],
+        script: vec![
+            NetStep::Link(1, 2),
+            NetStep::Link(2, 3),
+            NetStep::Link(3, 4),
+            NetStep::Attach(ep(1), 1),
+            NetStep::Attach(ep(4), 4),
+            NetStep::Subscribe(ep(4), "demo/a"),
+            NetStep::Interest(ep(1), 7, InterestKinds::SUBSCRIBERS, true, true, "demo/**"),
+            NetStep::Subscribe(ep(4), "demo/b"),
+            NetStep::InterestFinal(ep(1), 7),
+            NetStep::Subscribe(ep(4), "demo/c"),
+        ],
+    }
+}
+
+/// Liveliness across three links: a token at one end, a client at the other
+/// that asked for tokens with a current-and-future interest, the token and its
+/// withdrawal, a token that comes later and one after the interest ended.
+#[cfg(feature = "routing-token-tables")]
+fn liveliness_across_a_chain() -> Scene {
+    Scene {
+        name: "liveliness across a chain",
+        nodes: vec![1, 2, 3, 4],
+        script: vec![
+            NetStep::Link(1, 2),
+            NetStep::Link(2, 3),
+            NetStep::Link(3, 4),
+            NetStep::Attach(ep(1), 1),
+            NetStep::Attach(ep(4), 4),
+            NetStep::Token(ep(4), "live/a"),
+            NetStep::Interest(ep(1), 9, InterestKinds::TOKENS, true, true, "live/**"),
+            NetStep::Token(ep(4), "live/b"),
+            NetStep::Untoken(ep(4), "live/a"),
+            NetStep::InterestFinal(ep(1), 9),
+            NetStep::Token(ep(4), "live/c"),
+        ],
+    }
+}
+
 fn scenes() -> Vec<Scene> {
-    vec![
+    #[allow(unused_mut)]
+    let mut scenes = vec![
         two_nodes(),
         a_chain_of_four(),
         a_star(),
@@ -606,27 +723,69 @@ fn scenes() -> Vec<Scene> {
         a_subscription_withdrawn_across_three_links(),
         a_ring_that_loses_a_link(),
         queries_along_a_line(),
-    ]
+        an_interest_across_a_chain(),
+    ];
+    #[cfg(feature = "routing-token-tables")]
+    scenes.push(liveliness_across_a_chain());
+    scenes
 }
 
 /// Every step of every scene in `mode` on which the two planes' end points
 /// received something different, or the nodes carried a different number of
 /// data messages to do it.
-fn differences(mode: Mode) -> Vec<String> {
+///
+/// Returned with how many of the differences are the ONE the pin explains, a
+/// token pushed to an end point that asked for tokens (see
+/// [`is_a_token_pushed_to_an_interested_client`]); every other difference is a
+/// failure.
+fn differences(mode: Mode) -> (Vec<String>, usize) {
     let mut out = Vec::new();
+    let mut explained = 0;
     for scene in scenes() {
         let old = run(Plane::LinkstateForwarder, mode, &scene.nodes, &scene.script);
         let new = run(Plane::RegionHat, mode, &scene.nodes, &scene.script);
         for (n, (a, b)) in old.iter().zip(&new).enumerate() {
-            if a != b {
-                out.push(format!(
-                    "{mode:?} / {} / step {n} {:?}\n  linkstate:  {a:?}\n  region-hat: {b:?}",
-                    scene.name, scene.script[n]
-                ));
+            if a == b {
+                continue;
             }
+            if is_a_token_pushed_to_an_interested_client(&scene.script[n], a, b) {
+                explained += 1;
+                continue;
+            }
+            out.push(format!(
+                "{mode:?} / {} / step {n} {:?}\n  linkstate:  {a:?}\n  region-hat: {b:?}",
+                scene.name, scene.script[n]
+            ));
         }
     }
-    out
+    (out, explained)
+}
+
+/// The one difference the network gate allows, and the same one the one-node gate
+/// does (`TOKEN_TO_INTERESTED_CLIENT`): a token declared or withdrawn at a node
+/// reaches an end point that asked for tokens with a future interest, which the
+/// pin's broker hat does (it propagates a token to a south face that holds a
+/// matching remote interest) and `LinkstateForwarder`'s partial token plane does
+/// not. The two networks must carry as many messages to do it, and what
+/// `LinkstateForwarder` delivered must be a part of what the region-hat peer did.
+#[cfg(feature = "routing-token-tables")]
+fn is_a_token_pushed_to_an_interested_client(step: &NetStep, a: &Outcome, b: &Outcome) -> bool {
+    let is_token = |s: &Seen| matches!(s, Seen::DeclareToken { .. } | Seen::UndeclareToken);
+    matches!(step, NetStep::Token(..) | NetStep::Untoken(..))
+        && a.carried == b.carried
+        && b.received
+            .iter()
+            .any(|(ep, seen)| seen.iter().any(is_token) && !a.received.contains_key(ep))
+        && a.received.iter().all(|(ep, seen)| {
+            b.received
+                .get(ep)
+                .is_some_and(|r| seen.iter().all(|s| r.contains(s)))
+        })
+}
+
+#[cfg(not(feature = "routing-token-tables"))]
+fn is_a_token_pushed_to_an_interested_client(_: &NetStep, _: &Outcome, _: &Outcome) -> bool {
+    false
 }
 
 /// How many messages of the kind `wanted` the end points of `scene` received on
@@ -641,8 +800,12 @@ fn received(mode: Mode, scene: &Scene, wanted: impl Fn(&Seen) -> bool) -> usize 
 
 #[test]
 fn in_gossip_mode_a_network_of_either_plane_delivers_the_same() {
-    let differing = differences(Mode::Gossip);
+    let (differing, explained) = differences(Mode::Gossip);
     assert!(differing.is_empty(), "{}", differing.join("\n"));
+    assert_eq!(
+        explained, 0,
+        "gossip carries no token across a link to explain"
+    );
     // Equal is not the whole claim: the pin's peer hat sends a message across
     // one link and relays none between two peers, so gossip delivers across a
     // link and not across a second one, in both planes.
@@ -674,8 +837,14 @@ fn in_gossip_mode_a_network_of_either_plane_delivers_the_same() {
 
 #[test]
 fn in_link_state_mode_a_network_of_either_plane_delivers_the_same() {
-    let differing = differences(Mode::LinkState);
+    let (differing, explained) = differences(Mode::LinkState);
     assert!(differing.is_empty(), "{}", differing.join("\n"));
+    assert_eq!(
+        explained > 0,
+        cfg!(feature = "routing-token-tables"),
+        "the allowed token difference occurs exactly when the token plane is built, \
+         and a stale allowance is a hole"
+    );
     let is_put = |s: &Seen| matches!(s, Seen::Push { .. });
     // Each subscriber of each scene got each Put exactly once: across three
     // links, through a hub, round a ring, along two equal paths, and from a
@@ -691,6 +860,8 @@ fn in_link_state_mode_a_network_of_either_plane_delivers_the_same() {
         ("a subscription withdrawn across three links", 1),
         ("a ring that loses a link", 2),
         ("queries along a line", 0),
+        ("an interest across a chain", 0),
+        ("liveliness across a chain", 0),
     ];
     for scene in scenes() {
         let want = expected
@@ -726,4 +897,57 @@ fn in_link_state_mode_a_network_of_either_plane_delivers_the_same() {
         1,
         "and is sent exactly one final"
     );
+    // An interest across three links is answered with what exists at the far end
+    // and then with what comes, and with nothing after it is ended.
+    let interest = scenes()
+        .into_iter()
+        .find(|s| s.name == "an interest across a chain")
+        .expect("the interest scene");
+    let declared_to_asker = |key: &'static str, answering: bool| {
+        received(Mode::LinkState, &interest, move |s| {
+            matches!(
+                s,
+                Seen::DeclareSubscriber { keyexpr, answer_to }
+                    if keyexpr == key && answer_to.is_some() == answering
+            )
+        })
+    };
+    assert_eq!(
+        declared_to_asker("demo/a", true),
+        1,
+        "the subscription that existed answers the interest"
+    );
+    assert_eq!(
+        declared_to_asker("demo/b", false),
+        1,
+        "the one that came while it asked is told as a declaration of its own"
+    );
+    assert_eq!(
+        declared_to_asker("demo/c", false) + declared_to_asker("demo/c", true),
+        0,
+        "and not the one after it ended"
+    );
+    assert_eq!(
+        received(Mode::LinkState, &interest, |s| matches!(
+            s,
+            Seen::DeclareFinal { answer_to: Some(7) }
+        )),
+        1,
+        "the current half is closed by exactly one final"
+    );
+    // The same for liveliness: the token that existed is told to the asker.
+    #[cfg(feature = "routing-token-tables")]
+    {
+        let live = scenes()
+            .into_iter()
+            .find(|s| s.name == "liveliness across a chain")
+            .expect("the liveliness scene");
+        assert!(
+            received(Mode::LinkState, &live, |s| matches!(
+                s,
+                Seen::DeclareToken { keyexpr, answer_to: Some(9) } if keyexpr == "live/a"
+            )) >= 1,
+            "the token that existed at the far end is told to the asker"
+        );
+    }
 }

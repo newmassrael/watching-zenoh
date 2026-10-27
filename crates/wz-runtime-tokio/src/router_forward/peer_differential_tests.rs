@@ -29,6 +29,7 @@ use wz_codecs::linkstate::LinkstateOwned;
 use wz_codecs::linkstate_link::LinkstateLink;
 use wz_runtime_core::runtime::Runtime;
 use wz_session_core::declare_build::build_declare_subscriber;
+use wz_session_core::interest_build::InterestKinds;
 use wz_session_core::query_mode::ConsolidationMode;
 use wz_session_core::request_build::RequestQueryBuilder;
 use wz_session_core::wireexpr_resolve::id_and_suffix;
@@ -55,13 +56,39 @@ pub(super) enum Seen {
         payload: Option<Vec<u8>>,
     },
     /// A `DeclareSubscriber` and the keyexpr it names.
-    DeclareSubscriber { keyexpr: String },
-    /// A `DeclareFinal`.
-    DeclareFinal,
+    DeclareSubscriber {
+        keyexpr: String,
+        answer_to: Option<u64>,
+    },
+    /// A `DeclareFinal`, and the interest it ends.
+    DeclareFinal { answer_to: Option<u64> },
+    /// A `DeclareToken`, and the interest it answers when it answers one.
+    #[cfg(feature = "routing-token-tables")]
+    DeclareToken {
+        keyexpr: String,
+        answer_to: Option<u64>,
+    },
+    /// An `UndeclareToken`.
+    #[cfg(feature = "routing-token-tables")]
+    UndeclareToken,
+    /// An `Interest` the node propagated: what it asks for (current, future),
+    /// the kinds and options its body carries, and the key. Its id is left out,
+    /// as a request id is: a forwarder numbers the interests it relays itself.
+    Interest {
+        mode: u8,
+        options: u8,
+        keyexpr: Option<String>,
+    },
+    /// An `Interest` that ends a propagated one.
+    InterestFinal,
     /// An `UndeclareSubscriber`.
     UndeclareSubscriber,
     /// A `DeclareQueryable` and the completeness it carries.
-    DeclareQueryable { keyexpr: String, complete: bool },
+    DeclareQueryable {
+        keyexpr: String,
+        complete: bool,
+        answer_to: Option<u64>,
+    },
     /// A `Request` forwarded to a queryable, with the target, the timeout and
     /// the query body (consolidation and parameters) it carries. Its request id
     /// is left out: each forwarder numbers the queries it relays by its own
@@ -113,6 +140,18 @@ enum Step {
     Unsubscribe(u64, &'static str),
     /// A `Put` arrives on a face.
     Put(u64, &'static str, &'static [u8]),
+    /// An `Interest` arrives on a face: its id, the kinds it asks for, whether
+    /// it asks for what exists (`current`) and for what comes (`future`), and
+    /// the key it is restricted to.
+    Interest(u64, u64, InterestKinds, bool, bool, &'static str),
+    /// The `Interest` of that id is ended by its sender.
+    InterestFinal(u64, u64),
+    /// A `DeclareToken` arrives on a face.
+    #[cfg(feature = "routing-token-tables")]
+    Token(u64, &'static str),
+    /// The `UndeclareToken` of the same keyexpr arrives on a face.
+    #[cfg(feature = "routing-token-tables")]
+    Untoken(u64, &'static str),
     /// A `DeclareQueryable` arrives on a face: keyexpr, completeness.
     Queryable(u64, &'static str, bool),
     /// A `Request` arrives on a face: the querier's request id, keyexpr.
@@ -165,6 +204,13 @@ struct Node {
     /// The request id each face last ended with a `Final`, for a reply that
     /// arrives after it.
     ended_request: BTreeMap<u64, u64>,
+    /// The next declaration id. A face that reuses one replaces what it named,
+    /// which is a protocol violation and not a scene, so every declaration a
+    /// scene makes carries an id of its own.
+    next_declaration: std::cell::Cell<u64>,
+    /// The id each declaration of a face was made with, by the key and the kind,
+    /// so that its retraction names it.
+    declared: BTreeMap<(u64, &'static str, &'static str), u64>,
     self_zid: u8,
 }
 
@@ -177,8 +223,25 @@ impl Node {
             read: BTreeMap::new(),
             last_request: BTreeMap::new(),
             ended_request: BTreeMap::new(),
+            next_declaration: std::cell::Cell::new(1),
+            declared: BTreeMap::new(),
             self_zid,
         }
+    }
+
+    /// The id `face` declared `keyexpr` with as `kind`; a retraction of a
+    /// declaration that was never made is a scene's mistake.
+    fn declared_id(&self, face: u64, keyexpr: &'static str, kind: &'static str) -> u64 {
+        *self
+            .declared
+            .get(&(face, keyexpr, kind))
+            .unwrap_or_else(|| panic!("face {face} never declared {kind} {keyexpr}"))
+    }
+
+    fn declaration_id(&self) -> u64 {
+        let id = self.next_declaration.get();
+        self.next_declaration.set(id + 1);
+        id
     }
 
     /// Apply `step` and return what each face was sent by it.
@@ -203,21 +266,59 @@ impl Node {
                 self.deliver(*id, NetworkMessage::Oam(oam));
             }
             Step::Subscribe(id, keyexpr) => {
-                let declare = build_declare_subscriber(0, 0, Some(keyexpr)).expect("declare");
+                let declared = self.declaration_id();
+                self.declared.insert((*id, keyexpr, "subscriber"), declared);
+                let declare =
+                    build_declare_subscriber(declared, 0, Some(keyexpr)).expect("declare");
                 self.deliver(*id, NetworkMessage::Declare(Box::new(declare)));
             }
             Step::Unsubscribe(id, keyexpr) => {
-                let undeclare =
-                    wz_session_core::declare_build::build_undeclare_subscriber_with_keyexpr(
-                        keyexpr,
-                    )
-                    .expect("undeclare");
+                // The retraction carries the id AND the key, as zenoh-pico sends it.
+                let declared = self.declared_id(*id, keyexpr, "subscriber");
+                let undeclare = wz_session_core::declare_build::build_undeclare_subscriber_on_wire(
+                    declared, 0, keyexpr,
+                )
+                .expect("undeclare");
                 self.deliver(*id, NetworkMessage::Declare(Box::new(undeclare)));
             }
             Step::Put(id, keyexpr, payload) => {
                 let push = wz_session_core::push_build::build_push_literal(keyexpr, payload)
                     .expect("push");
                 self.deliver(*id, NetworkMessage::Push(Box::new(push)));
+            }
+            Step::Interest(id, interest_id, kinds, current, future, keyexpr) => {
+                let interest = wz_session_core::interest_build::build_interest_kinds(
+                    *interest_id,
+                    *kinds,
+                    *current,
+                    *future,
+                    0,
+                    Some(keyexpr),
+                )
+                .expect("interest");
+                self.deliver(*id, NetworkMessage::Interest(interest));
+            }
+            Step::InterestFinal(id, interest_id) => {
+                let end = wz_session_core::interest_build::build_interest_final(*interest_id);
+                self.deliver(*id, NetworkMessage::Interest(end));
+            }
+            #[cfg(feature = "routing-token-tables")]
+            Step::Token(id, keyexpr) => {
+                let declared = self.declaration_id();
+                self.declared.insert((*id, keyexpr, "token"), declared);
+                let declare =
+                    wz_session_core::declare_build::build_declare_token(declared, 0, Some(keyexpr))
+                        .expect("declare token");
+                self.deliver(*id, NetworkMessage::Declare(Box::new(declare)));
+            }
+            #[cfg(feature = "routing-token-tables")]
+            Step::Untoken(id, keyexpr) => {
+                let declared = self.declared_id(*id, keyexpr, "token");
+                let undeclare = wz_session_core::declare_build::build_undeclare_token_on_wire(
+                    declared, 0, keyexpr,
+                )
+                .expect("undeclare token");
+                self.deliver(*id, NetworkMessage::Declare(Box::new(undeclare)));
             }
             Step::Queryable(id, keyexpr, complete) => {
                 let declare = build_declare_queryable_with_info(
@@ -387,15 +488,34 @@ fn seen_of(message: &NetworkMessage) -> Seen {
                 assert_eq!(id, 0, "the scenes use literal key expressions");
                 Seen::DeclareSubscriber {
                     keyexpr: suffix.unwrap_or_default().to_owned(),
+                    answer_to: declare.interest_id,
                 }
             }
-            DeclareOwnedVariant::CodecZenohDeclFinal(_) => Seen::DeclareFinal,
+            DeclareOwnedVariant::CodecZenohDeclFinal(_) => Seen::DeclareFinal {
+                answer_to: declare.interest_id,
+            },
             DeclareOwnedVariant::CodecZenohUndeclSubscriber(_) => Seen::UndeclareSubscriber,
             DeclareOwnedVariant::CodecZenohDeclQueryable(q) => Seen::DeclareQueryable {
                 keyexpr: literal(&q.keyexpr.body),
                 complete: read_queryable_info(q.extensions.as_ref()).complete,
+                answer_to: declare.interest_id,
             },
+            #[cfg(feature = "routing-token-tables")]
+            DeclareOwnedVariant::CodecZenohDeclToken(t) => Seen::DeclareToken {
+                keyexpr: literal(&t.keyexpr.body),
+                answer_to: declare.interest_id,
+            },
+            #[cfg(feature = "routing-token-tables")]
+            DeclareOwnedVariant::CodecZenohUndeclToken(_) => Seen::UndeclareToken,
             _ => Seen::Other("declare"),
+        },
+        NetworkMessage::Interest(interest) => match &interest.body {
+            Some(body) => Seen::Interest {
+                mode: interest.header & 0x60,
+                options: body.header,
+                keyexpr: body.keyexpr.as_ref().map(|k| literal(&k.body)),
+            },
+            None => Seen::InterestFinal,
         },
         NetworkMessage::Request(request) => Seen::Request {
             keyexpr: literal(&request.keyexpr.body),
@@ -945,8 +1065,71 @@ fn finals_and_replies_in_every_order() -> Vec<Step> {
     ]
 }
 
-fn scenes() -> Vec<(&'static str, Vec<Step>)> {
+/// A client asks, with interests, what a peer declared: the current set and
+/// what follows it for subscribers, the current set alone for queryables, an
+/// interest ended and a declaration after it that is not answered.
+fn a_client_asks_what_peers_declared() -> Vec<Step> {
     vec![
+        Step::Up(0, 0xAA, Wire::Peer),
+        Step::Up(1, 0xCC, Wire::Client),
+        Step::LinkBack(0, 0xAA, 5),
+        Step::Tick,
+        Step::Subscribe(0, "demo/a"),
+        Step::Queryable(0, "demo/q", true),
+        Step::Interest(1, 7, InterestKinds::SUBSCRIBERS, true, true, "demo/**"),
+        Step::Interest(1, 8, InterestKinds::QUERYABLES, true, false, "demo/**"),
+        Step::Subscribe(0, "demo/b"),
+        Step::Queryable(0, "demo/r", false),
+        Step::Unsubscribe(0, "demo/a"),
+        Step::InterestFinal(1, 7),
+        Step::Subscribe(0, "demo/c"),
+    ]
+}
+
+/// A peer and a router ask what a client declared, each with a current
+/// interest: the answers and the final return to the face that asked.
+fn a_peer_and_a_router_ask_what_a_client_declared() -> Vec<Step> {
+    vec![
+        Step::Up(0, 0xAA, Wire::Peer),
+        Step::Up(1, 0xCC, Wire::Client),
+        Step::Up(2, 0xEE, Wire::Router),
+        Step::LinkBack(0, 0xAA, 5),
+        Step::LinkBack(2, 0xEE, 5),
+        Step::Tick,
+        Step::Subscribe(1, "demo/s"),
+        Step::Queryable(1, "demo/q", true),
+        Step::Interest(0, 3, InterestKinds::SUBSCRIBERS, true, false, "demo/**"),
+        Step::Interest(2, 4, InterestKinds::QUERYABLES, true, false, "demo/**"),
+        Step::Interest(0, 5, InterestKinds::SUBSCRIBERS, true, true, "other/**"),
+        Step::Subscribe(1, "other/x"),
+    ]
+}
+
+/// Liveliness tokens: a client's token reaches the peers, a client that asked
+/// with a current-and-future interest is told the tokens that exist and then
+/// the ones that come, a withdrawal reaches it, and an interest ended is
+/// answered no more.
+#[cfg(feature = "routing-token-tables")]
+fn liveliness_tokens() -> Vec<Step> {
+    vec![
+        Step::Up(0, 0xAA, Wire::Peer),
+        Step::Up(1, 0xC1, Wire::Client),
+        Step::Up(2, 0xC2, Wire::Client),
+        Step::LinkBack(0, 0xAA, 5),
+        Step::Tick,
+        Step::Token(1, "live/a"),
+        Step::Interest(2, 5, InterestKinds::TOKENS, true, true, "live/**"),
+        Step::Token(0, "live/b"),
+        Step::Untoken(1, "live/a"),
+        Step::Untoken(0, "live/b"),
+        Step::InterestFinal(2, 5),
+        Step::Token(1, "live/c"),
+    ]
+}
+
+fn scenes() -> Vec<(&'static str, Vec<Step>)> {
+    #[allow(unused_mut)]
+    let mut scenes = vec![
         (
             "a timeout shorter than the default",
             a_timeout_shorter_than_the_default(),
@@ -994,7 +1177,18 @@ fn scenes() -> Vec<(&'static str, Vec<Step>)> {
             a_subscription_withdrawn_and_a_face_gone(),
         ),
         ("a client puts", a_client_puts()),
-    ]
+        (
+            "a client asks what peers declared",
+            a_client_asks_what_peers_declared(),
+        ),
+        (
+            "a peer and a router ask what a client declared",
+            a_peer_and_a_router_ask_what_a_client_declared(),
+        ),
+    ];
+    #[cfg(feature = "routing-token-tables")]
+    scenes.push(("liveliness tokens", liveliness_tokens()));
+    scenes
 }
 
 /// How many data messages (anything but a link-state list) the region-hat
@@ -1111,14 +1305,39 @@ fn assert_the_query_scenes_exercise_what_they_claim(mode: Mode) {
     }
 }
 
-/// The two reasons the gate lets the planes differ in gossip mode, each a place
-/// where `LinkstateForwarder` leaves the pin and the region-hat peer follows it.
+/// The reasons the gate lets the planes differ, each a place where
+/// `LinkstateForwarder` leaves the pin and the region-hat peer follows it. The
+/// first two are about how a gossip peer behaves and so occur in gossip mode
+/// only; the rest are about the interest and token planes, which the link-state
+/// extension does not touch, and occur in both.
 const FACE_UP_LIST: &str = "face-up link-state list";
 const TREE_READVERTISE: &str = "re-advertise to a tree child";
+const INTEREST_ANSWER_DECLARATIONS: &str = "a current interest answered with the declarations";
+const ROUTER_INTEREST_REFUSED: &str = "an interest from a router refused";
+#[cfg(feature = "routing-token-tables")]
+const TOKEN_TO_INTERESTED_CLIENT: &str = "a token pushed to a client that asked for tokens";
 
-/// Why `d` is not a failure, or `None` when it is one. Link-state mode has no
-/// allowed difference: the extension is wz's, so there is no pin to be right.
+/// The reasons each mode must still produce: one no scene reaches any more is
+/// stale, and a stale allowance is a hole.
+fn expected_reasons(mode: Mode) -> std::collections::BTreeSet<&'static str> {
+    let mut reasons: std::collections::BTreeSet<&'static str> =
+        [INTEREST_ANSWER_DECLARATIONS, ROUTER_INTEREST_REFUSED]
+            .into_iter()
+            .collect();
+    #[cfg(feature = "routing-token-tables")]
+    reasons.insert(TOKEN_TO_INTERESTED_CLIENT);
+    if matches!(mode, Mode::Gossip) {
+        reasons.insert(FACE_UP_LIST);
+        reasons.insert(TREE_READVERTISE);
+    }
+    reasons
+}
+
+/// Why `d` is not a failure, or `None` when it is one.
 fn explained(mode: Mode, d: &Divergence) -> Option<&'static str> {
+    if let Some(reason) = explained_interest_or_token(d) {
+        return Some(reason);
+    }
     if !matches!(mode, Mode::Gossip) {
         return None;
     }
@@ -1146,6 +1365,66 @@ fn explained(mode: Mode, d: &Divergence) -> Option<&'static str> {
                 }) =>
         {
             Some(TREE_READVERTISE)
+        }
+        _ => None,
+    }
+}
+
+/// The differences in the interest and token planes, in either mode.
+fn explained_interest_or_token(d: &Divergence) -> Option<&'static str> {
+    if d.plane != "data" {
+        return None;
+    }
+    match &d.step {
+        Step::Interest(face, ..) => {
+            let asked = d.linkstate.get(face).map(Vec::as_slice);
+            let region_hat = d.region_hat.get(face).map(Vec::as_slice);
+            let only_a_final =
+                |seen: Option<&[Seen]>| matches!(seen, Some([Seen::DeclareFinal { .. }]));
+            // The pin's dispatcher refuses an Interest from a router
+            // (`zenoh/src/net/routing/dispatcher/interests.rs` @ `if self.state.whatami.is_router() {`),
+            // so the region-hat peer says nothing to it; `LinkstateForwarder`
+            // answers with a final.
+            if only_a_final(asked) && region_hat.is_none() && d.region_hat.is_empty() {
+                return Some(ROUTER_INTEREST_REFUSED);
+            }
+            // The pin's dispatcher answers a current Interest with the
+            // declarations the OTHER hats hold, then a final
+            // (`zenoh/src/net/routing/dispatcher/interests.rs` @ `hats[region].send_current_subscribers(`
+            // and `@ hats[region].send_declare_final(ctx.reborrow(), msg.id, &src);`).
+            // A current subscriber Interest from a peer in the north region is
+            // itself outside the pin's protocol (its peer hat asserts that a
+            // current Interest from the north asks for tokens only), so this is
+            // the dispatcher's release behaviour, which the region-hat peer
+            // follows; `LinkstateForwarder` sends the final alone.
+            if only_a_final(asked)
+                && matches!(
+                    region_hat,
+                    Some([.., Seen::DeclareFinal { .. }]) if region_hat.is_some_and(|r| r.len() > 1)
+                )
+            {
+                return Some(INTEREST_ANSWER_DECLARATIONS);
+            }
+            None
+        }
+        #[cfg(feature = "routing-token-tables")]
+        Step::Token(..) | Step::Untoken(..) => {
+            // A token declared or withdrawn at a peer reaches a client that asked
+            // for tokens with a future interest: the pin's broker hat propagates
+            // a token to a south face that holds a matching remote interest.
+            // `LinkstateForwarder`'s token plane is partial and does not.
+            let is_token = |s: &Seen| matches!(s, Seen::DeclareToken { .. } | Seen::UndeclareToken);
+            let extra_to_a_face_linkstate_left_out = d
+                .region_hat
+                .iter()
+                .any(|(face, seen)| seen.iter().any(is_token) && !d.linkstate.contains_key(face));
+            let linkstate_subset = d.linkstate.iter().all(|(face, seen)| {
+                d.region_hat
+                    .get(face)
+                    .is_some_and(|r| seen.iter().all(|s| r.contains(s)))
+            });
+            (extra_to_a_face_linkstate_left_out && linkstate_subset)
+                .then_some(TOKEN_TO_INTERESTED_CLIENT)
         }
         _ => None,
     }
@@ -1181,7 +1460,7 @@ fn in_gossip_mode_the_two_peer_planes_differ_only_where_the_pin_says() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
     assert_eq!(
         reasons,
-        [FACE_UP_LIST, TREE_READVERTISE].into_iter().collect(),
+        expected_reasons(Mode::Gossip),
         "each allowed difference must be one a scene produces"
     );
     assert!(
@@ -1227,16 +1506,110 @@ fn a_gossip_peer_tells_a_new_link_the_neighbours_it_knows_and_not_itself() {
     );
 }
 
+/// What the region-hat peer does with an Interest and a token, graded against
+/// the pin and not against `LinkstateForwarder`, which the pin-explained
+/// differences above leave out: an Interest from a router is refused (nothing is
+/// sent to it, not even a final), a current Interest from a peer is answered with
+/// the declarations the other hats hold and then its final, and a client that
+/// asked for tokens with a future interest is sent a token a peer declares and
+/// the withdrawal of it.
+#[test]
+fn the_region_hat_peer_answers_interests_and_tokens_as_the_pins_dispatcher_does() {
+    for mode in [Mode::Gossip, Mode::LinkState] {
+        let (_, mut node) = both(0x01, mode);
+        let steps = [
+            Step::Up(0, 0xAA, Wire::Peer),
+            Step::Up(1, 0xCC, Wire::Client),
+            Step::Up(2, 0xEE, Wire::Router),
+            Step::LinkBack(0, 0xAA, 5),
+            Step::LinkBack(2, 0xEE, 5),
+            Step::Tick,
+            Step::Subscribe(1, "demo/s"),
+        ];
+        for step in &steps {
+            node.apply(step);
+        }
+        let router_asks = node.apply(&Step::Interest(
+            2,
+            4,
+            InterestKinds::QUERYABLES,
+            true,
+            false,
+            "demo/**",
+        ));
+        assert!(
+            !router_asks.contains_key(&2),
+            "{mode:?}: an Interest from a router is refused, not answered: {router_asks:?}"
+        );
+        let peer_asks = node.apply(&Step::Interest(
+            0,
+            3,
+            InterestKinds::SUBSCRIBERS,
+            true,
+            false,
+            "demo/**",
+        ));
+        assert_eq!(
+            peer_asks.get(&0).map(Vec::as_slice),
+            // What a step sent is sorted, which puts a declaration before a final.
+            Some(
+                [
+                    Seen::DeclareSubscriber {
+                        keyexpr: "demo/s".to_owned(),
+                        answer_to: Some(3)
+                    },
+                    Seen::DeclareFinal { answer_to: Some(3) },
+                ]
+                .as_slice()
+            ),
+            "{mode:?}: a current Interest from a peer is answered with the declarations \
+             of the other hats and then its final"
+        );
+        #[cfg(feature = "routing-token-tables")]
+        {
+            node.apply(&Step::Up(3, 0xC2, Wire::Client));
+            node.apply(&Step::Interest(
+                3,
+                5,
+                InterestKinds::TOKENS,
+                true,
+                true,
+                "live/**",
+            ));
+            let declared = node.apply(&Step::Token(0, "live/b"));
+            assert_eq!(
+                declared.get(&3).map(Vec::as_slice),
+                Some(
+                    [Seen::DeclareToken {
+                        keyexpr: "live/b".to_owned(),
+                        answer_to: None
+                    }]
+                    .as_slice()
+                ),
+                "{mode:?}: a token a peer declares reaches a client that asked for tokens"
+            );
+            let withdrawn = node.apply(&Step::Untoken(0, "live/b"));
+            assert_eq!(
+                withdrawn.get(&3).map(Vec::as_slice),
+                Some([Seen::UndeclareToken].as_slice()),
+                "{mode:?}: and so does its withdrawal"
+            );
+        }
+    }
+}
+
 /// In wz's link-state extension the two planes send the same data AND the same
 /// topology: the region-hat peer relays inside its region along the tree, as
-/// `LinkstateForwarder` does.
+/// `LinkstateForwarder` does. The only differences are the interest and token
+/// planes' ones, which the extension does not touch.
 #[test]
 fn in_link_state_mode_the_two_peer_planes_send_the_same_data_and_topology() {
     let (failures, reasons) = unexplained(Mode::LinkState);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
-    assert!(
-        reasons.is_empty(),
-        "link-state mode has no allowed difference"
+    assert_eq!(
+        reasons,
+        expected_reasons(Mode::LinkState),
+        "each allowed difference must be one a scene produces"
     );
     assert!(
         data_messages_sent(Mode::LinkState) > data_messages_sent(Mode::Gossip),

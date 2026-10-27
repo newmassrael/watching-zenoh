@@ -321,7 +321,52 @@ then the last way is cut); queries along a line.
   and the two of this gate) pass with it; the router's end-to-end legs that need
   a pico or a stock zenohd are read on hosted CI.
 
-## 10. Open
+## 10. Step 5, tokens and interests
+
+Both gates carry the two planes. The one-node gate gains `Interest`,
+`InterestFinal`, `Token` and `Untoken` steps and three scenes (a client asks
+what peers declared; a peer and a router ask what a client declared; liveliness
+tokens), with what is compared widened to the interest an answer belongs to, the
+interests a node propagates and the token declarations. The network gate gains
+the same steps for end points and two scenes (an interest across a chain;
+liveliness across a chain). Tokens are built under `routing-token-tables`; the
+gates are run with and without it.
+
+Two corrections to the harness first, because they were mine and not the
+planes': a face that reuses a declaration id replaces what it named, a protocol
+violation and no scene, so every declaration now carries an id of its own; and a
+retraction carries the id AND the key, as zenoh-pico sends it, since a retraction
+by key alone no longer found a declaration with an id.
+
+What is equal: a client's interests (current and future, subscribers, queryables,
+tokens) are answered the same by both planes, and an interest answered across
+three links is answered the same in both modes.
+
+What differs, the same in both modes, each with the pin's rule, and the region-hat
+peer graded against it by `the_region_hat_peer_answers_interests_and_tokens_as_the_pins_dispatcher_does`:
+
+- **An Interest from a router is refused.** The pin's dispatcher refuses it
+  (`zenoh/src/net/routing/dispatcher/interests.rs` @ `if self.state.whatami.is_router() {`):
+  nothing is sent, not even a final. `LinkstateForwarder` answers with a final.
+- **A current Interest from a peer is answered with the declarations the other
+  hats hold, then a final** (`zenoh/src/net/routing/dispatcher/interests.rs` @
+  `hats[region].send_current_subscribers(` and `@ hats[region].send_declare_final(ctx.reborrow(), msg.id, &src);`).
+  This is the dispatcher's release behaviour: a current subscriber Interest from
+  a north peer is itself outside the pin's protocol (its peer hat asserts that a
+  current Interest from the north asks for tokens only), and the region-hat peer
+  does what the dispatcher does with it. `LinkstateForwarder` sends the final
+  alone. This one is stated as what it is, a choice between two readings of a
+  message the pin does not expect, and not as a defect of either.
+- **A token reaches a client that asked for tokens with a future interest.**
+  The pin's broker hat propagates a token to a south face that holds a matching
+  remote interest. `LinkstateForwarder`'s token plane is partial and does not,
+  across one node or across three links (the network gate allows the same one
+  difference and requires it to occur).
+
+No defect was found in the region-hat peer in this step, and no forwarder code
+changed.
+
+## 11. Open
 
 - The size of step 1's list is unknown until it is made, and the number of
   rounds after it follows from it. The router's own program ran from round 2865
