@@ -294202,6 +294202,34 @@
         "Codec primitive coverage at end of R38: 18 primitives (R37 17 + peek-byte). Remaining major: lookup-table dispatch (codec_variant_dispatch SCE fixture), TLV chain extension iterator advanced modes, embedded codec composition. R29 statechart carry items unchanged."
       ]
     },
+    "Round 3800": {
+      "decision_summary": "The demo's peer mode takes the accept bounds. --accept-pending and --accept-timeout-ms were read only by --router-hat, so a lane that connected a burst of sessions to a --peer node ran against upstream's hundred pending handshakes and ten seconds with no way to name a larger count. The mesh peer now reads both through the one parser the router-hat uses (parse_accept_bounds, gated on either run-mode), carries them in PeerOpts and hands them to the accept loop. Absent, nothing changes: upstream's bounds. The help names both run-modes. The parser had no test; three now cover absent, each flag alone, and zero or malformed values keeping the default.",
+      "changes_bullets": [
+        "crates/wz-ap-demo/src/args.rs (parse_accept_bounds gate, accept_bound_flag_tests), main.rs and runner.rs (PeerOpts.accept to the peer accept loop), usage.rs (help)."
+      ],
+      "verification_bullets": [
+        "On the build host: clippy of wz-ap-demo is clean with preset-ap-client plus routing-peer, with router-hat-router, and with preset-ap-full plus router-hat-router; the three new tests ran (ran=3) under the peer and the hat builds; stock_config_tests pass (48); the non-default tests gate passes (wz-ap-demo whole crate 256 tests). reason_review_pin_gate passes."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Hosted runs of the tips after round 3785 were all cancelled by the next push, so no hosted verdict exists for them; the next uncancelled run is read per job."
+      ],
+      "publishable_decision_summary": "The demo's peer mode takes the accept bounds. --accept-pending and --accept-timeout-ms were read only by --router-hat, so a lane that connected a burst of sessions to a --peer node ran against upstream's hundred pending handshakes and ten seconds with no way to name a larger count. The mesh peer now reads both through the one parser the router-hat uses (parse_accept_bounds, gated on either run-mode), carries them in PeerOpts and hands them to the accept loop. Absent, nothing changes: upstream's bounds. The help names both run-modes. The parser had no test; three now cover absent, each flag alone, and zero or malformed values keeping the default.",
+      "publishable_changes_bullets": [
+        "crates/wz-ap-demo/src/args.rs (parse_accept_bounds gate, accept_bound_flag_tests), main.rs and runner.rs (PeerOpts.accept to the peer accept loop), usage.rs (help)."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host: clippy of wz-ap-demo is clean with preset-ap-client plus routing-peer, with router-hat-router, and with preset-ap-full plus router-hat-router; the three new tests ran (ran=3) under the peer and the hat builds; stock_config_tests pass (48); the non-default tests gate passes (wz-ap-demo whole crate 256 tests). reason_review_pin_gate passes."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Hosted runs of the tips after round 3785 were all cancelled by the next push, so no hosted verdict exists for them; the next uncancelled run is read per job."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
