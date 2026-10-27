@@ -15,6 +15,10 @@
 // A point mark is made once per process; a scope is marked every time, since what it brackets is
 // what it attributes.
 //
+// An interface request (an ioctl whose request is one of the SIOCGIF* family, as a raw link's
+// SIOCGIFINDEX) is a system call the trace sees by itself; the shim brackets it too, so that it can
+// be denied like the listing it is the other half of.
+//
 // A scenario can also DENY a facility the shim brackets (WZ_FACILITY_DENY, a comma-separated list
 // of facility words): the scope is still marked, so the trace shows the run asked, and the call
 // fails as it fails on a device that refuses it (EACCES; EAI_FAIL for a resolution). A run denied a
@@ -29,9 +33,11 @@
 #include <net/if.h>
 #include <netdb.h>
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
@@ -54,10 +60,14 @@ static int denied(const char *facility) {
 }
 
 static void mark(const char *path) {
-    // The answer is always ENOENT and is not the point: the call is.
+    // The answer is always ENOENT and is not the point: the call is. The caller's errno is what the
+    // bracketed call left, so the mark leaves it as it found it.
+    int saved = errno;
     if (faccessat(AT_FDCWD, path, F_OK, 0) == 0) {
+        errno = saved;
         return;
     }
+    errno = saved;
 }
 
 static void mark_once(atomic_int *done, const char *path) {
@@ -181,6 +191,47 @@ char *if_indextoname(unsigned int index, char name[IF_NAMESIZE]) {
     char *out = real(index, name);
     mark(MARK_ROOT "leave/interface-list");
     return out;
+}
+
+// The interface requests of <linux/sockios.h>: every request strace names SIOCGIF*, which is what
+// facility_trace.py reads as an interface request when it sees one outside a scope.
+static int is_interface_request(unsigned long request) {
+    static const unsigned long requests[] = {
+        SIOCGIFNAME,    SIOCGIFCONF,  SIOCGIFFLAGS, SIOCGIFADDR,  SIOCGIFDSTADDR, SIOCGIFBRDADDR,
+        SIOCGIFNETMASK, SIOCGIFMETRIC, SIOCGIFMEM,  SIOCGIFMTU,   SIOCGIFENCAP,   SIOCGIFHWADDR,
+        SIOCGIFSLAVE,   SIOCGIFINDEX, SIOCGIFPFLAGS, SIOCGIFCOUNT, SIOCGIFTXQLEN, SIOCGIFMAP,
+    };
+    for (size_t i = 0; i < sizeof requests / sizeof requests[0]; i++) {
+        if (request == requests[i]) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// Every ioctl takes at most one argument after the request, a pointer or an integer the width of
+// one, so it is read and passed on as a pointer, as the C library's own wrappers do.
+int ioctl(int fd, unsigned long request, ...) {
+    static int (*real)(int, unsigned long, ...);
+    if (!real) {
+        real = (int (*)(int, unsigned long, ...))dlsym(RTLD_NEXT, "ioctl");
+    }
+    va_list rest;
+    va_start(rest, request);
+    void *arg = va_arg(rest, void *);
+    va_end(rest);
+    if (!is_interface_request(request)) {
+        return real(fd, request, arg);
+    }
+    mark(MARK_ROOT "enter/interface-list");
+    if (denied("interface-list")) {
+        mark(MARK_ROOT "leave/interface-list");
+        errno = EACCES;
+        return -1;
+    }
+    int rc = real(fd, request, arg);
+    mark(MARK_ROOT "leave/interface-list");
+    return rc;
 }
 
 int getaddrinfo(const char *restrict node, const char *restrict service,

@@ -22,7 +22,8 @@ event exactly one of three classes.
 
 What a trace cannot see, the witness shim (`facility_witness_shim.c`, LD_PRELOAD) marks: a read of
 the calendar time goes through the vDSO and makes no system call, and the C library's interface
-listing and name resolution are system calls that do not say what they are for. A mark is a
+listing and name resolution are system calls that do not say what they are for (an interface
+request, which strace does name, is bracketed too, so a run can be denied it). A mark is a
 faccessat(2) of a path under `/wz-facility-witness/`; `enter/X` and `leave/X` bracket a scope whose
 events are given to X, and `point/X` is a use of X.
 
@@ -39,8 +40,9 @@ Usage:
         Runs COMMAND under the oracle, stops it with SIGINT after S seconds (default: when it
         exits), and prints the observation as JSON.
     facility_trace.py --judge PACKAGE_DIR
-        Runs every artifact of a package that has scenarios (`SCENARIOS`) and judges each run
-        against the artifact's own manifest entry; an artifact with none is reported NOT JUDGED.
+        Runs every artifact of a package that has scenarios (`SCENARIOS`, or for a registered
+        profile's package `PROFILE_SCENARIOS`) and judges each run against the artifact's own
+        manifest entry; an artifact with none is reported NOT JUDGED.
 """
 
 from __future__ import annotations
@@ -89,16 +91,20 @@ WITNESSES = {
     "wall-clock": "the shim's mark of clock_gettime(CLOCK_REALTIME, _COARSE or CLOCK_TAI), "
                   "gettimeofday or time, or its scope of localtime, localtime_r or tzset (the zone "
                   "database they read is inside it)",
-    "interface-list": "the shim's scope of getifaddrs, if_nametoindex or if_indextoname, or an "
-                      "interface ioctl (SIOCGIF*)",
+    "interface-list": "the shim's scope of getifaddrs, if_nametoindex, if_indextoname or an interface "
+                      "ioctl (SIOCGIF*), or such an ioctl made where the shim does not reach",
     "name-resolution": "the shim's scope of getaddrinfo (the files it reads and the DNS it asks are "
                        "inside it)",
 }
 
-# What a scenario can deny a run (`Scenario.deny`): the facilities the shim brackets, whose calls it
-# refuses as a device without them refuses them. An interface ioctl (SIOCGIF*) is a system call the
-# shim does not see, so a raw Ethernet link is not denied its interface by this.
-DENIABLE = ("interface-list", "name-resolution")
+# What a scenario can deny a run (`Scenario.deny`), two ways. The shim refuses the calls it brackets
+# as a device without them refuses them (`SHIM_DENIABLE`, through WZ_FACILITY_DENY). A facility the
+# kernel grants by a capability is denied by not granting it (`CAPABILITY_DENIABLE`): a run on a
+# network of its own (`Scenario.own_network`) is given each of those capabilities over that network
+# except the ones `deny` names, which is how a device without them refuses them.
+SHIM_DENIABLE = ("interface-list", "name-resolution")
+CAPABILITY_DENIABLE = {"raw-ethernet": "CAP_NET_RAW"}
+DENIABLE = SHIM_DENIABLE + tuple(CAPABILITY_DENIABLE)
 
 # What the C library, the loader and the language runtime do for themselves, and why each is not
 # a request of the artifact: each is either done before the artifact runs or done without when the
@@ -324,7 +330,62 @@ def build_shim(work: pathlib.Path) -> pathlib.Path:
 
 
 def missing_tools() -> list[str]:
-    return [tool for tool in ("strace", "cc") if shutil.which(tool) is None]
+    return [tool for tool in ("strace", "cc", "bwrap") if shutil.which(tool) is None]
+
+
+def own_network(granted: tuple[str, ...]) -> list[str]:
+    """The prefix that runs a command on a network of its own: bubblewrap(1) in a new user and
+    network namespace, where the only interface is loopback, with exactly the capabilities
+    `granted` (over that namespace alone) and none else. The uid and the file system are the
+    caller's, and so is the process tree (no pid namespace), so the oracle stops the run as it
+    stops any other."""
+    argv = ["bwrap", "--unshare-user", "--unshare-net", "--die-with-parent", "--dev-bind", "/", "/",
+            "--cap-drop", "ALL"]
+    for capability in granted:
+        argv += ["--cap-add", capability]
+    return argv + ["--"]
+
+
+def own_network_refusal() -> str | None:
+    """Why this machine cannot give a run a network of its own, or None when it can. Ubuntu 24.04
+    and later refuse a capability inside an unprivileged user namespace unless an AppArmor profile
+    allows the program that made it (`kernel.apparmor_restrict_unprivileged_userns`); bubblewrap
+    then cannot even bring the namespace's loopback up. That is the machine's fact, and the run
+    that needs the namespace cannot be made there, so it is said in those words."""
+    probe = subprocess.run(own_network(("CAP_NET_RAW",)) + ["true"], capture_output=True, text=True)
+    if probe.returncode == 0:
+        return None
+    restrict = pathlib.Path("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+    try:
+        restricted = restrict.read_text(encoding="ascii").strip() == "1"
+    except OSError:
+        restricted = False
+    why = ("kernel.apparmor_restrict_unprivileged_userns is 1 and no AppArmor profile allows bwrap a "
+           "user namespace" if restricted else "bwrap could not make a user and network namespace")
+    return f"{why}: {probe.stderr.strip() or f'exit {probe.returncode}'}"
+
+
+def children_of(pid: int) -> list[int]:
+    try:
+        return [int(p) for p in pathlib.Path(f"/proc/{pid}/task/{pid}/children").read_text(encoding="ascii").split()]
+    except OSError:
+        return []
+
+
+def traced_programs(root: int) -> list[int]:
+    """The processes strace traces: its children, strace being `root` or, on a network of its own,
+    a descendant of the namespace's runner."""
+    pending = [root]
+    while pending:
+        pid = pending.pop(0)
+        try:
+            name = pathlib.Path(f"/proc/{pid}/comm").read_text(encoding="ascii").strip()
+        except OSError:
+            continue
+        if name == "strace":
+            return children_of(pid)
+        pending += children_of(pid)
+    return []
 
 
 def stop_tracee(strace: subprocess.Popen) -> None:
@@ -336,12 +397,7 @@ def stop_tracee(strace: subprocess.Popen) -> None:
     when its tracee does. A program that ignores SIGINT is asked again with SIGTERM, then killed.
     """
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGKILL):
-        children = pathlib.Path(f"/proc/{strace.pid}/task/{strace.pid}/children")
-        try:
-            pids = [int(p) for p in children.read_text(encoding="ascii").split()]
-        except OSError:
-            pids = []
-        for pid in pids:
+        for pid in traced_programs(strace.pid):
             try:
                 os.kill(pid, sig)
             except ProcessLookupError:
@@ -355,14 +411,17 @@ def stop_tracee(strace: subprocess.Popen) -> None:
     strace.wait()
 
 
-def observe(command: list[str], seconds: float | None = None, env: dict[str, str] | None = None) -> Observation:
-    """Run `command` under the oracle and classify every traced call of every thread it ran."""
+def observe(command: list[str], seconds: float | None = None, env: dict[str, str] | None = None,
+            runner: list[str] | None = None) -> Observation:
+    """Run `command` under the oracle and classify every traced call of every thread it ran. A
+    `runner` (`own_network`) runs strace, and so the command, inside it: what the runner does to
+    set the run up is not the command's and is not traced."""
     with tempfile.TemporaryDirectory(prefix="wz-facility-") as tmp:
         work = pathlib.Path(tmp)
         shim = build_shim(work)
         prefix = work / "trace"
-        argv = ["strace", "-ff", "-qq", "-s", "4096", "-e", "signal=none", "-e", f"trace={','.join(TRACED)}",
-                "-o", str(prefix), "-E", f"LD_PRELOAD={shim}"]
+        argv = [*(runner or []), "strace", "-ff", "-qq", "-s", "4096", "-e", "signal=none", "-e",
+                f"trace={','.join(TRACED)}", "-o", str(prefix), "-E", f"LD_PRELOAD={shim}"]
         for key, value in (env or {}).items():
             argv += ["-E", f"{key}={value}"]
         # strace writes the trace to its files and passes the program's own stderr through, so what
@@ -432,6 +491,11 @@ class Scenario:
     # Facilities of `DENIABLE` the traced run is refused. The run is held to its configuration's
     # door: it has to fail by itself when the door requires one of them, and go on otherwise.
     deny: tuple[str, ...] = ()
+    # The traced run is on a network of its own (`own_network`): loopback alone, and the
+    # capabilities of `CAPABILITY_DENIABLE` over it but the ones `deny` names. A raw link needs this:
+    # its socket takes CAP_NET_RAW, which no build machine gives a run on the machine's own network.
+    # A peer would be on the machine's network, so such a run has none.
+    own_network: bool = False
 
 
 def library_scenarios(driver: Driver) -> tuple[Scenario, ...]:
@@ -505,6 +569,22 @@ def denial_corpus(driver: Driver) -> tuple[Scenario, ...]:
     )
 
 
+def raw_link_corpus(driver: Driver) -> tuple[Scenario, ...]:
+    """The runs that hold a raw Ethernet group to its door (`requires` names `raw-ethernet` and
+    `interface-list`): a peer alone in a group on loopback, given CAP_NET_RAW, has to go on and ask
+    for both; denied the interface request its link makes for the interface's index, or not given
+    the capability, it has to fail. The MAC is a locally administered one, the session's own."""
+    group = ("{bin}", "listen", "reth/02:00:00:00:00:01#iface=lo", "3")
+    return (
+        Scenario("a peer that joins a group over raw Ethernet", group, seconds=15.0, driver=driver,
+                 own_network=True),
+        Scenario("a peer that joins a group over raw Ethernet, denied the interface request", group,
+                 seconds=15.0, driver=driver, own_network=True, deny=("interface-list",)),
+        Scenario("a peer that joins a group over raw Ethernet, without CAP_NET_RAW", group,
+                 seconds=15.0, driver=driver, own_network=True, deny=("raw-ethernet",)),
+    )
+
+
 def make_tls_material(work: pathlib.Path) -> None:
     """A certificate authority and a server certificate it signed for 127.0.0.1, in `work`."""
     def openssl(*args: str) -> None:
@@ -557,6 +637,12 @@ SCENARIOS = {
     "declared-node": (
         Scenario("a node whose router does not answer", ("{bin}",), seconds=3.0),
     ),
+}
+
+# The runs the artifacts of a registered profile's package are judged on, by profile id and then
+# manifest id. A profile package holds its libraries alone, so its runs need no other artifact.
+PROFILE_SCENARIOS = {
+    "host-peer-raweth": {"capi-pico": raw_link_corpus(PICO_DRIVER)},
 }
 
 
@@ -625,10 +711,21 @@ def _run(scenario: Scenario, binary: pathlib.Path, package: pathlib.Path, env: d
         late.start()
     undeniable = [f for f in scenario.deny if f not in DENIABLE]
     if undeniable:
-        raise ValueError(f"{scenario.name}: the shim cannot deny {', '.join(undeniable)}")
-    traced_env = {**env, "WZ_FACILITY_DENY": ",".join(scenario.deny)} if scenario.deny else env
+        raise ValueError(f"{scenario.name}: the oracle cannot deny {', '.join(undeniable)}")
+    by_capability = [f for f in scenario.deny if f in CAPABILITY_DENIABLE]
+    if by_capability and not scenario.own_network:
+        raise ValueError(f"{scenario.name}: {', '.join(by_capability)} is denied by withholding a "
+                         "capability, which only a run on a network of its own is given")
+    if scenario.own_network and scenario.peer:
+        raise ValueError(f"{scenario.name}: a run on a network of its own has no peer to reach")
+    by_shim = [f for f in scenario.deny if f in SHIM_DENIABLE]
+    traced_env = {**env, "WZ_FACILITY_DENY": ",".join(by_shim)} if by_shim else env
+    runner = None
+    if scenario.own_network:
+        runner = own_network(tuple(cap for facility, cap in CAPABILITY_DENIABLE.items()
+                                   if facility not in scenario.deny))
     try:
-        seen = observe(argv(scenario.traced), scenario.seconds, traced_env)
+        seen = observe(argv(scenario.traced), scenario.seconds, traced_env, runner)
         seen.stated = stated
         return seen
     finally:
@@ -651,8 +748,15 @@ def judge_package(directory: pathlib.Path) -> tuple[list[str], list[str]]:
     manifest = json.loads((directory / "wz-target-manifest.json").read_text(encoding="utf-8"))
     findings: list[str] = []
     report: list[str] = []
+    profile = manifest.get("profile")
+    table = PROFILE_SCENARIOS.get(profile["id"], {}) if profile else SCENARIOS
+    if any(s.own_network for art in manifest["artifacts"] for s in table.get(art["id"], ())):
+        refusal = own_network_refusal()
+        if refusal is not None:
+            return [f"the package's raw link runs need a network of their own, and this machine "
+                    f"cannot make one: {refusal}"], []
     for art in manifest["artifacts"]:
-        scenarios = SCENARIOS.get(art["id"])
+        scenarios = table.get(art["id"])
         if scenarios is None:
             report.append(f"{art['id']}: NOT JUDGED, no scenario runs it")
             continue
@@ -669,7 +773,8 @@ def judge_package(directory: pathlib.Path) -> tuple[list[str], list[str]]:
             fails = stated is not None and bool(set(scenario.deny) & set(stated[0]))
             found = judge(seen, requires, may, scenario.deny, fails)
             findings += [f"{art['id']} ({scenario.name}): {f}" for f in found]
-            report.append(f"{art['id']} ({scenario.name}): observed {sorted(seen.facilities)}, "
+            ended = "stopped" if seen.stopped else f"exit {seen.exit_status}"
+            report.append(f"{art['id']} ({scenario.name}): observed {sorted(seen.facilities)} ({ended}), "
                           f"{'refuted' if found else 'agrees with'} requires {requires} and may_require {may}")
             if stated is not None:
                 c_requires, c_may = stated
@@ -742,6 +847,7 @@ PROBE_SOURCE = r"""
 #include <pthread.h>
 #include <signal.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/random.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
@@ -768,7 +874,17 @@ int main(int argc, char **argv) {
         setsockopt(s, IPPROTO_IP, IP_ADD_MEMBERSHIP, &m, sizeof m);
         close(s);
     } else if (!strcmp(what, "raw-ethernet")) {
-        socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
+        int s = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
+        if (s < 0) return 3;
+        close(s);
+    } else if (!strcmp(what, "interface-request")) {
+        int s = socket(AF_INET, SOCK_DGRAM, 0);
+        struct ifreq r;
+        memset(&r, 0, sizeof r);
+        strcpy(r.ifr_name, "lo");
+        int rc = ioctl(s, SIOCGIFINDEX, &r);
+        close(s);
+        if (rc < 0) return 3;
     } else if (!strcmp(what, "unix-sockets")) {
         close(socket(AF_UNIX, SOCK_STREAM, 0));
     } else if (!strcmp(what, "filesystem")) {
@@ -888,8 +1004,12 @@ def _selftest() -> int:
            judge(failed_run, ["entropy", "name-resolution", "threads"], ["sockets-tcp"], ("name-resolution",),
                  True)
            == ["the run asked for sockets-udp outside requires and may_require (u)"])
-    expect("only what the shim brackets can be denied, and each is a facility",
-           set(DENIABLE) <= set(wz_config.OS_FACILITIES))
+    expect("only what the shim brackets or a capability grants can be denied, and each is a facility",
+           set(DENIABLE) <= set(wz_config.OS_FACILITIES)
+           and not set(SHIM_DENIABLE) & set(CAPABILITY_DENIABLE))
+    expect("a network of its own grants exactly the capabilities named, after dropping all",
+           own_network(("CAP_NET_RAW",))[-5:] == ["--cap-drop", "ALL", "--cap-add", "CAP_NET_RAW", "--"]
+           and "--cap-add" not in own_network(()))
 
     missing = missing_tools()
     if missing:
@@ -926,6 +1046,29 @@ def _selftest() -> int:
                 got = observed(facility, *args)
                 expect(f"the witness of {facility} sees it and nothing else ({got.as_json()})",
                        set(got.facilities) == {facility} | also and got.unclassified == [])
+            refusal = own_network_refusal()
+            if refusal is not None:
+                failures.append(f"a run on a network of its own cannot be made on this machine ({refusal}), "
+                                "so the raw link runs cannot be judged here")
+            got = observed("interface-request")
+            expect(f"an interface request is the interface listing's, on the socket it is made on "
+                   f"({got.as_json()})",
+                   set(got.facilities) == {"interface-list", "sockets-udp"} and got.unclassified == []
+                   and got.exit_status == 0)
+            got = observe([str(probe), "interface-request"], env={"WZ_FACILITY_DENY": "interface-list"})
+            expect(f"a denied interface request is still asked for, and the call fails ({got.as_json()}, "
+                   f"exit {got.exit_status})",
+                   set(got.facilities) == {"interface-list", "sockets-udp"} and got.exit_status == 3)
+            for granted, status in (((), 3), (("CAP_NET_RAW",), 0)) if refusal is None else ():
+                got = observe([str(probe), "raw-ethernet"], runner=own_network(granted))
+                expect(f"on a network of its own, a raw socket opens exactly when CAP_NET_RAW is granted "
+                       f"({granted}, {got.as_json()}, exit {got.exit_status}: {got.stderr_tail.strip()})",
+                       set(got.facilities) == {"raw-ethernet"} and got.unclassified == []
+                       and got.exit_status == status)
+            if refusal is None:
+                got = observe([str(probe), "wait"], seconds=0.5, runner=own_network(()))
+                expect(f"a run on a network of its own that does not end by itself is stopped ({got.as_json()})",
+                       got.stopped and got.exit_status is None and got.unclassified == [])
             got = observed("process")
             expect(f"starting a process is outside the vocabulary and is a finding ({got.as_json()})",
                    got.facilities == {} and len(got.unclassified) == 1 and got.unclassified[0].startswith("process"))
@@ -937,7 +1080,7 @@ def _selftest() -> int:
                    set(local.facilities) == {"wall-clock"} and local.unclassified == [])
             mono = observed("monotonic")
             expect(f"a monotonic clock is not the calendar ({mono.as_json()})", mono.facilities == {})
-            for facility in DENIABLE:
+            for facility in SHIM_DENIABLE:
                 refused = observe([str(probe), facility], env={"WZ_FACILITY_DENY": f"wall-clock,{facility}"})
                 expect(f"a denied {facility} is still asked for, and the call fails ({refused.as_json()}, "
                        f"exit {refused.exit_status})",

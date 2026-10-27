@@ -14521,6 +14521,14 @@ layer_c1st_abi_stamp() {
     [ "$rc" -eq 0 ] && { cmp "$work/pa/wz-target-manifest.json" "$work/pb/wz-target-manifest.json" \
         || { echo "  C1st FAIL: two packagings of one profile wrote different manifests"; rc=1; }; }
     [ "$rc" -eq 0 ] && { python3 scripts/lib/wz_package.py --verify "$work/pa" || rc=1; }
+    # The build a raw Ethernet group runs in (T9): no other package has pico's raweth transport, so
+    # the requirement a raw link states is held to runs of this one, each on a network of its own
+    # (bubblewrap), given CAP_NET_RAW over it or, for the run that must fail without it, not.
+    local raw=(python3 scripts/lib/wz_package.py --platform linux-x86_64-glibc
+        --artifact capi-pico --profile host-peer-raweth)
+    [ "$rc" -eq 0 ] && { "${raw[@]}" --out "$work/ra" || rc=1; }
+    [ "$rc" -eq 0 ] && { python3 scripts/lib/wz_package.py --verify "$work/ra" || rc=1; }
+    [ "$rc" -eq 0 ] && { python3 scripts/lib/facility_trace.py --judge "$work/ra" || rc=1; }
     rm -rf "$work"
     return "$rc"
 }

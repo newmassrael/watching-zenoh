@@ -6169,11 +6169,13 @@ jobs:
           WZ_C1CE_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer C1ce
 
-      - name: Install strace for the facility oracle
+      - name: Install strace and bubblewrap for the facility oracle
         # Layer C1st judges each packaged artifact's runs against its manifest's `requires` and
         # `may_require` (scripts/lib/facility_trace.py --judge), which reads the runs through
-        # strace; the judgement fails rather than skips without it.
-        run: bash scripts/lib/apt-install.sh strace
+        # strace, and runs a raw Ethernet group on a network of its own through bubblewrap (a
+        # user and network namespace that grants CAP_NET_RAW over itself alone); the judgement
+        # fails rather than skips without either.
+        run: bash scripts/lib/apt-install.sh strace bubblewrap
 
       - name: Layer C1st — every shipped artifact carries its ABI stamp
         # `docs/target-build-contract.md` T6. In THIS job because it builds the release profile

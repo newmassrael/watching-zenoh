@@ -377,13 +377,22 @@ and a host-named dial.
 
 A run that asks for a facility does not show that it cannot go on without it. So some runs
 are refused one: the oracle's shim fails the calls it brackets (the interface listing and
-lookups, name resolution) as a device without the facility does, and the run is held to
-its configuration's door. When the door's `requires` names the refused facility, the run
-has to fail by itself; when it does not, the run has to go on. Each library dials by host
-name without the resolver (it fails) and by address without the interface listing (it
-goes on), and the zenoh-c peer joins its `#iface=lo` group without the listing (it goes
-on, on the default interface). An interface ioctl is not refused this way, so the raw
-Ethernet claim is held by reading the code only.
+lookups, the interface ioctls `SIOCGIF*`, name resolution) as a device without the facility
+does, and the run is held to its configuration's door. When the door's `requires` names the
+refused facility, the run has to fail by itself; when it does not, the run has to go on.
+Each library dials by host name without the resolver (it fails) and by address without the
+interface listing (it goes on), and the zenoh-c peer joins its `#iface=lo` group without
+the listing (it goes on, on the default interface).
+
+A raw Ethernet socket takes `CAP_NET_RAW`, which no build machine gives a run on its own
+network. A raw link's runs are therefore each on a network of their own: bubblewrap puts the
+run in a new user and network namespace, where loopback is the only interface, and grants it
+`CAP_NET_RAW` over that namespace alone (every other capability dropped). Not granting the
+capability is how such a run is refused `raw-ethernet`. The build is the registered profile
+`host-peer-raweth` (zenoh-pico's defaults, the peer role, the raweth transport and the
+unstable API), packaged by Layer C1st beside the default package. A pico peer alone in a
+`reth/` group on loopback goes on and asks for both facilities its door requires; denied the
+interface index request, or not granted the capability, it fails.
 
 A manifest written before the split (schema 1 has no number for it) carries neither key,
 in every artifact; a reader takes its whole `device_requires` as `may_require`. Such a

@@ -181,6 +181,9 @@ _add("cmake", "Builds the cached native RocksDB engine via the local composite a
      ["nondefault", "nondefault-builds", "nondefault-legs", "reduced-docs"])
 _add("strace", "Layer C1st's facility oracle reads each packaged artifact's runs through it "
      "(scripts/lib/facility_trace.py --judge).", ["capi-c-arms"])
+_add("bubblewrap", "Layer C1st's facility oracle runs a raw Ethernet group on a network of its own "
+     "(a user and network namespace), given CAP_NET_RAW over it or not "
+     "(scripts/lib/facility_trace.py own_network).", ["capi-c-arms"])
 
 
 # bindgen, which is where libclang is consumed. 25.2 MB of a 32.3 MB job, and
