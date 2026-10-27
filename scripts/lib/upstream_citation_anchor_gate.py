@@ -526,7 +526,11 @@ BARE_BUDGET = 55
 # its own diff touched a citation.
 # R2934 — 89 -> 80, DOWNWARD by the removals `c867f7b8` made when it deleted
 # the RouteTable engine's modules; measured at the red tip, not chosen.
-ROOTLESS_LINE_BUDGET = 80
+# Item 751 (the multicast designated router) -- 80 -> 78, DOWNWARD by a removal:
+# the doc of the deleted election function cited the router hat's election by
+# line number with no root, twice, and the text that replaced it cites nothing
+# upstream. Read off the gate at the red tip, not chosen.
+ROOTLESS_LINE_BUDGET = 78
 # R2862 — 36 -> 35. The auth segment's helpers moved into the shared POSIX
 # segment module, and the retry-count note that named the upstream segment file
 # with no root went with them; its replacement is anchored.
@@ -787,7 +791,8 @@ def rootless_undeclared_budget() -> int:
 # R3540 — 677 -> 656, the 21 `common` occurrences that resolve to that crate's `common` module.
 # R3706 — 504 -> 502, the two `builders` occurrences (`builders/...` paths a reason cites) that now
 # resolve to a tracked file, the top crate's own `api/builders` directory; its row left the table.
-ROOTLESS_TOTAL_BUDGET = 502
+# Item 751 -- 502 -> 500, the same two line-form removals as ROOTLESS_LINE_BUDGET.
+ROOTLESS_TOTAL_BUDGET = 500
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete
