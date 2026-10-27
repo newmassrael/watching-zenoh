@@ -284,7 +284,7 @@ CASES: tuple[Case, ...] = (
     # answers `@/<zid>/pico/**`, which needs the answering end and, for the peers it lists, the
     # engine's faces. It lists no connectivity listener, so that plane's exports stay out.
     Case("pico-client-coop-admin-space", "wz-capi-pico", "libwz_capi_pico.so",
-         "engine-coop,link-udp,admin-space", 1_274_500,
+         "engine-coop,link-udp,admin-space", 1_282_800,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -305,11 +305,14 @@ CASES: tuple[Case, ...] = (
               "hosted figures did; the budget follows the hosted reading, which is the gate's. "
               "1,163,845 on pc2 on 2026-10-27 with the listening role (pico-client-coop's "
               "note), +6,196 over the reading before it; moved to the pc2 reading and 5,500, "
-              "an estimate the first hosted run replaces"),
+              "an estimate the first hosted run replaces. 1,279,229 on hosted CI on 2026-10-27 "
+              "(head `e6d953fc2`), the first hosted reading since the listening role: 8,200 "
+              "over pc2's 1,271,029, where the cases without the query plane read 800 over; "
+              "the budget follows the hosted reading and 3,500"),
     # The cooperative client that asks and answers queries: the requesting end and the answering
     # end, which is what the next case adds its loopback leg to.
     Case("pico-client-coop-query", "wz-capi-pico", "libwz_capi_pico.so",
-         "engine-coop,link-udp,query,queryable", 1_214_900,
+         "engine-coop,link-udp,query,queryable", 1_225_000,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -323,11 +326,13 @@ CASES: tuple[Case, ...] = (
               "1,210,960 on hosted CI on 2026-10-27 (head `f4bdeaee5`), the hosted reading the "
               "budget follows. 1,213,796 on pc2 on 2026-10-27 with the listening role "
               "(pico-client-coop's note), +6,196 over the reading before it; moved to the pc2 "
-              "reading and 5,500, an estimate the first hosted run replaces"),
+              "reading and 5,500, an estimate the first hosted run replaces. 1,221,476 on "
+              "hosted CI on 2026-10-27 (head `e6d953fc2`), 8,240 over pc2's 1,213,236; the "
+              "budget follows the hosted reading and 3,500"),
     # The same, with a get delivered to the session's own queryables
     # (`Z_FEATURE_LOCAL_QUERYABLE`), which a program that asks its own queryable needs.
     Case("pico-client-coop-local-queryable", "wz-capi-pico", "libwz_capi_pico.so",
-         "engine-coop,link-udp,query,queryable,local-queryable", 1_231_400,
+         "engine-coop,link-udp,query,queryable,local-queryable", 1_242_300,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -340,7 +345,8 @@ CASES: tuple[Case, ...] = (
               "`f4bdeaee5`), the hosted reading the budget follows. 1,230,320 on pc2 on "
               "2026-10-27 with the listening role (pico-client-coop's note), +6,224 over the "
               "reading before it; moved to the pc2 reading and 5,500, an estimate the first "
-              "hosted run replaces"),
+              "hosted run replaces. 1,238,764 on hosted CI on 2026-10-27 (head `e6d953fc2`), "
+              "8,724 over pc2's 1,230,040; the budget follows the hosted reading and 3,500"),
     # The cooperative client that scouts (`Z_FEATURE_SCOUTING`): `z_scout`, and the lookup `z_open`
     # runs when its config names no locator, over the engine's own window and no tokio engine.
     Case("pico-client-coop-scout", "wz-capi-pico", "libwz_capi_pico.so",
@@ -387,14 +393,16 @@ CASES: tuple[Case, ...] = (
          forbid=(SINGLE_THREADED,),
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
                   CONNECTIVITY, MULTICAST),
-         exports=802,
+         exports=803,
          note="every capability on: the symbol count is the drop-in's. 809 -> 802 when the "
-              "seven single-threaded entry points left the multi-threaded arm. 4,216,542 "
+              "seven single-threaded entry points left the multi-threaded arm; 803 with the "
+              "door that answers what a configuration asks of the operating system "
+              "(`wz_ext_config_device_requires`). 4,216,542 "
               "measured with the multicast transport pico's default has (open-debt item 913), "
               "3,790,610 without it"),
     Case("capic-client", "wz-capi-c", "libwz_capi_c.so", "", 3_000_000,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST)),
-    Case("capic-client-small", "wz-capi-c", "libwz_capi_c.so", "", 1_883_000,
+    Case("capic-client-small", "wz-capi-c", "libwz_capi_c.so", "", 1_927_200,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
          profile="capi-small",
          note="the capic-client build with panics aborting: 1,797,992 measured against "
@@ -403,18 +411,27 @@ CASES: tuple[Case, ...] = (
               "CI (run 40482567212, head `36f037a6b`) and 1,874,448 on pc2: +35,588 over "
               "`f4bdeaee5` while no pico lane moved, so it is the C ABI's own growth in "
               "between (the accept bounds, `dc42cd9a7`, and the lifecycle verbs served on the "
-              "fixed node, `c0e98be2d` to `bcb8c1c57`) and not a build that changed"),
+              "fixed node, `c0e98be2d` to `bcb8c1c57`) and not a build that changed. "
+              "1,921,843 on hosted CI at `23c300730` (571 exports against 570), +46,683 in the "
+              "step that added the door that answers what a configuration asks of the "
+              "operating system (`wz_capi_c_config_device_requires`, `0a85b8692`: the plan "
+              "`z_open` runs and the requirement derived from it, linked into a client "
+              "build); 1,923,539 at `bbd53d1ea` and 1,923,619 on hosted CI at `e6d953fc2`. "
+              "The attribution is from the hosted readings of those heads, not a symbol diff. "
+              "The budget follows the hosted reading and 3,500"),
     Case("capic-scout", "wz-capi-c", "libwz_capi_c.so", "scout", 3_275_000,
          forbid=(ACCEPT, RESPONDER, GOSSIP, CLOCK, ADVANCED, MULTICAST),
          require=(SCOUTING, UDP)),
     Case("capic-peer", "wz-capi-c", "libwz_capi_c.so", "peer", 4_065_000,
          forbid=(GOSSIP, CLOCK, ADVANCED, MULTICAST), require=(ACCEPT, RESPONDER, SCOUTING, UDP)),
-    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 9_210_000,
+    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 9_218_200,
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
-         exports=835,
+         exports=836,
          note="zenoh-c's default links and pubkey auth (rustls on ring, quinn, tungstenite, "
               "rsa): 8,866,359 measured, up from about 5.1 MB without them; 9,029,823 with "
-              "the multicast transport (open-debt item 913)"),
+              "the multicast transport (open-debt item 913). 9,214,622 and 836 exports on "
+              "hosted CI on 2026-10-27 (head `e6d953fc2`), 4,622 over the earlier budget with "
+              "the door `wz_capi_c_config_device_requires` (the pin's revision 7)"),
 )
 
 
