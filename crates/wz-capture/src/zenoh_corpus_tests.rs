@@ -383,7 +383,13 @@ fn the_corpus_holds_both_error_rates_and_every_files_tally() {
     );
 }
 
+// The counts below are a build's that reads every codec and reassembles a stream: the
+// null protocols' units read whole only where the codecs are, and an MQTT stream frames
+// only where the reassembler is. A lean build reads fewer of them, so it states other
+// counts, and the weights rest on this one.
+
 /// One file's counts the measured weights rest on.
+#[cfg(all(feature = "network-codecs", feature = "reassembly"))]
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Counts {
     /// Framing units read whole, residual, undecoded.
@@ -401,6 +407,7 @@ struct Counts {
     sn: [u64; 2],
 }
 
+#[cfg(all(feature = "network-codecs", feature = "reassembly"))]
 impl Counts {
     fn and(&mut self, other: &Counts) {
         let add = |a: &mut [u64], b: &[u64]| {
@@ -417,6 +424,7 @@ impl Counts {
     }
 }
 
+#[cfg(all(feature = "network-codecs", feature = "reassembly"))]
 fn counts(d: &Dissection) -> Counts {
     use crate::zenoh_evidence::{Check, ZenohEvidence};
     let mut out = Counts::default();
@@ -465,6 +473,7 @@ fn counts(d: &Dissection) -> Counts {
 /// The counts are a build's that opens lz4. A build that cannot reads the one
 /// lz4 batch of `zenoh-tcp-lz4.pcap` that no plain unit stands beside as
 /// `undecoded`, which it does not weigh ([`wz_session_core::passive::OPENS_LZ4_BATCHES`]).
+#[cfg(all(feature = "network-codecs", feature = "reassembly"))]
 #[test]
 fn the_corpus_measures_the_counts_model_two_is_computed_from() {
     use crate::zenoh_evidence::model::measured;

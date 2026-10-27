@@ -3433,10 +3433,18 @@ fn the_repositorys_captures_read_as_what_they_are() {
         "../../../captures/compressed-session-refused-body.pcap"
     ));
     let flow = compressed.first().expect("one flow");
-    assert_eq!(flow.0, ZenohVerdict::Yes);
     // Whether the batch is read depends on the reader's `compression` feature: off, the two
-    // compressed units are refused and read `undecoded`; on, one of them reads and its bytes
-    // are the decompressed ones.
+    // compressed units are refused and read `undecoded`, which the verdict does not weigh
+    // (`wz_session_core::passive::OPENS_LZ4_BATCHES`), so the handshake and the plain units
+    // carry the flow to `yes`; on, one of them reads and its bytes are the decompressed ones, and the
+    // one that is really broken is weighed as a unit that did not decode, a cost of about ten
+    // bits that leaves the flow at eleven and a half of the twenty `yes` asks: `undecided`.
+    let want = if cfg!(feature = "compression") {
+        ZenohVerdict::Undecided
+    } else {
+        ZenohVerdict::Yes
+    };
+    assert_eq!(flow.0, want);
     if cfg!(feature = "compression") {
         assert_eq!(flow.1.explained, tally(5, 289));
         assert_eq!(flow.1.undecoded, tally(1, 37));
