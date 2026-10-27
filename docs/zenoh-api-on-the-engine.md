@@ -677,9 +677,30 @@ Each lands whole with its surface lines, tests and faults in one round.
     tests that ran side by side (`LinkFailed` on open); a port is now handed out once by a
     process. 40 of the default lines and 41 and 41 of the other two arms; 9 injected faults,
     none missed.
-- **Z5. Scouting.** Scouting is not in the port; it is the slice that decides whether the port
-  gains it or the crate reaches it through the engine, and it contradicts "names no runtime" unless
-  the port gains it.
+- **Z5 (landed). Scouting.** `scout` with its builder (`callback`, `callback_mut`, `with`), `Scout`
+  with `stop`, the `scouting` module with `Hello` (the wrapper of `wz-zenoh-config`), and the root
+  re-export. **Decision: the crate reaches the engine, and the port gains nothing.** A scout is no
+  session's: it needs a configuration and a group and nothing a session holds, so it is not an
+  operation of `SessionEngine`, and the open does not go through the port either. D1 stands. The
+  engine already ran the cadence upstream's `scout` has, for a session that looks for its peers
+  (a Scout at once, then the answers to it for a window of a second, the next twice as long, up to
+  eight), so that loop is now one drive both use: `ScoutLink::scout_each` hands each Hello to its
+  caller as the window gathers it, and the session's autoconnect is a caller of it. What a scout a
+  program asks for adds is `ScoutingPlan::for_scout`, which reads the group, the interface and the
+  hop limit of a configuration and not whether the configuration enables multicast scouting (that
+  is a session's question, as upstream's `scout` does not ask it either), `ScoutLink::bind_for_scout`,
+  which does not need the group socket (upstream receives on its per-interface sockets alone, and a
+  scout with no socket finds nobody and is no error), and `ScoutStream`, a thread that scouts until
+  it is dropped and is joined by the drop, so no callback runs once `stop` has returned. A Hello
+  whose role was not asked for is left out, as upstream's receive loop leaves it. One difference is
+  recorded and not mended: the Scout the engine sends announces an id, where upstream's `scout`
+  announces none, so a node that answers sees the id of a scout it can read and not a scout with
+  none. The unit tests find a node of the crate by a scout on a group of their own, check the
+  roles, the locators, the windows (the second is twice the first), the stop and the error of an
+  unreadable configuration; the differential has a scout of each side hear an upstream node and an
+  upstream scout hear a node of each side, with equal transcripts. The surface falls to 2, 115 and
+  119 lines of the three arms; 8 injected faults, none missed (one did not compile at first and
+  was redone).
 - **Z6a. The unstable arm: information.** `info().links()`, `transports()`, the link and transport
   event listeners, `connectivity`.
 - **Z6b. The unstable arm: timestamps.** The timestamp stack (53 surface lines,
