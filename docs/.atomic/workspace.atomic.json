@@ -292640,6 +292640,44 @@
         "Open-debt item 925 is closed by this round; the sequence-number policy and the keepalive of the router (capacity model) remain."
       ]
     },
+    "Round 3761": {
+      "decision_summary": "The session kickoff procedure moves out of CLAUDE.md into a tracked project skill, and the instruction layers are separated by what they hold (owner, 2026-10-27: \"the ultimate structure, decided by the agent\"). CLAUDE.md is loaded by every session, so it keeps only the invariant and the trigger words; a procedure that runs once at session start belongs in a skill, which the harness loads only when the procedure is invoked. The `/load` trigger is dropped because the command it named was removed from this machine with the rest of its framework the same day; the other three trigger words are unchanged and `/kickoff` replaces it. `.claude/skills/` is re-included in .gitignore because a project skill is repository knowledge and a tracked one is present in every worktree, which an untracked one is not.",
+      "changes_bullets": [
+        "CLAUDE.md: the Auto-kickoff section now names the trigger words and points at the kickoff skill; the five steps moved out",
+        ".claude/skills/kickoff/SKILL.md: new tracked project skill carrying the five kickoff steps unchanged in substance",
+        ".gitignore: `!.claude/skills/` re-includes project skills under the `.claude/*` entry, with the reason beside it"
+      ],
+      "verification_bullets": [
+        "claude_md_upstream_pin_gate.py --check rc=0: the External references bullet still names the pinned upstream version",
+        "mnemosyne-cli validate-workspace rc=0 at commit time: T1 orphan total 14, new +0",
+        "reason_review_pin_gate.py: no pair cites CLAUDE.md, .gitignore or the new skill; its 5 standing FAIL rows predate this round (session-close-ingress files)"
+      ],
+      "impact_refs": [
+        "watching-zenoh/contributing"
+      ],
+      "carry_forward_bullets": [
+        "reason-review-pins: 5 rows for atom session-close-ingress are stale against session crate files changed by the session lifecycle work; that work's owner re-reads the reason and moves the rows",
+        "A session that wants the kickoff types /kickoff or one of the three trigger words; /load no longer exists"
+      ],
+      "publishable_decision_summary": "The session kickoff procedure moves out of CLAUDE.md into a tracked project skill, and the instruction layers are separated by what they hold (owner, 2026-10-27: \"the ultimate structure, decided by the agent\"). CLAUDE.md is loaded by every session, so it keeps only the invariant and the trigger words; a procedure that runs once at session start belongs in a skill, which the harness loads only when the procedure is invoked. The `/load` trigger is dropped because the command it named was removed from this machine with the rest of its framework the same day; the other three trigger words are unchanged and `/kickoff` replaces it. `.claude/skills/` is re-included in .gitignore because a project skill is repository knowledge and a tracked one is present in every worktree, which an untracked one is not.",
+      "publishable_changes_bullets": [
+        "CLAUDE.md: the Auto-kickoff section now names the trigger words and points at the kickoff skill; the five steps moved out",
+        ".claude/skills/kickoff/SKILL.md: new tracked project skill carrying the five kickoff steps unchanged in substance",
+        ".gitignore: `!.claude/skills/` re-includes project skills under the `.claude/*` entry, with the reason beside it"
+      ],
+      "publishable_verification_bullets": [
+        "claude_md_upstream_pin_gate.py --check rc=0: the External references bullet still names the pinned upstream version",
+        "mnemosyne-cli validate-workspace rc=0 at commit time: T1 orphan total 14, new +0",
+        "reason_review_pin_gate.py: no pair cites CLAUDE.md, .gitignore or the new skill; its 5 standing FAIL rows predate this round (session-close-ingress files)"
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/contributing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "reason-review-pins: 5 rows for atom session-close-ingress are stale against session crate files changed by the session lifecycle work; that work's owner re-reads the reason and moves the rows",
+        "A session that wants the kickoff types /kickoff or one of the three trigger words; /load no longer exists"
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
