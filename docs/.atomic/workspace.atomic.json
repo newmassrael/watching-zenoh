@@ -292868,6 +292868,50 @@
         "Zenoh versions other than 1.10.1 and 1.5.0, and links other than loopback, one emulated lossy link and one Wi-Fi link, are still to measure; structured TCP such as HTTP and TLS is still to add to the null side."
       ]
     },
+    "Round 3767": {
+      "decision_summary": "The hosted run that holds the SCE pin move (round 3759) is read job by job: thirteen jobs red, one cancelled, each attributed from its own log. Two reds are in part the pin's and are measured on one build host before and after it: the C ABI builds grew 336 to 4,920 B of text (pico-client +3,444), of which no budget is moved here because most of the overshoot (pico-client 6,641 B over at the commit before the pin) came earlier; the session slot is 8 B larger than its record, the same before the pin, and the record now holds the measurement. The rest are not this change: the capture corpus tests, three passive tests that fail before the pin too, and the old ack-row items. The parity matrix is re-run on the tree of round 3762, six boots of four images: the fixed client's text goes 1.227 to 1.212 of the single-threaded pico, stack used 1.624 to 1.525, flash 1.209, every size cell still a loss, heap and ram still wins, turnaround 1.043 (it was 1.035).",
+      "changes_bullets": [
+        "docs/hosted-red-acks.md: the R3766 row for run 40429162789, each job attributed.",
+        "deploy/session_slot_bytes.json: mcu-admin-node 36,800 to 36,808, zephyr-admin-node 36,792 to 36,800.",
+        "deploy/upstream_parity.json: run 20261027T122709 replaces run 20261026T214250; the 21 rows are kit_compare.py's output unchanged."
+      ],
+      "verification_bullets": [
+        "The failing sentence of each of the thirteen jobs was read from its log. On one build host at the commits before and after the pin, Layer C1cs reads pico-client 1,845,641 to 1,849,085, pico-client-small 1,505,178 to 1,510,098, pico-client-udp 1,906,753 to 1,910,209 and capic-client-small 1,834,184 to 1,838,884.",
+        "Layer C1g's leg, with its own command, fails the same three passive tests at the commit before the pin and at origin's tip. The session slot of mcu-admin-node measures 36,808 at the commit before the pin, after it and at origin's tip; session_slot_bytes.py --check passes with the record moved.",
+        "The matrix: scripts/kit-lane.sh compare --boots 6 over zephyr-pico-queryable, zephyr-pico-queryable-st, zephyr-client-heap and zephyr-client-fixed; the file's rows equal the tool's output exactly. deploy_sessions, test_discipline and kit_compare selftests pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "Layer C1cs stays red: decide whether to find what linked in (a symbol diff of the pico-client build before and after the pin, and of the earlier commits) or to move the budgets with the reason; the pin's share is 336 to 4,920 B per case.",
+        "Against the single-threaded pico the fixed client is still behind in text (177,280 B against 146,220, about 31 KB), flash, stack used (9,152 B against 6,000) and turnaround; only heap and ram win.",
+        "The owners of the reds that are not this change were not found: the capture corpus tests (C1, C1bnl, C1bo, C1bt), the three passive tests of C1g, round_fed_gate_reach and gate_provenance_lint.",
+        "The tls image and the heap client were not re-measured on the kit beyond the matrix run."
+      ],
+      "publishable_decision_summary": "The hosted run that holds the SCE pin move (round 3759) is read job by job: thirteen jobs red, one cancelled, each attributed from its own log. Two reds are in part the pin's and are measured on one build host before and after it: the C ABI builds grew 336 to 4,920 B of text (pico-client +3,444), of which no budget is moved here because most of the overshoot (pico-client 6,641 B over at the commit before the pin) came earlier; the session slot is 8 B larger than its record, the same before the pin, and the record now holds the measurement. The rest are not this change: the capture corpus tests, three passive tests that fail before the pin too, and the old ack-row items. The parity matrix is re-run on the tree of round 3762, six boots of four images: the fixed client's text goes 1.227 to 1.212 of the single-threaded pico, stack used 1.624 to 1.525, flash 1.209, every size cell still a loss, heap and ram still wins, turnaround 1.043 (it was 1.035).",
+      "publishable_changes_bullets": [
+        "docs/hosted-red-acks.md: the R3766 row for run 40429162789, each job attributed.",
+        "deploy/session_slot_bytes.json: mcu-admin-node 36,800 to 36,808, zephyr-admin-node 36,792 to 36,800.",
+        "deploy/upstream_parity.json: run 20261027T122709 replaces run 20261026T214250; the 21 rows are kit_compare.py's output unchanged."
+      ],
+      "publishable_verification_bullets": [
+        "The failing sentence of each of the thirteen jobs was read from its log. On one build host at the commits before and after the pin, Layer C1cs reads pico-client 1,845,641 to 1,849,085, pico-client-small 1,505,178 to 1,510,098, pico-client-udp 1,906,753 to 1,910,209 and capic-client-small 1,834,184 to 1,838,884.",
+        "Layer C1g's leg, with its own command, fails the same three passive tests at the commit before the pin and at origin's tip. The session slot of mcu-admin-node measures 36,808 at the commit before the pin, after it and at origin's tip; session_slot_bytes.py --check passes with the record moved.",
+        "The matrix: scripts/kit-lane.sh compare --boots 6 over zephyr-pico-queryable, zephyr-pico-queryable-st, zephyr-client-heap and zephyr-client-fixed; the file's rows equal the tool's output exactly. deploy_sessions, test_discipline and kit_compare selftests pass."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Layer C1cs stays red: decide whether to find what linked in (a symbol diff of the pico-client build before and after the pin, and of the earlier commits) or to move the budgets with the reason; the pin's share is 336 to 4,920 B per case.",
+        "Against the single-threaded pico the fixed client is still behind in text (177,280 B against 146,220, about 31 KB), flash, stack used (9,152 B against 6,000) and turnaround; only heap and ram win.",
+        "The owners of the reds that are not this change were not found: the capture corpus tests (C1, C1bnl, C1bo, C1bt), the three passive tests of C1g, round_fed_gate_reach and gate_provenance_lint.",
+        "The tls image and the heap client were not re-measured on the kit beyond the matrix run."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
