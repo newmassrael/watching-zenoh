@@ -293342,6 +293342,58 @@
         "Item 751 step (b) continues at step 2: a peer constructor and the peer's regions (node mode Peer, north peer hat, south client regions, faces placed by region_of). Until then nothing builds a forwarder with a mode other than Router, so the Peer arms of the predicates are unexercised by any forwarder test. mcast_ingress_region still names the router: the multicast ingress stays a router-only plane until step 6. The public admin names routers_net_view and routers_net_node_count keep their names and move in step 6. The size of the later steps follows the list in section 5 of the design note."
       ]
     },
+    "Round 3779": {
+      "decision_summary": "requires and may_require are a must and a may analysis, and both were derived from hand-written rows nothing held to the code. A facility oracle now supplies the ground truth: it runs an artifact under strace with an LD_PRELOAD shim marking what the trace cannot see (vDSO clock reads, the C library's interface listing and name resolution), and gives every traced call one closed class: a facility by its Linux witness, an exemption with its reason (loader, glibc and Rust runtime probes), or unclassified, which is a finding. Layer C1st judges each packaged artifact's scenario runs against its own manifest entry. Its first run refuted the bound: the default wz-ap-demo reads the calendar time for env_logger timestamps. Root cause: only the runtime package was assessed. The assessed set is now declared ([[assessed_package]]), and the demo is assessed whole.",
+      "changes_bullets": [
+        "scripts/lib/facility_trace.py (new): witnesses per facility, exemptions with reasons, scopes of the shim, classify_thread, loader_closure from the NEEDED closure, observe (strace -ff, stops the tracee itself), judge, SCENARIOS for ap-demo and declared-node, --run, --judge, --selftest.",
+        "scripts/lib/facility_witness_shim.c (new): marks calendar clock reads once per process, brackets getifaddrs, if_nametoindex, if_indextoname, getaddrinfo and pthread_getattr_np as scopes.",
+        "deploy/wz-config.toml: [[assessed_package]] for wz-runtime-tokio (by feature) and wz-ap-demo (whole: filesystem, wall-clock); [[runtime_feature]] renamed [[package_feature]].",
+        "scripts/lib/wz_config.py: ASSESSED_PACKAGES replaced by the declared table; resolve_package_needs adds each assessed package in the build; the TOML subset reads booleans; interface-list's meaning covers a lookup by name or index.",
+        "scripts/lib/wz_package.py: executable_requires; resolved_features records only assessed packages the build holds; fixtures regenerated.",
+        "scripts/run-ci.sh Layer C1st, .githooks/pre-push gate 2z, ci.yml capi-c-arms (strace, adjudicated in apt_package_census.py), docs/target-build-contract.md T9."
+      ],
+      "verification_bullets": [
+        "facility_trace.py --selftest OK: each of the ten witnesses observed alone on a compiled probe, the empty baseline asks for nothing, name resolution and a forked process are findings, the stack probe is exempt, a run that ignores SIGINT is still stopped and read.",
+        "Layer C1st on the build machine (32 cores) passes: ap-demo as listener and as connector agree with requires [entropy, threads] and the bound; the declared node observes [entropy, sockets-tcp] and agrees; capi-pico and capi-c are reported NOT JUDGED.",
+        "The first C1st run failed because a SIGINT to strace (-o FILE PROG blocks fatal signals) never reached the run; the tracee is now signalled.",
+        "A listener read /proc/sys/vm/overcommit_memory once: the path is in libc.so.6 and in no wz binary, so it is glibc's heap-shrink probe and exempt.",
+        "wz_config.py --selftest 228/228, --check, --check-presets; wz_package.py and wz_node.py --selftest OK; the hook's gate 2z array rc 0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "The two libraries have no scenario: a C program that opens a session through each must drive them before the oracle can judge them.",
+        "The seam gate is next: a static census of the facility primitives in every package an artifact links, so a package that asks the operating system for something and is not assessed is a finding before any run shows it.",
+        "Then the configuration-aware derivation the consumer named: the rows gain a condition over the configuration, requires and may_require of a build become their intersection and union over the configuration space, and a scenario corpus holds must(c) within observed(c) within may(c).",
+        "The measured records stay unsplit until they are re-recorded on their SDK hosts, which needs the owner's approval per host."
+      ],
+      "publishable_decision_summary": "requires and may_require are a must and a may analysis, and both were derived from hand-written rows nothing held to the code. A facility oracle now supplies the ground truth: it runs an artifact under strace with an LD_PRELOAD shim marking what the trace cannot see (vDSO clock reads, the C library's interface listing and name resolution), and gives every traced call one closed class: a facility by its Linux witness, an exemption with its reason (loader, glibc and Rust runtime probes), or unclassified, which is a finding. Layer C1st judges each packaged artifact's scenario runs against its own manifest entry. Its first run refuted the bound: the default wz-ap-demo reads the calendar time for env_logger timestamps. Root cause: only the runtime package was assessed. The assessed set is now declared ([[assessed_package]]), and the demo is assessed whole.",
+      "publishable_changes_bullets": [
+        "scripts/lib/facility_trace.py (new): witnesses per facility, exemptions with reasons, scopes of the shim, classify_thread, loader_closure from the NEEDED closure, observe (strace -ff, stops the tracee itself), judge, SCENARIOS for ap-demo and declared-node, --run, --judge, --selftest.",
+        "scripts/lib/facility_witness_shim.c (new): marks calendar clock reads once per process, brackets getifaddrs, if_nametoindex, if_indextoname, getaddrinfo and pthread_getattr_np as scopes.",
+        "deploy/wz-config.toml: [[assessed_package]] for wz-runtime-tokio (by feature) and wz-ap-demo (whole: filesystem, wall-clock); [[runtime_feature]] renamed [[package_feature]].",
+        "scripts/lib/wz_config.py: ASSESSED_PACKAGES replaced by the declared table; resolve_package_needs adds each assessed package in the build; the TOML subset reads booleans; interface-list's meaning covers a lookup by name or index.",
+        "scripts/lib/wz_package.py: executable_requires; resolved_features records only assessed packages the build holds; fixtures regenerated.",
+        "scripts/run-ci.sh Layer C1st, .githooks/pre-push gate 2z, ci.yml capi-c-arms (strace, adjudicated in apt_package_census.py), docs/target-build-contract.md T9."
+      ],
+      "publishable_verification_bullets": [
+        "facility_trace.py --selftest OK: each of the ten witnesses observed alone on a compiled probe, the empty baseline asks for nothing, name resolution and a forked process are findings, the stack probe is exempt, a run that ignores SIGINT is still stopped and read.",
+        "Layer C1st on the build machine (32 cores) passes: ap-demo as listener and as connector agree with requires [entropy, threads] and the bound; the declared node observes [entropy, sockets-tcp] and agrees; capi-pico and capi-c are reported NOT JUDGED.",
+        "The first C1st run failed because a SIGINT to strace (-o FILE PROG blocks fatal signals) never reached the run; the tracee is now signalled.",
+        "A listener read /proc/sys/vm/overcommit_memory once: the path is in libc.so.6 and in no wz binary, so it is glibc's heap-shrink probe and exempt.",
+        "wz_config.py --selftest 228/228, --check, --check-presets; wz_package.py and wz_node.py --selftest OK; the hook's gate 2z array rc 0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The two libraries have no scenario: a C program that opens a session through each must drive them before the oracle can judge them.",
+        "The seam gate is next: a static census of the facility primitives in every package an artifact links, so a package that asks the operating system for something and is not assessed is a finding before any run shows it.",
+        "Then the configuration-aware derivation the consumer named: the rows gain a condition over the configuration, requires and may_require of a build become their intersection and union over the configuration space, and a scenario corpus holds must(c) within observed(c) within may(c).",
+        "The measured records stay unsplit until they are re-recorded on their SDK hosts, which needs the owner's approval per host."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
