@@ -47,6 +47,8 @@ use wz_session_core::adminspace::{
 };
 use wz_session_core::bounded::BoundedVec;
 use wz_session_core::caps;
+#[cfg(feature = "lifecycle-verbs")]
+use wz_session_core::lifecycle_wire::VerbKey;
 use wz_session_core::lifecycle_wire::{write_verb_list, OpenKey, OPEN_VERB};
 use wz_session_core::locality::Locality;
 use wz_session_core::query::QueryableRegistry;
@@ -77,6 +79,69 @@ pub use crate::node_opening::{NoOpening, NodeOpening};
 
 /// The one [`NoOpening`] a node without verbs hands its queryable.
 static NO_OPENING: NoOpening = NoOpening;
+
+/// What a node binds of the in-band lifecycle verbs, as its admin queryable is typed by it
+/// (decision D7: whether and which verbs a node serves in band is a type, so a node that binds
+/// none holds none of their code).
+///
+/// A node that binds only the open verb is any [`NodeOpening`] (`NoOpening` binds none), and a
+/// node that binds all four is a `Verbs` around a `StoreNode` over the store of its connect manager
+/// (`lifecycle-verbs`). Either answers the capability query in the verbs it has and each verb it
+/// has in the documents the heap profile's queries use.
+pub trait InBand: Sync + 'static {
+    /// Whether the node binds any in-band verb. `false` only for [`NoOpening`].
+    const BOUND: bool = true;
+
+    /// Serve the lifecycle legs of `query`: the capability document, which any key that reaches
+    /// it is answered, and the verb the key names when it is a literal key of this node.
+    ///
+    /// Out of line in each implementation: it runs inside the admin answer, which is under every
+    /// receive of the node, and a node that binds no verb should not carry its frame there.
+    fn serve<const BODY: usize>(
+        &self,
+        arena: &mut AdminReplyArena<BODY>,
+        query: &dyn QueryView,
+        out: &mut dyn ReplyOut,
+        zid_hex: &str,
+        whatami: &str,
+    );
+}
+
+impl<O: NodeOpening + Sync + 'static> InBand for O {
+    const BOUND: bool = <O as NodeOpening>::BOUND;
+
+    fn serve<const BODY: usize>(
+        &self,
+        arena: &mut AdminReplyArena<BODY>,
+        query: &dyn QueryView,
+        out: &mut dyn ReplyOut,
+        zid_hex: &str,
+        whatami: &str,
+    ) {
+        serve_open(arena, query, out, zid_hex, whatami, self);
+    }
+}
+
+/// A node that binds all four verbs in band: the legs of `open`, `close`, `reset` and `status`,
+/// each decided by `lifecycle_node::lifecycle_verdict` over the node it wraps. The node of a
+/// fixed-memory image is `Verbs(StoreNode::new(&STORE, permits))`; the wrapper is what says that
+/// the node binds the verbs in band and not only out of band (decision D7).
+#[cfg(feature = "lifecycle-verbs")]
+pub struct Verbs<N>(pub N);
+
+#[cfg(feature = "lifecycle-verbs")]
+impl<N: wz_session_core::lifecycle_node::LifecycleNode + Sync + 'static> InBand for Verbs<N> {
+    fn serve<const BODY: usize>(
+        &self,
+        arena: &mut AdminReplyArena<BODY>,
+        query: &dyn QueryView,
+        out: &mut dyn ReplyOut,
+        zid_hex: &str,
+        whatami: &str,
+    ) {
+        serve_verbs(arena, query, out, zid_hex, whatami, &self.0);
+    }
+}
 
 /// `s` in a fixed text of `N` bytes, or `None` if it does not fit.
 fn fixed<const N: usize>(s: &str) -> Option<FixedText<N>> {
@@ -431,11 +496,7 @@ pub fn host_admin_queryable_fixed<const BODY: usize, const SESSIONS: usize>(
 /// so the capability document lists `open` and no other verb. The opener's type is the node's
 /// transport (decision D7): [`NoOpening`] binds none, any other binds the in-band verbs.
 #[allow(clippy::too_many_arguments)]
-pub fn host_admin_queryable_fixed_with_open<
-    const BODY: usize,
-    const SESSIONS: usize,
-    O: NodeOpening + Sync + 'static,
->(
+pub fn host_admin_queryable_fixed_with_open<const BODY: usize, const SESSIONS: usize, O: InBand>(
     queryables: &mut QueryableRegistry<AdminQuerySink<BODY, SESSIONS, O>>,
     identity: FixedNodeIdentity,
     status: &'static FixedNodeStatus<SESSIONS>,
@@ -466,11 +527,7 @@ pub fn host_admin_queryable_fixed_with_open<
 }
 
 /// What the node's admin queryable holds: its identity and the statics it answers from.
-pub struct AdminQueryState<
-    const BODY: usize,
-    const SESSIONS: usize,
-    O: NodeOpening + Sync + 'static = NoOpening,
-> {
+pub struct AdminQueryState<const BODY: usize, const SESSIONS: usize, O: InBand = NoOpening> {
     identity: FixedNodeIdentity,
     status: &'static FixedNodeStatus<SESSIONS>,
     host: &'static AdminHost<BODY>,
@@ -492,13 +549,11 @@ pub type AdminQuerySink<const BODY: usize, const SESSIONS: usize, O = NoOpening>
 /// A node built without `adminspace-write` answers admin GETs and takes no config
 /// write, as upstream's admin space does with its write permission off, so its
 /// subscriber slot is [`NoSink`].
-pub struct AdminSinks<
-    const BODY: usize,
-    const SESSIONS: usize,
-    O: NodeOpening + Sync + 'static = NoOpening,
->(core::marker::PhantomData<O>);
+pub struct AdminSinks<const BODY: usize, const SESSIONS: usize, O: InBand = NoOpening>(
+    core::marker::PhantomData<O>,
+);
 
-impl<const BODY: usize, const SESSIONS: usize, O: NodeOpening + Sync + 'static> ObserverSinks
+impl<const BODY: usize, const SESSIONS: usize, O: InBand> ObserverSinks
     for AdminSinks<BODY, SESSIONS, O>
 {
     #[cfg(feature = "adminspace-write")]
@@ -558,11 +613,70 @@ fn serve_open<const BODY: usize, O: NodeOpening>(
     );
 }
 
+/// The lifecycle legs of a node that binds all four verbs: the capability document, and the verb a
+/// literal key of this node names, decided by the one function every transport is decided by.
+#[cfg(feature = "lifecycle-verbs")]
+#[inline(never)]
+fn serve_verbs<const BODY: usize, N: wz_session_core::lifecycle_node::LifecycleNode>(
+    arena: &mut AdminReplyArena<BODY>,
+    query: &dyn QueryView,
+    out: &mut dyn ReplyOut,
+    zid_hex: &str,
+    whatami: &str,
+    node: &N,
+) {
+    use wz_session_core::lifecycle_node::{lifecycle_verdict, Command};
+    use wz_session_core::lifecycle_wire::{write_verbs_json, CLOSE_VERB, RESET_VERB, STATUS_VERB};
+    // The capability document says what the node KNOWS, not whether this caller may use it.
+    let _ = arena.serve_leg(
+        query,
+        out,
+        zid_hex,
+        whatami,
+        VERBS_TAIL,
+        AdminLegEncoding::Json,
+        |body| write_verbs_json(body, true),
+    );
+    let key = query.keyexpr();
+    let Some(parsed) = VerbKey::parse(key) else {
+        return;
+    };
+    if parsed.node_zid != zid_hex || parsed.whatami != whatami {
+        return;
+    }
+    let peer = parsed.peer_zid;
+    let command = match parsed.verb {
+        OPEN_VERB => Command::Open { peer },
+        CLOSE_VERB => Command::Close { peer },
+        RESET_VERB => Command::Reset {
+            peer,
+            generation: parsed.generation.unwrap_or(""),
+        },
+        STATUS_VERB => Command::Status { peer },
+        _ => return,
+    };
+    // The key's own tail, `session/<verb>/..`: it follows `@/<zid>/<whatami>/`, which the parse has
+    // just held to name this node. A reply the arena refuses is counted there; the verb has
+    // happened either way, as the heap profile's reply says.
+    let tail = &key[2 + zid_hex.len() + 1 + whatami.len() + 1..];
+    let _ = arena.serve_leg(
+        query,
+        out,
+        zid_hex,
+        whatami,
+        tail,
+        AdminLegEncoding::Json,
+        |body| {
+            lifecycle_verdict(node, command, body);
+        },
+    );
+}
+
 /// The tail of the capability query, `@/<zid>/<whatami>/session/verbs`.
 const VERBS_TAIL: &str = "session/verbs";
 
 /// One admin GET, answered from the node's status in the host's arena.
-fn answer_admin_query<const BODY: usize, const SESSIONS: usize, O: NodeOpening + Sync + 'static>(
+fn answer_admin_query<const BODY: usize, const SESSIONS: usize, O: InBand>(
     held: &mut AdminQueryState<BODY, SESSIONS, O>,
     query: &dyn QueryView,
     out: &mut dyn ReplyOut,
@@ -603,8 +717,8 @@ fn answer_admin_query<const BODY: usize, const SESSIONS: usize, O: NodeOpening +
             }
         }
         // A constant of the type: for `NoOpening` the branch and the call are not compiled.
-        if O::BOUND {
-            serve_open(&mut arena, query, out, zid_hex, identity.whatami, open);
+        if <O as InBand>::BOUND {
+            open.serve(&mut arena, query, out, zid_hex, identity.whatami);
         }
         let facts = AdminNodeFacts {
             zid_hex,

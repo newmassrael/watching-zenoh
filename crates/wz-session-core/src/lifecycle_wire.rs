@@ -507,6 +507,68 @@ impl<'a> OpenKey<'a> {
     }
 }
 
+/// The key of any one verb that acts on a peer, read: `@/<zid>/<whatami>/session/<verb>/<peer-zid>`
+/// for `open`, `close` and `status`, and `@/<zid>/<whatami>/session/reset/<generation>/<peer-zid>`
+/// for `reset`, whose generation is the chunk before the peer.
+///
+/// The same chunks `drive::LifecycleKey` reads on the heap profile, for a node with no allocator,
+/// borrowing the key. A chunk that names the node, its role, the generation or the peer is literal:
+/// a pattern is never a target, since a wildcard close is "close everything that matches".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerbKey<'a> {
+    /// The node the query addresses.
+    pub node_zid: &'a str,
+    /// That node's role as the querier spelled it.
+    pub whatami: &'a str,
+    /// The verb: one of [`VERBS`].
+    pub verb: &'a str,
+    /// A reset's generation as the key spells it; `None` for every other verb.
+    pub generation: Option<&'a str>,
+    /// The peer, as the key spells it.
+    pub peer_zid: &'a str,
+}
+
+impl<'a> VerbKey<'a> {
+    /// The key of a verb on a peer `keyexpr` is, or `None` when it is not one: `@` first, `session`
+    /// fourth, a verb of [`VERBS`] fifth, the right number of chunks for it, none empty, and no
+    /// wildcard in any chunk that names something.
+    pub fn parse(keyexpr: &'a str) -> Option<Self> {
+        let mut chunks = keyexpr.split('/');
+        let (at, node_zid, whatami, session, verb) = (
+            chunks.next()?,
+            chunks.next()?,
+            chunks.next()?,
+            chunks.next()?,
+            chunks.next()?,
+        );
+        if at != "@" || session != "session" || !VERBS.contains(&verb) {
+            return None;
+        }
+        let (generation, peer_zid) = if verb == RESET_VERB {
+            (Some(chunks.next()?), chunks.next()?)
+        } else {
+            (None, chunks.next()?)
+        };
+        if chunks.next().is_some() {
+            return None;
+        }
+        let named = [node_zid, whatami, peer_zid]
+            .into_iter()
+            .chain(generation)
+            .any(|chunk| chunk.is_empty() || chunk.contains(['*', '$']));
+        if named {
+            return None;
+        }
+        Some(Self {
+            node_zid,
+            whatami,
+            verb,
+            generation,
+            peer_zid,
+        })
+    }
+}
+
 /// Write the capability document `{"verbs":[...]}` for exactly the verbs `verbs` names, in
 /// that order. A node says what it has bound (`lifecycle_query` writes the heap profile's four,
 /// and the fixed profile its one).
@@ -555,6 +617,51 @@ mod tests {
         }
         let not_a_zid = OpenKey::parse("@/aa/peer/session/open/01").expect("still an open key");
         assert_eq!(not_a_zid.peer(), None, "a leading zero is no zid");
+    }
+
+    #[test]
+    fn a_verb_key_is_literal_chunks_and_a_reset_carries_its_generation() {
+        let key = VerbKey::parse("@/aa/peer/session/close/1f").expect("a close key");
+        assert_eq!(
+            (key.verb, key.generation, key.peer_zid),
+            ("close", None, "1f")
+        );
+        let key = VerbKey::parse("@/aa/peer/session/reset/7/1f").expect("a reset key");
+        assert_eq!(
+            (
+                key.node_zid,
+                key.whatami,
+                key.verb,
+                key.generation,
+                key.peer_zid
+            ),
+            ("aa", "peer", "reset", Some("7"), "1f")
+        );
+        for verb in ["open", "status"] {
+            let text = ["@/aa/peer/session/", verb, "/1f"].concat();
+            assert_eq!(VerbKey::parse(&text).map(|k| k.verb), Some(verb));
+        }
+        for refused in [
+            "@/aa/peer/session/close/*",
+            "@/aa/peer/session/close/$*",
+            "@/aa/*/session/status/1f",
+            "@/*/peer/session/open/1f",
+            "@/aa/peer/session/reset/*/1f",
+            "@/aa/peer/session/reset/7/*",
+            "@/aa/peer/session/reset/1f",
+            "@/aa/peer/session/reset/7/1f/x",
+            "@/aa/peer/session/close/7/1f",
+            "@/aa/peer/session/close",
+            "@/aa/peer/session/close/",
+            "@/aa/peer/session/verbs",
+            "@/aa/peer/session/hold/1f",
+            "@/aa/peer/status/close/1f",
+            "x/aa/peer/session/close/1f",
+            "@//peer/session/close/1f",
+            "@/aa/peer/session/reset//1f",
+        ] {
+            assert_eq!(VerbKey::parse(refused), None, "{refused}");
+        }
     }
 
     #[test]

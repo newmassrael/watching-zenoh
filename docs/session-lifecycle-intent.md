@@ -1268,8 +1268,9 @@ being skipped. The rows:
 3. Step C (built in part, 6.8): the fixed-memory store gains the typed
    requests, the link mirror and the generation record; the control port
    gains the commands; the rows run on the fixed node and on the process.
-   The fixed in-band query does not serve the new verbs yet.
-4. Step D: the capabilities and the capability document.
+4. Step D (built in part, 6.9): the fixed in-band query serves the verbs
+   (`Verbs`), and the capability document lists them. The capability per
+   verb is not built: one feature binds all three.
 
 ### 6.5 Decisions (owner, 2026-10-26)
 
@@ -1417,7 +1418,41 @@ heap node. What was built and how it differs from the sketch of 6.2:
   held is run twice on the fixed node, with room in the record and with it
   full.
 
-Not built: the fixed in-band query does not serve `close`, `reset` and
-`status` keys yet, so no Zephyr image has the verbs and the capability
-document lists none of them (step D). The count of links a node reached
-through an endpoint holds is not kept per node.
+Not built here: the in-band query (6.9) and the split per verb. The count of
+links a node reached through an endpoint holds is not kept per node.
+
+### 6.9 Step D, built in part: the verbs in band on the fixed node
+
+The in-band transport of the fixed node reaches the same function. What an
+image states of the verbs it serves in band is the type its admin queryable
+is made with, as it was for `open` alone (decision D7): `InBand` is what the
+queryable asks of it. Any `NodeOpening` is `InBand` and binds `open` only, as
+before, and `NoOpening` binds nothing. `Verbs<N>` makes any `LifecycleNode`
+`InBand` and binds all four; the node of a fixed image is
+`Verbs(StoreNode::new(&STORE, permits))`, and an image that does not name it
+carries none of its code.
+
+- **Keys.** `VerbKey` (in `lifecycle_wire`, no allocator) reads
+  `@/<zid>/<role>/session/<verb>/<peer>` for `open`, `close` and `status`
+  and `.../reset/<generation>/<peer>` for `reset`. A chunk that names the
+  node, the role, the generation or the peer is literal, as on the heap
+  profile: a pattern is never a target of a verb, and a key that merely
+  intersects one gets no reply from it.
+- **The documents are the function's.** The leg writes
+  `lifecycle_verdict` into the reply arena, so the permit, the order of
+  checks and the words are the ones of every other transport. The capability
+  document lists `close`, `reset`, `status`, `open`, in the heap profile's
+  order, and says what the node knows and not whether the caller may use it.
+- **Held to the table, at zero allocations.** `admin_open_query` (feature
+  `lifecycle-verbs`) puts a store in each case's world with a test seam
+  (`PeerStore::seed_node_for_test`), asks every request as a GET, counts the
+  closes the node was told to order, and counts the allocations of each GET:
+  none. It runs the cases the fixed node can be put in, and the reset of a
+  peer with nothing held twice, with room in the record and with it full.
+  Both patterns and the capability document have tests of their own.
+
+Not built: the capability per verb. `lifecycle-verbs` is one feature and
+`Verbs` lists all four; an image that wants only `status` would need the
+split of the store's flags and the permit by verb. No Zephyr image binds
+`Verbs` yet, and who may close, reset and read the status of a fixed image
+is still the image owner's.

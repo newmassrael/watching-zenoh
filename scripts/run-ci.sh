@@ -11914,6 +11914,18 @@ layer_c1m_session_lwip() {
         cargo test -p wz-session-mcu \
         --features adminspace-core,adminspace-write,session-slot,test-support \
         --test admin_open_query --quiet || return 1
+    # Step 8 (D) of the same document -- the node that binds all four verbs in band
+    # (`admin_fixed::Verbs` over a `StoreNode`, feature `lifecycle-verbs`): the table of close, reset
+    # and status asked as GETs on the node's own keys, each at zero heap allocations, a pattern never
+    # a target of any verb, and the capability document listing the four. The same file at the
+    # features above runs its six; with the feature it runs those and two more, on a node built for
+    # two peers by their zid (the record of generations has places to refuse for). 8 = what that
+    # command PRINTED.
+    _runci_guarded_test "C1m admin verbs query" 8 \
+        env WZ_LIMIT_MAX_PEER_NODES=2 \
+        cargo test -p wz-session-mcu \
+        --features adminspace-core,adminspace-write,session-slot,test-support,lifecycle-verbs \
+        --test admin_open_query --quiet || return 1
     # S9d -- the control records of a frame (a keyexpr alias, a subscriber
     # declaration and its withdrawal, a DeclFinal, a subscriber Interest and its
     # cancelling Interest, a ResponseFinal, an Oam, a MID with no decoder, and four of

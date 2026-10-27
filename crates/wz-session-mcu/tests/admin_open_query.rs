@@ -33,7 +33,7 @@ use wz_session_core::query::{QueryReply, QueryableRegistry, ReplyBody};
 use wz_session_core::request_build::RequestQueryBuilder;
 use wz_session_mcu::admin_fixed::{
     host_admin_queryable_fixed_with_open, AdminHost, AdminQuerySink, FixedNodeIdentity,
-    FixedNodeStatus, NoOpening, NodeOpening,
+    FixedNodeStatus, InBand, NoOpening, NodeOpening,
 };
 use wz_session_mcu::admin_host::ConnectControl;
 
@@ -168,10 +168,7 @@ fn peer(first: u8) -> [u8; 16] {
 
 /// Ask `key` of a node that binds `opener`, and what its session was told, with the heap
 /// counted over the dispatch.
-fn ask<O: NodeOpening + Sync + 'static>(
-    opener: &'static O,
-    key: &str,
-) -> (Vec<(String, String)>, usize) {
+fn ask<O: InBand>(opener: &'static O, key: &str) -> (Vec<(String, String)>, usize) {
     static STATUS: FixedNodeStatus<3> = FixedNodeStatus::new(true);
     static HOST: AdminHost<1024> = AdminHost::new();
     static CONTROL: ConnectControl = ConnectControl::new(true);
@@ -345,6 +342,178 @@ fn the_in_band_query_conforms_to_the_contract_every_transport_is_held_to() {
         if matches!(case.binding, Binding::Bound) {
             contract::judge_asking(case, opener).unwrap_or_else(|v| panic!("{v:?}"));
         }
+    }
+}
+
+/// The node that binds all four verbs in band (`lifecycle-verbs`), over a store of its own: the
+/// table of `close`, `reset` and `status` that every transport is held to (decision D7), asked as
+/// GETs on the node's own keys, each with the heap not touched.
+#[cfg(all(feature = "lifecycle-verbs", feature = "test-support"))]
+mod verbs {
+    use super::*;
+    use std::sync::atomic::AtomicU32;
+    use wz_session_core::caps::MAX_PEER_NODES;
+    use wz_session_core::lifecycle_contract::verbs::{
+        judge_session, Permits, Profile, Request, SessionCase, HELD, SESSION_CASES,
+    };
+    use wz_session_core::lifecycle_node::{Generation, LifecycleNode, Verb, Zid};
+    use wz_session_core::lifecycle_wire::{CloseOrder, MachineReport, SessionLinks};
+    use wz_session_core::peer_connection::PeerConnectionState;
+    use wz_session_mcu::admin_fixed::Verbs;
+    use wz_session_mcu::connect_manager::{LifecyclePermits, PeerStore, StoreNode};
+
+    struct CasePermits(Permits);
+
+    impl LifecyclePermits for CasePermits {
+        fn permits(&self, verb: Verb) -> bool {
+            match verb {
+                Verb::Open => true,
+                Verb::Close => self.0.close,
+                Verb::Reset => self.0.reset,
+                Verb::Status => self.0.status,
+            }
+        }
+    }
+
+    /// The store's node, counting the closes it was told to order.
+    struct Counting {
+        inner: StoreNode<CasePermits>,
+        orders: AtomicU32,
+    }
+
+    impl LifecycleNode for Counting {
+        fn permits(&self, verb: Verb) -> bool {
+            self.inner.permits(verb)
+        }
+        fn open(&self, peer: &Zid) -> OpenOutcome {
+            self.inner.open(peer)
+        }
+        fn withdraw(&self, peer: &Zid) {
+            self.inner.withdraw(peer);
+        }
+        fn order_close(&self, peer: &Zid) -> CloseOrder {
+            self.orders.fetch_add(1, Ordering::SeqCst);
+            self.inner.order_close(peer)
+        }
+        fn take_generation(&self, peer: &Zid, generation: u64) -> Generation {
+            self.inner.take_generation(peer, generation)
+        }
+        fn links(&self, peer: &Zid) -> SessionLinks {
+            self.inner.links(peer)
+        }
+        fn read_machines(&self, peer: &Zid, read: &mut dyn FnMut(&[MachineReport<'_>])) {
+            self.inner.read_machines(peer, read);
+        }
+    }
+
+    fn key_of(request: &Request) -> String {
+        match request {
+            Request::Close(peer) => format!("@/a1b2/peer/session/close/{peer}"),
+            Request::Reset(peer, generation) => {
+                format!("@/a1b2/peer/session/reset/{generation}/{peer}")
+            }
+            Request::Status(peer) => format!("@/a1b2/peer/session/status/{peer}"),
+        }
+    }
+
+    /// A node over a store the case's world is put in, and the store's full record of generations
+    /// when `full`.
+    fn node_of(case: &SessionCase, full: bool) -> &'static Verbs<Counting> {
+        let store: &'static PeerStore = Box::leak(Box::new(PeerStore::new()));
+        if case.world.open_links == 1 {
+            let held =
+                wz_session_core::credential_identity::zid_from_key_text(HELD).expect("a zid");
+            assert!(store.seed_node_for_test(held, 1, PeerConnectionState::Established));
+        }
+        let node = Counting {
+            inner: StoreNode::new(store, CasePermits(case.world.permits)),
+            orders: AtomicU32::new(0),
+        };
+        if full {
+            for at in (0u8..).take(MAX_PEER_NODES) {
+                let other = [0xe0 + at; 16];
+                assert_eq!(node.take_generation(&other, 1), Generation::Taken);
+            }
+        }
+        Box::leak(Box::new(Verbs(node)))
+    }
+
+    fn serve(case: &SessionCase, profile: Profile, full: bool) {
+        let node = node_of(case, full);
+        let answers: Vec<Option<String>> = case
+            .requests
+            .iter()
+            .map(|request| {
+                let key = key_of(request);
+                let (replies, allocations) = ask(node, &key);
+                assert_eq!(allocations, 0, "heap allocations of {key}");
+                replies
+                    .into_iter()
+                    .find(|(reply_key, _)| *reply_key == key)
+                    .map(|(_, body)| body)
+            })
+            .collect();
+        let seen: Vec<Option<&str>> = answers.iter().map(Option::as_deref).collect();
+        let orders = node.0.orders.load(Ordering::SeqCst);
+        judge_session(case, profile, &seen, orders)
+            .unwrap_or_else(|violation| panic!("{violation:?}: {seen:?}"));
+    }
+
+    #[test]
+    fn the_in_band_queries_of_the_verbs_conform_to_the_table_with_nothing_allocated() {
+        if MAX_PEER_NODES == 0 {
+            // A node built for no peer by its zid has no place to put one in a world.
+            return;
+        }
+        let mut ran = 0;
+        for case in SESSION_CASES
+            .iter()
+            .filter(|case| case.reachable_with_one_link_per_peer())
+        {
+            serve(case, Profile::Heap, false);
+            if case.fixed.is_some() {
+                serve(case, Profile::Fixed, true);
+            }
+            ran += 1;
+        }
+        assert!(ran >= 7, "the cases a fixed node can be put in: {ran}");
+    }
+
+    #[test]
+    fn a_pattern_is_no_target_of_a_verb_and_the_capability_document_lists_all_four() {
+        let case = &SESSION_CASES[0];
+        let node = node_of(case, false);
+        for pattern in [
+            "@/a1b2/peer/session/close/*",
+            "@/a1b2/peer/session/reset/*/1f",
+            "@/a1b2/peer/session/reset/1/*",
+            "@/a1b2/peer/session/status/$*",
+            "@/a1b2/peer/session/**",
+        ] {
+            let (replies, _) = ask(node, pattern);
+            assert!(
+                replies
+                    .iter()
+                    .all(|(key, _)| key.as_str() == "@/a1b2/peer/session/verbs"),
+                "{pattern} reached a verb: {replies:?}"
+            );
+        }
+        assert_eq!(
+            node.0.orders.load(Ordering::SeqCst),
+            0,
+            "a pattern orders nothing"
+        );
+
+        let key = "@/a1b2/peer/session/verbs";
+        let (replies, allocations) = ask(node, key);
+        assert_eq!(allocations, 0);
+        assert_eq!(
+            replies,
+            vec![(
+                key.to_string(),
+                "{\"verbs\":[\"close\",\"reset\",\"status\",\"open\"]}".to_string()
+            )]
+        );
     }
 }
 

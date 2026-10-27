@@ -861,6 +861,21 @@ impl PeerStore {
     }
 }
 
+#[cfg(all(feature = "lifecycle-verbs", feature = "test-support"))]
+impl PeerStore {
+    /// Put a node in the mirror the way the manager's tick leaves it, with `links` sessions and its
+    /// machine in `state`: the world an adapter of the conformance table puts the store in without a
+    /// manager and a dialer. Refused when the store has no room for another node.
+    pub fn seed_node_for_test(
+        &self,
+        zid: DirectoryZid,
+        links: u32,
+        state: PeerConnectionState,
+    ) -> bool {
+        self.with(|t| t.held.push(HeldNode { zid, links, state }).is_ok())
+    }
+}
+
 impl Default for PeerStore {
     fn default() -> Self {
         Self::new()
