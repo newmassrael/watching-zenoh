@@ -36,22 +36,63 @@ use async_trait::async_trait;
 use zenoh_config::wrappers::EntityGlobalId;
 use zenoh_config::wrappers::ZenohId;
 use zenoh_core::{Resolve, ResolveClosure, Wait};
-use zenoh_protocol::core::{EntityId, ExprId};
+#[cfg(feature = "unstable")]
+use zenoh_protocol::core::Reliability;
+use zenoh_protocol::core::{CongestionControl, EntityId, ExprId};
 use zenoh_result::ZResult;
 use zenoh_runtime::ZRuntime;
 
+#[cfg(feature = "unstable")]
+use crate::api::sample::SourceInfo;
+#[cfg(feature = "unstable")]
+use crate::api::timestamp_stack::TimestampInstrumentation;
 use crate::api::{
     builders::{
         close::{CloseBuilder, Closeable, Closee},
+        publisher::{
+            PublicationBuilderDelete, PublicationBuilderPut, PublisherBuilder,
+            SessionDeleteBuilder, SessionPutBuilder,
+        },
         session::OpenBuilder,
     },
+    bytes::ZBytes,
     config::Config,
+    encoding::Encoding,
     info::SessionInfo,
     key_expr::{KeyExpr, KeyExprUndeclaration, SessionAnchor, WireAnchor},
+    publisher::Priority,
+    sample::{Locality, SampleKind},
 };
 
 zconfigurable! {
     pub(crate) static ref API_DATA_RECEPTION_CHANNEL_SIZE: usize = 256;
+}
+
+/// What a put or a delete asks of the engine, in the types of this crate: the key as the wire
+/// names it, the payload and the settings of the publication. It is the one value the engines are
+/// handed, so what they convert to their own types is the whole of their part of a publication.
+// A build with no engine has nothing that reads the fields.
+#[cfg_attr(not(feature = "engine-tokio"), allow(dead_code))]
+pub(crate) struct Publication<'a> {
+    /// The key expression the data is for.
+    pub(crate) key: &'a str,
+    /// The declaration of a prefix of the key that the wire names it by, `0` when it names none.
+    pub(crate) scope: ExprId,
+    /// What follows the declared prefix, `None` when the declaration covers the whole key.
+    pub(crate) suffix: Option<String>,
+    pub(crate) payload: ZBytes,
+    pub(crate) kind: SampleKind,
+    pub(crate) encoding: Encoding,
+    pub(crate) congestion_control: CongestionControl,
+    pub(crate) priority: Priority,
+    pub(crate) is_express: bool,
+    pub(crate) destination: Locality,
+    #[cfg(feature = "unstable")]
+    pub(crate) reliability: Reliability,
+    pub(crate) timestamp: Option<uhlc::Timestamp>,
+    #[cfg(feature = "unstable")]
+    pub(crate) source_info: Option<SourceInfo>,
+    pub(crate) attachment: Option<ZBytes>,
 }
 
 /// What a session is run by: the engine that holds its faces, its declarations and its clock.
@@ -172,6 +213,24 @@ impl Engine {
             Engine::Tokio(state) => state.shared.as_engine().keyexpr_declarations(),
         }
     }
+
+    /// Publish what `publication` says: to the matching subscribers of the session itself and to
+    /// every peer, as its destination allows.
+    fn publish(&self, publication: &Publication<'_>) -> ZResult<()> {
+        match self {
+            Engine::Tokio(state) => {
+                let options = tokio_engine::publish_options(publication);
+                let wire = tokio_engine::wire_key(publication);
+                let payload = publication.payload.to_bytes();
+                state
+                    .shared
+                    .as_engine()
+                    .publish_on_wire_all(publication.key, &wire, &payload, &options)
+                    .map(|_delivered| ())
+                    .map_err(|refusal| tokio_engine::publish_error(refusal, publication))
+            }
+        }
+    }
 }
 
 #[cfg(not(feature = "engine-tokio"))]
@@ -203,6 +262,10 @@ impl Engine {
     fn peer_identities(&self) -> Vec<(Vec<u8>, u8)> {
         match *self {}
     }
+
+    fn publish(&self, _publication: &Publication<'_>) -> ZResult<()> {
+        match *self {}
+    }
 }
 
 /// The reading of a configuration for the tokio engine: its role, its endpoints, the document its
@@ -216,9 +279,21 @@ mod tokio_engine {
         open_plan::{key_state, KeyState, OpenRefusal},
         runtime::session_glue::WhatAmI as EngineWhatAmI,
     };
+    use wz_capi_core::{
+        faces::{FanoutError, WireKey},
+        runtime::{
+            locality::Locality as EngineLocality,
+            qos::{CongestionControl as EngineCongestion, Priority as EnginePriority},
+            sample::{EncodingHint, TimestampHint},
+            session::PublishOptions,
+        },
+    };
     use zenoh_config::{wrappers::ZenohId, ExpandedConfig, ModeDependent};
-    use zenoh_protocol::core::{EndPoints, WhatAmI};
+    use zenoh_protocol::core::{CongestionControl, EndPoints, WhatAmI};
     use zenoh_result::ZResult;
+
+    use super::Publication;
+    use crate::api::sample::{Locality, SampleKind};
 
     /// The role of the engine that is the mode of the configuration.
     pub(super) fn role_of(mode: WhatAmI) -> EngineWhatAmI {
@@ -330,6 +405,102 @@ mod tokio_engine {
             .endpoints
             .get(mode)
             .map_or_else(|| "[]".to_owned(), |peers| format!("{peers:?}"))
+    }
+
+    /// The options of the engine's publication that `publication` asks for.
+    ///
+    /// The engine stamps a publication that carries no time with the node's clock when the node
+    /// holds one, as upstream's session does, so an absent timestamp is left absent.
+    pub(super) fn publish_options(publication: &Publication<'_>) -> PublishOptions {
+        let mut options = match publication.kind {
+            SampleKind::Put => PublishOptions::put(),
+            SampleKind::Delete => PublishOptions::del(),
+        }
+        .with_locality(match publication.destination {
+            Locality::Any => EngineLocality::Any,
+            Locality::SessionLocal => EngineLocality::SessionLocal,
+            Locality::Remote => EngineLocality::Remote,
+        })
+        // The priority is the protocol's byte; the engine reads it the same way.
+        .with_priority(EnginePriority::from_wire(publication.priority as u8))
+        .with_congestion_control(match publication.congestion_control {
+            CongestionControl::Drop => EngineCongestion::Drop,
+            CongestionControl::Block => EngineCongestion::Block,
+            #[cfg(feature = "unstable")]
+            CongestionControl::BlockFirst => EngineCongestion::BlockFirst,
+        })
+        .with_express(publication.is_express);
+        #[cfg(feature = "unstable")]
+        {
+            options = options.with_reliability(match publication.reliability {
+                zenoh_protocol::core::Reliability::BestEffort => {
+                    wz_capi_core::runtime::Reliability::BestEffort
+                }
+                zenoh_protocol::core::Reliability::Reliable => {
+                    wz_capi_core::runtime::Reliability::Reliable
+                }
+            });
+        }
+        if publication.kind == SampleKind::Put {
+            let encoding: zenoh_protocol::core::Encoding = publication.encoding.clone().into();
+            // The default encoding is the absence of one on the wire, in both crates.
+            if encoding != zenoh_protocol::core::Encoding::default() {
+                let schema = encoding
+                    .schema
+                    .as_ref()
+                    .map(|schema| String::from_utf8_lossy(schema.as_slice()).into_owned());
+                options = options.with_encoding(EncodingHint {
+                    packed_id: (u32::from(encoding.id) << 1) | u32::from(schema.is_some()),
+                    schema,
+                });
+            }
+        }
+        if let Some(timestamp) = &publication.timestamp {
+            let id = timestamp.get_id();
+            options = options.with_timestamp(TimestampHint {
+                time: timestamp.get_time().as_u64(),
+                zid: id.to_le_bytes()[..id.size()].to_vec(),
+            });
+        }
+        #[cfg(feature = "unstable")]
+        if let Some(info) = &publication.source_info {
+            let zid = info.source_id.zid();
+            let size = zenoh_protocol::core::ZenohIdProto::from(zid).size();
+            options = options.with_source_info(wz_capi_core::runtime::sample::SourceInfo::new(
+                &zid.to_le_bytes()[..size],
+                info.source_id.eid(),
+                info.source_sn,
+            ));
+        }
+        if let Some(attachment) = &publication.attachment {
+            options = options.with_attachment(attachment.to_bytes().into_owned());
+        }
+        options
+    }
+
+    /// The name the wire gives the key of `publication`: the literal, or a declaration and what
+    /// follows it.
+    pub(super) fn wire_key(publication: &Publication<'_>) -> WireKey {
+        if publication.scope == 0 {
+            WireKey::literal()
+        } else {
+            WireKey::aliased(u64::from(publication.scope), publication.suffix.clone())
+        }
+    }
+
+    /// A publication the engine refused.
+    pub(super) fn publish_error(
+        refusal: FanoutError,
+        publication: &Publication<'_>,
+    ) -> zenoh_result::Error {
+        match refusal {
+            FanoutError::ExceedsCapacity => zerror!(
+                "the publication on {} is larger than what the session can send (its key \
+                 or its payload exceeds the capacity of the codec)",
+                publication.key
+            )
+            .into(),
+        }
     }
 
     /// An open that was carried out and failed. `dialled` is what the session was to dial, when
@@ -670,6 +841,168 @@ impl Session {
     {
         let key_expr: ZResult<KeyExpr> = key_expr.try_into().map_err(Into::into);
         ResolveClosure::new(move || key_expr?.declare(&self.anchor(), true))
+    }
+
+    /// The builder of the settings a publication carries, for `put` and `delete`. Resolving it into
+    /// a publisher is `declare_publisher` and arrives with slice Z2d.
+    pub(crate) fn publisher_builder<'b, TryIntoKeyExpr>(
+        &self,
+        key_expr: TryIntoKeyExpr,
+    ) -> PublisherBuilder<'_, 'b>
+    where
+        TryIntoKeyExpr: TryInto<KeyExpr<'b>>,
+        <TryIntoKeyExpr as TryInto<KeyExpr<'b>>>::Error: Into<zenoh_result::Error>,
+    {
+        PublisherBuilder {
+            session: self,
+            key_expr: key_expr.try_into().map_err(Into::into),
+            encoding: Encoding::default(),
+            congestion_control: CongestionControl::DEFAULT,
+            priority: Priority::DEFAULT,
+            is_express: false,
+            #[cfg(feature = "unstable")]
+            reliability: Reliability::DEFAULT,
+            destination: Locality::default(),
+        }
+    }
+
+    /// Publish [`SampleKind::Put`] sample directly from the session. This is a shortcut for declaring
+    /// a [`Publisher`](crate::pubsub::Publisher) and calling [`put`](crate::api::publisher::Publisher::put)
+    /// on it.
+    ///
+    /// # Arguments
+    ///
+    /// * `key_expr` - Key expression matching the resources to put
+    /// * `payload` - The payload to put
+    ///
+    /// # Examples
+    /// ```
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// use zenoh::bytes::Encoding;
+    ///
+    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// session
+    ///     .put("key/expression", "payload")
+    ///     .encoding(Encoding::TEXT_PLAIN)
+    ///     .await
+    ///     .unwrap();
+    /// # }
+    /// ```
+    #[inline]
+    pub fn put<'a, 'b: 'a, TryIntoKeyExpr, IntoZBytes>(
+        &'a self,
+        key_expr: TryIntoKeyExpr,
+        payload: IntoZBytes,
+    ) -> SessionPutBuilder<'a, 'b>
+    where
+        TryIntoKeyExpr: TryInto<KeyExpr<'b>>,
+        <TryIntoKeyExpr as TryInto<KeyExpr<'b>>>::Error: Into<zenoh_result::Error>,
+        IntoZBytes: Into<ZBytes>,
+    {
+        SessionPutBuilder {
+            publisher: self.publisher_builder(key_expr),
+            kind: PublicationBuilderPut {
+                payload: payload.into(),
+                encoding: Encoding::default(),
+            },
+            timestamp: None,
+            attachment: None,
+            #[cfg(feature = "unstable")]
+            source_info: None,
+            #[cfg(feature = "unstable")]
+            timestamp_instrumentation: None,
+        }
+    }
+
+    /// Publish a [`SampleKind::Delete`] sample directly from the session. This is a shortcut for declaring
+    /// a [`Publisher`](crate::pubsub::Publisher) and calling [`delete`](crate::api::publisher::Publisher::delete) on it.
+    ///
+    /// # Arguments
+    ///
+    /// * `key_expr` - Key expression matching the resources to delete
+    ///
+    /// # Examples
+    /// ```
+    /// # #[tokio::main]
+    /// # async fn main() {
+    ///
+    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// session.delete("key/expression").await.unwrap();
+    /// # }
+    /// ```
+    #[inline]
+    pub fn delete<'a, 'b: 'a, TryIntoKeyExpr>(
+        &'a self,
+        key_expr: TryIntoKeyExpr,
+    ) -> SessionDeleteBuilder<'a, 'b>
+    where
+        TryIntoKeyExpr: TryInto<KeyExpr<'b>>,
+        <TryIntoKeyExpr as TryInto<KeyExpr<'b>>>::Error: Into<zenoh_result::Error>,
+    {
+        SessionDeleteBuilder {
+            publisher: self.publisher_builder(key_expr),
+            kind: PublicationBuilderDelete,
+            timestamp: None,
+            attachment: None,
+            #[cfg(feature = "unstable")]
+            source_info: None,
+            #[cfg(feature = "unstable")]
+            timestamp_instrumentation: None,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)] // the arguments of upstream's function, kept as they are
+    pub(crate) fn resolve_put(
+        &self,
+        key_expr: &KeyExpr,
+        payload: ZBytes,
+        kind: SampleKind,
+        encoding: Encoding,
+        congestion_control: CongestionControl,
+        priority: Priority,
+        is_express: bool,
+        destination: Locality,
+        #[cfg(feature = "unstable")] reliability: Reliability,
+        timestamp: Option<uhlc::Timestamp>,
+        #[cfg(feature = "unstable")] source_info: Option<SourceInfo>,
+        attachment: Option<ZBytes>,
+        #[cfg(feature = "unstable")] timestamp_instrumentation: Option<TimestampInstrumentation>,
+    ) -> ZResult<()> {
+        if self.0.engine.is_closed() {
+            return Err(SessionClosedError.into());
+        }
+        // The instrumentation of a message at each node it crosses is the model of slice Z6b: an
+        // engine without it would send the message without the stamps asked for, which is the
+        // silent fallback this crate refuses everywhere else.
+        #[cfg(feature = "unstable")]
+        if timestamp_instrumentation.is_some() {
+            bail!(
+                "the timestamp instrumentation of a publication is not carried by this engine yet \
+                 (slice Z6b of docs/zenoh-api-on-the-engine.md)"
+            );
+        }
+        let anchor = self.anchor();
+        let wire = key_expr.to_wire(&anchor);
+        let suffix = (!wire.suffix.is_empty()).then(|| wire.suffix.to_string());
+        self.0.engine.publish(&Publication {
+            key: key_expr.as_str(),
+            scope: wire.scope,
+            suffix,
+            payload,
+            kind,
+            encoding,
+            congestion_control,
+            priority,
+            is_express,
+            destination,
+            #[cfg(feature = "unstable")]
+            reliability,
+            timestamp,
+            #[cfg(feature = "unstable")]
+            source_info,
+            attachment,
+        })
     }
 
     /// Check if the session has been closed.
@@ -1187,5 +1520,138 @@ mod tests {
             .wait()
             .expect_err("a strategy has no place here");
         assert!(error.to_string().contains("connect/endpoints"), "{error}");
+    }
+
+    /// A publication that states every setting, for the tests of what the engine is asked.
+    fn stated_publication(kind: SampleKind) -> Publication<'static> {
+        let id = uhlc::ID::try_from(&[0xab_u8, 0xcd][..]).expect("an id");
+        Publication {
+            key: "demo/stated",
+            scope: 0,
+            suffix: None,
+            payload: ZBytes::from("v"),
+            kind,
+            encoding: Encoding::APPLICATION_JSON.with_schema("v1"),
+            congestion_control: CongestionControl::Block,
+            priority: Priority::Background,
+            is_express: true,
+            destination: Locality::Remote,
+            #[cfg(feature = "unstable")]
+            reliability: Reliability::BestEffort,
+            timestamp: Some(uhlc::Timestamp::new(uhlc::NTP64(0x1234_5678_9abc_def0), id)),
+            #[cfg(feature = "unstable")]
+            source_info: None,
+            attachment: Some(ZBytes::from("attached")),
+        }
+    }
+
+    #[test]
+    fn a_publication_asks_the_engine_for_each_setting_it_states() {
+        use wz_capi_core::runtime::{
+            locality::Locality as EngineLocality,
+            qos::{CongestionControl as EngineCongestion, Priority as EnginePriority},
+            sample::QosLevel,
+        };
+
+        let options = tokio_engine::publish_options(&stated_publication(SampleKind::Put));
+        assert_eq!(options.allowed_destination, EngineLocality::Remote);
+        assert_eq!(
+            options.qos,
+            Some(
+                QosLevel::DEFAULT
+                    .with_priority(EnginePriority::Background)
+                    .with_congestion(EngineCongestion::Block)
+                    .with_express(true)
+            )
+        );
+        let encoding = options
+            .encoding
+            .expect("an encoding that is not the default");
+        let stated: zenoh_protocol::core::Encoding =
+            Encoding::APPLICATION_JSON.with_schema("v1").into();
+        assert_eq!(encoding.packed_id, (u32::from(stated.id) << 1) | 1);
+        assert_eq!(encoding.schema.as_deref(), Some("v1"));
+        let stamp = options.timestamp.expect("the time that was stated");
+        assert_eq!(stamp.time, 0x1234_5678_9abc_def0);
+        assert_eq!(
+            stamp.zid,
+            vec![0xab, 0xcd],
+            "the id as many bytes as it has"
+        );
+        assert_eq!(options.attachment.as_deref(), Some(&b"attached"[..]));
+        assert_eq!(options.kind, wz_capi_core::runtime::sample::SampleKind::Put);
+    }
+
+    #[test]
+    fn a_publication_that_states_no_encoding_or_time_leaves_both_to_the_engine() {
+        let mut publication = stated_publication(SampleKind::Put);
+        publication.encoding = Encoding::default();
+        publication.timestamp = None;
+        publication.attachment = None;
+        let options = tokio_engine::publish_options(&publication);
+        assert!(
+            options.encoding.is_none(),
+            "the default is the absence of one"
+        );
+        assert!(
+            options.timestamp.is_none(),
+            "the engine stamps it, or does not"
+        );
+        assert!(options.attachment.is_none());
+    }
+
+    #[test]
+    fn a_delete_carries_no_encoding() {
+        let options = tokio_engine::publish_options(&stated_publication(SampleKind::Delete));
+        assert!(options.encoding.is_none());
+        assert_eq!(options.kind, wz_capi_core::runtime::sample::SampleKind::Del);
+    }
+
+    #[test]
+    fn the_wire_names_a_key_by_its_declaration_only_when_it_has_one() {
+        let mut publication = stated_publication(SampleKind::Put);
+        assert!(tokio_engine::wire_key(&publication).is_literal());
+        publication.scope = 3;
+        publication.suffix = Some("/leaf".to_owned());
+        let wire = tokio_engine::wire_key(&publication);
+        assert!(!wire.is_literal());
+        assert_eq!(wire.mapping_id, 3);
+        assert_eq!(wire.suffix.as_deref(), Some("/leaf"));
+    }
+
+    #[test]
+    fn a_session_publishes_and_deletes_until_it_is_closed() {
+        let session = open(peer("a1b2d2")).wait().expect("opens");
+        session
+            .put("demo/put", "v")
+            .wait()
+            .expect("an open session puts");
+        session.delete("demo/put").wait().expect("and deletes");
+        let declared = session
+            .declare_keyexpr("demo/declared")
+            .wait()
+            .expect("declares");
+        session
+            .put(&declared, "v")
+            .wait()
+            .expect("puts on a declared key");
+        session
+            .put(declared.join("leaf").expect("a key"), "v")
+            .wait()
+            .expect("and under it");
+        session.close().wait().expect("closes");
+        for error in [
+            session.put("demo/put", "v").wait().expect_err("closed"),
+            session.delete("demo/put").wait().expect_err("closed"),
+        ] {
+            assert_eq!(error.to_string(), SessionClosedError.to_string());
+        }
+    }
+
+    #[test]
+    fn a_put_on_a_key_that_is_not_one_is_refused_before_anything_is_sent() {
+        let session = open(peer("a1b2d3")).wait().expect("opens");
+        let error = session.put("demo//bad", "v").wait().expect_err("not a key");
+        assert!(error.to_string().contains("demo//bad"), "{error}");
     }
 }

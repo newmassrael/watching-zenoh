@@ -132,6 +132,84 @@ mod observer {
         format!("routers {routers:?} peers {peers:?} transports {transports:?}")
     }
 
+    /// An upstream node that dials `port` and subscribes to `demo/**`, keeping what it receives as
+    /// text: every field of a sample that crosses a link.
+    pub struct Watcher {
+        _session: Session,
+        _subscriber: up_zenoh::pubsub::Subscriber<()>,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    /// What a received sample says, as one line. `with_time` includes the time of its timestamp,
+    /// which a stamp made by a clock would not repeat from one run to the next.
+    fn describe(sample: &up_zenoh::sample::Sample, with_time: bool) -> String {
+        let timestamp = sample.timestamp().map(|t| {
+            if with_time {
+                format!("{t}")
+            } else {
+                format!("id {}", t.get_id())
+            }
+        });
+        let payload = sample.payload().len();
+        let text = sample
+            .payload()
+            .try_to_string()
+            .map_or_else(|_| "(not text)".to_owned(), |s| s.to_string());
+        let attachment = sample
+            .attachment()
+            .map(|a| a.try_to_string().map_or_else(|_| "(not text)".to_owned(), |s| s.to_string()));
+        let source = sample
+            .source_info()
+            .map(|i| (format!("{:?}", i.source_id()), i.source_sn()));
+        format!(
+            "{} {:?} len={payload} {} encoding={} priority={:?} congestion={:?} express={} \
+             reliability={:?} timestamp={timestamp:?} attachment={attachment:?} source={source:?}",
+            sample.key_expr(),
+            sample.kind(),
+            if payload <= 16 { text } else { format!("{}...", &text[..8.min(text.len())]) },
+            sample.encoding(),
+            sample.priority(),
+            sample.congestion_control(),
+            sample.express(),
+            sample.reliability(),
+        )
+    }
+
+    /// An upstream node that dials the node of `port` and subscribes to everything under `demo`.
+    pub fn watch(id: &str, port: u16, with_time: bool) -> Result<Watcher, String> {
+        let session = open(id, "peer", None, Some(port))?;
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let subscriber = session
+            .declare_subscriber("demo/**")
+            .callback(move |sample| sink.lock().unwrap().push(describe(&sample, with_time)))
+            .wait()
+            .map_err(|error| error.to_string())?;
+        Ok(Watcher {
+            _session: session,
+            _subscriber: subscriber,
+            seen,
+        })
+    }
+
+    impl Watcher {
+        /// The lines received so far that are not the probe of readiness.
+        pub fn lines(&self) -> Vec<String> {
+            self.seen
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|line| !line.starts_with("demo/ready "))
+                .cloned()
+                .collect()
+        }
+
+        /// Whether a probe of readiness was received.
+        pub fn is_ready(&self) -> bool {
+            self.seen.lock().unwrap().iter().any(|line| line.starts_with("demo/ready "))
+        }
+    }
+
     /// [`seen`] once the session sees `count` transports, or after five seconds.
     pub fn seen_with(session: &Session, count: usize) -> String {
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -256,6 +334,156 @@ macro_rules! session_cases {
                     };
                     out.push(format!("{mode} dials an upstream router: {line}"));
                 }
+                out
+            }
+
+            /// What a node of this crate publishes, as an upstream node that subscribes on the other
+            /// side of a link receives it: every setting of a put and a delete, a key declared on the
+            /// session, a payload larger than a batch, and the destinations that deliver nothing.
+            /// `timestamping` turns on the node's clock, so that the publications carry its stamps.
+            pub fn publications(timestamping: bool) -> Vec<String> {
+                use $z::internal::traits::{
+                    EncodingBuilderTrait, QoSBuilderTrait, SampleBuilderTrait, TimestampBuilderTrait,
+                };
+                let mut out = vec![];
+                let port = free_port();
+                let subject = $z::open(config(&format!(
+                    r#"{{ id: "5a0010", mode: "peer",
+                          listen: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                          timestamping: {{ enabled: {timestamping} }},
+                          scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                )))
+                .wait()
+                .expect("opens");
+                let watcher = observer::watch("b00010", port, !timestamping).expect("the observer opens");
+                // The subject knows the observer's subscription once a probe on its key arrives.
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                while !watcher.is_ready() && std::time::Instant::now() < deadline {
+                    subject.put("demo/ready", "").wait().expect("a probe");
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                out.push(format!("subscription known: {}", watcher.is_ready()));
+                let mut delivered = 0usize;
+                let mut record = |label: &str, result: Result<(), _>, arrives: bool| {
+                    out.push(format!("{label}: {}", text(result)));
+                    delivered += usize::from(arrives);
+                };
+                record("plain put", subject.put("demo/plain", "v1").wait(), true);
+                record(
+                    "put with every setting",
+                    subject
+                        .put("demo/settings", "v2")
+                        .encoding($z::bytes::Encoding::TEXT_PLAIN)
+                        .priority($z::qos::Priority::RealTime)
+                        .congestion_control($z::qos::CongestionControl::Block)
+                        .express(true)
+                        .attachment("attached")
+                        .wait(),
+                    true,
+                );
+                record(
+                    "put with a schema",
+                    subject
+                        .put("demo/schema", "{}")
+                        .encoding($z::bytes::Encoding::APPLICATION_JSON.with_schema("v1"))
+                        .wait(),
+                    true,
+                );
+                record(
+                    "put with the lowest priority and blocking first",
+                    subject
+                        .put("demo/low", "v3")
+                        .priority($z::qos::Priority::Background)
+                        .congestion_control($z::qos::CongestionControl::BlockFirst)
+                        .wait(),
+                    true,
+                );
+                if !timestamping {
+                    let id = $z::time::TimestampId::try_from(&[0xab_u8, 0xcd][..]).expect("an id");
+                    let at = $z::time::Timestamp::new($z::time::NTP64(0x1234_5678_9abc_def0), id);
+                    record(
+                        "put with a timestamp",
+                        subject.put("demo/stamped", "v4").timestamp(at).wait(),
+                        true,
+                    );
+                }
+                record(
+                    "put with a source",
+                    subject
+                        .put("demo/sourced", "v5")
+                        .source_info($z::sample::SourceInfo::new(
+                            $z::session::EntityGlobalId::new(
+                                "c0ffee".parse().expect("an id"),
+                                7,
+                            ),
+                            41,
+                        ))
+                        .wait(),
+                    true,
+                );
+                record(
+                    "put best effort",
+                    subject
+                        .put("demo/best", "v6")
+                        .reliability($z::qos::Reliability::BestEffort)
+                        .wait(),
+                    true,
+                );
+                record(
+                    "put to remote only",
+                    subject
+                        .put("demo/remote", "v7")
+                        .allowed_destination($z::sample::Locality::Remote)
+                        .wait(),
+                    true,
+                );
+                record(
+                    "put to the session only",
+                    subject
+                        .put("demo/local", "v8")
+                        .allowed_destination($z::sample::Locality::SessionLocal)
+                        .wait(),
+                    false,
+                );
+                record("delete", subject.delete("demo/plain").wait(), true);
+                record(
+                    "delete with an attachment",
+                    subject.delete("demo/plain").attachment("gone").wait(),
+                    true,
+                );
+                // A key declared on the session goes on the wire as a declaration and its suffix.
+                // The declaration is kept until the samples have been seen: its retraction is
+                // carried at the control priority, which a link serves before the data priority,
+                // so a retraction sent right behind a put may reach the peer first (upstream's
+                // pipeline pulls its queues in the same order).
+                let mut declarations = vec![];
+                if let Ok(declared) = subject.declare_keyexpr("demo/declared").wait() {
+                    record("put on a declared key", subject.put(&declared, "v9").wait(), true);
+                    let longer = declared.join("leaf").expect("a key");
+                    record("put on a key under a declared one", subject.put(&longer, "v10").wait(), true);
+                    declarations.push(declared);
+                    declarations.push(longer);
+                }
+                // A payload larger than a batch is sent in fragments and arrives whole.
+                record("put of 70000 bytes", subject.put("demo/big", vec![7u8; 70_000]).wait(), true);
+                // Refusals made before anything is sent.
+                record("put on an invalid key", subject.put("demo//bad", "x").wait(), false);
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                while watcher.lines().len() < delivered && std::time::Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                // What may still be on its way, and should not be.
+                std::thread::sleep(Duration::from_millis(300));
+                drop(declarations);
+                let mut received = watcher.lines();
+                // Samples of different priorities are carried by different queues, so their order
+                // is not the order they were sent in.
+                received.sort();
+                out.push(format!("received {} of {delivered}", received.len()));
+                out.extend(received.into_iter().map(|line| format!("sample: {line}")));
+                subject.close().wait().expect("closes");
+                out.push(format!("put after close: {}", text(subject.put("demo/after", "x").wait())));
+                out.push(format!("delete after close: {}", text(subject.delete("demo/after").wait())));
                 out
             }
 
@@ -627,6 +855,30 @@ fn the_declaration_of_a_key_on_a_session() {
     assert!(u.iter().any(|l| l.starts_with("undeclare another session's key: Err(")), "{u:#?}");
     assert!(u.iter().any(|l| l.starts_with("undeclare a plain key: Err(")), "{u:#?}");
     compare("declarations", &u, &w);
+}
+
+#[test]
+fn what_a_session_publishes_is_what_an_upstream_subscriber_receives() {
+    // The log of upstream's nodes, for a run that is asked for it with `RUST_LOG`.
+    up_zenoh::try_init_log_from_env();
+    let (u, w) = (up::publications(false), wz::publications(false));
+    assert!(u.iter().any(|l| l == "subscription known: true"), "{u:#?}");
+    assert!(u.iter().any(|l| l.starts_with("received 13 of 13")), "{u:#?}");
+    assert!(
+        u.iter().any(|l| l.starts_with("sample: demo/settings Put len=2 v2 encoding=text/plain priority=RealTime congestion=Block express=true")),
+        "{u:#?}"
+    );
+    compare("publications", &u, &w);
+}
+
+#[test]
+fn what_a_session_with_a_clock_publishes_carries_its_stamps() {
+    let (u, w) = (up::publications(true), wz::publications(true));
+    assert!(
+        u.iter().any(|l| l.starts_with("sample: demo/plain Put") && l.contains("timestamp=Some(\"id 5a0010\")")),
+        "{u:#?}"
+    );
+    compare("publications with a clock", &u, &w);
 }
 
 #[test]

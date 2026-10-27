@@ -18,5 +18,6 @@
 
 pub(crate) mod close;
 pub(crate) mod info;
+pub(crate) mod publisher;
 pub(crate) mod sample;
 pub(crate) mod session;

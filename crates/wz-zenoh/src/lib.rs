@@ -435,6 +435,17 @@ pub mod time {
     pub use zenoh_protocol::core::{Timestamp, TimestampId, NTP64};
 }
 
+/// # Publish/subscribe primitives
+///
+/// The builders of a publication and of a publisher. Of upstream's module the publisher, the
+/// subscriber, their undeclarations and the builders that resolve into them arrive with slices Z2c
+/// and Z2d (docs/zenoh-api-on-the-engine.md).
+pub mod pubsub {
+    pub use crate::api::builders::publisher::{
+        PublicationBuilder, PublicationBuilderDelete, PublicationBuilderPut, PublisherBuilder,
+    };
+}
+
 /// # Zenoh [`Session`] and associated types
 ///
 /// The [`Session`] is the main component of Zenoh. It holds the zenoh runtime object,
@@ -458,12 +469,13 @@ pub mod session {
     #[zenoh_macros::unstable]
     pub use zenoh_protocol::core::EntityId;
 
-    // Of upstream's module the builders of a put, a delete and a get, the link and transport
-    // events and `WeakSession` arrive with the slices Z2, Z3 and Z6a.
+    // Of upstream's module the builder of a get, the link and transport events and `WeakSession`
+    // arrive with the slices Z3 and Z6a.
     pub use crate::api::{
         builders::{
             close::CloseBuilder,
             info::{PeersZenohIdBuilder, RoutersZenohIdBuilder, ZenohIdBuilder},
+            publisher::{SessionDeleteBuilder, SessionPutBuilder},
             session::OpenBuilder,
         },
         info::SessionInfo,
