@@ -54,14 +54,19 @@ use crate::api::{
             SessionDeleteBuilder, SessionPutBuilder,
         },
         session::OpenBuilder,
+        subscriber::SubscriberBuilder,
     },
     bytes::ZBytes,
+    cancellation::SyncGroupNotifier,
     config::Config,
     encoding::Encoding,
+    handlers::{Callback, DefaultHandler},
     info::SessionInfo,
     key_expr::{KeyExpr, KeyExprUndeclaration, SessionAnchor, WireAnchor},
     publisher::Priority,
-    sample::{Locality, SampleKind},
+    sample::{Locality, Sample, SampleKind},
+    subscriber::SubscriberKind,
+    Id,
 };
 
 zconfigurable! {
@@ -93,6 +98,26 @@ pub(crate) struct Publication<'a> {
     #[cfg(feature = "unstable")]
     pub(crate) source_info: Option<SourceInfo>,
     pub(crate) attachment: Option<ZBytes>,
+}
+
+/// What a subscription asks of the engine, in the types of this crate: the key as the wire names
+/// it, who it takes samples from, and what a sample is handed to.
+// A build with no engine has nothing that reads the fields.
+#[cfg_attr(not(feature = "engine-tokio"), allow(dead_code))]
+pub(crate) struct Subscription<'a> {
+    /// The key expression the samples are wanted for.
+    pub(crate) key: &'a str,
+    /// The declaration of a prefix of the key that the wire names it by, `0` when it names none.
+    pub(crate) scope: ExprId,
+    /// What follows the declared prefix, `None` when the declaration covers the whole key.
+    pub(crate) suffix: Option<String>,
+    pub(crate) origin: Locality,
+    pub(crate) callback: Callback<Sample>,
+    /// Held until the callback can be called no more: a wait on its group ends then.
+    pub(crate) notifier: Option<SyncGroupNotifier>,
+    /// What the engine keeps for as long as it records the subscription: the declaration of the
+    /// prefix the wire names the key by.
+    pub(crate) keeps: Arc<dyn Send + Sync>,
 }
 
 /// What a session is run by: the engine that holds its faces, its declarations and its clock.
@@ -231,6 +256,44 @@ impl Engine {
             }
         }
     }
+
+    /// Take samples for what `subscription` says, until [`Engine::undeclare_subscriber`] is called
+    /// with the id returned. The samples are those of the session's own publications and those of
+    /// every peer, as its origin allows.
+    fn declare_subscriber(&self, subscription: Subscription<'_>) -> ZResult<Id> {
+        match self {
+            Engine::Tokio(state) => {
+                let Subscription {
+                    key,
+                    scope,
+                    suffix,
+                    origin,
+                    callback,
+                    notifier,
+                    keeps,
+                } = subscription;
+                let wire = tokio_engine::wire_key_of(scope, suffix).keeping(keeps);
+                let id = state.shared.as_engine().declare_subscriber_on_wire(
+                    key.to_owned(),
+                    wire,
+                    tokio_engine::engine_locality(origin),
+                    None,
+                    tokio_engine::subscriber_sink(callback, notifier),
+                );
+                Id::try_from(id).map_err(|_| {
+                    zerror!("the engine numbered a subscriber {id}, which is more than an id holds")
+                        .into()
+                })
+            }
+        }
+    }
+
+    /// Stop the delivery to the subscription `id` and let go of what it keeps.
+    fn undeclare_subscriber(&self, id: Id) {
+        match self {
+            Engine::Tokio(state) => state.shared.as_engine().undeclare_subscriber(u64::from(id)),
+        }
+    }
 }
 
 #[cfg(not(feature = "engine-tokio"))]
@@ -266,6 +329,14 @@ impl Engine {
     fn publish(&self, _publication: &Publication<'_>) -> ZResult<()> {
         match *self {}
     }
+
+    fn declare_subscriber(&self, _subscription: Subscription<'_>) -> ZResult<Id> {
+        match *self {}
+    }
+
+    fn undeclare_subscriber(&self, _id: Id) {
+        match *self {}
+    }
 }
 
 /// The reading of a configuration for the tokio engine: its role, its endpoints, the document its
@@ -273,6 +344,8 @@ impl Engine {
 #[cfg(feature = "engine-tokio")]
 mod tokio_engine {
     pub(super) use wz_capi_core::runtime::session::LocalDeliveryDrain;
+    #[cfg(feature = "unstable")]
+    use wz_capi_core::runtime::Reliability as EngineReliability;
     pub(super) use wz_capi_core::{drive::FaceDrive, faces::no_shm_clients};
     use wz_capi_core::{
         drive::OpenError,
@@ -280,20 +353,30 @@ mod tokio_engine {
         runtime::session_glue::WhatAmI as EngineWhatAmI,
     };
     use wz_capi_core::{
-        faces::{FanoutError, WireKey},
+        faces::{FanoutError, SubscriberSink, WireKey},
         runtime::{
             locality::Locality as EngineLocality,
             qos::{CongestionControl as EngineCongestion, Priority as EnginePriority},
-            sample::{EncodingHint, TimestampHint},
+            sample::{EncodingHint, SampleKind as EngineSampleKind, TimestampHint},
             session::PublishOptions,
+            sink::SampleView,
         },
     };
     use zenoh_config::{wrappers::ZenohId, ExpandedConfig, ModeDependent};
-    use zenoh_protocol::core::{CongestionControl, EndPoints, WhatAmI};
+    use zenoh_protocol::core::{CongestionControl, EndPoints, ExprId, WhatAmI};
     use zenoh_result::ZResult;
 
-    use super::Publication;
-    use crate::api::sample::{Locality, SampleKind};
+    use super::{Arc, Publication};
+    #[cfg(feature = "unstable")]
+    use crate::api::sample::SourceInfo;
+    use crate::api::{
+        bytes::ZBytes,
+        cancellation::SyncGroupNotifier,
+        encoding::Encoding,
+        handlers::Callback,
+        key_expr::KeyExpr,
+        sample::{Locality, QoS, Sample, SampleKind},
+    };
 
     /// The role of the engine that is the mode of the configuration.
     pub(super) fn role_of(mode: WhatAmI) -> EngineWhatAmI {
@@ -416,11 +499,7 @@ mod tokio_engine {
             SampleKind::Put => PublishOptions::put(),
             SampleKind::Delete => PublishOptions::del(),
         }
-        .with_locality(match publication.destination {
-            Locality::Any => EngineLocality::Any,
-            Locality::SessionLocal => EngineLocality::SessionLocal,
-            Locality::Remote => EngineLocality::Remote,
-        })
+        .with_locality(engine_locality(publication.destination))
         // The priority is the protocol's byte; the engine reads it the same way.
         .with_priority(EnginePriority::from_wire(publication.priority as u8))
         .with_congestion_control(match publication.congestion_control {
@@ -481,11 +560,123 @@ mod tokio_engine {
     /// The name the wire gives the key of `publication`: the literal, or a declaration and what
     /// follows it.
     pub(super) fn wire_key(publication: &Publication<'_>) -> WireKey {
-        if publication.scope == 0 {
+        wire_key_of(publication.scope, publication.suffix.clone())
+    }
+
+    /// The name the wire gives a key that is `suffix` after the declaration `scope`, `0` for none.
+    pub(super) fn wire_key_of(scope: ExprId, suffix: Option<String>) -> WireKey {
+        if scope == 0 {
             WireKey::literal()
         } else {
-            WireKey::aliased(u64::from(publication.scope), publication.suffix.clone())
+            WireKey::aliased(u64::from(scope), suffix)
         }
+    }
+
+    /// The locality of the engine that is `locality`.
+    pub(super) fn engine_locality(locality: Locality) -> EngineLocality {
+        match locality {
+            Locality::Any => EngineLocality::Any,
+            Locality::SessionLocal => EngineLocality::SessionLocal,
+            Locality::Remote => EngineLocality::Remote,
+        }
+    }
+
+    /// What the engine hands the samples of a subscription to: the callback, called once for each
+    /// sample, from whichever thread the engine delivers on.
+    ///
+    /// The engine asks for a callback of its own for each face, so they share what the
+    /// subscription holds, and the notifier is let go with the last of them (and with a call that
+    /// is still running).
+    pub(super) fn subscriber_sink(
+        callback: Callback<Sample>,
+        notifier: Option<SyncGroupNotifier>,
+    ) -> SubscriberSink {
+        struct Delivery {
+            callback: Callback<Sample>,
+            _notifier: Option<SyncGroupNotifier>,
+        }
+        let delivery = Arc::new(Delivery {
+            callback,
+            _notifier: notifier,
+        });
+        Arc::new(move || {
+            let delivery = Arc::clone(&delivery);
+            Box::new(move |view: &dyn SampleView| match sample_of(view) {
+                Ok(sample) => delivery.callback.call(sample),
+                Err(error) => tracing::error!("a sample could not be delivered: {error}"),
+            })
+        })
+    }
+
+    /// The sample the engine's view of a frame is.
+    ///
+    /// The payload is copied out of the frame: handing it over as the frame's own bytes is the
+    /// zero-copy payload of slice Z2 that no engine offers yet.
+    fn sample_of(view: &dyn SampleView) -> ZResult<Sample> {
+        let key_expr = KeyExpr::try_from(view.keyexpr().to_owned())?;
+        let kind = match view.kind() {
+            EngineSampleKind::Put => SampleKind::Put,
+            EngineSampleKind::Del => SampleKind::Delete,
+        };
+        let encoding = view
+            .encoding()
+            .and_then(|hint| {
+                let id = u16::try_from(hint.packed_id >> 1).ok()?;
+                let schema = hint
+                    .schema
+                    .as_ref()
+                    .filter(|_| hint.packed_id & 1 == 1)
+                    .map(|schema| zenoh_buffers::ZSlice::from(schema.clone().into_bytes()));
+                Some(zenoh_protocol::core::Encoding { id, schema })
+            })
+            .map(Encoding::from)
+            .unwrap_or_default();
+        let timestamp = view.timestamp().and_then(|hint| {
+            let id = uhlc::ID::try_from(hint.zid.as_slice()).ok()?;
+            Some(uhlc::Timestamp::new(uhlc::NTP64(hint.time), id))
+        });
+        let qos = view.qos().map_or_else(QoS::default, |level| {
+            let priority = zenoh_protocol::core::Priority::try_from(level.priority() as u8)
+                .unwrap_or_default();
+            let congestion = match level.congestion() {
+                EngineCongestion::Drop => CongestionControl::Drop,
+                EngineCongestion::Block => CongestionControl::Block,
+                #[cfg(feature = "unstable")]
+                EngineCongestion::BlockFirst => CongestionControl::BlockFirst,
+                #[cfg(not(feature = "unstable"))]
+                EngineCongestion::BlockFirst => CongestionControl::Block,
+            };
+            QoS::from(zenoh_protocol::network::push::ext::QoSType::new(
+                priority,
+                congestion,
+                level.is_express(),
+            ))
+        });
+        Ok(Sample {
+            key_expr,
+            payload: ZBytes::from(view.payload().to_vec()),
+            kind,
+            encoding,
+            timestamp,
+            qos,
+            #[cfg(feature = "unstable")]
+            reliability: match view.reliability() {
+                EngineReliability::BestEffort => zenoh_protocol::core::Reliability::BestEffort,
+                EngineReliability::Reliable => zenoh_protocol::core::Reliability::Reliable,
+            },
+            #[cfg(feature = "unstable")]
+            source_info: view.source_info().and_then(|info| {
+                let zid = zenoh_protocol::core::ZenohIdProto::try_from(
+                    &info.zid[..usize::from(info.zid_len)],
+                )
+                .ok()?;
+                let id = zenoh_protocol::core::EntityGlobalIdProto { zid, eid: info.eid };
+                Some(SourceInfo::new(id.into(), info.sn))
+            }),
+            attachment: view.attachment().map(|bytes| ZBytes::from(bytes.to_vec())),
+            #[cfg(feature = "unstable")]
+            timestamp_stack: None,
+        })
     }
 
     /// A publication the engine refused.
@@ -524,6 +715,24 @@ pub(crate) struct SessionInner {
     engine: Engine,
     id: EntityId,
     zid: ZenohId,
+    /// The subscriptions declared on the session and not undeclared, which a close lets go of.
+    subscriptions: std::sync::Mutex<Vec<Id>>,
+}
+
+impl SessionInner {
+    fn subscriptions(&self) -> std::sync::MutexGuard<'_, Vec<Id>> {
+        self.subscriptions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Undeclare every subscription that is left: those of a session that has closed.
+    fn release_subscriptions(&self) {
+        let left = std::mem::take(&mut *self.subscriptions());
+        for id in left {
+            self.engine.undeclare_subscriber(id);
+        }
+    }
 }
 
 impl fmt::Debug for SessionInner {
@@ -603,6 +812,7 @@ impl Session {
             engine,
             id,
             zid,
+            subscriptions: std::sync::Mutex::new(vec![]),
         })))
     }
 }
@@ -631,12 +841,31 @@ impl Drop for Session {
 /// The handles count themselves ([`SessionInner::strong_counter`]) and the last one to be dropped
 /// closes the session, whatever references remain.
 #[derive(Debug, Clone)]
-pub(crate) struct WeakSession(Arc<SessionInner>);
+pub struct WeakSession(Arc<SessionInner>);
 
 impl WeakSession {
     /// The id the session stands on.
     pub(crate) fn zid(&self) -> ZenohId {
         self.0.zid
+    }
+
+    /// Stop the delivery to the subscriber `sid`. A closed session has none to stop, and
+    /// undeclaring on it is no error.
+    pub(crate) fn undeclare_subscriber_inner(&self, sid: Id, kind: SubscriberKind) -> ZResult<()> {
+        match kind {
+            SubscriberKind::Subscriber => {
+                let known = {
+                    let mut subscriptions = self.0.subscriptions();
+                    let before = subscriptions.len();
+                    subscriptions.retain(|id| *id != sid);
+                    before != subscriptions.len()
+                };
+                if known {
+                    self.0.engine.undeclare_subscriber(sid);
+                }
+                Ok(())
+            }
+        }
     }
 
     /// The ids of the nodes this session is connected to that play the role `whatami`.
@@ -841,6 +1070,85 @@ impl Session {
     {
         let key_expr: ZResult<KeyExpr> = key_expr.try_into().map_err(Into::into);
         ResolveClosure::new(move || key_expr?.declare(&self.anchor(), true))
+    }
+
+    /// Create a [`Subscriber`](crate::pubsub::Subscriber) for the given key expression.
+    ///
+    /// # Arguments
+    ///
+    /// * `key_expr` - The key expression to subscribe to
+    ///
+    /// # Examples
+    /// ```no_run
+    /// # #[tokio::main]
+    /// # async fn main() {
+    ///
+    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// let subscriber = session.declare_subscriber("key/expression")
+    ///     .await
+    ///     .unwrap();
+    /// tokio::task::spawn(async move {
+    ///     while let Ok(sample) = subscriber.recv_async().await {
+    ///         println!("Received: {:?}", sample);
+    ///     }
+    /// }).await;
+    /// # }
+    /// ```
+    pub fn declare_subscriber<'b, TryIntoKeyExpr>(
+        &self,
+        key_expr: TryIntoKeyExpr,
+    ) -> SubscriberBuilder<'_, 'b, DefaultHandler>
+    where
+        TryIntoKeyExpr: TryInto<KeyExpr<'b>>,
+        <TryIntoKeyExpr as TryInto<KeyExpr<'b>>>::Error: Into<zenoh_result::Error>,
+    {
+        SubscriberBuilder {
+            session: self,
+            key_expr: TryIntoKeyExpr::try_into(key_expr).map_err(Into::into),
+            origin: Locality::default(),
+            handler: DefaultHandler::default(),
+        }
+    }
+
+    /// Declare the longest prefix of `key_expr` that has no wildcard, so that the wire names the key
+    /// by it.
+    pub(crate) fn declare_nonwild_prefix<'a>(&self, key_expr: KeyExpr<'a>) -> ZResult<KeyExpr<'a>> {
+        key_expr.declare_nonwild_prefix(&self.anchor(), false)
+    }
+
+    /// Take samples for `key_expr` into `callback`, until the subscription is undeclared with the
+    /// id returned. `notifier` is let go with the callback.
+    pub(crate) fn declare_subscriber_inner(
+        &self,
+        key_expr: &KeyExpr,
+        origin: Locality,
+        callback: Callback<Sample>,
+        notifier: Option<SyncGroupNotifier>,
+    ) -> ZResult<Id> {
+        tracing::trace!("declare_subscriber({:?})", key_expr);
+        if self.0.engine.is_closed() {
+            return Err(SessionClosedError.into());
+        }
+        let wire = key_expr.to_wire(&self.anchor());
+        let suffix = (!wire.suffix.is_empty()).then(|| wire.suffix.to_string());
+        let id = self.0.engine.declare_subscriber(Subscription {
+            key: key_expr.as_str(),
+            scope: wire.scope,
+            suffix,
+            origin,
+            callback,
+            notifier,
+            // The declaration of the prefix is held by the subscription for as long as the engine
+            // records it, whoever else holds the key.
+            keeps: Arc::new(key_expr.clone().into_owned()),
+        })?;
+        self.0.subscriptions().push(id);
+        // A close that ran between the check and the record has not seen this subscription.
+        if self.0.engine.is_closed() {
+            self.0.release_subscriptions();
+            return Err(SessionClosedError.into());
+        }
+        Ok(id)
     }
 
     /// The builder of the settings a publication carries, for `put` and `delete`. Resolving it into
@@ -1073,7 +1381,12 @@ impl Closee for WeakSession {
         // A close joins the engine's threads, so it is run where blocking is allowed and not on the
         // executor of the caller, which may be the very thread a callback is about to be run on.
         let _ = ZRuntime::Net
-            .spawn_blocking(move || session.engine.close())
+            .spawn_blocking(move || {
+                session.engine.close();
+                // A closed session takes nothing more, and lets go of the callbacks it was to
+                // call: the channel of a subscriber ends with its session, as upstream's does.
+                session.release_subscriptions();
+            })
             .await;
     }
 }
@@ -1653,5 +1966,344 @@ mod tests {
         let session = open(peer("a1b2d3")).wait().expect("opens");
         let error = session.put("demo//bad", "v").wait().expect_err("not a key");
         assert!(error.to_string().contains("demo//bad"), "{error}");
+    }
+
+    mod subscribing {
+        use std::{sync::mpsc, time::Duration};
+
+        use super::*;
+        use crate::api::handlers::{FifoChannel, RingChannel};
+
+        const WAIT: Duration = Duration::from_secs(5);
+
+        fn text(sample: &Sample) -> String {
+            sample
+                .payload()
+                .try_to_string()
+                .expect("a text")
+                .into_owned()
+        }
+
+        /// A function that counts the samples it is given.
+        fn counting(count: &Arc<AtomicUsize>) -> impl Fn(Sample) + Send + Sync + 'static {
+            let count = Arc::clone(count);
+            move |_| {
+                count.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        #[test]
+        fn a_subscriber_takes_what_its_own_session_publishes_as_it_was_published() {
+            let session = open(peer("a1b2e0")).wait().expect("opens");
+            let subscriber = session
+                .declare_subscriber("demo/**")
+                .wait()
+                .expect("declares");
+            assert_eq!(subscriber.key_expr().as_str(), "demo/**");
+            session
+                .put("demo/one", "v")
+                .encoding(Encoding::TEXT_PLAIN)
+                .attachment("a")
+                .priority(Priority::Background)
+                .express(true)
+                .wait()
+                .expect("puts");
+            let sample = subscriber
+                .recv_timeout(WAIT)
+                .expect("a channel")
+                .expect("a sample");
+            assert_eq!(sample.key_expr().as_str(), "demo/one");
+            assert_eq!(text(&sample), "v");
+            assert_eq!(sample.kind(), SampleKind::Put);
+            assert_eq!(sample.encoding(), &Encoding::TEXT_PLAIN);
+            assert_eq!(
+                sample
+                    .attachment()
+                    .map(|bytes| bytes.try_to_string().unwrap().into_owned()),
+                Some("a".to_owned())
+            );
+            assert_eq!(sample.priority(), Priority::Background);
+            assert!(sample.express());
+            session.delete("demo/one").wait().expect("deletes");
+            let sample = subscriber
+                .recv_timeout(WAIT)
+                .expect("a channel")
+                .expect("a sample");
+            assert_eq!(sample.kind(), SampleKind::Delete);
+            assert!(sample.payload().is_empty());
+        }
+
+        #[test]
+        fn the_origin_of_a_subscriber_says_whose_publications_it_takes() {
+            let session = open(peer("a1b2e1")).wait().expect("opens");
+            let (local, remote, any) = (
+                Arc::new(AtomicUsize::new(0)),
+                Arc::new(AtomicUsize::new(0)),
+                Arc::new(AtomicUsize::new(0)),
+            );
+            let _local = session
+                .declare_subscriber("demo/origin")
+                .allowed_origin(Locality::SessionLocal)
+                .callback(counting(&local))
+                .wait()
+                .expect("declares");
+            let _remote = session
+                .declare_subscriber("demo/origin")
+                .allowed_origin(Locality::Remote)
+                .callback(counting(&remote))
+                .wait()
+                .expect("declares");
+            let _any = session
+                .declare_subscriber("demo/origin")
+                .callback(counting(&any))
+                .wait()
+                .expect("declares");
+            session.put("demo/origin", "v").wait().expect("puts");
+            assert_eq!(local.load(Ordering::SeqCst), 1);
+            assert_eq!(remote.load(Ordering::SeqCst), 0, "its own is not remote");
+            assert_eq!(any.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn every_kind_of_handler_takes_the_samples() {
+            let session = open(peer("a1b2e2")).wait().expect("opens");
+            let kept = Arc::new(std::sync::Mutex::new(vec![]));
+            let called = Arc::new(AtomicUsize::new(0));
+            let _callback = session
+                .declare_subscriber("demo/h")
+                .callback(counting(&called))
+                .wait()
+                .expect("declares");
+            let mut total = 0;
+            let sink = Arc::clone(&kept);
+            let _callback_mut = session
+                .declare_subscriber("demo/h")
+                .callback_mut(move |sample| {
+                    total += 1;
+                    sink.lock().unwrap().push((total, text(&sample)));
+                })
+                .wait()
+                .expect("declares");
+            let default = session
+                .declare_subscriber("demo/h")
+                .wait()
+                .expect("declares");
+            let fifo = session
+                .declare_subscriber("demo/h")
+                .with(FifoChannel::new(8))
+                .wait()
+                .expect("declares");
+            let ring = session
+                .declare_subscriber("demo/h")
+                .with(RingChannel::new(2))
+                .wait()
+                .expect("declares");
+            for value in ["a", "b", "c"] {
+                session.put("demo/h", value).wait().expect("puts");
+            }
+            assert_eq!(called.load(Ordering::SeqCst), 3);
+            assert_eq!(
+                *kept.lock().unwrap(),
+                vec![
+                    (1, "a".to_owned()),
+                    (2, "b".to_owned()),
+                    (3, "c".to_owned())
+                ]
+            );
+            for channel in [default.handler().len(), fifo.handler().len()] {
+                assert_eq!(channel, 3);
+            }
+            let ring: Vec<String> = (0..2)
+                .map(|_| text(&ring.recv().expect("a sample")))
+                .collect();
+            assert_eq!(ring, ["b", "c"], "a ring that is full drops the oldest");
+        }
+
+        #[test]
+        fn a_subscriber_takes_nothing_once_it_is_undeclared_or_dropped() {
+            let session = open(peer("a1b2e3")).wait().expect("opens");
+            let (undeclared, dropped) =
+                (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+            let first = session
+                .declare_subscriber("demo/gone")
+                .callback(counting(&undeclared))
+                .wait()
+                .expect("declares");
+            let second = session
+                .declare_subscriber("demo/gone")
+                .callback(counting(&dropped))
+                .wait()
+                .expect("declares");
+            session.put("demo/gone", "v").wait().expect("puts");
+            first.undeclare().wait().expect("undeclares");
+            drop(second);
+            session.put("demo/gone", "v").wait().expect("puts");
+            assert_eq!(undeclared.load(Ordering::SeqCst), 1);
+            assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn a_background_subscriber_outlives_its_builder_until_the_session_closes() {
+            let session = open(peer("a1b2e4")).wait().expect("opens");
+            let count = Arc::new(AtomicUsize::new(0));
+            session
+                .declare_subscriber("demo/back")
+                .callback(counting(&count))
+                .background()
+                .wait()
+                .expect("declares");
+            session.put("demo/back", "v").wait().expect("puts");
+            assert_eq!(count.load(Ordering::SeqCst), 1);
+            session.close().wait().expect("closes");
+            assert!(session.put("demo/back", "v").wait().is_err());
+            assert_eq!(count.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn what_a_closed_session_does_with_a_subscriber_is_what_upstreams_does() {
+            let session = open(peer("a1b2e5")).wait().expect("opens");
+            let subscriber = session
+                .declare_subscriber("demo/closed")
+                .wait()
+                .expect("declares");
+            session.close().wait().expect("closes");
+            let error = session
+                .declare_subscriber("demo/closed")
+                .wait()
+                .expect_err("closed");
+            assert_eq!(error.to_string(), SessionClosedError.to_string());
+            assert!(
+                subscriber.recv_timeout(WAIT).is_err(),
+                "the channel of a subscriber ends with its session"
+            );
+            subscriber
+                .undeclare()
+                .wait()
+                .expect("undeclaring after a close is no error");
+        }
+
+        #[test]
+        fn the_prefix_a_subscriber_is_named_by_is_declared_for_as_long_as_it_is() {
+            let session = open(peer("a1b2e6")).wait().expect("opens");
+            let declared = |session: &Session| {
+                session
+                    .0
+                    .engine
+                    .keyexpr_declarations()
+                    .into_iter()
+                    .map(|(_, key)| key)
+                    .collect::<Vec<_>>()
+            };
+            assert!(declared(&session).is_empty());
+            let subscriber = session
+                .declare_subscriber("demo/prefix/**")
+                .wait()
+                .expect("declares");
+            assert_eq!(declared(&session), ["demo/prefix"]);
+            subscriber.undeclare().wait().expect("undeclares");
+            assert!(
+                declared(&session).is_empty(),
+                "the declaration went with it"
+            );
+            session
+                .declare_subscriber("demo/prefix/**")
+                .callback(|_| {})
+                .background()
+                .wait()
+                .expect("declares");
+            assert_eq!(
+                declared(&session),
+                ["demo/prefix"],
+                "a background one keeps it too"
+            );
+        }
+
+        #[test]
+        fn the_callback_is_released_when_the_subscriber_is() {
+            let session = open(peer("a1b2e7")).wait().expect("opens");
+            let token = Arc::new(());
+            let held = Arc::clone(&token);
+            let subscriber = session
+                .declare_subscriber("demo/release")
+                .callback(move |_| {
+                    let _ = &held;
+                })
+                .wait()
+                .expect("declares");
+            assert_eq!(Arc::strong_count(&token), 2);
+            drop(subscriber);
+            assert_eq!(Arc::strong_count(&token), 1);
+        }
+
+        #[cfg(feature = "unstable")]
+        #[test]
+        fn an_undeclaration_can_wait_for_the_callbacks_that_are_running() {
+            let session = open(peer("a1b2e8")).wait().expect("opens");
+            let (entered_tx, entered) = mpsc::sync_channel::<()>(1);
+            let (release, released) = mpsc::channel::<()>();
+            let released = std::sync::Mutex::new(released);
+            let subscriber = session
+                .declare_subscriber("demo/wait")
+                .callback(move |_| {
+                    entered_tx.send(()).expect("the test is listening");
+                    released.lock().unwrap().recv().expect("released");
+                })
+                .wait()
+                .expect("declares");
+            let publisher = session.clone();
+            let put = std::thread::spawn(move || publisher.put("demo/wait", "v").wait());
+            entered.recv_timeout(WAIT).expect("the callback runs");
+            let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let flag = Arc::clone(&finished);
+            let undeclare = std::thread::spawn(move || {
+                let result = subscriber.undeclare().wait_callbacks().wait();
+                flag.store(true, Ordering::SeqCst);
+                result
+            });
+            std::thread::sleep(Duration::from_millis(300));
+            assert!(
+                !finished.load(Ordering::SeqCst),
+                "a callback is still running"
+            );
+            release.send(()).expect("the callback waits");
+            undeclare.join().expect("no panic").expect("undeclares");
+            put.join().expect("no panic").expect("puts");
+        }
+
+        /// Decision D4: a callback may declare, publish and undeclare on the session that is
+        /// calling it, and nothing it does waits for the thread it is on.
+        #[test]
+        fn a_callback_may_use_the_session_that_calls_it() {
+            let session = open(peer("a1b2e9")).wait().expect("opens");
+            let inner_count = Arc::new(AtomicUsize::new(0));
+            let (done_tx, done) = mpsc::channel::<ZResult<()>>();
+            let in_callback = session.clone();
+            let counted = Arc::clone(&inner_count);
+            let _outer = session
+                .declare_subscriber("demo/outer")
+                .callback(move |_| {
+                    let outcome = (|| -> ZResult<()> {
+                        let key = in_callback.declare_keyexpr("demo/reenter/key").wait()?;
+                        let inner = in_callback
+                            .declare_subscriber("demo/reenter/**")
+                            .callback(counting(&counted))
+                            .wait()?;
+                        in_callback.put(&key, "v").wait()?;
+                        in_callback.put("demo/reenter/other", "v").wait()?;
+                        inner.undeclare().wait()?;
+                        in_callback.put(&key, "v").wait()?;
+                        in_callback.undeclare(key).wait()
+                    })();
+                    done_tx.send(outcome).expect("the test is listening");
+                })
+                .wait()
+                .expect("declares");
+            let publisher = session.clone();
+            std::thread::spawn(move || publisher.put("demo/outer", "v").wait());
+            done.recv_timeout(WAIT)
+                .expect("the callback used the session and came back")
+                .expect("each thing it did worked");
+            assert_eq!(inner_count.load(Ordering::SeqCst), 2);
+        }
     }
 }

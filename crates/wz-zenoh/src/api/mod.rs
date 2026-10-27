@@ -16,8 +16,11 @@
 // src/api/mod.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). Only the modules of the
 // slices that have landed are declared here.
 
-// R3706: `SampleBuilder::qos` is used by the builders of a reply and of a publication, which are
-// slices Z2 and Z3 of docs/zenoh-api-on-the-engine.md.
+/// The number an entity declared on a session is known by.
+pub(crate) type Id = u32;
+
+// R3706: `SampleBuilder::qos` and the timestamp instrumentation trait are used by the builders of a
+// reply and of the timestamp stack, which are slices Z3 and Z6b of docs/zenoh-api-on-the-engine.md.
 #[allow(dead_code)]
 pub(crate) mod builders;
 pub(crate) mod bytes;
@@ -30,30 +33,29 @@ pub(crate) mod cancellation;
 #[allow(dead_code)]
 pub(crate) mod config;
 pub(crate) mod encoding;
-// R3699: the handlers' users, the builders of `declare_subscriber` and `get`, are slices Z2 and Z3 of
-// docs/zenoh-api-on-the-engine.md; until they land the helpers upstream calls from there
-// (`set_on_drop`, `call_with_message`, and `locked` and `CallbackParameter` outside `internal`) are
-// unused.
+// R3699: the builder of `get` is slice Z3 of docs/zenoh-api-on-the-engine.md; until it lands the
+// helpers upstream calls from there (`set_on_drop`, `call_with_message`, and `CallbackParameter`
+// outside `internal`) are unused. The builder of `declare_subscriber` has used the rest since Z2c.
 #[allow(dead_code)]
 pub(crate) mod handlers;
 pub(crate) mod info;
 // R3706: the publisher and its undeclaration are slice Z2 of docs/zenoh-api-on-the-engine.md; of the
 // file only the priority is here, which the sample reads.
 pub(crate) mod publisher;
-// R3706: the sample's users, the subscriber and the reply, are slices Z2 and Z3; until they land the
-// constructor from a frame and the builders' crate-private methods have no caller.
+// R3706: the sample's remaining user, the reply, is slice Z3; until it lands the constructor from a
+// frame (`from_push`) has no caller.
 #[allow(dead_code)]
 pub(crate) mod sample;
-// R3702: the session declares and undeclares a key since slice Z2a; what a key puts on the wire
-// (`to_wire`, the prefix tests) is used by the builders of a publication and a subscription, which
-// are slices Z2b and Z2c of docs/zenoh-api-on-the-engine.md, so until then those functions have no
-// caller.
+// R3702: the session declares and undeclares a key since slice Z2a, and the builders of a
+// publication and a subscription use what a key puts on the wire since Z2b and Z2c; `to_wire_local`
+// is used by the builder of `get`, slice Z3, so until then it has no caller.
 #[allow(dead_code)]
 pub(crate) mod key_expr;
 // R3702: the selector's users, the builders of `get` and the querier, are slice Z3.
 #[allow(dead_code)]
 pub(crate) mod selector;
 pub(crate) mod session;
+pub(crate) mod subscriber;
 // R3706: the instrumentation of a frame at a node (`push_ts_interception`) is slice Z6b.
 #[cfg(feature = "unstable")]
 #[allow(dead_code)]

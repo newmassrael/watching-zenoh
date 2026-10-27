@@ -210,6 +210,101 @@ mod observer {
         }
     }
 
+    /// An upstream node that dials `port` and publishes to the node it dials.
+    pub struct Source {
+        session: Session,
+    }
+
+    pub fn source(id: &str, port: u16) -> Result<Source, String> {
+        Ok(Source {
+            session: open(id, "peer", None, Some(port))?,
+        })
+    }
+
+    impl Source {
+        /// A put on the key of readiness, repeated until the node dialled has the subscription.
+        pub fn probe(&self) {
+            self.session.put("demo/ready", "").wait().expect("a probe");
+        }
+
+        /// A put on `key` as one of the nodes that publish for the test of origins and callbacks.
+        pub fn put(&self, key: &str, payload: &str) {
+            self.session.put(key, payload).wait().expect("a put");
+        }
+
+        /// Every setting of a put and a delete, published as the other tests' subjects publish
+        /// them: 13 publications that a subscriber of `demo/**` takes.
+        pub fn publish_all(&self) -> usize {
+            use up_zenoh::internal::traits::{
+                EncodingBuilderTrait, QoSBuilderTrait, SampleBuilderTrait, TimestampBuilderTrait,
+            };
+            let session = &self.session;
+            let mut sent = 0;
+            let mut sent_one = |result: up_zenoh::Result<()>| {
+                result.expect("a publication");
+                sent += 1;
+            };
+            sent_one(session.put("demo/plain", "v1").wait());
+            sent_one(
+                session
+                    .put("demo/settings", "v2")
+                    .encoding(up_zenoh::bytes::Encoding::TEXT_PLAIN)
+                    .priority(up_zenoh::qos::Priority::RealTime)
+                    .congestion_control(up_zenoh::qos::CongestionControl::Block)
+                    .express(true)
+                    .attachment("attached")
+                    .wait(),
+            );
+            sent_one(
+                session
+                    .put("demo/schema", "{}")
+                    .encoding(up_zenoh::bytes::Encoding::APPLICATION_JSON.with_schema("v1"))
+                    .wait(),
+            );
+            sent_one(
+                session
+                    .put("demo/low", "v3")
+                    .priority(up_zenoh::qos::Priority::Background)
+                    .congestion_control(up_zenoh::qos::CongestionControl::BlockFirst)
+                    .wait(),
+            );
+            let id = up_zenoh::time::TimestampId::try_from(&[0xab_u8, 0xcd][..]).expect("an id");
+            let at = up_zenoh::time::Timestamp::new(up_zenoh::time::NTP64(0x1234_5678_9abc_def0), id);
+            sent_one(session.put("demo/stamped", "v4").timestamp(at).wait());
+            sent_one(
+                session
+                    .put("demo/sourced", "v5")
+                    .source_info(up_zenoh::sample::SourceInfo::new(
+                        up_zenoh::session::EntityGlobalId::new("c0ffee".parse().expect("an id"), 7),
+                        41,
+                    ))
+                    .wait(),
+            );
+            sent_one(session.delete("demo/plain").wait());
+            sent_one(session.delete("demo/plain").attachment("gone").wait());
+            // A key declared by the source goes on the wire as a declaration and its suffix, and is
+            // kept until the end of the call, after which the samples have been seen by the test.
+            let declared = session.declare_keyexpr("demo/declared").wait().expect("declares");
+            sent_one(session.put(&declared, "v9").wait());
+            let longer = declared.join("leaf").expect("a key");
+            sent_one(session.put(&longer, "v10").wait());
+            sent_one(session.put("demo/big", vec![7u8; 70_000]).wait());
+            // Last, and after the fragments of the large one, which end a batch. Upstream puts a
+            // message of the other reliability into the batch that is open, behind a frame header
+            // of its own, and the engine reads a frame to the end of the batch it is in, so
+            // whatever follows a best-effort message in a batch is lost to it (carried in
+            // docs/zenoh-api-on-the-engine.md, Z2c). Sent here, no reliable message is behind it.
+            sent_one(
+                session
+                    .put("demo/best", "v6")
+                    .reliability(up_zenoh::qos::Reliability::BestEffort)
+                    .wait(),
+            );
+            std::thread::sleep(Duration::from_millis(400));
+            sent
+        }
+    }
+
     /// [`seen`] once the session sees `count` transports, or after five seconds.
     pub fn seen_with(session: &Session, count: usize) -> String {
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -484,6 +579,208 @@ macro_rules! session_cases {
                 subject.close().wait().expect("closes");
                 out.push(format!("put after close: {}", text(subject.put("demo/after", "x").wait())));
                 out.push(format!("delete after close: {}", text(subject.delete("demo/after").wait())));
+                out
+            }
+
+            /// What a sample says, as one line: every field of it that crosses a link.
+            fn describe(sample: &$z::sample::Sample) -> String {
+                let timestamp = sample.timestamp().map(|t| format!("{t}"));
+                let payload = sample.payload().len();
+                let text = sample
+                    .payload()
+                    .try_to_string()
+                    .map_or_else(|_| "(not text)".to_owned(), |s| s.to_string());
+                let attachment = sample.attachment().map(|a| {
+                    a.try_to_string().map_or_else(|_| "(not text)".to_owned(), |s| s.to_string())
+                });
+                let source = sample
+                    .source_info()
+                    .map(|i| (format!("{:?}", i.source_id()), i.source_sn()));
+                format!(
+                    "{} {:?} len={payload} {} encoding={} priority={:?} congestion={:?} \
+                     express={} reliability={:?} timestamp={timestamp:?} attachment={attachment:?} \
+                     source={source:?}",
+                    sample.key_expr(),
+                    sample.kind(),
+                    if payload <= 16 { text } else { format!("{}...", &text[..8.min(text.len())]) },
+                    sample.encoding(),
+                    sample.priority(),
+                    sample.congestion_control(),
+                    sample.express(),
+                    sample.reliability(),
+                )
+            }
+
+            /// What a node of this crate receives, from an upstream node that dials it and from
+            /// itself: every setting of a put and a delete, a key the publisher declared, a payload
+            /// larger than a batch, the origins a subscriber can ask for, what a callback may do
+            /// with the session that calls it, and the end of a subscriber with its session.
+            pub fn subscriptions() -> Vec<String> {
+                use std::sync::{
+                    atomic::{AtomicUsize, Ordering},
+                    Arc, Mutex,
+                };
+
+                let mut out = vec![];
+                let port = free_port();
+                let subject = $z::open(peer("5a0020", port)).wait().expect("opens");
+                let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+                let sink = seen.clone();
+                let _everything = subject
+                    .declare_subscriber("demo/**")
+                    .callback(move |sample| sink.lock().unwrap().push(describe(&sample)))
+                    .wait()
+                    .expect("declares");
+                let count = |counter: &Arc<AtomicUsize>| {
+                    let counter = counter.clone();
+                    move |_sample: $z::sample::Sample| {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                    }
+                };
+                let (local, remote, any) = (
+                    Arc::new(AtomicUsize::new(0)),
+                    Arc::new(AtomicUsize::new(0)),
+                    Arc::new(AtomicUsize::new(0)),
+                );
+                let _local = subject
+                    .declare_subscriber("demo/origin")
+                    .allowed_origin($z::sample::Locality::SessionLocal)
+                    .callback(count(&local))
+                    .wait()
+                    .expect("declares");
+                let _remote = subject
+                    .declare_subscriber("demo/origin")
+                    .allowed_origin($z::sample::Locality::Remote)
+                    .callback(count(&remote))
+                    .wait()
+                    .expect("declares");
+                let _any = subject
+                    .declare_subscriber("demo/origin")
+                    .callback(count(&any))
+                    .wait()
+                    .expect("declares");
+                // A callback that uses the session that calls it: declares a key and a subscriber,
+                // publishes on both, undeclares, and asks who the session is, each of them blocking.
+                let (done_tx, done) = std::sync::mpsc::channel::<String>();
+                let done_tx = Mutex::new(done_tx);
+                let inner_count = Arc::new(AtomicUsize::new(0));
+                let in_callback = subject.clone();
+                let counted = inner_count.clone();
+                let _reentrant = subject
+                    .declare_subscriber("demo/reenter/trigger")
+                    .callback(move |sample| {
+                        let mut steps = vec![];
+                        let mut step = |label: &str, result: Result<(), String>| {
+                            steps.push(format!("{label}: {}", text(result)));
+                        };
+                        let key = in_callback.declare_keyexpr("demo/reenter/key").wait();
+                        step("declare a key", key.as_ref().map(|_| ()).map_err(|e| e.to_string()));
+                        let inner = in_callback
+                            .declare_subscriber("demo/reenter/inner/**")
+                            .callback(count(&counted))
+                            .wait();
+                        step("declare a subscriber", inner.as_ref().map(|_| ()).map_err(|e| e.to_string()));
+                        step(
+                            "put on a key",
+                            in_callback.put("demo/reenter/inner/a", "v").wait().map_err(|e| e.to_string()),
+                        );
+                        if let Ok(key) = &key {
+                            step(
+                                "put on the declared key",
+                                in_callback.put(key, "v").wait().map_err(|e| e.to_string()),
+                            );
+                        }
+                        if let Ok(inner) = inner {
+                            step("undeclare it", inner.undeclare().wait().map_err(|e| e.to_string()));
+                        }
+                        step(
+                            "ask who the session is",
+                            Ok::<_, String>(in_callback.info().zid().wait().to_string()).map(|_| ()),
+                        );
+                        let line = format!(
+                            "{}: {}",
+                            sample.payload().try_to_string().unwrap(),
+                            steps.join(", ")
+                        );
+                        let _ = done_tx.lock().unwrap().send(line);
+                    })
+                    .wait()
+                    .expect("declares");
+                let source = observer::source("b00020", port).expect("the source opens");
+                // The source knows the subject's subscription once a probe of it arrives.
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                let ready = |seen: &Arc<Mutex<Vec<String>>>| {
+                    seen.lock().unwrap().iter().any(|line| line.starts_with("demo/ready "))
+                };
+                while !ready(&seen) && std::time::Instant::now() < deadline {
+                    source.probe();
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                out.push(format!("subscription known: {}", ready(&seen)));
+                let sent = source.publish_all();
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                let delivered = |seen: &Arc<Mutex<Vec<String>>>| {
+                    seen.lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|line| !line.starts_with("demo/ready "))
+                        .count()
+                };
+                while delivered(&seen) < sent && std::time::Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                std::thread::sleep(Duration::from_millis(300));
+                let mut received: Vec<String> = seen
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|line| !line.starts_with("demo/ready "))
+                    .cloned()
+                    .collect();
+                // Samples of different priorities are carried by different queues, so their order
+                // is not the order they were sent in.
+                received.sort();
+                out.push(format!("received {} of {sent}", received.len()));
+                out.extend(received.into_iter().map(|line| format!("sample: {line}")));
+                // The origins: the session's own put and the source's.
+                subject.put("demo/origin", "own").wait().expect("puts");
+                source.put("demo/origin", "other");
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                while remote.load(Ordering::SeqCst) < 1 && std::time::Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                std::thread::sleep(Duration::from_millis(200));
+                out.push(format!(
+                    "origins: local={} remote={} any={}",
+                    local.load(Ordering::SeqCst),
+                    remote.load(Ordering::SeqCst),
+                    any.load(Ordering::SeqCst)
+                ));
+                // The callback that uses the session, run from a link and from the session itself.
+                source.put("demo/reenter/trigger", "remote");
+                out.push(match done.recv_timeout(Duration::from_secs(10)) {
+                    Ok(line) => format!("callback on the remote path: {line}"),
+                    Err(_) => "callback on the remote path: it did not come back".to_owned(),
+                });
+                let own = subject.clone();
+                std::thread::spawn(move || own.put("demo/reenter/trigger", "local").wait());
+                out.push(match done.recv_timeout(Duration::from_secs(10)) {
+                    Ok(line) => format!("callback on the local path: {line}"),
+                    Err(_) => "callback on the local path: it did not come back".to_owned(),
+                });
+                out.push(format!("the callbacks' own subscribers took {}", inner_count.load(Ordering::SeqCst)));
+                // The end of a subscriber with its session.
+                let ending = subject.declare_subscriber("demo/ending").wait().expect("declares");
+                subject.close().wait().expect("closes");
+                out.push(format!(
+                    "channel after close: {}",
+                    text(ending.recv_timeout(Duration::from_secs(2)))
+                ));
+                out.push(format!(
+                    "declare after close: {}",
+                    text(subject.declare_subscriber("demo/after").wait().map(|_| ()))
+                ));
+                out.push(format!("undeclare after close: {}", text(ending.undeclare().wait())));
                 out
             }
 
@@ -879,6 +1176,29 @@ fn what_a_session_with_a_clock_publishes_carries_its_stamps() {
         "{u:#?}"
     );
     compare("publications with a clock", &u, &w);
+}
+
+#[test]
+fn what_an_upstream_publisher_sends_is_what_a_subscriber_receives() {
+    // The log of upstream's nodes, for a run that is asked for it with `RUST_LOG`.
+    up_zenoh::try_init_log_from_env();
+    let (u, w) = (up::subscriptions(), wz::subscriptions());
+    assert!(u.iter().any(|l| l == "subscription known: true"), "{u:#?}");
+    assert!(u.iter().any(|l| l.starts_with("received 12 of 12")), "{u:#?}");
+    assert!(
+        u.iter().any(|l| l.starts_with("sample: demo/settings Put len=2 v2 encoding=text/plain priority=RealTime congestion=Block express=true")),
+        "{u:#?}"
+    );
+    assert!(u.iter().any(|l| l == "origins: local=1 remote=1 any=2"), "{u:#?}");
+    assert!(
+        u.iter().any(|l| l.starts_with("callback on the remote path: remote: declare a key: Ok(())")),
+        "{u:#?}"
+    );
+    assert!(
+        u.iter().any(|l| l.starts_with("callback on the local path: local: declare a key: Ok(())")),
+        "{u:#?}"
+    );
+    compare("subscriptions", &u, &w);
 }
 
 #[test]
