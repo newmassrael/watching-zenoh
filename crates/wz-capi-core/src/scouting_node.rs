@@ -45,7 +45,8 @@ use wz_runtime_tokio::scouting_fanout::{
     bind_scout_sockets, scout_interface_addresses, ScoutFanOut,
 };
 use wz_runtime_tokio::scouting_glue::{
-    drive_scouting_until_resolved, new_scouting_engine, ScoutOutcome, ScoutParams, ScoutingActions,
+    drive_scouting_until_resolved, new_scouting_engine, ScoutOutcome, ScoutParams, ScoutedHello,
+    ScoutingActions,
 };
 use wz_runtime_tokio::zenoh_config::ZenohNodeConfig;
 use wz_runtime_tokio::{McastSocketConfig, UdpDriver};
@@ -108,6 +109,18 @@ pub struct ScoutingPlan {
     pub answers: bool,
 }
 
+/// The group and port `scouting/multicast/address` names, zenoh's default for an unstated one, or
+/// the refusal of one that is not a socket address.
+fn group_of(node: &ZenohNodeConfig) -> Result<(IpAddr, u16), ScoutingConfigError> {
+    match node.scout_multicast_address.as_deref() {
+        None => Ok((GROUP_DEFAULT, PORT_DEFAULT)),
+        Some(text) => match text.parse::<std::net::SocketAddr>() {
+            Ok(addr) => Ok((addr.ip(), addr.port())),
+            Err(_) => Err(ScoutingConfigError::Address(text.to_owned())),
+        },
+    }
+}
+
 /// The group a config named is not one this node can scout on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ScoutingConfigError {
@@ -137,13 +150,7 @@ impl ScoutingPlan {
         if !node.multicast_scouting {
             return Ok(None);
         }
-        let (group, port) = match node.scout_multicast_address.as_deref() {
-            None => (GROUP_DEFAULT, PORT_DEFAULT),
-            Some(text) => match text.parse::<std::net::SocketAddr>() {
-                Ok(addr) => (addr.ip(), addr.port()),
-                Err(_) => return Err(ScoutingConfigError::Address(text.to_owned())),
-            },
-        };
+        let (group, port) = group_of(node)?;
         let matcher = node
             .scout_multicast_autoconnect
             .unwrap_or_else(|| default_autoconnect(whatami));
@@ -163,6 +170,40 @@ impl ScoutingPlan {
                 .unwrap_or_default(),
             answers: node.scout_multicast_listen.unwrap_or(true),
         }))
+    }
+
+    /// The plan of a scout a program asks for, as upstream's `scout(what, config)` reads its
+    /// config (`zenoh/src/api/scouting.rs` @ `.multicast.address()`): the group, the interface and
+    /// the hop limit the config states or zenoh's default for each, and NOTHING ELSE of it.
+    /// Whether the config enables multicast scouting is a session's question, which `scout` does
+    /// not ask; and a scout has no delay, no timeout, no tie-break and no role to answer for.
+    /// `what` is the roles it asks for, in the API form.
+    pub fn for_scout(node: &ZenohNodeConfig, what: u8) -> Result<Self, ScoutingConfigError> {
+        let (group, port) = group_of(node)?;
+        let mut matcher = WhatAmIMatcher::empty();
+        for role in [WhatAmI::Router, WhatAmI::Peer, WhatAmI::Client] {
+            if what & role.to_api() != 0 {
+                matcher = match role {
+                    WhatAmI::Router => matcher.router(),
+                    WhatAmI::Peer => matcher.peer(),
+                    WhatAmI::Client => matcher.client(),
+                };
+            }
+        }
+        Ok(Self {
+            group,
+            port,
+            interface: node
+                .scout_multicast_interface
+                .clone()
+                .filter(|iface| iface != "auto"),
+            ttl: node.scout_multicast_ttl,
+            delay: Duration::from_millis(DELAY_DEFAULT_MS),
+            timeout: Duration::from_millis(TIMEOUT_DEFAULT_MS),
+            matcher,
+            strategies: AutoConnectStrategies::default(),
+            answers: false,
+        })
     }
 
     /// The Scout's `what` byte: the roles asked for, in the API form
@@ -235,6 +276,31 @@ pub struct ScoutLink {
 impl ScoutLink {
     /// Join `plan`'s group and bind its ask sockets.
     pub async fn bind(plan: &ScoutingPlan) -> io::Result<Self> {
+        let (group_socket, ask, refused) = Self::sockets(plan).await;
+        let (driver, _shape) = ScoutFanOut::over(group_socket?, ask, refused);
+        Ok(Self { driver })
+    }
+
+    /// The same sockets for a scout a program asks for, which does not need the group socket:
+    /// upstream's `scout` receives on its per-interface sockets alone
+    /// (`zenoh/src/api/scouting.rs` @ `Runtime::bind_ucast_port(iface, multicast_ttl).ok()`), so a
+    /// group that cannot be joined costs it nothing, and a scout with no socket at all is a scout
+    /// that finds nobody and is not an error (`ScoutInner { scout_task: None }`). `None` is that.
+    pub async fn bind_for_scout(plan: &ScoutingPlan) -> Option<Self> {
+        let (group_socket, ask, refused) = Self::sockets(plan).await;
+        ScoutFanOut::over_optional(group_socket.ok(), ask, refused)
+            .map(|(driver, _shape)| Self { driver })
+    }
+
+    /// The group socket (bound and joined, or the error that kept it from being) and the ask
+    /// sockets of `plan`, with the addresses that refused.
+    async fn sockets(
+        plan: &ScoutingPlan,
+    ) -> (
+        io::Result<UdpDriver>,
+        Vec<UdpDriver>,
+        Vec<(IpAddr, io::Error)>,
+    ) {
         let group = plan.group;
         // The addresses the config's interface text names, resolved before any socket exists.
         let named = plan
@@ -248,8 +314,10 @@ impl ScoutLink {
             ttl: plan.ttl,
             ..McastSocketConfig::default()
         };
-        let group_socket = UdpDriver::bind_scouting_group(group, plan.port, config).await?;
-        join_beyond_the_first(&group_socket, group, &named);
+        let group_socket = UdpDriver::bind_scouting_group(group, plan.port, config).await;
+        if let Ok(socket) = &group_socket {
+            join_beyond_the_first(socket, group, &named);
+        }
         // Where the Scout leaves from: every interface that can carry multicast when the
         // config names none, and the addresses its text names when it does, as upstream's
         // `get_interfaces` resolves them.
@@ -258,8 +326,7 @@ impl ScoutLink {
             None => scout_interface_addresses().unwrap_or_default(),
         };
         let (ask, refused) = bind_scout_sockets(group, plan.port, &locals, plan.ttl).await;
-        let (driver, _shape) = ScoutFanOut::over(group_socket, ask, refused);
-        Ok(Self { driver })
+        (group_socket, ask, refused)
     }
 
     /// Scout until `intents` has no receiver, posting a `DialIntent` for every responder the
@@ -275,19 +342,55 @@ impl ScoutLink {
     /// that was told where to connect.
     ///
     /// Returns when the receiver is gone (the session is closing) or the scouting link is lost.
-    pub async fn autoconnect(
-        mut self,
-        plan: &ScoutingPlan,
-        zid: &[u8],
-        intents: &DialIntentSender,
-    ) {
+    pub async fn autoconnect(self, plan: &ScoutingPlan, zid: &[u8], intents: &DialIntentSender) {
         let policy =
             AutoConnect::with_strategies(Zid::from_slice(zid), plan.matcher, plan.strategies);
+        // One intent for a responder in a window, and a window later another: a peer that went
+        // away is dialled again the next time it answers.
+        let mut posted = BTreeSet::new();
+        let mut current = 0;
+        self.scout_each(plan.what(), zid, |Delivery { hello, window }| {
+            if window != current {
+                current = window;
+                posted.clear();
+            }
+            // A node does not dial itself: its own Scout may come back through the group.
+            if hello.zid == zid || !posted.insert(hello.zid.clone()) {
+                return true;
+            }
+            match autoconnect_verdict(&policy, &hello) {
+                AutoconnectVerdict::Dial(intent) => intents.send(intent).is_ok(),
+                _ => true,
+            }
+        })
+        .await;
+    }
+
+    /// Scout for the roles `what` names until `each` declines, handing it every Hello as the
+    /// window it answers gathers it, in the order they arrive.
+    ///
+    /// The cadence is the one [`Self::autoconnect`] describes, and it is upstream's for a scout a
+    /// program asks for as well as for a node that looks for its peers
+    /// (`zenoh/src/net/runtime/orchestrator.rs` @ `pub(crate) async fn scout<Fut, F>(`): one Scout
+    /// and then the answers to it, windows of one second doubling to eight, for as long as it is
+    /// asked to. A responder that answers in every window is handed over in every window, and
+    /// nothing here dedupes: that is the caller's to decide. A Hello whose role `what` did not ask
+    /// for is dropped, as upstream's receive loop drops it (`matcher.matches(hello.whatami)`).
+    ///
+    /// Returns when `each` declines or the scouting link is lost; the caller stops a scout that
+    /// has no end of its own by dropping the future.
+    pub async fn scout_each(
+        mut self,
+        what: u8,
+        zid: &[u8],
+        mut each: impl FnMut(Delivery) -> bool,
+    ) {
         let clock = TokioTime::new();
         let mut window_ms = SCOUT_INITIAL_PERIOD_MS;
+        let mut window = 0u64;
         loop {
             let actions = ScoutingActions::new(ScoutParams {
-                what: plan.what(),
+                what,
                 zid: zid.to_vec(),
                 timeout_ms: window_ms,
                 // The survey arm: every responder of the window, not the first (upstream's
@@ -304,50 +407,116 @@ impl ScoutLink {
                 SCOUT_TICK_MS,
             );
             tokio::pin!(drive);
-            let mut posted = BTreeSet::new();
+            let mut handed = 0;
             let mut harvest = tokio::time::interval(HARVEST_PERIOD);
             let outcome = loop {
                 tokio::select! {
                     outcome = &mut drive => break outcome,
                     _ = harvest.tick() => {
-                        if !post_admitted(&actions, &policy, zid, intents, &mut posted) {
+                        if !hand_over(&actions, what, window, &mut handed, &mut each) {
                             return;
                         }
                     }
                 }
             };
             // What arrived in the last tick before the window closed.
-            if !post_admitted(&actions, &policy, zid, intents, &mut posted)
+            if !hand_over(&actions, what, window, &mut handed, &mut each)
                 || matches!(outcome, ScoutOutcome::LinkLost(_))
             {
                 return;
             }
             window_ms = (window_ms * 2).min(SCOUT_MAX_PERIOD_MS);
+            window += 1;
         }
     }
 }
 
-/// Post the intent of every responder of this window that has not been posted yet and whom the
-/// policy admits. `false` when the receiver is gone.
-fn post_admitted(
+/// A Hello a scout hands over, and the window it answered: windows are numbered from 0.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Delivery {
+    /// What the responder said of itself.
+    pub hello: ScoutedHello,
+    /// The window it answered.
+    pub window: u64,
+}
+
+/// Hand `each` the Hellos of this window that it has not been handed, in arrival order, and drop
+/// those of a role `what` did not ask for. `false` when `each` declined.
+fn hand_over(
     actions: &ScoutingActions,
-    policy: &AutoConnect,
-    own_zid: &[u8],
-    intents: &DialIntentSender,
-    posted: &mut BTreeSet<Vec<u8>>,
+    what: u8,
+    window: u64,
+    handed: &mut usize,
+    each: &mut impl FnMut(Delivery) -> bool,
 ) -> bool {
-    for hello in actions.scouted_hellos() {
-        // A node does not dial itself: its own Scout may come back through the group.
-        if hello.zid == own_zid || !posted.insert(hello.zid.clone()) {
+    for hello in actions.scouted_hellos().into_iter().skip(*handed) {
+        *handed += 1;
+        if !hello.whatami.is_some_and(|role| what & role.to_api() != 0) {
             continue;
         }
-        if let AutoconnectVerdict::Dial(intent) = autoconnect_verdict(policy, &hello) {
-            if intents.send(intent).is_err() {
-                return false;
-            }
+        if !each(Delivery { hello, window }) {
+            return false;
         }
     }
     true
+}
+
+/// A running scout a program asked for: a thread that scouts until this is dropped.
+///
+/// Dropping it stops the scout and waits for the thread, so no callback runs once the drop has
+/// returned; upstream waits for its task for up to ten seconds in the same place
+/// (`zenoh/src/api/scouting.rs` @ `terminate(Duration::from_secs(10))`).
+pub struct ScoutStream {
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ScoutStream {
+    /// Scout on `plan` for the roles `what` names, announcing `zid`, handing every Hello to
+    /// `each` on the scout's own thread. A plan that no socket can carry is a scout that finds
+    /// nobody, and not an error.
+    pub fn start(
+        plan: ScoutingPlan,
+        what: u8,
+        zid: Vec<u8>,
+        mut each: impl FnMut(ScoutedHello) + Send + 'static,
+    ) -> io::Result<Self> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()?;
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let thread = std::thread::Builder::new()
+            .name("wz-scout".to_owned())
+            .spawn(move || {
+                runtime.block_on(async move {
+                    let Some(link) = ScoutLink::bind_for_scout(&plan).await else {
+                        return;
+                    };
+                    tokio::select! {
+                        _ = link.scout_each(what, &zid, |delivery| {
+                            each(delivery.hello);
+                            true
+                        }) => {}
+                        _ = stopped => {}
+                    }
+                });
+            })?;
+        Ok(Self {
+            stop: Some(stop),
+            thread: Some(thread),
+        })
+    }
+}
+
+impl Drop for ScoutStream {
+    fn drop(&mut self) {
+        // The receiver of the stop completes when its sender goes.
+        drop(self.stop.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -503,6 +672,84 @@ mod tests {
         assert_eq!(
             (plan.group, plan.port),
             (IpAddr::from([0xff05, 0, 0, 0, 0, 0, 0, 0x231]), 7511)
+        );
+    }
+
+    /// A scout a program asks for reads the group, the interface and the hop limit of a config
+    /// and nothing else of it: not whether multicast scouting is on (a session's question), and
+    /// the roles are the ones it asks for. A group that is not a socket address is refused by name.
+    #[test]
+    fn a_scout_a_program_asks_for_reads_the_group_and_not_whether_scouting_is_on() {
+        let mut node = ZenohNodeConfig::default();
+        node.multicast_scouting = false;
+        node.scout_multicast_address = Some(String::from("224.0.0.231:7511"));
+        node.scout_multicast_interface = Some(String::from("auto"));
+        node.scout_multicast_ttl = Some(3);
+        let plan = ScoutingPlan::for_scout(&node, 1 | 2).expect("a plan");
+        assert_eq!(
+            (plan.group, plan.port),
+            (IpAddr::V4(Ipv4Addr::new(224, 0, 0, 231)), 7511)
+        );
+        assert_eq!((plan.interface.as_deref(), plan.ttl), (None, Some(3)));
+        assert_eq!(plan.what(), 1 | 2, "routers and peers, not clients");
+        assert_eq!(ScoutingPlan::for_scout(&node, 4).unwrap().what(), 4);
+        assert_eq!(
+            ScoutingPlan::for_scout(&ZenohNodeConfig::default(), 2)
+                .unwrap()
+                .port,
+            7446,
+            "an unstated group is zenoh's"
+        );
+        node.scout_multicast_address = Some(String::from("not-an-address"));
+        assert_eq!(
+            ScoutingPlan::for_scout(&node, 2).err(),
+            Some(ScoutingConfigError::Address(String::from("not-an-address")))
+        );
+    }
+
+    /// A window hands each Hello over once, as it arrives, in arrival order, and leaves out one
+    /// whose role was not asked for or that names no role; a caller that declines is told so.
+    #[test]
+    fn a_window_hands_each_hello_over_once_and_only_of_the_roles_asked_for() {
+        let actions: std::sync::Arc<ScoutingActions> = ScoutingActions::new(ScoutParams {
+            what: 2,
+            zid: vec![9],
+            timeout_ms: 1000,
+            exit_on_first: false,
+        });
+        let hello = |zid: u8, role: Option<WhatAmI>| ScoutedHello {
+            version: 9,
+            whatami: role,
+            zid: vec![zid],
+            locators: vec![],
+        };
+        let mut handed = 0;
+        let mut got = Vec::new();
+        let mut each = |delivery: Delivery| {
+            got.push((delivery.hello.zid[0], delivery.window));
+            true
+        };
+        actions.hellos.lock().unwrap().extend([
+            hello(1, Some(WhatAmI::Peer)),
+            hello(2, Some(WhatAmI::Router)),
+            hello(3, None),
+        ]);
+        assert!(hand_over(&actions, 2, 7, &mut handed, &mut each));
+        actions
+            .hellos
+            .lock()
+            .unwrap()
+            .push(hello(4, Some(WhatAmI::Peer)));
+        assert!(hand_over(&actions, 2, 7, &mut handed, &mut each));
+        assert_eq!(got, vec![(1, 7), (4, 7)], "once each, and the peers only");
+        actions
+            .hellos
+            .lock()
+            .unwrap()
+            .push(hello(5, Some(WhatAmI::Peer)));
+        assert!(
+            !hand_over(&actions, 2, 7, &mut handed, &mut |_: Delivery| false),
+            "a caller that declines ends the window"
         );
     }
 
