@@ -9,6 +9,7 @@
 //! names it.
 
 use crate::config::{ACCEPT_PENDING, ACCEPT_TIMEOUT_MS};
+#[cfg(feature = "transport-unicast")]
 use crate::session_glue::SessionTimeouts;
 
 /// How much an accepting node gives an inbound link before the handshake is complete, and how
@@ -51,7 +52,10 @@ impl AcceptBounds {
     /// The deadlines of the session handshake of an accept that has already spent
     /// `spent_ms` of the bound on the link's own handshake: the §2.5 baseline, with the
     /// `Accepting` window the rest of the bound, and never nothing, so the drive finds the
-    /// deadline elapsed rather than waiting for ever on a zero.
+    /// deadline elapsed rather than waiting for ever on a zero. The deadlines are the session
+    /// machine's, so this is there with the unicast session (`transport-unicast`) and not in a
+    /// build that holds the bounds as data only.
+    #[cfg(feature = "transport-unicast")]
     pub fn timeouts_after(&self, spent_ms: u64) -> SessionTimeouts {
         SessionTimeouts {
             accepting_inactivity_ms: self.timeout_ms.saturating_sub(spent_ms).max(1),
