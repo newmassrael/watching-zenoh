@@ -293814,6 +293814,36 @@
         "Item 751 step (b) continues at step 5, the token and interest planes, then step 6, the node surfaces listed in section 5 of the note. Still not covered in the query plane: a querier-carried timeout shorter than the default firing a relay's sweep, a relay consolidating replies itself, and a ResponseFinal racing its last reply. The owner question of step 3 stands: a ROUTER node's south peer region relays nothing between link-state peers."
       ]
     },
+    "Round 3791": {
+      "decision_summary": "Open-debt item 751, step (b), step 4 third pass: the three things the second pass (round 3790) still listed as uncovered, which had no reason to be left. Three scenes in the differential gate and a ReplyAfterFinal step. A querier-carried timeout shorter than the default: the clock moves past 2,000 ms and not past the default, so only a relay arming its deadline from the carried value ends the query; both planes send Err(Timeout) and the final under the querier's own id and drop the reply after it. Consolidation: a queryable answers one keyexpr twice under each mode and both replies reach the querier in both planes, so neither consolidates at the relay. Final and reply in every order: one branch ends unanswered, the other answers, the querier's final follows both, the finals in the opposite order, and a reply after its own final is dropped. No difference and no defect in either mode, each thing counted in what was sent. No test function is added, so the count guards are unchanged.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward/peer_differential_tests.rs: the ReplyAfterFinal step with the ended-request record, three scenes (a timeout shorter than the default, two replies under each consolidation mode, finals and replies in every order) and three counted checks. docs/peer-region-hats.md: section 8 extended, the uncovered paragraph replaced by what the pass found. No forwarder code changes."
+      ],
+      "verification_bullets": [
+        "On pc2 the three gate tests pass over fourteen scenes in both modes, with the counted checks for the Err(Timeout) under the carried 2,000 ms deadline (request id 51), both replies of a consolidated query (ids 60 to 62) and the answer after one branch ended with the final after both (id 71). The mcast-faces arm of router_forward prints 264, the number its guard holds; clippy with -D warnings is clean under all features and under the defaults; rustfmt passes. Not run: the hosted run, the peer E2E files needing a foreign binary, a three-hop tree."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Item 751 step (b) continues at step 5, the token and interest planes, then step 6, the node surfaces listed in section 5 of the note. Still not covered, and for the publish plane too: a tree of more than one hop. The owner question of step 3 stands: a ROUTER node's south peer region relays nothing between link-state peers."
+      ],
+      "publishable_decision_summary": "Open-debt item 751, step (b), step 4 third pass: the three things the second pass (round 3790) still listed as uncovered, which had no reason to be left. Three scenes in the differential gate and a ReplyAfterFinal step. A querier-carried timeout shorter than the default: the clock moves past 2,000 ms and not past the default, so only a relay arming its deadline from the carried value ends the query; both planes send Err(Timeout) and the final under the querier's own id and drop the reply after it. Consolidation: a queryable answers one keyexpr twice under each mode and both replies reach the querier in both planes, so neither consolidates at the relay. Final and reply in every order: one branch ends unanswered, the other answers, the querier's final follows both, the finals in the opposite order, and a reply after its own final is dropped. No difference and no defect in either mode, each thing counted in what was sent. No test function is added, so the count guards are unchanged.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward/peer_differential_tests.rs: the ReplyAfterFinal step with the ended-request record, three scenes (a timeout shorter than the default, two replies under each consolidation mode, finals and replies in every order) and three counted checks. docs/peer-region-hats.md: section 8 extended, the uncovered paragraph replaced by what the pass found. No forwarder code changes."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2 the three gate tests pass over fourteen scenes in both modes, with the counted checks for the Err(Timeout) under the carried 2,000 ms deadline (request id 51), both replies of a consolidated query (ids 60 to 62) and the answer after one branch ended with the final after both (id 71). The mcast-faces arm of router_forward prints 264, the number its guard holds; clippy with -D warnings is clean under all features and under the defaults; rustfmt passes. Not run: the hosted run, the peer E2E files needing a foreign binary, a three-hop tree."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Item 751 step (b) continues at step 5, the token and interest planes, then step 6, the node surfaces listed in section 5 of the note. Still not covered, and for the publish plane too: a tree of more than one hop. The owner question of step 3 stands: a ROUTER node's south peer region relays nothing between link-state peers."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
