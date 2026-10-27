@@ -293784,6 +293784,36 @@
         "The configuration corpus is three capi-c scenarios; a TLS, a scouting-only and a listen-may-fail configuration would each hold a branch of the derivation to a run."
       ]
     },
+    "Round 3790": {
+      "decision_summary": "Open-debt item 751, step (b), step 4 second pass, what the first pass (round 3787) left uncovered in the query plane: three more scenes in the differential gate and three steps (QueryWith, ReplyErr, Advance), with a clock injected into both nodes. What a querier asks for (target All and AllComplete, each consolidation mode, a timeout, parameters) reaches the queryables and the answers return; an Err reply is relayed under the querier's id; a query nobody answers ends with the relay's own Err(Timeout) and the final once the clock passes the default deadline, and a late reply is dropped by both planes; a query open across a recompute is answered. No difference was found in either mode beyond the gossip one already listed, so this pass found no defect in either plane. Each claimed thing is counted in what was sent, so a scene that stops producing one fails rather than passing equal over nothing. No test function is added, so the count guards are unchanged.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward/peer_differential_tests.rs: the QueryWith, ReplyErr and Advance steps, the Asked extras, a clock injected into both nodes, the Request compared with its target, timeout and body, the Err response kind, three scenes and the check that each claimed thing is produced. crates/wz-runtime-tokio/src/router_forward.rs: the cfg(test) peer_with_clock. docs/peer-region-hats.md: section 8 extended. No forwarder code changes."
+      ],
+      "verification_bullets": [
+        "On pc2 the three gate tests pass over eleven scenes in both modes, including the counted checks (a Request carrying target All, target AllComplete, a timeout, a consolidation mode and parameters; an Err reply and the relay's Err(Timeout) returned to a querier; a reply that crossed a recompute). The mcast-faces arm of router_forward prints 264, the number its guard holds; clippy with -D warnings is clean under all features and under the defaults; rustfmt, the citation gate and the debt census pass. The first run passed at once, which is why the counted checks were added and run next rather than the pass being reported on equality alone. Not run: the hosted run, the peer E2E files needing a foreign binary."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Item 751 step (b) continues at step 5, the token and interest planes, then step 6, the node surfaces listed in section 5 of the note. Still not covered in the query plane: a querier-carried timeout shorter than the default firing a relay's sweep, a relay consolidating replies itself, and a ResponseFinal racing its last reply. The owner question of step 3 stands: a ROUTER node's south peer region relays nothing between link-state peers."
+      ],
+      "publishable_decision_summary": "Open-debt item 751, step (b), step 4 second pass, what the first pass (round 3787) left uncovered in the query plane: three more scenes in the differential gate and three steps (QueryWith, ReplyErr, Advance), with a clock injected into both nodes. What a querier asks for (target All and AllComplete, each consolidation mode, a timeout, parameters) reaches the queryables and the answers return; an Err reply is relayed under the querier's id; a query nobody answers ends with the relay's own Err(Timeout) and the final once the clock passes the default deadline, and a late reply is dropped by both planes; a query open across a recompute is answered. No difference was found in either mode beyond the gossip one already listed, so this pass found no defect in either plane. Each claimed thing is counted in what was sent, so a scene that stops producing one fails rather than passing equal over nothing. No test function is added, so the count guards are unchanged.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward/peer_differential_tests.rs: the QueryWith, ReplyErr and Advance steps, the Asked extras, a clock injected into both nodes, the Request compared with its target, timeout and body, the Err response kind, three scenes and the check that each claimed thing is produced. crates/wz-runtime-tokio/src/router_forward.rs: the cfg(test) peer_with_clock. docs/peer-region-hats.md: section 8 extended. No forwarder code changes."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2 the three gate tests pass over eleven scenes in both modes, including the counted checks (a Request carrying target All, target AllComplete, a timeout, a consolidation mode and parameters; an Err reply and the relay's Err(Timeout) returned to a querier; a reply that crossed a recompute). The mcast-faces arm of router_forward prints 264, the number its guard holds; clippy with -D warnings is clean under all features and under the defaults; rustfmt, the citation gate and the debt census pass. The first run passed at once, which is why the counted checks were added and run next rather than the pass being reported on equality alone. Not run: the hosted run, the peer E2E files needing a foreign binary."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Item 751 step (b) continues at step 5, the token and interest planes, then step 6, the node surfaces listed in section 5 of the note. Still not covered in the query plane: a querier-carried timeout shorter than the default firing a relay's sweep, a relay consolidating replies itself, and a ResponseFinal racing its last reply. The owner question of step 3 stands: a ROUTER node's south peer region relays nothing between link-state peers."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
