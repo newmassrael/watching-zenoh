@@ -2,7 +2,7 @@
   "schema": 1,
   "catalog_version": 2,
   "built_from": {
-    "commit": "79b900170f77f7e155e59508fe4f0cf7faaf3b21",
+    "commit": "1c6272844f64d9c38544dd14bcb2e53c4fa07ea3",
     "tree_clean": true
   },
   "platform": {
@@ -47,8 +47,8 @@
       "name": "declared-node",
       "kind": "executable",
       "path": "bin/declared-node",
-      "sha256": "9d5f3b200b3d821b60597642b925362f01143720d10602e8d699e75ac307221b",
-      "size": 236976,
+      "sha256": "c0f11f4922b0e8762dc1bdd9cd4ca66f506ef0b2297c307de6a0037e90daa1b3",
+      "size": 233632,
       "elf": {
         "class": 64,
         "machine": "aarch64",
@@ -93,15 +93,16 @@
         "declared",
         "default"
       ],
-      "resolved_features": {
-        "wz-runtime-tokio": []
-      },
+      "resolved_features": {},
       "device_requires": [
         "entropy",
-        "interface-list",
-        "sockets-tcp",
-        "threads"
+        "sockets-tcp"
       ],
+      "requires": [
+        "entropy",
+        "sockets-tcp"
+      ],
+      "may_require": [],
       "unassessed_features": []
     }
   ]
