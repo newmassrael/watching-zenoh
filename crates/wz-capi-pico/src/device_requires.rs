@@ -56,22 +56,16 @@ pub unsafe extern "C" fn wz_ext_config_device_requires(
 /// The requirement of pico's open of `cfg`, or the code and reason `z_open` refuses it with.
 fn requirement_of(cfg: &ConfigState) -> Result<String, (ZResult, &'static str)> {
     // The TLS material is resolved before anything else, as `z_open` resolves it: a key whose file
-    // cannot be read or whose inline value cannot be decoded refuses the open.
-    #[cfg(feature = "engine-tokio")]
-    let files = match crate::session::resolve_tls_config(cfg) {
-        Ok(_) => tls_files_named(cfg),
-        Err(code) => {
-            return Err((
-                code,
-                "the open refuses this config: a TLS key's material cannot be read",
-            ))
-        }
-    };
-    #[cfg(not(feature = "engine-tokio"))]
-    let files = {
-        let _ = tls_files_named;
-        Vec::<String>::new()
-    };
+    // cannot be read or whose inline value cannot be decoded refuses the open. A build without a
+    // TLS backend reads no certificate file, whatever its engine.
+    #[cfg(any(feature = "transport-link-tls", feature = "transport-link-quic"))]
+    if let Err(code) = crate::session::resolve_tls_config(cfg) {
+        return Err((
+            code,
+            "the open refuses this config: a TLS key's material cannot be read",
+        ));
+    }
+    let files = tls_files_named(cfg);
     let OpenConfig {
         connect,
         listen,
@@ -87,12 +81,14 @@ fn requirement_of(cfg: &ConfigState) -> Result<String, (ZResult, &'static str)> 
     #[cfg(feature = "peer")]
     let _ = dial_whatami;
     // A listen endpoint that names a group is the session's one transport, and a connect locator
-    // beside it opens nothing (pico adds a peer to a unicast transport only).
-    #[cfg(feature = "engine-tokio")]
+    // beside it opens nothing (pico adds a peer to a unicast transport only). Each engine reads it
+    // with `is_group_endpoint`; a build with neither the tokio engine nor `peer` refused every
+    // listener above.
+    #[cfg(any(feature = "engine-tokio", feature = "peer"))]
     let joins_a_group = listen
         .as_deref()
         .is_some_and(crate::session::is_group_endpoint);
-    #[cfg(not(feature = "engine-tokio"))]
+    #[cfg(not(any(feature = "engine-tokio", feature = "peer")))]
     let joins_a_group = false;
     #[cfg(not(feature = "multicast-transport"))]
     if joins_a_group {

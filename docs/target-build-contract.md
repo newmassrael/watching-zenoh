@@ -372,7 +372,18 @@ ap-demo scenario asks `--device-requires` for the document it runs, and Layer C1
 each traced run to that answer as well as to the build's bound. Its runs include a
 host-named dial, a TLS dial whose trust anchor is a file, a client that finds its node
 only by scouting (on a group port of the run's own), a listener allowed to fail its bind,
-and a sessions document with a listener and a host-named dial.
+a peer alone on a group named by its interface, and a sessions document with a listener
+and a host-named dial.
+
+A run that asks for a facility does not show that it cannot go on without it. So some runs
+are refused one: the oracle's shim fails the calls it brackets (the interface listing and
+lookups, name resolution) as a device without the facility does, and the run is held to
+its configuration's door. When the door's `requires` names the refused facility, the run
+has to fail by itself; when it does not, the run has to go on. Each library dials by host
+name without the resolver (it fails) and by address without the interface listing (it
+goes on), and the zenoh-c peer joins its `#iface=lo` group without the listing (it goes
+on, on the default interface). An interface ioctl is not refused this way, so the raw
+Ethernet claim is held by reading the code only.
 
 A manifest written before the split (schema 1 has no number for it) carries neither key,
 in every artifact; a reader takes its whole `device_requires` as `may_require`. Such a

@@ -14,20 +14,44 @@
 // fails with ENOENT, changes nothing, and is ordered with the thread's other calls in its trace.
 // A point mark is made once per process; a scope is marked every time, since what it brackets is
 // what it attributes.
+//
+// A scenario can also DENY a facility the shim brackets (WZ_FACILITY_DENY, a comma-separated list
+// of facility words): the scope is still marked, so the trace shows the run asked, and the call
+// fails as it fails on a device that refuses it (EACCES; EAI_FAIL for a resolution). A run denied a
+// facility its configuration does not require has to go on, and one denied a facility it requires
+// has to fail: the must analysis, held to a run.
 
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <netdb.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
 
 #define MARK_ROOT "/wz-facility-witness/"
+
+// Whether the run's WZ_FACILITY_DENY names `facility`.
+static int denied(const char *facility) {
+    const char *list = getenv("WZ_FACILITY_DENY");
+    size_t want = strlen(facility);
+    while (list && *list) {
+        const char *end = strchr(list, ',');
+        size_t len = end ? (size_t)(end - list) : strlen(list);
+        if (len == want && !strncmp(list, facility, want)) {
+            return 1;
+        }
+        list = end ? end + 1 : NULL;
+    }
+    return 0;
+}
 
 static void mark(const char *path) {
     // The answer is always ENOENT and is not the point: the call is.
@@ -117,6 +141,11 @@ int getifaddrs(struct ifaddrs **out) {
         real = (int (*)(struct ifaddrs **))dlsym(RTLD_NEXT, "getifaddrs");
     }
     mark(MARK_ROOT "enter/interface-list");
+    if (denied("interface-list")) {
+        mark(MARK_ROOT "leave/interface-list");
+        errno = EACCES;
+        return -1;
+    }
     int rc = real(out);
     mark(MARK_ROOT "leave/interface-list");
     return rc;
@@ -128,6 +157,11 @@ unsigned int if_nametoindex(const char *name) {
         real = (unsigned int (*)(const char *))dlsym(RTLD_NEXT, "if_nametoindex");
     }
     mark(MARK_ROOT "enter/interface-list");
+    if (denied("interface-list")) {
+        mark(MARK_ROOT "leave/interface-list");
+        errno = EACCES;
+        return 0;
+    }
     unsigned int index = real(name);
     mark(MARK_ROOT "leave/interface-list");
     return index;
@@ -139,6 +173,11 @@ char *if_indextoname(unsigned int index, char name[IF_NAMESIZE]) {
         real = (char *(*)(unsigned int, char *))dlsym(RTLD_NEXT, "if_indextoname");
     }
     mark(MARK_ROOT "enter/interface-list");
+    if (denied("interface-list")) {
+        mark(MARK_ROOT "leave/interface-list");
+        errno = EACCES;
+        return NULL;
+    }
     char *out = real(index, name);
     mark(MARK_ROOT "leave/interface-list");
     return out;
@@ -153,6 +192,10 @@ int getaddrinfo(const char *restrict node, const char *restrict service,
                         struct addrinfo **restrict))dlsym(RTLD_NEXT, "getaddrinfo");
     }
     mark(MARK_ROOT "enter/name-resolution");
+    if (denied("name-resolution")) {
+        mark(MARK_ROOT "leave/name-resolution");
+        return EAI_FAIL;
+    }
     int rc = real(node, service, hints, res);
     mark(MARK_ROOT "leave/name-resolution");
     return rc;

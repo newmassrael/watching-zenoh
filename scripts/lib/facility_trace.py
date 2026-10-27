@@ -95,6 +95,11 @@ WITNESSES = {
                        "inside it)",
 }
 
+# What a scenario can deny a run (`Scenario.deny`): the facilities the shim brackets, whose calls it
+# refuses as a device without them refuses them. An interface ioctl (SIOCGIF*) is a system call the
+# shim does not see, so a raw Ethernet link is not denied its interface by this.
+DENIABLE = ("interface-list", "name-resolution")
+
 # What the C library, the loader and the language runtime do for themselves, and why each is not
 # a request of the artifact: each is either done before the artifact runs or done without when the
 # operating system refuses it.
@@ -424,6 +429,9 @@ class Scenario:
     # An untraced command run before the traced one, whose stdout is the requirement of the run's
     # configuration (a door that answers apart from the run, as ap-demo's `--device-requires`).
     stated_by: tuple[str, ...] = ()
+    # Facilities of `DENIABLE` the traced run is refused. The run is held to its configuration's
+    # door: it has to fail by itself when the door requires one of them, and go on otherwise.
+    deny: tuple[str, ...] = ()
 
 
 def library_scenarios(driver: Driver) -> tuple[Scenario, ...]:
@@ -473,6 +481,27 @@ def configuration_corpus(driver: Driver) -> tuple[Scenario, ...]:
                  (peer_lib, "listen", "udp/224.0.0.224:{port2}#iface=lo", "3",
                   "scouting/multicast/enabled=false"),
                  seconds=15.0, driver=driver),
+        Scenario("a peer that joins a group on a named interface, denied the interface listing",
+                 (peer_lib, "listen", "udp/224.0.0.224:{port2}#iface=lo", "3",
+                  "scouting/multicast/enabled=false"),
+                 seconds=15.0, driver=driver, deny=("interface-list",)),
+    )
+
+
+def denial_corpus(driver: Driver) -> tuple[Scenario, ...]:
+    """The runs that hold a library's `requires` to a run, each refused one facility (`deny`): a dial
+    whose only target is named by host cannot go on without the resolver, so it has to fail, and a
+    dial to an address goes on without the interface listing its link reads, so it has to go on."""
+    demo = "{package}/bin/wz-ap-demo"
+    return (
+        Scenario("a client that dials ap-demo by host name, denied name resolution",
+                 ("{bin}", "connect", "tcp/localhost:{port}", "3"),
+                 (demo, "--listen", "tcp/127.0.0.1:{port}", "--key", "demo/x"), peer_listens=True,
+                 seconds=15.0, driver=driver, deny=("name-resolution",)),
+        Scenario("a client that dials ap-demo by address, denied the interface listing",
+                 ("{bin}", "connect", "tcp/127.0.0.1:{port}", "3"),
+                 (demo, "--listen", "tcp/127.0.0.1:{port}", "--key", "demo/x"), peer_listens=True,
+                 seconds=15.0, driver=driver, deny=("interface-list",)),
     )
 
 
@@ -506,10 +535,12 @@ SESSIONS_DOCUMENT = """{
 }
 """
 
+PICO_DRIVER = Driver("pico_session.c", ("crates/wz-capi-pico/include", "crates/wz-capi-core/include"))
+C_DRIVER = Driver("c_session.c")
+
 SCENARIOS = {
-    "capi-pico": library_scenarios(Driver("pico_session.c",
-                                          ("crates/wz-capi-pico/include", "crates/wz-capi-core/include"))),
-    "capi-c": library_scenarios(Driver("c_session.c")) + configuration_corpus(Driver("c_session.c")),
+    "capi-pico": library_scenarios(PICO_DRIVER) + denial_corpus(PICO_DRIVER),
+    "capi-c": library_scenarios(C_DRIVER) + configuration_corpus(C_DRIVER) + denial_corpus(C_DRIVER),
     "ap-demo": (
         Scenario("a listener that a peer publishes to",
                  ("{bin}", "--listen", "tcp/127.0.0.1:{port}", "--key", "demo/x"),
@@ -592,8 +623,12 @@ def _run(scenario: Scenario, binary: pathlib.Path, package: pathlib.Path, env: d
     elif scenario.peer:
         late = threading.Timer(1.5, start_peer)
         late.start()
+    undeniable = [f for f in scenario.deny if f not in DENIABLE]
+    if undeniable:
+        raise ValueError(f"{scenario.name}: the shim cannot deny {', '.join(undeniable)}")
+    traced_env = {**env, "WZ_FACILITY_DENY": ",".join(scenario.deny)} if scenario.deny else env
     try:
-        seen = observe(argv(scenario.traced), scenario.seconds, env)
+        seen = observe(argv(scenario.traced), scenario.seconds, traced_env)
         seen.stated = stated
         return seen
     finally:
@@ -625,14 +660,20 @@ def judge_package(directory: pathlib.Path) -> tuple[list[str], list[str]]:
         may = art.get("may_require", art["device_requires"]) if "requires" in art else art["device_requires"]
         for scenario in scenarios:
             seen = run_scenario(scenario, directory / art["path"], directory)
-            found = judge(seen, requires, may)
+            stated = stated_requirement(seen.stated) if seen.stated else configuration_requirement(seen.stdout)
+            if scenario.deny and stated is None:
+                raise ValueError(f"{scenario.name}: a run denied a facility is held to its configuration's "
+                                 "door, and this run states none")
+            # A run denied a facility its configuration requires is expected to fail: what it asked for
+            # before failing stands for no whole run, under the build's bound as under its own.
+            fails = stated is not None and bool(set(scenario.deny) & set(stated[0]))
+            found = judge(seen, requires, may, scenario.deny, fails)
             findings += [f"{art['id']} ({scenario.name}): {f}" for f in found]
             report.append(f"{art['id']} ({scenario.name}): observed {sorted(seen.facilities)}, "
                           f"{'refuted' if found else 'agrees with'} requires {requires} and may_require {may}")
-            stated = stated_requirement(seen.stated) if seen.stated else configuration_requirement(seen.stdout)
             if stated is not None:
                 c_requires, c_may = stated
-                found = judge(seen, c_requires, c_may)
+                found = judge(seen, c_requires, c_may, scenario.deny, fails)
                 findings += [f"{art['id']} ({scenario.name}, for its configuration): {f}" for f in found]
                 report.append(f"{art['id']} ({scenario.name}): {'refuted' if found else 'agrees with'} "
                               f"its configuration's requires {c_requires} and may_require {c_may}")
@@ -656,17 +697,29 @@ def stated_requirement(text: str) -> tuple[list[str], list[str] | None]:
     return list(stated["requires"]), stated["may_require"]
 
 
-def judge(seen: Observation, requires: list[str], may_require: list[str] | None) -> list[str]:
+def judge(seen: Observation, requires: list[str], may_require: list[str] | None,
+          denied: tuple[str, ...] = (), fails: bool = False) -> list[str]:
     """What an observation refutes of a derivation: a required facility the run never asked for (the
     must analysis claimed too much), a facility asked for outside the bound (the may analysis
     claimed too little), and each unclassified event. `may_require` None is UNKNOWN: the bound
     cannot be refuted. A run that ended by itself with a failure is a finding first: it stopped
-    short of what a run does, so what it asked for stands for nothing."""
+    short of what a run does, so what it asked for stands for nothing.
+
+    A run `denied` facilities is held to `fails`, which its configuration's door decides: a run that
+    goes on without a facility `requires` names refutes the must analysis, and a run that fails
+    without one it does not name refutes it the other way (that failure is the finding above). A
+    run expected to fail is not held to have asked for every required facility."""
     out = []
-    if seen.exit_status not in (None, 0):
-        out.append(f"the run failed by itself (exit {seen.exit_status}), so it stands for no run: "
-                   f"{seen.stderr_tail.strip() or 'it wrote nothing to stderr'}")
-    out += [f"requires {f} and the run never asked for it" for f in requires if f not in seen.facilities]
+    if fails:
+        claimed = [f for f in denied if f in requires]
+        if claimed and seen.exit_status in (None, 0):
+            out.append(f"requires {', '.join(claimed)}, and a run denied it went on")
+    else:
+        if seen.exit_status not in (None, 0):
+            without = f" denied {', '.join(denied)}," if denied else ""
+            out.append(f"the run{without} failed by itself (exit {seen.exit_status}), so it stands for no "
+                       f"run: {seen.stderr_tail.strip() or 'it wrote nothing to stderr'}")
+        out += [f"requires {f} and the run never asked for it" for f in requires if f not in seen.facilities]
     if may_require is not None:
         bound = set(requires) | set(may_require)
         out += [f"the run asked for {f} outside requires and may_require ({seen.facilities[f]})"
@@ -728,10 +781,12 @@ int main(int argc, char **argv) {
         clock_gettime(CLOCK_REALTIME, &ts);
     } else if (!strcmp(what, "interface-list")) {
         struct ifaddrs *list;
-        if (!getifaddrs(&list)) freeifaddrs(list);
+        if (getifaddrs(&list)) return 3;
+        freeifaddrs(list);
     } else if (!strcmp(what, "name-resolution")) {
         struct addrinfo *res;
-        if (!getaddrinfo("localhost", "7447", 0, &res)) freeaddrinfo(res);
+        if (getaddrinfo("localhost", "7447", 0, &res)) return 3;
+        freeaddrinfo(res);
     } else if (!strcmp(what, "process")) {
         pid_t p = fork();
         if (p == 0) _exit(0);
@@ -819,6 +874,22 @@ def _selftest() -> int:
     expect("a run that failed by itself is a finding, with what it said",
            judge(failed_run, ["entropy"], None)
            == ["the run failed by itself (exit 1), so it stands for no run: z_open returned -1"])
+    expect("a run denied a facility it requires is to fail, and one that goes on refutes the claim",
+           judge(failed_run, ["entropy", "name-resolution"], None, ("name-resolution",), True) == []
+           and judge(seen, ["entropy", "name-resolution"], None, ("name-resolution",), True)
+           == ["requires name-resolution, and a run denied it went on"])
+    expect("a run denied a facility it does not require is to go on, and one that fails is a finding",
+           judge(seen, ["entropy"], None, ("interface-list",)) == []
+           and judge(failed_run, ["entropy"], None, ("interface-list",))
+           == ["the run denied interface-list, failed by itself (exit 1), so it stands for no run: "
+               "z_open returned -1"])
+    expect("a run expected to fail is not held to have asked for every required facility, and its "
+           "bound still holds",
+           judge(failed_run, ["entropy", "name-resolution", "threads"], ["sockets-tcp"], ("name-resolution",),
+                 True)
+           == ["the run asked for sockets-udp outside requires and may_require (u)"])
+    expect("only what the shim brackets can be denied, and each is a facility",
+           set(DENIABLE) <= set(wz_config.OS_FACILITIES))
 
     missing = missing_tools()
     if missing:
@@ -866,6 +937,14 @@ def _selftest() -> int:
                    set(local.facilities) == {"wall-clock"} and local.unclassified == [])
             mono = observed("monotonic")
             expect(f"a monotonic clock is not the calendar ({mono.as_json()})", mono.facilities == {})
+            for facility in DENIABLE:
+                refused = observe([str(probe), facility], env={"WZ_FACILITY_DENY": f"wall-clock,{facility}"})
+                expect(f"a denied {facility} is still asked for, and the call fails ({refused.as_json()}, "
+                       f"exit {refused.exit_status})",
+                       set(refused.facilities) == {facility} and refused.exit_status == 3)
+                other = observe([str(probe), facility], env={"WZ_FACILITY_DENY": "wall-clock"})
+                expect(f"a facility the list does not name is not denied ({facility}, exit {other.exit_status})",
+                       other.exit_status == 0)
             for what in ("wait", "stubborn"):
                 started = time.monotonic()
                 stopped = observe([str(probe), what], seconds=0.5)
