@@ -431,6 +431,24 @@ Each lands whole with its surface lines, tests and faults in one round.
   QoS, attachments, encodings, localities, express, congestion control, `new_timestamp`, the
   zero-copy payload (`ZBytes` over the engine's received bytes, which no adapter does today),
   `declare_keyexpr` and `undeclare` (a key declared by another session is an error upstream).
+  Cut in four, each landing whole: **Z2a** the declaration of a key, **Z2b** `put` and `delete`
+  from the session (the publication builder with its setters), **Z2c** `declare_subscriber` with
+  the five handlers and the test of D4, **Z2d** `Publisher`.
+  - **Z2a (landed).** `Session::declare_keyexpr`, `Session::undeclare` with `Undeclarable` and its
+    sealed trait, and the impl for `KeyExpr`, over the anchor of Z1: a declared key is held by
+    the engine once per holder (`acquire_keyexpr`) and let go with the last, and a key declared by
+    another session is an error. Two things differ from upstream's file on purpose. The
+    undeclaration of a key holds its anchor, where upstream's borrows the session, because a
+    handle here is made by the call that undeclares; and the anchor lets go of a hold whose
+    engine id does not fit the sixteen bits of the wire and uses the key whole, where taking the
+    hold and returning no id would leak it (the engine counts in sixty-four bits and no test can
+    reach an id that large, so the branch is argued and not run). Upstream retracts only when the
+    caller holds the one reference, so `undeclare` of a key that has a clone leaves the
+    declaration to the last clone; a unit test holds that. The differential reads 17 lines of
+    transcript on each side (the error texts included, down to the id upstream numbers the first
+    declaration with) and the engine's table is read by unit tests only, because upstream shows no
+    such table. 3 of the default lines and the same of each other arm, 5 injected faults, none
+    missed.
 - **Z3. Queries.** `get`, `declare_queryable`, `Query`, `Reply`, `declare_querier`, consolidation,
   targets, timeouts. (The cancellation token is already in, Z0b; the builders of `get` that take
   it join here.)
