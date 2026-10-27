@@ -1196,6 +1196,141 @@ macro_rules! session_cases {
                 out
             }
 
+            /// A node of this crate that asks an upstream queryable through queriers of every
+            /// shape: what each querier says of itself, what each get of one received, and what
+            /// the queryable saw of each query.
+            pub fn queriers() -> Vec<String> {
+                use $z::{
+                    internal::traits::{EncodingBuilderTrait, QoSBuilderTrait, SampleBuilderTrait},
+                    query::{ConsolidationMode, QueryTarget, ReplyKeyExpr},
+                };
+                let port = free_port();
+                let subject = $z::open(peer("5a0040", port)).wait().expect("opens");
+                let answerer = observer::answerer("b00040", port).expect("the answerer opens");
+                let wait = Duration::from_secs(5);
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                let mut ready = false;
+                while !ready && std::time::Instant::now() < deadline {
+                    ready = subject
+                        .get("demo/g/ready")
+                        .timeout(Duration::from_secs(1))
+                        .wait()
+                        .map(|replies| replies.iter().count() > 0)
+                        .unwrap_or(false);
+                }
+                let mut out = vec![format!("queryable known: {ready}")];
+                let says = |label: &str, querier: &$z::query::Querier<'_>| {
+                    format!(
+                        "{label} says: {} {:?} {:?} {:?}",
+                        querier.key_expr(),
+                        querier.priority(),
+                        querier.congestion_control(),
+                        querier.accept_replies(),
+                    )
+                };
+                let plain = subject
+                    .declare_querier("demo/g/plain")
+                    .priority($z::qos::Priority::RealTime)
+                    .congestion_control($z::qos::CongestionControl::Block)
+                    .express(true)
+                    .target(QueryTarget::AllComplete)
+                    .timeout(wait)
+                    .wait()
+                    .expect("declares");
+                out.push(says("plain", &plain));
+                // A querier asks again as it was declared, and each get is a query of its own.
+                for round in ["first", "second"] {
+                    out.extend(replies_of(
+                        &format!("plain, {round}"),
+                        plain.get().parameters("a=1;b=2").wait(),
+                    ));
+                }
+                let body = subject.declare_querier("demo/g/body").timeout(wait).wait().expect("declares");
+                out.extend(replies_of(
+                    "with a body",
+                    body.get()
+                        .payload("body")
+                        .encoding($z::bytes::Encoding::TEXT_PLAIN)
+                        .attachment("att")
+                        .source_info($z::sample::SourceInfo::new(
+                            $z::session::EntityGlobalId::new("c0ffee".parse().expect("an id"), 3),
+                            5,
+                        ))
+                        .wait(),
+                ));
+                let forms = subject
+                    .declare_querier("demo/g/forms/**")
+                    .target(QueryTarget::All)
+                    .timeout(wait)
+                    .wait()
+                    .expect("declares");
+                out.extend(replies_of("every form of reply", forms.get().wait()));
+                let far = subject
+                    .declare_querier("demo/g/far")
+                    .accept_replies(ReplyKeyExpr::Any)
+                    .timeout(wait)
+                    .wait()
+                    .expect("declares");
+                out.push(says("far", &far));
+                out.extend(replies_of("disjoint reply accepted", far.get().wait()));
+                let refusing = subject
+                    .declare_querier("demo/g/far")
+                    .timeout(Duration::from_secs(2))
+                    .wait()
+                    .expect("declares");
+                out.push(says("refusing", &refusing));
+                out.extend(replies_of("disjoint reply refused", refusing.get().wait()));
+                let silent = subject
+                    .declare_querier("demo/g/silent")
+                    .timeout(Duration::from_millis(500))
+                    .wait()
+                    .expect("declares");
+                out.extend(replies_of("never answered", silent.get().wait()));
+                for (label, mode) in [
+                    ("auto", None),
+                    ("none", Some(ConsolidationMode::None)),
+                    ("monotonic", Some(ConsolidationMode::Monotonic)),
+                    ("latest", Some(ConsolidationMode::Latest)),
+                ] {
+                    let declared = subject.declare_querier("demo/g/dup").timeout(wait);
+                    let dup = match mode {
+                        Some(mode) => declared.consolidation(mode).wait(),
+                        None => declared.wait(),
+                    }
+                    .expect("declares");
+                    out.extend(replies_of(&format!("versions, consolidation {label}"), dup.get().wait()));
+                }
+                // A key the session declared goes on the wire as a declaration.
+                let declared = subject.declare_keyexpr("demo/g/options").wait().expect("declares");
+                let options = subject.declare_querier(declared).timeout(wait).wait().expect("declares");
+                out.extend(replies_of("on a declared key", options.get().wait()));
+                let nobody = subject
+                    .declare_querier("demo/elsewhere/none")
+                    .timeout(Duration::from_secs(2))
+                    .wait()
+                    .expect("declares");
+                out.extend(replies_of("nobody to answer", nobody.get().wait()));
+                out.push(format!(
+                    "invalid key: {}",
+                    text(subject.declare_querier("demo//bad").wait().map(|_| ()))
+                ));
+                out.extend(
+                    answerer
+                        .lines()
+                        .into_iter()
+                        .map(|line| format!("the answerer {line}")),
+                );
+                out.push(format!("undeclare: {}", text(plain.undeclare().wait())));
+                subject.close().wait().expect("closes");
+                out.extend(replies_of("a get after close", body.get().wait()));
+                out.push(format!("undeclare after close: {}", text(body.undeclare().wait())));
+                out.push(format!(
+                    "declare after close: {}",
+                    text(subject.declare_querier("demo/g/plain").wait().map(|_| ()))
+                ));
+                out
+            }
+
             /// What a sample says, as one line: every field of it that crosses a link.
             fn describe(sample: &$z::sample::Sample) -> String {
                 let timestamp = sample.timestamp().map(|t| format!("{t}"));
@@ -1833,6 +1968,21 @@ fn what_a_get_asks_is_what_an_upstream_queryable_receives_and_answers() {
     assert!(u.iter().any(|l| l == "answered late: 1 reply(ies)"), "{u:#?}");
     assert!(u.iter().any(|l| l == "never answered: 1 reply(ies)"), "{u:#?}");
     compare("gets", &u, &w);
+}
+
+#[test]
+fn what_a_querier_asks_is_what_an_upstream_queryable_receives_and_answers() {
+    // The log of upstream's nodes, for a run that is asked for it with `RUST_LOG`.
+    up_zenoh::try_init_log_from_env();
+    let (u, w) = (up::queriers(), wz::queriers());
+    assert!(u.iter().any(|l| l == "queryable known: true"), "{u:#?}");
+    assert!(u.iter().any(|l| l == "plain, second: 1 reply(ies)"), "{u:#?}");
+    assert!(u.iter().any(|l| l == "every form of reply: 3 reply(ies)"), "{u:#?}");
+    assert!(u.iter().any(|l| l == "disjoint reply accepted: 1 reply(ies)"), "{u:#?}");
+    assert!(u.iter().any(|l| l == "disjoint reply refused: 0 reply(ies)"), "{u:#?}");
+    assert!(u.iter().any(|l| l == "on a declared key: 1 reply(ies)"), "{u:#?}");
+    assert!(u.iter().any(|l| l == "never answered: 1 reply(ies)"), "{u:#?}");
+    compare("queriers", &u, &w);
 }
 
 #[test]

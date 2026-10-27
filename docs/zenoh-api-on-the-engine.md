@@ -589,6 +589,38 @@ Each lands whole with its surface lines, tests and faults in one round.
     that the get ended with one, because upstream's two expiries (the asker's and the asked
     node's routing) race and the asker is handed whichever is first. 51 of the default lines and 56
     and 56 of the other two arms, 13 injected faults, none missed.
+  - **Z3c (landed).** `Session::declare_querier` with `QuerierBuilder` (the target, the
+    consolidation, the timeout, `accept_replies`, the allowed destination and the quality of
+    service), `Querier` (its key, quality of service and `accept_replies`, `id`, `get`,
+    `undeclare` and its wait on the callbacks), `QuerierGetBuilder` (the handlers, the payload,
+    the parameters, the encoding, the attachment, the source information and the cancellation
+    token) and `QuerierUndeclaration`. A querier is declared as a write filter of the engine on
+    the queryables plane, which keeps the interest in the queryables of its key and asks the peers
+    for them as upstream's declaration does; the session lists its queriers beside its
+    publishers and lets go of them at close. A get of a querier is `Session::query` with the id
+    of the querier and a notifier of its callback group: the query holds a fan (the port's
+    `CancellableFan`) for as long as it is under way, the session keeps a `Weak` of it with the
+    querier, and an undeclaration cancels what is still there, so the queries of a querier end
+    with it and their channels close, as upstream removes them from its table; the wait of the
+    undeclaration on the callbacks holds for a callback that is running. What the querier's
+    matching reads (`matching_status`, `matching_listener`) is Z4's, and so is which queryables
+    count for a target of all-complete, which the filter does not take at declaration. The port
+    gained no operation. The differential has the queriers of each side ask an upstream
+    queryable the gets of Z3b through 13 queriers (their accessors, the options, a declared key,
+    the consolidations, an invalid key, a get and an undeclaration after close) and the
+    transcripts are equal. 40 of the default lines and 45 and 45 of the other two arms, 7
+    injected faults, none missed (one did not compile at first and was redone).
+  - **D1, taken again at the end of Z3.** The hypothesis is decided: the seam is the port. Of the
+    list of additions it was to be taken from, Z2 asked none, Z3a none, Z3c none, and Z3b the two
+    defaulted accessors of the reply view (`responder`, `qos`), a field each on the engine's
+    inbound reply. What else Z2 and Z3 needed was behaviour of the engine that was wrong and is
+    fixed there (the error encoding of a loopback reply, the expiry of a get answered by the
+    session's own queryables, an error reply with no key), which is the argument for the seam: each
+    was a defect of one place, found by a test of the top crate and mended in that place for every
+    other client of it. The strongest argument against, upstream's own `IRuntime`, has not been
+    needed: nothing in the top crate keeps a table that the engine owns, except the lists of ids
+    that a close lets go of. Z4 takes up the list again with the one-shot matching status
+    (`matching_status(plane, key, locality)`), which decision D1's table already names.
 - **Z4. Liveliness and matching.**
 - **Z5. Scouting.** Scouting is not in the port; it is the slice that decides whether the port
   gains it or the crate reaches it through the engine, and it contradicts "names no runtime" unless

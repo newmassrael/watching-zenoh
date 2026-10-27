@@ -59,6 +59,7 @@ use crate::api::{
             PublicationBuilderDelete, PublicationBuilderPut, PublisherBuilder,
             SessionDeleteBuilder, SessionPutBuilder,
         },
+        querier::QuerierBuilder,
         query::SessionGetBuilder,
         queryable::QueryableBuilder,
         session::OpenBuilder,
@@ -72,7 +73,7 @@ use crate::api::{
     info::SessionInfo,
     key_expr::{KeyExpr, KeyExprUndeclaration, SessionAnchor, WireAnchor},
     publisher::Priority,
-    query::{ConsolidationMode, QueryConsolidation, Reply},
+    query::{ConsolidationMode, QueryConsolidation, Reply, ReplyKeyExpr},
     queryable::Query,
     sample::{Locality, QoS, Sample, SampleKind},
     selector::Selector,
@@ -198,6 +199,42 @@ pub(crate) struct QueryRequest<'a> {
     pub(crate) callback: Callback<Reply>,
     #[cfg(feature = "unstable")]
     pub(crate) cancellation_token: Option<CancellationToken>,
+    /// What stops the legs of the query before they end by themselves, when something may: a
+    /// cancellation token or the undeclaration of the querier that asks. The query holds it for as
+    /// long as it is under way, so whoever keeps a `Weak` of it knows when the query is over.
+    pub(crate) fan: Option<Arc<QueryFan>>,
+    /// Held until the callback can be called no more: the wait of a querier's undeclaration on its
+    /// callbacks ends then.
+    pub(crate) querier_notifier: Option<SyncGroupNotifier>,
+}
+
+/// What stops the legs of a query: the engine's.
+#[cfg(feature = "engine-tokio")]
+pub(crate) type QueryFan = wz_capi_port::cancellation::CancellableFan;
+
+/// What stops the legs of a query. A build with no engine asks no query, so there is none.
+#[cfg(not(feature = "engine-tokio"))]
+pub(crate) enum QueryFan {}
+
+#[cfg(not(feature = "engine-tokio"))]
+impl QueryFan {
+    fn cancel(&self) {
+        match *self {}
+    }
+}
+
+/// What the declaration of a querier asks of the engine, in the types of this crate: the key as
+/// the wire names it and who the querier asks.
+// A build with no engine has nothing that reads the fields.
+#[cfg_attr(not(feature = "engine-tokio"), allow(dead_code))]
+pub(crate) struct QuerierDeclaration<'a> {
+    /// The key expression the querier asks on.
+    pub(crate) key: &'a str,
+    /// The declaration of a prefix of the key that the wire names it by, `0` when it names none.
+    pub(crate) scope: ExprId,
+    /// What follows the declared prefix, `None` when the declaration covers the whole key.
+    pub(crate) suffix: Option<String>,
+    pub(crate) destination: Locality,
 }
 
 /// What a session is run by: the engine that holds its faces, its declarations and its clock.
@@ -466,6 +503,57 @@ impl Engine {
             Engine::Tokio(state) => tokio_engine::ask(state.shared.engine_ref(), request),
         }
     }
+
+    /// What stops the legs of a query that is about to be asked.
+    fn new_query_fan(&self) -> Arc<QueryFan> {
+        match self {
+            Engine::Tokio(_) => QueryFan::new(),
+        }
+    }
+
+    /// Declare the querier `querier` says: the engine keeps the interest in the queryables
+    /// matching its key, and asks every peer for them as upstream's declaration does, unless the
+    /// querier asks the session itself. The id is released by [`Engine::undeclare_querier`].
+    fn declare_querier(&self, querier: QuerierDeclaration<'_>) -> ZResult<Id> {
+        match self {
+            Engine::Tokio(state) => {
+                let QuerierDeclaration {
+                    key,
+                    scope,
+                    suffix,
+                    destination,
+                } = querier;
+                let wire = tokio_engine::wire_key_of(scope, suffix.clone());
+                let ask = tokio_engine::interest_of(scope, suffix, destination);
+                // Which queryables count for the matching of the querier depends on the target
+                // of each query, which the matching slice reads when it asks (slice Z4).
+                let id = state.shared.as_engine().declare_write_filter(
+                    wz_capi_core::faces::FilterPlane::Queryables {
+                        complete_required: false,
+                    },
+                    key.to_owned(),
+                    &wire,
+                    ask,
+                    destination != Locality::Remote,
+                );
+                Id::try_from(id).map_err(|_| {
+                    zerror!("the engine numbered a querier {id}, which is more than an id holds")
+                        .into()
+                })
+            }
+        }
+    }
+
+    /// Let go of the querier `id`: the engine retracts its interest once no other querier on the
+    /// key holds it.
+    fn undeclare_querier(&self, id: Id) {
+        match self {
+            Engine::Tokio(state) => state
+                .shared
+                .as_engine()
+                .undeclare_write_filter(u64::from(id)),
+        }
+    }
 }
 
 #[cfg(not(feature = "engine-tokio"))]
@@ -527,6 +615,18 @@ impl Engine {
     }
 
     fn query(&self, _request: QueryRequest<'_>) -> ZResult<()> {
+        match *self {}
+    }
+
+    fn new_query_fan(&self) -> Arc<QueryFan> {
+        match *self {}
+    }
+
+    fn declare_querier(&self, _querier: QuerierDeclaration<'_>) -> ZResult<Id> {
+        match *self {}
+    }
+
+    fn undeclare_querier(&self, _id: Id) {
         match *self {}
     }
 }
@@ -1093,16 +1193,23 @@ mod tokio_engine {
             callback,
             #[cfg(feature = "unstable")]
             cancellation_token,
+            fan,
+            querier_notifier,
         } = request;
-        // Only a query that can be cancelled changes its callback, to tell the token when it ends.
-        #[cfg_attr(not(feature = "unstable"), allow(unused_mut))]
+        // What must know when the query is over is told by its callback, when it is dropped: the
+        // token the query was made with, and the querier whose undeclaration may wait on it.
         let mut callback = callback;
         #[cfg(feature = "unstable")]
-        let fan = cancellation_token
-            .map(|token| cancellable(token, &mut callback))
-            .transpose()?;
+        tie_to_end(
+            cancellation_token,
+            fan.as_ref(),
+            querier_notifier,
+            &mut callback,
+        )?;
         #[cfg(not(feature = "unstable"))]
-        let fan: Option<Arc<CancellableFan>> = None;
+        if let Some(notifier) = querier_notifier {
+            callback.set_on_drop(move || drop(notifier));
+        }
         let wire = wire_key_of(scope, suffix);
         let mut options = QueryOptions::get()
             .with_allowed_destination(engine_locality(destination))
@@ -1137,7 +1244,10 @@ mod tokio_engine {
         if let Some(info) = &source_info {
             options = options.with_source_info(source_info_hint_of(info));
         }
-        let delivery = Arc::new(ReplyDelivery { callback });
+        let delivery = Arc::new(ReplyDelivery {
+            callback,
+            _fan: fan.clone(),
+        });
         let mut leg = move || -> ReplyCallback {
             let delivery = Arc::clone(&delivery);
             Box::new(move |view: &dyn ReplyView| match reply_of(view) {
@@ -1158,20 +1268,32 @@ mod tokio_engine {
     /// What the legs of a query are handed their replies to.
     struct ReplyDelivery {
         callback: Callback<Reply>,
+        /// What stops the legs, held for as long as the query is under way: whoever keeps a
+        /// `Weak` of it reads the end of the query in it.
+        _fan: Option<Arc<CancellableFan>>,
     }
 
-    /// Tie the query being made to `token`: cancelling the token cancels every leg of the query,
-    /// and cancelling a cancelled token is refused. The token's wait for the callbacks ends when
-    /// the callback is dropped, with the last leg.
+    /// Have the callback of the query tell, when it is dropped with the last leg, whoever waits on
+    /// its end: the `token` it was made with, which it is also tied to (cancelling the token
+    /// cancels every leg through `fan`, and a token that was cancelled refuses the query), and the
+    /// querier that asks it, through `notifier`.
     #[cfg(feature = "unstable")]
-    fn cancellable(
-        token: CancellationToken,
+    fn tie_to_end(
+        token: Option<CancellationToken>,
+        fan: Option<&Arc<CancellableFan>>,
+        notifier: Option<SyncGroupNotifier>,
         callback: &mut Callback<Reply>,
-    ) -> ZResult<Arc<CancellableFan>> {
-        let fan = CancellableFan::new();
-        if let Some(notifier) = token.notifier() {
+    ) -> ZResult<()> {
+        let Some(token) = token else {
+            if let Some(notifier) = notifier {
+                callback.set_on_drop(move || drop(notifier));
+            }
+            return Ok(());
+        };
+        let fan = fan.ok_or_else(|| zerror!("a query with a cancellation token has no fan"))?;
+        if let Some(token_notifier) = token.notifier() {
             let on_cancel = {
-                let fan = Arc::clone(&fan);
+                let fan = Arc::clone(fan);
                 move || {
                     fan.cancel();
                     Ok(())
@@ -1180,9 +1302,10 @@ mod tokio_engine {
             if let Ok(handler_id) = token.add_on_cancel_handler(on_cancel) {
                 callback.set_on_drop(move || {
                     token.remove_on_cancel_handler(handler_id);
+                    drop(token_notifier);
                     drop(notifier);
                 });
-                return Ok(fan);
+                return Ok(());
             }
         }
         bail!("Query was cancelled")
@@ -1254,6 +1377,14 @@ mod tokio_engine {
     }
 }
 
+/// A querier of a session: its id, which is the engine's for its interest, and the queries it has
+/// asked, each by the fan that stops it while it is under way. A query that has ended is a fan
+/// nobody holds any more.
+struct QuerierEntry {
+    id: Id,
+    pending: Vec<std::sync::Weak<QueryFan>>,
+}
+
 /// The state of a session. A handle ([`Session`]) is one more reference to it, and the entities a
 /// session declares hold it by [`WeakSession`], so that dropping the last handle closes it.
 #[allow(dead_code)] // to allow using `id` with `unstable` feature
@@ -1272,6 +1403,9 @@ pub(crate) struct SessionInner {
     /// The queryables declared on the session and not undeclared, the entity id of each beside the
     /// engine's id for it, which a close lets go of.
     queryables: std::sync::Mutex<Vec<(Id, u64)>>,
+    /// The queriers declared on the session and not undeclared, which a close lets go of, each
+    /// with the queries it has asked that may still be under way.
+    queriers: std::sync::Mutex<Vec<QuerierEntry>>,
 }
 
 impl SessionInner {
@@ -1298,6 +1432,80 @@ impl SessionInner {
         let left = std::mem::take(&mut *self.queryables());
         for (_, engine_id) in left {
             self.engine.undeclare_queryable(engine_id);
+        }
+    }
+
+    fn queriers(&self) -> std::sync::MutexGuard<'_, Vec<QuerierEntry>> {
+        self.queriers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Undeclare every querier that is left: those of a session that has closed.
+    fn release_queriers(&self) {
+        let left = std::mem::take(&mut *self.queriers());
+        for entry in left {
+            self.end_querier(entry);
+        }
+    }
+
+    /// Let go of a querier: its interest goes, and so do the queries it has under way, whose
+    /// callbacks are dropped and whose channels end, as upstream's undeclaration removes them.
+    fn end_querier(&self, entry: QuerierEntry) {
+        self.engine.undeclare_querier(entry.id);
+        for fan in entry.pending.iter().filter_map(std::sync::Weak::upgrade) {
+            fan.cancel();
+        }
+    }
+
+    /// Declare a querier for `key_expr` on the engine and record it, so that a close lets go of it.
+    fn declare_querier_inner(
+        self: &Arc<Self>,
+        key_expr: &KeyExpr,
+        destination: Locality,
+    ) -> ZResult<Id> {
+        if self.engine.is_closed() {
+            return Err(SessionClosedError.into());
+        }
+        tracing::trace!("declare_querier({:?})", key_expr);
+        let anchor: SessionAnchor = self.clone();
+        let wire = key_expr.to_wire(&anchor);
+        let suffix = (!wire.suffix.is_empty()).then(|| wire.suffix.to_string());
+        let id = self.engine.declare_querier(QuerierDeclaration {
+            key: key_expr.as_str(),
+            scope: wire.scope,
+            suffix,
+            destination,
+        })?;
+        self.queriers().push(QuerierEntry {
+            id,
+            pending: vec![],
+        });
+        // A close that ran between the check and the record has not seen this querier.
+        if self.engine.is_closed() {
+            self.release_queriers();
+            return Err(SessionClosedError.into());
+        }
+        Ok(id)
+    }
+
+    /// Undeclare the querier `id`: a closed session has none, and undeclaring on it is no error;
+    /// an id the session does not hold is one.
+    fn undeclare_querier_inner(&self, id: Id) -> ZResult<()> {
+        if self.engine.is_closed() {
+            return Ok(());
+        }
+        let entry = {
+            let mut queriers = self.queriers();
+            let position = queriers.iter().position(|entry| entry.id == id);
+            position.map(|at| queriers.remove(at))
+        };
+        match entry {
+            Some(entry) => {
+                self.end_querier(entry);
+                Ok(())
+            }
+            None => Err(zerror!("Unable to find querier").into()),
         }
     }
 
@@ -1458,6 +1666,8 @@ impl SessionInner {
         #[cfg(feature = "unstable")] source_info: Option<SourceInfo>,
         callback: Callback<Reply>,
         #[cfg(feature = "unstable")] cancellation_token: Option<CancellationToken>,
+        querier_id: Option<Id>,
+        querier_notifier: Option<SyncGroupNotifier>,
         #[cfg(feature = "unstable")] timestamp_instrumentation: Option<TimestampInstrumentation>,
     ) -> ZResult<()> {
         tracing::trace!(
@@ -1486,6 +1696,22 @@ impl SessionInner {
             ConsolidationMode::Auto => ConsolidationMode::Latest,
             mode => mode,
         };
+        // A query that something may stop before it ends by itself is given a fan: a cancellation
+        // token, and the undeclaration of the querier that asks it, which keeps the fans of the
+        // queries it has under way.
+        #[cfg(feature = "unstable")]
+        let stoppable = querier_id.is_some() || cancellation_token.is_some();
+        #[cfg(not(feature = "unstable"))]
+        let stoppable = querier_id.is_some();
+        let fan = stoppable.then(|| self.engine.new_query_fan());
+        if let (Some(id), Some(fan)) = (querier_id, &fan) {
+            let mut queriers = self.queriers();
+            let Some(entry) = queriers.iter_mut().find(|entry| entry.id == id) else {
+                bail!("Unable to find querier");
+            };
+            entry.pending.retain(|pending| pending.strong_count() > 0);
+            entry.pending.push(Arc::downgrade(fan));
+        }
         let anchor: SessionAnchor = self.clone();
         let wire = key_expr.to_wire(&anchor);
         let suffix = (!wire.suffix.is_empty()).then(|| wire.suffix.to_string());
@@ -1506,6 +1732,8 @@ impl SessionInner {
             callback,
             #[cfg(feature = "unstable")]
             cancellation_token,
+            fan,
+            querier_notifier,
         })
     }
 }
@@ -1597,6 +1825,7 @@ impl Session {
             subscriptions: std::sync::Mutex::new(vec![]),
             publishers: std::sync::Mutex::new(vec![]),
             queryables: std::sync::Mutex::new(vec![]),
+            queriers: std::sync::Mutex::new(vec![]),
         })))
     }
 }
@@ -1689,6 +1918,54 @@ impl WeakSession {
             }
             None => Err(zerror!("Unable to find queryable").into()),
         }
+    }
+
+    /// Undeclare the querier `qid` with the queries it has under way. A closed session has none,
+    /// and undeclaring on it is no error; an id the session does not hold is one.
+    pub(crate) fn undeclare_querier_inner(&self, qid: Id) -> ZResult<()> {
+        self.0.undeclare_querier_inner(qid)
+    }
+
+    /// What [`Session::query`] is, for an entity that holds the session by this reference.
+    #[allow(clippy::too_many_arguments)] // the arguments of upstream's function, kept as they are
+    pub(crate) fn query(
+        &self,
+        key_expr: &KeyExpr<'_>,
+        parameters: &Parameters<'_>,
+        target: QueryTarget,
+        consolidation: QueryConsolidation,
+        qos: QoS,
+        destination: Locality,
+        timeout: Duration,
+        value: Option<(ZBytes, Encoding)>,
+        attachment: Option<ZBytes>,
+        #[cfg(feature = "unstable")] source_info: Option<SourceInfo>,
+        callback: Callback<Reply>,
+        #[cfg(feature = "unstable")] cancellation_token: Option<CancellationToken>,
+        querier_id: Option<Id>,
+        querier_notifier: Option<SyncGroupNotifier>,
+        #[cfg(feature = "unstable")] timestamp_instrumentation: Option<TimestampInstrumentation>,
+    ) -> ZResult<()> {
+        self.0.query(
+            key_expr,
+            parameters,
+            target,
+            consolidation,
+            qos,
+            destination,
+            timeout,
+            value,
+            attachment,
+            #[cfg(feature = "unstable")]
+            source_info,
+            callback,
+            #[cfg(feature = "unstable")]
+            cancellation_token,
+            querier_id,
+            querier_notifier,
+            #[cfg(feature = "unstable")]
+            timestamp_instrumentation,
+        )
     }
 
     /// What [`Session::resolve_put`] is, for an entity that holds the session by this reference.
@@ -2077,6 +2354,56 @@ impl Session {
         self.0.declare_publisher_inner(key_expr, destination)
     }
 
+    /// Create a [`Querier`](crate::query::Querier) for the given key expression.
+    ///
+    /// # Arguments
+    ///
+    /// * `key_expr` - The key expression matching resources to query
+    ///
+    /// # Examples
+    /// ```
+    /// # #[tokio::main]
+    /// # async fn main() {
+    ///
+    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// let querier = session.declare_querier("key/expression")
+    ///     .await
+    ///     .unwrap();
+    /// let replies = querier.get().await.unwrap();
+    /// # }
+    /// ```
+    pub fn declare_querier<'b, TryIntoKeyExpr>(
+        &self,
+        key_expr: TryIntoKeyExpr,
+    ) -> QuerierBuilder<'_, 'b>
+    where
+        TryIntoKeyExpr: TryInto<KeyExpr<'b>>,
+        <TryIntoKeyExpr as TryInto<KeyExpr<'b>>>::Error: Into<zenoh_result::Error>,
+    {
+        let qos: QoS = request::ext::QoSType::REQUEST.into();
+        QuerierBuilder {
+            session: self,
+            key_expr: key_expr.try_into().map_err(Into::into),
+            qos: qos.into(),
+            destination: Locality::default(),
+            target: QueryTarget::default(),
+            consolidation: QueryConsolidation::default(),
+            timeout: self.queries_default_timeout(),
+            accept_replies: ReplyKeyExpr::default(),
+        }
+    }
+
+    /// Declare the querier `key_expr` was declared for: the interest in the queryables matching it
+    /// that the peers are asked for, unless the destination is the session itself. The id of the
+    /// engine's declaration, released at undeclare or at close.
+    pub(crate) fn declare_querier_inner(
+        &self,
+        key_expr: KeyExpr,
+        destination: Locality,
+    ) -> ZResult<Id> {
+        self.0.declare_querier_inner(&key_expr, destination)
+    }
+
     /// Create a [`Publisher`](crate::pubsub::Publisher) for the given key expression.
     ///
     /// # Arguments
@@ -2276,6 +2603,8 @@ impl Session {
         #[cfg(feature = "unstable")] source_info: Option<SourceInfo>,
         callback: Callback<Reply>,
         #[cfg(feature = "unstable")] cancellation_token: Option<CancellationToken>,
+        querier_id: Option<Id>,
+        querier_notifier: Option<SyncGroupNotifier>,
         #[cfg(feature = "unstable")] timestamp_instrumentation: Option<TimestampInstrumentation>,
     ) -> ZResult<()> {
         self.0.query(
@@ -2293,6 +2622,8 @@ impl Session {
             callback,
             #[cfg(feature = "unstable")]
             cancellation_token,
+            querier_id,
+            querier_notifier,
             #[cfg(feature = "unstable")]
             timestamp_instrumentation,
         )
@@ -2410,6 +2741,7 @@ impl Closee for WeakSession {
                 session.release_subscriptions();
                 session.release_publishers();
                 session.release_queryables();
+                session.release_queriers();
             })
             .await;
     }
@@ -4146,6 +4478,283 @@ mod tests {
                 .wait()
                 .expect("asks");
             assert_eq!(nested.recv_timeout(WAIT), Ok(1));
+        }
+
+        /// Whether the engine still holds the querier `id`: a filter it holds says nothing matches
+        /// when no queryable does, and one it does not hold says nothing.
+        fn held(session: &Session, id: Id) -> bool {
+            match &session.0.engine {
+                Engine::Tokio(state) => state.shared.as_engine().write_filter_active(u64::from(id)),
+            }
+        }
+
+        #[test]
+        fn a_querier_asks_with_the_settings_it_was_declared_with_and_says_them() {
+            let session = open(peer("a1b2e3")).wait().expect("opens");
+            let seen = Arc::new(std::sync::Mutex::new(vec![]));
+            let record = Arc::clone(&seen);
+            let _queryable = session
+                .declare_queryable("demo/q/**")
+                .callback(move |query| {
+                    // The quality of service of a query is read in the unstable arm.
+                    #[cfg(feature = "unstable")]
+                    let qos = format!("{:?}", (query.priority(), query.express()));
+                    #[cfg(not(feature = "unstable"))]
+                    let qos = String::new();
+                    record.lock().unwrap().push(format!(
+                        "{} | {:?} | {:?} | {qos}",
+                        query.selector(),
+                        query
+                            .payload()
+                            .map(|p| p.try_to_string().unwrap().into_owned()),
+                        query
+                            .attachment()
+                            .map(|a| a.try_to_string().unwrap().into_owned()),
+                    ));
+                    query.reply("demo/q/a", "one").wait().expect("replies");
+                    let _ = query.reply("demo/other", "far").wait();
+                })
+                .wait()
+                .expect("declares");
+            let querier = session
+                .declare_querier("demo/q/**")
+                .target(QueryTarget::All)
+                .consolidation(ConsolidationMode::None)
+                .accept_replies(ReplyKeyExpr::Any)
+                .timeout(Duration::from_secs(3))
+                .priority(Priority::RealTime)
+                .express(true)
+                .congestion_control(CongestionControl::Block)
+                .wait()
+                .expect("declares");
+            assert_eq!(querier.key_expr().as_str(), "demo/q/**");
+            assert_eq!(querier.priority(), Priority::RealTime);
+            assert_eq!(querier.congestion_control(), CongestionControl::Block);
+            assert_eq!(querier.accept_replies(), ReplyKeyExpr::Any);
+            // Each get of a querier is asked as the querier was declared, and is its own query.
+            for _ in 0..2 {
+                let replies = querier
+                    .get()
+                    .parameters("x=1")
+                    .payload("body")
+                    .attachment("att")
+                    .wait()
+                    .expect("asks");
+                assert_eq!(
+                    lines(&answers(&replies)),
+                    [
+                        "demo/other Put far zenoh/bytes None RealTime Block true",
+                        "demo/q/a Put one zenoh/bytes None RealTime Block true",
+                    ]
+                );
+            }
+            let seen = seen.lock().unwrap().clone();
+            assert_eq!(seen.len(), 2);
+            #[cfg(feature = "unstable")]
+            let qos = "(RealTime, true)";
+            #[cfg(not(feature = "unstable"))]
+            let qos = "";
+            for line in seen {
+                assert_eq!(
+                    line,
+                    format!("demo/q/**?x=1;_anyke | Some(\"body\") | Some(\"att\") | {qos}")
+                );
+            }
+        }
+
+        #[test]
+        fn undeclaring_a_querier_ends_the_queries_it_has_under_way_and_lets_go_of_it() {
+            let session = open(peer("a1b2e4")).wait().expect("opens");
+            let (asked_tx, asked) = mpsc::channel();
+            let held_queries = Arc::new(std::sync::Mutex::new(vec![]));
+            let keep = Arc::clone(&held_queries);
+            let _queryable = session
+                .declare_queryable("demo/under")
+                .callback(move |query| {
+                    keep.lock().unwrap().push(query);
+                    let _ = asked_tx.send(());
+                })
+                .wait()
+                .expect("declares");
+            let querier = session
+                .declare_querier("demo/under")
+                .wait()
+                .expect("declares");
+            let id = querier.id;
+            assert!(session.0.queriers().iter().any(|entry| entry.id == id));
+            // A querier on a key nobody answers on is one the engine holds, and says so.
+            let lonely = session
+                .declare_querier("demo/lonely")
+                .wait()
+                .expect("declares");
+            let lonely_id = lonely.id;
+            assert!(held(&session, lonely_id), "the engine holds the querier");
+            let replies = querier.get().wait().expect("asks");
+            asked
+                .recv_timeout(WAIT)
+                .expect("the queryable has the query");
+            querier.undeclare().wait().expect("undeclares");
+            // The query is over with the querier, though the queryable still holds it.
+            assert!(answers(&replies).is_empty());
+            assert_eq!(session.0.queriers().len(), 1);
+            lonely.undeclare().wait().expect("undeclares");
+            assert!(session.0.queriers().is_empty());
+            assert!(
+                !held(&session, lonely_id),
+                "the engine let go of the querier"
+            );
+            assert_eq!(held_queries.lock().unwrap().len(), 1);
+        }
+
+        #[test]
+        fn a_querier_that_is_dropped_or_whose_session_closes_is_let_go_of() {
+            let session = open(peer("a1b2e5")).wait().expect("opens");
+            let dropped = session
+                .declare_querier("demo/drop")
+                .wait()
+                .expect("declares");
+            let closed = session
+                .declare_querier("demo/close")
+                .wait()
+                .expect("declares");
+            assert_eq!(session.0.queriers().len(), 2);
+            drop(dropped);
+            assert_eq!(session.0.queriers().len(), 1);
+            session.close().wait().expect("closes");
+            assert_eq!(session.0.queriers().len(), 0);
+            let error = closed
+                .get()
+                .wait()
+                .expect_err("a querier of a closed session asks nothing");
+            assert!(error.downcast_ref::<SessionClosedError>().is_some());
+            closed
+                .undeclare()
+                .wait()
+                .expect("no error on a closed session");
+            let error = session
+                .declare_querier("demo/after")
+                .wait()
+                .expect_err("a closed session");
+            assert!(error.downcast_ref::<SessionClosedError>().is_some());
+        }
+
+        #[test]
+        fn a_querier_forgets_the_queries_that_ended_and_refuses_an_id_it_does_not_hold() {
+            let session = open(peer("a1b2e6")).wait().expect("opens");
+            let _queryable = session
+                .declare_queryable("demo/forget")
+                .callback(|query| query.reply("demo/forget", "v").wait().expect("replies"))
+                .wait()
+                .expect("declares");
+            let querier = session
+                .declare_querier("demo/forget")
+                .wait()
+                .expect("declares");
+            for _ in 0..5 {
+                answers(&querier.get().wait().expect("asks"));
+            }
+            // Only the query that is being asked is under way: the five before it ended.
+            let _last = querier.get().wait().expect("asks");
+            assert!(session.0.queriers()[0].pending.len() <= 2);
+            let error = session
+                .downgrade()
+                .undeclare_querier_inner(Id::MAX)
+                .expect_err("no such querier");
+            assert!(
+                error.to_string().contains("Unable to find querier"),
+                "{error}"
+            );
+        }
+
+        #[cfg(feature = "unstable")]
+        #[test]
+        fn undeclaring_a_querier_can_wait_for_the_callbacks_of_its_queries() {
+            let session = open(peer("a1b2e7")).wait().expect("opens");
+            let (asked_tx, asked) = mpsc::channel();
+            let held_queries = Arc::new(std::sync::Mutex::new(vec![]));
+            let keep = Arc::clone(&held_queries);
+            let _queryable = session
+                .declare_queryable("demo/wait")
+                .callback(move |query| {
+                    keep.lock().unwrap().push(query);
+                    let _ = asked_tx.send(());
+                })
+                .wait()
+                .expect("declares");
+            let querier = session
+                .declare_querier("demo/wait")
+                .wait()
+                .expect("declares");
+            let (replied_tx, replied) = mpsc::channel();
+            querier
+                .get()
+                .callback(move |reply| {
+                    let _ = replied_tx.send(reply.result().is_err());
+                })
+                .wait()
+                .expect("asks");
+            asked
+                .recv_timeout(WAIT)
+                .expect("the queryable has the query");
+            // The wait ends when the callback of the query has been let go of, which the
+            // undeclaration itself does, so it returns although the queryable holds the query.
+            let (done_tx, done) = mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = done_tx.send(querier.undeclare().wait_callbacks().wait());
+            });
+            done.recv_timeout(WAIT)
+                .expect("the undeclaration returned")
+                .expect("undeclares");
+            assert_eq!(
+                replied.recv_timeout(WAIT),
+                Err(mpsc::RecvTimeoutError::Disconnected)
+            );
+        }
+
+        #[cfg(feature = "unstable")]
+        #[test]
+        fn the_wait_of_an_undeclaration_holds_for_a_callback_that_is_running() {
+            let session = open(peer("a1b2e8")).wait().expect("opens");
+            let _queryable = session
+                .declare_queryable("demo/running")
+                .callback(|query| {
+                    // Answered from another thread, so that the get has returned and the callback
+                    // of its replies runs on that one.
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_millis(50));
+                        query.reply("demo/running", "v").wait().expect("replies");
+                    });
+                })
+                .wait()
+                .expect("declares");
+            let querier = session
+                .declare_querier("demo/running")
+                .wait()
+                .expect("declares");
+            let (inside_tx, inside) = mpsc::channel();
+            let (release_tx, release) = mpsc::channel::<()>();
+            let release = std::sync::Mutex::new(release);
+            querier
+                .get()
+                .callback(move |_| {
+                    let _ = inside_tx.send(());
+                    let _ = release.lock().unwrap().recv_timeout(WAIT);
+                })
+                .wait()
+                .expect("asks");
+            inside.recv_timeout(WAIT).expect("the callback is running");
+            let (done_tx, done) = mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = done_tx.send(querier.undeclare().wait_callbacks().wait());
+            });
+            assert!(
+                done.recv_timeout(Duration::from_millis(300)).is_err(),
+                "the undeclaration returned while a callback was running"
+            );
+            release_tx.send(()).expect("the callback is waiting");
+            done.recv_timeout(WAIT)
+                .expect("the undeclaration returned once the callback had")
+                .expect("undeclares");
         }
     }
 

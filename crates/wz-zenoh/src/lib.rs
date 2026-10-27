@@ -234,8 +234,8 @@ pub mod key_expr {
 /// # Query/reply primitives
 ///
 /// This module provides the query/reply API of Zenoh. Of it, the selector, its parameters and the
-/// time range they carry, the queryable, the get and its replies are here; the querier arrives
-/// with slice Z3c.
+/// time range they carry, the queryable, the get, its replies and the querier are here; the
+/// matching status of a querier arrives with slice Z4.
 ///
 /// The selector syntax is a key expression followed by a question mark and the list of parameters in
 /// the format "name=value" separated by ';'. For example `key/expression?param1=value1;param2=value2`.
@@ -250,9 +250,11 @@ pub mod query {
     pub use crate::api::selector::ZenohParameters;
     pub use crate::api::{
         builders::{
+            querier::{QuerierBuilder, QuerierGetBuilder},
             queryable::QueryableBuilder,
             reply::{ReplyBuilder, ReplyBuilderDelete, ReplyBuilderPut, ReplyErrBuilder},
         },
+        querier::{Querier, QuerierUndeclaration},
         query::{
             ConsolidationMode, QueryConsolidation, QueryTarget, Reply, ReplyError, ReplyKeyExpr,
         },
