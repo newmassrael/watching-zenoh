@@ -5476,7 +5476,10 @@ layer_c1v_cargo_test_ws() {
     # Round 3548 -- 11 -> 12: `the_loop_dials_a_node_at_the_hints_its_planes_gave_newest_first`,
     # decision D3's directory on the face loop. Ungated, so C1y moves by the same +1. Read off
     # what guarded_count_gate PRINTED.
-    _runci_guarded_test C1v 12 cargo test -p wz-runtime-tokio --features routing-accept,transport-link-ws --lib accept_loop --quiet \
+    # Round 3798 -- 12 -> 14: the two accept-bound units that came with the accept bounds
+    # (`accept_loop.rs`), present in this feature set and not in C1y's, which stays at 18. Read
+    # off the run, not derived.
+    _runci_guarded_test C1v 14 cargo test -p wz-runtime-tokio --features routing-accept,transport-link-ws --lib accept_loop --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-ws --quiet -- -D warnings \
@@ -11603,11 +11606,13 @@ layer_c1m_session_lwip() {
     # the body pool, the documents a front end chose, the single endpoint, the subscriptions and
     # the queryables that answer from them (their order, a sample reaching its cell, the refusals),
     # and the liveliness tokens (declared last, refused by a node that cannot send one).
-    _runci_guarded_test "C1m mcu slot node" 28 \
+    # Round 3798 -- 28 -> 29: the group membership the node holds beside its sessions, read off
+    # the run (the tokens leg below is the same number).
+    _runci_guarded_test "C1m mcu slot node" 29 \
         cargo test -p wz-session-mcu --features client-slot --lib slot_node --quiet || return 1
     # The same tests of a node built with `declare-token`: the number is the same, and what two of
     # them assert is the other half (a token is declared, and is not refused).
-    _runci_guarded_test "C1m mcu slot node with tokens" 28 \
+    _runci_guarded_test "C1m mcu slot node with tokens" 29 \
         cargo test -p wz-session-mcu --features client-slot,declare-token --lib slot_node --quiet || return 1
     # The latest sample of a subscription (`latest`, the same profile): the cell, its cut at the
     # subscription's capacity, a delete, a key cut at a character, the storage's bounds, and the
