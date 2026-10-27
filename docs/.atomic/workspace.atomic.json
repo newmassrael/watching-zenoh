@@ -293102,6 +293102,36 @@
         "Still open: attribute the 9,000 to 11,000 bytes the query-answering cooperative builds grew beyond the client's at step L1; ask who owns the slot node whether SubscriberPeer::reconcile should announce a subscription registered after a peer's interest; wait_declarations_stable and a synced query on the cooperative engine; the differential of the typed tokio host against the port's host."
       ]
     },
+    "Round 3773": {
+      "decision_summary": "Two reds repaid. (1) The hosted census of non-default tests found the wz-session-mcu test that holds the fixed in-band query to the conformance table of decision D7 claimed by no leg: the slot profile row lacked the table's feature beside the slot profile (another session had added test-support; this round adds the three lifecycle verb features, so the in-band tests of close, reset and status and of what a build binds are claimed too). On the build host the gate passes. (2) a_router_that_pins_another_certificate_refuses_the_device in wz-tls-mbedtls asserted a refused dial, but TLS 1.3 completes the client's handshake once it has sent its Finished, so the router's verdict on the client certificate may arrive before the dial returns or just after: ten of ten alone, a failure under the gate's load. The test now holds what does not depend on scheduling: the router refused, and the device is never left with a session that carries data.",
+      "changes_bullets": [
+        "scripts/lib/nondefault-tests-gate.sh: the slot profile row of wz-session-mcu names lifecycle-close, lifecycle-reset and lifecycle-status, with a comment saying what they add.",
+        "crates/wz-tls-mbedtls/tests/rustls_peer.rs: a_router_that_pins_another_certificate_refuses_the_device asserts a refused dial or a session that ends at its first read, and that the router refused."
+      ],
+      "verification_bullets": [
+        "On the build host: the whole nondefault-tests gate passes (it failed first on the TLS test, then, with that repaired, completed with the mcu legs reaching their tests); the rustls_peer test file passes, and the repaired test ten times of ten alone before the change; clippy of wz-tls-mbedtls with -D warnings. The reason pin and census gates after the rebase. Read in the hosted run of the commit before this round: the capture tests and the slot size record that failed there pass at the current tip, so they are not repaired here."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "The hosted CI of the tips from round 3770 on was queued when this was filed and is not read. Binding Verbs on a Zephyr admin image waits for a modelling decision in the build configuration: the verbs have no upstream counterpart, so they are neither a capability nor a policy of docs/build-configuration.md C2 as written, and an image states who may use them."
+      ],
+      "publishable_decision_summary": "Two reds repaid. (1) The hosted census of non-default tests found the wz-session-mcu test that holds the fixed in-band query to the conformance table of decision D7 claimed by no leg: the slot profile row lacked the table's feature beside the slot profile (another session had added test-support; this round adds the three lifecycle verb features, so the in-band tests of close, reset and status and of what a build binds are claimed too). On the build host the gate passes. (2) a_router_that_pins_another_certificate_refuses_the_device in wz-tls-mbedtls asserted a refused dial, but TLS 1.3 completes the client's handshake once it has sent its Finished, so the router's verdict on the client certificate may arrive before the dial returns or just after: ten of ten alone, a failure under the gate's load. The test now holds what does not depend on scheduling: the router refused, and the device is never left with a session that carries data.",
+      "publishable_changes_bullets": [
+        "scripts/lib/nondefault-tests-gate.sh: the slot profile row of wz-session-mcu names lifecycle-close, lifecycle-reset and lifecycle-status, with a comment saying what they add.",
+        "crates/wz-tls-mbedtls/tests/rustls_peer.rs: a_router_that_pins_another_certificate_refuses_the_device asserts a refused dial or a session that ends at its first read, and that the router refused."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host: the whole nondefault-tests gate passes (it failed first on the TLS test, then, with that repaired, completed with the mcu legs reaching their tests); the rustls_peer test file passes, and the repaired test ten times of ten alone before the change; clippy of wz-tls-mbedtls with -D warnings. The reason pin and census gates after the rebase. Read in the hosted run of the commit before this round: the capture tests and the slot size record that failed there pass at the current tip, so they are not repaired here."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The hosted CI of the tips from round 3770 on was queued when this was filed and is not read. Binding Verbs on a Zephyr admin image waits for a modelling decision in the build configuration: the verbs have no upstream counterpart, so they are neither a capability nor a policy of docs/build-configuration.md C2 as written, and an image states who may use them."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
