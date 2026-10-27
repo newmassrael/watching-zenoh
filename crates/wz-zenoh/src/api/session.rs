@@ -6182,6 +6182,75 @@ mod tests {
             .is_empty());
         }
 
+        /// A get that its peer does not end is ended by its timeout, as upstream ends one
+        /// (`zenoh/src/api/session.rs` @ `Timeout on liveliness query {}! Send error and close.`):
+        /// with an error reply `Timeout` encoded as a string, after which the channel of the
+        /// handler closes. The peer is kept from ending it by holding the thread that reads its
+        /// link inside a subscriber's callback, so the interest of the get waits unread; a
+        /// timeout of nothing is an instant one, and ends the same way.
+        #[test]
+        fn a_get_that_a_peer_does_not_end_is_ended_by_its_timeout_with_an_error_reply() {
+            let (held, asker) = pair(("a1b2d7", "a1b2d8"));
+            let (entered_tx, entered) = mpsc::channel();
+            let entered_tx = std::sync::Mutex::new(entered_tx);
+            let (release_tx, release) = mpsc::channel::<()>();
+            let release = std::sync::Mutex::new(release);
+            let _holder = held
+                .declare_subscriber("demo/l/hold")
+                .callback(move |_| {
+                    let _ = entered_tx.lock().unwrap().send(());
+                    // Returns at once when the test lets go of the sender.
+                    let _ = release.lock().unwrap().recv();
+                })
+                .wait()
+                .expect("declares");
+            // The declaration reaches the asker some time after it returns: put until the
+            // callback holds the thread that reads the link.
+            let deadline = std::time::Instant::now() + WAIT;
+            while entered.recv_timeout(Duration::from_millis(50)).is_err() {
+                assert!(std::time::Instant::now() < deadline, "the put arrives");
+                asker.put("demo/l/hold", "x").wait().expect("puts");
+            }
+
+            let timeout_of = |timeout: Duration| {
+                let started = std::time::Instant::now();
+                let replies = asker
+                    .liveliness()
+                    .get("demo/l/**")
+                    .timeout(timeout)
+                    .wait()
+                    .expect("asks");
+                let reply = replies
+                    .recv_timeout(WAIT)
+                    .expect("the get is open")
+                    .expect("the get timed out with a reply");
+                let waited = started.elapsed();
+                let told = match reply.result() {
+                    Err(error) => format!(
+                        "Err {} {}",
+                        error.payload().try_to_string().expect("a text"),
+                        error.encoding()
+                    ),
+                    Ok(sample) => panic!("a token answered a get nobody reads: {sample:?}"),
+                };
+                assert!(
+                    replies.recv_timeout(WAIT).is_err(),
+                    "the channel closes with the timeout reply"
+                );
+                (told, waited)
+            };
+            let (told, waited) = timeout_of(Duration::from_millis(400));
+            assert_eq!(told, "Err Timeout zenoh/string");
+            assert!(
+                waited >= Duration::from_millis(350) && waited < WAIT,
+                "ended by its timeout, not before it and not by the wait: {waited:?}"
+            );
+            let (told, waited) = timeout_of(Duration::ZERO);
+            assert_eq!(told, "Err Timeout zenoh/string");
+            assert!(waited < Duration::from_millis(350), "instant: {waited:?}");
+            drop(release_tx);
+        }
+
         #[test]
         fn the_tokens_of_a_session_are_told_to_its_own_subscribers_and_found_by_its_own_get() {
             let (node, _peer) = pair(("a1b2d5", "a1b2d6"));
