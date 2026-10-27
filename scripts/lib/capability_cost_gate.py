@@ -169,6 +169,18 @@ CASES: tuple[Case, ...] = (
     # (pico-client-coop 934,883 to 930,823), which the budgets keep. The per-case notes state
     # the history up to the day before, and each reading of this day is the figure in the
     # budget less 5,500.
+    #
+    # The three cases that carry `unstable-api` (unstable, connectivity, admin-space) read about
+    # 109,800 bytes more on pc2 once `wz_ext_config_device_requires` (`device_requires.rs`, a
+    # door of the unstable surface) joined: 934,049 to 1,043,866, 1,003,773 to 1,113,554 and
+    # 1,159,421 to 1,269,025, and the five cases without `unstable-api` read about 1,100 more
+    # (pico-client-coop 930,823 to 931,919), which the 5,500 holds. The attribution is by the
+    # feature set (only the cases with `unstable-api` grew), not by a symbol diff; the likely
+    # source is that the door reads a config's locators through `parse_any_locator`, the
+    # grammar of every protocol the tree has, in client builds that parse only the dial's. The
+    # budgets of the three move over that door (the 5,500 above them, as the rest), and
+    # narrowing what the door parses to the build's protocols is the door's owner's (the
+    # round's carry).
     Case("pico-client-coop", "wz-capi-pico", "libwz_capi_pico.so", "engine-coop,link-udp",
          936_300,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
@@ -228,7 +240,7 @@ CASES: tuple[Case, ...] = (
     # built with (`-DZ_FEATURE_UNSTABLE_API`): entity global ids, source info, cancellation
     # tokens. Nothing of it is the engine's, so it costs the ABI's own code and no engine's.
     Case("pico-client-coop-unstable", "wz-capi-pico", "libwz_capi_pico.so",
-         "engine-coop,link-udp,unstable-api", 939_600,
+         "engine-coop,link-udp,unstable-api", 1_049_400,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -257,7 +269,7 @@ CASES: tuple[Case, ...] = (
     # of its transports and links and the listeners that hear them come and go. The engine reports
     # its faces whatever the build, so the plane's own cost is the ABI's.
     Case("pico-client-coop-connectivity", "wz-capi-pico", "libwz_capi_pico.so",
-         "engine-coop,link-udp,unstable-api,connectivity", 1_009_300,
+         "engine-coop,link-udp,unstable-api,connectivity", 1_119_100,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, MULTICAST,
                  TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE, CONNECTIVITY),
@@ -272,7 +284,7 @@ CASES: tuple[Case, ...] = (
     # answers `@/<zid>/pico/**`, which needs the answering end and, for the peers it lists, the
     # engine's faces. It lists no connectivity listener, so that plane's exports stay out.
     Case("pico-client-coop-admin-space", "wz-capi-pico", "libwz_capi_pico.so",
-         "engine-coop,link-udp,admin-space", 1_164_900,
+         "engine-coop,link-udp,admin-space", 1_274_500,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
