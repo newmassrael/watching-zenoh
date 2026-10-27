@@ -3646,7 +3646,7 @@
       ]
     },
     "runtime-crate--sce_link_runtime_tokio/2-3-rx-borrows-from-pool-slot": {
-      "intent": "RxFrame borrows pool slot per RFC §5.E Sample lifetime — no copy default, take() opt-in for owned, Rust borrow checker enforces lifetime across await; (rust,*) only kind.",
+      "intent": "RxFrame is an OWNED handle on a pool slot (LinkRxFrame: slot address + home table, slot returns on drop), no copy by default, valid across await; the borrow reading was dropped in R2742.",
       "caveats_bullets": [
         "R2740: the pin's RecyclingObject<T> is OWNED with a Weak home, not a borrow -- no lifetime at all",
         "R2740: ZSlice is likewise an owned Arc plus a range, not a borrow of another's array",
