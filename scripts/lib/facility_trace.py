@@ -145,6 +145,8 @@ class Observation:
     exit_status: int | None = None
     stderr_tail: str = ""
     stdout: str = ""
+    # What the scenario's `stated_by` door answered for the run's configuration, when it has one.
+    stated: str = ""
 
     def add(self, kind: str, name: str, evidence: str) -> None:
         if kind == "facility":
@@ -392,10 +394,10 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 @dataclasses.dataclass(frozen=True)
 class Driver:
     """The program a library runs inside: a C source of `facility_drivers/`, compiled against the
-    packaged library itself (and the include directory of the tree, when the source includes a
-    header of it) and run with the library's directory on the loader's path."""
+    packaged library itself (and the include directories of the tree, when the source includes a
+    header of them) and run with the library's directory on the loader's path."""
     source: str
-    include: str = ""
+    include: tuple[str, ...] = ()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -403,7 +405,8 @@ class Scenario:
     """One run of a packaged artifact under the oracle: the traced command and, when the run needs
     a counterpart to open a session, the untraced peer's. `{bin}` is the artifact's file, or the
     driver compiled against it for a library; `{package}` is the package's directory, so a peer can
-    be another artifact of the same package; `{port}` is a free local port. A peer that listens
+    be another artifact of the same package; `{port}` and `{port2}` are free local ports, and
+    `{work}` the run's own directory (where a TLS scenario's material is). A peer that listens
     starts first; one that dials starts after the traced run has had time to listen. A run that has
     not ended by itself is stopped after `seconds`."""
     name: str
@@ -412,6 +415,15 @@ class Scenario:
     peer_listens: bool = False
     seconds: float = 5.0
     driver: Driver | None = None
+    # A certificate authority and a server certificate for 127.0.0.1, made for the run in `{work}`
+    # (`ca.pem`, `server.pem`, `server.key`), for a scenario whose links are TLS.
+    tls: bool = False
+    # Files written in `{work}` before the run, as (name, text). The text takes `{port}` and
+    # `{port2}` replaced literally, since a document's own braces are not templates.
+    documents: tuple[tuple[str, str], ...] = ()
+    # An untraced command run before the traced one, whose stdout is the requirement of the run's
+    # configuration (a door that answers apart from the run, as ap-demo's `--device-requires`).
+    stated_by: tuple[str, ...] = ()
 
 
 def library_scenarios(driver: Driver) -> tuple[Scenario, ...]:
@@ -433,12 +445,67 @@ def library_scenarios(driver: Driver) -> tuple[Scenario, ...]:
     )
 
 
+def configuration_corpus(driver: Driver) -> tuple[Scenario, ...]:
+    """The zenoh-c runs that hold each branch of a configuration's derivation to a run
+    (`OpenPlan::device_requires`): a TLS dial whose material is files, a client that can only find
+    its node by scouting, and a listener allowed to fail. The peer is the driver itself, on the same
+    library. Scouting goes to a group port of the run's own (`{port2}`), so no other node on the
+    network can answer it."""
+    peer_lib = "{bin}"
+    group = 'scouting/multicast/address="224.0.0.224:{port2}"'
+    return (
+        Scenario("a client that dials over TLS with its trust anchor in a file",
+                 (peer_lib, "connect", "tls/127.0.0.1:{port}", "3",
+                  'transport/link/tls/root_ca_certificate="{work}/ca.pem"'),
+                 (peer_lib, "listen", "tls/127.0.0.1:{port}", "12",
+                  'transport/link/tls/listen_certificate="{work}/server.pem"',
+                  'transport/link/tls/listen_private_key="{work}/server.key"'),
+                 peer_listens=True, seconds=15.0, driver=driver, tls=True),
+        Scenario("a client that finds its node only by scouting",
+                 (peer_lib, "connect", "-", "3", group),
+                 (peer_lib, "listen", "tcp/127.0.0.1:{port}", "12", group),
+                 peer_listens=True, seconds=15.0, driver=driver),
+        Scenario("a listener allowed to fail its bind",
+                 (peer_lib, "listen", "tcp/127.0.0.1:{port}", "3", "listen/exit_on_failure=false"),
+                 ("{package}/bin/wz-ap-demo", "--connect", "tcp/127.0.0.1:{port}", "--key", "demo/x"),
+                 seconds=15.0, driver=driver),
+    )
+
+
+def make_tls_material(work: pathlib.Path) -> None:
+    """A certificate authority and a server certificate it signed for 127.0.0.1, in `work`."""
+    def openssl(*args: str) -> None:
+        subprocess.run(["openssl", *args], cwd=work, check=True, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
+
+    openssl("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", "ca.key", "-out", "ca.pem",
+            "-days", "2", "-subj", "/CN=wz facility oracle CA")
+    openssl("req", "-newkey", "rsa:2048", "-nodes", "-keyout", "server.key", "-out", "server.csr",
+            "-subj", "/CN=127.0.0.1")
+    (work / "san.ext").write_text("subjectAltName=IP:127.0.0.1\n", encoding="utf-8")
+    openssl("x509", "-req", "-in", "server.csr", "-CA", "ca.pem", "-CAkey", "ca.key", "-CAcreateserial",
+            "-out", "server.pem", "-days", "2", "-extfile", "san.ext")
+
+
 # The runs each artifact is judged on, by its manifest id. A scenario must reach what `requires`
 # claims every run asks for, so each opens a session (or, for a node whose router is a lab address,
 # reaches its dial), and it may reach any part of the bound.
+# ap-demo's `--sessions` run, judged against what its `--device-requires` answers for the same
+# document: a listening session and a dialling one whose only target is named by host.
+SESSIONS_DOCUMENT = """{
+    sessions: [
+        { name: "inbound", mode: "peer", transport: "unicast", zid: "ee02",
+          listen: { endpoints: ["tcp/127.0.0.1:{port2}"] } },
+        { name: "to_peer", mode: "client", transport: "unicast", zid: "ee01",
+          connect: { endpoints: ["tcp/localhost:{port}"] } },
+    ],
+}
+"""
+
 SCENARIOS = {
-    "capi-pico": library_scenarios(Driver("pico_session.c", "crates/wz-capi-pico/include")),
-    "capi-c": library_scenarios(Driver("c_session.c")),
+    "capi-pico": library_scenarios(Driver("pico_session.c",
+                                          ("crates/wz-capi-pico/include", "crates/wz-capi-core/include"))),
+    "capi-c": library_scenarios(Driver("c_session.c")) + configuration_corpus(Driver("c_session.c")),
     "ap-demo": (
         Scenario("a listener that a peer publishes to",
                  ("{bin}", "--listen", "tcp/127.0.0.1:{port}", "--key", "demo/x"),
@@ -446,6 +513,11 @@ SCENARIOS = {
         Scenario("a connector that publishes to a listener",
                  ("{bin}", "--connect", "tcp/127.0.0.1:{port}", "--publish", "demo/x", "--value", "v"),
                  ("{bin}", "--listen", "tcp/127.0.0.1:{port}", "--key", "demo/x"), peer_listens=True),
+        Scenario("a sessions document: a listener, and a dial by host name to a peer",
+                 ("{bin}", "--sessions", "{work}/sessions.json5"),
+                 ("{bin}", "--listen", "tcp/127.0.0.1:{port}", "--key", "demo/x"), peer_listens=True,
+                 seconds=8.0, documents=(("sessions.json5", SESSIONS_DOCUMENT),),
+                 stated_by=("{bin}", "--device-requires", "{work}/sessions.json5")),
     ),
     "declared-node": (
         Scenario("a node whose router does not answer", ("{bin}",), seconds=3.0),
@@ -464,8 +536,8 @@ def build_driver(driver: Driver, library: pathlib.Path, work: pathlib.Path) -> p
     machine can stand in)."""
     out = work / pathlib.Path(driver.source).stem
     argv = ["cc", "-std=c11", "-Wall", "-Wextra", "-Werror"]
-    if driver.include:
-        argv += ["-I", str(ROOT / driver.include)]
+    for directory in driver.include:
+        argv += ["-I", str(ROOT / directory)]
     argv += [str(DRIVERS / driver.source), "-L", str(library.parent), f"-l:{library.name}", "-o", str(out)]
     subprocess.run(argv, check=True)
     return out
@@ -474,22 +546,40 @@ def build_driver(driver: Driver, library: pathlib.Path, work: pathlib.Path) -> p
 def run_scenario(scenario: Scenario, artifact: pathlib.Path, package: pathlib.Path) -> Observation:
     """The observation of one scenario: the peer is started and stopped around the traced run."""
     with tempfile.TemporaryDirectory(prefix="wz-facility-driver-") as tmp:
+        work = pathlib.Path(tmp)
+        if scenario.tls:
+            make_tls_material(work)
         if scenario.driver is None:
-            return _run(scenario, artifact, package, {})
-        binary = build_driver(scenario.driver, artifact, pathlib.Path(tmp))
-        return _run(scenario, binary, package, {"LD_LIBRARY_PATH": str(artifact.parent)})
+            return _run(scenario, artifact, package, {}, work)
+        binary = build_driver(scenario.driver, artifact, work)
+        return _run(scenario, binary, package, {"LD_LIBRARY_PATH": str(artifact.parent)}, work)
 
 
-def _run(scenario: Scenario, binary: pathlib.Path, package: pathlib.Path, env: dict[str, str]) -> Observation:
-    port = free_port()
+def _run(scenario: Scenario, binary: pathlib.Path, package: pathlib.Path, env: dict[str, str],
+         work: pathlib.Path) -> Observation:
+    port, port2 = free_port(), free_port()
 
     def argv(words: tuple[str, ...]) -> list[str]:
-        return [w.format(bin=binary, package=package, port=port) for w in words]
+        return [w.format(bin=binary, package=package, port=port, port2=port2, work=work) for w in words]
+
+    for name, text in scenario.documents:
+        (work / name).write_text(text.replace("{port}", str(port)).replace("{port2}", str(port2)),
+                                 encoding="utf-8")
+    stated = ""
+    if scenario.stated_by:
+        door = subprocess.run(argv(scenario.stated_by), capture_output=True, text=True, timeout=30,
+                              env={**os.environ, **env})
+        if door.returncode != 0:
+            raise ValueError(f"{scenario.name}: the requirement door exited {door.returncode}: "
+                             f"{door.stderr.strip()}")
+        stated = door.stdout
 
     peer: list[subprocess.Popen] = []
 
     def start_peer() -> None:
-        peer.append(subprocess.Popen(argv(scenario.peer), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+        # A peer that is the driver needs the library's path as the traced run does.
+        peer.append(subprocess.Popen(argv(scenario.peer), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                     env={**os.environ, **env}))
 
     late = None
     if scenario.peer and scenario.peer_listens:
@@ -499,7 +589,9 @@ def _run(scenario: Scenario, binary: pathlib.Path, package: pathlib.Path, env: d
         late = threading.Timer(1.5, start_peer)
         late.start()
     try:
-        return observe(argv(scenario.traced), scenario.seconds, env)
+        seen = observe(argv(scenario.traced), scenario.seconds, env)
+        seen.stated = stated
+        return seen
     finally:
         if late is not None:
             late.cancel()
@@ -533,7 +625,7 @@ def judge_package(directory: pathlib.Path) -> tuple[list[str], list[str]]:
             findings += [f"{art['id']} ({scenario.name}): {f}" for f in found]
             report.append(f"{art['id']} ({scenario.name}): observed {sorted(seen.facilities)}, "
                           f"{'refuted' if found else 'agrees with'} requires {requires} and may_require {may}")
-            stated = configuration_requirement(seen.stdout)
+            stated = stated_requirement(seen.stated) if seen.stated else configuration_requirement(seen.stdout)
             if stated is not None:
                 c_requires, c_may = stated
                 found = judge(seen, c_requires, c_may)
@@ -551,7 +643,12 @@ def configuration_requirement(stdout: str) -> tuple[list[str], list[str] | None]
         return None
     if len(lines) > 1:
         raise ValueError(f"the run printed {len(lines)} device_requires lines, and states one configuration")
-    stated = json.loads(lines[0][len("device_requires "):])
+    return stated_requirement(lines[0][len("device_requires "):])
+
+
+def stated_requirement(text: str) -> tuple[list[str], list[str] | None]:
+    """A configuration's requirement as a door states it, one JSON object with the manifest's keys."""
+    stated = json.loads(text)
     return list(stated["requires"]), stated["may_require"]
 
 

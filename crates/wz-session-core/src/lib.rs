@@ -463,6 +463,10 @@ pub mod scout_static;
 // distinct from wz-codecs::locator (the wire codec).
 #[cfg(feature = "alloc")]
 pub mod locator;
+// What an open of a configuration asks of the operating system, for every reader of one
+// (docs/target-build-contract.md T9). Pure alloc over the locator parse above.
+#[cfg(feature = "alloc")]
+pub mod facilities;
 
 // R311nt — transport-agnostic SERIAL-link framing, handshake, and
 // locator logic (the `Z_FEATURE_LINK_SERIAL` upper protocol). Mirrors

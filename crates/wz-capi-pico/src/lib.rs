@@ -94,8 +94,12 @@ pub mod revision;
 pub mod cancellation;
 pub mod codec;
 pub mod config;
+// What an open of a config would ask of the operating system: a wz door (`wz_ext.h`) of the
+// unstable surface (docs/target-build-contract.md T9).
 #[cfg(feature = "connectivity")]
 pub mod connectivity;
+#[cfg(feature = "unstable-api")]
+pub mod device_requires;
 pub mod encoding;
 pub mod entity;
 mod ffi;

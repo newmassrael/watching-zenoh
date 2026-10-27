@@ -6,8 +6,10 @@
 // a scenario runs. `pico_session listen|connect <locator> <seconds>` opens a session through the
 // pico C ABI (a peer that listens on the locator, or a client that dials it), puts `v` on
 // `demo/x` every 100 ms for the given seconds, and closes the session: the run ends by itself,
-// through the library's own close. It exits 0 when every call succeeded and names the one that
-// did not otherwise.
+// through the library's own close. Before it opens, it prints what the library says the config
+// asks of the device (`wz_ext_config_device_requires`, of the unstable surface), which the oracle
+// holds the traced run to. It exits 0 when every call succeeded and names the one that did not
+// otherwise.
 
 #define _POSIX_C_SOURCE 200809L
 
@@ -16,6 +18,7 @@
 #include <time.h>
 
 #include "wz_capi_pico.h"
+#include "wz_ext.h"
 
 static int failed(const char *call, int rc) {
     fprintf(stderr, "pico_session: %s returned %d\n", call, rc);
@@ -42,6 +45,15 @@ int main(int argc, char **argv) {
     rc = zp_config_insert(z_config_loan_mut(&config), listens ? Z_CONFIG_LISTEN_KEY : Z_CONFIG_CONNECT_KEY,
                           argv[2]);
     if (rc != Z_OK) return failed("zp_config_insert(locator)", rc);
+    // What the library says this config asks of the device, on the line the oracle judges the run
+    // by (`device_requires <json>`), before the open consumes the config.
+    z_owned_string_t requirement;
+    rc = wz_ext_config_device_requires(z_config_loan(&config), &requirement);
+    if (rc != Z_OK) return failed("wz_ext_config_device_requires", rc);
+    printf("device_requires %.*s\n", (int)z_string_len(z_string_loan(&requirement)),
+           z_string_data(z_string_loan(&requirement)));
+    fflush(stdout);
+    z_string_drop(z_string_move(&requirement));
 
     z_owned_session_t session;
     rc = z_open(&session, z_config_move(&config), NULL);

@@ -82,6 +82,7 @@ pub(crate) fn print_usage() {
     eprintln!("               [--sweep-cadence-ms <ms>]");
     eprintln!("    wz-ap-demo --sessions <file>");
     eprintln!("    wz-ap-demo --check-sessions <file>");
+    eprintln!("    wz-ap-demo --device-requires <file>");
     eprintln!("    wz-ap-demo --driver-vocabulary");
     eprintln!();
     eprintln!("OPTIONS:");
@@ -147,7 +148,13 @@ pub(crate) fn print_usage() {
     eprintln!("                             by its key path, as --sessions prints them), 3 the");
     eprintln!("                             file cannot be read. The verdict is for THIS binary's");
     eprintln!("                             build features. Takes no other flag.");
-    eprintln!("    --driver-vocabulary      print, as JSON on stdout, every driver role of this");
+    eprintln!("    --device-requires <file> judge the same document as --check-sessions and, when");
+    eprintln!("                             it is accepted, print on stdout what a --sessions run");
+    eprintln!("                             of it asks of the operating system: one JSON object");
+    eprintln!("                             {{requires, may_require, unknown}} in the facility");
+    eprintln!("                             words of the target-build manifest. Exit statuses as");
+    eprintln!("                             --check-sessions. Takes no other flag.");
+    eprintln!("    --driver-vocabulary     print, as JSON on stdout, every driver role of this");
     eprintln!("                             build with its keys (kind, required, default) and the");
     eprintln!("                             feature it needs; made from the table --sessions and");
     eprintln!("                             --check-sessions judge with. Takes no other flag.");

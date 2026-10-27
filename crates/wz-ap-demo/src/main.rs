@@ -94,6 +94,7 @@ mod runner;
 mod sessions;
 mod sessions_access;
 mod sessions_driver;
+mod sessions_facilities;
 mod sessions_run;
 mod sessions_scouting;
 mod shutdown;
@@ -198,6 +199,17 @@ fn demo_main() -> ExitCode {
             return ExitCode::from(2);
         }
         Some(Ok(path)) => return check_sessions_mode(&path),
+    }
+    // `--device-requires <file>`: the same document judged, answered with what a
+    // `--sessions` run of it asks of the operating system. Read after
+    // `--check-sessions`, for the reason that one is read after `--sessions`.
+    match crate::sessions::device_requires_flag(rest) {
+        None => {}
+        Some(Err(message)) => {
+            eprintln!("wz-ap-demo: {message}");
+            return ExitCode::from(2);
+        }
+        Some(Ok(path)) => return device_requires_mode(&path),
     }
 
     // R2072 (open-debt item 496) — `--check-topology <file>` once per node: the
@@ -2985,6 +2997,36 @@ fn check_sessions_mode(path: &str) -> ExitCode {
         Err(refusals) => {
             for refusal in &refusals {
                 eprintln!("wz-ap-demo: --check-sessions {path}: {refusal}");
+            }
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// `--device-requires <file>`: the document judged as `--check-sessions` judges
+/// it, and for a document it accepts, what a `--sessions` run of it asks of the
+/// operating system as one JSON line on stdout
+/// ([`crate::sessions_facilities`]). The exit status is `--check-sessions`'.
+fn device_requires_mode(path: &str) -> ExitCode {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("wz-ap-demo: --device-requires: cannot read {path}: {e}");
+            return ExitCode::from(3);
+        }
+    };
+    let caps = crate::sessions::BuildCapabilities::of_this_build();
+    match crate::sessions::judge_sessions_document(&text, &caps) {
+        Ok(plan) => {
+            println!(
+                "{}",
+                crate::sessions_facilities::device_requires_of(&plan).to_json()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(refusals) => {
+            for refusal in &refusals {
+                eprintln!("wz-ap-demo: --device-requires {path}: {refusal}");
             }
             ExitCode::from(2)
         }

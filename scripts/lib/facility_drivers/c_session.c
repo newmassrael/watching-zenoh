@@ -3,7 +3,8 @@
 //
 // The facility oracle's driver of libwz_capi_c (scripts/lib/facility_trace.py,
 // docs/target-build-contract.md T9): `c_session listen|connect <locator> <seconds>` opens a
-// session through the zenoh-c ABI (a peer that listens on the locator, or a client that dials it),
+// session through the zenoh-c ABI (a peer that listens on the locator, or a client that dials it;
+// `-` for none, and any further `<key>=<json5 value>` argument is one more key of its config),
 // puts `v` on `demo/x` every 100 ms for the given seconds, and closes it. Before it opens, it prints
 // what the library says the config asks of the device (`wz_capi_c_config_device_requires`), which
 // the oracle holds the traced run to.
@@ -54,8 +55,8 @@ static int failed(const char *call, int rc) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 4 || (strcmp(argv[1], "listen") && strcmp(argv[1], "connect"))) {
-        fprintf(stderr, "usage: c_session listen|connect <locator> <seconds>\n");
+    if (argc < 4 || (strcmp(argv[1], "listen") && strcmp(argv[1], "connect"))) {
+        fprintf(stderr, "usage: c_session listen|connect <locator>|- <seconds> [<key>=<json5>...]\n");
         return 2;
     }
     int listens = !strcmp(argv[1], "listen");
@@ -75,9 +76,26 @@ int main(int argc, char **argv) {
     if (rc != 0) return failed("z_config_default", rc);
     rc = zc_config_insert_json5(z_config_loan_mut(&config), "mode", listens ? "\"peer\"" : "\"client\"");
     if (rc != 0) return failed("zc_config_insert_json5(mode)", rc);
-    rc = zc_config_insert_json5(z_config_loan_mut(&config), listens ? "listen/endpoints" : "connect/endpoints",
-                                endpoints);
-    if (rc != 0) return failed("zc_config_insert_json5(endpoints)", rc);
+    // `-` states no endpoint: a client that finds its node by scouting, or a peer on its defaults.
+    if (strcmp(argv[2], "-")) {
+        rc = zc_config_insert_json5(z_config_loan_mut(&config),
+                                    listens ? "listen/endpoints" : "connect/endpoints", endpoints);
+        if (rc != 0) return failed("zc_config_insert_json5(endpoints)", rc);
+    }
+    // Each further argument is one more key of the config, `<key>=<json5 value>`.
+    for (int i = 4; i < argc; i++) {
+        char key[256];
+        const char *eq = strchr(argv[i], '=');
+        size_t len = eq ? (size_t)(eq - argv[i]) : 0;
+        if (!eq || len == 0 || len >= sizeof key) {
+            fprintf(stderr, "c_session: %s is not <key>=<json5 value>\n", argv[i]);
+            return 2;
+        }
+        memcpy(key, argv[i], len);
+        key[len] = '\0';
+        rc = zc_config_insert_json5(z_config_loan_mut(&config), key, eq + 1);
+        if (rc != 0) return failed(argv[i], rc);
+    }
     // What the library says this config asks of the device, on the line the oracle judges the run
     // by (`device_requires <json>`), before the open consumes the config.
     static storage requirement;

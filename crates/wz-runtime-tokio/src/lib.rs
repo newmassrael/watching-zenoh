@@ -496,6 +496,11 @@ pub use wz_session_core::locality;
 /// so naming it never depends on a `transport-link-*` feature.
 pub use wz_session_core::locator;
 
+/// What an open of a configuration asks of the operating system (docs/target-build-contract.md
+/// T9), for the readers of a configuration this runtime runs: the zenoh-c open plan and the demo's
+/// sessions document.
+pub use wz_session_core::facilities;
+
 /// For how many sessions a node's control work fits the CPU it was promised: the
 /// [`CapacityContract`](capacity::CapacityContract) an operator declares and the
 /// bounds it yields. Re-exported so a facade consumer (wz-ap-demo's `--cpu-share`)

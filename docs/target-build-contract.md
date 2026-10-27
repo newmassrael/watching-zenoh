@@ -335,12 +335,26 @@ its signing key at start and stops without one) and each endpoint's socket, and 
 may list the interfaces (only when routing has none for the group). It starts no thread,
 reads no calendar time and reads no file, so the host build's base is not its own.
 
-A manifest bounds every run of a BUILD; a configuration narrows it. For an open that reads
-a zenoh configuration through `OpenPlan` (the zenoh-c drop-in and the Rust API),
-`OpenPlan::device_requires` (`crates/wz-capi-core/src/open_facilities.rs`) answers for one
-configuration from the plan the open itself runs, and the drop-in exposes it as the door
-`wz_capi_c_config_device_requires`: one JSON object, `requires`, `may_require` (`null` when
-part of it has no facility name) and `unknown` (why). `requires` is the engine's
+A manifest bounds every run of a BUILD; a configuration narrows it. The derivation is one
+function, `device_requires` in `crates/wz-session-core/src/facilities.rs`, over the
+`OpenFacts` each reader of a configuration reads from it the way its open does: what is
+dialled and whether a failed dial fails the open, what is bound or joined and whether a
+failed bind fails it, how it scouts, whether it reads a file it cannot go on without, and
+whether it reads the calendar. Each artifact has a door that answers one JSON object,
+`requires`, `may_require` (`null` when part of it has no facility name) and `unknown`
+(why):
+
+- the zenoh-c drop-in and the Rust API, `wz_capi_c_config_device_requires`, from the
+  `OpenPlan` the open runs (`crates/wz-capi-core/src/open_facilities.rs`);
+- the pico library, `wz_ext_config_device_requires` (`wz_ext.h`, `unstable-api`), from the
+  config as `z_open` reads it: one attempt at its one locator, a listened group as its one
+  transport, scouting only when no locator is given, and the code `z_open` refuses with;
+- `wz-ap-demo --device-requires <file>`, from a `--sessions` document as `--check-sessions`
+  judges it: every session is required by the run (a failed session fails it), a session
+  that answers Scouts joins its scouting group, and the process reads the document and
+  stamps its log lines with the calendar time.
+
+For the zenoh-c open, `requires` is the engine's
 `threads` and `entropy`, `filesystem` when the plan read a certificate or credential file
 (an unreadable one is refused), each listener and group's socket under
 `listen/exit_on_failure`, what EVERY dial target needs under `connect/exit_on_failure`
@@ -349,10 +363,12 @@ an `#iface=` target `interface-list`), and `sockets-udp` and `multicast` for a c
 whose only way to a node is scouting. Everything else a run of it may ask is
 `may_require`; a serial or vsock endpoint makes it `null`. The vocabulary and the engine's
 part are spelled again in Rust and `wz_config.py --check` holds them to this declaration.
-The capi-c driver prints the door's answer for the configuration it opens, and Layer C1st
-holds the traced run to that answer as well as to the build's bound, a host-named dial
-among its runs. The pico library and `wz-ap-demo` open through other readers than
-`OpenPlan`, and have no configuration door until they read through the same plan.
+The library drivers print their door's answer for the configuration they open, the
+ap-demo scenario asks `--device-requires` for the document it runs, and Layer C1st holds
+each traced run to that answer as well as to the build's bound. Its runs include a
+host-named dial, a TLS dial whose trust anchor is a file, a client that finds its node
+only by scouting (on a group port of the run's own), a listener allowed to fail its bind,
+and a sessions document with a listener and a host-named dial.
 
 A manifest written before the split (schema 1 has no number for it) carries neither key,
 in every artifact; a reader takes its whole `device_requires` as `may_require`. Such a

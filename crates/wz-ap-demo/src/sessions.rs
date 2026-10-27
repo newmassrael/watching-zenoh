@@ -228,6 +228,15 @@ pub(crate) fn check_sessions_flag(argv: &[String]) -> Option<Result<String, Stri
     document_flag(argv, "--check-sessions")
 }
 
+/// The `--device-requires <file>` command line, or `None` when the flag is absent.
+///
+/// The same document judged as `--check-sessions` judges it, answered with what a
+/// `--sessions` run of it asks of the operating system: it takes a file and
+/// nothing beside it, for the reason [`sessions_flag`] gives.
+pub(crate) fn device_requires_flag(argv: &[String]) -> Option<Result<String, String>> {
+    document_flag(argv, "--device-requires")
+}
+
 /// A flag that names the one sessions document and stands alone.
 fn document_flag(argv: &[String], flag: &str) -> Option<Result<String, String>> {
     let at = argv.iter().position(|a| a == flag)?;

@@ -26,6 +26,15 @@ const DEADLINE: Duration = Duration::from_secs(20);
 /// `(exit code, stderr)` of one run. A run that has not exited by the deadline
 /// fails the test: a check that starts a session would never exit.
 fn run(args: &[&str]) -> (Option<i32>, String) {
+    let out = output(args);
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// The whole output of one run, under [`run`]'s deadline.
+fn output(args: &[&str]) -> std::process::Output {
     let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -36,13 +45,8 @@ fn run(args: &[&str]) -> (Option<i32>, String) {
             .expect("the demo binary runs");
         let _ = tx.send(out);
     });
-    let out = rx
-        .recv_timeout(DEADLINE)
-        .expect("the run did not exit, so it started what it was asked only to check");
-    (
-        out.status.code(),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
-    )
+    rx.recv_timeout(DEADLINE)
+        .expect("the run did not exit, so it started what it was asked only to check")
 }
 
 /// A directory of this test's own, removed with it.
@@ -147,6 +151,35 @@ fn a_refused_document_exits_two_with_the_sessions_sentences() {
     let checked = sentences(&stderr, "--check-sessions");
     assert_eq!(checked.len(), 3, "{stderr}");
     assert_eq!(checked, sentences(&stderr_start, "--sessions"));
+}
+
+/// `--device-requires` judges the document as `--check-sessions` does and, for an
+/// accepted one, prints its requirement as one JSON line on stdout and starts
+/// nothing: the listener and the dial of `ACCEPTED` are both required, with the
+/// document the run reads.
+#[test]
+fn device_requires_answers_an_accepted_document_and_refuses_as_the_check() {
+    let dir = Dir::new("device-requires");
+    let path = dir.write("ok.json5", ACCEPTED);
+    let out = output(&["--device-requires", &path]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "{\"requires\": [\"entropy\", \"filesystem\", \"sockets-tcp\", \"threads\"], \
+         \"may_require\": [\"interface-list\", \"wall-clock\"], \"unknown\": []}\n"
+    );
+    assert!(
+        !stderr.contains("wz-ap-demo session ") && !stderr.contains("READY"),
+        "the answer started a session\n{stderr}"
+    );
+    let refused = dir.write("refused.json5", REFUSED);
+    let out = output(&["--device-requires", &refused]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&out.stderr).contains(&format!(
+        "--device-requires {refused}: sessions[0].limits: "
+    )));
 }
 
 /// A file that cannot be read is a third answer, not a refusal of the document.

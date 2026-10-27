@@ -887,9 +887,9 @@ fn apply_quic_ca(cfg: DialConfig, _quic_ca: &Option<String>) -> io::Result<DialC
 /// directions must join the same default or a network that moved neither would
 /// still have wz asking on one group and answering on another.
 #[cfg(any(feature = "scouting-active", feature = "scouting-responder"))]
-const SCOUT_GROUP: std::net::Ipv4Addr = std::net::Ipv4Addr::new(224, 0, 0, 224);
+pub(crate) const SCOUT_GROUP: std::net::Ipv4Addr = std::net::Ipv4Addr::new(224, 0, 0, 224);
 #[cfg(any(feature = "scouting-active", feature = "scouting-responder"))]
-const SCOUT_PORT: u16 = 7446;
+pub(crate) const SCOUT_PORT: u16 = 7446;
 
 /// The WhatAmI bitmask the Scout asks for: `ROUTER (0x01) | PEER (0x02)`. The
 /// demo's `--scout` path becomes an Initiator, which announces

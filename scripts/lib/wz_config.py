@@ -148,7 +148,7 @@ RUST_POLICIES = ROOT / "crates" / "wz-session-core" / "src" / "policy_generated.
 CAPS_RS =ROOT / "crates" / "wz-session-core" / "src" / "caps.rs"
 # The configuration-aware derivation's own spelling of the vocabulary and of `[os] always`
 # (docs/target-build-contract.md T9), held to this declaration by `--check`.
-OPEN_FACILITIES_RS = ROOT / "crates" / "wz-capi-core" / "src" / "open_facilities.rs"
+OPEN_FACILITIES_RS = ROOT / "crates" / "wz-session-core" / "src" / "facilities.rs"
 MANIFESTS = {
     "core": ROOT / "crates" / "wz-capi-core" / "Cargo.toml",
     "pico": ROOT / "crates" / "wz-capi-pico" / "Cargo.toml",

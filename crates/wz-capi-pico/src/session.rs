@@ -86,7 +86,7 @@ use wz_session_core::WhatAmI;
 /// (`vendor/zenoh-pico/src/transport/raweth/link.c` @
 /// `static z_result_t _z_f_link_listen_raweth(_z_link_t *self) { return _z_f_link_open_raweth(self); }`).
 #[cfg(feature = "engine-tokio")]
-fn is_group_endpoint(endpoint: &str) -> bool {
+pub(crate) fn is_group_endpoint(endpoint: &str) -> bool {
     let (locator, metadata) = endpoint.split_once('#').unwrap_or((endpoint, ""));
     #[cfg(all(feature = "raweth-transport", target_os = "linux"))]
     if locator.starts_with("reth/") {
@@ -229,7 +229,7 @@ fn resolve_pem(
 /// correct answer for that build, where a `tls/` or `quic/` endpoint is rejected
 /// at bind/dial as `Unsupported` and the cert keys have no consumer to reach.
 #[cfg(any(feature = "transport-link-tls", feature = "transport-link-quic"))]
-fn resolve_tls_config(cfg: &ConfigState) -> Result<CapiTlsConfig, ZResult> {
+pub(crate) fn resolve_tls_config(cfg: &ConfigState) -> Result<CapiTlsConfig, ZResult> {
     let enable_mtls = cfg.get(Z_CONFIG_TLS_ENABLE_MTLS_KEY) == Some("true");
     // The mTLS material is read only when mTLS is ON. pico gates its own
     // insertion the same way (`if (enable_mtls)`), so reading it unconditionally
@@ -282,8 +282,41 @@ fn resolve_tls_config(cfg: &ConfigState) -> Result<CapiTlsConfig, ZResult> {
     feature = "engine-tokio",
     not(any(feature = "transport-link-tls", feature = "transport-link-quic"))
 ))]
-fn resolve_tls_config(_cfg: &ConfigState) -> Result<CapiTlsConfig, ZResult> {
+pub(crate) fn resolve_tls_config(_cfg: &ConfigState) -> Result<CapiTlsConfig, ZResult> {
     Ok(CapiTlsConfig::default())
+}
+
+/// The files [`resolve_tls_config`] reads: each of its keys that names the PEM by path, the
+/// client certificate's two only when mTLS is on, as it reads them. Read by
+/// `wz_ext_config_device_requires` only, so it is part of the unstable surface.
+#[cfg(all(
+    feature = "unstable-api",
+    any(feature = "transport-link-tls", feature = "transport-link-quic")
+))]
+pub(crate) fn tls_files_named(cfg: &ConfigState) -> Vec<String> {
+    let mut keys = vec![
+        Z_CONFIG_TLS_ROOT_CA_CERTIFICATE_KEY,
+        Z_CONFIG_TLS_LISTEN_CERTIFICATE_KEY,
+        Z_CONFIG_TLS_LISTEN_PRIVATE_KEY_KEY,
+    ];
+    if cfg.get(Z_CONFIG_TLS_ENABLE_MTLS_KEY) == Some("true") {
+        keys.extend([
+            Z_CONFIG_TLS_CONNECT_CERTIFICATE_KEY,
+            Z_CONFIG_TLS_CONNECT_PRIVATE_KEY_KEY,
+        ]);
+    }
+    keys.into_iter()
+        .filter_map(|key| cfg.get(key).map(str::to_owned))
+        .collect()
+}
+
+/// The no-TLS-backend build reads no certificate file.
+#[cfg(all(
+    feature = "unstable-api",
+    not(any(feature = "transport-link-tls", feature = "transport-link-quic"))
+))]
+pub(crate) fn tls_files_named(_cfg: &ConfigState) -> Vec<String> {
+    Vec::new()
 }
 
 // --- ABI structs (session owned = pico rc `{ void* _val; void* _cnt }`) ----
@@ -453,8 +486,11 @@ pub unsafe extern "C" fn z_open(
         let cfg = Box::from_raw(cfg_handle as *mut ConfigState);
         (*config)._this = z_owned_config_t::null_value();
 
-        let connect = cfg.get(Z_CONFIG_CONNECT_KEY).map(str::to_owned);
-        let listen = cfg.get(Z_CONFIG_LISTEN_KEY).map(str::to_owned);
+        let OpenConfig {
+            connect,
+            listen,
+            dial_whatami,
+        } = open_config(&cfg);
         // R311y406 / R311y534 — the TLS material, RESOLVED here (path or inline
         // base64 -> PEM bytes) because the key numbers are this ABI's knowledge.
         // A malformed value fails the open rather than degrading to a plaintext
@@ -464,15 +500,6 @@ pub unsafe extern "C" fn z_open(
         let tls = match resolve_tls_config(&cfg) {
             Ok(tls) => tls,
             Err(code) => return code,
-        };
-        // The dial role's whatami is config-driven, mirroring pico's
-        // `_z_config_get_mode` (`~/zenoh-pico/src/net/session.c:120-140`,
-        // default CLIENT): `mode=peer` opens a dialing PEER, otherwise CLIENT.
-        // (The listen role forces PEER regardless — pico force-inserts
-        // `MODE=PEER` for any listen config, session.c:98.)
-        let dial_whatami = match cfg.get(Z_CONFIG_MODE_KEY) {
-            Some("peer") => WhatAmI::Peer,
-            _ => WhatAmI::Client,
         };
         // The connect locators: the configured one, or with neither locator configured the
         // first scouted node's (`vendor/zenoh-pico/src/net/session.c` @
@@ -529,6 +556,30 @@ pub unsafe extern "C" fn z_open(
         #[cfg(not(feature = "engine-tokio"))]
         return open_on_coop(zs, request);
     })
+}
+
+/// What a config tells pico's open, read once for [`z_open`] and for the door that describes the
+/// open (`wz_ext_config_device_requires`), so the two cannot read a config differently: the
+/// locator it dials, the one it listens on, and the role it dials as.
+pub(crate) struct OpenConfig {
+    pub(crate) connect: Option<String>,
+    pub(crate) listen: Option<String>,
+    pub(crate) dial_whatami: WhatAmI,
+}
+
+/// Read [`OpenConfig`] off `cfg`. The dial role's whatami is config-driven, mirroring pico's
+/// `_z_config_get_mode` (`~/zenoh-pico/src/net/session.c:120-140`, default CLIENT): `mode=peer`
+/// opens a dialing PEER, otherwise CLIENT. (The listen role forces PEER regardless — pico
+/// force-inserts `MODE=PEER` for any listen config, session.c:98.)
+pub(crate) fn open_config(cfg: &ConfigState) -> OpenConfig {
+    OpenConfig {
+        connect: cfg.get(Z_CONFIG_CONNECT_KEY).map(str::to_owned),
+        listen: cfg.get(Z_CONFIG_LISTEN_KEY).map(str::to_owned),
+        dial_whatami: match cfg.get(Z_CONFIG_MODE_KEY) {
+            Some("peer") => WhatAmI::Peer,
+            _ => WhatAmI::Client,
+        },
+    }
 }
 
 /// What `z_open` read off the C config and its options, for the engine that opens it.
