@@ -182,7 +182,8 @@ members = [
     "wz-host-interop-tests",
     # R311qw — the linkstate-peer routing topology graph, lifted out of
     # wz-runtime-tokio so the runtime-agnostic kernel mirrors the
-    # RouteTable(wz-session-core)/RoutingForwarder(wz-runtime-tokio) split.
+    # kernel(wz-session-core)/forwarder(wz-runtime-tokio) split (its first pair,
+    # RouteTable and RoutingForwarder, was retired in R2912).
     # std-allowed (petgraph is std-only), pulled only by routing-peer.
     "wz-routing-graph",
     # R311tt — the §5.16 access-control ACL policy KERNEL (pure decision engine,

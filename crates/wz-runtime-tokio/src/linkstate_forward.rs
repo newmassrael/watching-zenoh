@@ -2149,8 +2149,8 @@ impl LinkstateForwarder {
     /// restricted to the priority sub-field wz decodes (express / congestion-control
     /// are not carried on `FramePayload`). R311y224 added the router twin
     /// (`RouterForwarder::fan_out_tier_qos`) so the router-tier re-forward
-    /// (`forward_push_tier` + the cross-mesh bridge) and the switchboard
-    /// `RouteTable::forward_push` preserve a transit band too; R311y225 extended it to
+    /// (`forward_push_tier` + the cross-mesh bridge) and the since-retired
+    /// switchboard (`RouteTable::forward_push`) preserve a transit band too; R311y225 extended it to
     /// the CLIENT-face egress (`deliver_to_client_subscribers`) and the client->mesh
     /// re-inject (`reinject_client_push`) on this plane. The remaining DEFAULT data
     /// egresses are the multicast plane (a structural 2-channel, no per-priority

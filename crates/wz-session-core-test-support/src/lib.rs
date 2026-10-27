@@ -94,7 +94,8 @@ pub fn decl_subscriber(id: u64, mapping_id: u64, suffix: Option<&str>) -> DeclSu
 /// the envelope carries the `c` (CURRENT) and `f` (FUTURE) bits, and the body
 /// `ag` (AGGREGATE) bit is set per the caller. wz never SENDS one (a wz publisher
 /// puts without a write filter), so this fixture exists only to drive the
-/// router's inbound-interest reply path (`RouteTable::record_interest`) in tests.
+/// router's inbound-interest reply path (`RouterForwarder::respond_to_interest`)
+/// in tests.
 /// The `c` and `f` bits also gate body presence in the wire codec (Interest
 /// header 0x20 / 0x40), so setting them keeps the owned form self-consistent with
 /// a real decoded interest.

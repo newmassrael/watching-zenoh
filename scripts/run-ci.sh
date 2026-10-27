@@ -20969,13 +20969,15 @@ layer_e3_router_multi_peer() {
     (cd crates && cargo build -p wz-ap-demo --features routing-router --quiet) || return 1
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_router_multi_peer -- --ignored --quiet) || return 1
-    # R311y778 — the DeclareFinal witness, and it needs `routing-routes` ON TOP
-    # of `routing-router`: without it the router installs `NoOpForwarder` and
-    # there is no `RouteTable` to own `record_interest`, so the fixture would
-    # prove nothing while looking identical. Built as a SECOND binary rather
-    # than widening the build above, because that build is Layer E4's negative
-    # twin's reference for "routing-router alone" and widening it would blur
-    # what that lane rejects.
+    # R311y778 — the DeclareFinal witness, built with `routing-routes` ON TOP
+    # of `routing-router`. It was needed then: `routing-router` alone installed
+    # `NoOpForwarder` and there was no `RouteTable` to own `record_interest`, so
+    # the fixture would have proved nothing while looking identical. Since R2886
+    # `routing-router` carries the router hat, and R2912 retired the `RouteTable`,
+    # so `routing-routes` gates no code and this binary is the same code as the
+    # build above; it stays a SECOND build because that build is Layer E4's
+    # negative twin's reference for "routing-router alone" and widening it would
+    # blur what that lane rejects.
     #
     # The requester is a real zenoh-pico `z_get_liveliness`. It is the ONE
     # consumer in either upstream that acts on a Final
@@ -21082,9 +21084,9 @@ layer_e5_router_forward() {
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_router_forward -- --ignored --quiet) || return 1
     # R311y373 — the CROSS-IMPL half of routing-routes forwarding: real pico
-    # z_pub / z_put -> wz --router (RoutingForwarder) -> real pico z_sub, the
+    # z_pub / z_put -> wz --router (the router hat) -> real pico z_sub, the
     # §5.15 forwarding atom's foreign<->foreign witness (incl the pico publisher's
-    # write-filter Interest release, which the wz RouteTable now answers). Needs
+    # write-filter Interest release, which the hat's `respond_to_interest` answers). Needs
     # the FOREIGN pico CLI, so SKIP green when it is absent (WZ_PICO_REQUIRE
     # escalates to FAIL, per the E/E2/E6/E8 rule); the self-contained wz<->wz
     # wz_router_forward leg above stays a hard gate. Rides the SAME routing-routes
