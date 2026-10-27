@@ -66,7 +66,7 @@ EXPECTED = {
         },
     },
     "capi-c": {
-        "revision": 6,
+        "revision": 7,
         "layout": {"unstable_api": True, "shared_memory": False},
     },
     "ap-demo-surface": {"revision": 1, "layout": {}},
