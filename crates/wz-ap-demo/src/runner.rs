@@ -6105,6 +6105,10 @@ pub(crate) struct RouterHatOpts {
     /// run-modes carry separate opts and a router-hat is the node most likely
     /// to reach the limit.
     pub max_sessions: usize,
+    /// `--accept-pending` and `--accept-timeout-ms`: how many inbound links may be mid-handshake at
+    /// once and how long each gets (upstream's `transport/unicast/accept_pending` and
+    /// `accept_timeout`). Upstream's own when the flags are absent.
+    pub accept: wz::runtime_tokio::accept_bounds::AcceptBounds,
     /// `--cpu-share` and `--max-data-wait`: what the operator declares about the CPU this router
     /// may count on. `None` declares nothing, so `max_sessions` is the only bound. Carried to
     /// `WzConfig::with_capacity_contract`, which turns it into the number of sessions the router
@@ -7482,7 +7486,7 @@ async fn run_router_hat_until(
             // and is the node most likely to reach the limit. "One source, not
             // two", which is the rule the `host_cfg` comment states.
             max_sessions: host_cfg.guard().effective_max_sessions().limit,
-            accept: wz::runtime_tokio::accept_loop::AcceptBounds::default(),
+            accept: opts.accept,
             ceiling: Some(session_ceiling.clone()),
             peer_board: loop_board,
             // R2095 (open-debt item 513) — the capability offer every face this

@@ -1186,6 +1186,7 @@ fn demo_main() -> ExitCode {
                     // R2758 — the same parse the peer mesh mode uses; one flag,
                     // one meaning, both run-modes.
                     max_sessions: crate::args::parse_max_sessions(rest),
+                    accept: crate::args::parse_accept_bounds(rest),
                     capacity,
                     // R2233 (open-debt item 585) — the DIAL mirror of the
                     // `AcceptCertPaths` above: a `--connect quic/...` federation

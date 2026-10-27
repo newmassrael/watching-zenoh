@@ -530,6 +530,40 @@ pub(crate) fn parse_max_sessions(args: &[String]) -> usize {
         .unwrap_or(default)
 }
 
+/// `--accept-pending <N>` and `--accept-timeout-ms <MS>`: how many inbound links may be
+/// mid-handshake at once and how long each gets, the two keys upstream keeps under
+/// `transport/unicast` (`accept_pending`, `accept_timeout`). Absent, upstream's own, a hundred and
+/// ten seconds ([`wz::runtime_tokio::accept_bounds::AcceptBounds`]).
+///
+/// A zero or malformed value WARNS and keeps the default, as `--max-sessions` does: a router that
+/// accepts none is never what an operator meant. A test that connects many sessions at once names a
+/// larger count, since a burst past the default is closed at once, as upstream's router closes it.
+#[cfg(feature = "router-hat-router")]
+pub(crate) fn parse_accept_bounds(
+    args: &[String],
+) -> wz::runtime_tokio::accept_bounds::AcceptBounds {
+    let mut bounds = wz::runtime_tokio::accept_bounds::AcceptBounds::default();
+    if let Some(s) = parse_pair(args, "--accept-pending") {
+        match s.trim().parse::<usize>() {
+            Ok(n) if n >= 1 => bounds.pending = n,
+            _ => eprintln!(
+                "wz-ap-demo: --accept-pending '{s}' is not a number >= 1; using {}",
+                bounds.pending
+            ),
+        }
+    }
+    if let Some(s) = parse_pair(args, "--accept-timeout-ms") {
+        match s.trim().parse::<u64>() {
+            Ok(n) if n >= 1 => bounds.timeout_ms = n,
+            _ => eprintln!(
+                "wz-ap-demo: --accept-timeout-ms '{s}' is not a number >= 1; using {}",
+                bounds.timeout_ms
+            ),
+        }
+    }
+    bounds
+}
+
 pub(crate) fn parse_pair(args: &[String], flag: &str) -> Option<String> {
     let mut it = args.iter();
     while let Some(a) = it.next() {

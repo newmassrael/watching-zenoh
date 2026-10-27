@@ -190,10 +190,17 @@ fn sessions_shed(line: &str) -> Option<usize> {
 
 fn spawn_router(demo: &Path, pin: Option<usize>, cpu_share: Option<&str>) -> Router {
     let max_sessions = ROUTER_MAX_SESSIONS.to_string();
+    // The client processes start their sessions together, so the router sees every handshake at
+    // once. Upstream's router closes the links past `accept_pending` (a hundred) at once; this test
+    // measures the data plane and not that bound, so it names a count that holds the whole
+    // population. The bound itself is held by `accept_bounds` of `wz-capi-c` and the accept loop's
+    // own tests.
     let mut args = vec![
         "--router-hat",
         "127.0.0.1:0",
         "--max-sessions",
+        &max_sessions,
+        "--accept-pending",
         &max_sessions,
     ];
     if let Some(share) = cpu_share {
