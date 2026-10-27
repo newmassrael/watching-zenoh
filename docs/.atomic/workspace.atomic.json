@@ -292732,6 +292732,40 @@
         "Read the hosted Qzb, C1 and B2 lanes from the first run that finishes with these commits."
       ]
     },
+    "Round 3763": {
+      "decision_summary": "Open-debt item 924 is closed. The claim was that an open dissect handle holds five to six times the capture file. Steps 1 to 5, D9 and D10 landed in rounds 3469 to 3646: a row is a packed index entry, its bytes are read again from one source, and a handle reports what follows its rows (wz_dissect_live_memory, ABI 51). The handle now holds 0.7 to 1.5 times the file on the smallest-packet fixture and the figure does not grow with the payload. Both memory gates ran at this head and passed: handle_memory_gate (4 tests) and memory_matrix (3). Section 5 of the design note said the cost was not yet measured; it now states the expectation and what the gates hold. No hosted run holds a verdict for this head: the recent ones were cancelled or pending.",
+      "changes_bullets": [
+        "docs/dissect-row-index.md section 5 is retitled and gains the measured memory and CPU figures with the two gates that hold them. The debt register marks item 924 closed at this round. No code changed."
+      ],
+      "verification_bullets": [
+        "On the build host at head 55df8f1e6: cargo test -p wz-capi-dissect --test handle_memory_gate ran 4 tests, 4 passed; cargo test -p wz-capture --features dissect memory_matrix ran 3 tests, 3 passed (1612 filtered out). The debt census passes after the register edit. The first two attempts at the run were refused or failed before any test ran (a drifted submodule, then a wrong directory) and are not counted."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Hosted CI holds no verdict for this closure: the runs since round 3646 were cancelled by later pushes or pending. Read the first completed run that holds this round and re-open the item if a dissect layer is red.",
+        "The consumer's own measure (about 41 bytes a row) came from the consumer; this round re-ran the repository's gates, not the consumer's bench.",
+        "The digests of the field walk (8 bytes a row on a stream capture) stay by decision of the D10 round."
+      ],
+      "publishable_decision_summary": "Open-debt item 924 is closed. The claim was that an open dissect handle holds five to six times the capture file. Steps 1 to 5, D9 and D10 landed in rounds 3469 to 3646: a row is a packed index entry, its bytes are read again from one source, and a handle reports what follows its rows (wz_dissect_live_memory, ABI 51). The handle now holds 0.7 to 1.5 times the file on the smallest-packet fixture and the figure does not grow with the payload. Both memory gates ran at this head and passed: handle_memory_gate (4 tests) and memory_matrix (3). Section 5 of the design note said the cost was not yet measured; it now states the expectation and what the gates hold. No hosted run holds a verdict for this head: the recent ones were cancelled or pending.",
+      "publishable_changes_bullets": [
+        "docs/dissect-row-index.md section 5 is retitled and gains the measured memory and CPU figures with the two gates that hold them. The debt register marks item 924 closed at this round. No code changed."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host at head 55df8f1e6: cargo test -p wz-capi-dissect --test handle_memory_gate ran 4 tests, 4 passed; cargo test -p wz-capture --features dissect memory_matrix ran 3 tests, 3 passed (1612 filtered out). The debt census passes after the register edit. The first two attempts at the run were refused or failed before any test ran (a drifted submodule, then a wrong directory) and are not counted."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Hosted CI holds no verdict for this closure: the runs since round 3646 were cancelled by later pushes or pending. Read the first completed run that holds this round and re-open the item if a dissect layer is red.",
+        "The consumer's own measure (about 41 bytes a row) came from the consumer; this round re-ran the repository's gates, not the consumer's bench.",
+        "The digests of the field walk (8 bytes a row on a stream capture) stay by decision of the D10 round."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
