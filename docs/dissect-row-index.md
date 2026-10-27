@@ -421,14 +421,33 @@ handle can be told not to keep them. Each step lowers the figure that its report
 key names, and each is judged at two sizes, because a value that falls at one
 size only is a fixed cost that fell.
 
-## 5. Expected cost, not yet measured
+## 5. Expected cost, and what was measured
 
-Per row: the index entry (about 64 B), one segment-map entry per packet (about
-16 B), and the sparse side tables. For the capture in section 2 (about 156 B per
-row on disk), that is about 0.5x the file with a lent buffer and about 1.5x with
-an owned copy, against 5.4x to 6.2x today. The price is CPU: a row read again is
-decoded again, about 1 microsecond per row on the consumer's bench, so a full
-re-walk of 1.39M rows costs about 1.5 s more than it does now.
+Expected, written before step 1: per row the index entry (about 64 B), one
+segment-map entry per packet (about 16 B), and the sparse side tables. For the
+capture in section 2 (about 156 B per row on disk), that is about 0.5x the file
+with a lent buffer and about 1.5x with an owned copy, against 5.4x to 6.2x
+then. The price is CPU: a row read again is decoded again, about 1 microsecond
+per row on the consumer's bench, so a full re-walk of 1.39M rows costs about
+1.5 s more than it did.
+
+Measured since, and held by gates that fail when it moves:
+
+- Memory. The handle's heap per row above the empty handle is 15.5 to 82.2 B
+  across the four cases (datagram or stream capture, owned or lent door), after
+  the replay and after the consumer's reads (section 4, D10). On the gate's
+  fixture, whose packets are the smallest a Push makes, that is 0.7x to 1.5x
+  the capture file after the reads, and the figure does not grow with the
+  payload. The report (`wz_dissect_live_memory`) equals the allocator to the
+  byte in every case of the matrix (D7). The consumer's own application
+  measured about 41 B a row at 60 thousand rows and 40 B at 240 thousand.
+  The gates are `handle_memory_gate` in `wz-capi-dissect` and `memory_matrix`
+  in `wz-capture`; both were run on 2026-10-27 at the head this section was
+  written against (4 and 3 tests, all passed).
+- CPU. A one-row field window costs 0.0 to 0.1 ms where it cost about 150 ms
+  at 409,064 rows (step 6, D9). A capture read the way the consumer reads it
+  decodes each row three times; the fields windows cost 11% to 12% more and
+  the census got faster (D5, section 7).
 
 ## 6. Order of work
 
