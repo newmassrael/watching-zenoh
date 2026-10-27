@@ -45,8 +45,11 @@ use wz_session_core::bounded::BoundedVec;
 use wz_session_core::caps::{MAX_LOCATOR_LEN, MAX_PEER_NODES, MAX_STATIC_CONNECT};
 use wz_session_core::connect_endpoints::{group_len, ConnectEndpoints, ConnectEntry, EndpointText};
 use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
+#[cfg(feature = "lifecycle-verbs")]
 use wz_session_core::lifecycle_node::{Generation, LifecycleNode, Verb, Zid};
-use wz_session_core::lifecycle_wire::{CloseOrder, MachineReport, OpenOutcome, SessionLinks};
+use wz_session_core::lifecycle_wire::OpenOutcome;
+#[cfg(feature = "lifecycle-verbs")]
+use wz_session_core::lifecycle_wire::{CloseOrder, MachineReport, SessionLinks};
 use wz_session_core::locator_directory::{
     DirectoryRefusal, DirectoryZid, Lifetime, LocatorDirectory, LocatorSource,
 };
@@ -333,7 +336,10 @@ impl NodeOpener {
             if !t.verifies_nodes {
                 return Err(NodeRefusal::Unverifiable);
             }
+            #[cfg(feature = "lifecycle-verbs")]
             let leaving = t.pending_at(zid).is_some_and(|at| t.requests[at].withdraw);
+            #[cfg(not(feature = "lifecycle-verbs"))]
+            let leaving = false;
             // A node that is held or asked for, and is not on its way out, is unchanged.
             if t.knows(zid) && !leaving {
                 return Ok(());
@@ -350,6 +356,7 @@ impl NodeOpener {
             if first_dialable(&t.directory, zid, t.now_ms, classify).is_none() {
                 return Err(NodeRefusal::NoDialableLocator);
             }
+            #[cfg(feature = "lifecycle-verbs")]
             if leaving {
                 // Asked again after a close: taken again once the close has run.
                 if let Some(at) = t.pending_at(zid) {
@@ -357,9 +364,9 @@ impl NodeOpener {
                 }
                 return Ok(());
             }
-            let mut asked = Pending::new(*zid);
-            asked.open = true;
-            t.requests.push(asked).map_err(|_| NodeRefusal::NoRoom)
+            t.requests
+                .push(Pending::asked(*zid))
+                .map_err(|_| NodeRefusal::NoRoom)
         })
     }
 }
@@ -372,11 +379,13 @@ impl NodeOpener {
 /// It decides nothing and checks no permit: that is `lifecycle_node::lifecycle_verdict`'s, over
 /// [`StoreNode`], which pairs this with a permit. As [`NodeOpener`], it holds only a reference to
 /// the store, so it is `Copy` and an image declares it in a `static`.
+#[cfg(feature = "lifecycle-verbs")]
 #[derive(Clone, Copy)]
 pub struct NodeDesk {
     store: &'static PeerStore,
 }
 
+#[cfg(feature = "lifecycle-verbs")]
 impl NodeDesk {
     /// The desk of the nodes held in `store`. `const`, so a `static` can be one.
     pub const fn in_store(store: &'static PeerStore) -> Self {
@@ -486,6 +495,7 @@ impl NodeDesk {
 
 /// Who may ask the node to hold, close, reset or report a peer: one answer per verb, and a node
 /// refuses by default (least privilege). The image that binds a verb states who may use it.
+#[cfg(feature = "lifecycle-verbs")]
 pub trait LifecyclePermits {
     /// Whether the node permits `verb`.
     fn permits(&self, verb: Verb) -> bool;
@@ -493,11 +503,13 @@ pub trait LifecyclePermits {
 
 /// A node's lifecycle verbs, for `lifecycle_node::lifecycle_verdict` to decide: the desk of the
 /// store that holds its nodes, and a permit per verb.
+#[cfg(feature = "lifecycle-verbs")]
 pub struct StoreNode<P> {
     desk: NodeDesk,
     permits: P,
 }
 
+#[cfg(feature = "lifecycle-verbs")]
 impl<P: LifecyclePermits> StoreNode<P> {
     /// The verbs of the nodes held in `store`, permitted as `permits` says. `const`, so the image
     /// declares it in a `static` beside the store.
@@ -509,6 +521,7 @@ impl<P: LifecyclePermits> StoreNode<P> {
     }
 }
 
+#[cfg(feature = "lifecycle-verbs")]
 impl<P: LifecyclePermits> LifecycleNode for StoreNode<P> {
     fn permits(&self, verb: Verb) -> bool {
         self.permits.permits(verb)
@@ -597,10 +610,18 @@ impl crate::admin_fixed::NodeOpening for ControlledOpener {
 /// (`adminspace.permissions.write`): it lets a request open a session and permits no other verb.
 /// Close, reset and status each need an authority of their own, which an image that binds one
 /// states by its own [`LifecyclePermits`]; this one grants them nothing.
-#[cfg(all(feature = "adminspace-fixed", feature = "session-slot"))]
+#[cfg(all(
+    feature = "adminspace-fixed",
+    feature = "session-slot",
+    feature = "lifecycle-verbs"
+))]
 pub struct WritePermit(pub &'static (dyn crate::admin_status::ConnectStatusSource + Sync));
 
-#[cfg(all(feature = "adminspace-fixed", feature = "session-slot"))]
+#[cfg(all(
+    feature = "adminspace-fixed",
+    feature = "session-slot",
+    feature = "lifecycle-verbs"
+))]
 impl LifecyclePermits for WritePermit {
     fn permits(&self, verb: Verb) -> bool {
         matches!(verb, Verb::Open) && self.0.write_permit()
@@ -658,7 +679,8 @@ struct Tables {
     /// at-most-once calls, Birrell and Nelson, 1984), one entry per peer up to the room the node
     /// was built with. It never grows past that and never evicts, since evicting a peer's entry
     /// would let a retransmission of its reset close the session once more: a peer with no entry
-    /// and no place for one is refused, and the sender learns why ([`Generation::NoRoom`]).
+    /// and no place for one is refused, and the sender learns why (`Generation::NoRoom`).
+    #[cfg(feature = "lifecycle-verbs")]
     generations: FixedVec<(DirectoryZid, u64), MAX_PEER_NODES>,
     /// Whether the manager's dialer holds a session to the node it dials for
     /// ([`Dialer::VERIFIES_NODES`]), written when the manager is made. `false` before: a store
@@ -682,8 +704,10 @@ struct HeldNode {
     zid: DirectoryZid,
     /// Sessions the row holds: one while there is a session, none while it waits to dial again.
     /// A session an endpoint's dial reached is the endpoint's row, not counted here.
+    #[cfg(feature = "lifecycle-verbs")]
     links: u32,
     /// The state of the node's machine, as of the manager's last tick.
+    #[cfg(feature = "lifecycle-verbs")]
     state: PeerConnectionState,
 }
 
@@ -692,17 +716,38 @@ struct HeldNode {
 struct Pending {
     zid: DirectoryZid,
     /// The node was asked for and the manager holds no row for it yet.
+    #[cfg(feature = "lifecycle-verbs")]
     open: bool,
     /// The node leaves the intent: its session is hung up and it is dialled no more (a close).
+    #[cfg(feature = "lifecycle-verbs")]
     withdraw: bool,
     /// Its session is ordered closed (a close, or a reset that leaves the intent).
+    #[cfg(feature = "lifecycle-verbs")]
     closing: bool,
     /// An open came after a close, so the node is taken again once it has gone.
+    #[cfg(feature = "lifecycle-verbs")]
     reopen: bool,
 }
 
 impl Pending {
-    const fn new(zid: DirectoryZid) -> Self {
+    /// An entry for a node asked for, which the next tick takes.
+    const fn asked(zid: DirectoryZid) -> Self {
+        Self {
+            zid,
+            #[cfg(feature = "lifecycle-verbs")]
+            open: true,
+            #[cfg(feature = "lifecycle-verbs")]
+            withdraw: false,
+            #[cfg(feature = "lifecycle-verbs")]
+            closing: false,
+            #[cfg(feature = "lifecycle-verbs")]
+            reopen: false,
+        }
+    }
+
+    /// An entry for a node the manager holds, with nothing asked of it yet.
+    #[cfg(feature = "lifecycle-verbs")]
+    const fn held(zid: DirectoryZid) -> Self {
         Self {
             zid,
             open: false,
@@ -714,22 +759,38 @@ impl Pending {
 }
 
 impl Tables {
+    /// Whether the node holds `zid` or was asked to.
+    #[cfg(not(feature = "lifecycle-verbs"))]
+    fn knows(&self, zid: &DirectoryZid) -> bool {
+        self.held.iter().any(|node| node.zid == *zid) || self.requests.iter().any(|p| p.zid == *zid)
+    }
+
+    /// How many nodes the room is spent on: the ones held and the ones asked for.
+    #[cfg(not(feature = "lifecycle-verbs"))]
+    fn nodes(&self) -> usize {
+        self.held.len() + self.requests.len()
+    }
+
+    #[cfg(feature = "lifecycle-verbs")]
     fn held_node(&self, zid: &DirectoryZid) -> Option<&HeldNode> {
         self.held.iter().find(|node| node.zid == *zid)
     }
 
     /// The place of `zid` among the requests, if it has one.
+    #[cfg(feature = "lifecycle-verbs")]
     fn pending_at(&self, zid: &DirectoryZid) -> Option<usize> {
         self.requests.iter().position(|p| p.zid == *zid)
     }
 
     /// Whether the node holds `zid` or was asked to.
+    #[cfg(feature = "lifecycle-verbs")]
     fn knows(&self, zid: &DirectoryZid) -> bool {
         self.held_node(zid).is_some() || self.pending_at(zid).is_some()
     }
 
     /// How many nodes the room is spent on: the ones held, and the ones asked for and not yet
     /// taken. A node that is both is one.
+    #[cfg(feature = "lifecycle-verbs")]
     fn nodes(&self) -> usize {
         self.held.len()
             + self
@@ -741,6 +802,7 @@ impl Tables {
 
     /// The entry of a node the node knows, made if it has none. A node it does not know has no
     /// entry made: the table is the size of the room, and an unknown node has none.
+    #[cfg(feature = "lifecycle-verbs")]
     fn pending_of_known(&mut self, zid: &DirectoryZid) -> Option<&mut Pending> {
         if !self.knows(zid) {
             return None;
@@ -748,7 +810,7 @@ impl Tables {
         let at = match self.pending_at(zid) {
             Some(at) => at,
             None => {
-                self.requests.push(Pending::new(*zid)).ok()?;
+                self.requests.push(Pending::held(*zid)).ok()?;
                 self.requests.len() - 1
             }
         };
@@ -785,6 +847,7 @@ impl PeerStore {
                 now_ms: 0,
                 held: FixedVec::new(),
                 requests: FixedVec::new(),
+                #[cfg(feature = "lifecycle-verbs")]
                 generations: FixedVec::new(),
                 verifies_nodes: false,
                 classify: None,
@@ -1157,6 +1220,28 @@ impl<D: Dialer> ConnectManager<D> {
     /// Take the nodes an opener accepted since the last tick, and hold each as if
     /// [`Self::open_node`] had been asked here. An open the tables refuse by now (the hint
     /// lapsed between the request and this tick) leaves no row, and is asked again.
+    #[cfg(not(feature = "lifecycle-verbs"))]
+    #[inline(never)]
+    fn serve_requests(&mut self, now_ms: u64) {
+        loop {
+            let next = self.store.get().with(|t| {
+                if t.requests.is_empty() {
+                    None
+                } else {
+                    Some(t.requests.remove(0))
+                }
+            });
+            let Some(asked) = next else {
+                return;
+            };
+            let _ = self.open_node(asked.zid, now_ms);
+        }
+    }
+
+    /// Take what requests made outside the loop asked of each node since the last tick, in the
+    /// order a node's flags keep: a node leaving is closed (and taken again if an open came after),
+    /// otherwise it is taken if it was asked for, and its session ended if a reset ordered it.
+    #[cfg(feature = "lifecycle-verbs")]
     #[inline(never)]
     fn serve_requests(&mut self, now_ms: u64) {
         loop {
@@ -1186,8 +1271,23 @@ impl<D: Dialer> ConnectManager<D> {
         }
     }
 
+    /// Say which nodes this manager holds a row for, where an opener reads it.
+    #[cfg(not(feature = "lifecycle-verbs"))]
+    fn mirror_held(&self) {
+        self.store.get().with(|t| {
+            t.held.clear();
+            for row in self.rows.iter() {
+                if let Key::Node(zid) = &row.key {
+                    // As many rows for nodes as the limit, which the mirror is sized by.
+                    let _ = t.held.push(HeldNode { zid: *zid });
+                }
+            }
+        });
+    }
+
     /// Say which nodes this manager holds a row for, where a request made outside the loop
     /// reads it: each node's links and the state of its machine, as of now.
+    #[cfg(feature = "lifecycle-verbs")]
     fn mirror_held(&self) {
         self.store.get().with(|t| {
             t.held.clear();
@@ -1309,6 +1409,7 @@ impl<D: Dialer> ConnectManager<D> {
     /// End the session the node `zid` holds and keep the node in the intent (decision D6: a
     /// lifecycle `reset`): its machine is told the dial was lost, and dials again after its wait.
     /// A node with no session is unchanged.
+    #[cfg(feature = "lifecycle-verbs")]
     pub fn reset_node(&mut self, zid: &DirectoryZid, now_ms: u64) {
         let key = Key::Node(*zid);
         if let Some(held) = self.row_mut(&key).and_then(|row| row.held.take()) {
@@ -1340,6 +1441,8 @@ impl<D: Dialer> ConnectManager<D> {
         self.serve_requests(now_ms);
         self.observe(now_ms);
         self.fire_due(now_ms);
+        // The mirror is read outside the loop (the status of a node), so it is as of this tick.
+        #[cfg(feature = "lifecycle-verbs")]
         self.mirror_held();
     }
 
@@ -2460,308 +2563,314 @@ mod tests {
         std::assert_eq!(m.dialer().dials_for.borrow().len(), 2);
     }
 
-    /// A node under test: the verbs of the store under the permits a case's world states, with the
-    /// number of times it was told to order a close counted, as the heap profile's test counts it.
-    struct CasePermits(wz_session_core::lifecycle_contract::verbs::Permits);
+    /// The tests of the verbs the fixed node serves, compiled with them (`lifecycle-verbs`).
+    #[cfg(feature = "lifecycle-verbs")]
+    mod lifecycle_verbs {
+        use super::*;
 
-    impl LifecyclePermits for CasePermits {
-        fn permits(&self, verb: Verb) -> bool {
-            match verb {
-                Verb::Open => true,
-                Verb::Close => self.0.close,
-                Verb::Reset => self.0.reset,
-                Verb::Status => self.0.status,
+        /// A node under test: the verbs of the store under the permits a case's world states, with the
+        /// number of times it was told to order a close counted, as the heap profile's test counts it.
+        struct CasePermits(wz_session_core::lifecycle_contract::verbs::Permits);
+
+        impl LifecyclePermits for CasePermits {
+            fn permits(&self, verb: Verb) -> bool {
+                match verb {
+                    Verb::Open => true,
+                    Verb::Close => self.0.close,
+                    Verb::Reset => self.0.reset,
+                    Verb::Status => self.0.status,
+                }
             }
         }
-    }
 
-    struct Counting<N> {
-        inner: N,
-        orders: core::cell::Cell<u32>,
-    }
+        struct Counting<N> {
+            inner: N,
+            orders: core::cell::Cell<u32>,
+        }
 
-    impl<N: LifecycleNode> LifecycleNode for Counting<N> {
-        fn permits(&self, verb: Verb) -> bool {
-            self.inner.permits(verb)
+        impl<N: LifecycleNode> LifecycleNode for Counting<N> {
+            fn permits(&self, verb: Verb) -> bool {
+                self.inner.permits(verb)
+            }
+            fn open(&self, peer: &Zid) -> OpenOutcome {
+                self.inner.open(peer)
+            }
+            fn withdraw(&self, peer: &Zid) {
+                self.inner.withdraw(peer);
+            }
+            fn order_close(&self, peer: &Zid) -> CloseOrder {
+                self.orders.set(self.orders.get() + 1);
+                self.inner.order_close(peer)
+            }
+            fn take_generation(&self, peer: &Zid, generation: u64) -> Generation {
+                self.inner.take_generation(peer, generation)
+            }
+            fn links(&self, peer: &Zid) -> SessionLinks {
+                self.inner.links(peer)
+            }
+            fn read_machines(&self, peer: &Zid, read: &mut dyn FnMut(&[MachineReport<'_>])) {
+                self.inner.read_machines(peer, read);
+            }
         }
-        fn open(&self, peer: &Zid) -> OpenOutcome {
-            self.inner.open(peer)
-        }
-        fn withdraw(&self, peer: &Zid) {
-            self.inner.withdraw(peer);
-        }
-        fn order_close(&self, peer: &Zid) -> CloseOrder {
-            self.orders.set(self.orders.get() + 1);
-            self.inner.order_close(peer)
-        }
-        fn take_generation(&self, peer: &Zid, generation: u64) -> Generation {
-            self.inner.take_generation(peer, generation)
-        }
-        fn links(&self, peer: &Zid) -> SessionLinks {
-            self.inner.links(peer)
-        }
-        fn read_machines(&self, peer: &Zid, read: &mut dyn FnMut(&[MachineReport<'_>])) {
-            self.inner.read_machines(peer, read);
-        }
-    }
 
-    /// A manager over a store of its own, with the peer a case's world holds established (one
-    /// session, as a fixed node holds a node), and the node that serves the verbs of that store.
-    fn world_of(
-        case: &wz_session_core::lifecycle_contract::verbs::SessionCase,
-        full_generations: bool,
-    ) -> (ConnectManager<FakeDialer>, Counting<StoreNode<CasePermits>>) {
-        use wz_session_core::credential_identity::zid_from_key_text;
-        use wz_session_core::lifecycle_contract::verbs::HELD;
-        let store: &'static PeerStore =
-            alloc::boxed::Box::leak(alloc::boxed::Box::new(PeerStore::new()));
-        let control: &'static ConnectControl =
-            alloc::boxed::Box::leak(alloc::boxed::Box::new(ConnectControl::new(true)));
-        let mut m = ConnectManager::in_static_store(control, FakeDialer::default(), store);
-        let held = zid_from_key_text(HELD).expect("a zid");
-        if case.world.open_links == 1 {
-            declare(&mut m, held, "udp/10.0.0.9:7447");
-            std::assert_eq!(m.open_node(held, 0), Ok(()));
+        /// A manager over a store of its own, with the peer a case's world holds established (one
+        /// session, as a fixed node holds a node), and the node that serves the verbs of that store.
+        fn world_of(
+            case: &wz_session_core::lifecycle_contract::verbs::SessionCase,
+            full_generations: bool,
+        ) -> (ConnectManager<FakeDialer>, Counting<StoreNode<CasePermits>>) {
+            use wz_session_core::credential_identity::zid_from_key_text;
+            use wz_session_core::lifecycle_contract::verbs::HELD;
+            let store: &'static PeerStore =
+                alloc::boxed::Box::leak(alloc::boxed::Box::new(PeerStore::new()));
+            let control: &'static ConnectControl =
+                alloc::boxed::Box::leak(alloc::boxed::Box::new(ConnectControl::new(true)));
+            let mut m = ConnectManager::in_static_store(control, FakeDialer::default(), store);
+            let held = zid_from_key_text(HELD).expect("a zid");
+            if case.world.open_links == 1 {
+                declare(&mut m, held, "udp/10.0.0.9:7447");
+                std::assert_eq!(m.open_node(held, 0), Ok(()));
+                m.dialer()
+                    .up
+                    .push((String::from("udp/10.0.0.9:7447@"), Some(held)));
+                m.tick(1);
+            } else {
+                m.tick(1);
+            }
+            let node = Counting {
+                inner: StoreNode::new(store, CasePermits(case.world.permits)),
+                orders: core::cell::Cell::new(0),
+            };
+            if full_generations {
+                // Every place of the record taken by other peers.
+                for at in (0u8..).take(MAX_PEER_NODES) {
+                    let other = [0xe0 + at; CREDENTIAL_ZID_BYTES];
+                    std::assert_eq!(node.take_generation(&other, 1), Generation::Taken);
+                }
+            }
+            (m, node)
+        }
+
+        fn serve_case(
+            case: &wz_session_core::lifecycle_contract::verbs::SessionCase,
+            profile: wz_session_core::lifecycle_contract::verbs::Profile,
+            full_generations: bool,
+        ) {
+            use wz_session_core::lifecycle_contract::verbs::{judge_session, Request};
+            use wz_session_core::lifecycle_node::{lifecycle_verdict, Command};
+            use wz_session_core::text_out::FixedText;
+            let (_manager, node) = world_of(case, full_generations);
+            let answers: Vec<Option<String>> = case
+                .requests
+                .iter()
+                .map(|request| {
+                    let command = match *request {
+                        Request::Close(peer) => Command::Close { peer },
+                        Request::Reset(peer, generation) => Command::Reset { peer, generation },
+                        Request::Status(peer) => Command::Status { peer },
+                    };
+                    let mut out = FixedText::<256>::new();
+                    lifecycle_verdict(&node, command, &mut out);
+                    std::assert!(!out.overflowed());
+                    Some(String::from(out.prefix()))
+                })
+                .collect();
+            let seen: Vec<Option<&str>> = answers.iter().map(Option::as_deref).collect();
+            judge_session(case, profile, &seen, node.orders.get())
+                .unwrap_or_else(|violation| std::panic!("{violation:?}: {seen:?}"));
+        }
+
+        /// The fixed-memory node answers the table of every verb that the heap profile answers
+        /// (decision D7), on the cases a node that holds one session per peer can be put in. The
+        /// reset of a peer the node holds nothing of is run twice: with room in its record of
+        /// generations, where it answers as the heap profile does, and with the record full, where it
+        /// refuses by name.
+        #[test]
+        fn the_fixed_node_conforms_to_the_table_of_every_verb() {
+            use wz_session_core::lifecycle_contract::verbs::{Profile, SESSION_CASES};
+            if !nodes_asked_for() {
+                return;
+            }
+            let mut ran = 0;
+            for case in SESSION_CASES
+                .iter()
+                .filter(|c| c.reachable_with_one_link_per_peer())
+            {
+                serve_case(case, Profile::Heap, false);
+                if case.fixed.is_some() {
+                    serve_case(case, Profile::Fixed, true);
+                }
+                ran += 1;
+            }
+            std::assert!(ran >= 7, "the cases a fixed node can be put in: {ran}");
+        }
+
+        /// A reset ends the session and keeps the node in the intent, so the machine dials again
+        /// after its wait; a close ends it and the node is dialled no more.
+        #[test]
+        fn a_reset_dials_again_and_a_close_does_not() {
+            use wz_session_core::lifecycle_node::{lifecycle_verdict, Command};
+            use wz_session_core::text_out::FixedText;
+            static CONTROL: ConnectControl = ConnectControl::new(true);
+            static STORE: PeerStore = PeerStore::new();
+            if !nodes_asked_for() {
+                return;
+            }
+            let mut m = ConnectManager::in_static_store(&CONTROL, FakeDialer::default(), &STORE);
+            let node = StoreNode::new(&STORE, CasePermits(all_permits()));
+            declare(&mut m, NODE_A, "udp/10.0.0.9:7447");
+            std::assert_eq!(m.open_node(NODE_A, 0), Ok(()));
             m.dialer()
                 .up
-                .push((String::from("udp/10.0.0.9:7447@"), Some(held)));
+                .push((String::from("udp/10.0.0.9:7447@"), Some(NODE_A)));
             m.tick(1);
-        } else {
-            m.tick(1);
+            std::assert_eq!(m.dialer().dials_for.borrow().len(), 1);
+
+            // The order is kept until the loop's next tick, and the tick carries it out.
+            let mut out = FixedText::<256>::new();
+            lifecycle_verdict(
+                &node,
+                Command::Reset {
+                    peer: "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+                    generation: "1",
+                },
+                &mut out,
+            );
+            std::assert_eq!(out.prefix(), "{\"verdict\":\"resetting\",\"links\":1}");
+            std::assert!(
+                m.dialer().hang_ups.is_empty(),
+                "nothing is hung up outside the loop"
+            );
+            m.dialer().up.clear();
+            m.tick(2);
+            std::assert_eq!(
+                m.dialer().hang_ups,
+                vec![String::from("udp/10.0.0.9:7447@")]
+            );
+            std::assert_eq!(m.node_states().count(), 1, "a reset keeps the node");
+            // After its wait the machine dials the node again.
+            m.tick(60_000);
+            std::assert_eq!(m.dialer().dials_for.borrow().len(), 2);
+
+            // A close takes the node out, and nothing dials it again.
+            m.dialer()
+                .up
+                .push((String::from("udp/10.0.0.9:7447@"), Some(NODE_A)));
+            m.tick(60_001);
+            let mut out = FixedText::<256>::new();
+            lifecycle_verdict(
+                &node,
+                Command::Close {
+                    peer: "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+                },
+                &mut out,
+            );
+            std::assert_eq!(out.prefix(), "{\"verdict\":\"closing\",\"links\":1}");
+            m.tick(60_002);
+            std::assert_eq!(m.node_states().count(), 0, "a close takes the node out");
+            m.tick(600_000);
+            std::assert_eq!(
+                m.dialer().dials_for.borrow().len(),
+                2,
+                "and nothing dials it again"
+            );
         }
-        let node = Counting {
-            inner: StoreNode::new(store, CasePermits(case.world.permits)),
-            orders: core::cell::Cell::new(0),
-        };
-        if full_generations {
-            // Every place of the record taken by other peers.
-            for at in (0u8..).take(MAX_PEER_NODES) {
-                let other = [0xe0 + at; CREDENTIAL_ZID_BYTES];
-                std::assert_eq!(node.take_generation(&other, 1), Generation::Taken);
+
+        fn all_permits() -> wz_session_core::lifecycle_contract::verbs::Permits {
+            wz_session_core::lifecycle_contract::verbs::Permits {
+                close: true,
+                reset: true,
+                status: true,
             }
         }
-        (m, node)
-    }
 
-    fn serve_case(
-        case: &wz_session_core::lifecycle_contract::verbs::SessionCase,
-        profile: wz_session_core::lifecycle_contract::verbs::Profile,
-        full_generations: bool,
-    ) {
-        use wz_session_core::lifecycle_contract::verbs::{judge_session, Request};
-        use wz_session_core::lifecycle_node::{lifecycle_verdict, Command};
-        use wz_session_core::text_out::FixedText;
-        let (_manager, node) = world_of(case, full_generations);
-        let answers: Vec<Option<String>> = case
-            .requests
-            .iter()
-            .map(|request| {
-                let command = match *request {
-                    Request::Close(peer) => Command::Close { peer },
-                    Request::Reset(peer, generation) => Command::Reset { peer, generation },
-                    Request::Status(peer) => Command::Status { peer },
-                };
-                let mut out = FixedText::<256>::new();
-                lifecycle_verdict(&node, command, &mut out);
-                std::assert!(!out.overflowed());
-                Some(String::from(out.prefix()))
-            })
-            .collect();
-        let seen: Vec<Option<&str>> = answers.iter().map(Option::as_deref).collect();
-        judge_session(case, profile, &seen, node.orders.get())
-            .unwrap_or_else(|violation| std::panic!("{violation:?}: {seen:?}"));
-    }
-
-    /// The fixed-memory node answers the table of every verb that the heap profile answers
-    /// (decision D7), on the cases a node that holds one session per peer can be put in. The
-    /// reset of a peer the node holds nothing of is run twice: with room in its record of
-    /// generations, where it answers as the heap profile does, and with the record full, where it
-    /// refuses by name.
-    #[test]
-    fn the_fixed_node_conforms_to_the_table_of_every_verb() {
-        use wz_session_core::lifecycle_contract::verbs::{Profile, SESSION_CASES};
-        if !nodes_asked_for() {
-            return;
-        }
-        let mut ran = 0;
-        for case in SESSION_CASES
-            .iter()
-            .filter(|c| c.reachable_with_one_link_per_peer())
-        {
-            serve_case(case, Profile::Heap, false);
-            if case.fixed.is_some() {
-                serve_case(case, Profile::Fixed, true);
+        /// An open that comes after a close is taken again once the close has run, in the order the
+        /// requests came; a close after an open cancels it; and no request is lost for want of a
+        /// place, since an entry exists only for a node the room is already spent on.
+        #[test]
+        fn requests_made_outside_the_loop_run_in_the_order_they_came() {
+            static CONTROL: ConnectControl = ConnectControl::new(true);
+            static STORE: PeerStore = PeerStore::new();
+            if !nodes_asked_for() {
+                return;
             }
-            ran += 1;
+            let mut m = ConnectManager::in_static_store(&CONTROL, FakeDialer::default(), &STORE);
+            let desk = NodeDesk::in_store(&STORE);
+            declare(&mut m, NODE_A, "udp/10.0.0.9:7447");
+            std::assert_eq!(desk.open(&NODE_A), Ok(()));
+            // A close after an open (the node is not yet taken) cancels the open.
+            desk.withdraw(&NODE_A);
+            desk.order_close(&NODE_A);
+            m.tick(1);
+            std::assert_eq!(m.node_states().count(), 0);
+            std::assert!(m.dialer().dials_for.borrow().is_empty());
+
+            // An open after a close of a held node: closed first, taken again after.
+            std::assert_eq!(desk.open(&NODE_A), Ok(()));
+            m.tick(2);
+            std::assert_eq!(m.node_states().count(), 1);
+            desk.withdraw(&NODE_A);
+            desk.order_close(&NODE_A);
+            std::assert_eq!(desk.open(&NODE_A), Ok(()));
+            m.tick(3);
+            std::assert_eq!(
+                m.node_states().count(),
+                1,
+                "taken again once the close has run"
+            );
+            std::assert_eq!(m.dialer().dials_for.borrow().len(), 2);
+
+            // The room is spent on distinct nodes: a node with several requests is one place.
+            for at in (1u8..).take(MAX_PEER_NODES) {
+                let zid = [at; CREDENTIAL_ZID_BYTES];
+                declare(&mut m, zid, "udp/10.0.0.9:7447");
+                let _ = desk.open(&zid);
+                desk.withdraw(&zid);
+                desk.order_close(&zid);
+            }
+            // One entry per node, however many requests a node made.
+            STORE.with(|t| {
+                for (at, entry) in t.requests.iter().enumerate() {
+                    std::assert!(
+                        !t.requests[at + 1..]
+                            .iter()
+                            .any(|other| other.zid == entry.zid),
+                        "two entries for one node"
+                    );
+                }
+            });
         }
-        std::assert!(ran >= 7, "the cases a fixed node can be put in: {ran}");
-    }
 
-    /// A reset ends the session and keeps the node in the intent, so the machine dials again
-    /// after its wait; a close ends it and the node is dialled no more.
-    #[test]
-    fn a_reset_dials_again_and_a_close_does_not() {
-        use wz_session_core::lifecycle_node::{lifecycle_verdict, Command};
-        use wz_session_core::text_out::FixedText;
-        static CONTROL: ConnectControl = ConnectControl::new(true);
-        static STORE: PeerStore = PeerStore::new();
-        if !nodes_asked_for() {
-            return;
-        }
-        let mut m = ConnectManager::in_static_store(&CONTROL, FakeDialer::default(), &STORE);
-        let node = StoreNode::new(&STORE, CasePermits(all_permits()));
-        declare(&mut m, NODE_A, "udp/10.0.0.9:7447");
-        std::assert_eq!(m.open_node(NODE_A, 0), Ok(()));
-        m.dialer()
-            .up
-            .push((String::from("udp/10.0.0.9:7447@"), Some(NODE_A)));
-        m.tick(1);
-        std::assert_eq!(m.dialer().dials_for.borrow().len(), 1);
-
-        // The order is kept until the loop's next tick, and the tick carries it out.
-        let mut out = FixedText::<256>::new();
-        lifecycle_verdict(
-            &node,
-            Command::Reset {
-                peer: "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
-                generation: "1",
-            },
-            &mut out,
-        );
-        std::assert_eq!(out.prefix(), "{\"verdict\":\"resetting\",\"links\":1}");
-        std::assert!(
-            m.dialer().hang_ups.is_empty(),
-            "nothing is hung up outside the loop"
-        );
-        m.dialer().up.clear();
-        m.tick(2);
-        std::assert_eq!(
-            m.dialer().hang_ups,
-            vec![String::from("udp/10.0.0.9:7447@")]
-        );
-        std::assert_eq!(m.node_states().count(), 1, "a reset keeps the node");
-        // After its wait the machine dials the node again.
-        m.tick(60_000);
-        std::assert_eq!(m.dialer().dials_for.borrow().len(), 2);
-
-        // A close takes the node out, and nothing dials it again.
-        m.dialer()
-            .up
-            .push((String::from("udp/10.0.0.9:7447@"), Some(NODE_A)));
-        m.tick(60_001);
-        let mut out = FixedText::<256>::new();
-        lifecycle_verdict(
-            &node,
-            Command::Close {
-                peer: "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
-            },
-            &mut out,
-        );
-        std::assert_eq!(out.prefix(), "{\"verdict\":\"closing\",\"links\":1}");
-        m.tick(60_002);
-        std::assert_eq!(m.node_states().count(), 0, "a close takes the node out");
-        m.tick(600_000);
-        std::assert_eq!(
-            m.dialer().dials_for.borrow().len(),
-            2,
-            "and nothing dials it again"
-        );
-    }
-
-    fn all_permits() -> wz_session_core::lifecycle_contract::verbs::Permits {
-        wz_session_core::lifecycle_contract::verbs::Permits {
-            close: true,
-            reset: true,
-            status: true,
-        }
-    }
-
-    /// An open that comes after a close is taken again once the close has run, in the order the
-    /// requests came; a close after an open cancels it; and no request is lost for want of a
-    /// place, since an entry exists only for a node the room is already spent on.
-    #[test]
-    fn requests_made_outside_the_loop_run_in_the_order_they_came() {
-        static CONTROL: ConnectControl = ConnectControl::new(true);
-        static STORE: PeerStore = PeerStore::new();
-        if !nodes_asked_for() {
-            return;
-        }
-        let mut m = ConnectManager::in_static_store(&CONTROL, FakeDialer::default(), &STORE);
-        let desk = NodeDesk::in_store(&STORE);
-        declare(&mut m, NODE_A, "udp/10.0.0.9:7447");
-        std::assert_eq!(desk.open(&NODE_A), Ok(()));
-        // A close after an open (the node is not yet taken) cancels the open.
-        desk.withdraw(&NODE_A);
-        desk.order_close(&NODE_A);
-        m.tick(1);
-        std::assert_eq!(m.node_states().count(), 0);
-        std::assert!(m.dialer().dials_for.borrow().is_empty());
-
-        // An open after a close of a held node: closed first, taken again after.
-        std::assert_eq!(desk.open(&NODE_A), Ok(()));
-        m.tick(2);
-        std::assert_eq!(m.node_states().count(), 1);
-        desk.withdraw(&NODE_A);
-        desk.order_close(&NODE_A);
-        std::assert_eq!(desk.open(&NODE_A), Ok(()));
-        m.tick(3);
-        std::assert_eq!(
-            m.node_states().count(),
-            1,
-            "taken again once the close has run"
-        );
-        std::assert_eq!(m.dialer().dials_for.borrow().len(), 2);
-
-        // The room is spent on distinct nodes: a node with several requests is one place.
-        for at in (1u8..).take(MAX_PEER_NODES) {
-            let zid = [at; CREDENTIAL_ZID_BYTES];
-            declare(&mut m, zid, "udp/10.0.0.9:7447");
-            let _ = desk.open(&zid);
-            desk.withdraw(&zid);
-            desk.order_close(&zid);
-        }
-        // One entry per node, however many requests a node made.
-        STORE.with(|t| {
-            for (at, entry) in t.requests.iter().enumerate() {
-                std::assert!(
-                    !t.requests[at + 1..]
-                        .iter()
-                        .any(|other| other.zid == entry.zid),
-                    "two entries for one node"
+        /// The record of generations is the size of the room, never grows past it, and never
+        /// evicts: a peer outside it is refused, and the peers inside keep their answers.
+        #[test]
+        fn the_record_of_generations_is_the_size_of_the_room_and_never_evicts() {
+            static STORE: PeerStore = PeerStore::new();
+            let desk = NodeDesk::in_store(&STORE);
+            for at in (1u8..).take(MAX_PEER_NODES) {
+                let zid = [at; CREDENTIAL_ZID_BYTES];
+                std::assert_eq!(desk.take_generation(&zid, 5), Generation::Taken);
+                std::assert_eq!(
+                    desk.take_generation(&zid, 5),
+                    Generation::Duplicate { last: 5 }
+                );
+                std::assert_eq!(
+                    desk.take_generation(&zid, 4),
+                    Generation::Duplicate { last: 5 }
+                );
+                std::assert_eq!(desk.take_generation(&zid, 6), Generation::Taken);
+            }
+            let outside = [0xee; CREDENTIAL_ZID_BYTES];
+            std::assert_eq!(desk.take_generation(&outside, 1), Generation::NoRoom);
+            // Still refused after being asked again, and the ones inside are as they were.
+            std::assert_eq!(desk.take_generation(&outside, 2), Generation::NoRoom);
+            for at in (1u8..).take(MAX_PEER_NODES) {
+                let zid = [at; CREDENTIAL_ZID_BYTES];
+                std::assert_eq!(
+                    desk.take_generation(&zid, 6),
+                    Generation::Duplicate { last: 6 }
                 );
             }
-        });
-    }
-
-    /// The record of generations is the size of the room, never grows past it, and never
-    /// evicts: a peer outside it is refused, and the peers inside keep their answers.
-    #[test]
-    fn the_record_of_generations_is_the_size_of_the_room_and_never_evicts() {
-        static STORE: PeerStore = PeerStore::new();
-        let desk = NodeDesk::in_store(&STORE);
-        for at in (1u8..).take(MAX_PEER_NODES) {
-            let zid = [at; CREDENTIAL_ZID_BYTES];
-            std::assert_eq!(desk.take_generation(&zid, 5), Generation::Taken);
-            std::assert_eq!(
-                desk.take_generation(&zid, 5),
-                Generation::Duplicate { last: 5 }
-            );
-            std::assert_eq!(
-                desk.take_generation(&zid, 4),
-                Generation::Duplicate { last: 5 }
-            );
-            std::assert_eq!(desk.take_generation(&zid, 6), Generation::Taken);
-        }
-        let outside = [0xee; CREDENTIAL_ZID_BYTES];
-        std::assert_eq!(desk.take_generation(&outside, 1), Generation::NoRoom);
-        // Still refused after being asked again, and the ones inside are as they were.
-        std::assert_eq!(desk.take_generation(&outside, 2), Generation::NoRoom);
-        for at in (1u8..).take(MAX_PEER_NODES) {
-            let zid = [at; CREDENTIAL_ZID_BYTES];
-            std::assert_eq!(
-                desk.take_generation(&zid, 6),
-                Generation::Duplicate { last: 6 }
-            );
         }
     }
 }
