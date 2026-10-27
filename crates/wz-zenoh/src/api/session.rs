@@ -2659,21 +2659,31 @@ mod tests {
                 .allowed_destination(Locality::Remote)
                 .wait()
                 .expect("declares");
+            // A delivery is complete when its callback has run, which the drive task can be in the
+            // middle of when the put returns, so the count is waited for. The remote put's skip is
+            // read from the order: had it been delivered, the count would pass the one the next
+            // put brings.
+            let reaches = |count: usize| {
+                let deadline = std::time::Instant::now() + WAIT;
+                while seen.load(Ordering::SeqCst) < count && std::time::Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                assert_eq!(seen.load(Ordering::SeqCst), count);
+            };
             remote.put("v").wait().expect("puts");
-            assert_eq!(seen.load(Ordering::SeqCst), 0, "a remote one skips its own");
             let local = session
                 .declare_publisher("demo/destination")
                 .allowed_destination(Locality::SessionLocal)
                 .wait()
                 .expect("declares");
             local.put("v").wait().expect("puts");
-            assert_eq!(seen.load(Ordering::SeqCst), 1);
+            reaches(1);
             let any = session
                 .declare_publisher("demo/destination")
                 .wait()
                 .expect("declares");
             any.put("v").wait().expect("puts");
-            assert_eq!(seen.load(Ordering::SeqCst), 2);
+            reaches(2);
         }
 
         #[test]
