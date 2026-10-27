@@ -538,7 +538,7 @@ pub(crate) fn parse_max_sessions(args: &[String]) -> usize {
 /// A zero or malformed value WARNS and keeps the default, as `--max-sessions` does: a router that
 /// accepts none is never what an operator meant. A test that connects many sessions at once names a
 /// larger count, since a burst past the default is closed at once, as upstream's router closes it.
-#[cfg(feature = "router-hat-router")]
+#[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
 pub(crate) fn parse_accept_bounds(
     args: &[String],
 ) -> wz::runtime_tokio::accept_bounds::AcceptBounds {
@@ -10121,6 +10121,51 @@ mod capacity_flag_tests {
             assert!(
                 parse_capacity_contract(&bad).is_err(),
                 "{bad:?} is not a promise a router can keep"
+            );
+        }
+    }
+}
+
+#[cfg(all(test, any(feature = "routing-peer", feature = "router-hat-router")))]
+mod accept_bound_flag_tests {
+    use super::parse_accept_bounds;
+    use wz::runtime_tokio::accept_bounds::AcceptBounds;
+
+    fn words(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| (*a).to_string()).collect()
+    }
+
+    #[test]
+    fn absent_flags_leave_upstreams_own_bounds() {
+        assert_eq!(parse_accept_bounds(&words(&[])), AcceptBounds::default());
+    }
+
+    #[test]
+    fn each_flag_sets_its_own_bound_and_leaves_the_other() {
+        let both = parse_accept_bounds(&words(&[
+            "--accept-pending",
+            "4096",
+            "--accept-timeout-ms",
+            "250",
+        ]));
+        assert_eq!((both.pending, both.timeout_ms), (4096, 250));
+        let only_pending = parse_accept_bounds(&words(&["--accept-pending", "7"]));
+        assert_eq!(only_pending.pending, 7);
+        assert_eq!(only_pending.timeout_ms, AcceptBounds::default().timeout_ms);
+    }
+
+    #[test]
+    fn a_zero_or_malformed_value_keeps_the_default() {
+        for bad in [
+            ["--accept-pending", "0"],
+            ["--accept-pending", "many"],
+            ["--accept-timeout-ms", "0"],
+            ["--accept-timeout-ms", "soon"],
+        ] {
+            assert_eq!(
+                parse_accept_bounds(&words(&bad)),
+                AcceptBounds::default(),
+                "{bad:?}"
             );
         }
     }

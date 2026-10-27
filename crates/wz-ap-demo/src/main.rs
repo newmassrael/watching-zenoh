@@ -702,6 +702,9 @@ fn demo_main() -> ExitCode {
             // capability, a bound on peers is a property of every build. The
             // parse is `args::parse_max_sessions`, shared with `--router-hat`.
             let max_sessions: usize = crate::args::parse_max_sessions(rest);
+            // `--accept-pending` / `--accept-timeout-ms`: the bounds on handshakes in flight,
+            // read as `--router-hat` reads them.
+            let accept = crate::args::parse_accept_bounds(rest);
             // R311y218 (transport-qos) — `--qos` (presence bool) offers the QoS
             // transport on this peer's aggregated links (the WzConfig.qos knob),
             // threaded through the multilink open path (option-b). Priority
@@ -922,6 +925,7 @@ fn demo_main() -> ExitCode {
                     #[cfg(feature = "transport-multilink")]
                     max_links,
                     max_sessions,
+                    accept,
                     #[cfg(feature = "transport-qos")]
                     qos,
                     #[cfg(feature = "transport-qos")]

@@ -4352,6 +4352,10 @@ pub(crate) struct PeerOpts {
     /// `wz-runtime-tokio` and is not in this crate's scope, which Layer C1bz
     /// counts as a broken link rather than as a reference.
     pub max_sessions: usize,
+    /// `--accept-pending` and `--accept-timeout-ms`, the bounds on inbound links that are still
+    /// mid-handshake: the same two flags `--router-hat` takes, parsed once
+    /// ([`crate::args::parse_accept_bounds`]). Upstream's own when absent.
+    pub accept: wz::runtime_tokio::accept_bounds::AcceptBounds,
     /// R311y218 (transport-qos) — offer the QoS transport on this peer's aggregated
     /// links (`--qos`). Routed through `WzConfig::with_qos` into `FaceSources.qos`.
     #[cfg(feature = "transport-qos")]
@@ -5438,7 +5442,7 @@ async fn run_peer_until(
             // GET renders, so the loop and the config surface cannot disagree
             // about how many peers this node will hold.
             max_sessions: wz_config.borrow().effective_max_sessions().limit,
-            accept: wz::runtime_tokio::accept_loop::AcceptBounds::default(),
+            accept: opts.accept,
             ceiling: None,
             peer_board: None,
             // R2095 (open-debt item 513) — the capability offer every face this
@@ -10087,6 +10091,7 @@ mod peer_quic_cert_tests {
             // R2758 — upstream's default; these fixtures do not exercise the
             // bound and must not acquire it.
             max_sessions: wz::runtime_tokio::config::DEFAULT_MAX_SESSIONS,
+            accept: wz::runtime_tokio::accept_bounds::AcceptBounds::default(),
             #[cfg(feature = "transport-qos")]
             qos: false,
             // R2096 — R2095 added `PeerOpts.offer` and did not reach these two
@@ -10223,6 +10228,7 @@ mod peer_failfast_tests {
             // R2758 — upstream's default; these fixtures do not exercise the
             // bound and must not acquire it.
             max_sessions: wz::runtime_tokio::config::DEFAULT_MAX_SESSIONS,
+            accept: wz::runtime_tokio::accept_bounds::AcceptBounds::default(),
             #[cfg(feature = "transport-qos")]
             qos: false,
             // R2096 — R2095 added `PeerOpts.offer` and did not reach these two
