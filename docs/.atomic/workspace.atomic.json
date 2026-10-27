@@ -294618,6 +294618,48 @@
         "The hosted result of this push is read per job at the start of the next round; the size red of the capability cost gate named in round 3776 is still not of this family."
       ]
     },
+    "Round 3810": {
+      "decision_summary": "The link of a cooperative session that listens gives the session nothing between its handshake and the face table's decision. Each link is read through an AdmissionGate: once the session is established and until the engine admits the link, the gate hands the link's task no frame and no end of link, so what the peer sent after the handshake waits in the link, is read in order after the admission, and goes with a link that is refused. This closes the window L5 carried, where a refused link's frames were dispatched in the step that completed its handshake and reached the application once more. A frame in the very batch that completed the handshake is still dispatched and flushed with the lost link. The gate is the listen feature's and wraps only the engine's own links, so the shared session drive and the MCU profiles are unchanged.",
+      "changes_bullets": [
+        "crates/wz-capi-coop/src/admission_gate.rs (new, under listen): AdmissionGate, Admitted, and a test on the in-memory network. crates/wz-capi-coop/src/engine.rs: Wire::admitted, open_wire wraps the link, bring_up admits. crates/wz-capi-coop/src/lib.rs: the module. crates/wz-capi-coop/src/tests.rs: params is pub(crate). crates/wz-capi-coop/Cargo.toml: wz-session-mcu test-support as a dev-dependency, for the in-memory network.",
+        "scripts/lib/capability_cost_gate.py: the budget of pico-peer-coop and its note. docs/capi-pico-on-coop-engine.md: the window closed, and why the proof is not over sockets."
+      ],
+      "verification_bullets": [
+        "wz-capi-coop on pc2 with connectivity, listen, liveliness, liveliness-get, local-queryable, local-subscriber, query, queryable, scout and ticker: 69 passed (68 before, 1 new). The new test sends a put the moment after the acceptor's handshake and asserts the subscriber hears nothing until the link is admitted, then hears it once; with the gate shut off (shut() returning false) it fails at that assertion. A test over loopback sockets passed with the gate off too, and was dropped: the acceptor decides before its peer's first frame can arrive, and a dialler's window depends on the order of two threads.",
+        "Clippy with -D warnings and all targets: default, listen, and every plane with listen. The pico crate with engine-coop, peer, multi-thread, link-udp, query, queryable passes its tests, the two remote-only tests with the local switches off as they assume. Layer C1co on pc2 passes (the pico client against each listener, and the real zenoh-pico z_pub, z_sub and z_get against each).",
+        "Size on pc2: pico-peer-coop reads 1,064,448 (888 more than 1,063,560), budget 1,069,900 (that and 5,500)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "carry_forward_bullets": [
+        "The cooperative engine and the tokio engine keep different rules for two links to one node: the cooperative one by the lower zid's dial when the links went opposite ways, the tokio linkstate peer by the first up. A cooperative node that races a tokio peer can close both links until the next redial; one rule for both engines is the owner's of the tokio registry to decide.",
+        "A cooperative listener refuses the second of two clients of one zid, where the tokio acceptor holds both (Layer E3 and E5 fixtures share a zid): if a pico fixture ever shares one, give it its own.",
+        "Layer E's drop-in programs against the cooperative cdylib, and a foreign pico that listens for a cooperative peer to dial, are still open.",
+        "The cooperative budgets are the pc2 reading plus 5,500, an estimate of the hosted reading; replace them with the first hosted reading (the hosted runs of the last pushes were cancelled).",
+        "Read the hosted run of this round and of the one before at the start of the next: C1co builds the pico CLI and runs stdbuf there for the first time."
+      ],
+      "publishable_decision_summary": "The link of a cooperative session that listens gives the session nothing between its handshake and the face table's decision. Each link is read through an AdmissionGate: once the session is established and until the engine admits the link, the gate hands the link's task no frame and no end of link, so what the peer sent after the handshake waits in the link, is read in order after the admission, and goes with a link that is refused. This closes the window L5 carried, where a refused link's frames were dispatched in the step that completed its handshake and reached the application once more. A frame in the very batch that completed the handshake is still dispatched and flushed with the lost link. The gate is the listen feature's and wraps only the engine's own links, so the shared session drive and the MCU profiles are unchanged.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-coop/src/admission_gate.rs (new, under listen): AdmissionGate, Admitted, and a test on the in-memory network. crates/wz-capi-coop/src/engine.rs: Wire::admitted, open_wire wraps the link, bring_up admits. crates/wz-capi-coop/src/lib.rs: the module. crates/wz-capi-coop/src/tests.rs: params is pub(crate). crates/wz-capi-coop/Cargo.toml: wz-session-mcu test-support as a dev-dependency, for the in-memory network.",
+        "scripts/lib/capability_cost_gate.py: the budget of pico-peer-coop and its note. docs/capi-pico-on-coop-engine.md: the window closed, and why the proof is not over sockets."
+      ],
+      "publishable_verification_bullets": [
+        "wz-capi-coop on pc2 with connectivity, listen, liveliness, liveliness-get, local-queryable, local-subscriber, query, queryable, scout and ticker: 69 passed (68 before, 1 new). The new test sends a put the moment after the acceptor's handshake and asserts the subscriber hears nothing until the link is admitted, then hears it once; with the gate shut off (shut() returning false) it fails at that assertion. A test over loopback sockets passed with the gate off too, and was dropped: the acceptor decides before its peer's first frame can arrive, and a dialler's window depends on the order of two threads.",
+        "Clippy with -D warnings and all targets: default, listen, and every plane with listen. The pico crate with engine-coop, peer, multi-thread, link-udp, query, queryable passes its tests, the two remote-only tests with the local switches off as they assume. Layer C1co on pc2 passes (the pico client against each listener, and the real zenoh-pico z_pub, z_sub and z_get against each).",
+        "Size on pc2: pico-peer-coop reads 1,064,448 (888 more than 1,063,560), budget 1,069,900 (that and 5,500)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The cooperative engine and the tokio engine keep different rules for two links to one node: the cooperative one by the lower zid's dial when the links went opposite ways, the tokio linkstate peer by the first up. A cooperative node that races a tokio peer can close both links until the next redial; one rule for both engines is the owner's of the tokio registry to decide.",
+        "A cooperative listener refuses the second of two clients of one zid, where the tokio acceptor holds both (Layer E3 and E5 fixtures share a zid): if a pico fixture ever shares one, give it its own.",
+        "Layer E's drop-in programs against the cooperative cdylib, and a foreign pico that listens for a cooperative peer to dial, are still open.",
+        "The cooperative budgets are the pc2 reading plus 5,500, an estimate of the hosted reading; replace them with the first hosted reading (the hosted runs of the last pushes were cancelled).",
+        "Read the hosted run of this round and of the one before at the start of the next: C1co builds the pico CLI and runs stdbuf there for the first time."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
