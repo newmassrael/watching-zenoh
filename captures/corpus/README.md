@@ -49,6 +49,11 @@ The original captures are not kept anywhere.
 | `zenoh-pico-udp.pcap` | zenoh | UDP unicast | zenoh-pico 1.10.1 clients |
 | `zenoh-handshakes.pcap` | zenoh | TCP and UDP | 240 short sessions, the handshake checks' population |
 | `zenoh-udp-lossy.pcap` | zenoh | UDP unicast | a link that drops 5% each way |
+| `link-tcp-full.pcap` | zenoh | TCP | a router and clients on two machines over an office Wi-Fi, from before the first Init |
+| `link-tcp-large.pcap` | zenoh | TCP | the same with 3000-byte samples, so a sample spans segments |
+| `link-tcp-midsession.pcap` | zenoh | TCP | the same, joined seven seconds in |
+| `link-udp-full.pcap` | zenoh | UDP unicast | the same over UDP |
+| `link-pico-tcp.pcap` | zenoh | TCP | zenoh-pico 1.10.1 clients on the Wi-Fi link |
 | `lan-dns.pcap` | other | DNS | one host's queries and answers, fifteen minutes |
 | `lan-mdns.pcap` | other | mDNS | the devices of an office Wi-Fi, fifteen minutes |
 | `lan-ssdp.pcap` | other | SSDP | one search and the devices' answers |
@@ -62,7 +67,8 @@ The original captures are not kept anywhere.
 
 LLMNR, WS-Discovery, NTP and DHCP from a busier network,
 structured TCP such as HTTP and TLS, and on the zenoh side versions other than
-1.10.1 and 1.5.0 and links other than loopback and an emulated lossy one.
+1.10.1 and 1.5.0 and links other than loopback, an emulated lossy one and one
+office Wi-Fi link.
 Each is added the same way: captured from the real
 implementation, a parser in the anonymiser where a payload of other devices can
 carry an identity, and the measured tally pinned beside the others. QUIC needed

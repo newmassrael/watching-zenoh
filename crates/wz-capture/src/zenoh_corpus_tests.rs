@@ -270,6 +270,13 @@ const EXPECTED: &[(&str, Tally, Tally)] = &[
     ("zenoh-pico-udp.pcap", (2, 0, 0), (2, 0, 0)),
     ("zenoh-handshakes.pcap", (240, 0, 0), (240, 0, 0)),
     ("zenoh-udp-lossy.pcap", (2, 0, 0), (2, 0, 0)),
+    // A real link between two machines (an office Wi-Fi, 2026-10-27): the same
+    // 1.10.1 router and clients, and zenoh-pico clients, off the loopback.
+    ("link-tcp-full.pcap", (2, 0, 0), (2, 0, 0)),
+    ("link-tcp-large.pcap", (2, 0, 0), (2, 0, 0)),
+    ("link-tcp-midsession.pcap", (2, 0, 0), (2, 0, 0)),
+    ("link-udp-full.pcap", (2, 0, 0), (2, 0, 0)),
+    ("link-pico-tcp.pcap", (2, 0, 0), (2, 0, 0)),
     ("lan-dns.pcap", (0, 2, 185), (0, 2, 185)),
     ("lan-mdns.pcap", (0, 1, 18), (0, 1, 18)),
     ("lan-ssdp.pcap", (0, 1, 1), (0, 1, 1)),

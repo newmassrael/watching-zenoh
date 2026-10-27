@@ -235,11 +235,13 @@ the weights by `model_weights_are_their_stated_probabilities`):
 
 - zenoh's chance of each failure is the one-sided 95% Clopper-Pearson upper
   bound on its count, and the confirming outcome takes the rest: 0 residual
-  and 0 undecoded in 2824 units; 0 framings lost in 256 directions held from
-  their start; 0 differing cookies in 256 echoes; 0 Init pairs of one kind in
-  256; 0 other versions in 512 version headers. The zenoh files are 1.10.1
+  and 0 undecoded in 3062 units; 0 framings lost in 268 directions held from
+  their start; 0 differing cookies in 264 echoes; 0 Init pairs of one kind in
+  264; 0 other versions in 528 version headers. The zenoh files are 1.10.1
   routers and clients, an upstream 1.5.0 router, zenoh-pico 1.10.1 clients,
-  240 short sessions captured for their handshakes, and a lossy link;
+  240 short sessions captured for their handshakes, a lossy link, and a real
+  link between two machines (an office Wi-Fi: TCP with small and 3000-byte
+  samples, joined mid-session, UDP, and zenoh-pico);
 - the `yes` sum's null chance of an outcome is the largest such upper bound
   over the null protocols (a unit read whole: mDNS, 13 of 36 units, bound
   0.51; a framing held: MQTT, 0 of 84 directions, bound 0.035);
@@ -249,22 +251,22 @@ the weights by `model_weights_are_their_stated_probabilities`):
 | outcome | `yes` sum | `no` sum | model 1 |
 |---|---|---|---|
 | unit read whole | +964 | +3663 | +2603 |
-| unit residual | -9881 | -8027 | -6745 |
-| unit undecoded | -9881 | -9248 | -7000 |
-| stream framing held | +4818 | +7393 | (none) |
-| stream framing lost | -6426 | -6417 | (none) |
-| cookie matched (8 bytes) | +63983 | +63983 | +63999 |
-| cookie differing | -6426 | -6426 | -10000 |
-| Inits of opposite kinds | +983 | +983 | +999 |
-| Inits of one kind | -5426 | -5426 | -9000 |
+| unit residual | -9998 | -8144 | -6745 |
+| unit undecoded | -9998 | -9365 | -7000 |
+| stream framing held | +4819 | +7393 | (none) |
+| stream framing lost | -6491 | -6483 | (none) |
+| cookie matched (8 bytes) | +63984 | +63984 | +63999 |
+| cookie differing | -6470 | -6470 | -10000 |
+| Inits of opposite kinds | +984 | +984 | +999 |
+| Inits of one kind | -5470 | -5470 | -9000 |
 | version of this reader | +7992 | +7992 | +8000 |
-| another version | -7416 | -7416 | (none) |
+| another version | -7460 | -7460 | (none) |
 
 The unit weight fell because the corpus's real mDNS reads a unit whole 36% of
 the time where the generated mDNS model 1 was priced on did 16%: model 1's
 weight claimed more than the bytes give, against a protocol the corpus holds.
 The handshake violations weigh less than model 1's assumed `2^-10` gave them:
-256 clean handshakes bound a failure only to about 1.2%, and a weight may not
+264 clean handshakes bound a failure only to about 1.1%, and a weight may not
 claim more than the corpus shows.
 
 **The SN steps stay assumed, as a tolerance.** How often a step breaks is a
@@ -281,7 +283,7 @@ first: a unit framed (held) or a desynchronisation this reader inferred
 capture holds from its SYN: a tap that joins a zenoh stream later lands inside
 a unit nearly always and loses the framing too, so there the observation says
 how the capture began and not what the bytes are. Held from the start, zenoh
-never lost it (0 in 256). The forty short MQTT connections lose it in both
+never lost it (0 in 268). The forty short MQTT connections lose it in both
 directions and read `undecided` still: twenty-odd bytes a direction are too
 few to say `no` at 2^-20, and that is the honest word.
 
@@ -292,5 +294,6 @@ read whole and one SN break come to about ten and a half bits, and model 1's
 crossing rested on the unit weight the real mDNS beats.
 
 Still open after model 2: zenoh versions other than 1.10.1 and 1.5.0, links
-other than loopback and one emulated lossy link, and the null side only on
-the protocols the corpus holds.
+other than loopback, one emulated lossy link and one Wi-Fi link, and the
+null side only on the protocols the corpus holds (a busier LAN's DHCP, NTP,
+LLMNR and WS-Discovery from real implementations are still to add).
