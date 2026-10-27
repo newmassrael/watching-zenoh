@@ -841,7 +841,14 @@ impl From<QueryReply> for InboundReply {
             } => Self {
                 rid,
                 keyexpr_literal,
-                body: InboundReplyBody::Err { encoding, payload },
+                // The staged reply names the id and the schema as the responder gave them; a reply
+                // that came over the wire says them as the codec does, the id shifted over the
+                // bit that tells whether a schema follows. A querier reads both the same way.
+                body: InboundReplyBody::Err {
+                    encoding: encoding
+                        .map(|(id, schema)| ((id << 1) | u32::from(schema.is_some()), schema)),
+                    payload,
+                },
                 responder,
                 qos: Some(qos),
             },
@@ -1169,6 +1176,12 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         let resolved = match resolve_wireexpr_in(&response.keyexpr.body, peer_keyexpr_table) {
             Some(s) => s,
+            // An error reply is not about a key: a node that expires a query it forwarded
+            // (upstream's routing does) sends its `Timeout` with no key expression at all, and
+            // the error is what the asker is waiting on. It is delivered with none.
+            None if matches!(response.body, ResponseOwnedVariant::CodecZenohErr(_)) => {
+                String::new()
+            }
             None => {
                 // R3042 -- a reply routing cannot place has still ARRIVED, and the
                 // shared-memory slice it carries is owed its release and its
@@ -3970,7 +3983,8 @@ mod tests {
         );
         match inbound.body {
             InboundReplyBody::Err { encoding, payload } => {
-                assert_eq!(encoding, Some((4, Some("schema_v1".to_string()))));
+                // The id 4 and a schema, packed as the wire packs them: (4 << 1) | 1.
+                assert_eq!(encoding, Some((9, Some("schema_v1".to_string()))));
                 assert_eq!(payload, b"err-payload");
             }
             other => panic!("expected Err, got {other:?}"),

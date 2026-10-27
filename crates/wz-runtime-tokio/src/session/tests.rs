@@ -3454,7 +3454,9 @@ fn query_loopback_propagates_err_body_with_encoding_tuple() {
     assert_eq!(got.keyexpr_literal, "error/path");
     match &got.body {
         InboundReplyBody::Err { encoding, payload } => {
-            assert_eq!(*encoding, Some((4, Some("schema_v1".to_string()))));
+            // Packed as the wire packs it, so that a loopback reply reads as a received one does:
+            // the id 4 shifted over the bit that says a schema follows.
+            assert_eq!(*encoding, Some((9, Some("schema_v1".to_string()))));
             assert_eq!(payload, b"oops");
         }
         other => panic!("expected Err, got {other:?}"),

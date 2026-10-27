@@ -321,6 +321,11 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
         let mut composed = KeyexprBuf::new();
         let keyexpr = match resolve_wireexpr_view(&response.keyexpr.body, spaces, &mut composed) {
             Ok(Some(keyexpr)) => keyexpr,
+            // An error reply is not about a key: a node that expires a query it forwarded
+            // (upstream's routing does) sends its `Timeout` with no key expression at all, and
+            // the error is what the asker is waiting on. It is delivered with none, as the owned
+            // path delivers it.
+            Ok(None) if body.kind == crate::reply_sink::ReplyKind::Err => "",
             // An id the space does not hold: dropped, as the owned path drops
             // it. A sliced Put never reaches here, so there are no shared-memory
             // slices to settle.
@@ -528,6 +533,13 @@ mod tests {
                 .qos(crate::sample::QosLevel::from_raw(0b0000_0011))
                 .build()
                 .expect("build"),
+            // An error is not about a key, so it is delivered whether it names none (the
+            // `Timeout` that upstream's routing sends for a query it forwarded) or one the peer
+            // never declared.
+            crate::response_build::build_response_err_empty(RID, b"Timeout").expect("build"),
+            ResponseErrBuilder::new(RID, 77, None, b"unplaced")
+                .build()
+                .expect("build"),
             // An id the peer never declared: nothing is delivered.
             ResponseReplyBuilder::new(RID, 77, None, b"lost")
                 .build()
@@ -545,6 +557,24 @@ mod tests {
             delivered += owned.len();
         }
         assert_eq!(delivered, cases.len() - 1, "every case but the lost one");
+    }
+
+    #[test]
+    fn an_error_that_names_no_key_is_delivered_with_none_on_either_path() {
+        let timeout =
+            crate::response_build::build_response_err_empty(RID, b"Timeout").expect("build");
+        let (owned, lent) = both(&timeout);
+        for seen in [&owned, &lent] {
+            assert_eq!(seen.len(), 1);
+            assert_eq!(
+                (
+                    seen[0].kind,
+                    seen[0].keyexpr.as_str(),
+                    seen[0].payload.as_slice()
+                ),
+                (ReplyKind::Err, "", b"Timeout".as_slice())
+            );
+        }
     }
 
     #[test]
