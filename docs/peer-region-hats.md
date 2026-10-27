@@ -235,8 +235,32 @@ planes must restore, and are compared with it.
 - Non-vacuity: the scenes must deliver answers to a querier in gossip mode, and
   more of them in link-state mode.
 
-Not covered: query targets and consolidation, a query's timeout, an error
-reply, and the pending table across a recompute.
+What the first pass left, and a second pass paid (three more scenes, steps
+`QueryWith`, `ReplyErr` and `Advance`, and a clock injected into both nodes):
+
+- **What a querier asks for** reaches the queryables unchanged and the answers
+  return: target `All` and `AllComplete`, each consolidation mode, a timeout and
+  parameters. The compared `Request` now carries the target, the timeout and
+  the query body.
+- **An `Err` reply** is relayed to the querier under its own id, and a query
+  nobody answers ends with the relay's own `Err("Timeout")` and the final when
+  the clock passes the default deadline; a reply that arrives after it is
+  dropped by both.
+- **A query open across a recompute**: a router comes up and the tick recomputes
+  the tree while a query is pending, and the reply and the final still reach the
+  querier; a second query from the new router is answered.
+
+No difference was found, in either mode, beyond the gossip one already listed:
+this pass found no defect in either plane. Each thing the scenes claim is
+counted in what was sent (a `Request` carrying each target and the timeout, an
+`Err` reply, the `Err("Timeout")`, a reply across a recompute), so a scene that
+stopped producing one fails rather than passes equal over nothing.
+
+Not covered: a timeout a querier carries that is shorter than the default
+firing a relay's sweep (the scene moves the clock past the default only; the
+carried timeout is compared as forwarded), whether a relay consolidates replies
+itself (only that the mode reaches the queryable is compared), and a
+`ResponseFinal` that races its last reply.
 
 ## 9. Open
 

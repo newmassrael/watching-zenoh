@@ -24,10 +24,13 @@ use crate::runtime_impl::TokioRuntime;
 use crate::test_fixtures::{recording_actions, RecordingLinkDriver};
 use sce_forge_runtime::codec::SceBytes;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use wz_codecs::linkstate::LinkstateOwned;
 use wz_codecs::linkstate_link::LinkstateLink;
 use wz_runtime_core::runtime::Runtime;
 use wz_session_core::declare_build::build_declare_subscriber;
+use wz_session_core::query_mode::ConsolidationMode;
+use wz_session_core::request_build::RequestQueryBuilder;
 use wz_session_core::wireexpr_resolve::id_and_suffix;
 
 fn zid(b: u8) -> Zid {
@@ -59,16 +62,29 @@ enum Seen {
     UndeclareSubscriber,
     /// A `DeclareQueryable` and the completeness it carries.
     DeclareQueryable { keyexpr: String, complete: bool },
-    /// A `Request` forwarded to a queryable. Its request id is left out: each
-    /// forwarder numbers the queries it relays by its own table, and the
-    /// reply is matched to it through [`Node::last_request`].
-    Request { keyexpr: String },
+    /// A `Request` forwarded to a queryable, with the target, the timeout and
+    /// the query body (consolidation and parameters) it carries. Its request id
+    /// is left out: each forwarder numbers the queries it relays by its own
+    /// table, and the reply is matched to it through [`Node::last_request`].
+    Request {
+        keyexpr: String,
+        target: Option<String>,
+        timeout_ms: Option<u64>,
+        body: String,
+    },
     /// A `Response` as the querier sees it, so the request id is the
     /// querier's own, which both forwarders must restore.
     Response {
         request_id: u64,
         keyexpr: String,
         payload: Option<Vec<u8>>,
+    },
+    /// An `Err` `Response` as the querier sees it, the relay's own
+    /// `Err("Timeout")` included.
+    ResponseErr {
+        request_id: u64,
+        keyexpr: String,
+        payload: Vec<u8>,
     },
     /// A `ResponseFinal` as the querier sees it.
     ResponseFinal { request_id: u64 },
@@ -101,9 +117,15 @@ enum Step {
     Queryable(u64, &'static str, bool),
     /// A `Request` arrives on a face: the querier's request id, keyexpr.
     Query(u64, u64, &'static str),
+    /// A `Request` that also carries what the querier asked for.
+    QueryWith(u64, u64, &'static str, Asked),
     /// The queryable on a face answers the last `Request` that was forwarded
     /// to it, with a `Reply` under the keyexpr.
     Reply(u64, &'static str, &'static [u8]),
+    /// The same, with an `Err` reply.
+    ReplyErr(u64, &'static str, &'static [u8]),
+    /// Time passes: the node's clock moves on by this many milliseconds.
+    Advance(u64),
     /// The queryable on a face ends the last `Request` forwarded to it.
     Final(u64),
     /// A face goes down.
@@ -112,9 +134,22 @@ enum Step {
     Tick,
 }
 
+/// What a querier asks beyond the keyexpr. Every field left `None` is absent
+/// from the Request, which is the wire default.
+#[derive(Clone, Copy, Debug, Default)]
+struct Asked {
+    target: Option<QueryTarget>,
+    consolidation: Option<ConsolidationMode>,
+    timeout_ms: Option<u64>,
+    parameters: Option<&'static str>,
+}
+
 /// A node under test: the forwarder and what has been recorded on each face.
 struct Node {
     fwd: Box<dyn FaceForwarder>,
+    /// How far the node's injected clock has been moved from where it began,
+    /// in milliseconds.
+    clock_ms: Arc<AtomicU64>,
     sinks: BTreeMap<u64, Arc<RecordingLinkDriver>>,
     /// How many frames of each face were already read.
     read: BTreeMap<u64, usize>,
@@ -128,9 +163,10 @@ struct Node {
 }
 
 impl Node {
-    fn new(fwd: Box<dyn FaceForwarder>, self_zid: u8) -> Self {
+    fn new(fwd: Box<dyn FaceForwarder>, clock_ms: Arc<AtomicU64>, self_zid: u8) -> Self {
         Self {
             fwd,
+            clock_ms,
             sinks: BTreeMap::new(),
             read: BTreeMap::new(),
             last_request: BTreeMap::new(),
@@ -192,6 +228,35 @@ impl Node {
                     wz_session_core::request_build::build_request_query(*rid, 0, Some(keyexpr))
                         .expect("request");
                 self.deliver(*id, NetworkMessage::Request(Box::new(request)));
+            }
+            Step::QueryWith(id, rid, keyexpr, asked) => {
+                let mut builder = RequestQueryBuilder::new(*rid, 0, Some(keyexpr));
+                if let Some(target) = asked.target {
+                    builder = builder.request_target(target);
+                }
+                if let Some(mode) = asked.consolidation {
+                    builder = builder.consolidation(mode);
+                }
+                if let Some(ms) = asked.timeout_ms {
+                    builder = builder.request_timeout_ms(ms);
+                }
+                if let Some(parameters) = asked.parameters {
+                    builder = builder.parameters(parameters.as_bytes());
+                }
+                let request = builder.build().expect("request");
+                self.deliver(*id, NetworkMessage::Request(Box::new(request)));
+            }
+            Step::Advance(ms) => {
+                self.clock_ms.fetch_add(*ms, Ordering::SeqCst);
+            }
+            Step::ReplyErr(id, keyexpr, payload) => {
+                if let Some(rid) = self.last_request.get(id).copied() {
+                    let response = wz_session_core::response_build::build_response_err_literal(
+                        rid, keyexpr, payload,
+                    )
+                    .expect("response");
+                    self.deliver(*id, NetworkMessage::Response(Box::new(response)));
+                }
             }
             Step::Reply(id, keyexpr, payload) => {
                 if let Some(rid) = self.last_request.get(id).copied() {
@@ -317,25 +382,44 @@ fn seen_of(message: &NetworkMessage) -> Seen {
         },
         NetworkMessage::Request(request) => Seen::Request {
             keyexpr: literal(&request.keyexpr.body),
-        },
-        NetworkMessage::Response(response) => {
-            let payload = match &response.body {
-                wz_session_core::wire::ResponseOwnedVariant::CodecZenohReply(reply) => {
-                    match &reply.body {
-                        wz_session_core::wire::parts::ReplyOwnedVariant::CodecZenohMsgPut(put) => {
-                            wz_session_core::put_payload::inline_bytes(put).map(<[u8]>::to_vec)
-                        }
-                        _ => None,
-                    }
+            target: wz_session_core::request_routing_context::read_request_target(request)
+                .map(|target| format!("{target:?}")),
+            timeout_ms: wz_session_core::request_routing_context::read_request_timeout_ms(request),
+            body: match &request.body {
+                wz_session_core::wire::RequestOwnedVariant::CodecZenohQuery(query) => {
+                    format!("{:?} {:?}", query.consolidation, query.parameters)
                 }
-                _ => None,
-            };
-            Seen::Response {
+                #[allow(unreachable_patterns)]
+                _ => String::new(),
+            },
+        },
+        NetworkMessage::Response(response) => match &response.body {
+            wz_session_core::wire::ResponseOwnedVariant::CodecZenohErr(err) => Seen::ResponseErr {
                 request_id: response.request_id,
                 keyexpr: literal(&response.keyexpr.body),
-                payload,
+                payload: err.payload.as_slice().to_vec(),
+            },
+            body => {
+                let payload = match body {
+                    wz_session_core::wire::ResponseOwnedVariant::CodecZenohReply(reply) => {
+                        match &reply.body {
+                            wz_session_core::wire::parts::ReplyOwnedVariant::CodecZenohMsgPut(
+                                put,
+                            ) => {
+                                wz_session_core::put_payload::inline_bytes(put).map(<[u8]>::to_vec)
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+                Seen::Response {
+                    request_id: response.request_id,
+                    keyexpr: literal(&response.keyexpr.body),
+                    payload,
+                }
             }
-        }
+        },
         NetworkMessage::ResponseFinal(end) => Seen::ResponseFinal {
             request_id: end.request_id,
         },
@@ -411,13 +495,25 @@ enum Mode {
 /// both in `mode`.
 fn both(self_zid: u8, mode: Mode) -> (Node, Node) {
     let full = matches!(mode, Mode::LinkState);
-    let linkstate = LinkstateForwarder::new(zid(self_zid), WhatAmI::Peer);
+    // Each node reads its own clock, which a scene moves by the same amount in
+    // both with `Step::Advance`.
+    let began = Instant::now();
+    let clock = || {
+        let moved = Arc::new(AtomicU64::new(0));
+        let read = Arc::clone(&moved);
+        let now: Box<dyn Fn() -> Instant + Send + Sync> =
+            Box::new(move || began + Duration::from_millis(read.load(Ordering::SeqCst)));
+        (moved, now)
+    };
+    let (moved_old, now_old) = clock();
+    let linkstate = LinkstateForwarder::with_clock(zid(self_zid), WhatAmI::Peer, now_old);
     linkstate.set_full_linkstate(full);
-    let hat = RouterForwarder::peer(zid(self_zid));
+    let (moved_new, now_new) = clock();
+    let hat = RouterForwarder::peer_with_clock(zid(self_zid), now_new);
     hat.on_tables_mut().set_peer_region_full_linkstate(full);
     (
-        Node::new(Box::new(linkstate), self_zid),
-        Node::new(Box::new(hat), self_zid),
+        Node::new(Box::new(linkstate), moved_old, self_zid),
+        Node::new(Box::new(hat), moved_new, self_zid),
     )
 }
 
@@ -623,8 +719,108 @@ fn a_queryable_face_goes_down_mid_query() -> Vec<Step> {
     ]
 }
 
+/// Two client queryables of one keyexpr, one complete and one not, queried with
+/// each target, each consolidation mode, a timeout and parameters: what a
+/// querier asked for reaches the queryables, and the answers return.
+fn what_a_querier_asks_for() -> Vec<Step> {
+    let ask = |target, consolidation, timeout_ms, parameters| Asked {
+        target,
+        consolidation,
+        timeout_ms,
+        parameters,
+    };
+    let mut scene = vec![
+        Step::Up(0, 0xAA, Wire::Peer),
+        Step::Up(1, 0xC1, Wire::Client),
+        Step::Up(2, 0xC2, Wire::Client),
+        Step::Up(3, 0xEE, Wire::Router),
+        Step::LinkBack(0, 0xAA, 5),
+        Step::LinkBack(3, 0xEE, 5),
+        Step::Tick,
+        Step::Queryable(1, "demo/a", true),
+        Step::Queryable(2, "demo/a", false),
+        Step::Tick,
+    ];
+    let asks = [
+        ask(None, None, None, None),
+        ask(Some(QueryTarget::All), None, None, None),
+        ask(Some(QueryTarget::AllComplete), None, None, None),
+        ask(None, Some(ConsolidationMode::None), None, None),
+        ask(None, Some(ConsolidationMode::Monotonic), None, None),
+        ask(None, Some(ConsolidationMode::Latest), None, None),
+        ask(None, None, Some(4_000), None),
+        ask(None, None, None, Some("x=1;y=2")),
+    ];
+    for (n, asked) in asks.into_iter().enumerate() {
+        let querier = if n % 2 == 0 { 0 } else { 3 };
+        scene.extend([
+            Step::QueryWith(querier, 40 + n as u64, "demo/a", asked),
+            Step::Reply(1, "demo/a", b"one"),
+            Step::Final(1),
+            Step::Reply(2, "demo/a", b"two"),
+            Step::Final(2),
+        ]);
+    }
+    scene
+}
+
+/// A queryable answers with an `Err`, and another leaves its query unanswered
+/// until it times out, after which a late reply arrives and is dropped.
+fn an_error_reply_and_a_timeout() -> Vec<Step> {
+    vec![
+        Step::Up(0, 0xAA, Wire::Peer),
+        Step::Up(1, 0xC1, Wire::Client),
+        Step::Up(2, 0xC2, Wire::Client),
+        Step::LinkBack(0, 0xAA, 5),
+        Step::Tick,
+        Step::Queryable(1, "demo/e", true),
+        Step::Queryable(2, "demo/t", true),
+        Step::Tick,
+        Step::Query(0, 21, "demo/e"),
+        Step::ReplyErr(1, "demo/e", b"refused"),
+        Step::Final(1),
+        Step::Query(0, 22, "demo/t"),
+        Step::Advance(5_000),
+        Step::Tick,
+        Step::Advance(6_000),
+        Step::Tick,
+        Step::Reply(2, "demo/t", b"too late"),
+        Step::Final(2),
+    ]
+}
+
+/// A query is open while the topology changes: a new router comes up and the
+/// tick recomputes the tree, and the reply still reaches the querier.
+fn a_query_open_across_a_recompute() -> Vec<Step> {
+    vec![
+        Step::Up(0, 0xAA, Wire::Peer),
+        Step::Up(1, 0xC1, Wire::Client),
+        Step::LinkBack(0, 0xAA, 5),
+        Step::Tick,
+        Step::Queryable(1, "demo/r", true),
+        Step::Query(0, 31, "demo/r"),
+        Step::Up(2, 0xEE, Wire::Router),
+        Step::LinkBack(2, 0xEE, 5),
+        Step::Tick,
+        Step::Reply(1, "demo/r", b"across"),
+        Step::Final(1),
+        Step::Query(2, 32, "demo/r"),
+        Step::Reply(1, "demo/r", b"to the new router"),
+        Step::Final(1),
+    ]
+}
+
 fn scenes() -> Vec<(&'static str, Vec<Step>)> {
     vec![
+        ("what a querier asks for", what_a_querier_asks_for()),
+        (
+            "an error reply and a timeout",
+            an_error_reply_and_a_timeout(),
+        ),
+        (
+            "a query across a recompute",
+            a_query_open_across_a_recompute(),
+        ),
         (
             "queries between peers, clients and a router",
             queries_between_peers_clients_and_a_router(),
@@ -687,6 +883,66 @@ fn messages_sent(mode: Mode, wanted: impl Fn(&Seen) -> bool) -> usize {
 /// the query plane a scene set that only sent Requests would not exercise.
 fn answers_delivered(mode: Mode) -> usize {
     messages_sent(mode, |s| matches!(s, Seen::Response { .. }))
+}
+
+/// Each thing the query scenes claim to exercise, counted in what the region-hat
+/// peer sent in `mode`. A scene that stopped producing one would still be
+/// "equal", and equal over nothing proves nothing.
+fn assert_the_query_scenes_exercise_what_they_claim(mode: Mode) {
+    let requests_with = |wanted: fn(&Seen) -> bool| messages_sent(mode, wanted);
+    let counted = [
+        (
+            "a Request carrying target All",
+            requests_with(|s| matches!(s, Seen::Request { target: Some(t), .. } if t == "All")),
+        ),
+        (
+            "a Request carrying target AllComplete",
+            requests_with(
+                |s| matches!(s, Seen::Request { target: Some(t), .. } if t == "AllComplete"),
+            ),
+        ),
+        (
+            "a Request carrying a timeout",
+            requests_with(|s| {
+                matches!(
+                    s,
+                    Seen::Request {
+                        timeout_ms: Some(4_000),
+                        ..
+                    }
+                )
+            }),
+        ),
+        (
+            "a Request carrying a consolidation mode",
+            requests_with(|s| matches!(s, Seen::Request { body, .. } if body.starts_with("Some("))),
+        ),
+        (
+            "a Request carrying parameters",
+            requests_with(|s| matches!(s, Seen::Request { body, .. } if body.contains(" Some("))),
+        ),
+        (
+            "an Err reply returned to a querier",
+            requests_with(
+                |s| matches!(s, Seen::ResponseErr { payload, .. } if payload == b"refused"),
+            ),
+        ),
+        (
+            "the relay's own Err(Timeout) returned to a querier",
+            requests_with(
+                |s| matches!(s, Seen::ResponseErr { payload, .. } if payload == b"Timeout"),
+            ),
+        ),
+        (
+            "a reply that crossed a recompute",
+            requests_with(
+                |s| matches!(s, Seen::Response { payload: Some(p), .. } if p == b"across"),
+            ),
+        ),
+    ];
+    for (what, n) in counted {
+        assert!(n >= 1, "{mode:?}: no scene produced {what}");
+    }
 }
 
 /// The two reasons the gate lets the planes differ in gossip mode, each a place
@@ -770,6 +1026,7 @@ fn in_gossip_mode_the_two_peer_planes_differ_only_where_the_pin_says() {
         answers_delivered(Mode::Gossip) >= 2,
         "the query scenes must deliver an answer to a querier for the comparison to mean anything"
     );
+    assert_the_query_scenes_exercise_what_they_claim(Mode::Gossip);
 }
 
 /// What the pin's gossip peer tells a new link (`zenoh/src/net/protocol/network.rs`
@@ -824,4 +1081,5 @@ fn in_link_state_mode_the_two_peer_planes_send_the_same_data_and_topology() {
         answers_delivered(Mode::LinkState) > answers_delivered(Mode::Gossip),
         "the extension answers a query across peers, which gossip does not"
     );
+    assert_the_query_scenes_exercise_what_they_claim(Mode::LinkState);
 }

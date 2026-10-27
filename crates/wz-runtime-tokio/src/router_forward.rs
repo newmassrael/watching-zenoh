@@ -2939,10 +2939,17 @@ impl RouterForwarder {
     /// `run_peer` uses.
     #[cfg(test)]
     fn peer(self_zid: Zid) -> Self {
+        Self::peer_with_clock(self_zid, Box::new(Instant::now))
+    }
+
+    /// [`peer`](Self::peer) with an injected monotonic clock, for a test that
+    /// moves "now" across a query's deadline.
+    #[cfg(test)]
+    fn peer_with_clock(self_zid: Zid, clock: Box<dyn Fn() -> Instant + Send + Sync>) -> Self {
         Self::build(
             WhatAmI::Peer,
             self_zid,
-            Box::new(Instant::now),
+            clock,
             crate::node_clock::TimestampingEnabled::default(),
         )
     }
