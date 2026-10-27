@@ -101,7 +101,12 @@ engine-coop = ["dep:wz-capi-coop", "dep:wz-runtime-posix"]
 # endpoints it is given and refuses a config that asks for more. This is a stronger cut than
 # pico's `Z_FEATURE_UNICAST_PEER`, which leaves a lone listener in and takes out only the
 # combined listen and connect and a second connect locator.
-peer = ["engine-tokio", "scout", "wz-capi-core/peer"]
+#
+# Both engines take the roles, so it selects neither: the tokio engine accepts every link the
+# runtime has, and the cooperative engine the `tcp/` ones its stack listens on
+# (`wz-capi-coop`'s `listen`, `docs/capi-pico-on-coop-engine.md` step L4). What only the tokio
+# engine has (a group, the secure and the other links, gossip) selects it by its own feature.
+peer = ["scout", "wz-capi-core?/peer", "wz-capi-coop?/listen"]
 # `multicast-transport` (`Z_FEATURE_MULTICAST_TRANSPORT` with `Z_FEATURE_LINK_UDP_MULTICAST`,
 # open-debt item 913): `z_open` with a `listen` endpoint `udp/<group>:<port>#iface=<if>` joins
 # that group as the session's one transport, as pico's listen of a UDP endpoint with an
@@ -291,9 +296,13 @@ transport-link-serial = ["engine-tokio", "wz-capi-core/transport-link-serial"]
 name = "accept_timeout"
 required-features = ["peer"]
 
+# `peer` selects no engine, so a test that reaches the tokio engine's own types (a runtime of its
+# own, a session of `wz-capi-core` as the far end) names `engine-tokio` too, and the rest are the
+# ABI's alone and run on whichever engine the build has: on the cooperative one they are the
+# proof that its listener serves a C program as the tokio one does (Layer C1co).
 [[test]]
 name = "advanced_subscriber_faces"
-required-features = ["peer", "advanced"]
+required-features = ["engine-tokio", "peer", "advanced"]
 
 # It drives the advanced publisher, the liveliness subscriber and a get together.
 [[test]]
@@ -302,11 +311,11 @@ required-features = ["peer", "advanced", "query"]
 
 [[test]]
 name = "liveliness_face_death"
-required-features = ["peer", "liveliness"]
+required-features = ["engine-tokio", "peer", "liveliness"]
 
 [[test]]
 name = "get_roundtrip"
-required-features = ["peer", "query"]
+required-features = ["engine-tokio", "peer", "query"]
 
 # These ask with a get or a querier and answer with a queryable, so they need both ends.
 [[test]]
@@ -327,11 +336,11 @@ required-features = ["peer", "query", "queryable"]
 
 [[test]]
 name = "matching_multiface"
-required-features = ["peer", "query", "queryable"]
+required-features = ["engine-tokio", "peer", "query", "queryable"]
 
 [[test]]
 name = "queryable_roundtrip"
-required-features = ["peer", "query", "queryable"]
+required-features = ["engine-tokio", "peer", "query", "queryable"]
 
 # A peer's get asks the admin space of the session it dialled.
 [[test]]
@@ -340,7 +349,7 @@ required-features = ["peer", "query", "admin-space"]
 
 [[test]]
 name = "blocking_callback_keeps_session"
-required-features = ["peer"]
+required-features = ["engine-tokio", "peer"]
 
 # A closed session's publisher and querier, over a listening session.
 [[test]]
@@ -354,7 +363,7 @@ required-features = ["peer", "query", "queryable", "local-subscriber", "local-qu
 
 [[test]]
 name = "connectivity_events"
-required-features = ["peer", "connectivity"]
+required-features = ["engine-tokio", "peer", "connectivity"]
 
 [[test]]
 name = "fragmentation_roundtrip"
@@ -390,7 +399,7 @@ required-features = ["peer"]
 
 [[test]]
 name = "teardown_drain"
-required-features = ["peer"]
+required-features = ["engine-tokio", "peer"]
 
 [[test]]
 name = "unixpipe_listen_multiclient"

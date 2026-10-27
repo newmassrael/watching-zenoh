@@ -85,7 +85,7 @@ use wz_session_core::WhatAmI;
 /// opens its raweth transport, a multicast session over raw Ethernet
 /// (`vendor/zenoh-pico/src/transport/raweth/link.c` @
 /// `static z_result_t _z_f_link_listen_raweth(_z_link_t *self) { return _z_f_link_open_raweth(self); }`).
-#[cfg(feature = "engine-tokio")]
+#[cfg(any(feature = "engine-tokio", feature = "peer"))]
 pub(crate) fn is_group_endpoint(endpoint: &str) -> bool {
     let (locator, metadata) = endpoint.split_once('#').unwrap_or((endpoint, ""));
     #[cfg(all(feature = "raweth-transport", target_os = "linux"))]
@@ -792,9 +792,13 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
     }
 }
 
-/// Open `request` on the cooperative engine and install the session in `zs`: a client session
-/// dialled over the host's sockets, opened on this thread before `z_open` returns, as the tokio
-/// engine's is.
+/// Open `request` on the cooperative engine and install the session in `zs`: a session dialled
+/// over the host's sockets, and with `peer` one that listens on the `tcp/` endpoint of its
+/// `listen` key as well, opened on this thread before `z_open` returns, as the tokio engine's is.
+/// A listener is open once its port is bound, as pico's `z_open(listen)` returns, and takes each
+/// inbound link as a face of the session (`wz-capi-coop`'s `listen`). A group (a `udp/` endpoint
+/// with an interface) is the tokio engine's alone: a build that joins one selects that engine, so
+/// this one answers it as a build without the multicast transport does.
 ///
 /// What zenoh-pico's client advertises, as the tokio engine's open does: zenoh's default batch
 /// size (`transport/link/tx/batch_size`, 65535, which the link's own capacity caps), pico's lease
@@ -809,16 +813,24 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
 /// `zs` is a valid, null-initialised `z_owned_session_t`.
 #[cfg(not(feature = "engine-tokio"))]
 unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZResult {
-    // A build without the tokio engine has no `peer` feature, so `z_open` refused a listener and
-    // the peer role before this.
+    // A build without `peer` is a client build: `z_open` refused a listener and the peer role
+    // before this.
+    #[cfg(not(feature = "peer"))]
     debug_assert!(request.listen.is_none());
+    #[cfg(feature = "peer")]
+    if request.listen.as_deref().is_some_and(is_group_endpoint) {
+        return crate::result::Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN;
+    }
     let dial_whatami = request.dial_whatami;
     let connect = request.connect;
+    // pico's config carries ONE listen locator, so the set is that one or none.
+    let listen: Vec<String> = request.listen.into_iter().collect();
     // The locator pico's one transport is opened on, which its admin space reports as the
-    // transport's link: the first connect locator (`vendor/zenoh-pico/src/net/session.c` @
-    // `// First, try to open the optional listen locator.`, which this build has none of).
+    // transport's link: the listen locator when there is one, the first connect locator
+    // otherwise (`vendor/zenoh-pico/src/net/session.c` @
+    // `// First, try to open the optional listen locator.`).
     #[cfg(feature = "admin-space")]
-    let transport_endpoint = connect.first().cloned();
+    let transport_endpoint = listen.first().or_else(|| connect.first()).cloned();
     let opened = wz_capi_coop::CoopEngine::open(
         wz_runtime_posix::links::PosixLinks::new([0; 4], wz_runtime_posix::stream::PosixTcpDial)
             .waited_by_owner(),
@@ -839,7 +851,13 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
             sn_resolution: wz_session_core::policy::SessionPolicy::from_build().sn_resolution,
             link_rx: PICO_LINK_RX,
             tx_queue: TxQueueConf::pico(),
-            timeouts: wz_session_core::session_timeouts::SessionTimeouts::spec_defaults(),
+            // How long an inbound link may take to complete its handshake is pico's
+            // `Z_TRANSPORT_ACCEPT_TIMEOUT` as the build states it, as the tokio engine's
+            // `PICO_ACCEPT` says.
+            timeouts: wz_session_core::session_timeouts::SessionTimeouts {
+                accepting_inactivity_ms: wz_session_core::caps::PICO_ACCEPT_TIMEOUT_MS as u64,
+                ..wz_session_core::session_timeouts::SessionTimeouts::spec_defaults()
+            },
             open_timeout_ms: wz_session_core::caps::PICO_CONNECT_TIMEOUT_MS as u64,
             // pico tries again every 1000 ms while the reopen fails
             // (`vendor/zenoh-pico/src/net/session.c` @
@@ -848,9 +866,9 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
             // A read waits on the link as long as pico's socket receive times out, its
             // `Z_CONFIG_SOCKET_TIMEOUT` as this build states it.
             idle_wait_ms: pico_socket_timeout(wz_session_core::caps::PICO_SOCKET_TIMEOUT_MS),
-            // This build listens on nothing (`z_open` refused a listener before this), so the
-            // bounds of an accept are upstream's and are not reached.
-            listen: Vec::new(),
+            // The bounds of an accept are upstream's, as the tokio engine's are
+            // (`PICO_ACCEPT`): pico bounds no count of pending accepts or of sessions.
+            listen,
             accept_pending: wz_capi_coop::DEFAULT_ACCEPT_PENDING,
             max_faces: wz_capi_coop::DEFAULT_MAX_FACES,
         },
