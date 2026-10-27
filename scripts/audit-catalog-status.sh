@@ -376,7 +376,7 @@ import atom_test_graph  # noqa: E402
 # someone remembers to run it is the skip-is-green defect one level up.
 fail_selftest = atom_test_graph._selftest()
 
-_atg = atom_test_graph.graph()
+_atg = atom_test_graph.graph(set(atoms))
 fail_untested_complete = []
 for _a in sorted(atoms):
     if impl_tag(_a) != "COMPLETE":

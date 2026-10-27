@@ -616,12 +616,23 @@ def _crate_public_symbols(crate_dir):
     return syms
 
 
-def _exclusive_crates(pulls, paths):
+def _exclusive_crates(pulls, paths, atoms=None):
     """feature -> {crate dir}: the in-tree crates NO other feature also pulls.
 
     The seam `dep_ownership()` and the self-check share, so the guard drives the
-    same selection the tree walk does. Pure: both inputs are handed in.
+    same selection the tree walk does. Pure: all inputs are handed in.
+
+    `atoms` is the set of catalog atoms, and when it is handed in only an ATOM
+    counts as a puller. The exclusivity this function enforces is between atoms:
+    one test of a crate two atoms pull would prove both. A cargo feature that is
+    not an atom (the engine choice of a consumer crate, an inner half of an atom)
+    is not a claim on the crate's code, only a way to get at it, and counting it
+    took `wz-runtime-tokio` from the `runtime-tokio` atom the day a second crate
+    forwarded to it, with no second atom involved. `None` keeps every feature a
+    puller, which is what the fixtures that carry no catalog want.
     """
+    if atoms is not None:
+        pulls = {feat: deps for feat, deps in pulls.items() if feat in atoms}
     pullers = {}
     for feat, deps in pulls.items():
         for dep in deps:
@@ -634,7 +645,7 @@ def _exclusive_crates(pulls, paths):
     return out
 
 
-def dep_ownership():
+def dep_ownership(atoms=None):
     """atom -> {symbol}: the API of the in-tree crates ONLY this feature pulls in.
 
     ARM 3 (R2365) — the blind spot ARM 1 was built with. ARM 1 asks which
@@ -671,10 +682,16 @@ def dep_ownership():
     the atom's COMPLETE tag goes red until a test names something it still owns.
     That is the derivation working -- it is what "derived, nothing authored"
     costs, and the alternative is a pinned list that rots silently.
+
+    A puller is an ATOM when the caller hands the catalog in (`atoms`): a
+    consumer crate's own feature that forwards to the crate (`wz-zenoh`'s
+    `engine-tokio` over `wz-runtime-tokio`) shares no atom's proof with
+    another atom, so it does not end the owner's claim. Measured: that one
+    forward took `runtime-tokio` to zero owned symbols and redded A3.
     """
     pulls, paths = _dep_forwards()
     owned = {}
-    for feat, dirs in _exclusive_crates(pulls, paths).items():
+    for feat, dirs in _exclusive_crates(pulls, paths, atoms).items():
         for crate_dir in dirs:
             syms = _crate_public_symbols(crate_dir)
             if syms:
@@ -682,7 +699,7 @@ def dep_ownership():
     return owned
 
 
-def ownership():
+def ownership(atoms=None):
     """atom -> {symbol}: the symbols each feature's cfg sites gate. Derived."""
     owned = {}
     for path in _rs_files():
@@ -692,7 +709,7 @@ def ownership():
             continue
         for f, syms in _scan_lines(lines).items():
             owned.setdefault(f, set()).update(syms)
-    for f, syms in dep_ownership().items():
+    for f, syms in dep_ownership(atoms).items():
         owned.setdefault(f, set()).update(syms)
     return owned
 
@@ -872,9 +889,9 @@ def _reached(owned, regions):
     return hit
 
 
-def graph():
+def graph(atoms=None):
     """atom -> (owned_symbols, symbols_a_test_names). Derived, nothing authored."""
-    owned = ownership()
+    owned = ownership(atoms)
     regions = [idents for _p, idents in _test_regions()]
     return {a: (syms, _reached(syms, regions)) for a, syms in owned.items()}
 
@@ -1111,6 +1128,29 @@ def _selftest():
     # the feature pulls it: `ext-crate` has no in-tree path and must drop out.
     eq("ARM3 external: a dep with no in-tree path is not owned",
        _excl.get("feat-coop") == {"crates/wz-runtime-coop"}, True)
+    # ARM 3, the DEFECT (a consumer crate forwarding to an atom's crate): a feature
+    # that is not an atom, `feat-engine` of a consumer, also pulls the crate, and
+    # counting it as a puller took the crate from its one atom. With the catalog
+    # handed in, only an atom is a puller.
+    _consumer = {
+        "feat-tokio": {"wz-runtime-tokio", "wz-runtime-core"},
+        "feat-coop": {"wz-runtime-coop", "wz-runtime-core"},
+        "feat-engine": {"wz-runtime-tokio"},
+    }
+    _catalog = {"feat-tokio", "feat-coop"}
+    eq("ARM3 consumer: a feature that is no atom does not end the owner's claim",
+       _exclusive_crates(_consumer, _paths, _catalog).get("feat-tokio"),
+       {"crates/wz-runtime-tokio"})
+    # The twins. Without the catalog every feature is a puller, as before; and two
+    # ATOMS pulling one crate still leave it to neither, which is the whole point
+    # of the exclusivity.
+    eq("ARM3 consumer twin: with no catalog the consumer feature still shares the crate",
+       "crates/wz-runtime-tokio" in _exclusive_crates(_consumer, _paths).get("feat-tokio", set()),
+       False)
+    eq("ARM3 consumer twin: two atoms pulling one crate leave it to neither",
+       sorted(c for dirs in _exclusive_crates(
+           _consumer, _paths, _catalog | {"feat-engine"}).values()
+           for c in dirs if c.endswith("wz-runtime-tokio")), [])
     # ARM 3, the SPLIT (S9e): the dependency moved into an inner feature the atom
     # implies. The atom, which still configures the crate (`wz-runtime-coop/alloc`),
     # owns it; the inner half, which no atom is, owns nothing; a consumer that only
