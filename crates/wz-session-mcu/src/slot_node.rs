@@ -901,7 +901,7 @@ pub struct ClientNode<
     /// that listens on nothing).
     pub listening: Listening<X, ACCEPTS>,
     /// What the node takes part in beside its sessions: the multicast group
-    /// ([`SlotGroup`](crate::slot_group::SlotGroup)), or [`NoPlane`] for a node that has none.
+    /// (`slot_group::SlotGroup`, which is `group`'s), or [`NoPlane`] for a node that has none.
     pub plane: W,
     /// Who the node is.
     pub identity: NodeIdentity,

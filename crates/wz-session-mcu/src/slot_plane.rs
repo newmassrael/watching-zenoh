@@ -5,7 +5,7 @@
 //!
 //! A node's sessions are the dialled and the accepted ones ([`crate::slot_client`]); a PLANE is
 //! something else the node takes part in that is not a session with anyone, and today it is the
-//! multicast group ([`crate::slot_group`]). The node knows a plane only by these two traits, so a
+//! multicast group (`slot_group`, which is `group`'s). The node knows a plane only by these two traits, so a
 //! build with no plane names none of its code ([`NoPlane`] is the plane of a node that has none),
 //! and the plane is given to the node as a value, as the acceptor is, rather than the node growing
 //! a field and a feature for each.

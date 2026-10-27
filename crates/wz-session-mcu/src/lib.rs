@@ -19,8 +19,8 @@
 //! - `admin_fixed` (`adminspace-core` and `session-slot`) — the same admin GET with
 //!   no allocator: the node's state in fixed rows, its reply built in a bounded
 //!   arena.
-//! - [`connect_manager`] (`adminspace-write`) — the node holds a session with every
-//!   endpoint its control names and re-dials the ones that drop.
+//! - `connect_manager` (`dial`, which `adminspace-write` takes) — the node holds a
+//!   session with every endpoint its control names and re-dials the ones that drop.
 //! - `dial` (`adminspace-write`) — the dialer that opens a written
 //!   `udp/<ipv4>:<port>` as an initiator session. Under `session-slot` only the
 //!   endpoint parser is here: the dialer that opens the link is the stack's
