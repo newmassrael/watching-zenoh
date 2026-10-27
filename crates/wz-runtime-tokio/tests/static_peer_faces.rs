@@ -97,6 +97,7 @@ fn sources(
         // existed. A test that does not exercise `max_sessions` must not
         // acquire it by default, or its subject changes silently.
         max_sessions: usize::MAX,
+        accept: wz_runtime_tokio::accept_loop::AcceptBounds::default(),
         ceiling: None,
         peer_board: None,
         offer: SessionOffer::universal(),

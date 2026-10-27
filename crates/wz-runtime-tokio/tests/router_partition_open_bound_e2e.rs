@@ -81,6 +81,7 @@ fn sources(listeners: Vec<BoundListener>, dial_targets: Vec<AnyLocator>) -> Face
         #[cfg(feature = "transport-multilink")]
         max_links: 1,
         max_sessions: usize::MAX,
+        accept: wz_runtime_tokio::accept_loop::AcceptBounds::default(),
         ceiling: None,
         peer_board: None,
         offer: SessionOffer::universal(),

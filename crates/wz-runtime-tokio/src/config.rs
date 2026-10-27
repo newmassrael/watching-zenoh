@@ -740,6 +740,18 @@ impl core::fmt::Debug for ConfigSinks<'_> {
 /// `usize`.
 pub const DEFAULT_MAX_SESSIONS: usize = 1_000;
 
+/// Upstream's default `transport/unicast/accept_timeout`, in milliseconds
+/// (`commons/zenoh-config/src/defaults.rs` @ `accept_timeout: 10_000,`): how long an inbound link
+/// gets to complete its whole handshake. Here, and not beside the accept loop that applies it,
+/// for the reason [`DEFAULT_MAX_SESSIONS`] is: the config layer states it in builds that do not
+/// have the loop.
+pub const ACCEPT_TIMEOUT_MS: u64 = 10_000;
+
+/// Upstream's default `transport/unicast/accept_pending`
+/// (`commons/zenoh-config/src/defaults.rs` @ `accept_pending: 100,`): how many inbound links may
+/// be mid-handshake at once.
+pub const ACCEPT_PENDING: usize = 100;
+
 /// The typed wz runtime config SSOT — see the module doc. The read-at-open
 /// fields are `pub` (introspection-readable); the live `interceptors`
 /// field is private so every mutation routes through

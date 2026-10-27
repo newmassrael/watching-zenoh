@@ -1366,8 +1366,9 @@ note = "how long the cooperative engine's open waits for the session to be estab
 [[upstream_switch]]
 original = "zenoh-pico"
 switch = "Z_TRANSPORT_ACCEPT_TIMEOUT"
-class = "never"
-note = "the accepting side's handshake bound; wz holds it at one second, pico's default, with no switch: open-debt item 925"
+class = "maps"
+anchor = "limit:PICO_ACCEPT_TIMEOUT_MS"
+note = "how long an inbound link gets to complete its whole handshake before the accepting side drops it"
 
 [[upstream_switch]]
 original = "zenoh-pico"
@@ -1959,6 +1960,18 @@ from fragments, unicast and in a multicast group, as zenoh-pico's
 FRAG_MAX_SIZE. A fragment that would take its message past it ends the chain
 and the message is dropped; a message that arrives in one frame is never
 measured against it.
+'''
+
+[[limit]]
+id = "PICO_ACCEPT_TIMEOUT_MS"
+kconfig = "WZ_LIMIT_PICO_ACCEPT_TIMEOUT_MS"
+default = 1000
+help = '''
+How long, in milliseconds, a listening session of the zenoh-pico interface gives
+an inbound link to complete its whole handshake, link handshake included,
+before it drops the link without a word, as zenoh-pico's
+Z_TRANSPORT_ACCEPT_TIMEOUT. zenoh's own bound is ten seconds; the zenoh-c
+interface reads it from transport/unicast/accept_timeout.
 '''
 
 [[limit]]

@@ -57,6 +57,8 @@ const KEY_BATCH_SIZE: &str = "transport/link/tx/batch_size";
 /// `transport/link/tx/lease`.
 const KEY_LEASE: &str = "transport/link/tx/lease";
 const KEY_KEEP_ALIVE: &str = "transport/link/tx/keep_alive";
+const KEY_ACCEPT_TIMEOUT: &str = "transport/unicast/accept_timeout";
+const KEY_ACCEPT_PENDING: &str = "transport/unicast/accept_pending";
 /// `transport/unicast/max_links`.
 const KEY_MAX_LINKS: &str = "transport/unicast/max_links";
 
@@ -184,6 +186,8 @@ impl ConfigDefect {
             ConfigDefect::ZeroBatchSize => (None, vec![KEY_BATCH_SIZE]),
             ConfigDefect::ZeroLease => (None, vec![KEY_LEASE]),
             ConfigDefect::ZeroKeepAlive => (None, vec![KEY_KEEP_ALIVE]),
+            ConfigDefect::ZeroAcceptTimeout => (None, vec![KEY_ACCEPT_TIMEOUT]),
+            ConfigDefect::ZeroAcceptPending => (None, vec![KEY_ACCEPT_PENDING]),
             ConfigDefect::ZeroMaxLinks => (None, vec![KEY_MAX_LINKS]),
         };
         Finding::describing(self, endpoint, sites_in(node, &keys))
@@ -347,6 +351,14 @@ mod tests {
             keep_alive: 0,
             ..Default::default()
         };
+        let zero_accept_timeout = ZenohNodeConfig {
+            accept_timeout_ms: 0,
+            ..Default::default()
+        };
+        let zero_accept_pending = ZenohNodeConfig {
+            accept_pending: 0,
+            ..Default::default()
+        };
         let zero_links = ZenohNodeConfig {
             max_links: 0,
             ..Default::default()
@@ -354,12 +366,14 @@ mod tests {
         let duplicated = ZenohNodeConfig::default()
             .listening_on("tcp/10.0.0.5:7447")
             .listening_on("tcp/10.0.0.5:7447");
-        let cases: [(&str, ZenohNodeConfig); 7] = [
+        let cases: [(&str, ZenohNodeConfig); 9] = [
             ("Unreachable", unreachable),
             ("QosWithLowlatency", qos_lowlatency),
             ("ZeroBatchSize", zero_batch),
             ("ZeroLease", zero_lease),
             ("ZeroKeepAlive", zero_keep_alive),
+            ("ZeroAcceptTimeout", zero_accept_timeout),
+            ("ZeroAcceptPending", zero_accept_pending),
             ("ZeroMaxLinks", zero_links),
             ("DuplicateListenEndpoint", duplicated),
         ];
@@ -432,6 +446,8 @@ mod tests {
             ConfigDefect::ZeroBatchSize,
             ConfigDefect::ZeroLease,
             ConfigDefect::ZeroKeepAlive,
+            ConfigDefect::ZeroAcceptTimeout,
+            ConfigDefect::ZeroAcceptPending,
             ConfigDefect::ZeroMaxLinks,
         ] {
             findings.push(defect.finding(None));

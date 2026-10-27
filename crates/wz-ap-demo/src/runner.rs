@@ -5438,6 +5438,7 @@ async fn run_peer_until(
             // GET renders, so the loop and the config surface cannot disagree
             // about how many peers this node will hold.
             max_sessions: wz_config.borrow().effective_max_sessions().limit,
+            accept: wz::runtime_tokio::accept_loop::AcceptBounds::default(),
             ceiling: None,
             peer_board: None,
             // R2095 (open-debt item 513) — the capability offer every face this
@@ -7481,6 +7482,7 @@ async fn run_router_hat_until(
             // and is the node most likely to reach the limit. "One source, not
             // two", which is the rule the `host_cfg` comment states.
             max_sessions: host_cfg.guard().effective_max_sessions().limit,
+            accept: wz::runtime_tokio::accept_loop::AcceptBounds::default(),
             ceiling: Some(session_ceiling.clone()),
             peer_board: loop_board,
             // R2095 (open-debt item 513) — the capability offer every face this

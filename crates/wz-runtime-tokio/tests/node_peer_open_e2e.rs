@@ -77,6 +77,7 @@ fn sources(
         #[cfg(feature = "transport-multilink")]
         max_links: 1,
         max_sessions: usize::MAX,
+        accept: wz_runtime_tokio::accept_loop::AcceptBounds::default(),
         ceiling: None,
         peer_board,
         offer: SessionOffer::universal(),

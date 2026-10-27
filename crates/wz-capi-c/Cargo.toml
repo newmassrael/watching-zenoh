@@ -70,6 +70,10 @@ required-features = ["peer"]
 # one meets its session through a listener of this same library, so each needs `peer` beside what
 # it exercises; a build without `peer` is covered by `client_only_dials_a_listener`.
 [[test]]
+name = "accept_bounds"
+required-features = ["peer"]
+
+[[test]]
 name = "config_verdict_zenohd_interop"
 required-features = ["peer"]
 

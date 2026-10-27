@@ -114,6 +114,17 @@ const PICO_LINK_RX: LinkRxConf = LinkRxConf {
     max_message_size: wz_session_core::caps::PICO_FRAG_MAX_BYTES,
 };
 
+/// How long a listening session of this ABI gives an inbound link, pico's
+/// `Z_TRANSPORT_ACCEPT_TIMEOUT` as the build states it. pico bounds no count of pending accepts
+/// (it accepts one link at a time on its read task), so the count is upstream's rather than
+/// none: a bound pico never refused on is no worse than zenoh's.
+#[cfg(feature = "engine-tokio")]
+const PICO_ACCEPT: wz_capi_core::runtime::accept_loop::AcceptBounds =
+    wz_capi_core::runtime::accept_loop::AcceptBounds {
+        timeout_ms: wz_session_core::caps::PICO_ACCEPT_TIMEOUT_MS as u64,
+        pending: wz_capi_core::runtime::accept_loop::ACCEPT_PENDING,
+    };
+
 /// How often a session of this ABI sends a keepalive on an idle link, on either engine: pico's
 /// `Z_TRANSPORT_LEASE_EXPIRE_FACTOR` as the build states it, dividing the adopted lease. Refused
 /// when the build is made if the build states none (a division by zero in pico's own task).
@@ -631,6 +642,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             keep_alive: PICO_KEEP_ALIVE,
             sn_resolution: wz_session_core::policy::SessionPolicy::from_build().sn_resolution,
             link_rx: PICO_LINK_RX,
+            accept: PICO_ACCEPT,
             // pico negotiates no transport capability on unicast: its InitSyn
             // carries the patch ext and nothing else
             // (`vendor/zenoh-pico/src/protocol/codec/transport.c` @

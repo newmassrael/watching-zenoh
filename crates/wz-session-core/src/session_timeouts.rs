@@ -42,8 +42,9 @@ pub struct SessionTimeouts {
     /// `GotInitAck` -> `open_ack.timeout` window (§2.5: 2s).
     pub open_ack_ms: u64,
     /// `Accepting` whole-handshake -> `accepting.inactivity_timeout`
-    /// window (§2.5: 1s). A single bound armed once on accept entry, NOT
-    /// reset as the Accepting children advance.
+    /// window (§2.5: 1s, zenoh-pico's `Z_TRANSPORT_ACCEPT_TIMEOUT`). A single bound armed once on
+    /// accept entry, NOT reset as the Accepting children advance. A host that stands for zenoh
+    /// states its own: `transport/unicast/accept_timeout`, ten seconds.
     pub accepting_inactivity_ms: u64,
     /// `Closing` -> `closing.timeout` window (§2.5: 100ms).
     pub closing_ms: u64,

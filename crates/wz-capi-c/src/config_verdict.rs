@@ -909,6 +909,14 @@ pub(crate) mod tests {
                 "ZeroKeepAlive",
             ),
             (
+                vec![listen_one, ("transport/unicast/accept_timeout", "0")],
+                "ZeroAcceptTimeout",
+            ),
+            (
+                vec![listen_one, ("transport/unicast/accept_pending", "0")],
+                "ZeroAcceptPending",
+            ),
+            (
                 vec![listen_one, ("transport/unicast/max_links", "0")],
                 "ZeroMaxLinks",
             ),

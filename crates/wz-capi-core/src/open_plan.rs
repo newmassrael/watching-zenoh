@@ -30,6 +30,7 @@
 //! in: a document that would be refused for two reasons reports the earlier. The order is held by
 //! the characterization table in `wz-capi-c` (`tests/open_refusals.rs`).
 
+use wz_runtime_tokio::accept_loop::AcceptBounds;
 use wz_runtime_tokio::node_clock::TimestampingEnabled;
 use wz_runtime_tokio::policy::{SessionPolicy, SnResolution};
 use wz_runtime_tokio::retry_period::RetryPolicy;
@@ -514,6 +515,10 @@ pub struct OpenPlan {
     /// The width of the sequence numbers the session advertises, unicast and in a group's Join:
     /// the build's `sn-resolution` policy, 32 bits unless it states another.
     pub sn_resolution: SnResolution,
+    /// How long an inbound link gets to complete its handshake and how many get it at once:
+    /// `transport/unicast/accept_timeout` and `accept_pending`. A config that states none is
+    /// upstream's ten seconds and a hundred.
+    pub accept: AcceptBounds,
     /// What the session's links rejoin from fragments: `transport/link/rx/max_message_size`. A
     /// config that states none is zenoh's default.
     pub link_rx: LinkRxConf,
@@ -579,6 +584,12 @@ impl OpenPlan {
         let link_rx = node
             .as_ref()
             .map_or_else(LinkRxConf::default, |node| node.link_rx);
+        let accept = node
+            .as_ref()
+            .map_or_else(AcceptBounds::default, |node| AcceptBounds {
+                timeout_ms: node.accept_timeout_ms,
+                pending: node.accept_pending,
+            });
         let dial = node.as_ref().map(|node| dial_phase(node, role));
         // R3076 -- what an endpoint that cannot be bound does to the open (`listen/exit_on_failure`
         // for this node's role, true when the document says nothing, as upstream's default is),
@@ -778,6 +789,7 @@ impl OpenPlan {
             lease_ms,
             keep_alive,
             sn_resolution,
+            accept,
             link_rx,
             offer,
             shm,
@@ -824,6 +836,10 @@ impl OpenPlan {
         line(format!(
             "keep_alive: {} per lease, of the {:?} lease",
             self.keep_alive.per_lease, self.keep_alive.basis
+        ));
+        line(format!(
+            "accept: {}ms, {} pending",
+            self.accept.timeout_ms, self.accept.pending
         ));
         line(format!(
             "max_message_size: {}",
@@ -885,6 +901,7 @@ impl OpenPlan {
                 lease_ms: self.lease_ms,
                 keep_alive: self.keep_alive,
                 sn_resolution: self.sn_resolution,
+                accept: self.accept,
                 link_rx: self.link_rx,
                 offer,
                 zid: self.zid,
@@ -1145,17 +1162,26 @@ mod tests {
         };
         let stated = stance(
             r#"{ transport: { link: { tx: { lease: 4000, keep_alive: 2 },
-                                      rx: { max_message_size: 4096 } } } }"#,
+                                      rx: { max_message_size: 4096 } },
+                              unicast: { accept_timeout: 2500, accept_pending: 7 } } }"#,
         );
         assert_eq!(stated.lease_ms, 4000);
         assert_eq!(stated.keep_alive, KeepAliveConf::zenoh(2));
         assert_eq!(stated.link_rx.max_message_size, 4096);
+        assert_eq!(
+            stated.accept,
+            AcceptBounds {
+                timeout_ms: 2500,
+                pending: 7
+            }
+        );
         // Control: the same open with none of the keys is zenoh's defaults, so the numbers above
         // are the document's and not the plan's own.
         let silent = stance("{}");
         assert_eq!(silent.lease_ms, DEFAULT_LEASE_MS);
         assert_eq!(silent.keep_alive, KeepAliveConf::ZENOH);
         assert_eq!(silent.link_rx, LinkRxConf::default());
+        assert_eq!(silent.accept, AcceptBounds::default());
     }
 
     /// The width of the sequence numbers a group's Join states is the `sn-resolution` policy's,
@@ -1443,6 +1469,7 @@ mod tests {
                  batch_size: 65535\n\
                  lease_ms: 10000\n\
                  keep_alive: 4 per lease, of the Own lease\n\
+                 accept: 10000ms, 100 pending\n\
                  max_message_size: 1073741824\n\
                  offer: mode=Qos compression=false shm=false\n\
                  shm: ShmKeys {{ enabled: true, transport_optimization: true, pool_size: 16777216 }}\n\
@@ -1511,8 +1538,13 @@ mod tests {
             Some(KeyState::Inert)
         );
         assert_eq!(
-            key_state("transport/unicast/accept_timeout"),
+            key_state("transport/unicast/open_timeout"),
             Some(KeyState::Unmapped)
+        );
+        // A key the C interface acts on is mapped, whichever list it left.
+        assert_eq!(
+            key_state("transport/unicast/accept_timeout"),
+            Some(KeyState::Mapped)
         );
         assert_eq!(
             key_state("transport/link/tls/root_ca_certificate_base64"),
@@ -1521,7 +1553,7 @@ mod tests {
         assert_eq!(key_state("a/key/nobody/lists"), None);
         assert!(is_section_of_keys_with_a_state("gateway"));
         assert!(!is_section_of_keys_with_a_state(
-            "transport/unicast/accept_timeout"
+            "transport/unicast/open_timeout"
         ));
     }
 
@@ -1535,10 +1567,10 @@ mod tests {
             &[],
             r#"{ connect: { timeout_ms: 500 },
                  scouting: { multicast: { enabled: false } },
-                 transport: { unicast: { accept_timeout: 1234 } } }"#,
+                 transport: { unicast: { open_timeout: 1234 } } }"#,
         )
         .expect("opens");
-        assert_eq!(plan.ignored, ["transport/unicast/accept_timeout"]);
+        assert_eq!(plan.ignored, ["transport/unicast/open_timeout"]);
     }
 
     /// A plan's description never holds a credential, so a golden built from it cannot leak one.

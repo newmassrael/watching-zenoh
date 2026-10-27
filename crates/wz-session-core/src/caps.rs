@@ -471,3 +471,9 @@ pub const PICO_FRAG_MAX_BYTES: usize = generated::PICO_FRAG_MAX_BYTES;
 /// `return _z_fut_fn_result_wake_up_after((unsigned long)ztu->_common._lease / Z_TRANSPORT_LEASE_EXPIRE_FACTOR);`).
 /// At least 1.
 pub const PICO_KEEPALIVES_PER_LEASE: usize = generated::PICO_KEEPALIVES_PER_LEASE;
+
+/// How long, in milliseconds, a listening session of the pico ABI gives an inbound link to
+/// complete its whole handshake: pico's `Z_TRANSPORT_ACCEPT_TIMEOUT`, the receive deadline of its
+/// accept (`vendor/zenoh-pico/src/transport/unicast/transport.c` @
+/// `z_clock_advance_ms(&recv_deadline, Z_TRANSPORT_ACCEPT_TIMEOUT);`).
+pub const PICO_ACCEPT_TIMEOUT_MS: usize = generated::PICO_ACCEPT_TIMEOUT_MS;

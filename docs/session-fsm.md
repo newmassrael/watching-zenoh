@@ -348,12 +348,12 @@ All timeouts are named here so they have a single home in
 | `open_ack_timeout` | 2 s | deploy.session.handshake_timeout |
 | `scout_timeout` | 1 s | deploy.scouting.timeout |
 | `lease` | 10 s (peer), 10 s (client) — negotiated | `OpenSyn/OpenAck.lease` field; deploy.session.lease |
-| `keepalive_interval` | `lease / 3` | derived; deploy.session.keepalive_ratio |
+| `keepalive_interval` | `adopted lease / 3` (the session's `KeepAliveConf` default); an interface that stands for zenoh states `own lease / transport/link/tx/keep_alive` (4), zenoh-pico's build states its `Z_TRANSPORT_LEASE_EXPIRE_FACTOR` | derived; deploy.session.keepalive_ratio |
 | `closing_timeout` | 100 ms | deploy.session.closing_timeout |
 | `batch_timer` (TxSchedule) | 1 ms (AP), 5 ms (MCU profile) | deploy.qos.batch_linger |
 | `reassembly_timeout` | 500 ms per (peer, priority, reliability, sn_base) | deploy.session.reassembly_timeout |
 | `accept_rate_window` | 1 s (token-bucket replenish window) | deploy.links[].accept_rate_per_sec (§5.K, §2.7) |
-| `accepting_inactivity_timeout` | 1 s (drop unprogressed `Accepting.*` slot to free quota) | deploy.links[].accepting_inactivity_timeout (§2.7) |
+| `accepting_inactivity_timeout` | 1 s baseline, which is zenoh-pico's `Z_TRANSPORT_ACCEPT_TIMEOUT` (drop unprogressed `Accepting.*` slot to free quota). The host states the window: the tokio accept loop gives zenoh's `transport/unicast/accept_timeout`, 10 s, as ONE bound over the whole accept (the link's own handshake spends from it, the machine gets the rest); a build standing for zenoh-pico states its `PICO_ACCEPT_TIMEOUT_MS`. Beside it `transport/unicast/accept_pending` (100) bounds the accepts mid-handshake, one past it is closed unanswered | deploy.links[].accepting_inactivity_timeout (§2.7) |
 | `cookie_hmac_lifetime` | 30 s (validity window of a stateless-accept cookie) | deploy.links[].stateless_accept.cookie_lifetime (§5.K, §2.7) |
 | `cookie_hmac_key_rotation` | 1 h (HMAC key roll; old key honored one extra lifetime to avoid mid-handshake invalidation) | deploy.links[].stateless_accept.key_rotation_s (§5.K, §2.7) |
 

@@ -27,6 +27,7 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 
+use wz_runtime_tokio::accept_loop::AcceptBounds;
 #[cfg(feature = "scout")]
 use wz_runtime_tokio::accept_loop::DialIntent;
 #[cfg(feature = "peer")]
@@ -1222,6 +1223,9 @@ pub struct LinkConf {
     pub tx: LinkTx,
     /// The receive half: see [`OpenStance::link_rx`].
     pub rx: LinkRxConf,
+    /// How long an inbound link gets to complete its handshake and how many get it at once:
+    /// see [`OpenStance::accept`]. Read by the accepting roles only.
+    pub accept: AcceptBounds,
 }
 
 /// The batch size a session advertises when its config states none: zenoh's own default
@@ -2850,6 +2854,7 @@ fn dial_config(tls: &CapiTlsConfig, endpoint: &str) -> std::io::Result<DialConfi
 struct Listening {
     listener: BoundListener,
     params: SessionInitParams,
+    accept: AcceptBounds,
 }
 
 /// A bound listener together with what [`accept_faces`] needs beside it, as one
@@ -3228,7 +3233,11 @@ async fn bind_listener(
         log_open_failure(&format!("session parameters for {endpoint}"), &e);
         OpenError::DriveFailed
     })?;
-    Ok(Listening { listener, params })
+    Ok(Listening {
+        listener,
+        params,
+        accept: link_conf.accept,
+    })
 }
 
 /// The [`FaceExecutor`] of a [`FaceDrive::PerFace`] node: every face's drive runs on a thread of
@@ -3296,13 +3305,18 @@ async fn accept_faces(
     // dials meanwhile waits in the backlog, and is served once the task starts.
     gate.wait_running().await;
     let forwarder = Arc::new(CApiForwarder::listening(shared, index));
-    let Listening { listener, params } = listening;
+    let Listening {
+        listener,
+        params,
+        accept,
+    } = listening;
     match gate.face_drive() {
         FaceDrive::Serial => {
             let _summary = accept_loop_offering_spawned_local(
                 listener,
                 params,
                 offer,
+                accept,
                 clock,
                 DEFAULT_OPEN_TICK_MS,
                 shutdown,
@@ -3317,6 +3331,7 @@ async fn accept_faces(
                 listener,
                 params,
                 offer,
+                accept,
                 clock,
                 DEFAULT_OPEN_TICK_MS,
                 shutdown,
@@ -3856,6 +3871,12 @@ pub struct OpenStance {
     /// whose config states none passes [`LinkRxConf::default`]; zenoh-pico's ABI has no such key
     /// and passes the number its build states for pico's `FRAG_MAX_SIZE`.
     pub link_rx: LinkRxConf,
+    /// How long an inbound link gets to complete its whole handshake and how many get it at
+    /// once, for a session that listens: see [`AcceptBounds`]. A zenoh-c session reads them from
+    /// `transport/unicast/accept_timeout` and `accept_pending`, upstream's defaults when its
+    /// config states none; zenoh-pico's ABI passes the number its build states for pico's
+    /// `Z_TRANSPORT_ACCEPT_TIMEOUT` with upstream's pending count.
+    pub accept: AcceptBounds,
     /// What the session's links offer at their handshake, every dialled link and
     /// every accepted one alike: the other half of the same fact. A zenoh-c
     /// session offers what its config enables — QoS, and shared memory on the
@@ -4148,6 +4169,7 @@ pub fn open_blocking(
         keep_alive,
         sn_resolution,
         link_rx,
+        accept,
         offer,
         zid,
         start_read_task,
@@ -4198,6 +4220,7 @@ pub fn open_blocking(
             sn_resolution,
         },
         rx: link_rx,
+        accept,
     };
     let clock = TokioTime::new();
     // R3074 -- where the nodes a peer is told of are posted. Made here because both ends are
@@ -4414,6 +4437,7 @@ mod tests {
             rx: LinkRxConf {
                 max_message_size: 4096,
             },
+            accept: AcceptBounds::default(),
         };
         let params = init_params(WhatAmI::Client, vec![0xC1; 4], stated).expect("entropy");
         assert_eq!(params.seq_num_res, SnResolution::Bits8.wire_code());
@@ -4626,6 +4650,7 @@ mod tests {
                             sn_resolution: SnResolution::default(),
                         },
                         rx: LinkRxConf::default(),
+                        accept: AcceptBounds::default(),
                     },
                 )
                 .expect("entropy"),
@@ -5208,6 +5233,7 @@ mod tests {
             keep_alive: KeepAliveConf::PICO,
             sn_resolution: SnResolution::default(),
             link_rx: LinkRxConf::default(),
+            accept: AcceptBounds::default(),
             offer: SessionOffer::universal(),
             zid: None,
             start_read_task: true,

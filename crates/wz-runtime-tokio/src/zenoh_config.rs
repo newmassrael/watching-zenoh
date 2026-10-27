@@ -291,6 +291,10 @@ pub enum ConfigDefect {
     ZeroBatchSize,
     /// A zero lease. Every link is instantly expired.
     ZeroLease,
+    /// A zero accept timeout. Every inbound link is dropped before it can answer.
+    ZeroAcceptTimeout,
+    /// Zero accepts allowed mid-handshake. Every inbound link is closed on arrival.
+    ZeroAcceptPending,
     /// Zero keepalives in a lease. Upstream divides the lease by it, so a session would
     /// panic when it started its link's keepalive.
     ZeroKeepAlive,
@@ -344,6 +348,8 @@ impl core::fmt::Display for ConfigDefect {
             ),
             ConfigDefect::ZeroBatchSize => write!(f, "batch_size is 0"),
             ConfigDefect::ZeroLease => write!(f, "lease is 0"),
+            ConfigDefect::ZeroAcceptTimeout => write!(f, "accept_timeout is 0"),
+            ConfigDefect::ZeroAcceptPending => write!(f, "accept_pending is 0"),
             ConfigDefect::ZeroKeepAlive => write!(f, "keep_alive is 0"),
             ConfigDefect::ZeroMaxLinks => write!(f, "max_links is 0"),
         }
@@ -1089,6 +1095,14 @@ pub struct ZenohNodeConfig {
     /// `/ self.manager.config.unicast.keep_alive as u32;`); upstream's default is 4
     /// (`commons/zenoh-config/src/defaults.rs` @ `keep_alive: 4,`).
     pub keep_alive: u32,
+    /// `transport/unicast/accept_timeout`, in ms: how long an inbound link gets to complete its
+    /// handshake. Read by the zenoh-c session's accept loop ([`C_ABI_SESSION_HONOURED_KEYS`]);
+    /// upstream's default is ten seconds (`commons/zenoh-config/src/defaults.rs` @
+    /// `accept_timeout: 10_000,`).
+    pub accept_timeout_ms: u64,
+    /// `transport/unicast/accept_pending`: how many inbound links may be mid-handshake at once,
+    /// upstream's default a hundred (`accept_pending: 100,`).
+    pub accept_pending: usize,
     /// R2925 — `transport/link/tx/queue/size/*` (batches per priority, each in
     /// upstream's `1..=16`) and the two congestion waits,
     /// `.../congestion_control/drop/wait_before_drop` and
@@ -1464,6 +1478,8 @@ impl Default for ZenohNodeConfig {
             batch_size: 65_535,
             lease_ms: 10_000,
             keep_alive: wz_session_core::session_init_params::KEEP_ALIVE_PER_LEASE,
+            accept_timeout_ms: crate::config::ACCEPT_TIMEOUT_MS,
+            accept_pending: crate::config::ACCEPT_PENDING,
             tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
             link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             max_links: 1,
@@ -1741,6 +1757,12 @@ impl ZenohNodeConfig {
         if self.keep_alive == 0 {
             out.push(ConfigDefect::ZeroKeepAlive);
         }
+        if self.accept_timeout_ms == 0 {
+            out.push(ConfigDefect::ZeroAcceptTimeout);
+        }
+        if self.accept_pending == 0 {
+            out.push(ConfigDefect::ZeroAcceptPending);
+        }
         if self.max_links == 0 {
             out.push(ConfigDefect::ZeroMaxLinks);
         }
@@ -1904,6 +1926,8 @@ impl ZenohNodeConfig {
             self.drop_future_timestamp
         );
         out.push_str(" },\n  \"transport\": {\n    \"unicast\": {\n");
+        let _ = writeln!(out, "      \"accept_timeout\": {},", self.accept_timeout_ms);
+        let _ = writeln!(out, "      \"accept_pending\": {},", self.accept_pending);
         let _ = writeln!(out, "      \"max_links\": {},", self.max_links);
         let _ = writeln!(out, "      \"max_sessions\": {},", self.max_sessions);
         let _ = writeln!(out, "      \"lowlatency\": {},", self.lowlatency);
@@ -2598,11 +2622,12 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // ([`C_ABI_SESSION_HONOURED_KEYS`]). The two left name the promotion alone.
     "transport/shared_memory/transport_optimization/message_size_threshold",
     "transport/shared_memory/transport_optimization/messages",
-    "transport/unicast/accept_pending",
-    "transport/unicast/accept_timeout",
+    // Open-debt item 925 — `transport/unicast/accept_pending` and `accept_timeout` LEFT this
+    // list for [`C_ABI_SESSION_HONOURED_KEYS`]: the zenoh-c session's accept loop bounds its
+    // handshakes by them ([`crate::accept_loop::AcceptBounds`]).
     // R2758 — `transport/unicast/max_sessions` LEFT this list: wz honours it.
     // It never resembled the neighbours it sat between — `accept_pending` and
-    // the two timeouts quantify over a half-open accept pipeline wz does not
+    // the two timeouts quantify over a half-open accept pipeline wz did not
     // model, while this one is a comparison against a table the accept loop
     // already kept. See `HONOURED_CONFIG_KEYS`.
     "transport/unicast/open_timeout",
@@ -2810,8 +2835,8 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // ([`C_ABI_SESSION_HONOURED_KEYS`]). The two left name the promotion alone.
     "transport/shared_memory/transport_optimization/message_size_threshold",
     "transport/shared_memory/transport_optimization/messages",
-    "transport/unicast/accept_pending",
-    "transport/unicast/accept_timeout",
+    // Open-debt item 925 — `transport/unicast/accept_pending` and `accept_timeout` LEFT here,
+    // and their group below: the zenoh-c session reads them ([`C_ABI_SESSION_HONOURED_KEYS`]).
     // R2758 — `transport/unicast/max_sessions` LEFT this list too, and this is
     // the one whose classification was actually wrong. "Beyond wz" is the claim
     // that the key needs a capability wz has not got; the capability here is a
@@ -3018,8 +3043,8 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
             // a group's beacon interval is a profile wz's multicast transport holds.
             "transport/multicast/max_sessions",
             "transport/shared_memory/mode",
-            "transport/unicast/accept_pending",
-            "transport/unicast/accept_timeout",
+            // Open-debt item 925 — `transport/unicast/accept_pending` and `accept_timeout`
+            // LEFT this group: the accept loop holds a half-open accept pipeline, bounded.
             // R2758 — `transport/unicast/max_sessions` LEFT this group, and the
             // group's own name is why it had to: "a configurable session table"
             // is two things, and wz had the table all along. `accept_loop`'s
@@ -3394,11 +3419,8 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
     ("transport/link/tx/threads", "asserted-ignored", "ignored"),
     // Open-debt item 913 — `transport/multicast/join_interval`'s row is GONE: the zenoh-c
     // session honours the key now, and this ledger carries evidence for unhonoured keys.
-    (
-        "transport/unicast/accept_timeout",
-        "not-this-key",
-        "HANDSHAKE_TIMEOUT",
-    ),
+    // Open-debt item 925 -- `transport/unicast/accept_timeout`'s row is GONE too: the zenoh-c
+    // session honours the key, so the ledger of unhonoured keys carries no evidence for it.
     // Open-debt 732 — `link_pipeline` cites this key to explain why the
     // per-candidate dial bound is NOT derived from it: upstream clocks the whole
     // walk plus the handshake with it, which cannot bound one candidate. The
@@ -3652,6 +3674,11 @@ pub const DEEPENABLE_UPSTREAM_KEYS: &[&str] = &[
 /// one of its own leases. The demo and the router keep the cadence their capacity model was
 /// calibrated on (the adopted lease in three), so it is the C ABI session's alone until that
 /// model takes the count from the session.
+///
+/// Open-debt item 925 -- and `transport/unicast/accept_timeout` and `accept_pending`, how long
+/// an inbound link gets to finish its handshake and how many get it at once. The demo's and the
+/// router's loops keep upstream's defaults and do not read the keys yet, so they are the C ABI
+/// session's alone.
 pub const C_ABI_SESSION_HONOURED_KEYS: &[&str] = &[
     "scouting/gossip/autoconnect",
     "scouting/gossip/autoconnect_strategy",
@@ -3661,6 +3688,8 @@ pub const C_ABI_SESSION_HONOURED_KEYS: &[&str] = &[
     "transport/multicast/join_interval",
     "transport/shared_memory/transport_optimization/enabled",
     "transport/shared_memory/transport_optimization/pool_size",
+    "transport/unicast/accept_pending",
+    "transport/unicast/accept_timeout",
 ];
 
 /// R2963 (open-debt item 843) — the flat lists whose members are HONOURED keys
@@ -6692,6 +6721,17 @@ impl ZenohNodeConfig {
             out.drop_future_timestamp = v;
             named.push("timestamping/drop_future_timestamp");
         }
+        if let Some(v) = want_u64(&doc, "transport/unicast/accept_timeout")? {
+            out.accept_timeout_ms = v;
+            named.push("transport/unicast/accept_timeout");
+        }
+        if let Some(v) = want_u64(&doc, "transport/unicast/accept_pending")? {
+            out.accept_pending = usize::try_from(v).map_err(|_| ConfigIngestError::OutOfRange {
+                path: "transport/unicast/accept_pending",
+                value: v.to_string(),
+            })?;
+            named.push("transport/unicast/accept_pending");
+        }
         if let Some(v) = want_u64(&doc, "transport/unicast/max_links")? {
             out.max_links = usize::try_from(v).map_err(|_| ConfigIngestError::OutOfRange {
                 path: "transport/unicast/max_links",
@@ -7318,6 +7358,8 @@ mod tests {
             batch_size: 0,
             lease_ms: 0,
             keep_alive: 0,
+            accept_timeout_ms: 0,
+            accept_pending: 0,
             max_links: 0,
             ..Default::default()
         };
@@ -7327,6 +7369,8 @@ mod tests {
                 ConfigDefect::ZeroBatchSize,
                 ConfigDefect::ZeroLease,
                 ConfigDefect::ZeroKeepAlive,
+                ConfigDefect::ZeroAcceptTimeout,
+                ConfigDefect::ZeroAcceptPending,
                 ConfigDefect::ZeroMaxLinks
             ]
         );

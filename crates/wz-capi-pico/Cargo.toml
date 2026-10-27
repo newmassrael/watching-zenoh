@@ -288,6 +288,10 @@ transport-link-serial = ["engine-tokio", "wz-capi-core/transport-link-serial"]
 # a thing a unit test can start), so each needs `peer` beside what it exercises. A build
 # without `peer` is covered by `client_only_refuses_a_listener`, which runs only there.
 [[test]]
+name = "accept_timeout"
+required-features = ["peer"]
+
+[[test]]
 name = "advanced_subscriber_faces"
 required-features = ["peer", "advanced"]
 

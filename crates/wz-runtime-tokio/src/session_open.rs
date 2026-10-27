@@ -4462,6 +4462,32 @@ fn wire_session_engine(
 /// re-runs this same open loop over a re-dialed link with the surviving
 /// actions bundle.
 pub(crate) async fn drive_open_loop(
+    inbound: InboundLink,
+    actions: Arc<SessionLinkActions>,
+    engine: Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
+    writer_handle: WriterHandle,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError> {
+    drive_open_loop_within(
+        inbound,
+        actions,
+        engine,
+        writer_handle,
+        clock,
+        max_iters,
+        tick_interval_ms,
+        SessionTimeouts::spec_defaults(),
+    )
+    .await
+}
+
+/// [`drive_open_loop`] with the handshake deadlines the host states, in place of the §2.5
+/// baseline: the node's accept bound (`transport/unicast/accept_timeout`), which zenoh keeps at
+/// ten seconds and zenoh-pico at one, is the `Accepting` window of `timeouts`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn drive_open_loop_within(
     mut inbound: InboundLink,
     actions: Arc<SessionLinkActions>,
     mut engine: Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
@@ -4469,14 +4495,14 @@ pub(crate) async fn drive_open_loop(
     clock: TokioTime,
     max_iters: Option<usize>,
     tick_interval_ms: u64,
+    timeouts: SessionTimeouts,
 ) -> Result<OpenedSession, OpenError> {
     // R311il — the engine-free FSM arms no `<send delay>` (NoOpHal), so the
     // host owns every handshake deadline. The deadline VALUES are the §2.5
-    // spec baseline — the same literals the SCXML `<send delay>`s carried
-    // before the migration (deploy-config overrides are a later round); the
+    // spec baseline unless the host states others (see above); the
     // [`HandshakeDeadlineTracker`] owns the arming-key staleness logic
     // shared with the steady-state loop.
-    let mut deadline_tracker = HandshakeDeadlineTracker::new(SessionTimeouts::spec_defaults());
+    let mut deadline_tracker = HandshakeDeadlineTracker::new(timeouts);
     let mut iter: usize = 0;
     loop {
         // A4 (R311js) — Established is detected via the `established_at`
@@ -5614,6 +5640,7 @@ pub async fn accept_and_open_session_with_multilink(
         clock,
         max_iters,
         tick_interval_ms,
+        SessionTimeouts::spec_defaults(),
     )
     .await
 }
@@ -5632,6 +5659,7 @@ pub(crate) async fn accept_multilink_with_staging<S>(
     clock: TokioTime,
     max_iters: Option<usize>,
     tick_interval_ms: u64,
+    timeouts: SessionTimeouts,
 ) -> Result<OpenedSession, OpenError>
 where
     S: FnOnce(&Arc<SessionLinkActions>) -> Result<(), OpenError>,
@@ -5654,6 +5682,7 @@ where
         clock,
         max_iters,
         tick_interval_ms,
+        timeouts,
     )
     .await
 }
@@ -5711,6 +5740,7 @@ pub async fn accept_and_open_session_with_offer(
         clock,
         max_iters,
         tick_interval_ms,
+        SessionTimeouts::spec_defaults(),
     )
     .await
 }
@@ -5724,6 +5754,10 @@ pub async fn accept_and_open_session_with_offer(
 ///
 /// `stage` runs after the offer is applied and before the drive, so it is in
 /// place when the acceptor decides its OpenAck.
+///
+/// `timeouts` are the handshake deadlines, the node's accept bound among them: see
+/// `accept_open_offering`.
+#[allow(clippy::too_many_arguments)]
 pub async fn accept_and_open_session_with_staging<S>(
     accepted: DialedLink,
     params: SessionInitParams,
@@ -5732,6 +5766,7 @@ pub async fn accept_and_open_session_with_staging<S>(
     clock: TokioTime,
     max_iters: Option<usize>,
     tick_interval_ms: u64,
+    timeouts: SessionTimeouts,
 ) -> Result<OpenedSession, OpenError>
 where
     S: FnOnce(&Arc<SessionLinkActions>) -> Result<(), OpenError>,
@@ -5744,6 +5779,7 @@ where
         clock,
         max_iters,
         tick_interval_ms,
+        timeouts,
     )
     .await
 }
@@ -5762,6 +5798,12 @@ where
 /// `stage` returns [`OpenError`] because the aggregating caller draws a FRESH
 /// per-handshake challenge nonce from OS entropy here (the responder replay
 /// defence), which the no_std session core cannot do for itself.
+///
+/// `timeouts` are the handshake deadlines of this accept. Its `Accepting` window is the node's
+/// accept bound, the whole of the handshake from the first byte: the production loop hands what
+/// is left of `transport/unicast/accept_timeout` after the link's own handshake, and the
+/// entry points that state none are the §2.5 baseline.
+#[allow(clippy::too_many_arguments)]
 async fn accept_open_offering<S>(
     accepted: DialedLink,
     params: SessionInitParams,
@@ -5770,6 +5812,7 @@ async fn accept_open_offering<S>(
     clock: TokioTime,
     max_iters: Option<usize>,
     tick_interval_ms: u64,
+    timeouts: SessionTimeouts,
 ) -> Result<OpenedSession, OpenError>
 where
     S: FnOnce(&Arc<SessionLinkActions>) -> Result<(), OpenError>,
@@ -5796,7 +5839,7 @@ where
     stage(&actions)?;
 
     engine.process_event(E::InboundStart);
-    let opened = drive_open_loop(
+    let opened = drive_open_loop_within(
         inbound,
         actions,
         engine,
@@ -5804,6 +5847,7 @@ where
         clock,
         max_iters,
         tick_interval_ms,
+        timeouts,
     )
     .await?;
     // At Established: switch to the 4-byte u32 lowlatency wire iff the peer's

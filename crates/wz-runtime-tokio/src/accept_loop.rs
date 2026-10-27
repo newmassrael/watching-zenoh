@@ -164,7 +164,7 @@ use crate::session_open::{accept_multilink_with_staging, initiate_multilink_with
 // Item 751 — the staging twins of the two offer-carrying entrypoints: the offer
 // and the node's south partition ride every face ([`FaceTemplate`]).
 use crate::session_open::{
-    accept_and_open_session_with_staging, initiate_and_open_session_with_staging,
+    accept_and_open_session_with_staging, initiate_and_open_session_with_staging, DialedLink,
 };
 #[cfg(feature = "transport-multilink")]
 use std::collections::BTreeSet;
@@ -1072,6 +1072,10 @@ pub struct AcceptLoopSummary {
     /// [`refused_over_max_sessions`](Self::refused_over_max_sessions), so a refusal says whose
     /// limit it was.
     pub refused_over_capacity: usize,
+    /// Links closed unanswered because [`AcceptBounds::pending`] accepts were already
+    /// mid-handshake when they arrived. Before the session exists, so none of the counters
+    /// above applies to them and none of [`accepted`](Self::accepted) counts them.
+    pub refused_over_pending: usize,
     /// R311y423 — of [`dialed`](Self::dialed), the subset dialed because the
     /// GOSSIP-autoconnect policy admitted a discovered peer (the `Step::Dial`
     /// arm), as opposed to a configured `--connect` target or a reconcile add.
@@ -1205,8 +1209,11 @@ impl FaceTemplate {
 /// blocks accepting the next peer (a failed handshake surfaces as
 /// [`OpenError::AcceptHandshake`], an isolated `FaceFailed`). Production
 /// semantics: `max_iters = None` (the accept-side open-deadline —
-/// `accepting.inactivity_timeout`, 1s — bounds a silent peer; see
+/// `accepting.inactivity_timeout`, which is what is left of
+/// [`AcceptBounds::timeout_ms`] once the link's own handshake is done — bounds a silent peer;
+/// see
 /// [`accept_and_open_session_with_offer`](crate::session_open::accept_and_open_session_with_offer)).
+#[allow(clippy::too_many_arguments)]
 async fn open_face(
     id: FaceId,
     peer: AcceptedPeer,
@@ -1215,15 +1222,18 @@ async fn open_face(
     offer: SessionOffer,
     clock: TokioTime,
     tick_interval_ms: u64,
+    bounds: AcceptBounds,
 ) -> OpenResult {
     let (params, stage) = template.into_parts(AuthRole::Accept, None);
-    let result = match accepted.handshake().await {
+    let started = clock.now_monotonic_ms();
+    let result = match handshake_within(accepted, &bounds).await {
         // R2095 — the loop's WHOLE capability offer rides the accept open, the
         // same value its dials carry. A declared QoS band still arms the
         // acceptor's subset containment against the initiator's `QoSLink`; what
         // is new is that the other capabilities travel with it, which is what
         // zenoh's acceptor does off the manager config the opener also reads.
         Ok(link) => {
+            let spent = clock.now_monotonic_ms().saturating_sub(started);
             accept_and_open_session_with_staging(
                 link,
                 params,
@@ -1232,12 +1242,32 @@ async fn open_face(
                 clock,
                 None,
                 tick_interval_ms,
+                bounds.timeouts_after(spent),
             )
             .await
         }
         Err(e) => Err(OpenError::AcceptHandshake(e)),
     };
     (id, peer, result)
+}
+
+/// The accepted link's own handshake (the ws or tls server side), given at most the accept
+/// bound: upstream wraps its whole accept in the timeout, so a peer that stalls here is
+/// dropped by the same clock that bounds the session handshake after it. A bound that elapses
+/// is a failed link handshake, the error of a peer that never completed it.
+async fn handshake_within(accepted: AcceptedLink, bounds: &AcceptBounds) -> io::Result<DialedLink> {
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(bounds.timeout_ms),
+        accepted.handshake(),
+    )
+    .await
+    {
+        Ok(link) => link,
+        Err(_) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "the accepted link did not complete its handshake within the accept timeout",
+        )),
+    }
 }
 
 /// Dial one configured peer and bring the OUTBOUND link up to Established — the
@@ -1352,13 +1382,16 @@ async fn open_face_multilink(
     template: FaceTemplate,
     clock: TokioTime,
     tick_interval_ms: u64,
+    bounds: AcceptBounds,
 ) -> OpenResult {
     let (params, stage) = template.into_parts(AuthRole::Accept, None);
+    let started = clock.now_monotonic_ms();
     // The deferred transport handshake runs here in the spawned future (never the
     // loop's `select!` arm), same as the single-link [`open_face`] — a failed
     // ws/tls handshake is an isolated `FaceFailed`, not a loop stall.
-    let result = match accepted.handshake().await {
+    let result = match handshake_within(accepted, &bounds).await {
         Ok(link) => {
+            let spent = clock.now_monotonic_ms().saturating_sub(started);
             accept_multilink_with_staging(
                 link,
                 params,
@@ -1368,6 +1401,7 @@ async fn open_face_multilink(
                 clock,
                 None,
                 tick_interval_ms,
+                bounds.timeouts_after(spent),
             )
             .await
         }
@@ -2423,6 +2457,57 @@ impl std::fmt::Debug for SessionCeiling {
     }
 }
 
+/// How much an accepting node gives an inbound link before the handshake is complete, and how
+/// many it gives at once: upstream's `transport/unicast/accept_timeout` and `accept_pending`,
+/// which its manager keeps side by side (`io/zenoh-transport/src/unicast/manager.rs` @
+/// `pub accept_timeout: Duration,` and `pub accept_pending: usize,`).
+///
+/// The timeout is ONE bound over the whole accept, as upstream wraps its accept in a single
+/// `tokio::time::timeout`: the link's own handshake (the ws or tls server side) spends from it,
+/// and the session handshake is given what is left. The pending count is the accepts whose
+/// handshake has not finished; one past it is closed at once, with nothing said to the peer
+/// (`handle_new_link_unicast`: "Closing link for preventing potential DoS").
+///
+/// `Default` is upstream's, ten seconds and a hundred. zenoh-pico bounds its accept at one second
+/// (`Z_TRANSPORT_ACCEPT_TIMEOUT`), which is also the §2.5 baseline of the session machine: an
+/// interface standing for it states that ([`Self::with_timeout_ms`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AcceptBounds {
+    /// How long an accepted link may take to complete its whole handshake, in milliseconds.
+    pub timeout_ms: u64,
+    /// How many accepted links may be mid-handshake at once.
+    pub pending: usize,
+}
+
+pub use crate::config::{ACCEPT_PENDING, ACCEPT_TIMEOUT_MS};
+
+impl Default for AcceptBounds {
+    fn default() -> Self {
+        Self {
+            timeout_ms: ACCEPT_TIMEOUT_MS,
+            pending: ACCEPT_PENDING,
+        }
+    }
+}
+
+impl AcceptBounds {
+    /// These bounds with another accept timeout, in milliseconds.
+    pub const fn with_timeout_ms(self, timeout_ms: u64) -> Self {
+        Self { timeout_ms, ..self }
+    }
+
+    /// The deadlines of the session handshake of an accept that has already spent
+    /// `spent_ms` of the bound on the link's own handshake: the §2.5 baseline, with the
+    /// `Accepting` window the rest of the bound, and never nothing, so the drive finds the
+    /// deadline elapsed rather than waiting for ever on a zero.
+    pub fn timeouts_after(&self, spent_ms: u64) -> SessionTimeouts {
+        SessionTimeouts {
+            accepting_inactivity_ms: self.timeout_ms.saturating_sub(spent_ms).max(1),
+            ..SessionTimeouts::spec_defaults()
+        }
+    }
+}
+
 pub struct FaceSources {
     /// The bound listeners for inbound peers (accept source), each scheme-keyed
     /// ([`BoundListener`]) so a router/peer accepts the whole stream family
@@ -2576,6 +2661,10 @@ pub struct FaceSources {
     /// bound whose absence is invisible is the one that is discovered by a
     /// peer rather than by a reader.
     pub max_sessions: usize,
+    /// How long an inbound link gets to complete its handshake and how many get it at once
+    /// (zenoh `unicast.accept_timeout` and `accept_pending`): see [`AcceptBounds`]. Upstream's
+    /// own when the host states none.
+    pub accept: AcceptBounds,
     /// A ceiling worked out at each admission, or `None` for a node whose only bound is
     /// [`Self::max_sessions`]. A face is refused when the held set has reached the SMALLER of
     /// the two, and the refusal is counted under
@@ -2700,6 +2789,7 @@ where
         #[cfg(feature = "transport-multilink")]
         max_links,
         max_sessions,
+        accept,
         ceiling,
         peer_board,
         offer,
@@ -3852,6 +3942,21 @@ where
                 // admit every variant, leaving this arm a check that can never fire.
                 // The surviving consumer is the BIND-time one, which now reports the
                 // cadence to an operator rather than refusing the listen.
+                // Upstream's DoS guard, at the same place (`handle_new_link_unicast`): a link
+                // that arrives while `accept_pending` accepts are still mid-handshake is closed
+                // straight away and nothing is said to the peer, because either the bound is too
+                // small for the deployment or someone is filling it, and a reply costs the
+                // acceptor what the peer is spending. `accepted_ids` is exactly those accepts:
+                // inserted below, removed when the open resolves.
+                if accepted_ids.len() >= accept.pending {
+                    summary.refused_over_pending += 1;
+                    log::debug!(
+                        "closing {peer:?} unanswered: {} accepts are already mid-handshake",
+                        accepted_ids.len()
+                    );
+                    drop(accepted);
+                    continue;
+                }
                 let id = FaceId(next_id);
                 next_id += 1;
                 summary.accepted += 1;
@@ -3872,6 +3977,7 @@ where
                     offer,
                     clock,
                     tick_interval_ms,
+                    accept,
                 )));
                 #[cfg(feature = "transport-multilink")]
                 opening.push(if max_links > 1 {
@@ -3884,6 +3990,7 @@ where
                         params.clone(),
                         clock,
                         tick_interval_ms,
+                        accept,
                     )) as OpenFuture
                 } else {
                     Box::pin(open_face(
@@ -3894,6 +4001,7 @@ where
                         offer,
                         clock,
                         tick_interval_ms,
+                        accept,
                     )) as OpenFuture
                 });
             }
@@ -3999,7 +4107,7 @@ where
     F: FnMut(&AcceptEvent),
 {
     face_drive_loop(
-        accept_only_sources(listener, offer),
+        accept_only_sources(listener, offer, AcceptBounds::default()),
         params,
         clock,
         tick_interval_ms,
@@ -4032,6 +4140,7 @@ pub async fn accept_loop_offering_spawned<S, F>(
     listener: BoundListener,
     params: SessionInitParams,
     offer: SessionOffer,
+    accept: AcceptBounds,
     clock: TokioTime,
     tick_interval_ms: u64,
     shutdown: S,
@@ -4048,6 +4157,7 @@ where
         listener,
         params,
         offer,
+        accept,
         clock,
         tick_interval_ms,
         shutdown,
@@ -4066,6 +4176,7 @@ pub async fn accept_loop_offering_spawned_local<S, F>(
     listener: BoundListener,
     params: SessionInitParams,
     offer: SessionOffer,
+    accept: AcceptBounds,
     clock: TokioTime,
     tick_interval_ms: u64,
     shutdown: S,
@@ -4082,6 +4193,7 @@ where
         listener,
         params,
         offer,
+        accept,
         clock,
         tick_interval_ms,
         shutdown,
@@ -4098,6 +4210,7 @@ async fn accept_loop_spawned_on<S, F>(
     listener: BoundListener,
     params: SessionInitParams,
     offer: SessionOffer,
+    accept: AcceptBounds,
     clock: TokioTime,
     tick_interval_ms: u64,
     shutdown: S,
@@ -4111,7 +4224,7 @@ where
 {
     let control: &dyn FaceForwarder = &*forwarder;
     face_drive_loop(
-        accept_only_sources(listener, offer),
+        accept_only_sources(listener, offer, accept),
         params,
         clock,
         tick_interval_ms,
@@ -4131,7 +4244,11 @@ where
 
 /// What an accept-only node's loop is built from: the one listener it was handed, and the
 /// defaults of everything an accept-only node does not do.
-fn accept_only_sources(listener: BoundListener, offer: SessionOffer) -> FaceSources {
+fn accept_only_sources(
+    listener: BoundListener,
+    offer: SessionOffer,
+    accept: AcceptBounds,
+) -> FaceSources {
     FaceSources {
         // accept-only: ONE listener, the one this entry point binds. A node
         // that binds a whole `listen/endpoints` list reaches `peer_loop`,
@@ -4164,6 +4281,9 @@ fn accept_only_sources(listener: BoundListener, offer: SessionOffer) -> FaceSour
         // always compares against it. A caller that needs a different bound
         // reaches `peer_loop`, which takes the configured `FaceSources`.
         max_sessions: crate::config::DEFAULT_MAX_SESSIONS,
+        // The caller's: upstream's own for the entries that state none, the C interface's
+        // for the ones that stand for a node with a configuration of its own.
+        accept,
         ceiling: None,
         peer_board: None,
         // The caller's: [`accept_loop`] passes the zero offer, an accept-only
@@ -4249,7 +4369,6 @@ mod tests {
     // through `dial_locator`, which owns every scheme's connect and returns the
     // `DialedLink` union. The loop's own fixtures still stand up raw loopback
     // streams, so the imports live here rather than at module scope.
-    use crate::session_open::DialedLink;
     use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
     use std::sync::Arc;
     use std::time::Duration;
@@ -5314,6 +5433,7 @@ mod tests {
                         listener,
                         acceptor_params(),
                         SessionOffer::universal(),
+                        AcceptBounds::default(),
                         TokioTime::new(),
                         DEFAULT_OPEN_TICK_MS,
                         shutdown_on(go_rx.clone()),
@@ -5328,6 +5448,7 @@ mod tests {
                         listener,
                         acceptor_params(),
                         SessionOffer::universal(),
+                        AcceptBounds::default(),
                         TokioTime::new(),
                         DEFAULT_OPEN_TICK_MS,
                         shutdown_on(go_rx.clone()),
@@ -5513,6 +5634,7 @@ mod tests {
                 max_links: 1,
                 // THE SUBJECT.
                 max_sessions: 1,
+                accept: AcceptBounds::default(),
                 ceiling: None,
                 peer_board: None,
                 offer: SessionOffer::universal(),
@@ -5546,6 +5668,101 @@ mod tests {
         assert_eq!(
             summary.refused_over_max_sessions, 1,
             "the second peer was refused BY THE BOUND, not by a handshake failure"
+        );
+    }
+
+    /// Runs an accept-only loop with `bounds` over `peers` silent TCP connections, which send
+    /// nothing, and reports for each whether the loop had closed it `after` the last connected,
+    /// with the loop's summary. A silent peer is the whole subject of both bounds: it is a link
+    /// that has arrived and has not begun a handshake.
+    async fn silent_peers_against(
+        bounds: AcceptBounds,
+        peers: usize,
+        after: Duration,
+    ) -> (Vec<bool>, AcceptLoopSummary) {
+        use tokio::io::AsyncReadExt as _;
+        let (listener, addr) = bind_loopback().await;
+        let (go_tx, go_rx) = watch::channel(false);
+        let node = face_drive_loop(
+            accept_only_sources(listener, SessionOffer::universal(), bounds),
+            acceptor_params(),
+            TokioTime::new(),
+            DEFAULT_OPEN_TICK_MS,
+            shutdown_on(go_rx.clone()),
+            |_event: &AcceptEvent| {},
+            FaceDriving {
+                forwarder: &NoOpForwarder,
+                spawned: None,
+            },
+        );
+        let observe = async move {
+            let mut streams = Vec::new();
+            for _ in 0..peers {
+                streams.push(TcpStream::connect(addr).await.expect("connect"));
+                // One at a time, so the order the loop sees them in is the order they are
+                // counted in, and the refused one is the last.
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            tokio::time::sleep(after).await;
+            let mut closed = Vec::new();
+            for stream in &mut streams {
+                let mut byte = [0u8; 1];
+                // A closed link reads end-of-stream at once; an open and silent one has nothing
+                // to read, so the read is still pending when the short bound elapses.
+                let read =
+                    tokio::time::timeout(Duration::from_millis(200), stream.read(&mut byte)).await;
+                closed.push(matches!(read, Ok(Ok(0)) | Ok(Err(_))));
+            }
+            let _ = go_tx.send(true);
+            closed
+        };
+        let (summary, closed) = tokio::join!(node, observe);
+        (closed, summary)
+    }
+
+    /// Upstream's `accept_pending`: a link that arrives while that many accepts are still
+    /// mid-handshake is closed at once, unanswered. Two silent peers fill a bound of two, the
+    /// third is closed and counted apart; with the default bound, a hundred, the same three
+    /// are all held, so the closing above is the bound's and not the loop's.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_link_past_the_pending_bound_is_closed_unanswered_and_counted() {
+        let bounded = AcceptBounds {
+            pending: 2,
+            ..AcceptBounds::default()
+        };
+        let (closed, summary) = silent_peers_against(bounded, 3, Duration::from_millis(300)).await;
+        assert_eq!(
+            closed,
+            [false, false, true],
+            "the third link, past the bound of two, is the one closed"
+        );
+        assert_eq!(summary.refused_over_pending, 1);
+        assert_eq!(summary.accepted, 2, "a refused link is not an accepted one");
+
+        let (closed, summary) =
+            silent_peers_against(AcceptBounds::default(), 3, Duration::from_millis(300)).await;
+        assert_eq!(closed, [false, false, false], "control: nothing is closed");
+        assert_eq!(summary.refused_over_pending, 0);
+        assert_eq!(summary.accepted, 3);
+    }
+
+    /// Upstream's `accept_timeout` is the whole accept's bound, and it is the node's to state:
+    /// a silent peer is dropped when the stated time has passed, and not before. The session
+    /// machine's own window is one second (§2.5, pico's), which this loop used to apply to every
+    /// peer; a bound of four hundred milliseconds drops a peer the old one would have kept for
+    /// another six hundred, and the default, ten seconds, keeps one the old one had dropped.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_silent_link_is_dropped_when_the_accept_timeout_has_passed_and_not_before() {
+        let short = AcceptBounds::default().with_timeout_ms(400);
+        let (closed, _) = silent_peers_against(short, 1, Duration::from_millis(700)).await;
+        assert_eq!(closed, [true], "dropped after 400 ms, well within 700");
+
+        let (closed, _) =
+            silent_peers_against(AcceptBounds::default(), 1, Duration::from_millis(1500)).await;
+        assert_eq!(
+            closed,
+            [false],
+            "control: the default ten seconds still holds a peer silent for one and a half"
         );
     }
 
@@ -5599,6 +5816,7 @@ mod tests {
                 #[cfg(feature = "transport-multilink")]
                 max_links: 1,
                 max_sessions: usize::MAX,
+                accept: AcceptBounds::default(),
                 // THE SUBJECT.
                 ceiling: Some(live.clone()),
                 peer_board: None,
@@ -5703,6 +5921,7 @@ mod tests {
                 #[cfg(feature = "transport-multilink")]
                 max_links: 1,
                 max_sessions: crate::config::DEFAULT_MAX_SESSIONS,
+                accept: AcceptBounds::default(),
                 ceiling: None,
                 peer_board: None,
                 offer: SessionOffer::universal(),
@@ -6727,6 +6946,7 @@ mod tests {
                 max_links: 1,
                 // R2758 — unbounded, so these fixtures keep the subject they had.
                 max_sessions: usize::MAX,
+                accept: AcceptBounds::default(),
                 ceiling: None,
                 peer_board: None,
             },
@@ -6863,6 +7083,7 @@ mod tests {
                 max_links: 1,
                 // R2758 — unbounded, so these fixtures keep the subject they had.
                 max_sessions: usize::MAX,
+                accept: AcceptBounds::default(),
                 ceiling: None,
                 peer_board: None,
             },
@@ -6967,6 +7188,7 @@ mod tests {
                 max_links: 1,
                 // R2758 — unbounded, so these fixtures keep the subject they had.
                 max_sessions: usize::MAX,
+                accept: AcceptBounds::default(),
                 ceiling: None,
                 peer_board: None,
             },
@@ -7071,6 +7293,7 @@ mod tests {
                 max_links: 1,
                 // R2758 — unbounded, so these fixtures keep the subject they had.
                 max_sessions: usize::MAX,
+                accept: AcceptBounds::default(),
                 ceiling: None,
                 peer_board: None,
             },
