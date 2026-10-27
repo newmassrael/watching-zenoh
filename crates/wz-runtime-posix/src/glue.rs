@@ -6,6 +6,7 @@
 //! `glue`, over `write(2)` and `nanosleep(2)`.
 
 use core::fmt::Write;
+use wz_session_core::text_out::{write_parts, LogPart, TextOut};
 
 /// The bytes of one console line. A longer line is cut, never allocated for.
 const LINE: usize = 256;
@@ -28,10 +29,24 @@ pub fn log_args(args: core::fmt::Arguments<'_>) {
     write_all(b"\n");
 }
 
+/// [`log`] of a line made of [`LogPart`]s: the bytes [`log_args`] writes for the same line, cut at
+/// 256 bytes.
+pub fn log_parts(parts: &[LogPart<'_>]) {
+    let mut line = LineBuf {
+        bytes: [0; LINE],
+        len: 0,
+    };
+    write_parts(&mut line, parts);
+    write_all(&line.bytes[..line.len]);
+    write_all(b"\n");
+}
+
 struct LineBuf {
     bytes: [u8; LINE],
     len: usize,
 }
+
+impl TextOut for LineBuf {}
 
 impl Write for LineBuf {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {

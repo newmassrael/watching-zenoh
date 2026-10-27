@@ -19,7 +19,8 @@
 //! is the comparison and the words, with no kernel call, so they are tested on a
 //! host.
 
-use core::fmt;
+use wz_session_core::text_out::LogPart;
+use LogPart::{Str, U64};
 
 /// How far the core clock may be from the one the image assumes, in parts per
 /// thousand of the assumed clock, in either direction.
@@ -90,28 +91,37 @@ pub enum CoreClockLine {
     },
 }
 
-impl fmt::Display for CoreClockLine {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl CoreClockLine {
+    /// Hand the line to `say` as the pieces it is made of ([`LogPart`]), which a console renders
+    /// with `glue::log_parts`. The words are written here once; there is no `Display`, because
+    /// the machinery behind one is code a firmware with no other formatting would not carry.
+    pub fn with_parts<R>(&self, say: impl FnOnce(&[LogPart<'_>]) -> R) -> R {
         match *self {
-            CoreClockLine::Unknown { assumed_hz } => write!(
-                out,
-                "wz: core clock unknown (the board's reading gave 0 Hz; the image assumes {assumed_hz} Hz)"
-            ),
+            CoreClockLine::Unknown { assumed_hz } => say(&[
+                Str("wz: core clock unknown (the board's reading gave 0 Hz; the image assumes "),
+                U64(u64::from(assumed_hz)),
+                Str(" Hz)"),
+            ]),
             CoreClockLine::Reading {
                 actual_hz,
                 assumed_hz,
-            } => write!(
-                out,
-                "wz: core clock {actual_hz} Hz (the image assumes {assumed_hz} Hz)"
-            ),
+            } => say(&[
+                Str("wz: core clock "),
+                U64(u64::from(actual_hz)),
+                Str(" Hz (the image assumes "),
+                U64(u64::from(assumed_hz)),
+                Str(" Hz)"),
+            ]),
             CoreClockLine::Mismatch {
                 actual_hz,
                 assumed_hz,
-            } => write!(
-                out,
-                "wz: FAIL - the core runs at {actual_hz} Hz, the image assumes {assumed_hz} Hz; \
-                 start a CM0+ image that configures the clock tree"
-            ),
+            } => say(&[
+                Str("wz: FAIL - the core runs at "),
+                U64(u64::from(actual_hz)),
+                Str(" Hz, the image assumes "),
+                U64(u64::from(assumed_hz)),
+                Str(" Hz; start a CM0+ image that configures the clock tree"),
+            ]),
         }
     }
 }
@@ -160,7 +170,15 @@ pub fn assess_core_clock(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::string::ToString;
+    use std::string::String;
+    use wz_session_core::text_out::{write_parts, FixedText};
+
+    /// The line as the console prints it.
+    fn said(line: &CoreClockLine) -> String {
+        let mut text: FixedText<200> = FixedText::new();
+        line.with_parts(|parts| write_parts(&mut text, parts));
+        String::from(text.finish().expect("the line fits the buffer"))
+    }
 
     /// `CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC` of the CYT4BF M7 board (devicetree
     /// `clock-frequency` of its CPU node).
@@ -270,7 +288,7 @@ mod tests {
             }
         );
         assert_eq!(
-            line.to_string(),
+            said(&line),
             "wz: FAIL - the core runs at 8000000 Hz, the image assumes 350000000 Hz; \
              start a CM0+ image that configures the clock tree"
         );
@@ -288,7 +306,7 @@ mod tests {
             panic!("a core at the assumed clock reports it");
         };
         assert_eq!(
-            line.to_string(),
+            said(&line),
             "wz: core clock 349500000 Hz (the image assumes 350000000 Hz)"
         );
     }
@@ -312,7 +330,7 @@ mod tests {
             panic!("a hook that read nothing is reported, not stopped on");
         };
         assert_eq!(
-            line.to_string(),
+            said(&line),
             "wz: core clock unknown (the board's reading gave 0 Hz; \
              the image assumes 350000000 Hz)"
         );

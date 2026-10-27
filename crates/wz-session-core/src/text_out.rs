@@ -99,6 +99,76 @@ impl TextOut for alloc::string::String {}
 /// that the callee takes the sink by value or by reference.
 impl<W: TextOut + ?Sized> TextOut for &mut W {}
 
+/// One piece of a console line: text, or a number printed in decimal.
+///
+/// A console line is handed over as pieces and not as `fmt::Arguments`: the line a lab reads is
+/// the same bytes, and the firmware that says it carries no `core::fmt` for it (the machinery is
+/// some 3 KB of code that a node with no other formatting caller would not have). A piece is data,
+/// so a platform renders it where it likes: [`write_parts`] into a sink, which is how the Zephyr
+/// console builds its line and the host builds its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogPart<'a> {
+    /// Text, written as it is.
+    Str(&'a str),
+    /// A number, written in decimal as `{n}` writes it.
+    U64(u64),
+    /// A 32-bit value, written as `{n:#010x}` writes it: `0x` and eight hexadecimal digits, as an
+    /// address is printed.
+    Hex32(u32),
+}
+
+macro_rules! log_part_from_narrower {
+    ($($int:ty),*) => {$(
+        impl From<$int> for LogPart<'_> {
+            fn from(n: $int) -> Self {
+                LogPart::U64(u64::from(n))
+            }
+        }
+    )*};
+}
+
+log_part_from_narrower!(u8, u16, u32);
+
+impl From<u64> for LogPart<'_> {
+    fn from(n: u64) -> Self {
+        LogPart::U64(n)
+    }
+}
+
+impl From<usize> for LogPart<'_> {
+    fn from(n: usize) -> Self {
+        // A `usize` is at most 64 bits on every target this builds for.
+        LogPart::U64(n as u64)
+    }
+}
+
+impl<'a> From<&'a str> for LogPart<'a> {
+    fn from(text: &'a str) -> Self {
+        LogPart::Str(text)
+    }
+}
+
+/// Write `parts` to `out`, in order, as the line they make.
+pub fn write_parts<W: TextOut + ?Sized>(out: &mut W, parts: &[LogPart<'_>]) {
+    for part in parts {
+        match *part {
+            LogPart::Str(text) => out.push_str(text),
+            LogPart::U64(n) => out.push_u64(n),
+            LogPart::Hex32(n) => {
+                const DIGITS: &[u8; 16] = b"0123456789abcdef";
+                let mut text = *b"0x00000000";
+                for (at, digit) in text[2..].iter_mut().enumerate() {
+                    *digit = DIGITS[((n >> (28 - 4 * at)) & 0xf) as usize];
+                }
+                // The bytes are `0x` and ASCII hex digits, so they are valid text.
+                if let Ok(text) = core::str::from_utf8(&text) {
+                    out.push_str(text);
+                }
+            }
+        }
+    }
+}
+
 /// The bytes a fixed sink was asked to hold and what it can hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Overflow {
@@ -235,6 +305,44 @@ mod tests {
             t.push_hex_u128(n);
             assert_eq!(t.finish(), Ok(alloc::format!("{n:x}").as_str()), "hex {n}");
         }
+    }
+
+    #[test]
+    fn a_line_of_parts_is_the_line_the_formatter_makes() {
+        let mut t: FixedText<64> = FixedText::new();
+        write_parts(
+            &mut t,
+            &[
+                LogPart::Str("stack: peak "),
+                LogPart::U64(3524),
+                LogPart::Str(" of "),
+                LogPart::U64(32768),
+                LogPart::Str(" bytes"),
+            ],
+        );
+        assert_eq!(
+            t.finish(),
+            Ok(alloc::format!("stack: peak {} of {} bytes", 3524, 32768).as_str())
+        );
+    }
+
+    #[test]
+    fn an_address_part_is_what_the_padded_alternate_hex_format_prints() {
+        for n in [0u32, 1, 0xf, 0x10, 0x2000_0000, 0xdead_beef, u32::MAX] {
+            let mut t: FixedText<16> = FixedText::new();
+            write_parts(&mut t, &[LogPart::Hex32(n)]);
+            assert_eq!(t.finish(), Ok(alloc::format!("{n:#010x}").as_str()), "{n}");
+        }
+    }
+
+    #[test]
+    fn the_integers_and_text_convert_into_the_part_they_are() {
+        assert_eq!(LogPart::from(7u8), LogPart::U64(7));
+        assert_eq!(LogPart::from(65_535u16), LogPart::U64(65_535));
+        assert_eq!(LogPart::from(u32::MAX), LogPart::U64(u64::from(u32::MAX)));
+        assert_eq!(LogPart::from(u64::MAX), LogPart::U64(u64::MAX));
+        assert_eq!(LogPart::from(12usize), LogPart::U64(12));
+        assert_eq!(LogPart::from("x"), LogPart::Str("x"));
     }
 
     #[test]

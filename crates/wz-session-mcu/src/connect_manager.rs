@@ -303,6 +303,33 @@ pub enum DeclaredRefusal {
     Node(usize, NodeRefusal),
 }
 
+impl DeclaredRefusal {
+    /// Which declared peer, by its index in the list.
+    pub const fn index(&self) -> usize {
+        match *self {
+            DeclaredRefusal::Locator(index, _) | DeclaredRefusal::Node(index, _) => index,
+        }
+    }
+
+    /// Why, as the words a console line carries: the kind of refusal and the refusal itself, the
+    /// names `Debug` gave them, so a line a lab has read keeps meaning what it meant.
+    pub const fn reason(&self) -> &'static str {
+        match *self {
+            DeclaredRefusal::Locator(_, DirectoryRefusal::LocatorTooLong) => {
+                "Locator LocatorTooLong"
+            }
+            DeclaredRefusal::Locator(_, DirectoryRefusal::Full) => "Locator Full",
+            DeclaredRefusal::Locator(_, DirectoryRefusal::LifetimeOfAnotherSource) => {
+                "Locator LifetimeOfAnotherSource"
+            }
+            DeclaredRefusal::Node(_, NodeRefusal::Unverifiable) => "Node Unverifiable",
+            DeclaredRefusal::Node(_, NodeRefusal::NoRoom) => "Node NoRoom",
+            DeclaredRefusal::Node(_, NodeRefusal::NoLocator) => "Node NoLocator",
+            DeclaredRefusal::Node(_, NodeRefusal::NoDialableLocator) => "Node NoDialableLocator",
+        }
+    }
+}
+
 /// The request to hold a node by its zid (a lifecycle `open`, decision D6), made where the
 /// manager is not: a query a node answers is served beside its loop and not inside it.
 ///

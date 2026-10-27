@@ -55,9 +55,7 @@ use host_slot_node_glue::tuning::{
 };
 use host_slot_node_glue::{fresh_signing_key, ConsoleName, HostPort};
 use wz_runtime_coop::session_drive::{IpEndpoint, Locator};
-use wz_runtime_posix::glue::log;
-#[cfg(feature = "tls")]
-use wz_runtime_posix::glue::log_args;
+use wz_runtime_posix::glue::{log, log_args};
 #[cfg(not(feature = "tls"))]
 use wz_runtime_posix::slot::PosixStack;
 #[cfg(not(feature = "tls"))]
@@ -371,8 +369,10 @@ fn run(args: Args) -> i32 {
     let mut app = app;
     // The line a lab (or a person at the console) waits for, once the node is built: who it claims
     // to be and the router it dials.
-    node.run(&mut Port::new(), &mut app, |port, zid_hex| {
-        port.log(format_args!(
+    node.run(&mut Port::new(), &mut app, |_, zid_hex| {
+        // The router is a `Locator`, which is printed through its `Display`: the host has no
+        // image size to keep, so this line is the one that does not go through the port's parts.
+        log_args(format_args!(
             "HOST-WZ-CLIENT READY {zid_hex} {}",
             args.router
         ));

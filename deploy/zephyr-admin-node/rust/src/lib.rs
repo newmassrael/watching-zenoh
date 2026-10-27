@@ -50,7 +50,7 @@ use wz::runtime_coop::{CoopLocalSet, CoopRuntime, CoopTime};
 use wz::runtime_zephyr::core_clock::{assess_core_clock, CoreClockOutcome};
 #[cfg(not(all(role_client, storage_fixed)))]
 use wz::runtime_zephyr::glue::log;
-use wz::runtime_zephyr::glue::{core_clock_hz, log_args};
+use wz::runtime_zephyr::glue::{core_clock_hz, log_args, log_parts};
 #[cfg(not(storage_fixed))]
 use wz::runtime_zephyr::glue::{log_line, stack_usage, yield_us};
 #[cfg(not(storage_fixed))]
@@ -840,11 +840,11 @@ fn check_core_clock() -> Option<i32> {
     match assess_core_clock(core_clock_hz(), IMAGE_CORE_CLOCK_HZ, board_reads_clock) {
         CoreClockOutcome::Silent => None,
         CoreClockOutcome::Report(line) => {
-            log_args(format_args!("{line}"));
+            line.with_parts(log_parts);
             None
         }
         CoreClockOutcome::Stop(line) => {
-            log_args(format_args!("{line}"));
+            line.with_parts(log_parts);
             Some(CORE_CLOCK_MISMATCH)
         }
     }

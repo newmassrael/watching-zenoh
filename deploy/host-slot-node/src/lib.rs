@@ -15,12 +15,12 @@
 //! It is `#![no_std]` and links no allocator, as the nodes do.
 #![no_std]
 
-use core::fmt;
 use core::marker::PhantomData;
 
-use wz_runtime_posix::glue::{log_args, yield_us};
+use wz_runtime_posix::glue::{log_parts, yield_us};
 use wz_runtime_posix::PosixEntropy;
 use wz_session_core::entropy::EntropySource;
+use wz_session_core::text_out::LogPart;
 use wz_session_mcu::slot_node::{NodePort, SIGNING_KEY_BYTES, ZID_MAX};
 
 #[cfg(feature = "control")]
@@ -113,8 +113,8 @@ impl<N: ConsoleName> Default for HostPort<N> {
 impl<N: ConsoleName> NodePort for HostPort<N> {
     const NAME: &'static str = N::NAME;
 
-    fn log(&mut self, line: fmt::Arguments<'_>) {
-        log_args(line);
+    fn log(&mut self, line: &[LogPart<'_>]) {
+        log_parts(line);
     }
 
     fn idle(&mut self, us: u32) {

@@ -18,6 +18,7 @@
 #[cfg(feature = "alloc")]
 use alloc::string::String;
 use core::ffi::{c_char, CStr};
+use wz_session_core::text_out::{write_parts, LogPart};
 
 extern "C" {
     /// `printk("%s\n", msg)`, wrapped C-side so the FFI target is non-variadic.
@@ -93,6 +94,18 @@ impl core::fmt::Write for LineBuf {
     }
 }
 
+impl wz_session_core::text_out::TextOut for LineBuf {}
+
+/// Write `parts` into a nul-terminated line of at most [`LOG_LINE_BYTES`] bytes.
+fn render_parts(parts: &[LogPart<'_>]) -> LineBuf {
+    let mut line = LineBuf {
+        bytes: [0; LOG_LINE_BYTES],
+        len: 0,
+    };
+    write_parts(&mut line, parts);
+    line
+}
+
 /// Format `args` into a nul-terminated line of at most [`LOG_LINE_BYTES`] bytes.
 fn render_line(args: core::fmt::Arguments<'_>) -> LineBuf {
     let mut line = LineBuf {
@@ -116,6 +129,20 @@ fn render_line(args: core::fmt::Arguments<'_>) -> LineBuf {
 #[inline(never)]
 pub fn log_args(args: core::fmt::Arguments<'_>) {
     let line = render_line(args);
+    // SAFETY: the buffer is zero-filled past `len` and `len` leaves one byte, so it is
+    // nul-terminated; it outlives the call and `wz_log` only reads it (printk %s).
+    unsafe { wz_log(line.bytes.as_ptr() as *const c_char) };
+}
+
+/// Print a line made of [`LogPart`]s on the board's console without allocating and without
+/// `core::fmt`: the same bytes [`log_args`] prints for the same line, for a firmware that has no
+/// other formatting caller. A line longer than [`LOG_LINE_BYTES`] is cut.
+///
+/// Never inlined, for the reason [`log_args`] gives: the line's buffer is wanted for the length of
+/// the one call and not under every call of its caller.
+#[inline(never)]
+pub fn log_parts(parts: &[LogPart<'_>]) {
+    let line = render_parts(parts);
     // SAFETY: the buffer is zero-filled past `len` and `len` leaves one byte, so it is
     // nul-terminated; it outlives the call and `wz_log` only reads it (printk %s).
     unsafe { wz_log(line.bytes.as_ptr() as *const c_char) };
@@ -222,6 +249,20 @@ mod tests {
             line.bytes[line.len], 0,
             "the byte after the text is the nul"
         );
+    }
+
+    #[test]
+    fn a_line_of_parts_is_the_bytes_the_formatted_line_is() {
+        let by_parts = render_parts(&[
+            LogPart::Str("stack: peak "),
+            LogPart::U64(3524),
+            LogPart::Str(" of "),
+            LogPart::U64(32768),
+            LogPart::Str(" bytes"),
+        ]);
+        let by_args = render_line(format_args!("stack: peak {} of {} bytes", 3524, 32768));
+        assert_eq!(text(&by_parts), text(&by_args));
+        assert_eq!(by_parts.bytes[by_parts.len], 0, "and the nul follows it");
     }
 
     #[test]

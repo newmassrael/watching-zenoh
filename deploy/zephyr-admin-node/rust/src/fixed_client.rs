@@ -30,9 +30,9 @@
 //! The CMake build selects this profile with `CONFIG_WZ_FIXED_MEMORY` for the client node
 //! (`CONFIG_WZ_ROLE_CLIENT`), the same switch the lwIP admin node has.
 
-use core::fmt;
-
-use wz::runtime_zephyr::glue::{log, log_args, stack_usage, yield_us};
+#[cfg(feature = "tls")]
+use wz::runtime_zephyr::glue::log_args;
+use wz::runtime_zephyr::glue::{log, log_parts, stack_usage, yield_us};
 use wz::runtime_zephyr::net::await_board_ipv4;
 #[cfg(not(feature = "tls"))]
 use wz::runtime_zephyr::net::{board_zid_fixed, ZephyrStack};
@@ -42,6 +42,8 @@ use wz_runtime_coop::session_drive::SlotStack;
 use wz_runtime_coop::{CoopRuntime, CoopTime};
 use wz_session_core::entropy::EntropySource;
 use wz_session_core::session_slot::SessionSlots;
+use wz_session_core::text_out::LogPart;
+use LogPart::{Str, U64};
 use wz_session_mcu::slot_client::Listening;
 #[cfg(not(feature = "get"))]
 use wz_session_mcu::slot_node::Answering;
@@ -223,8 +225,8 @@ struct ZephyrPort {
 impl NodePort for ZephyrPort {
     const NAME: &'static str = "zephyr-wz-client";
 
-    fn log(&mut self, line: fmt::Arguments<'_>) {
-        log_args(line);
+    fn log(&mut self, line: &[LogPart<'_>]) {
+        log_parts(line);
     }
 
     fn idle(&mut self, us: u32) {
@@ -240,11 +242,13 @@ impl NodePort for ZephyrPort {
         }
         self.next_stack_check_ms = now_ms + STACK_CHECK_MS;
         if let Some(usage) = self.stack_watch.observe_peak(stack_usage()) {
-            log_args(format_args!(
-                "stack: peak {} of {} bytes",
-                usage.peak(),
-                usage.size
-            ));
+            log_parts(&[
+                Str("stack: peak "),
+                U64(u64::from(usage.peak())),
+                Str(" of "),
+                U64(u64::from(usage.size)),
+                Str(" bytes"),
+            ]);
         }
     }
 }
@@ -327,11 +331,13 @@ pub fn run() -> i32 {
     // The line a lane (or a person at the console) waits for: who the node claims to be and the
     // router it dials.
     node.run(&mut port, &mut app, |_, zid_hex| {
-        log_args(format_args!(
-            "ZEPHYR-WZ-CLIENT READY {} {} {}",
-            NODE_ID,
-            zid_hex,
-            env!("WZ_CLIENT_ENDPOINT")
-        ));
+        log_parts(&[
+            Str("ZEPHYR-WZ-CLIENT READY "),
+            Str(NODE_ID),
+            Str(" "),
+            Str(zid_hex),
+            Str(" "),
+            Str(env!("WZ_CLIENT_ENDPOINT")),
+        ]);
     })
 }

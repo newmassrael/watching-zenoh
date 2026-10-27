@@ -41,6 +41,7 @@ use wz_runtime_posix::stream::PosixTcpListener;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::caps::{MAX_QUERYABLES, MAX_REPLY_PAYLOAD_BYTES, MAX_SUBSCRIPTIONS};
 use wz_session_core::sample_kind::SampleKind;
+use wz_session_core::text_out::LogPart::Str;
 use wz_session_mcu::connect_manager::{DeclaredPeer, StaticEndpoints};
 #[cfg(feature = "multicast")]
 use wz_session_mcu::group_drive::MulticastSlots;
@@ -741,12 +742,14 @@ fn run() -> i32 {
         &mut report,
         |port, zid_hex| {
             // The router it dials, or `-` for a node that dials none.
-            port.log(format_args!(
-                "HOST-WZ-CLIENT READY {zid_hex} {}",
-                DIALED.first().copied().unwrap_or("-")
-            ));
+            port.log(&[
+                Str("HOST-WZ-CLIENT READY "),
+                Str(zid_hex),
+                Str(" "),
+                Str(DIALED.first().copied().unwrap_or("-")),
+            ]);
             if LISTENS {
-                port.log(format_args!("HOST-WZ-LISTEN {LISTEN}"));
+                port.log(&[Str("HOST-WZ-LISTEN "), Str(LISTEN)]);
             }
         },
     )

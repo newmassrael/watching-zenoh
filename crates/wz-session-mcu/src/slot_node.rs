@@ -59,9 +59,10 @@ use wz_session_core::session_slot::SessionSlots;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
 use wz_session_core::slot_observer::{ObserverCell, Requesters};
-use wz_session_core::text_out::FixedText;
+use wz_session_core::text_out::{FixedText, LogPart};
 use wz_session_core::zid_hex::write_zenoh_hex;
 use wz_session_core::WhatAmI;
+use LogPart::{Str, U64};
 
 use crate::app_layer::{NoReplies, SessionEvents, SlotApp, SlotDispatch};
 use crate::connect_manager::{DeclaredPeer, EndpointSource, PeerStore};
@@ -780,8 +781,11 @@ pub trait NodePort {
     /// The name the node's console lines carry ("zephyr-wz-client: session established").
     const NAME: &'static str;
 
-    /// Say one line on the console.
-    fn log(&mut self, line: fmt::Arguments<'_>);
+    /// Say one line on the console, made of `line`'s pieces in order. The pieces and not
+    /// `fmt::Arguments`: the line is the same bytes (a lane reads `stack: peak N of M bytes` and
+    /// `session established, peer ` off the console), and a port that renders them through
+    /// [`wz_session_core::text_out::write_parts`] carries no `core::fmt` for it.
+    fn log(&mut self, line: &[LogPart<'_>]);
 
     /// Give the CPU away for `us` microseconds. Called when the node holds no socket (between two
     /// dials of a router that is not up), which would otherwise spin above the network stack's
@@ -984,7 +988,7 @@ where
         } = self;
 
         let Some(runtime) = storage.runtime.start(clock) else {
-            port.log(format_args!("wz: FAIL - the runtime was started twice"));
+            port.log(&[Str("wz: FAIL - the runtime was started twice")]);
             return EXIT_RUNTIME_TWICE;
         };
         let local = CoopLocalSet::new(&runtime);
@@ -1000,7 +1004,7 @@ where
         let observer = match install_entities(&storage.app, documents, &entities, declared) {
             Ok(observer) => observer,
             Err(why) => {
-                port.log(format_args!("{}", why.message()));
+                port.log(&[Str(why.message())]);
                 return EXIT_OBSERVER;
             }
         };
@@ -1031,9 +1035,12 @@ where
         // The peers the build declares are held from the first tick. A node that silently lost
         // one it was built to hold would run and be wrong: stop, and say which.
         if let Err(why) = node.hold_declared(peers, clock.now_us() / 1000) {
-            port.log(format_args!(
-                "wz: FAIL - a declared peer cannot be held: {why:?}"
-            ));
+            port.log(&[
+                Str("wz: FAIL - a declared peer cannot be held: peer "),
+                U64(why.index() as u64),
+                Str(", "),
+                Str(why.reason()),
+            ]);
             return EXIT_DECLARED_PEER;
         }
         let mut plane = plane.start(PlaneContext {
@@ -1055,33 +1062,39 @@ where
             }
             let seen = watch.observe(now_ms, node.is_established(), counters());
             if let Some(report) = seen.loop_report {
-                port.log(format_args!(
-                    "{}: loop {} rounds in {} ms",
-                    P::NAME,
-                    report.rounds,
-                    report.ms
-                ));
+                port.log(&[
+                    Str(P::NAME),
+                    Str(": loop "),
+                    U64(u64::from(report.rounds)),
+                    Str(" rounds in "),
+                    U64(report.ms),
+                    Str(" ms"),
+                ]);
             }
             if let Some((tasks, timers)) = seen.refused {
-                port.log(format_args!(
-                    "wz: FAIL - the runtime refused a task or a timer: no cell {}, too large {}, timers {}",
-                    tasks.no_task_cell, tasks.too_large, timers
-                ));
+                port.log(&[
+                    Str("wz: FAIL - the runtime refused a task or a timer: no cell "),
+                    U64(u64::from(tasks.no_task_cell)),
+                    Str(", too large "),
+                    U64(u64::from(tasks.too_large)),
+                    Str(", timers "),
+                    U64(u64::from(timers)),
+                ]);
             }
             port.observe(now_ms);
             match seen.session {
                 // Whether the router is the holder of the key its zid names: only a secure
                 // channel can say yes (decisions D1 and D9).
-                Some(true) => port.log(format_args!(
-                    "{}: session established, peer {}",
-                    P::NAME,
-                    if node.peer_verified() {
+                Some(true) => port.log(&[
+                    Str(P::NAME),
+                    Str(": session established, peer "),
+                    Str(if node.peer_verified() {
                         "verified"
                     } else {
                         "not verified"
-                    }
-                )),
-                Some(false) => port.log(format_args!("{}: session lost", P::NAME)),
+                    }),
+                ]),
+                Some(false) => port.log(&[Str(P::NAME), Str(": session lost")]),
                 None => {}
             }
             // The stack's own wait on a socket is what gives the CPU away while a session is
@@ -1108,6 +1121,33 @@ mod tests {
     /// A watch over counters that are one number, with a report every 5 s.
     fn watch() -> RoundWatch<u32> {
         RoundWatch::new(0, 5_000)
+    }
+
+    #[test]
+    fn a_declared_refusal_says_the_words_debug_gave_it() {
+        use crate::connect_manager::{DeclaredRefusal, NodeRefusal};
+        use wz_session_core::locator_directory::DirectoryRefusal;
+
+        let all = [
+            DeclaredRefusal::Locator(2, DirectoryRefusal::LocatorTooLong),
+            DeclaredRefusal::Locator(2, DirectoryRefusal::Full),
+            DeclaredRefusal::Locator(2, DirectoryRefusal::LifetimeOfAnotherSource),
+            DeclaredRefusal::Node(2, NodeRefusal::Unverifiable),
+            DeclaredRefusal::Node(2, NodeRefusal::NoRoom),
+            DeclaredRefusal::Node(2, NodeRefusal::NoLocator),
+            DeclaredRefusal::Node(2, NodeRefusal::NoDialableLocator),
+        ];
+        for why in all {
+            // `Locator(2, Full)` is the kind, the index and the refusal: the reason is the kind and
+            // the refusal, the index is its own number.
+            let debug = alloc::format!("{why:?}");
+            let words = alloc::format!("{} {}", debug.split('(').next().unwrap(), {
+                let inner = debug.rsplit(", ").next().unwrap();
+                inner.trim_end_matches(')')
+            });
+            assert_eq!(why.reason(), words, "{debug}");
+            assert_eq!(why.index(), 2, "{debug}");
+        }
     }
 
     #[test]
