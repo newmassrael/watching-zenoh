@@ -744,9 +744,39 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
   Not done: the drop-in legs of Layer E (upstream's C programs compiled against the cooperative
   cdylib), which run the tokio build, and a foreign pico that LISTENS for a cooperative peer to
   dial (the dial role is L1 and L2's, held by C1co against the tokio listener).
-- **L5. Both roles at once.** A peer that listens and dials: the dial role's face and the
-  accepted ones in one table, one face for each remote zid as the tokio registry keeps (a node
-  the session is already linked to is not given a second face).
+- **L5. Both roles at once. Done.** A peer that listens and dials holds the dial role's face and
+  the accepted ones in one table, and one face for each remote zid, as zenoh's transport manager
+  keeps one transport for each and the tokio registry keeps one face (`SharedSession::face_up`).
+  It is the face table's decision at the moment a handshake completes (`Core::admission`), and it
+  is the `listen` feature's: a build that does not listen has the dial role's face (and the
+  faces attached to it), which nothing there can reach twice, and read 5,000 to 8,000 bytes more
+  when the rule was in it. Each decision of the step:
+  - A link that is a second to a node the session holds is closed with the reason `MaxLinks`
+    (what zenoh names it), and its face goes. The tables its frames filled between the handshake
+    and the step that saw it are flushed as a lost link's are.
+  - Two links that went the same way (both dialled, or both taken off a port) are the first one
+    up and the one after. Two that went opposite ways are two nodes that dialled each other at
+    once, which "the first up" decides differently at the two ends (each keeps the link that
+    completed first on its side, and both links are closed). The link kept is the one the node
+    with the lower zid dialled, which both ends compute from the two zids alone, so it holds
+    whichever completes first, and a kept link may replace a held one that went the other way.
+  - The dial role's face is never removed, so a refusal or a replacement leaves it standing by
+    (`Link::Held`) and not dialled: it would be refused at every redial, the handshake paid each
+    time. It is dialled again, at once, when the face that held the node is lost. An open of a
+    session that listens and dials is released by the dial's link or by its being held.
+  - The tokio engine's acceptor keeps no such rule for a pure acceptor (two clients that share a
+    fixture zid are both held there: Layer E3, E5) and its linkstate peer keeps it by "first up".
+    A cooperative listener refuses the second of two clients of one zid, as zenoh does; the
+    routers of a test are given zids of their own for it (`tests::face_table`).
+
+  The proof: `tests::one_face::`, three tests of the engine against itself over loopback. Two
+  nodes dial each other from one barrier twelve times, the lower zid being the first node's in
+  the even rounds and the second's in the odd ones, and each ends holding one face that it keeps
+  and that carries what each puts; a second dial to a node held is refused with one face at each
+  end; a node whose dial role stands by for a held node reaches it again when that node has gone
+  and come back. Not done: a cooperative node against a tokio peer that races it (the two keep
+  different rules, and a race can close both links until the next redial), and a pico ABI test of
+  a session that listens and dials a peer that dials it (the engine's tests are the proof).
 
 ### What is decided and what is open
 
@@ -762,6 +792,10 @@ with its link; a get is one leg for each face and one for the session's own quer
 
 Decided by L3: `read` waits on every link and port together (a multiplexed wait, with the
 bounded look kept for a stack that cannot); the bounds of an accept are the config's.
+
+Decided by L5: a session that listens holds one face for each remote zid; of two links to one
+node, the first up is kept, and of two that went opposite ways the one the lower zid dialled; the
+dial role's face stands by when its node is held.
 
 Open, to be settled by the step that meets it and not before: what a liveliness subscriber's
 history is when two faces hold the same token key (L2 hands it every face's tokens, and each
