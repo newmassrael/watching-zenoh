@@ -13,6 +13,7 @@
       "owners": [
         "ci.yml:ci",
         "ci.yml:nondefault",
+        "ci.yml:nondefault-builds",
         "ci.yml:nondefault-legs",
         "ci.yml:dissect",
         "ci.yml:interop",
@@ -74,6 +75,7 @@
         "ci.yml:verdict-legs",
         "ci.yml:session-planes",
         "ci.yml:nondefault",
+        "ci.yml:nondefault-builds",
         "ci.yml:nondefault-legs",
         "ci.yml:defaults-off",
         "ci.yml:gate-provenance",
@@ -87,6 +89,7 @@
         "ci.yml:feature-gates",
         "ci.yml:feature-gates-peel",
         "ci.yml:routing-adminspace",
+        "ci.yml:adminspace-lanes",
         "ci.yml:transport-modes",
         "ci.yml:isolated-crates",
         "ci.yml:capi-c-arms",
@@ -113,6 +116,7 @@
       "readers": [
         "ci.yml:session-planes",
         "ci.yml:nondefault",
+        "ci.yml:nondefault-builds",
         "ci.yml:nondefault-legs",
         "ci.yml:defaults-off",
         "ci.yml:gate-provenance",
@@ -122,6 +126,7 @@
         "ci.yml:feature-gates-peel",
         "ci.yml:pico-client-only",
         "ci.yml:routing-adminspace",
+        "ci.yml:adminspace-lanes",
         "ci.yml:transport-modes"
       ],
       "budget_mb": 700,

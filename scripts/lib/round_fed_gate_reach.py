@@ -165,6 +165,15 @@ SUBPROCESS_CALLS = frozenset(
 #: row whose module has left the population is a finding, and so is a row the
 #: hook turns out to run.
 DEFERRED: dict[str, str] = {
+    "debt_plane_census.py": (
+        "R311y919 -- its input is the open-debt register, which lives in the "
+        "agent memory outside this repository (item 454, the debt the script "
+        "itself names), so a clone without that memory cannot grade it, and "
+        "its exit code 3 is the normal state of a standing claim, which a hook "
+        "would have to read as a pass. 3.9s in its default mode. It is an "
+        "instrument a repayment loop measures itself with, run by hand before "
+        "a debt is chosen; Layer C0 runs its --selftest."
+    ),
     "zephyr_cargo_lines.py": (
         "R3439 -- configures every Zephyr image of the board table and the "
         "stacks its overlays document with `west build --cmake-only`: "

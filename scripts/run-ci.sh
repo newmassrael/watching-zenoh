@@ -3384,6 +3384,11 @@ layer_c0_test_discipline() {
     # `timeout-minutes` into a string, and renaming the script out from under
     # the lint's own regex (which must FAIL as population-zero, not pass).
     python3 scripts/lib/job_budget_binding.py || return 1
+    # Layer C1cn's two halves (the census shards and the builds job) are one fact
+    # in two places: a builds job dropped from the workflow leaves every job green
+    # and the crates uncompiled with their features.
+    python3 scripts/lib/c1cn_part_binding.py --selftest || return 1
+    python3 scripts/lib/c1cn_part_binding.py || return 1
     # R311y570 — the UNSEQUENCED-PROBE lint. A C probe that passes `&x` to a
     # constructor and reads `x` through a loan accessor in the SAME full
     # expression is reading an uninitialised object: C does not order call
@@ -10855,8 +10860,28 @@ layer_c1cn_nondefault_features() {
     # run once, in the LAST shard (the one whose slice of the census is the
     # lighter: shard 0 holds wz-runtime-tokio), and every shard runs its slice of
     # the census. Unset means unsharded, which is shard 0 of 1 and so the last.
-    local _shard0=0
-    [[ "${WZ_CENSUS_SHARD:-0}" == "$(( ${WZ_CENSUS_SHARDS:-1} - 1 ))" ]] && _shard0=1
+    #
+    # `WZ_C1CN_PART` splits the layer itself when hosted CI wants it split:
+    # `census` runs the census slice and none of the builds, `builds` runs the
+    # builds and no census, and unset (or `all`) is the layer as it always was,
+    # with the builds in the last shard. The last shard read 1689 s of its 1800 s
+    # (93 percent) on run 40429162789 against 880 s for the first: the builds are
+    # about 1400 s of it and the census slice is the rest, so moving census
+    # positions between shards cannot balance them, and the builds get a job of
+    # their own.
+    local _part="${WZ_C1CN_PART:-all}"
+    local _shard0=0 _census=1
+    case "$_part" in
+        all)
+            [[ "${WZ_CENSUS_SHARD:-0}" == "$(( ${WZ_CENSUS_SHARDS:-1} - 1 ))" ]] && _shard0=1
+            ;;
+        census) ;;
+        builds) _shard0=1; _census=0 ;;
+        *)
+            echo "  C1cn FAIL: WZ_C1CN_PART=$_part is none of all, census, builds" >&2
+            return 1
+            ;;
+    esac
     if [[ $_shard0 -eq 1 ]]; then
         bash scripts/lib/nondefault-features-gate.sh || return 1
     fi
@@ -10874,7 +10899,9 @@ layer_c1cn_nondefault_features() {
     # 84. That gap is what item 543 was, and closing it is what the widened LEGS
     # table does -- so this line is now the thing that keeps it closed, not a
     # report on how open it is.
-    bash scripts/lib/nondefault-tests-gate.sh --census || return 1
+    if [[ $_census -eq 1 ]]; then
+        bash scripts/lib/nondefault-tests-gate.sh --census || return 1
+    fi
     # R3335 -- the BUILD half of the domain bundles: the census reads their
     # names, and nothing built one until this line.
     if [[ $_shard0 -eq 1 ]]; then

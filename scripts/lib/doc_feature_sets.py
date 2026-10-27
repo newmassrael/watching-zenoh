@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""Which feature configurations Layer C1bz documents a crate under.
+"""R3768 (no register item) -- which feature configurations Layer C1bz documents a crate under.
 
 THE PROBLEM. C1bz documents a crate with every feature on, because a module behind a feature that
 is off is not compiled and its doc links are never checked. That is right for a crate whose

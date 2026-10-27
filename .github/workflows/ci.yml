@@ -1580,6 +1580,10 @@ jobs:
     env:
       WZ_CENSUS_SHARDS: "2"
       WZ_CENSUS_SHARD: ${{ matrix.shard }}
+      # The census slice only: the builds of this layer are the next job's
+      # (`nondefault-builds`), and `scripts/lib/c1cn_part_binding.py` holds the
+      # two together.
+      WZ_C1CN_PART: census
     steps:
       - name: Budget stamp — start this job's own clock
         # Same reason the `ci` job stamps: `timeout-minutes` measures from when
@@ -1679,6 +1683,99 @@ jobs:
         # case the floor exists to catch, and if C1cn ever shrinks back under a
         # fifth of the budget it should hand the budget back rather than sit on
         # it. The alarm stays 90 for the reason the `ci` copy gives.
+        if: always()
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 20 '${{ job.status }}'
+
+  # ─────────────────────────────────────────────────────────────────
+  # The BUILDS of Layer C1cn, peeled off its last census shard. On run 40429162789
+  # that shard read `elapsed 1689s of 1800s budget (93%)` against 880s for the
+  # first, which held wz-runtime-tokio's census; the compile gate, the domain
+  # bundles and the lifecycle guard are the larger part of it (about 1400s of
+  # the 1689s by the arithmetic of the two shards), so no choice of census
+  # positions balances the pair, and the 90% alarm was the thing that said so.
+  # Last green run (40057753860): 685s and 1061s.
+  #
+  # WHAT STAYS TRUE, and `scripts/lib/c1cn_part_binding.py` holds it: the census
+  # shards run `WZ_C1CN_PART=census`, this job runs `WZ_C1CN_PART=builds`, and
+  # the builds run in exactly one job. A layer whose builds move out of the shard
+  # that ran them and into nothing is a set of crates no longer compiled with
+  # their features while everything stays green.
+  nondefault-builds:
+    name: non-default feature builds (Layer C1cn, the compile gate and the bundles)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      WZ_C1CN_PART: builds
+    steps:
+      - name: Budget stamp — start this job's own clock
+        run: date +%s > "$RUNNER_TEMP/wz_job_start"
+
+      - name: Free runner disk space (headroom for the feature builds)
+        run: |
+          echo "=== free space BEFORE prune ==="
+          df -h /
+          prune() {
+            local started=$SECONDS
+            "$@" || true
+            echo "prune: $* took $((SECONDS - started))s"
+          }
+          prune sudo rm -rf /usr/share/dotnet &
+          prune sudo rm -rf /usr/local/lib/android &
+          prune sudo rm -rf /opt/ghc &
+          prune sudo rm -rf /usr/local/share/boost &
+          prune sudo rm -rf /opt/hostedtoolcache/CodeQL &
+          prune sudo docker image prune --all --force &
+          wait
+          echo "=== free space AFTER prune ==="
+          df -h /
+
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        id: apt-archives
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
+
+      - name: Install system dependencies
+        run: |
+          bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
+            cmake libclang-dev clang perl pkg-config
+
+      - name: Save apt archives
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: bash scripts/lib/rust-toolchain-pinned.sh
+
+      - name: Cache Cargo registry + build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          add-job-id-key: "false"
+          save-if: "false"
+          workspaces: crates -> target
+
+      - name: Reuse the RocksDB native engine across feature sets
+        uses: ./.github/actions/rocksdb-engine
+
+      - name: Layer C1cn — every crate compiles its non-default code
+        run: bash scripts/run-ci.sh --layer C1cn
+
+      - name: Budget margin — this job's own clock
+        # 1800 is `timeout-minutes: 30` in seconds, held by
+        # `scripts/lib/job_budget_binding.py`; 90 / 20 are the alarm and floor
+        # the census shards use, for the same reason.
         if: always()
         run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 20 '${{ job.status }}'
 
@@ -4936,12 +5033,9 @@ jobs:
         run: bash scripts/run-ci.sh --layer C1ax
       - name: Layer C1ay — router-hat forward tables
         run: bash scripts/run-ci.sh --layer C1ay
-      - name: Layer C1am — adminspace handlers
-        run: bash scripts/run-ci.sh --layer C1am
-      - name: Layer C1an — adminspace no-default-features
-        run: bash scripts/run-ci.sh --layer C1an
-      - name: Layer C1ao — config-mutate-runtime + admin json
-        run: bash scripts/run-ci.sh --layer C1ao
+      # Layers C1am, C1an and C1ao (the adminspace half) are `adminspace-lanes`
+      # below: this job read 2466s of its 2700s (91%, past the 90% alarm) on run
+      # 40429162789, of which the adminspace half was 769s (532 + 124 + 113).
 
       - name: Disk headroom after the lanes (measurement, not a gate)
         if: always()
@@ -4962,6 +5056,72 @@ jobs:
         # the signal. 20% is 540s.
         if: always()
         run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 2700 90 20 '${{ job.status }}'
+
+  # The ADMINSPACE half of the routing + adminspace job, peeled off it. The theme
+  # the two shared was the convenience of the first split (R311y793), and the pair
+  # has outgrown one job's budget: 2466s of 2700s on run 40429162789 against 2126s
+  # on the last green run (40057753860). The routing half keeps its 45 minutes and
+  # reads about 1599s of them; the three adminspace lanes (769s) need the same
+  # runner setup and nothing else of the routing half.
+  adminspace-lanes:
+    name: adminspace lanes (handlers, no-default-features, config mutate)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Budget stamp — start this job's own clock
+        run: date +%s > "$RUNNER_TEMP/wz_job_start"
+
+      - name: Checkout (with submodules)
+        # `recursive`: these lanes compile wz-session-core, which resolves
+        # sce_forge_runtime out of vendor/sce.
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        id: apt-archives
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
+
+      - name: Install system dependencies
+        run: |
+          bash scripts/lib/apt-install.sh libclang-dev clang perl pkg-config
+
+      - name: Save apt archives
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: bash scripts/lib/rust-toolchain-pinned.sh
+
+      - name: Cache Cargo registry + build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          add-job-id-key: "false"
+          save-if: "false"
+          workspaces: crates -> target
+
+      - name: Layer C1am — adminspace handlers
+        run: bash scripts/run-ci.sh --layer C1am
+      - name: Layer C1an — adminspace no-default-features
+        run: bash scripts/run-ci.sh --layer C1an
+      - name: Layer C1ao — config-mutate-runtime + admin json
+        run: bash scripts/run-ci.sh --layer C1ao
+
+      - name: Budget margin — this job may not approach its timeout in silence
+        # 1800 is `timeout-minutes: 30` in seconds, held by
+        # `scripts/lib/job_budget_binding.py`; 90 / 20 are the alarm and floor of
+        # the job this was peeled from.
+        if: always()
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 20 '${{ job.status }}'
 
   transport-modes:
     name: transport-MODE lanes (the §5.1 mode axis)

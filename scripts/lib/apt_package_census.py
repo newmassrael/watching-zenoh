@@ -173,11 +173,12 @@ def _add(pkg: str, why: str, jobs: list[str]) -> None:
 # shared library at runtime, including on a cache hit.
 for _codec_package in ("libsnappy-dev", "liblz4-dev", "libzstd-dev", "zlib1g-dev", "libbz2-dev"):
     _add(_codec_package, "The cached RocksDB engine's five compression codecs.",
-         ["ci", "nondefault", "nondefault-legs", "dissect", "interop", "feature-gates",
+         ["ci", "nondefault", "nondefault-builds", "nondefault-legs", "dissect", "interop",
+          "feature-gates",
           "transport-modes", "capi-c-arms", "e2e-demo", "e2e-demo-pico",
           "e2e-router-scale"])
 _add("cmake", "Builds the cached native RocksDB engine via the local composite action.",
-     ["nondefault", "nondefault-legs"])
+     ["nondefault", "nondefault-builds", "nondefault-legs"])
 
 
 # bindgen, which is where libclang is consumed. 25.2 MB of a 32.3 MB job, and
@@ -231,6 +232,9 @@ _add(
         # this row that reaches a member reaches it. Its Rust lanes do not reach
         # zenoh-pico-sys; R2805 independently adds cmake for the native engine.
         "nondefault",
+        # Layer C1cn's builds, peeled off its last census shard: the same compile
+        # gate over the same members, so every reason of this row reaches it too.
+        "nondefault-builds",
         # R3464 -- Layer C1bnl's own job, peeled off `dissect`: the legs of the
         # non-default test table build the same members at the same features
         # `nondefault` does, so whatever this row says reaches it too.
@@ -259,6 +263,9 @@ _add(
         # `wz-integration-tests`, so it takes this row's package and not cmake.
         "feature-gates-peel",
         "routing-adminspace",
+        # The adminspace lanes, peeled off the job above for its budget: the same
+        # runner setup and the same lanes' crates, so it takes the same rows.
+        "adminspace-lanes",
         "transport-modes",
         "isolated-crates",
         "capi-c-arms",
@@ -282,6 +289,9 @@ _add(
         # this row that reaches a member reaches it. Its Rust lanes do not reach
         # zenoh-pico-sys; R2805 independently adds cmake for the native engine.
         "nondefault",
+        # Layer C1cn's builds, peeled off its last census shard: the same compile
+        # gate over the same members, so every reason of this row reaches it too.
+        "nondefault-builds",
         # R3464 -- Layer C1bnl's own job, peeled off `dissect`: the legs of the
         # non-default test table build the same members at the same features
         # `nondefault` does, so whatever this row says reaches it too.
@@ -310,6 +320,9 @@ _add(
         # `wz-integration-tests`, so it takes this row's package and not cmake.
         "feature-gates-peel",
         "routing-adminspace",
+        # The adminspace lanes, peeled off the job above for its budget: the same
+        # runner setup and the same lanes' crates, so it takes the same rows.
+        "adminspace-lanes",
         "transport-modes",
         "isolated-crates",
         "capi-c-arms",
@@ -336,6 +349,9 @@ _add(
         # this row that reaches a member reaches it. Its Rust lanes do not reach
         # zenoh-pico-sys; R2805 independently adds cmake for the native engine.
         "nondefault",
+        # Layer C1cn's builds, peeled off its last census shard: the same compile
+        # gate over the same members, so every reason of this row reaches it too.
+        "nondefault-builds",
         # R3464 -- Layer C1bnl's own job, peeled off `dissect`: the legs of the
         # non-default test table build the same members at the same features
         # `nondefault` does, so whatever this row says reaches it too.
@@ -360,6 +376,9 @@ _add(
         # `wz-integration-tests`, so it takes this row's package and not cmake.
         "feature-gates-peel",
         "routing-adminspace",
+        # The adminspace lanes, peeled off the job above for its budget: the same
+        # runner setup and the same lanes' crates, so it takes the same rows.
+        "adminspace-lanes",
         "transport-modes",
         "isolated-crates",
         "capi-c-arms",
@@ -537,6 +556,9 @@ _add(
         # this row that reaches a member reaches it. Its Rust lanes do not reach
         # zenoh-pico-sys; R2805 independently adds cmake for the native engine.
         "nondefault",
+        # Layer C1cn's builds, peeled off its last census shard: the same compile
+        # gate over the same members, so every reason of this row reaches it too.
+        "nondefault-builds",
         # R3464 -- Layer C1bnl's own job, peeled off `dissect`: the legs of the
         # non-default test table build the same members at the same features
         # `nondefault` does, so whatever this row says reaches it too.
@@ -565,6 +587,9 @@ _add(
         # `wz-integration-tests`, so it takes this row's package and not cmake.
         "feature-gates-peel",
         "routing-adminspace",
+        # The adminspace lanes, peeled off the job above for its budget: the same
+        # runner setup and the same lanes' crates, so it takes the same rows.
+        "adminspace-lanes",
         "transport-modes",
         "isolated-crates",
         "capi-c-arms",
