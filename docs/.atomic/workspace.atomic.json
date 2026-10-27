@@ -293886,6 +293886,42 @@
         "An ap-demo session whose scouting interface is an address, not a name, is still read as an #iface= group, which requires interface-list: the same reading a group endpoint gets."
       ]
     },
+    "Round 3793": {
+      "decision_summary": "The zenoh verdict's null side gains structured TCP from real implementations in containers on a bridge of their own: HTTP/1.1 from python's http.server and the same server behind OpenSSL 3 with TLS 1.2 and 1.3, each with four clients that carry six requests over one keep-alive connection and a fifth that opens thirty short connections, 34 connections a file. No flow reads yes, and none reads no either: all 68 stay undecided because the reader frames no unit of these streams and loses no framing, so nothing is weighed against them. The two files therefore join the null protocols with zero counts, which changes no measured weight (a member that shows no observation of a check is not counted for it), and the corpus pins the tallies as a regression guard against a false yes. The new files are fixed points of the anonymiser.",
+      "changes_bullets": [
+        "`captures/corpus/`: `stack-http` and `stack-tls`, listed in `corpus.json5`; the README table and its pending sentence follow; the corpus holds 31 files, all fixed points of the anonymiser.",
+        "`zenoh_evidence.rs`: two zero-count members of `measured::NULL`; `zenoh_corpus_tests.rs` pins the two tallies at 34 undecided flows each.",
+        "Design note 6.1 says what the two files add: nothing weighed and no weight moved."
+      ],
+      "verification_bullets": [
+        "Measured: 68 flows of the two files, none reads yes, none reads no; their framing units and framing directions are 0. wz-capture 1263 tests pass (6 ignored as before), clippy -D warnings on wz-capture is clean, and the corpus verifies as 31 fixed points.",
+        "The pre-push static gate array was run whole: all pass but `round_fed_gate_reach.py` and `gate_provenance_lint.py`, which fail on main for the feature-set documentation lane and read no file this round touched."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "Zenoh versions other than 1.10.1 and 1.5.0, and links other than loopback, one emulated lossy link and one Wi-Fi link, are still to measure; why the reader frames no unit of an HTTP or TLS stream is not yet explained, and a long HTTP response could change it."
+      ],
+      "publishable_decision_summary": "The zenoh verdict's null side gains structured TCP from real implementations in containers on a bridge of their own: HTTP/1.1 from python's http.server and the same server behind OpenSSL 3 with TLS 1.2 and 1.3, each with four clients that carry six requests over one keep-alive connection and a fifth that opens thirty short connections, 34 connections a file. No flow reads yes, and none reads no either: all 68 stay undecided because the reader frames no unit of these streams and loses no framing, so nothing is weighed against them. The two files therefore join the null protocols with zero counts, which changes no measured weight (a member that shows no observation of a check is not counted for it), and the corpus pins the tallies as a regression guard against a false yes. The new files are fixed points of the anonymiser.",
+      "publishable_changes_bullets": [
+        "`captures/corpus/`: `stack-http` and `stack-tls`, listed in `corpus.json5`; the README table and its pending sentence follow; the corpus holds 31 files, all fixed points of the anonymiser.",
+        "`zenoh_evidence.rs`: two zero-count members of `measured::NULL`; `zenoh_corpus_tests.rs` pins the two tallies at 34 undecided flows each.",
+        "Design note 6.1 says what the two files add: nothing weighed and no weight moved."
+      ],
+      "publishable_verification_bullets": [
+        "Measured: 68 flows of the two files, none reads yes, none reads no; their framing units and framing directions are 0. wz-capture 1263 tests pass (6 ignored as before), clippy -D warnings on wz-capture is clean, and the corpus verifies as 31 fixed points.",
+        "The pre-push static gate array was run whole: all pass but `round_fed_gate_reach.py` and `gate_provenance_lint.py`, which fail on main for the feature-set documentation lane and read no file this round touched."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Zenoh versions other than 1.10.1 and 1.5.0, and links other than loopback, one emulated lossy link and one Wi-Fi link, are still to measure; why the reader frames no unit of an HTTP or TLS stream is not yet explained, and a long HTTP response could change it."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
