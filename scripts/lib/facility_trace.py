@@ -144,6 +144,7 @@ class Observation:
     stopped: bool = False
     exit_status: int | None = None
     stderr_tail: str = ""
+    stdout: str = ""
 
     def add(self, kind: str, name: str, evidence: str) -> None:
         if kind == "facility":
@@ -360,8 +361,9 @@ def observe(command: list[str], seconds: float | None = None, env: dict[str, str
         # strace writes the trace to its files and passes the program's own stderr through, so what
         # the stderr file holds is the program's; strace's exit status is the program's.
         stderr_path = work / "stderr"
-        with stderr_path.open("wb") as stderr:
-            proc = subprocess.Popen(argv + ["--", *command], stdout=subprocess.DEVNULL, stderr=stderr)
+        stdout_path = work / "stdout"
+        with stderr_path.open("wb") as stderr, stdout_path.open("wb") as stdout:
+            proc = subprocess.Popen(argv + ["--", *command], stdout=stdout, stderr=stderr)
             stopped = False
             try:
                 proc.wait(timeout=seconds)
@@ -376,7 +378,8 @@ def observe(command: list[str], seconds: float | None = None, env: dict[str, str
                   for s in [first_string(line) or ""] if s.endswith(".so") or ".so." in s]
         names = loader_closure(binary, opened)
         seen = Observation(stopped=stopped, exit_status=None if stopped else proc.returncode,
-                           stderr_tail=stderr_path.read_text(encoding="utf-8", errors="replace")[-600:])
+                           stderr_tail=stderr_path.read_text(encoding="utf-8", errors="replace")[-600:],
+                           stdout=stdout_path.read_text(encoding="utf-8", errors="replace"))
         for lines in threads:
             classify_thread(lines, names, seen)
         return seen
@@ -421,6 +424,10 @@ def library_scenarios(driver: Driver) -> tuple[Scenario, ...]:
                  (demo, "--connect", "tcp/127.0.0.1:{port}", "--key", "demo/x"), seconds=15.0, driver=driver),
         Scenario("a client that dials ap-demo and publishes",
                  ("{bin}", "connect", "tcp/127.0.0.1:{port}", "3"),
+                 (demo, "--listen", "tcp/127.0.0.1:{port}", "--key", "demo/x"), peer_listens=True,
+                 seconds=15.0, driver=driver),
+        Scenario("a client that dials ap-demo by host name",
+                 ("{bin}", "connect", "tcp/localhost:{port}", "3"),
                  (demo, "--listen", "tcp/127.0.0.1:{port}", "--key", "demo/x"), peer_listens=True,
                  seconds=15.0, driver=driver),
     )
@@ -526,7 +533,26 @@ def judge_package(directory: pathlib.Path) -> tuple[list[str], list[str]]:
             findings += [f"{art['id']} ({scenario.name}): {f}" for f in found]
             report.append(f"{art['id']} ({scenario.name}): observed {sorted(seen.facilities)}, "
                           f"{'refuted' if found else 'agrees with'} requires {requires} and may_require {may}")
+            stated = configuration_requirement(seen.stdout)
+            if stated is not None:
+                c_requires, c_may = stated
+                found = judge(seen, c_requires, c_may)
+                findings += [f"{art['id']} ({scenario.name}, for its configuration): {f}" for f in found]
+                report.append(f"{art['id']} ({scenario.name}): {'refuted' if found else 'agrees with'} "
+                              f"its configuration's requires {c_requires} and may_require {c_may}")
     return findings, report
+
+
+def configuration_requirement(stdout: str) -> tuple[list[str], list[str] | None] | None:
+    """The requirement a run printed for its own configuration, `device_requires <json>` (what a
+    library's door answered for the config it opened), or None when it printed none."""
+    lines = [line for line in stdout.splitlines() if line.startswith("device_requires ")]
+    if not lines:
+        return None
+    if len(lines) > 1:
+        raise ValueError(f"the run printed {len(lines)} device_requires lines, and states one configuration")
+    stated = json.loads(lines[0][len("device_requires "):])
+    return list(stated["requires"]), stated["may_require"]
 
 
 def judge(seen: Observation, requires: list[str], may_require: list[str] | None) -> list[str]:
@@ -683,6 +709,12 @@ def _selftest() -> int:
     expect("an unknown bound cannot be refuted, a lower bound still can",
            judge(seen, ["entropy"], None) == [])
     failed_run = dataclasses.replace(seen, exit_status=1, stderr_tail="z_open returned -1\n")
+    expect("a run's own configuration requirement is read from its line, and a run without one has none",
+           configuration_requirement('x\ndevice_requires {"requires": ["entropy"], "may_require": null, '
+                                     '"unknown": ["serial"]}\n') == (["entropy"], None)
+           and configuration_requirement("nothing\n") is None)
+    expect("a run's other lines are not a configuration requirement",
+           configuration_requirement("requires entropy\n") is None)
     expect("a run that failed by itself is a finding, with what it said",
            judge(failed_run, ["entropy"], None)
            == ["the run failed by itself (exit 1), so it stands for no run: z_open returned -1"])

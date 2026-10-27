@@ -133,6 +133,61 @@ fn stated_endpoints(cfg: &ConfigState) -> StatedEndpoints {
     }
 }
 
+/// The plan an open of `cfg` runs: the one reading of a config that [`open_session`] opens and
+/// [`wz_capi_c_config_device_requires`] describes, so the two cannot read a document differently.
+///
+/// The document is read for the role the session DIALS as, because several keys are
+/// mode-dependent upstream ([`ConfigState::with_default_mode`]). It goes through wz's one reader
+/// of a stock config, in the plan.
+fn plan_of(cfg: &ConfigState) -> Result<OpenPlan, OpenRefusal> {
+    let role = dial_role(cfg.first(MODE_KEY));
+    let stated = stated_endpoints(cfg);
+    let document = cfg.with_default_mode(role.to_str()).render_nested().ok();
+    OpenPlan::resolve(role, stated, document.as_deref())
+}
+
+/// What an open of `config` would ask of the operating system, as one JSON object with the keys of
+/// the target-build manifest (docs/target-build-contract.md T9): `requires` (what every run of it
+/// cannot go on without), `may_require` (the rest it may ask for, `null` when part of it has no
+/// name) and `unknown` (why it has none). It reads the config through the same plan [`z_open`]
+/// runs, and does not consume it.
+///
+/// A config the open would refuse returns that refusal's code, and the string names it with the
+/// keys at fault: no requirement is written for an open that would not happen.
+///
+/// # Safety
+/// `config` must be null or a valid loaned config; `out_requirement` must be valid and writable.
+#[no_mangle]
+pub unsafe extern "C" fn wz_capi_c_config_device_requires(
+    config: *const crate::abi::z_loaned_config_t,
+    out_requirement: *mut crate::abi::z_owned_string_t,
+) -> ZResult {
+    guarded(|| {
+        if out_requirement.is_null() {
+            return Z_ENULL;
+        }
+        // SAFETY: checked non-null above.
+        unsafe { *out_requirement = crate::string::null_string() };
+        // SAFETY: the caller's contract; the config is only read.
+        let Some(cfg) = (unsafe { config_state(config.cast_mut()) }) else {
+            return Z_ENULL;
+        };
+        let (text, code) = match plan_of(cfg) {
+            Ok(plan) => (plan.device_requires().to_json(), Z_OK),
+            Err(refusal) => (
+                format!(
+                    "{refusal:?}: the open refuses this configuration ({})",
+                    refusal.key()
+                ),
+                refusal_code(refusal),
+            ),
+        };
+        // SAFETY: checked non-null above.
+        unsafe { *out_requirement = crate::string::owned_string_from(text.as_bytes()) };
+        code
+    })
+}
+
 /// The open `z_open` and `z_open_with_custom_shm_clients` both are: the same config, the same
 /// refusals and the same session, over `shm_clients` as its shared-memory reader (R3065). The
 /// default is the reader every session had before this crate could be given one, POSIX alone.
@@ -158,19 +213,13 @@ pub(crate) unsafe fn open_session(
     let Some(cfg) = (unsafe { config_state(loaned) }) else {
         return Z_ENULL;
     };
-    // The document is read for the role this session DIALS as, because several keys are
-    // mode-dependent upstream ([`ConfigState::with_default_mode`]). It goes through wz's one
-    // reader of a stock config, in the plan.
-    let role = dial_role(cfg.first(MODE_KEY));
-    let stated = stated_endpoints(cfg);
-    let document = cfg.with_default_mode(role.to_str()).render_nested().ok();
+    // Everything the document decides, and every refusal, before anything is bound or dialled.
+    let plan = plan_of(cfg);
     let handle = unsafe { (*config)._this.handle };
     // SAFETY: a live `Box<ConfigState>` this crate leaked; consumed here.
     drop(unsafe { Box::from_raw(handle as *mut ConfigState) });
     unsafe { (*config)._this = crate::abi::z_owned_config_t::null_value() };
-
-    // Everything the document decides, and every refusal, before anything is bound or dialled.
-    let plan = match OpenPlan::resolve(role, stated, document.as_deref()) {
+    let plan = match plan {
         Ok(plan) => plan,
         Err(refusal) => return refusal_code(refusal),
     };

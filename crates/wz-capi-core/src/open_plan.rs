@@ -473,6 +473,41 @@ fn tls_of(_node: &ZenohNodeConfig) -> std::io::Result<CapiTlsConfig> {
     Ok(CapiTlsConfig::default())
 }
 
+/// The files [`tls_of`] and [`node_security_of`] read, under the same features as they read
+/// them: a build without a mechanism refuses its keys instead of reading their files.
+fn files_read_by_resolve(node: &ZenohNodeConfig) -> Vec<String> {
+    #[allow(unused_mut)]
+    let mut out: Vec<String> = Vec::new();
+    #[cfg(any(feature = "transport_tls", feature = "transport_quic"))]
+    out.extend(
+        [
+            &node.tls_root_ca,
+            &node.tls_listen_certificate,
+            &node.tls_listen_private_key,
+        ]
+        .into_iter()
+        .flatten()
+        .cloned(),
+    );
+    #[cfg(feature = "auth_usrpwd")]
+    out.extend(node.usrpwd_dictionary_file.iter().cloned());
+    #[cfg(feature = "auth_pubkey")]
+    out.extend(
+        [&node.pubkey_public_key_file, &node.pubkey_private_key_file]
+            .into_iter()
+            .flatten()
+            .cloned(),
+    );
+    #[cfg(not(any(
+        feature = "transport_tls",
+        feature = "transport_quic",
+        feature = "auth_usrpwd",
+        feature = "auth_pubkey"
+    )))]
+    let _ = node;
+    out
+}
+
 /// The `transport/shared_memory` keys a document states, whatever the build does with them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ShmKeys {
@@ -545,6 +580,10 @@ pub struct OpenPlan {
     pub policy: NodePolicy,
     /// The certificate material for the `tls/` and `quic/` links.
     pub tls: CapiTlsConfig,
+    /// The files [`Self::resolve`] read for the material above and for the authentication, in the
+    /// order of their keys: what the open asks of the file system, and cannot go on without, since
+    /// an unreadable one is refused (`crate::open_facilities`).
+    pub read_files: Vec<String>,
     /// The keys the document states that the engine does not act on, sorted: the leaves the
     /// reader reports ignored, whether or not the value is the default. What an open does about
     /// them is its client's (see [`KeyState`]).
@@ -609,6 +648,7 @@ impl OpenPlan {
             Ok(tls) => tls.unwrap_or_default(),
             Err(_) => return Err(OpenRefusal::TlsMaterial),
         };
+        let read_files = node.as_ref().map_or_else(Vec::new, files_read_by_resolve);
 
         // The id this config STATES for its session, if it states one. Read off the node the
         // reader already parsed, so a config's `id` is one value whether it arrived by an insert,
@@ -801,6 +841,7 @@ impl OpenPlan {
             auth,
             policy,
             tls,
+            read_files,
             ignored,
         })
     }

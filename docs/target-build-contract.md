@@ -335,6 +335,25 @@ its signing key at start and stops without one) and each endpoint's socket, and 
 may list the interfaces (only when routing has none for the group). It starts no thread,
 reads no calendar time and reads no file, so the host build's base is not its own.
 
+A manifest bounds every run of a BUILD; a configuration narrows it. For an open that reads
+a zenoh configuration through `OpenPlan` (the zenoh-c drop-in and the Rust API),
+`OpenPlan::device_requires` (`crates/wz-capi-core/src/open_facilities.rs`) answers for one
+configuration from the plan the open itself runs, and the drop-in exposes it as the door
+`wz_capi_c_config_device_requires`: one JSON object, `requires`, `may_require` (`null` when
+part of it has no facility name) and `unknown` (why). `requires` is the engine's
+`threads` and `entropy`, `filesystem` when the plan read a certificate or credential file
+(an unreadable one is refused), each listener and group's socket under
+`listen/exit_on_failure`, what EVERY dial target needs under `connect/exit_on_failure`
+(one success suffices, so the intersection: a host-named target needs `name-resolution`,
+an `#iface=` target `interface-list`), and `sockets-udp` and `multicast` for a client
+whose only way to a node is scouting. Everything else a run of it may ask is
+`may_require`; a serial or vsock endpoint makes it `null`. The vocabulary and the engine's
+part are spelled again in Rust and `wz_config.py --check` holds them to this declaration.
+The capi-c driver prints the door's answer for the configuration it opens, and Layer C1st
+holds the traced run to that answer as well as to the build's bound, a host-named dial
+among its runs. The pico library and `wz-ap-demo` open through other readers than
+`OpenPlan`, and have no configuration door until they read through the same plan.
+
 A manifest written before the split (schema 1 has no number for it) carries neither key,
 in every artifact; a reader takes its whole `device_requires` as `may_require`. The
 measured records under `deploy/fixtures/manifests/measured/` are of that form, and an

@@ -243,6 +243,23 @@ z_result_t wz_capi_c_config_validate(const z_loaned_config_t *config,
 z_result_t wz_capi_c_config_validate_for_build(const z_loaned_config_t *config,
                                                z_owned_string_t *out_defects);
 
+/* What an open of this config would ask of the operating system, as ONE
+ * JSON object with the keys of the target-build manifest
+ * (docs/target-build-contract.md T9):
+ *
+ *     {"requires": [...], "may_require": [...] or null, "unknown": [...]}
+ *
+ * requires is what every run of the config cannot go on without;
+ * may_require is the rest a run may ask for, null when part of it has no
+ * facility name, and unknown says why. The words are the manifest's
+ * facility vocabulary. The config is read through the same plan z_open
+ * runs, and is not consumed.
+ *
+ * Z_OK with the object, or the code z_open would refuse the config with,
+ * the string then naming the refusal and its keys. */
+z_result_t wz_capi_c_config_device_requires(const z_loaned_config_t *config,
+                                            z_owned_string_t *out_requirement);
+
 /* Every reason this SET of configs cannot work TOGETHER, one per line,
  * in the same <VariantName>: <message> form.
  *

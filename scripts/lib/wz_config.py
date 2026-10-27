@@ -146,6 +146,9 @@ RUST_LIMITS = ROOT / "crates" / "wz-session-core" / "src" / "caps_generated.rs"
 KCONFIG_POLICIES = ROOT / "deploy" / "Kconfig.policies"
 RUST_POLICIES = ROOT / "crates" / "wz-session-core" / "src" / "policy_generated.rs"
 CAPS_RS =ROOT / "crates" / "wz-session-core" / "src" / "caps.rs"
+# The configuration-aware derivation's own spelling of the vocabulary and of `[os] always`
+# (docs/target-build-contract.md T9), held to this declaration by `--check`.
+OPEN_FACILITIES_RS = ROOT / "crates" / "wz-capi-core" / "src" / "open_facilities.rs"
 MANIFESTS = {
     "core": ROOT / "crates" / "wz-capi-core" / "Cargo.toml",
     "pico": ROOT / "crates" / "wz-capi-pico" / "Cargo.toml",
@@ -1835,6 +1838,24 @@ BARE_RE = re.compile(r"^pub const (?P<name>[A-Z0-9_]+): usize =\s*\d+;", re.MULT
 STATED_RE = re.compile(r'option_env!\("WZ_LIMIT_')
 
 
+def check_open_facilities_rs(decl: dict, text: str) -> list[str]:
+    """The Rust derivation's `FACILITIES` is `OS_FACILITIES`, in order, and its `ENGINE` is
+    `[os] always`: a word added here and not there would be a facility one side can name and the
+    other cannot."""
+    out = []
+    for name, want in (("FACILITIES", list(OS_FACILITIES)), ("ENGINE", list(decl["os_always"]))):
+        match = re.search(rf"const {name}: \[&str; (\d+)\] = \[(.*?)\];", text, re.S)
+        if match is None:
+            out.append(f"{OPEN_FACILITIES_RS.name}: no `const {name}: [&str; N]`")
+            continue
+        got = re.findall(r'"([^"]*)"', match.group(2))
+        if int(match.group(1)) != len(got):
+            out.append(f"{OPEN_FACILITIES_RS.name}: {name} declares {match.group(1)} items and lists {len(got)}")
+        if (sorted(got) if name == "ENGINE" else got) != (sorted(want) if name == "ENGINE" else want):
+            out.append(f"{OPEN_FACILITIES_RS.name}: {name} is {got}, the declaration's is {want}")
+    return out
+
+
 def check_caps_rs(decl: dict, text: str) -> list[str]:
     out: list[str] = []
     declared = [l["id"] for l in decl["limits"]]
@@ -2264,6 +2285,7 @@ def cmd_check() -> int:
         if kconfig.is_file():
             findings += check_image_sources(image, kconfig.read_text(encoding="utf-8"))
     findings += check_caps_rs(decl, CAPS_RS.read_text(encoding="utf-8"))
+    findings += check_open_facilities_rs(decl, OPEN_FACILITIES_RS.read_text(encoding="utf-8"))
     for abi, path in MANIFESTS.items():
         try:
             feats = manifest_features(path)
@@ -2815,6 +2837,18 @@ def cmd_selftest() -> int:
            caps_refused('always = ["threads", "entropy"]', 'always = ["threadz"]', "not a facility"))
     expect("every facility of the vocabulary says what it means, in one line",
            all(isinstance(m, str) and m and "\n" not in m for m in OS_FACILITIES.values()))
+    words = ", ".join(f'"{f}"' for f in OS_FACILITIES)
+    rust = (f"pub const FACILITIES: [&str; {len(OS_FACILITIES)}] = [{words}];\n"
+            'const ENGINE: [&str; 2] = ["threads", "entropy"];\n')
+    sample_decl = {"os_always": ["threads", "entropy"]}
+    expect("the Rust derivation's vocabulary and engine that match the declaration are clean",
+           check_open_facilities_rs(sample_decl, rust) == [])
+    expect("a Rust vocabulary missing a word is a finding",
+           any("FACILITIES is" in f for f in check_open_facilities_rs(
+               sample_decl, rust.replace(', "name-resolution"', "").replace(
+                   f"[&str; {len(OS_FACILITIES)}]", f"[&str; {len(OS_FACILITIES) - 1}]", 1))))
+    expect("a Rust engine that is not [os] always is a finding",
+           any("ENGINE is" in f for f in check_open_facilities_rs({"os_always": ["threads"]}, rust)))
     expect("every import a facility is proved by names a facility of the vocabulary",
            set(FACILITY_IMPORTS.values()) <= set(OS_FACILITIES)
            and not set(FACILITY_IMPORTS) & set(UNNAMED_IMPORTS))
