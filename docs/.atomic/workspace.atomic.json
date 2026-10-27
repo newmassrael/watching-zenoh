@@ -293710,6 +293710,44 @@
         "Item 751 step (b) continues at step 5, the token and interest planes, then step 6, the node surfaces listed in section 5 of the note. Not covered by the gate in steps 3 and 4: query targets and consolidation, a query's timeout, an error reply, the pending table across a recompute, priorities and reliability, a three-hop tree. The owner question of step 3 stands: a ROUTER node's south peer region relays nothing between link-state peers."
       ]
     },
+    "Round 3788": {
+      "decision_summary": "The measured manifests are recorded again from real builds, so the records a consumer reads carry requires and may_require like every manifest the entry now writes. Each was built from a clean commit that is on origin, packaged where its toolchain is and verified again from its bytes here before it was recorded: Android with NDK 30 on this workstation, x86_64 and aarch64 glibc on the build machine, aarch64 under the Yocto SDK. The entry's import check passed on every one, the first cross builds it has read. Running a command inside an SDK's environment was a shell string composed for each occasion; scripts/with-sdk-env.sh is that string, once, for the Yocto and QNX toolchain scripts. The three QNX records stay in the unsplit form: building them means cloning and building under the account that owns the QNX SDP, which the owner has not cleared in this session.",
+      "changes_bullets": [
+        "deploy/fixtures/manifests/measured: android-arm64.json (from 302cb6db0), linux-x86_64-glibc.json, linux-x86_64-glibc-slot-answerer.json and linux-aarch64-glibc.json (from b6b7cedb6), linux-aarch64-glibc-slot-answerer.json (from 1c6272844), each in the split form, with the index rewritten.",
+        "scripts/with-sdk-env.sh (new): sources yocto-toolchain-env.sh or qnx-toolchain-env.sh for an SDK's environment script and executes one command in it; exit 2 on a usage error or a refused environment."
+      ],
+      "verification_bullets": [
+        "wz_package.py --record-measured on each package directory: every file re-measured from its bytes and verified against the declaration, built_from a commit present on origin with tree_clean true; the import check held on the Android, x86_64 and aarch64 builds.",
+        "The aarch64 node was built three times: once while records were uncommitted (tree_clean false), once from a commit a concurrent landing then rebased (its SHA would never reach origin); each was discarded, not recorded, and the record is the build of 1c6272844, already on origin.",
+        "The x86_64 artifacts were linked by mold, which the build machine's runner sets for its host target; the manifest describes those bytes. The cross builds use their SDK's linker.",
+        "shellcheck of with-sdk-env.sh clean; an unknown SDK kind exits 2 with its usage line; wz_package.py --selftest OK with the new records."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "The three QNX records (qnx710-iosock-aarch64 and its slot-answerer, qnx710-iopkt-aarch64) are still the unsplit ones from 79b90017: re-recording them needs a clone and a build of a commit on origin under the account that owns the QNX SDP, which waits for the owner's clearance.",
+        "pico and wz-ap-demo have no configuration door until they open through OpenPlan."
+      ],
+      "publishable_decision_summary": "The measured manifests are recorded again from real builds, so the records a consumer reads carry requires and may_require like every manifest the entry now writes. Each was built from a clean commit that is on origin, packaged where its toolchain is and verified again from its bytes here before it was recorded: Android with NDK 30 on this workstation, x86_64 and aarch64 glibc on the build machine, aarch64 under the Yocto SDK. The entry's import check passed on every one, the first cross builds it has read. Running a command inside an SDK's environment was a shell string composed for each occasion; scripts/with-sdk-env.sh is that string, once, for the Yocto and QNX toolchain scripts. The three QNX records stay in the unsplit form: building them means cloning and building under the account that owns the QNX SDP, which the owner has not cleared in this session.",
+      "publishable_changes_bullets": [
+        "deploy/fixtures/manifests/measured: android-arm64.json (from 302cb6db0), linux-x86_64-glibc.json, linux-x86_64-glibc-slot-answerer.json and linux-aarch64-glibc.json (from b6b7cedb6), linux-aarch64-glibc-slot-answerer.json (from 1c6272844), each in the split form, with the index rewritten.",
+        "scripts/with-sdk-env.sh (new): sources yocto-toolchain-env.sh or qnx-toolchain-env.sh for an SDK's environment script and executes one command in it; exit 2 on a usage error or a refused environment."
+      ],
+      "publishable_verification_bullets": [
+        "wz_package.py --record-measured on each package directory: every file re-measured from its bytes and verified against the declaration, built_from a commit present on origin with tree_clean true; the import check held on the Android, x86_64 and aarch64 builds.",
+        "The aarch64 node was built three times: once while records were uncommitted (tree_clean false), once from a commit a concurrent landing then rebased (its SHA would never reach origin); each was discarded, not recorded, and the record is the build of 1c6272844, already on origin.",
+        "The x86_64 artifacts were linked by mold, which the build machine's runner sets for its host target; the manifest describes those bytes. The cross builds use their SDK's linker.",
+        "shellcheck of with-sdk-env.sh clean; an unknown SDK kind exits 2 with its usage line; wz_package.py --selftest OK with the new records."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The three QNX records (qnx710-iosock-aarch64 and its slot-answerer, qnx710-iopkt-aarch64) are still the unsplit ones from 79b90017: re-recording them needs a clone and a build of a commit on origin under the account that owns the QNX SDP, which waits for the owner's clearance.",
+        "pico and wz-ap-demo have no configuration door until they open through OpenPlan."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
