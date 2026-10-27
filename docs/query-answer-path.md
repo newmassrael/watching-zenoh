@@ -128,11 +128,56 @@ symbol per lever, each documented with its measurement table, as `WZ_POLL_PATH_I
 
 Each step reports the same four numbers before it is kept, from the same instrument: the stamps'
 recvfrom to sendto mean (500-query lines), the text of the three fixed images, the stack gate, and
-the matrix turnaround cell against single-threaded pico. A step that does not move the stamps is
-not kept. The target is recvfrom to sendto at or under pico's 45.6 us, which makes the software
+the matrix turnaround cell against single-threaded pico. A step is kept when it measures better,
+however little (owner, 2026-10-27), and refused only when it measures worse or breaks a test; its
+cost in text is reported beside the gain. The target is recvfrom to sendto at or under pico's 45.6 us, which makes the software
 round trip about 116 us against pico's 124. About 9 us of the turnaround at the wire lies outside
 what the stamps see (the MAC's DMA and the host's capture), so a tie of the turnaround cell is not
 promised by this design; it is promised that the application's part stops being the loss.
+
+## 5a. What was built, and what the kit said (2026-10-27)
+
+The design above was revised by its own first measurement. Named points of the query path (the
+cycle counter read at fifteen places, an experiment that was not kept) showed that the tick-sampled
+profile of section 1 had aliased against the periodic probe: it put key matching at 17% of the
+application's time and the stamps put it at 1.9 us. The costs that were real, in us after the
+`recvfrom` of the fixed client, were: the Request's decode 9.2, the dispatch to the queryable table
+6.9, the handler 8.3, the reply written into the slot 13.6 (of which 7.2 in the codec's generic
+encoder and 2.5 in building the `Response` it encodes), and the writes themselves 7.9.
+
+Built, each step measured by the stamps' `recvfrom` to `sendto` mean over 500-query lines that
+agree to 0.1 us, and kept because it measured better:
+
+| step | commit | recvfrom to sendto | text of the fixed image |
+|---|---|---|---|
+| before | | 53.2 us | 173,932 B |
+| key facts read once (L0) | 1836935b5 | 53.0 | +192 B |
+| the plain reply written where it lies (C1's first half) | 0ffca234d | 48.4 | +380 B |
+| the Request's target and QoS in one walk (L1, interim) | 639c1e26f | 46.2 | -40 B |
+| a reply keyed as its query admitted from the facts | 76c5802f3 | 44.0 | +88 B |
+
+Single-threaded pico on the same instrument: 45.6 us. The three gaps of the software round trip,
+fixed against pico: rx to recvfrom 30.4 against 33.1, recvfrom to sendto 44.0 against 45.6, sendto
+to the wire 44.7 against 45.7; rx to tx 119.1 against 124.3. The matrix (run 20261027T224704) reads
+the fixed client's turnaround at the wire 0.2016 ms against pico's 0.2054, ratio 0.981, interval
+0.957 to 1.015: a TIE, where the run before read 1.062, a LOSS.
+
+Three things the work found that the design had not said:
+
+- **A fast path that is not taken is not a fast path.** The first plain writer took no reply of the
+  kit: every reply carries the query's QoS as an extension, and the writer refused it. The marks
+  showed the generic encoder still running; the writer now writes the QoS entry.
+- **A branch the path never takes still sets the stack.** The generic encoder, inlined into the
+  closure that encodes a reply, gave that closure a frame of 2,528 bytes for every reply; the
+  fixed image's stack peak rose by 368 bytes until the encoder was left out of line.
+- **The 64-bit tick division and the extra chain moves were not the cost.** The first moved
+  nothing the stamps could see beyond 216 bytes of text; the second (`bool::then_some` on a chain
+  of eight entries) changed no time at all.
+
+Not done: the encoder is still reached through two layers of dynamic dispatch, one per byte
+written (7.9 us for about a hundred bytes); the Request's decode (9.2 us) is the generated
+codec's; the handler still stages its reply and the drain reads it back. Each is a request to the
+codec generator or the larger change of section 4 (L3), and the order of section 5 stands.
 
 ## 6. Not decided here
 
