@@ -1382,6 +1382,23 @@ pub fn encode_responder_ext_body(zid: &[u8], eid: u32) -> Vec<u8> {
     out
 }
 
+/// The responder a `Response` names: the read twin of [`encode_responder_ext_body`], over the
+/// bytes the ZBuf extension carries (`network_eid::RESPONDER`), as upstream reads them
+/// (`commons/zenoh-codec/src/network/mod.rs` @ `for EntityGlobalIdType<{ ID }>`).
+///
+/// `None` for a body that is cut short or whose entity id does not fit the 32 bits an entity
+/// id has: a Response whose responder cannot be read is read as one that names none, as
+/// upstream's codec drops an extension it cannot read and goes on. The id of the node is a
+/// range of `body`, so the read allocates nothing.
+#[cfg(feature = "codec-response")]
+pub fn decode_responder_ext_body(body: &[u8]) -> Option<(&[u8], u32)> {
+    let (&flags, rest) = body.split_first()?;
+    let zid_len = usize::from(flags >> 4) + 1;
+    let zid = rest.get(..zid_len)?;
+    let (eid, _) = crate::vle::read_vle_u64(rest.get(zid_len..)?)?;
+    Some((zid, u32::try_from(eid).ok()?))
+}
+
 // R311fs — the byte-stable Response reply/err builder regression
 // tests, relocated from wz-runtime-tokio::session_glue to their SSOT
 // home now that the production code lives here (R311dv). The builders
@@ -2292,6 +2309,39 @@ mod tests {
             "VLE(eid=16384) = 0x80 0x80 0x01"
         );
         assert_eq!(bytes.len(), 7, "total = 1 leading + 3 zid + 3 VLE(eid) = 7");
+    }
+
+    /// The read twin gives back what the encoder wrote, for every zid length and an entity id of
+    /// each width, and reads a body that is cut short, or whose id is wider than an entity id,
+    /// as one that names no responder.
+    #[cfg(feature = "codec-response")]
+    #[test]
+    fn decode_responder_ext_body_reads_what_the_encoder_wrote() {
+        for zid_len in 1..=16usize {
+            let zid: Vec<u8> = (0..zid_len as u8)
+                .map(|byte| byte.wrapping_mul(7) + 1)
+                .collect();
+            for eid in [0u32, 1, 127, 128, 16_384, u32::MAX] {
+                let body = encode_responder_ext_body(&zid, eid);
+                assert_eq!(
+                    decode_responder_ext_body(&body),
+                    Some((zid.as_slice(), eid)),
+                    "zid of {zid_len} bytes, entity {eid}"
+                );
+            }
+        }
+        let whole = encode_responder_ext_body(&[0xCA, 0xFE, 0xBA], 0x4000);
+        for cut in 0..whole.len() {
+            assert_eq!(
+                decode_responder_ext_body(&whole[..cut]),
+                None,
+                "cut at {cut}"
+            );
+        }
+        // 2^32 does not fit an entity id.
+        let mut wide = vec![0x00, 0xAA];
+        encode_vle_u64_into(&mut wide, 1 << 32);
+        assert_eq!(decode_responder_ext_body(&wide), None);
     }
 
     /// R121j-3d — ResponseReplyBuilder.reply_del() swaps the inner

@@ -287,6 +287,12 @@ pub mod network_eid {
     /// `pub type QoS = zextz64!(0x1, false);`).
     pub const QOS: u8 = ext_identity(0x1, false, EXT_ENC_Z64);
 
+    /// The identity of the responder on a `Response`, `zextzbuf!(0x3, false)`: `0x43`, a ZBuf
+    /// that holds the id of the node and the id of the entity that answered
+    /// (`commons/zenoh-protocol/src/network/response.rs` @
+    /// `pub type ResponderId = zextzbuf!(0x3, false);`).
+    pub const RESPONDER: u8 = ext_identity(0x3, false, super::EXT_ENC_ZBUF);
+
     /// The transport QoS on `Frame` and `Fragment`, `zextz64!(0x1, true)`:
     /// `0x31`, MANDATORY where the network one is not
     /// (`commons/zenoh-protocol/src/transport/frame.rs` @

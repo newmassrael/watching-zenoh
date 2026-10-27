@@ -338,6 +338,8 @@ fn reply(sn: u32, v: u8) -> InboundReply {
             source_info: Some(SourceInfo::new(&[0x02], 7, sn)),
             timestamp: None,
         },
+        responder: None,
+        qos: None,
     }
 }
 

@@ -157,6 +157,20 @@ pub trait ReplyView {
     fn attachment_shared(&self) -> Option<&crate::link::RxBytes> {
         None
     }
+    /// The node and the entity that answered: the zid with its own length, and the entity id,
+    /// as the Response's responder extension names them, or `None` for a Response that names
+    /// none. What upstream hands an application as `Reply::replier_id`. Default `None`, so a
+    /// view that predates the accessor stays valid.
+    fn responder(&self) -> Option<(&[u8], u32)> {
+        None
+    }
+    /// The quality of service the reply was sent at, or `None` for a Response that carries
+    /// none, which upstream reads as the default one. What the sample of a reply has for its
+    /// priority, congestion control and express. Default `None`.
+    #[cfg(feature = "storage-profile")]
+    fn qos(&self) -> Option<crate::sample::QosLevel> {
+        None
+    }
 }
 
 /// A [`ReplyView`] over loose borrowed fields — the canonical impl for a
@@ -787,6 +801,8 @@ mod consolidating_sink_tests {
                 encoding: None,
                 payload: payload.to_vec(),
             },
+            responder: None,
+            qos: None,
         }
     }
 
@@ -886,6 +902,8 @@ mod consolidating_sink_tests {
                 source_info: None,
                 timestamp,
             },
+            responder: None,
+            qos: None,
         }
     }
 

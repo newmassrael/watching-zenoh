@@ -296,6 +296,17 @@ pub struct InboundReply {
     pub keyexpr_literal: String,
     /// Inbound reply body arm (Put / Del / Err).
     pub body: InboundReplyBody,
+    /// The node and the entity that answered: the Response's responder extension
+    /// ([`crate::ext_header::network_eid::RESPONDER`]), the zid with its own length and the
+    /// entity id, or `None` for a Response that names none. What upstream's
+    /// `Reply::replier_id` is made of (`zenoh/src/api/session.rs` @
+    /// `replier_id: mem::take(&mut msg.ext_respid).map(|rid| {`).
+    pub responder: Option<(Vec<u8>, u32)>,
+    /// The quality of service the Response was sent at, from its QoS extension, or `None`
+    /// for a Response that carries none. What the sample of a reply has for its priority,
+    /// congestion control and express (`zenoh/src/api/session.rs` @ `Sample::from_push(`,
+    /// which is given the `ext_qos` of the Response).
+    pub qos: Option<crate::sample::QosLevel>,
 }
 
 /// R311gb-3c — connect the owned [`InboundReply`] (the AP retention form)
@@ -386,6 +397,14 @@ impl ReplyView for InboundReply {
             InboundReplyBody::Err { .. } => None,
         }
     }
+    fn responder(&self) -> Option<(&[u8], u32)> {
+        self.responder
+            .as_ref()
+            .map(|(zid, eid)| (zid.as_slice(), *eid))
+    }
+    fn qos(&self) -> Option<crate::sample::QosLevel> {
+        self.qos
+    }
 }
 
 #[cfg(feature = "alloc")]
@@ -432,6 +451,8 @@ impl InboundReply {
             rid: view.rid(),
             keyexpr_literal: view.keyexpr().to_string(),
             body,
+            responder: view.responder().map(|(zid, eid)| (zid.to_vec(), eid)),
+            qos: view.qos(),
         }
     }
 }
@@ -445,6 +466,19 @@ fn retained_attachment(view: &dyn ReplyView) -> Option<crate::link::RxBytes> {
         view.attachment()
             .map(|bytes| crate::link::RxBytes::from(bytes.to_vec()))
     })
+}
+
+/// The responder a `Response` names in its own extension chain, as a range of that chain: the
+/// zid with its own length and the entity id, or `None` when the chain holds no responder
+/// extension, or one that cannot be read. One reader for the owned chain and for the chain of
+/// a record read where its frame lies, so the two receive paths cannot disagree about which
+/// extension is the responder.
+#[cfg(all(feature = "codec-response", feature = "storage-profile"))]
+pub(crate) fn response_responder<E: crate::ext_view::ExtEntryView>(
+    extensions: &[E],
+) -> Option<(&[u8], u32)> {
+    let ext = crate::ext_view::find_by_eid(extensions, crate::ext_header::network_eid::RESPONDER)?;
+    crate::response_build::decode_responder_ext_body(ext.plain_zbuf()?)
 }
 
 /// A8b — gate a loopback Put reply's staged attachment on the SAME inner
@@ -696,10 +730,9 @@ fn put_reply_encoding(put: &crate::wire::parts::MsgPutOwned) -> Option<(u32, Opt
 /// the wire path decodes a peer-sent `Response` into `InboundReply`;
 /// the loopback path projects a locally-fired `QueryReply` into the
 /// same shape so the same callback runs against both origins. The
-/// producer's `responder` tuple (envelope-level identity) is dropped
-/// in the projection — the AP MVP consumer surface does not expose
-/// the responder ext on `InboundReply` either way, so loopback
-/// matches the wire branch's information loss exactly.
+/// producer's `responder` tuple (envelope-level identity) and the QoS it
+/// staged the reply at are carried over, as the wire decode reads them off
+/// the Response's own extensions, so loopback matches the wire branch.
 ///
 /// Consumes `self` so producer-allocated payload bytes flow directly
 /// into the consumer body without an intermediate clone. Mirrors the
@@ -724,9 +757,9 @@ impl From<QueryReply> for InboundReply {
                 // needs standing in for the field's contract, and it left the
                 // loopback path unable to represent what the wire path emits.
                 timestamp,
-                // responder is envelope-level identity the AP consumer surface
-                // does not expose either way.
-                responder: _,
+                // The responder is the envelope's identity, and a requester of this
+                // session is shown it as one of another session is, by `ReplyView`.
+                responder,
                 attachment,
                 // R311y78 — surface the recovery source_info (id 0x01) onto the
                 // loopback InboundReply (gated reply-source-info via
@@ -735,12 +768,10 @@ impl From<QueryReply> for InboundReply {
                 // sample identically whether it arrived loopback or over the
                 // wire. Put-only (a Del reply carries no source_info slot).
                 source_info,
-                // R2594 — dropped for the reason `responder` is: the wire
-                // decode does not surface a Response's `ext_qos` on
-                // `InboundReply` either, so the two origins lose the same
-                // thing. That receive-side gap is the querier's, not this
-                // projection's.
-                qos: _,
+                // R2594 — the QoS the responder staged the reply at, which the wire
+                // decode surfaces from the Response's `ext_qos` and this projection
+                // from the staged reply, so the two origins show the same.
+                qos,
             } => {
                 // R3062 -- the payload of a Put reply, whichever way it was staged: the
                 // responder's own vector, moved in, or a buffer of shared memory, which the
@@ -790,6 +821,8 @@ impl From<QueryReply> for InboundReply {
                     rid,
                     keyexpr_literal,
                     body,
+                    responder,
+                    qos: Some(qos),
                 }
             }
             // R311y315 — the staged `QueryReply::Err` variant is gated on
@@ -803,12 +836,14 @@ impl From<QueryReply> for InboundReply {
                 keyexpr_literal,
                 encoding,
                 payload,
-                responder: _,
-                qos: _,
+                responder,
+                qos,
             } => Self {
                 rid,
                 keyexpr_literal,
                 body: InboundReplyBody::Err { encoding, payload },
+                responder,
+                qos: Some(qos),
             },
         }
     }
@@ -1212,10 +1247,13 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
             // See ResponseVariant::Default rationale on Reply arm.
             ResponseOwnedVariant::Default { .. } => return,
         };
+        let extensions = response.extensions.as_deref().unwrap_or(&[]);
         let inbound = InboundReply {
             rid: response.request_id,
             keyexpr_literal: resolved,
             body,
+            responder: response_responder(extensions).map(|(zid, eid)| (zid.to_vec(), eid)),
+            qos: crate::sample::extract_qos(extensions),
         };
         self.fire_replies_for(&inbound, true);
     }
@@ -2981,6 +3019,8 @@ mod tests {
                 rid: 5,
                 keyexpr_literal: "a/b".into(),
                 body,
+                responder: None,
+                qos: None,
             };
 
             let kept = InboundReply::from_view(&live);
@@ -3366,6 +3406,8 @@ mod tests {
                 source_info: None,
                 timestamp: None,
             },
+            responder: None,
+            qos: None,
         };
         reg.deliver_local_reply(&inbound);
 
@@ -3399,6 +3441,8 @@ mod tests {
                 source_info: None,
                 timestamp: None,
             },
+            responder: None,
+            qos: None,
         };
         reg.deliver_local_reply(&inbound);
         assert_eq!(count.load(Ordering::SeqCst), 0);
@@ -3480,6 +3524,8 @@ mod tests {
                     source_info: None,
                     timestamp: None,
                 },
+                responder: None,
+                qos: None,
             });
         }
 
@@ -3509,6 +3555,8 @@ mod tests {
                 source_info: None,
                 timestamp: None,
             },
+            responder: None,
+            qos: None,
         };
         let refused = InboundReply {
             rid: 7,
@@ -3518,6 +3566,8 @@ mod tests {
                 source_info: None,
                 timestamp: None,
             },
+            responder: None,
+            qos: None,
         };
         assert_eq!(reg.dispatch_borrowed(&admitted), 1);
         assert_eq!(reg.dispatch_borrowed(&refused), 0);
@@ -3874,7 +3924,7 @@ mod tests {
             responder: Some((vec![0xaa, 0xbb], 5)),
             attachment: None,
             source_info: None,
-            qos: crate::sample::QosLevel::DEFAULT,
+            qos: crate::sample::QosLevel::from_raw(0b0001_0011),
         };
         let inbound: InboundReply = qr.into();
         assert_eq!(inbound.rid, 12);
@@ -3887,9 +3937,13 @@ mod tests {
                 timestamp: None,
             }
         );
-        // responder is intentionally dropped in projection (loopback
-        // mirrors the wire branch's information loss exactly — the
-        // consumer InboundReply surface does not expose responder).
+        // The responder and the QoS cross the projection as the wire decode reads them off the
+        // Response, so a requester of this session is shown what a remote one is.
+        assert_eq!(inbound.responder, Some((vec![0xaa, 0xbb], 5)));
+        assert_eq!(
+            inbound.qos,
+            Some(crate::sample::QosLevel::from_raw(0b0001_0011))
+        );
     }
 
     // R311y315 — `query-reply-err` joined the gate: the fixture stages a
@@ -3903,12 +3957,17 @@ mod tests {
             keyexpr_literal: "sensors/c".to_string(),
             encoding: Some((4, Some("schema_v1".to_string()))),
             payload: b"err-payload".to_vec(),
-            responder: None,
-            qos: crate::sample::QosLevel::DEFAULT,
+            responder: Some((vec![0x01], 9)),
+            qos: crate::sample::QosLevel::from_raw(0b0000_0110),
         };
         let inbound: InboundReply = qr.into();
         assert_eq!(inbound.rid, 13);
         assert_eq!(inbound.keyexpr_literal, "sensors/c");
+        assert_eq!(inbound.responder, Some((vec![0x01], 9)));
+        assert_eq!(
+            inbound.qos,
+            Some(crate::sample::QosLevel::from_raw(0b0000_0110))
+        );
         match inbound.body {
             InboundReplyBody::Err { encoding, payload } => {
                 assert_eq!(encoding, Some((4, Some("schema_v1".to_string()))));
@@ -4425,6 +4484,8 @@ mod tests {
                 source_info: None,
                 timestamp: None,
             },
+            responder: None,
+            qos: None,
         };
         reg.deliver_local_reply(&own);
         assert_eq!(hits.load(Ordering::SeqCst), 3);

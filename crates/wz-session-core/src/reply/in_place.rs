@@ -56,6 +56,10 @@ struct LentReply<'r> {
     attachment: Option<&'r [u8]>,
     source_info: Option<SourceInfo>,
     timestamp: Option<&'r Timestamp<'r>>,
+    // The node and the entity the Response names as its responder, and the quality of
+    // service it was sent at, both read off the Response's own chain.
+    responder: Option<(&'r [u8], u32)>,
+    qos: Option<crate::sample::QosLevel>,
     // The owned hint a sink asks for by `timestamp`, built on the first ask: it owns a
     // heap field, so a build with no allocator reads the stamp as `timestamp_parts`.
     #[cfg(feature = "alloc")]
@@ -100,6 +104,12 @@ impl ReplyView for LentReply<'_> {
             time: ts.time,
             zid: ts.zid,
         })
+    }
+    fn responder(&self) -> Option<(&[u8], u32)> {
+        self.responder
+    }
+    fn qos(&self) -> Option<crate::sample::QosLevel> {
+        self.qos
     }
     // `payload_shared` and `attachment_shared` keep their `None` defaults: the
     // bytes are the link's, lent for the call, and a sink that keeps them copies
@@ -306,6 +316,8 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
         let Some(body) = lent_body(response)? else {
             return Ok(());
         };
+        let extensions: &[wz_codecs::ext_entry::ExtEntry<'_>] =
+            response.extensions.as_deref().unwrap_or(&[]);
         let mut composed = KeyexprBuf::new();
         let keyexpr = match resolve_wireexpr_view(&response.keyexpr.body, spaces, &mut composed) {
             Ok(Some(keyexpr)) => keyexpr,
@@ -325,6 +337,8 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
             attachment: body.attachment,
             source_info: body.source_info,
             timestamp: body.timestamp,
+            responder: super::response_responder(extensions),
+            qos: crate::sample::extract_qos_in(extensions),
             #[cfg(feature = "alloc")]
             timestamp_hint: OnceCell::new(),
         };
@@ -382,6 +396,8 @@ mod tests {
         attachment: Option<Vec<u8>>,
         source_info: Option<SourceInfo>,
         timestamp: Option<TimestampHint>,
+        responder: Option<(Vec<u8>, u32)>,
+        qos: Option<crate::sample::QosLevel>,
     }
 
     fn seen(view: &dyn ReplyView) -> Seen {
@@ -395,6 +411,8 @@ mod tests {
             attachment: view.attachment().map(<[u8]>::to_vec),
             source_info: view.source_info().cloned(),
             timestamp: view.timestamp().cloned(),
+            responder: view.responder().map(|(zid, eid)| (zid.to_vec(), eid)),
+            qos: view.qos(),
         }
     }
 
@@ -493,6 +511,23 @@ mod tests {
             ResponseReplyBuilder::new(RID, 5, Some("/more"), b"composed")
                 .build()
                 .expect("build"),
+            // The envelope's own fields: who answered, and the QoS it was sent at, on a
+            // reply, a delete and an error alike.
+            ResponseReplyBuilder::new(RID, 0, Some("demo/e"), b"named")
+                .responder(&[0xCA, 0xFE, 0xBA, 0xBE], 300)
+                .qos(crate::sample::QosLevel::from_raw(0b0001_1010))
+                .build()
+                .expect("build"),
+            ResponseReplyBuilder::new(RID, 0, Some("demo/f"), b"")
+                .reply_del()
+                .responder(&[0x11; 16], 1)
+                .build()
+                .expect("build"),
+            ResponseErrBuilder::new(RID, 0, Some("demo/g"), b"nope")
+                .responder(&[0x22], u32::MAX)
+                .qos(crate::sample::QosLevel::from_raw(0b0000_0011))
+                .build()
+                .expect("build"),
             // An id the peer never declared: nothing is delivered.
             ResponseReplyBuilder::new(RID, 77, None, b"lost")
                 .build()
@@ -510,5 +545,33 @@ mod tests {
             delivered += owned.len();
         }
         assert_eq!(delivered, cases.len() - 1, "every case but the lost one");
+    }
+
+    #[test]
+    fn a_reply_shows_who_answered_and_the_qos_it_was_sent_at_on_either_path() {
+        let named = ResponseReplyBuilder::new(RID, 0, Some("demo/e"), b"named")
+            .responder(&[0xCA, 0xFE, 0xBA, 0xBE], 300)
+            .qos(crate::sample::QosLevel::from_raw(0b0001_1010))
+            .build()
+            .expect("build");
+        let (owned, lent) = both(&named);
+        for seen in [&owned, &lent] {
+            assert_eq!(
+                seen[0].responder,
+                Some((alloc::vec![0xCA, 0xFE, 0xBA, 0xBE], 300))
+            );
+            assert_eq!(
+                seen[0].qos,
+                Some(crate::sample::QosLevel::from_raw(0b0001_1010))
+            );
+        }
+        // A Response that names neither shows neither.
+        let bare = ResponseReplyBuilder::new(RID, 0, Some("demo/h"), b"bare")
+            .build()
+            .expect("build");
+        let (owned, lent) = both(&bare);
+        for seen in [&owned, &lent] {
+            assert_eq!((seen[0].responder.clone(), seen[0].qos), (None, None));
+        }
     }
 }

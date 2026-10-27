@@ -4213,6 +4213,8 @@ mod tests {
                 source_info: Some(SourceInfo::new(&[0x02], 7, 0)),
                 timestamp: None,
             },
+            responder: None,
+            qos: None,
         };
         session
             .observer()
