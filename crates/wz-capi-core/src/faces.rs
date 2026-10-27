@@ -73,9 +73,10 @@ use crate::cancellation::CancellableFan;
 use crate::group::{retire_copies, FaceGroup, GroupAggregate, GroupError, GroupId};
 #[cfg(feature = "peer")]
 use wz_runtime_tokio::accept_loop::{DialIntentSender, FaceForwarder, FaceId};
-use wz_runtime_tokio::declare::LivelinessSample;
+use wz_runtime_tokio::declare::{LivelinessSample, LivelinessSampleKind};
 #[cfg(feature = "gossip")]
 use wz_runtime_tokio::gossip_plane::{FaceIdentity, GossipPlane, Outbound};
+use wz_runtime_tokio::keyexpr_match::keyexpr_intersects_text;
 
 #[cfg(feature = "peer")]
 use crate::gossip::GossipPolicy;
@@ -700,6 +701,26 @@ struct TokenEntry {
     options: LivelinessOptions,
 }
 
+/// One leg of a liveliness subscription: what a [`LivelinessSink`] mints.
+type LivelinessLeg = Box<dyn for<'a> FnMut(LivelinessSample<'a>) + Send + 'static>;
+
+/// Tell the liveliness subscriptions behind `legs` that the token `token_id` on `keyexpr` is
+/// `kind`: a put when it comes alive, a delete when it is retracted. Called with no lock held.
+fn tell_liveliness(
+    legs: Vec<LivelinessLeg>,
+    kind: LivelinessSampleKind,
+    keyexpr: &str,
+    token_id: TokenId,
+) {
+    for mut leg in legs {
+        leg(LivelinessSample {
+            kind,
+            keyexpr,
+            token_id,
+        });
+    }
+}
+
 /// A C-declared liveliness SUBSCRIPTION — the fifth SSOT. Shares `SubId` space
 /// with the ordinary subscriptions because both are handed back to C as a
 /// `z_owned_subscriber_t`; `undeclare_subscriber` therefore looks in both maps.
@@ -1300,7 +1321,7 @@ impl Inner {
     /// upstream's matching status counts them: `Session::matching_status_local` walks the
     /// session's subscribers and queryables whatever origin each was declared for.
     fn local_entity_matches(&self, plane: FilterPlane, keyexpr: &str, any_origin: bool) -> bool {
-        use wz_runtime_tokio::keyexpr_match::{keyexpr_includes_target, keyexpr_intersects_text};
+        use wz_runtime_tokio::keyexpr_match::keyexpr_includes_target;
         match plane {
             FilterPlane::Subscribers => self.subs.iter().any(|sub| {
                 (any_origin || sub.allowed_origin.allows_local())
@@ -1414,6 +1435,8 @@ pub struct SharedSession {
     /// R3073 -- whether a face this node reaches as a peer is ended with the initial interest's
     /// `DeclareFinal`; see [`SessionResources::initial_interest`].
     initial_interest: bool,
+    /// See [`SessionResources::liveliness_to_self`].
+    liveliness_to_self: bool,
     /// R3074 -- the gossip plane, for a node that gossips: what introduces the nodes that
     /// each hold a face to this one. See [`SessionResources::gossip`].
     #[cfg(feature = "gossip")]
@@ -1481,6 +1504,13 @@ pub struct SessionResources {
     /// inside the call that caused it ([`LocalDeliveryDrain::Caller`]). It governs the local
     /// plane; a face session's loopback is always `Locality::Remote`, so it has none.
     pub local_delivery: LocalDeliveryDrain,
+    /// Whether the liveliness tokens of the node are told to its own liveliness subscribers and
+    /// answer its own liveliness gets. Upstream zenoh's session does both. zenoh-pico's does
+    /// neither: its history walks the tokens of its peers alone (`vendor/zenoh-pico/src/net/
+    /// liveliness.c` @ `_z_keyexpr_intmap_iterator_make(&zn->_remote_tokens)`), so its ABI says
+    /// `false`. The tokens are delivered inside the call that declares or retracts one, on the
+    /// calling thread, which is the drain the ABI that says `true` has chosen.
+    pub liveliness_to_self: bool,
     /// R3073 -- whether the node ends the declarations it replays to a new face with the
     /// `DeclareFinal` of the INITIAL interest (id 0), which is what a zenoh peer's open waits for
     /// before it returns: without it that open runs out `scouting/delay` (500 ms, against about
@@ -1530,6 +1560,7 @@ impl Default for SessionResources {
             node_hlc: NodeHlc::disabled(),
             shm_clients: no_shm_clients(),
             local_delivery: LocalDeliveryDrain::DriveTask,
+            liveliness_to_self: false,
             initial_interest: false,
             #[cfg(feature = "peer")]
             gossip: None,
@@ -1616,6 +1647,7 @@ impl SharedSession {
             node_hlc,
             shm_clients,
             local_delivery,
+            liveliness_to_self,
             initial_interest,
             #[cfg(feature = "peer")]
             gossip,
@@ -1717,6 +1749,7 @@ impl SharedSession {
             local_wake,
             node_hlc,
             shm_clients,
+            liveliness_to_self,
             initial_interest,
             #[cfg(feature = "gossip")]
             gossip,
@@ -3037,12 +3070,17 @@ impl SharedSession {
         // says.
         #[cfg(feature = "multicast-transport")]
         Self::announce_token_on_groups(&guard, id, &keyexpr, &wire);
+        // The session's own liveliness subscribers, told of the token once the registry is
+        // unlocked: what they run may re-enter the session.
+        let legs = self.own_liveliness_legs(&guard, &keyexpr);
         guard.tokens.push(TokenEntry {
             id,
-            keyexpr,
+            keyexpr: keyexpr.clone(),
             wire,
             options,
         });
+        drop(guard);
+        tell_liveliness(legs, LivelinessSampleKind::Put, &keyexpr, id);
         Some(id)
     }
 
@@ -3052,12 +3090,15 @@ impl SharedSession {
     pub fn undeclare_liveliness_token(&self, id: TokenId) {
         let mut dropped = Vec::new();
         let mut dropped_entry = None;
+        let mut told = None;
         {
             let mut guard = self.lock();
             // R2959 — moved OUT, like every other plane's entry: its `WireKey`
             // may keep a keyexpr declaration alive, and releasing the last one
             // retracts it through this registry.
             if let Some(pos) = guard.tokens.iter().position(|e| e.id == id) {
+                let keyexpr = guard.tokens[pos].keyexpr.clone();
+                told = Some((self.own_liveliness_legs(&guard, &keyexpr), keyexpr));
                 // Open-debt item 913 — retracted from every group told of it, by the key the
                 // entry holds.
                 #[cfg(feature = "multicast-transport")]
@@ -3084,6 +3125,11 @@ impl SharedSession {
         // before the entry's keyexpr declaration can be released.
         drop(dropped);
         drop(dropped_entry);
+        // And the session's own liveliness subscribers, last: the token is gone from the wire
+        // when they hear of it.
+        if let Some((legs, keyexpr)) = told {
+            tell_liveliness(legs, LivelinessSampleKind::Delete, &keyexpr, id);
+        }
     }
 
     /// Record a C liveliness SUBSCRIPTION in the SSOT and declare it on every
@@ -3128,6 +3174,18 @@ impl SharedSession {
                 face.live_subs.insert(id, sub);
             }
         }
+        // A history lists the tokens the session itself holds as it lists those of its peers.
+        let history: Vec<(TokenId, String)> = if options.history && self.liveliness_to_self {
+            guard
+                .tokens
+                .iter()
+                .filter(|token| keyexpr_intersects_text(&keyexpr, &token.keyexpr))
+                .map(|token| (token.id, token.keyexpr.clone()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let leg = (!history.is_empty()).then(|| sink());
         guard.live_subs.push(LiveSubEntry {
             id,
             keyexpr,
@@ -3135,7 +3193,67 @@ impl SharedSession {
             wire,
             sink,
         });
+        drop(guard);
+        if let Some(mut leg) = leg {
+            for (token_id, key) in &history {
+                leg(LivelinessSample {
+                    kind: LivelinessSampleKind::Put,
+                    keyexpr: key,
+                    token_id: *token_id,
+                });
+            }
+        }
         id
+    }
+
+    /// The legs of the liveliness subscriptions that the token on `keyexpr` is told to, one per
+    /// subscription whose key meets it, when the node tells its own subscribers of its own tokens
+    /// ([`SessionResources::liveliness_to_self`]); none otherwise. Minted under the registry's
+    /// lock, run after it is let go.
+    fn own_liveliness_legs(&self, guard: &Inner, keyexpr: &str) -> Vec<LivelinessLeg> {
+        if !self.liveliness_to_self {
+            return Vec::new();
+        }
+        guard
+            .live_subs
+            .iter()
+            .filter(|sub| keyexpr_intersects_text(&sub.keyexpr, keyexpr))
+            .map(|sub| (sub.sink)())
+            .collect()
+    }
+
+    /// Answer a liveliness get with the liveliness tokens of the session itself that meet
+    /// `keyexpr`, one reply each, as the leg of the get that no peer is behind: upstream's get
+    /// finds the tokens of its own session as well as those of its peers, and zenoh-pico's finds
+    /// those of its peers alone ([`SessionResources::liveliness_to_self`]). Returns how many were
+    /// found. The replies are made here, one after the other, and not staged.
+    pub fn answer_liveliness_get_locally(
+        &self,
+        keyexpr: &str,
+        mut reply: impl FnMut(&dyn ReplyView),
+    ) -> usize {
+        if !self.liveliness_to_self {
+            return 0;
+        }
+        let found: Vec<String> = self
+            .lock()
+            .tokens
+            .iter()
+            .filter(|token| keyexpr_intersects_text(keyexpr, &token.keyexpr))
+            .map(|token| token.keyexpr.clone())
+            .collect();
+        for key in &found {
+            reply(&wz_session_core::reply_sink::BorrowedReply {
+                rid: 0,
+                keyexpr: key,
+                kind: wz_runtime_tokio::reply_sink::ReplyKind::Put,
+                payload: &[],
+                err_encoding: None,
+                attachment: None,
+                put_encoding: None,
+            });
+        }
+        found.len()
     }
 
     /// A snapshot of every connected face's session, taken OUT of the registry
@@ -3917,7 +4035,6 @@ impl SharedSession {
     /// Called with no lock held. The listeners are read under the registry lock and folded
     /// after it is released, by the matching lock order.
     fn refresh_local_matches(&self, plane: FilterPlane, keyexpr: &str) {
-        use wz_runtime_tokio::keyexpr_match::keyexpr_intersects_text;
         let affected: Vec<(Arc<StdMutex<MatchAggregate>>, FilterPlane, String, bool)> = {
             let guard = self.lock();
             guard
@@ -5729,5 +5846,79 @@ mod matching_aggregate_tests {
             retire_matching_sink(&state).is_some(),
             "the sink is still there to retire once the callback has left"
         );
+    }
+
+    /// Whether a session tells its own liveliness subscribers of its own tokens is its ABI's
+    /// choice ([`SessionResources::liveliness_to_self`]): zenoh's does, with the put when a
+    /// token is declared, the delete when it is retracted, and the replay a history asks for;
+    /// zenoh-pico's tells of its peers' tokens alone. The get is answered the same way.
+    #[test]
+    fn a_session_tells_its_own_liveliness_subscribers_of_its_own_tokens_when_its_abi_says_so() {
+        let heard = |to_self: bool| {
+            let shared = SharedSession::new_with_resources(
+                TokioTime::new(),
+                test_zid(),
+                SessionResources {
+                    liveliness_to_self: to_self,
+                    ..SessionResources::default()
+                },
+            )
+            .expect("test host entropy");
+            let told = Arc::new(StdMutex::new(Vec::new()));
+            let sink = |told: &Arc<StdMutex<Vec<String>>>| -> LivelinessSink {
+                let told = told.clone();
+                Arc::new(move || {
+                    let told = told.clone();
+                    Box::new(move |sample: LivelinessSample<'_>| {
+                        told.lock()
+                            .unwrap()
+                            .push(format!("{} {:?}", sample.keyexpr, sample.kind));
+                    })
+                })
+            };
+            shared.declare_liveliness_subscriber(
+                "wz/live/**".to_owned(),
+                LivelinessSubscriberOptions::default(),
+                sink(&told),
+            );
+            let token = shared
+                .declare_liveliness_token("wz/live/a".to_owned())
+                .expect("declares");
+            let _apart = shared
+                .declare_liveliness_token("wz/other".to_owned())
+                .expect("declares");
+            let replayed = Arc::new(StdMutex::new(Vec::new()));
+            shared.declare_liveliness_subscriber(
+                "wz/live/*".to_owned(),
+                LivelinessSubscriberOptions::default().with_history(true),
+                sink(&replayed),
+            );
+            let mut found = Vec::new();
+            let answered = shared.answer_liveliness_get_locally("wz/live/*", |view| {
+                found.push(view.keyexpr().to_owned());
+            });
+            assert_eq!(answered, found.len());
+            shared.undeclare_liveliness_token(token);
+            let told = told.lock().unwrap().clone();
+            let replayed = replayed.lock().unwrap().clone();
+            (told, replayed, found)
+        };
+
+        let (told, replayed, found) = heard(true);
+        assert_eq!(told, ["wz/live/a Put", "wz/live/a Delete"]);
+        assert_eq!(
+            replayed,
+            ["wz/live/a Put", "wz/live/a Delete"],
+            "the history lists the token, and the retraction follows"
+        );
+        assert_eq!(found, ["wz/live/a"]);
+
+        let (told, replayed, found) = heard(false);
+        assert!(
+            told.is_empty(),
+            "zenoh-pico tells of its peers' tokens alone"
+        );
+        assert!(replayed.is_empty());
+        assert!(found.is_empty());
     }
 }

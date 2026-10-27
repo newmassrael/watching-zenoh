@@ -102,6 +102,9 @@ fn abi_choices(shm_clients: OpenShmClients) -> AbiChoices {
         // tolerates both, and one that puts and then reads what its callback set relies on the
         // first.
         local_delivery: LocalDeliveryDrain::Caller,
+        // zenoh's session tells its own liveliness subscribers of its own tokens, and its own
+        // liveliness get finds them.
+        liveliness_to_self: true,
         // R3073 -- zenoh-c's peer ends what it sends a new peer with the initial interest's
         // Final, and the open of a zenoh peer that dials this one waits for it.
         initial_interest: true,

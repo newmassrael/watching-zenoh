@@ -343,6 +343,12 @@ impl SessionEngine for SharedSession {
         let opts =
             crate::runtime::session::LivelinessGetOptions::default().with_timeout_ms(timeout_ms);
         let mut issued = 0;
+        // The leg no face is behind: the tokens of this session itself, which upstream's get
+        // finds beside those of its peers. It answers at once, and its end is the leg being
+        // dropped when this call returns.
+        let mut own = leg();
+        self.answer_liveliness_get_locally(keyexpr, |view| own(view));
+        drop(own);
         for (session, revised) in self.face_sessions_with_wake() {
             let mut reply = leg();
             // Completion is the pending entry's sink being DROPPED, which covers a real final,

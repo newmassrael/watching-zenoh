@@ -39,6 +39,7 @@ pub(crate) mod encoding;
 #[allow(dead_code)]
 pub(crate) mod handlers;
 pub(crate) mod info;
+pub(crate) mod liveliness;
 pub(crate) mod matching;
 pub(crate) mod publisher;
 pub(crate) mod querier;

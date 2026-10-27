@@ -651,6 +651,32 @@ Each lands whole with its surface lines, tests and faults in one round.
     reads the status when its task runs and so merges a change that is undone before then. 32 of
     the default lines and 33 and 33 of the other two arms, 11 injected faults, none missed (three
     were not seen at first or did not compile, and were strengthened or redone).
+  - **Z4b (landed; Z4 is complete).** `Session::liveliness`, `Liveliness` with `declare_token`,
+    `declare_subscriber` and `get`, `LivelinessToken` with its undeclaration, the builders of the
+    three (the subscriber's `callback`, `callback_mut`, `with`, `background` and `history`; the
+    get's `timeout` and, with `unstable`, `cancellation_token`) and the `lib.rs` module
+    `liveliness`. A liveliness subscriber is a `Subscriber` of the kind `LivelinessSubscriber`,
+    listed with the session's subscriptions and undeclared as one is, over the id space the engine
+    already shares between the two. A session lists its tokens and retracts those that are left at
+    close, as it does its listeners. The port asked for nothing: it had the three operations, and
+    the crate reaches them through the engine as it does the others. The differential found one
+    thing that the engine did not do as upstream does, and it is mended in the engine as an opt-in
+    that leaves the pico ABI as it was: upstream's session tells its own liveliness subscribers of
+    its own tokens, with the history of a subscriber that asks for it, and its own liveliness get
+    finds them, where the engine's plane never delivered a declaration to a subscriber of the
+    same session (its link driver is inert, and what it writes is discarded). The registry now
+    tells the matching subscriptions inside the declare and the undeclare of a token, on the
+    calling thread and with no lock held, replays the tokens a history asks for, and answers the
+    get with a leg of its own beside those of the faces. `SessionResources::liveliness_to_self`
+    chooses it: the zenoh and zenoh-c ABIs say `true`, and zenoh-pico's says `false` because its
+    history walks the tokens of its peers alone (`vendor/zenoh-pico/src/net/liveliness.c` @
+    `_z_keyexpr_intmap_iterator_make(&zn->_remote_tokens)`). The differential has an upstream node declare and
+    retract tokens and a node of each side watch them, with and without history, ask for them,
+    and declare, retract and drop its own, and compares after each step what every subscriber
+    was told and what a get found. The unit tests of the crate had a port picked twice by two
+    tests that ran side by side (`LinkFailed` on open); a port is now handed out once by a
+    process. 40 of the default lines and 41 and 41 of the other two arms; 9 injected faults,
+    none missed.
 - **Z5. Scouting.** Scouting is not in the port; it is the slice that decides whether the port
   gains it or the crate reaches it through the engine, and it contradicts "names no runtime" unless
   the port gains it.

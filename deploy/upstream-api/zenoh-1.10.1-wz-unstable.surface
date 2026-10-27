@@ -85,6 +85,20 @@ fn zenoh::key_expr::KeyExpr::from_string_unchecked(alloc::string::String) -> Sel
 fn zenoh::key_expr::KeyExpr::into_owned(Self) -> zenoh::key_expr::KeyExpr<'static> ; in impl<'0> zenoh::key_expr::KeyExpr<'0>
 fn zenoh::key_expr::KeyExpr::join<S: ?core::marker::Sized + core::convert::AsRef<str>>(&Self, &S) -> zenoh::Result<zenoh::key_expr::KeyExpr<'static>> ; in impl<'0> zenoh::key_expr::KeyExpr<'0>
 fn zenoh::key_expr::KeyExpr::new<T, E>(T) -> core::result::Result<Self, E> where Self: core::convert::TryFrom<T, Error = E> ; in impl<'0> zenoh::key_expr::KeyExpr<'0>
+fn zenoh::liveliness::Liveliness::declare_subscriber<'0, TryIntoKeyExpr>(&Self, TryIntoKeyExpr) -> zenoh::liveliness::LivelinessSubscriberBuilder<'1, '0, zenoh::handlers::DefaultHandler> where <TryIntoKeyExpr as core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>>>::Error: core::convert::Into<zenoh::Error>, TryIntoKeyExpr: core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>> ; in impl<'1> zenoh::liveliness::Liveliness<'1>
+fn zenoh::liveliness::Liveliness::declare_token<'0, TryIntoKeyExpr>(&Self, TryIntoKeyExpr) -> zenoh::liveliness::LivelinessTokenBuilder<'1, '0> where <TryIntoKeyExpr as core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>>>::Error: core::convert::Into<zenoh::Error>, TryIntoKeyExpr: core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>> ; in impl<'1> zenoh::liveliness::Liveliness<'1>
+fn zenoh::liveliness::Liveliness::get<'0, TryIntoKeyExpr>(&Self, TryIntoKeyExpr) -> zenoh::liveliness::LivelinessGetBuilder<'1, '0, zenoh::handlers::DefaultHandler> where <TryIntoKeyExpr as core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>>>::Error: core::convert::Into<zenoh::Error>, TryIntoKeyExpr: core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>> ; in impl<'1> zenoh::liveliness::Liveliness<'1>
+fn zenoh::liveliness::LivelinessGetBuilder::callback<F>(Self, F) -> zenoh::liveliness::LivelinessGetBuilder<'0, '1, zenoh::handlers::Callback<zenoh::query::Reply>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::Fn(zenoh::query::Reply) ; in impl<'0, '1> zenoh::liveliness::LivelinessGetBuilder<'0, '1, zenoh::handlers::DefaultHandler>
+fn zenoh::liveliness::LivelinessGetBuilder::callback_mut<F>(Self, F) -> zenoh::liveliness::LivelinessGetBuilder<'0, '1, zenoh::handlers::Callback<zenoh::query::Reply>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::FnMut(zenoh::query::Reply) ; in impl<'0, '1> zenoh::liveliness::LivelinessGetBuilder<'0, '1, zenoh::handlers::DefaultHandler>
+fn zenoh::liveliness::LivelinessGetBuilder::cancellation_token(Self, zenoh::cancellation::CancellationToken) -> Self ; in impl<Handler> zenoh::liveliness::LivelinessGetBuilder<'_, '_, Handler>
+fn zenoh::liveliness::LivelinessGetBuilder::timeout(Self, core::time::Duration) -> Self ; in impl<Handler> zenoh::liveliness::LivelinessGetBuilder<'_, '_, Handler>
+fn zenoh::liveliness::LivelinessGetBuilder::with<Handler>(Self, Handler) -> zenoh::liveliness::LivelinessGetBuilder<'0, '1, Handler> where Handler: zenoh::handlers::IntoHandler<zenoh::query::Reply> ; in impl<'0, '1> zenoh::liveliness::LivelinessGetBuilder<'0, '1, zenoh::handlers::DefaultHandler>
+fn zenoh::liveliness::LivelinessSubscriberBuilder::background(Self) -> zenoh::liveliness::LivelinessSubscriberBuilder<'0, '1, zenoh::handlers::Callback<zenoh::sample::Sample>, true> ; in impl<'0, '1> zenoh::liveliness::LivelinessSubscriberBuilder<'0, '1, zenoh::handlers::Callback<zenoh::sample::Sample>>
+fn zenoh::liveliness::LivelinessSubscriberBuilder::callback<F>(Self, F) -> zenoh::liveliness::LivelinessSubscriberBuilder<'0, '1, zenoh::handlers::Callback<zenoh::sample::Sample>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::Fn(zenoh::sample::Sample) ; in impl<'0, '1> zenoh::liveliness::LivelinessSubscriberBuilder<'0, '1, zenoh::handlers::DefaultHandler>
+fn zenoh::liveliness::LivelinessSubscriberBuilder::callback_mut<F>(Self, F) -> zenoh::liveliness::LivelinessSubscriberBuilder<'0, '1, zenoh::handlers::Callback<zenoh::sample::Sample>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::FnMut(zenoh::sample::Sample) ; in impl<'0, '1> zenoh::liveliness::LivelinessSubscriberBuilder<'0, '1, zenoh::handlers::DefaultHandler>
+fn zenoh::liveliness::LivelinessSubscriberBuilder::history(Self, bool) -> Self ; in impl<Handler, const BACKGROUND: bool> zenoh::liveliness::LivelinessSubscriberBuilder<'_, '_, Handler, BACKGROUND>
+fn zenoh::liveliness::LivelinessSubscriberBuilder::with<Handler>(Self, Handler) -> zenoh::liveliness::LivelinessSubscriberBuilder<'0, '1, Handler> where Handler: zenoh::handlers::IntoHandler<zenoh::sample::Sample> ; in impl<'0, '1> zenoh::liveliness::LivelinessSubscriberBuilder<'0, '1, zenoh::handlers::DefaultHandler>
+fn zenoh::liveliness::LivelinessToken::undeclare(Self) -> impl zenoh::Resolve<zenoh::Result<()>> ; in impl zenoh::liveliness::LivelinessToken
 fn zenoh::matching::MatchingListener::handler(&Self) -> &Handler ; in impl<Handler> zenoh::matching::MatchingListener<Handler>
 fn zenoh::matching::MatchingListener::handler_mut(&mut Self) -> &mut Handler ; in impl<Handler> zenoh::matching::MatchingListener<Handler>
 fn zenoh::matching::MatchingListener::undeclare(Self) -> zenoh::matching::MatchingListenerUndeclaration<Handler> where Handler: core::marker::Send ; in impl<Handler> zenoh::matching::MatchingListener<Handler>
@@ -255,6 +269,7 @@ fn zenoh::session::Session::get<'0, '1: '0, TryIntoSelector>(&'0 Self, TryIntoSe
 fn zenoh::session::Session::id(&Self) -> zenoh::session::EntityGlobalId ; in impl zenoh::session::Session
 fn zenoh::session::Session::info(&Self) -> zenoh::session::SessionInfo ; in impl zenoh::session::Session
 fn zenoh::session::Session::is_closed(&Self) -> bool ; in impl zenoh::session::Session
+fn zenoh::session::Session::liveliness(&Self) -> zenoh::liveliness::Liveliness<'_> ; in impl zenoh::session::Session
 fn zenoh::session::Session::put<'0, '1: '0, TryIntoKeyExpr, IntoZBytes>(&'0 Self, TryIntoKeyExpr, IntoZBytes) -> zenoh::session::SessionPutBuilder<'0, '1> where <TryIntoKeyExpr as core::convert::TryInto<zenoh::key_expr::KeyExpr<'1>>>::Error: core::convert::Into<zenoh::Error>, IntoZBytes: core::convert::Into<zenoh::bytes::ZBytes>, TryIntoKeyExpr: core::convert::TryInto<zenoh::key_expr::KeyExpr<'1>> ; in impl zenoh::session::Session
 fn zenoh::session::Session::undeclare<'0, T>(&'0 Self, T) -> impl '0 + zenoh::Resolve<zenoh::Result<()>> where T: '0 + zenoh::session::Undeclarable<&'0 zenoh::session::Session> ; in impl zenoh::session::Session
 fn zenoh::session::Session::zid(&Self) -> zenoh::session::ZenohId ; in impl zenoh::session::Session
@@ -441,6 +456,12 @@ impl core::fmt::Debug for zenoh::handlers::fifo::RecvStream
 impl core::fmt::Debug for zenoh::handlers::fifo::TryIter
 impl core::fmt::Debug for zenoh::key_expr::KeyExpr
 impl core::fmt::Debug for zenoh::key_expr::KeyExprUndeclaration
+impl core::fmt::Debug for zenoh::liveliness::Liveliness
+impl core::fmt::Debug for zenoh::liveliness::LivelinessGetBuilder
+impl core::fmt::Debug for zenoh::liveliness::LivelinessSubscriberBuilder
+impl core::fmt::Debug for zenoh::liveliness::LivelinessToken
+impl core::fmt::Debug for zenoh::liveliness::LivelinessTokenBuilder
+impl core::fmt::Debug for zenoh::liveliness::LivelinessTokenUndeclaration
 impl core::fmt::Debug for zenoh::matching::MatchingListener
 impl core::fmt::Debug for zenoh::matching::MatchingListenerBuilder
 impl core::fmt::Debug for zenoh::matching::MatchingListenerUndeclaration
@@ -506,6 +527,10 @@ impl core::fmt::Display for zenoh::sample::SampleKind
 impl core::fmt::Display for zenoh::session::SessionClosedError
 impl core::future::future::Future for zenoh::handlers::fifo::RecvFut
 impl core::future::into_future::IntoFuture for zenoh::key_expr::KeyExprUndeclaration
+impl core::future::into_future::IntoFuture for zenoh::liveliness::LivelinessGetBuilder
+impl core::future::into_future::IntoFuture for zenoh::liveliness::LivelinessSubscriberBuilder
+impl core::future::into_future::IntoFuture for zenoh::liveliness::LivelinessTokenBuilder
+impl core::future::into_future::IntoFuture for zenoh::liveliness::LivelinessTokenUndeclaration
 impl core::future::into_future::IntoFuture for zenoh::matching::MatchingListenerBuilder
 impl core::future::into_future::IntoFuture for zenoh::matching::MatchingListenerUndeclaration
 impl core::future::into_future::IntoFuture for zenoh::pubsub::PublicationBuilder
@@ -574,6 +599,7 @@ impl core::ops::deref::DerefMut for zenoh::matching::MatchingListener
 impl core::ops::deref::DerefMut for zenoh::pubsub::Subscriber
 impl core::ops::deref::DerefMut for zenoh::query::Queryable
 impl core::ops::drop::Drop for zenoh::handlers::CallbackDrop
+impl core::ops::drop::Drop for zenoh::liveliness::LivelinessToken
 impl core::ops::drop::Drop for zenoh::matching::MatchingListener
 impl core::ops::drop::Drop for zenoh::pubsub::Publisher
 impl core::ops::drop::Drop for zenoh::pubsub::Subscriber
@@ -603,6 +629,10 @@ impl std::io::Read for zenoh::bytes::ZBytesReader
 impl std::io::Seek for zenoh::bytes::ZBytesReader
 impl std::io::Write for zenoh::bytes::ZBytesWriter
 impl zenoh::Resolvable for zenoh::key_expr::KeyExprUndeclaration
+impl zenoh::Resolvable for zenoh::liveliness::LivelinessGetBuilder
+impl zenoh::Resolvable for zenoh::liveliness::LivelinessSubscriberBuilder
+impl zenoh::Resolvable for zenoh::liveliness::LivelinessTokenBuilder
+impl zenoh::Resolvable for zenoh::liveliness::LivelinessTokenUndeclaration
 impl zenoh::Resolvable for zenoh::matching::MatchingListenerBuilder
 impl zenoh::Resolvable for zenoh::matching::MatchingListenerUndeclaration
 impl zenoh::Resolvable for zenoh::pubsub::PublicationBuilder
@@ -624,6 +654,10 @@ impl zenoh::Resolvable for zenoh::session::RoutersZenohIdBuilder
 impl zenoh::Resolvable for zenoh::session::SessionGetBuilder
 impl zenoh::Resolvable for zenoh::session::ZenohIdBuilder
 impl zenoh::Wait for zenoh::key_expr::KeyExprUndeclaration
+impl zenoh::Wait for zenoh::liveliness::LivelinessGetBuilder
+impl zenoh::Wait for zenoh::liveliness::LivelinessSubscriberBuilder
+impl zenoh::Wait for zenoh::liveliness::LivelinessTokenBuilder
+impl zenoh::Wait for zenoh::liveliness::LivelinessTokenUndeclaration
 impl zenoh::Wait for zenoh::matching::MatchingListenerBuilder
 impl zenoh::Wait for zenoh::matching::MatchingListenerUndeclaration
 impl zenoh::Wait for zenoh::pubsub::PublicationBuilder
@@ -658,6 +692,7 @@ mod zenoh::key_expr
 mod zenoh::key_expr::format
 mod zenoh::key_expr::format::macro_support
 mod zenoh::key_expr::keyexpr_tree
+mod zenoh::liveliness
 mod zenoh::matching
 mod zenoh::pubsub
 mod zenoh::qos
@@ -737,6 +772,12 @@ struct zenoh::handlers::fifo::RecvStream
 struct zenoh::handlers::fifo::TryIter
 struct zenoh::key_expr::KeyExpr
 struct zenoh::key_expr::KeyExprUndeclaration
+struct zenoh::liveliness::Liveliness
+struct zenoh::liveliness::LivelinessGetBuilder
+struct zenoh::liveliness::LivelinessSubscriberBuilder
+struct zenoh::liveliness::LivelinessToken
+struct zenoh::liveliness::LivelinessTokenBuilder
+struct zenoh::liveliness::LivelinessTokenUndeclaration
 struct zenoh::matching::MatchingListener
 struct zenoh::matching::MatchingListenerBuilder
 struct zenoh::matching::MatchingListenerUndeclaration

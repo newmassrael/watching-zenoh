@@ -72,6 +72,7 @@ use crate::api::{
     handlers::{Callback, DefaultHandler},
     info::SessionInfo,
     key_expr::{KeyExpr, KeyExprUndeclaration, SessionAnchor, WireAnchor},
+    liveliness::Liveliness,
     matching::{MatchingStatus, MatchingStatusType},
     publisher::Priority,
     query::{ConsolidationMode, QueryConsolidation, Reply, ReplyKeyExpr},
@@ -209,6 +210,48 @@ pub(crate) struct QueryRequest<'a> {
     pub(crate) querier_notifier: Option<SyncGroupNotifier>,
 }
 
+/// What a liveliness query asks of the engine, in the types of this crate: the key as the wire
+/// names it, how long to wait, and what the tokens that are alive are handed to.
+// A build with no engine has nothing that reads the fields.
+#[cfg_attr(not(feature = "engine-tokio"), allow(dead_code))]
+pub(crate) struct LivelinessRequest<'a> {
+    /// The key expression the tokens are asked for.
+    pub(crate) key: &'a str,
+    /// The declaration of a prefix of the key that the wire names it by, `0` when it names none.
+    pub(crate) scope: ExprId,
+    /// What follows the declared prefix, `None` when the declaration covers the whole key.
+    pub(crate) suffix: Option<String>,
+    pub(crate) timeout: Duration,
+    /// What each token that is alive is handed to, as a reply; it is dropped when the query is
+    /// over, which ends the channel of a handler.
+    pub(crate) callback: Callback<Reply>,
+    #[cfg(feature = "unstable")]
+    pub(crate) cancellation_token: Option<CancellationToken>,
+    /// What stops the legs of the query, when something may: see [`QueryRequest::fan`].
+    pub(crate) fan: Option<Arc<QueryFan>>,
+}
+
+/// What the declaration of a liveliness subscription asks of the engine, in the types of this
+/// crate: the key as the wire names it, whether the tokens already alive are delivered first, and
+/// what the changes are handed to.
+// A build with no engine has nothing that reads the fields.
+#[cfg_attr(not(feature = "engine-tokio"), allow(dead_code))]
+pub(crate) struct LivelinessSubscription<'a> {
+    /// The key expression the changes are wanted for.
+    pub(crate) key: &'a str,
+    /// The declaration of a prefix of the key that the wire names it by, `0` when it names none.
+    pub(crate) scope: ExprId,
+    /// What follows the declared prefix, `None` when the declaration covers the whole key.
+    pub(crate) suffix: Option<String>,
+    pub(crate) history: bool,
+    pub(crate) callback: Callback<Sample>,
+    /// Held until the callback can be called no more: a wait on its group ends then.
+    pub(crate) notifier: Option<SyncGroupNotifier>,
+    /// What the engine keeps for as long as it records the subscription: the declaration of the
+    /// prefix the wire names the key by.
+    pub(crate) keeps: Arc<dyn Send + Sync>,
+}
+
 /// What stops the legs of a query: the engine's.
 #[cfg(feature = "engine-tokio")]
 pub(crate) type QueryFan = wz_capi_port::cancellation::CancellableFan;
@@ -296,6 +339,9 @@ impl Engine {
                 // Upstream runs the callbacks of a delivery a session makes to itself inside the
                 // call that causes it, on the calling thread.
                 local_delivery: tokio_engine::LocalDeliveryDrain::Caller,
+                // Upstream tells the liveliness subscribers of a session of the tokens of that
+                // session, and its liveliness get finds them.
+                liveliness_to_self: true,
                 initial_interest: true,
                 // Each face of the session has a thread of its own, so a callback that blocks
                 // holds up its link and no other.
@@ -601,6 +647,93 @@ impl Engine {
         }
     }
 
+    /// Announce a liveliness token on `key` to every peer, now and later, until
+    /// [`Engine::undeclare_liveliness_token`] is called with the id returned.
+    fn declare_liveliness_token(
+        &self,
+        key: &str,
+        scope: ExprId,
+        suffix: Option<String>,
+    ) -> ZResult<Id> {
+        match self {
+            Engine::Tokio(state) => {
+                let wire = tokio_engine::wire_key_of(scope, suffix);
+                // The retraction names its token by id alone, as upstream's does.
+                let id = state
+                    .shared
+                    .as_engine()
+                    .declare_liveliness_token_on_wire(key.to_owned(), wire, None)
+                    .ok_or_else(|| zerror!("this engine declares no liveliness token"))?;
+                Id::try_from(id).map_err(|_| {
+                    zerror!(
+                        "the engine numbered a liveliness token {id}, which is more than an id \
+                         holds"
+                    )
+                    .into()
+                })
+            }
+        }
+    }
+
+    /// Retract the liveliness token `id`, which tells the peers it is gone.
+    fn undeclare_liveliness_token(&self, id: Id) {
+        match self {
+            Engine::Tokio(state) => state
+                .shared
+                .as_engine()
+                .undeclare_liveliness_token(u64::from(id)),
+        }
+    }
+
+    /// Take the changes of the liveliness tokens the peers hold for what `subscription` says,
+    /// until [`Engine::undeclare_subscriber`] is called with the id returned: the ids are those of
+    /// the subscribers of the engine.
+    fn declare_liveliness_subscriber(
+        &self,
+        subscription: LivelinessSubscription<'_>,
+    ) -> ZResult<Id> {
+        match self {
+            Engine::Tokio(state) => {
+                let LivelinessSubscription {
+                    key,
+                    scope,
+                    suffix,
+                    history,
+                    callback,
+                    notifier,
+                    keeps,
+                } = subscription;
+                let wire = tokio_engine::wire_key_of(scope, suffix).keeping(keeps);
+                let id = state
+                    .shared
+                    .as_engine()
+                    .declare_liveliness_subscriber_on_wire(
+                        key.to_owned(),
+                        wire,
+                        history,
+                        tokio_engine::liveliness_sink(callback, notifier),
+                    )
+                    .ok_or_else(|| zerror!("this engine has no liveliness subscriber"))?;
+                Id::try_from(id).map_err(|_| {
+                    zerror!(
+                        "the engine numbered a liveliness subscriber {id}, which is more than an \
+                         id holds"
+                    )
+                    .into()
+                })
+            }
+        }
+    }
+
+    /// Ask which liveliness tokens are alive: the query `request` says.
+    fn liveliness_query(&self, request: LivelinessRequest<'_>) -> ZResult<()> {
+        match self {
+            Engine::Tokio(state) => {
+                tokio_engine::ask_liveliness(state.shared.engine_ref(), request)
+            }
+        }
+    }
+
     /// Whether anything `kind` counts matches `key` among the declarations `destination` admits.
     fn matching_status(
         &self,
@@ -711,6 +844,30 @@ impl Engine {
         match *self {}
     }
 
+    fn declare_liveliness_token(
+        &self,
+        _key: &str,
+        _scope: ExprId,
+        _suffix: Option<String>,
+    ) -> ZResult<Id> {
+        match *self {}
+    }
+
+    fn undeclare_liveliness_token(&self, _id: Id) {
+        match *self {}
+    }
+
+    fn declare_liveliness_subscriber(
+        &self,
+        _subscription: LivelinessSubscription<'_>,
+    ) -> ZResult<Id> {
+        match *self {}
+    }
+
+    fn liveliness_query(&self, _request: LivelinessRequest<'_>) -> ZResult<()> {
+        match *self {}
+    }
+
     fn matching_status(
         &self,
         _kind: MatchingStatusType,
@@ -725,6 +882,7 @@ impl Engine {
 /// plan is made from, and the words an open that cannot be carried out is refused in.
 #[cfg(feature = "engine-tokio")]
 mod tokio_engine {
+    use wz_capi_core::runtime::declare::{LivelinessSample, LivelinessSampleKind};
     #[cfg(feature = "unstable")]
     use wz_capi_core::runtime::sample::SourceInfo as EngineSourceInfo;
     pub(super) use wz_capi_core::runtime::session::LocalDeliveryDrain;
@@ -751,7 +909,8 @@ mod tokio_engine {
     };
     use wz_capi_port::cancellation::CancellableFan;
     use wz_capi_port::{
-        HeldQuery, MatchingSink, QueryHolder, QueryableSink, ReplyCallback, SessionEngine,
+        HeldQuery, LivelinessSink, MatchingSink, QueryHolder, QueryableSink, ReplyCallback,
+        SessionEngine,
     };
     use zenoh_config::{wrappers::ZenohId, ExpandedConfig, ModeDependent};
     use zenoh_protocol::{
@@ -761,7 +920,7 @@ mod tokio_engine {
     };
     use zenoh_result::ZResult;
 
-    use super::{Arc, Publication, QueryRequest};
+    use super::{Arc, LivelinessRequest, Publication, QueryRequest};
     use crate::api::{
         bytes::ZBytes,
         cancellation::SyncGroupNotifier,
@@ -1337,17 +1496,7 @@ mod tokio_engine {
         if let Some(info) = &source_info {
             options = options.with_source_info(source_info_hint_of(info));
         }
-        let delivery = Arc::new(ReplyDelivery {
-            callback,
-            _fan: fan.clone(),
-        });
-        let mut leg = move || -> ReplyCallback {
-            let delivery = Arc::clone(&delivery);
-            Box::new(move |view: &dyn ReplyView| match reply_of(view) {
-                Ok(reply) => delivery.callback.call(reply),
-                Err(error) => tracing::error!("a reply could not be delivered: {error}"),
-            })
-        };
+        let mut leg = leg_minter(callback, fan.clone());
         let issued = engine.get_on_wire(key, &wire, &options, fan.as_deref(), &mut leg);
         // The closure holds the delivery the legs share: what it let go of is the last hold, when
         // no leg is left.
@@ -1356,6 +1505,111 @@ mod tokio_engine {
             Some(_) => Ok(()),
             None => Err(zerror!("this engine asks no queries").into()),
         }
+    }
+
+    /// Ask the liveliness query `request` says of `engine`, handing each token that is alive to
+    /// its callback as a reply, as [`ask`] does for a query.
+    pub(super) fn ask_liveliness(
+        engine: &dyn SessionEngine,
+        request: LivelinessRequest<'_>,
+    ) -> ZResult<()> {
+        let LivelinessRequest {
+            key,
+            scope,
+            suffix,
+            timeout,
+            callback,
+            #[cfg(feature = "unstable")]
+            cancellation_token,
+            fan,
+        } = request;
+        #[cfg(feature = "unstable")]
+        let mut callback = callback;
+        #[cfg(feature = "unstable")]
+        tie_to_end(cancellation_token, fan.as_ref(), None, &mut callback)?;
+        let wire = wire_key_of(scope, suffix);
+        // As for a query, `0` is the default timeout of the engine and a timeout of nothing is an
+        // instant one.
+        let timeout_ms = u32::try_from(timeout.as_millis().max(1)).unwrap_or(u32::MAX);
+        let mut leg = leg_minter(callback, fan.clone());
+        let issued =
+            engine.liveliness_get_on_wire(key, &wire, timeout_ms, fan.as_deref(), &mut leg);
+        drop(leg);
+        match issued {
+            Some(_) => Ok(()),
+            None => Err(zerror!("this engine asks no liveliness queries").into()),
+        }
+    }
+
+    /// What mints the callback of each leg of a query: they share what the query holds, and the
+    /// callback is dropped with the last of them, which is what ends the channel of a handler.
+    fn leg_minter(
+        callback: Callback<Reply>,
+        fan: Option<Arc<CancellableFan>>,
+    ) -> impl FnMut() -> ReplyCallback {
+        let delivery = Arc::new(ReplyDelivery {
+            callback,
+            _fan: fan,
+        });
+        move || -> ReplyCallback {
+            let delivery = Arc::clone(&delivery);
+            Box::new(move |view: &dyn ReplyView| match reply_of(view) {
+                Ok(reply) => delivery.callback.call(reply),
+                Err(error) => tracing::error!("a reply could not be delivered: {error}"),
+            })
+        }
+    }
+
+    /// What the engine hands the changes of a liveliness subscription to: the callback, called
+    /// once for each token that comes alive (a put) or is retracted (a delete), from whichever
+    /// thread the engine delivers on. As for a subscriber, the legs share what the subscription
+    /// holds, and the notifier is let go with the last of them.
+    pub(super) fn liveliness_sink(
+        callback: Callback<Sample>,
+        notifier: Option<SyncGroupNotifier>,
+    ) -> LivelinessSink {
+        struct Delivery {
+            callback: Callback<Sample>,
+            _notifier: Option<SyncGroupNotifier>,
+        }
+        let delivery = Arc::new(Delivery {
+            callback,
+            _notifier: notifier,
+        });
+        Arc::new(move || {
+            let delivery = Arc::clone(&delivery);
+            Box::new(
+                move |change: LivelinessSample<'_>| match liveliness_sample_of(&change) {
+                    Ok(sample) => delivery.callback.call(sample),
+                    Err(error) => {
+                        tracing::error!("a liveliness change could not be delivered: {error}")
+                    }
+                },
+            )
+        })
+    }
+
+    /// The sample a token coming alive or going is: its key, with no payload, as upstream makes
+    /// it.
+    fn liveliness_sample_of(change: &LivelinessSample<'_>) -> ZResult<Sample> {
+        Ok(Sample {
+            key_expr: KeyExpr::try_from(change.keyexpr.to_owned())?,
+            payload: ZBytes::new(),
+            kind: match change.kind {
+                LivelinessSampleKind::Put => SampleKind::Put,
+                LivelinessSampleKind::Delete => SampleKind::Delete,
+            },
+            encoding: Encoding::default(),
+            timestamp: None,
+            qos: QoS::default(),
+            #[cfg(feature = "unstable")]
+            reliability: zenoh_protocol::core::Reliability::Reliable,
+            #[cfg(feature = "unstable")]
+            source_info: None,
+            attachment: None,
+            #[cfg(feature = "unstable")]
+            timestamp_stack: None,
+        })
     }
 
     /// What the legs of a query are handed their replies to.
@@ -1530,9 +1784,137 @@ pub(crate) struct SessionInner {
     /// The matching listeners declared on the session and not undeclared, which a close lets go
     /// of.
     matching_listeners: std::sync::Mutex<Vec<Id>>,
+    /// The liveliness tokens declared on the session and not undeclared, which a close retracts.
+    tokens: std::sync::Mutex<Vec<Id>>,
 }
 
 impl SessionInner {
+    fn tokens(&self) -> std::sync::MutexGuard<'_, Vec<Id>> {
+        self.tokens
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Retract every liveliness token that is left: those of a session that has closed.
+    fn release_tokens(&self) {
+        let left = std::mem::take(&mut *self.tokens());
+        for id in left {
+            self.engine.undeclare_liveliness_token(id);
+        }
+    }
+
+    /// Declare a liveliness token on `key_expr` on the engine and record it, so that a close
+    /// retracts it.
+    fn declare_liveliness_inner(self: &Arc<Self>, key_expr: &KeyExpr) -> ZResult<Id> {
+        tracing::trace!("declare_liveliness({:?})", key_expr);
+        if self.engine.is_closed() {
+            return Err(SessionClosedError.into());
+        }
+        let anchor: SessionAnchor = self.clone();
+        let wire = key_expr.to_wire(&anchor);
+        let suffix = (!wire.suffix.is_empty()).then(|| wire.suffix.to_string());
+        let id = self
+            .engine
+            .declare_liveliness_token(key_expr.as_str(), wire.scope, suffix)?;
+        self.tokens().push(id);
+        // A close that ran between the check and the record has not seen this token.
+        if self.engine.is_closed() {
+            self.release_tokens();
+            return Err(SessionClosedError.into());
+        }
+        Ok(id)
+    }
+
+    /// Retract the liveliness token `id`. A closed session has none, and retracting on it is no
+    /// error; the retraction of one the session does not hold is none either, as upstream's.
+    fn undeclare_liveliness_inner(&self, id: Id) -> ZResult<()> {
+        if self.engine.is_closed() {
+            return Ok(());
+        }
+        let known = {
+            let mut tokens = self.tokens();
+            let before = tokens.len();
+            tokens.retain(|held| *held != id);
+            before != tokens.len()
+        };
+        if known {
+            self.engine.undeclare_liveliness_token(id);
+        }
+        Ok(())
+    }
+
+    /// Declare a liveliness subscription on the engine and record it with the subscriptions, so
+    /// that a close lets go of it and it is undeclared as a subscriber is.
+    fn declare_liveliness_subscriber_inner(
+        self: &Arc<Self>,
+        key_expr: &KeyExpr,
+        history: bool,
+        callback: Callback<Sample>,
+        notifier: Option<SyncGroupNotifier>,
+    ) -> ZResult<Id> {
+        tracing::trace!("declare_liveliness_subscriber({:?})", key_expr);
+        if self.engine.is_closed() {
+            return Err(SessionClosedError.into());
+        }
+        let anchor: SessionAnchor = self.clone();
+        let wire = key_expr.to_wire(&anchor);
+        let suffix = (!wire.suffix.is_empty()).then(|| wire.suffix.to_string());
+        let id = self
+            .engine
+            .declare_liveliness_subscriber(LivelinessSubscription {
+                key: key_expr.as_str(),
+                scope: wire.scope,
+                suffix,
+                history,
+                callback,
+                notifier,
+                // The declaration of the prefix is held by the subscription for as long as the
+                // engine records it, whoever else holds the key.
+                keeps: Arc::new(key_expr.clone().into_owned()),
+            })?;
+        self.subscriptions().push(id);
+        // A close that ran between the check and the record has not seen this subscription.
+        if self.engine.is_closed() {
+            self.release_subscriptions();
+            return Err(SessionClosedError.into());
+        }
+        Ok(id)
+    }
+
+    /// Ask which liveliness tokens are alive on `key_expr`, with each one handed to `callback` as
+    /// a reply.
+    fn liveliness_query(
+        self: &Arc<Self>,
+        key_expr: &KeyExpr,
+        timeout: Duration,
+        callback: Callback<Reply>,
+        #[cfg(feature = "unstable")] cancellation_token: Option<CancellationToken>,
+    ) -> ZResult<()> {
+        tracing::trace!("liveliness.get({}, {:?})", key_expr, timeout);
+        if self.engine.is_closed() {
+            return Err(SessionClosedError.into());
+        }
+        #[cfg(feature = "unstable")]
+        let fan = cancellation_token
+            .is_some()
+            .then(|| self.engine.new_query_fan());
+        #[cfg(not(feature = "unstable"))]
+        let fan = None;
+        let anchor: SessionAnchor = self.clone();
+        let wire = key_expr.to_wire(&anchor);
+        let suffix = (!wire.suffix.is_empty()).then(|| wire.suffix.to_string());
+        self.engine.liveliness_query(LivelinessRequest {
+            key: key_expr.as_str(),
+            scope: wire.scope,
+            suffix,
+            timeout,
+            callback,
+            #[cfg(feature = "unstable")]
+            cancellation_token,
+            fan,
+        })
+    }
+
     fn matching_listeners(&self) -> std::sync::MutexGuard<'_, Vec<Id>> {
         self.matching_listeners
             .lock()
@@ -2015,6 +2397,7 @@ impl Session {
             queryables: std::sync::Mutex::new(vec![]),
             queriers: std::sync::Mutex::new(vec![]),
             matching_listeners: std::sync::Mutex::new(vec![]),
+            tokens: std::sync::Mutex::new(vec![]),
         })))
     }
 }
@@ -2055,7 +2438,8 @@ impl WeakSession {
     /// undeclaring on it is no error.
     pub(crate) fn undeclare_subscriber_inner(&self, sid: Id, kind: SubscriberKind) -> ZResult<()> {
         match kind {
-            SubscriberKind::Subscriber => {
+            // The two kinds are subscribers of the engine, listed together.
+            SubscriberKind::Subscriber | SubscriberKind::LivelinessSubscriber => {
                 let known = {
                     let mut subscriptions = self.0.subscriptions();
                     let before = subscriptions.len();
@@ -2141,6 +2525,12 @@ impl WeakSession {
     /// no error; an id the session does not hold is one.
     pub(crate) fn undeclare_matches_listener_inner(&self, id: Id) -> ZResult<()> {
         self.0.undeclare_matches_listener_inner(id)
+    }
+
+    /// Retract the liveliness token `tid`. A closed session has none, and retracting on it is no
+    /// error.
+    pub(crate) fn undeclare_liveliness(&self, tid: Id) -> ZResult<()> {
+        self.0.undeclare_liveliness_inner(tid)
     }
 
     /// Undeclare the querier `qid` with the queries it has under way. A closed session has none,
@@ -2577,6 +2967,63 @@ impl Session {
         self.0.declare_publisher_inner(key_expr, destination)
     }
 
+    /// Obtain a [`Liveliness`] struct tied to this Zenoh [`Session`].
+    ///
+    /// # Examples
+    /// ```
+    /// # #[tokio::main]
+    /// # async fn main() {
+    ///
+    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// let liveliness = session
+    ///     .liveliness()
+    ///     .declare_token("key/expression")
+    ///     .await
+    ///     .unwrap();
+    /// # }
+    /// ```
+    pub fn liveliness(&self) -> Liveliness<'_> {
+        Liveliness { session: self }
+    }
+
+    /// Declare a liveliness token on `key_expr`, retracted by a close.
+    pub(crate) fn declare_liveliness_inner(&self, key_expr: &KeyExpr) -> ZResult<Id> {
+        self.0.declare_liveliness_inner(key_expr)
+    }
+
+    /// Take the changes of the liveliness tokens of the peers on `key_expr` into `callback`, with
+    /// the tokens already alive first when `history` says so, until the subscription is
+    /// undeclared with the id returned. `notifier` is let go with the callback. Only the
+    /// declarations of other nodes are tokens that change: the origin is the default one.
+    pub(crate) fn declare_liveliness_subscriber_inner(
+        &self,
+        key_expr: &KeyExpr,
+        _origin: Locality,
+        history: bool,
+        callback: Callback<Sample>,
+        notifier: Option<SyncGroupNotifier>,
+    ) -> ZResult<Id> {
+        self.0
+            .declare_liveliness_subscriber_inner(key_expr, history, callback, notifier)
+    }
+
+    /// Ask which liveliness tokens are alive on `key_expr`.
+    pub(crate) fn liveliness_query(
+        &self,
+        key_expr: &KeyExpr,
+        timeout: Duration,
+        callback: Callback<Reply>,
+        #[cfg(feature = "unstable")] cancellation_token: Option<CancellationToken>,
+    ) -> ZResult<()> {
+        self.0.liveliness_query(
+            key_expr,
+            timeout,
+            callback,
+            #[cfg(feature = "unstable")]
+            cancellation_token,
+        )
+    }
+
     /// Create a [`Querier`](crate::query::Querier) for the given key expression.
     ///
     /// # Arguments
@@ -2966,6 +3413,7 @@ impl Closee for WeakSession {
                 session.release_queryables();
                 session.release_queriers();
                 session.release_matching_listeners();
+                session.release_tokens();
             })
             .await;
     }
@@ -3236,10 +3684,16 @@ mod tests {
     /// A loopback port that nothing holds and that the kernel never picks for a socket that binds
     /// port 0: below every platform's ephemeral range, so a session of this process that listens on
     /// `tcp/[::]:0` cannot be handed it between the choice and the use. Chosen by trying numbers
-    /// from one that depends on the process, and not read back from a socket that is dropped.
+    /// from one that depends on the process, and not read back from a socket that is dropped. A
+    /// number is handed out once: the tests of a process run side by side, and a port that is free
+    /// when one of them tries it is still free for another until the session of the first listens.
     fn unautoselected_port() -> u16 {
+        use std::sync::atomic::{AtomicU16, Ordering};
+
+        static HANDED_OUT: AtomicU16 = AtomicU16::new(0);
         let start = 20_000 + (std::process::id() % 8_000) as u16;
-        (start..start + 2_000)
+        (0..2_000)
+            .map(|_| start + HANDED_OUT.fetch_add(1, Ordering::Relaxed) % 2_000)
             .find(|port| std::net::TcpListener::bind(("127.0.0.1", *port)).is_ok())
             .expect("a free port below the ephemeral range")
     }
@@ -5503,6 +5957,358 @@ mod tests {
             done.recv_timeout(WAIT)
                 .expect("the undeclaration returned once the callback had")
                 .expect("undeclares");
+        }
+    }
+
+    /// The liveliness of the tokens a node declares, as another node reads it.
+    mod liveliness {
+        use std::{sync::mpsc, time::Duration};
+
+        use super::*;
+
+        const WAIT: Duration = Duration::from_secs(5);
+
+        /// Two connected nodes: the one that declares tokens and the one that watches them.
+        fn pair(ids: (&str, &str)) -> (Session, Session) {
+            let port = unautoselected_port();
+            let on = |id: &str, listen: &str, connect: &str| {
+                open(
+                    Config::from_json5(&format!(
+                        r#"{{ id: "{id}", mode: "peer",
+                              listen: {{ endpoints: [{listen}] }},
+                              connect: {{ endpoints: [{connect}] }},
+                              scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                    ))
+                    .expect("a configuration zenoh reads"),
+                )
+                .wait()
+                .expect("opens")
+            };
+            let writer = on(ids.0, &format!(r#""tcp/127.0.0.1:{port}""#), "");
+            let reader = on(ids.1, "", &format!(r#""tcp/127.0.0.1:{port}""#));
+            assert_eq!(connected(&reader, 1).1.len(), 1, "the nodes are linked");
+            (writer, reader)
+        }
+
+        /// Every change a liveliness subscriber is told of, as `key kind`.
+        fn changes() -> (
+            impl Fn(Sample) + Send + Sync + 'static,
+            mpsc::Receiver<String>,
+        ) {
+            let (sender, received) = mpsc::channel();
+            let sender = std::sync::Mutex::new(sender);
+            (
+                move |sample: Sample| {
+                    let _ = sender.lock().unwrap().send(format!(
+                        "{} {:?} {}",
+                        sample.key_expr(),
+                        sample.kind(),
+                        sample.payload().len()
+                    ));
+                },
+                received,
+            )
+        }
+
+        #[test]
+        fn a_token_of_another_node_is_told_alive_and_gone_to_a_liveliness_subscriber() {
+            let (writer, reader) = pair(("a1b2c9", "a1b2ca"));
+            let (callback, told) = changes();
+            let _subscriber = reader
+                .liveliness()
+                .declare_subscriber("demo/l/**")
+                .callback(callback)
+                .wait()
+                .expect("declares");
+            let token = writer
+                .liveliness()
+                .declare_token("demo/l/a")
+                .wait()
+                .expect("declares");
+            assert_eq!(told.recv_timeout(WAIT), Ok("demo/l/a Put 0".to_owned()));
+            // A token that does not meet the key of the subscriber is not told.
+            let _apart = writer
+                .liveliness()
+                .declare_token("demo/other")
+                .wait()
+                .expect("declares");
+            token.undeclare().wait().expect("undeclares");
+            assert_eq!(told.recv_timeout(WAIT), Ok("demo/l/a Delete 0".to_owned()));
+            assert_eq!(
+                told.recv_timeout(Duration::from_millis(200)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            );
+        }
+
+        #[test]
+        fn the_history_of_a_liveliness_subscriber_is_the_tokens_already_alive() {
+            let (writer, reader) = pair(("a1b2cb", "a1b2cc"));
+            let _first = writer
+                .liveliness()
+                .declare_token("demo/l/h1")
+                .wait()
+                .expect("declares");
+            let _second = writer
+                .liveliness()
+                .declare_token("demo/l/h2")
+                .wait()
+                .expect("declares");
+            std::thread::sleep(Duration::from_millis(300));
+            let (with, with_told) = changes();
+            let _with = reader
+                .liveliness()
+                .declare_subscriber("demo/l/*")
+                .history(true)
+                .callback(with)
+                .wait()
+                .expect("declares");
+            let mut seen = vec![
+                with_told.recv_timeout(WAIT).expect("a token"),
+                with_told.recv_timeout(WAIT).expect("a token"),
+            ];
+            seen.sort();
+            assert_eq!(seen, ["demo/l/h1 Put 0", "demo/l/h2 Put 0"]);
+            let (without, without_told) = changes();
+            let _without = reader
+                .liveliness()
+                .declare_subscriber("demo/l/*")
+                .callback(without)
+                .wait()
+                .expect("declares");
+            assert_eq!(
+                without_told.recv_timeout(Duration::from_millis(300)),
+                Err(mpsc::RecvTimeoutError::Timeout),
+                "without history only what changes is told"
+            );
+        }
+
+        #[test]
+        fn a_token_dropped_or_of_a_session_that_closes_is_told_gone() {
+            let (writer, reader) = pair(("a1b2cd", "a1b2ce"));
+            let (callback, told) = changes();
+            let _subscriber = reader
+                .liveliness()
+                .declare_subscriber("demo/l/d/**")
+                .callback(callback)
+                .wait()
+                .expect("declares");
+            let dropped = writer
+                .liveliness()
+                .declare_token("demo/l/d/1")
+                .wait()
+                .expect("declares");
+            let closed = writer
+                .liveliness()
+                .declare_token("demo/l/d/2")
+                .wait()
+                .expect("declares");
+            let mut alive = vec![
+                told.recv_timeout(WAIT).expect("a token"),
+                told.recv_timeout(WAIT).expect("a token"),
+            ];
+            alive.sort();
+            assert_eq!(alive, ["demo/l/d/1 Put 0", "demo/l/d/2 Put 0"]);
+            drop(dropped);
+            assert_eq!(
+                told.recv_timeout(WAIT),
+                Ok("demo/l/d/1 Delete 0".to_owned())
+            );
+            assert_eq!(writer.0.tokens().len(), 1);
+            writer.close().wait().expect("closes");
+            assert_eq!(writer.0.tokens().len(), 0);
+            assert_eq!(
+                told.recv_timeout(WAIT),
+                Ok("demo/l/d/2 Delete 0".to_owned())
+            );
+            closed
+                .undeclare()
+                .wait()
+                .expect("no error on a closed session");
+            let error = writer
+                .liveliness()
+                .declare_token("demo/l/d/3")
+                .wait()
+                .expect_err("a closed session");
+            assert!(error.downcast_ref::<SessionClosedError>().is_some());
+        }
+
+        #[test]
+        fn a_get_is_answered_with_the_tokens_that_are_alive_and_ends() {
+            let (writer, reader) = pair(("a1b2cf", "a1b2d0"));
+            let first = writer
+                .liveliness()
+                .declare_token("demo/l/g/1")
+                .wait()
+                .expect("declares");
+            let _second = writer
+                .liveliness()
+                .declare_token("demo/l/g/2")
+                .wait()
+                .expect("declares");
+            let _apart = writer
+                .liveliness()
+                .declare_token("demo/other")
+                .wait()
+                .expect("declares");
+            std::thread::sleep(Duration::from_millis(300));
+            let keys = |replies: crate::api::handlers::FifoChannelHandler<Reply>| {
+                let mut keys: Vec<String> = replies
+                    .iter()
+                    .map(|reply| {
+                        let sample = reply.into_result().expect("a sample");
+                        format!("{} {:?}", sample.key_expr(), sample.kind())
+                    })
+                    .collect();
+                keys.sort();
+                keys
+            };
+            assert_eq!(
+                keys(reader.liveliness().get("demo/l/g/*").wait().expect("asks")),
+                ["demo/l/g/1 Put", "demo/l/g/2 Put"]
+            );
+            first.undeclare().wait().expect("undeclares");
+            std::thread::sleep(Duration::from_millis(300));
+            assert_eq!(
+                keys(reader.liveliness().get("demo/l/g/*").wait().expect("asks")),
+                ["demo/l/g/2 Put"]
+            );
+            assert!(keys(
+                reader
+                    .liveliness()
+                    .get("demo/none/**")
+                    .wait()
+                    .expect("asks")
+            )
+            .is_empty());
+        }
+
+        #[test]
+        fn the_tokens_of_a_session_are_told_to_its_own_subscribers_and_found_by_its_own_get() {
+            let (node, _peer) = pair(("a1b2d5", "a1b2d6"));
+            let (live, live_told) = changes();
+            let _live = node
+                .liveliness()
+                .declare_subscriber("demo/l/o/**")
+                .callback(live)
+                .wait()
+                .expect("declares");
+            let first = node
+                .liveliness()
+                .declare_token("demo/l/o/1")
+                .wait()
+                .expect("declares");
+            let _apart = node
+                .liveliness()
+                .declare_token("demo/other")
+                .wait()
+                .expect("declares");
+            assert_eq!(
+                live_told.recv_timeout(WAIT),
+                Ok("demo/l/o/1 Put 0".to_owned())
+            );
+            // The history of a subscriber declared later lists the token; one without it does not.
+            let (with, with_told) = changes();
+            let _with = node
+                .liveliness()
+                .declare_subscriber("demo/l/o/*")
+                .history(true)
+                .callback(with)
+                .wait()
+                .expect("declares");
+            assert_eq!(
+                with_told.recv_timeout(WAIT),
+                Ok("demo/l/o/1 Put 0".to_owned())
+            );
+            // The get finds it and ends.
+            let found: Vec<String> = node
+                .liveliness()
+                .get("demo/l/o/*")
+                .wait()
+                .expect("asks")
+                .iter()
+                .map(|reply| {
+                    reply
+                        .into_result()
+                        .expect("a sample")
+                        .key_expr()
+                        .to_string()
+                })
+                .collect();
+            assert_eq!(found, ["demo/l/o/1"]);
+            first.undeclare().wait().expect("undeclares");
+            assert_eq!(
+                live_told.recv_timeout(WAIT),
+                Ok("demo/l/o/1 Delete 0".to_owned())
+            );
+            assert_eq!(
+                with_told.recv_timeout(WAIT),
+                Ok("demo/l/o/1 Delete 0".to_owned())
+            );
+            assert_eq!(
+                live_told.recv_timeout(Duration::from_millis(200)),
+                Err(mpsc::RecvTimeoutError::Timeout),
+                "a token that does not meet the key is not told"
+            );
+            assert!(node
+                .liveliness()
+                .get("demo/l/o/*")
+                .wait()
+                .expect("asks")
+                .iter()
+                .next()
+                .is_none());
+        }
+
+        #[test]
+        fn a_liveliness_subscriber_is_undeclared_as_a_subscriber_is_and_ends_with_its_session() {
+            let (_writer, reader) = pair(("a1b2d1", "a1b2d2"));
+            let channel = reader
+                .liveliness()
+                .declare_subscriber("demo/l/s")
+                .wait()
+                .expect("declares");
+            let (callback, _told) = changes();
+            reader
+                .liveliness()
+                .declare_subscriber("demo/l/s")
+                .callback(callback)
+                .background()
+                .wait()
+                .expect("declares");
+            assert_eq!(reader.0.subscriptions().len(), 2);
+            channel.undeclare().wait().expect("undeclares");
+            assert_eq!(reader.0.subscriptions().len(), 1);
+            let kept = reader
+                .liveliness()
+                .declare_subscriber("demo/l/s2")
+                .wait()
+                .expect("declares");
+            reader.close().wait().expect("closes");
+            assert_eq!(reader.0.subscriptions().len(), 0);
+            assert!(kept.recv_timeout(WAIT).is_err());
+            let error = reader
+                .liveliness()
+                .get("demo/l/**")
+                .wait()
+                .expect_err("a closed session");
+            assert!(error.downcast_ref::<SessionClosedError>().is_some());
+        }
+
+        #[cfg(feature = "unstable")]
+        #[test]
+        fn a_cancelled_token_refuses_a_liveliness_get() {
+            use crate::api::cancellation::CancellationToken;
+
+            let (_writer, reader) = pair(("a1b2d3", "a1b2d4"));
+            let token = CancellationToken::default();
+            token.cancel().wait().expect("cancels");
+            let error = reader
+                .liveliness()
+                .get("demo/l/c")
+                .cancellation_token(token)
+                .wait()
+                .expect_err("a cancelled token");
+            assert!(error.to_string().contains("Query was cancelled"));
         }
     }
 

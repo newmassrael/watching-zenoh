@@ -950,6 +950,7 @@ impl OpenPlan {
                 timestamping: self.timestamping,
                 shm_clients: abi.shm_clients,
                 local_delivery: abi.local_delivery,
+                liveliness_to_self: abi.liveliness_to_self,
                 #[cfg(feature = "scout")]
                 scouting: self.scouting,
                 initial_interest: abi.initial_interest,
@@ -983,6 +984,9 @@ pub struct AbiChoices {
     pub start_read_task: bool,
     /// Who runs the callbacks of a delivery the session makes to itself.
     pub local_delivery: LocalDeliveryDrain,
+    /// Whether the session's liveliness tokens are told to its own liveliness subscribers and
+    /// answer its own liveliness gets: zenoh's are, zenoh-pico's are not.
+    pub liveliness_to_self: bool,
     /// Whether a face reached as a north-bound peer is ended with the initial interest's Final.
     pub initial_interest: bool,
     /// Where the faces of the session are driven.
@@ -1164,6 +1168,7 @@ mod tests {
             tx_queue: TxQueueConf::default(),
             start_read_task: true,
             local_delivery: LocalDeliveryDrain::Caller,
+            liveliness_to_self: true,
             initial_interest: true,
             face_drive: FaceDrive::PerFace,
             shm_clients: crate::faces::no_shm_clients(),
@@ -1193,6 +1198,7 @@ mod tests {
                     tx_queue: TxQueueConf::default(),
                     start_read_task: true,
                     local_delivery: LocalDeliveryDrain::Caller,
+                    liveliness_to_self: true,
                     initial_interest: true,
                     face_drive: FaceDrive::PerFace,
                     shm_clients: crate::faces::no_shm_clients(),
@@ -1370,6 +1376,7 @@ mod tests {
             tx_queue: TxQueueConf::default(),
             start_read_task: true,
             local_delivery: LocalDeliveryDrain::Caller,
+            liveliness_to_self: true,
             initial_interest: true,
             face_drive: FaceDrive::PerFace,
             shm_clients: crate::faces::no_shm_clients(),

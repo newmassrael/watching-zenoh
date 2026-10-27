@@ -581,6 +581,90 @@ mod observer {
         }
     }
 
+    /// An upstream node that dials `port`, declares and undeclares liveliness tokens as a test
+    /// says, watches the tokens of the node it dials and asks it which are alive.
+    pub struct Beacon {
+        session: Session,
+        tokens: std::sync::Mutex<std::collections::HashMap<String, up_zenoh::liveliness::LivelinessToken>>,
+        events: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        _watcher: std::sync::Mutex<Option<up_zenoh::pubsub::Subscriber<()>>>,
+    }
+
+    /// An upstream node that dials the node of `port` and takes part in liveliness as told.
+    pub fn beacon(id: &str, port: u16) -> Result<Beacon, String> {
+        Ok(Beacon {
+            session: open(id, "peer", None, Some(port))?,
+            tokens: Default::default(),
+            events: Default::default(),
+            _watcher: Default::default(),
+        })
+    }
+
+    impl Beacon {
+        pub fn declare(&self, label: &str, key: &str) {
+            let token = self
+                .session
+                .liveliness()
+                .declare_token(key)
+                .wait()
+                .expect("declares");
+            self.tokens.lock().unwrap().insert(label.to_owned(), token);
+        }
+
+        pub fn undeclare(&self, label: &str) {
+            let token = self.tokens.lock().unwrap().remove(label).expect("a token");
+            token.undeclare().wait().expect("undeclares");
+        }
+
+        /// Watch the tokens of `key` from now on, the ones already alive included.
+        pub fn watch(&self, key: &str) {
+            let events = self.events.clone();
+            let subscriber = self
+                .session
+                .liveliness()
+                .declare_subscriber(key)
+                .history(true)
+                .callback(move |sample| {
+                    events
+                        .lock()
+                        .unwrap()
+                        .push(format!("{} {:?}", sample.key_expr(), sample.kind()));
+                })
+                .wait()
+                .expect("declares");
+            *self._watcher.lock().unwrap() = Some(subscriber);
+        }
+
+        /// What the watch was told since it was last asked, sorted.
+        pub fn told(&self) -> Vec<String> {
+            let mut told = std::mem::take(&mut *self.events.lock().unwrap());
+            told.sort();
+            told
+        }
+
+        /// The tokens that are alive on `key`, by a liveliness get, sorted.
+        pub fn alive(&self, key: &str) -> Vec<String> {
+            let mut alive: Vec<String> = match self
+                .session
+                .liveliness()
+                .get(key)
+                .timeout(Duration::from_secs(3))
+                .wait()
+            {
+                Ok(replies) => replies
+                    .iter()
+                    .map(|reply| match reply.result() {
+                        Ok(sample) => format!("{} {:?}", sample.key_expr(), sample.kind()),
+                        Err(error) => format!("err {:?}", error.payload().try_to_string()),
+                    })
+                    .collect(),
+                Err(error) => vec![format!("the get failed: {error}")],
+            };
+            alive.sort();
+            alive
+        }
+    }
+
     /// [`seen`] once the session sees `count` transports, or after five seconds.
     pub fn seen_with(session: &Session, count: usize) -> String {
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -1534,6 +1618,146 @@ macro_rules! session_cases {
                 out
             }
 
+            /// The liveliness of a node of this crate and of an upstream node that dials it, each
+            /// as the other reads it: the changes that subscribers of the node are told with and
+            /// without history, the tokens a get finds alive, and what the upstream node is told
+            /// of the tokens of the node and finds alive, after each step.
+            pub fn livelinesses() -> Vec<String> {
+                use std::sync::{Arc, Mutex};
+
+                let port = free_port();
+                let subject = $z::open(peer("5a0060", port)).wait().expect("opens");
+                let beacon = observer::beacon("b00060", port).expect("the beacon opens");
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                while subject.info().peers_zid().wait().count() < 1
+                    && std::time::Instant::now() < deadline
+                {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let unhistoried = Arc::new(Mutex::new(Vec::<String>::new()));
+                let kept = Arc::new(Mutex::new(Vec::<String>::new()));
+                let record = |events: &Arc<Mutex<Vec<String>>>| {
+                    let events = events.clone();
+                    move |sample: $z::sample::Sample| {
+                        events.lock().unwrap().push(format!(
+                            "{} {:?} len={} encoding={}",
+                            sample.key_expr(),
+                            sample.kind(),
+                            sample.payload().len(),
+                            sample.encoding()
+                        ));
+                    }
+                };
+                let _plain = subject
+                    .liveliness()
+                    .declare_subscriber("demo/lv/**")
+                    .callback(record(&unhistoried))
+                    .wait()
+                    .expect("declares");
+                let _history = subject
+                    .liveliness()
+                    .declare_subscriber("demo/lv/**")
+                    .history(true)
+                    .callback(record(&kept))
+                    .wait()
+                    .expect("declares");
+                beacon.watch("demo/lv/**");
+                let out = std::cell::RefCell::new(Vec::<String>::new());
+                let step = |label: &str| {
+                    // What a change does is seen by the other node after it has crossed a link.
+                    std::thread::sleep(Duration::from_millis(500));
+                    let take = |events: &Arc<Mutex<Vec<String>>>| {
+                        let mut taken = std::mem::take(&mut *events.lock().unwrap());
+                        taken.sort();
+                        taken
+                    };
+                    let mut found: Vec<String> = match subject
+                        .liveliness()
+                        .get("demo/lv/**")
+                        .timeout(Duration::from_secs(3))
+                        .wait()
+                    {
+                        Ok(replies) => replies
+                            .iter()
+                            .map(|reply| match reply.result() {
+                                Ok(sample) => format!("{} {:?}", sample.key_expr(), sample.kind()),
+                                Err(error) => format!("err {:?}", error.payload().try_to_string()),
+                            })
+                            .collect(),
+                        Err(error) => vec![format!("the get failed: {}", plain(&error.to_string()))],
+                    };
+                    found.sort();
+                    out.borrow_mut().push(format!(
+                        "{label}: subject told {:?} with history {:?} found {found:?} | beacon told {:?} found {:?}",
+                        take(&unhistoried),
+                        take(&kept),
+                        beacon.told(),
+                        beacon.alive("demo/lv/**"),
+                    ));
+                };
+                step("nothing declared");
+                beacon.declare("t1", "demo/lv/a");
+                step("a token of the beacon");
+                beacon.declare("t2", "demo/lv/b/c");
+                beacon.declare("t3", "demo/other");
+                step("two more, one apart");
+                beacon.undeclare("t1");
+                step("the first one gone");
+                // A subscriber declared late is told what is alive with history, and not without.
+                let (late_kept, late_plain) = (
+                    Arc::new(Mutex::new(Vec::<String>::new())),
+                    Arc::new(Mutex::new(Vec::<String>::new())),
+                );
+                let _late_history = subject
+                    .liveliness()
+                    .declare_subscriber("demo/lv/**")
+                    .history(true)
+                    .callback(record(&late_kept))
+                    .wait()
+                    .expect("declares");
+                let _late_plain = subject
+                    .liveliness()
+                    .declare_subscriber("demo/lv/**")
+                    .callback(record(&late_plain))
+                    .wait()
+                    .expect("declares");
+                std::thread::sleep(Duration::from_millis(500));
+                let mut told = std::mem::take(&mut *late_kept.lock().unwrap());
+                told.sort();
+                out.borrow_mut().push(format!(
+                    "a subscriber declared late: with history {told:?} without {:?}",
+                    std::mem::take(&mut *late_plain.lock().unwrap())
+                ));
+                // The tokens of the node itself: the beacon is told of them, and the node's own
+                // subscribers and get may or may not be.
+                let own = subject.liveliness().declare_token("demo/lv/own").wait().expect("declares");
+                step("a token of the node");
+                own.undeclare().wait().expect("undeclares");
+                step("that token gone");
+                let dropped = subject.liveliness().declare_token("demo/lv/own2").wait().expect("declares");
+                step("another token of the node");
+                drop(dropped);
+                step("that one dropped");
+                beacon.undeclare("t2");
+                beacon.undeclare("t3");
+                step("the rest gone");
+                let last = subject.liveliness().declare_token("demo/lv/last").wait().expect("declares");
+                step("a last token of the node");
+                subject.close().wait().expect("closes");
+                std::thread::sleep(Duration::from_millis(500));
+                out.borrow_mut().push(format!("after close: beacon told {:?}", beacon.told()));
+                out.borrow_mut().push(format!(
+                    "a token after close: {}",
+                    text(subject.liveliness().declare_token("demo/lv/z").wait().map(|_| ()))
+                ));
+                out.borrow_mut().push(format!(
+                    "a get after close: {}",
+                    text(subject.liveliness().get("demo/lv/**").wait().map(|_| ()))
+                ));
+                out.borrow_mut().push(format!("undeclare after close: {}", text(last.undeclare().wait())));
+                out.into_inner()
+            }
+
             /// What a sample says, as one line: every field of it that crosses a link.
             fn describe(sample: &$z::sample::Sample) -> String {
                 let timestamp = sample.timestamp().map(|t| format!("{t}"));
@@ -2198,6 +2422,18 @@ fn what_matches_a_publisher_or_a_querier_is_what_upstream_says_matches_it() {
         "{u:#?}"
     );
     compare("matchings", &u, &w);
+}
+
+#[test]
+fn what_liveliness_tells_is_what_upstream_nodes_tell_each_other() {
+    // The log of upstream's nodes, for a run that is asked for it with `RUST_LOG`.
+    up_zenoh::try_init_log_from_env();
+    let (u, w) = (up::livelinesses(), wz::livelinesses());
+    assert!(
+        u.iter().any(|l| l.starts_with("a token of the beacon: ") && l.contains("demo/lv/a Put")),
+        "{u:#?}"
+    );
+    compare("livelinesses", &u, &w);
 }
 
 #[test]

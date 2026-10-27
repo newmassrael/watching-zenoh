@@ -15,8 +15,7 @@
 // Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
 // src/api/subscriber.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). A partial
 // derivative: `SubscriberState`, the entry of the table a session keeps of its subscribers, is not
-// here, since the engine keeps the subscriptions (docs/zenoh-api-on-the-engine.md, decision D3),
-// and `SubscriberKind` has the one kind that exists until the liveliness subscriber of slice Z4.
+// here, since the engine keeps the subscriptions (docs/zenoh-api-on-the-engine.md, decision D3).
 
 use std::{
     fmt,
@@ -275,4 +274,5 @@ impl<Handler> DerefMut for Subscriber<Handler> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SubscriberKind {
     Subscriber,
+    LivelinessSubscriber,
 }

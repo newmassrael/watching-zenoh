@@ -723,6 +723,10 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             local_delivery: wz_capi_core::runtime::session::LocalDeliveryDrain::DriveTask,
             #[cfg(any(feature = "local-subscriber", feature = "local-queryable"))]
             local_delivery: wz_capi_core::runtime::session::LocalDeliveryDrain::Caller,
+            // zenoh-pico tells a liveliness subscriber only of the tokens of its peers
+            // (`vendor/zenoh-pico/src/net/liveliness.c` @
+            // `_z_keyexpr_intmap_iterator_make(&zn->_remote_tokens)`).
+            liveliness_to_self: false,
             // The plan is zenoh's scouting node, which keeps looking and answers Scouts.
             // pico's open looks once, before the open (`connect` above), and its session
             // answers no Scout.

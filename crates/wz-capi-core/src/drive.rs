@@ -3915,6 +3915,9 @@ pub struct OpenStance {
     /// [`SessionResources::local_delivery`]. zenoh-pico's ABI says [`LocalDeliveryDrain::DriveTask`]
     /// and zenoh-c's says [`LocalDeliveryDrain::Caller`].
     pub local_delivery: LocalDeliveryDrain,
+    /// Whether the liveliness tokens of the session are told to its own liveliness subscribers
+    /// and answer its own liveliness gets; see [`SessionResources::liveliness_to_self`].
+    pub liveliness_to_self: bool,
     /// R3070 -- what the session does with multicast scouting, or `None` for a session that does
     /// not scout: zenoh-pico's ABI, whose scouting is a call a program makes, and a config that
     /// turned it off. A peer or router that has a plan dials what it finds beside its endpoints;
@@ -4176,6 +4179,7 @@ pub fn open_blocking(
         timestamping,
         shm_clients,
         local_delivery,
+        liveliness_to_self,
         #[cfg(feature = "scout")]
         scouting,
         initial_interest,
@@ -4251,6 +4255,7 @@ pub fn open_blocking(
                 node_hlc,
                 shm_clients,
                 local_delivery,
+                liveliness_to_self,
                 initial_interest,
                 #[cfg(feature = "peer")]
                 gossip: gossip.map(|policy| GossipSetup {
@@ -5240,6 +5245,7 @@ mod tests {
             timestamping: TimestampingEnabled::default(),
             shm_clients: crate::faces::no_shm_clients(),
             local_delivery: LocalDeliveryDrain::DriveTask,
+            liveliness_to_self: false,
             scouting: None,
             initial_interest: true,
             gossip: None,

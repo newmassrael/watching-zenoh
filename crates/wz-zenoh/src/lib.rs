@@ -448,6 +448,77 @@ pub mod time {
     pub use zenoh_protocol::core::{Timestamp, TimestampId, NTP64};
 }
 
+/// # Liveliness primitives
+///
+/// Sometimes it's necessary to know whether a Zenoh node is available on the network.
+/// It's possible to achieve this by declaring special publishers and queryables, but this task is
+/// not straightforward, so a dedicated API is provided.
+///
+/// The [liveliness](Session::liveliness) API allows a node to declare a
+/// [LivelinessToken](liveliness::LivelinessToken)
+/// with a key expression assigned to it by [declare_token](liveliness::Liveliness::declare_token).
+/// Other nodes can use the liveliness API to query this
+/// key expression or subscribe to it to be notified when the token appears or disappears on the network
+/// using the corresponding functions [get](liveliness::Liveliness::get) and
+/// [declare_subscriber](liveliness::Liveliness::declare_subscriber).
+/// The [history](liveliness::LivelinessSubscriberBuilder::history) option allows subscribers to
+/// receive updates about already declared tokens.
+///
+/// # Examples
+/// ### Declaring a token
+/// ```no_run
+/// # #[tokio::main]
+/// # async fn main() {
+///
+/// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// let liveliness = session
+///     .liveliness()
+///     .declare_token("key/expression")
+///     .await
+///     .unwrap();
+/// # }
+/// ```
+///
+/// ### Querying tokens
+/// ```no_run
+/// # #[tokio::main]
+/// # async fn main() {
+///
+/// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// let replies = session.liveliness().get("key/**").await.unwrap();
+/// while let Ok(reply) = replies.recv_async().await {
+///     if let Ok(sample) = reply.result() {
+///         println!(">> Liveliness token {}", sample.key_expr());
+///     }
+/// }
+/// # }
+/// ```
+///
+/// ### Subscribing to liveliness changes
+/// ```no_run
+/// # #[tokio::main]
+/// # async fn main() {
+/// use zenoh::sample::SampleKind;
+///
+/// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// let subscriber = session.liveliness().declare_subscriber("key/**").await.unwrap();
+/// while let Ok(sample) = subscriber.recv_async().await {
+///     match sample.kind() {
+///         SampleKind::Put => println!("New liveliness: {}", sample.key_expr()),
+///         SampleKind::Delete => println!("Lost liveliness: {}", sample.key_expr()),
+///     }
+/// }
+/// # }
+/// ```
+pub mod liveliness {
+    pub use crate::api::{
+        builders::liveliness::{
+            LivelinessGetBuilder, LivelinessSubscriberBuilder, LivelinessTokenBuilder,
+        },
+        liveliness::{Liveliness, LivelinessToken, LivelinessTokenUndeclaration},
+    };
+}
+
 /// # Matching primitives
 ///
 /// The matching API allows the active side of communication (publisher, querier) to know
