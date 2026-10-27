@@ -119,10 +119,10 @@ const PICO_LINK_RX: LinkRxConf = LinkRxConf {
 /// (it accepts one link at a time on its read task), so the count is upstream's rather than
 /// none: a bound pico never refused on is no worse than zenoh's.
 #[cfg(feature = "engine-tokio")]
-const PICO_ACCEPT: wz_capi_core::runtime::accept_loop::AcceptBounds =
-    wz_capi_core::runtime::accept_loop::AcceptBounds {
+const PICO_ACCEPT: wz_capi_core::runtime::accept_bounds::AcceptBounds =
+    wz_capi_core::runtime::accept_bounds::AcceptBounds {
         timeout_ms: wz_session_core::caps::PICO_ACCEPT_TIMEOUT_MS as u64,
-        pending: wz_capi_core::runtime::accept_loop::ACCEPT_PENDING,
+        pending: wz_capi_core::runtime::config::ACCEPT_PENDING,
     };
 
 /// How often a session of this ABI sends a keepalive on an idle link, on either engine: pico's

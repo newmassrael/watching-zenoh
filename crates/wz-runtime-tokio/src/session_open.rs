@@ -4421,6 +4421,7 @@ pub enum OpenError {
 /// `SessionFsmUnicastPolicy<SessionActionsBinding>` built by
 /// [`new_session_engine`]; no `LuaEngine` / `IScriptEngine` is involved
 /// (the 18 actions are native trait methods on the binding).
+#[cfg(feature = "session-unicast-accept")]
 fn wire_session_engine(
     outbound: Arc<dyn BoxedLinkDriver + Send + Sync>,
     params: SessionInitParams,
