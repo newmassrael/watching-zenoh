@@ -36,6 +36,8 @@
 use alloc::boxed::Box;
 #[cfg(not(feature = "session-slot"))]
 use alloc::rc::Rc;
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use alloc::sync::Arc;
 #[cfg(feature = "session-slot")]
 use core::cell::{Cell, UnsafeCell};
 use core::mem::MaybeUninit;
@@ -204,6 +206,33 @@ pub trait LinkReadiness: Send + Sync {
     /// when it already has. A failed wait is a quiet link: the step that follows reads and
     /// reports the failure.
     fn wait_readable(&self, timeout_ms: u32);
+
+    /// The platform's handle for what this waits on (a descriptor), opaque to everything but the
+    /// stack that made it; `None` when it has none to give. A wait over several links reads these
+    /// to ask the platform for the first of them to be ready ([`Self::wait_readable_among`]).
+    fn handle(&self) -> Option<usize> {
+        None
+    }
+
+    /// Block until this or any of `others` is ready, or `timeout_ms` has passed. A stack that
+    /// can wait on several handles at once overrides it; the answer of one that cannot is a
+    /// bounded look at this alone, a millisecond at most, and the step that follows reads every
+    /// link whether or not it was the one waited on.
+    fn wait_readable_among(&self, others: &[Arc<dyn LinkReadiness>], timeout_ms: u32) {
+        let _ = others;
+        self.wait_readable(timeout_ms.min(1));
+    }
+}
+
+/// Block until one of `waits` is ready or `timeout_ms` has passed. Nothing to wait on returns at
+/// once, and the wait of one is that wait's own.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+pub fn wait_any(waits: &[Arc<dyn LinkReadiness>], timeout_ms: u32) {
+    match waits {
+        [] => {}
+        [only] => only.wait_readable(timeout_ms),
+        [first, rest @ ..] => first.wait_readable_among(rest, timeout_ms),
+    }
 }
 
 /// A shared link is a link: the same object is usually the session's
@@ -384,6 +413,45 @@ pub trait SessionLinks {
     /// to the end it names. A protocol the stack has no link for is
     /// [`LinkOpenError::Unsupported`].
     fn open_initiator(&self, to: Locator) -> Result<OpenedLink<Self::Pump>, LinkOpenError>;
+
+    /// A listener on `at`, which yields one link for each connection a peer opens to it. A stack
+    /// that does not listen, or not for the locator's protocol, is
+    /// [`LinkOpenError::Unsupported`]: the default, so a stack that never accepts a stream
+    /// writes nothing here.
+    #[cfg(feature = "alloc")]
+    fn open_listener(
+        &self,
+        at: Locator,
+    ) -> Result<Box<dyn LinkListener<Self::Pump>>, LinkOpenError> {
+        let _ = at;
+        Err(LinkOpenError::Unsupported)
+    }
+}
+
+/// The accepting end of a stream protocol: a port a node listens on, and the links of the
+/// connections that arrive on it. It is a value the node holds and polls from its loop, like the
+/// slot profile's `Accept`; what it yields is the link of a connection already made, so a session
+/// opened over it takes the acceptor's role at the handshake and nothing else differs from a
+/// dial.
+///
+/// Absent under `session-slot`, with [`OpenedLink`] (see there).
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+pub trait LinkListener<P> {
+    /// The locator the listener is bound to, with the port the stack chose when the one asked
+    /// for was 0.
+    fn local(&self) -> Locator;
+
+    /// The link of the connection waiting on the port, taken without blocking: `Ok(None)` when
+    /// none waits. [`LinkOpenError::Exhausted`] when the stack had no socket or buffer for it
+    /// (the connection is closed or stays queued, as the stack's listener says, and a later call
+    /// tries again); [`LinkOpenError::Unsupported`] when the listener is broken for good.
+    fn accept(&self) -> Result<Option<OpenedLink<P>>, LinkOpenError>;
+
+    /// A wait for a connection that a thread other than the one that accepts can make; `None`
+    /// when the stack gives none, and then the node looks for one at a pace of its own.
+    fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
+        None
+    }
 }
 
 /// The handshake role to activate the FSM with before the loop starts.

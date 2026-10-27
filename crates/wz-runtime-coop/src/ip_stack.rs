@@ -16,6 +16,8 @@
 //! dial is then the stack it names, not a flag beside it.
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use alloc::boxed::Box;
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use alloc::rc::Rc;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use alloc::vec::Vec;
@@ -37,19 +39,21 @@ use wz_session_core::session_slot::SlotDriver;
 use crate::link_storage::HeapTx;
 use crate::link_storage::TxStore;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use crate::session_drive::IpEndpoint;
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::session_drive::LinkReadiness;
 use crate::session_drive::SessionDatagramLink;
 #[cfg(feature = "session-slot")]
 use crate::session_drive::{Accept, Bind, DriverPump, SlotStack};
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use crate::session_drive::{LinkListener, OpenedLink, SessionLinks};
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
 use crate::session_drive::{LinkOpenError, LinkProto, Locator};
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use crate::session_drive::{OpenedLink, SessionLinks};
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
 use crate::stream_link::NoDial;
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
 use crate::stream_link::StreamDial;
-#[cfg(feature = "session-slot")]
+#[cfg(any(feature = "session-slot", feature = "alloc"))]
 use crate::stream_link::StreamListen;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::stream_link::STREAM_RX_CAPACITY;
@@ -241,10 +245,50 @@ pub struct IpLinks<U, D, L = NoDial> {
     local: [u8; 4],
     dial: D,
     tls: L,
+    shape: LinkShape,
+    datagrams: core::marker::PhantomData<fn() -> U>,
+}
+
+/// What every link of a stack is given besides its socket: the buffers its frames are encoded
+/// into and whether its owner waits for its input. Held by the stack and copied to its listeners,
+/// so a link taken off a port is shaped as one dialled.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+#[derive(Debug, Clone, Copy, Default)]
+struct LinkShape {
     tx_slots: usize,
     tx_capacity: usize,
     owner_waits: bool,
-    datagrams: core::marker::PhantomData<fn() -> U>,
+}
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl LinkShape {
+    fn tx(&self) -> HeapTx {
+        HeapTx::new(self.tx_slots, self.tx_capacity)
+    }
+
+    /// A stream link as the stack opens it: waited on by its owner when the shape says so.
+    fn stream<S: StreamSocket>(
+        &self,
+        link: StreamDriver<S, Vec<u8>, HeapTx>,
+    ) -> StreamDriver<S, Vec<u8>, HeapTx> {
+        if self.owner_waits {
+            link.waited_by_owner()
+        } else {
+            link
+        }
+    }
+
+    /// A datagram link as the stack opens it: waited on by its owner when the shape says so.
+    fn datagram<U: DatagramSocket>(
+        &self,
+        link: UdpDriver<U, Vec<u8>, HeapTx>,
+    ) -> UdpDriver<U, Vec<u8>, HeapTx> {
+        if self.owner_waits {
+            link.waited_by_owner()
+        } else {
+            link
+        }
+    }
 }
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
@@ -262,9 +306,7 @@ where
             local,
             dial,
             tls: NoDial,
-            tx_slots: 0,
-            tx_capacity: 0,
-            owner_waits: false,
+            shape: LinkShape::default(),
             datagrams: core::marker::PhantomData,
         }
     }
@@ -285,9 +327,7 @@ where
             local: self.local,
             dial: self.dial,
             tls,
-            tx_slots: self.tx_slots,
-            tx_capacity: self.tx_capacity,
-            owner_waits: self.owner_waits,
+            shape: self.shape,
             datagrams: self.datagrams,
         }
     }
@@ -297,32 +337,8 @@ where
     /// waited on that way does not wait in its loop; one whose socket cannot still does.
     #[must_use]
     pub fn waited_by_owner(mut self) -> Self {
-        self.owner_waits = true;
+        self.shape.owner_waits = true;
         self
-    }
-
-    /// A stream link as these links open it: waited on by its owner when they are.
-    fn opened_stream<S: StreamSocket>(
-        &self,
-        link: StreamDriver<S, Vec<u8>, HeapTx>,
-    ) -> StreamDriver<S, Vec<u8>, HeapTx> {
-        if self.owner_waits {
-            link.waited_by_owner()
-        } else {
-            link
-        }
-    }
-
-    /// A datagram link as these links open it: waited on by its owner when they are.
-    fn opened_datagram(
-        &self,
-        link: UdpDriver<U, Vec<u8>, HeapTx>,
-    ) -> UdpDriver<U, Vec<u8>, HeapTx> {
-        if self.owner_waits {
-            link.waited_by_owner()
-        } else {
-            link
-        }
     }
 
     /// Links that lend the session `slots` buffers of `bytes` each to encode its frames into, as
@@ -330,13 +346,9 @@ where
     /// batches holds one slot open while it encodes into another, so it needs two.
     #[must_use]
     pub fn with_tx_buffers(mut self, slots: usize, bytes: usize) -> Self {
-        self.tx_slots = slots;
-        self.tx_capacity = bytes;
+        self.shape.tx_slots = slots;
+        self.shape.tx_capacity = bytes;
         self
-    }
-
-    fn tx(&self) -> HeapTx {
-        HeapTx::new(self.tx_slots, self.tx_capacity)
     }
 
     /// The link of a dial to `to`, before it is shared. A stack that cannot make a socket is
@@ -351,25 +363,25 @@ where
             LinkProto::Udp => {
                 // Port 0 has the stack choose a free one, one per initiator session.
                 let socket = U::bind(self.local, 0).map_err(|_| LinkOpenError::Exhausted)?;
-                Ok(IpDriver::Udp(self.opened_datagram(
+                Ok(IpDriver::Udp(self.shape.datagram(
                     UdpDriver::initiator_with_buffers(
                         socket,
                         (to.at.addr, to.at.port),
                         UDP_RX_CAPACITY,
-                        self.tx(),
+                        self.shape.tx(),
                     ),
                 )))
             }
             LinkProto::Tcp => {
                 let socket = self.dial.dial(to.at.addr, to.at.port)?;
-                Ok(IpDriver::Tcp(self.opened_stream(
-                    StreamDriver::with_buffers(socket, STREAM_RX_CAPACITY, self.tx()),
+                Ok(IpDriver::Tcp(self.shape.stream(
+                    StreamDriver::with_buffers(socket, STREAM_RX_CAPACITY, self.shape.tx()),
                 )))
             }
             LinkProto::Tls => {
                 let channel = self.tls.dial(to.at.addr, to.at.port)?;
-                Ok(IpDriver::Tls(self.opened_stream(
-                    StreamDriver::with_buffers(channel, STREAM_RX_CAPACITY, self.tx()),
+                Ok(IpDriver::Tls(self.shape.stream(
+                    StreamDriver::with_buffers(channel, STREAM_RX_CAPACITY, self.shape.tx()),
                 )))
             }
         }
@@ -390,8 +402,8 @@ where
     fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
         // The peer is whoever opens a session first; the driver is bound by its InitSyn.
         let socket = U::bind(self.local, port).map_err(|_| LinkOpenError::Exhausted)?;
-        let driver = Rc::new(IpDriver::Udp(self.opened_datagram(
-            UdpDriver::acceptor_with_buffers(socket, UDP_RX_CAPACITY, self.tx()),
+        let driver = Rc::new(IpDriver::Udp(self.shape.datagram(
+            UdpDriver::acceptor_with_buffers(socket, UDP_RX_CAPACITY, self.shape.tx()),
         )));
         Ok(OpenedLink {
             sink: driver.clone(),
@@ -405,6 +417,64 @@ where
             sink: driver.clone(),
             pump: driver,
         })
+    }
+
+    /// A `tcp/` listener over the stack's stream dial. A `udp/` locator is not listened on yet
+    /// (a UDP port is one peer, and a face for each needs the datagrams told apart by their
+    /// source address), and a `tls/` one waits for the secure channel's listening half.
+    fn open_listener(
+        &self,
+        at: Locator,
+    ) -> Result<Box<dyn LinkListener<Self::Pump>>, LinkOpenError> {
+        if at.proto != LinkProto::Tcp || !D::CARRIED {
+            return Err(LinkOpenError::Unsupported);
+        }
+        let listener = self.dial.listen(at.at.addr, at.at.port)?;
+        Ok(Box::new(IpListener::<U, D::Stream, L::Stream> {
+            listener,
+            shape: self.shape,
+            stack: core::marker::PhantomData,
+        }))
+    }
+}
+
+/// The accepting end of the `tcp/` port a stack listens on: the connections it takes yield the
+/// same [`HeapIpDriver`] a dial does, shaped as the stack's links are, so a session opened over
+/// one is run as one over a dialled link, and the acceptor's role is the handshake's alone.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+struct IpListener<U, S: StreamSocket, T> {
+    listener: Box<dyn StreamListen<Stream = S>>,
+    shape: LinkShape,
+    stack: core::marker::PhantomData<fn() -> (U, T)>,
+}
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl<U, S, T> LinkListener<Rc<HeapIpDriver<U, S, T>>> for IpListener<U, S, T>
+where
+    U: DatagramSocket + 'static,
+    S: StreamSocket + 'static,
+    T: StreamSocket + 'static,
+{
+    fn local(&self) -> Locator {
+        let (addr, port) = self.listener.local();
+        Locator::tcp(IpEndpoint { addr, port })
+    }
+
+    fn accept(&self) -> Result<Option<OpenedLink<Rc<HeapIpDriver<U, S, T>>>>, LinkOpenError> {
+        let Some(stream) = self.listener.accept()? else {
+            return Ok(None);
+        };
+        let driver = Rc::new(IpDriver::Tcp(self.shape.stream(
+            StreamDriver::with_buffers(stream, STREAM_RX_CAPACITY, self.shape.tx()),
+        )));
+        Ok(Some(OpenedLink {
+            sink: driver.clone(),
+            pump: driver,
+        }))
+    }
+
+    fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
+        self.listener.readiness()
     }
 }
 

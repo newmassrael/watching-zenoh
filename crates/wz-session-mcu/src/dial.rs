@@ -58,8 +58,18 @@ pub use heap::*;
 pub type McuActions<C> = SessionLinkActions<CoopRuntime<C>, CoopTime<C>>;
 
 /// Read `udp/<a.b.c.d>:<port>`, `tcp/<a.b.c.d>:<port>` or `tls/<a.b.c.d>:<port>`
-/// into the locator it names.
+/// into the locator it names. A port of 0 names nothing to dial.
 pub fn parse_locator(endpoint: &str) -> Result<Locator, DialRefused> {
+    parse_endpoint(endpoint, false)
+}
+
+/// Read the locator of a port to listen on: [`parse_locator`]'s text, where a port of 0 is
+/// the stack's to choose and the locator it is bound to then names the port it chose.
+pub fn parse_listen_locator(endpoint: &str) -> Result<Locator, DialRefused> {
+    parse_endpoint(endpoint, true)
+}
+
+fn parse_endpoint(endpoint: &str, any_port: bool) -> Result<Locator, DialRefused> {
     let Some((proto, rest)) = [LinkProto::Udp, LinkProto::Tcp, LinkProto::Tls]
         .into_iter()
         .find_map(|proto| {
@@ -74,7 +84,7 @@ pub fn parse_locator(endpoint: &str) -> Result<Locator, DialRefused> {
     }
     let (host, port) = rest.rsplit_once(':').ok_or(DialRefused::BadAddress)?;
     let port: u16 = digits(port).ok_or(DialRefused::BadAddress)?;
-    if port == 0 {
+    if port == 0 && !any_port {
         return Err(DialRefused::BadAddress);
     }
     let mut addr = [0u8; 4];

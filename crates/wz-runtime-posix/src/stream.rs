@@ -101,6 +101,25 @@ impl StreamDial for PosixTcpDial {
             _ => LinkOpenError::Refused,
         })
     }
+
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn listen(
+        &self,
+        addr: [u8; 4],
+        port: u16,
+    ) -> Result<alloc::boxed::Box<dyn StreamListen<Stream = PosixTcpSocket>>, LinkOpenError> {
+        PosixTcpListener::bind(addr, port)
+            .map(|listener| {
+                alloc::boxed::Box::new(listener)
+                    as alloc::boxed::Box<dyn StreamListen<Stream = PosixTcpSocket>>
+            })
+            .map_err(|e| match e {
+                // No descriptor left: worth a later try, as a dial's is.
+                PosixNetError::Socket(_) => LinkOpenError::Exhausted,
+                // The port is taken or not the host's to bind: the same answer a retry meets.
+                _ => LinkOpenError::Refused,
+            })
+    }
 }
 
 /// A TCP port the host listens on: the half of the seam [`PosixTcpDial`] is not, handing the stack
@@ -161,6 +180,12 @@ impl StreamListen for PosixTcpListener {
 
     fn local(&self) -> ([u8; 4], u16) {
         self.local
+    }
+
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
+        // A listening descriptor polls readable while a connection is queued on it.
+        crate::net::FdReadiness::of(self.fd)
     }
 
     fn accept(&self) -> Result<Option<PosixTcpSocket>, LinkOpenError> {

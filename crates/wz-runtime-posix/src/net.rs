@@ -100,6 +100,39 @@ impl LinkReadiness for FdReadiness {
         // failed or interrupted wait is a quiet socket: the step that follows reports the error.
         unsafe { libc::poll(&mut pfd, 1, timeout) };
     }
+
+    fn handle(&self) -> Option<usize> {
+        usize::try_from(self.0).ok()
+    }
+
+    fn wait_readable_among(&self, others: &[alloc::sync::Arc<dyn LinkReadiness>], timeout_ms: u32) {
+        let mut fds = alloc::vec![libc::pollfd {
+            fd: self.0,
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        for other in others {
+            match other
+                .handle()
+                .and_then(|handle| c_int::try_from(handle).ok())
+            {
+                Some(fd) => fds.push(libc::pollfd {
+                    fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                }),
+                // A wait this cannot name to the kernel: the bounded look, so it is not starved
+                // behind a wait on the others.
+                None => return self.wait_readable(timeout_ms.min(1)),
+            }
+        }
+        let timeout = c_int::try_from(timeout_ms).unwrap_or(c_int::MAX);
+        // SAFETY: `fds` is live for the call and its length is the count passed; every descriptor
+        // is a duplicate its owner holds open for as long as the wait is held, and the timeout
+        // bounds the wait. A failed or interrupted wait is a quiet socket: the step that follows
+        // reads and reports the error.
+        unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
+    }
 }
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]

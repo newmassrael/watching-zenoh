@@ -125,6 +125,21 @@ pub trait StreamDial {
     /// protocol it does not carry is [`LinkOpenError::Unsupported`] (permanent) and never
     /// [`LinkOpenError::Exhausted`] (retried) when its tables happen to be full.
     const CARRIED: bool = true;
+
+    /// Listen on `addr:port` (port 0: the platform picks one, read back with
+    /// [`StreamListen::local`]) for the connections of the protocol this dial opens. A stack that
+    /// listens overrides it; the answer of one that does not is [`LinkOpenError::Unsupported`],
+    /// as a dial it does not carry is. Boxed, so a stack names the listener it opens here and
+    /// nowhere above, and one that never listens links none.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn listen(
+        &self,
+        addr: [u8; 4],
+        port: u16,
+    ) -> Result<alloc::boxed::Box<dyn StreamListen<Stream = Self::Stream>>, LinkOpenError> {
+        let _ = (addr, port);
+        Err(LinkOpenError::Unsupported)
+    }
 }
 
 /// How a stack takes the connections that arrive on a port it listens on: the other half of
@@ -145,6 +160,15 @@ pub trait StreamListen {
     /// connection stays queued and the next call tries again. [`LinkOpenError::Unsupported`]
     /// when the listener itself is broken, which no later call mends.
     fn accept(&self) -> Result<Option<Self::Stream>, LinkOpenError>;
+
+    /// A wait for a connection that a thread other than the one that accepts can make
+    /// ([`StreamSocket::readiness`] is the stream's): ready when a connection is queued.
+    /// `None` when the platform gives none, and then the owner looks for a connection at a pace
+    /// of its own.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
+        None
+    }
 }
 
 /// The dial of a stream protocol a stack does not carry: an image with no secure channel names
