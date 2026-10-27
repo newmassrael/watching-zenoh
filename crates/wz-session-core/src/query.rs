@@ -435,6 +435,9 @@ struct Queryable<C: QuerySink, P: Storage = Profile> {
     /// chunk substring wildcards (R220) match via the shared
     /// [`keyexpr_pattern_matches`] helper.
     pattern: BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P>,
+    /// What is true of [`Self::pattern`] (a wildcard, a key the matchers accept), read once when
+    /// the queryable is declared: the pattern does not change, so a match does not scan it.
+    pattern_facts: crate::keyexpr_match::KeyFacts,
     /// R223 — locality filter applied before the callback fires.
     /// Identical semantics to
     /// [`crate::pubsub::SubscriberRegistry`] —
@@ -477,7 +480,13 @@ impl<C: QuerySink, P: Storage> Queryable<C, P> {
     /// default (and for `All`); only a `Some(AllComplete)` query is filtered
     /// down to the complete queryables — matching zenoh, where BestMatching /
     /// All reach every locally-matching queryable regardless of completeness.
-    fn matches(&self, keyexpr: &str, is_remote: bool, target: Option<QueryTarget>) -> bool {
+    fn matches(
+        &self,
+        keyexpr: &str,
+        keyexpr_facts: crate::keyexpr_match::KeyFacts,
+        is_remote: bool,
+        target: Option<QueryTarget>,
+    ) -> bool {
         let allowed = if is_remote {
             self.allowed_origin.allows_remote()
         } else {
@@ -505,7 +514,12 @@ impl<C: QuerySink, P: Storage> Queryable<C, P> {
         // `declare::declared_intersects` asks; the query is split only when a
         // wildcard makes the walk necessary. For a concrete query this is
         // identical to the prior pattern match.
-        crate::keyexpr_match::keyexpr_intersects_text(&self.pattern, keyexpr)
+        crate::keyexpr_match::keyexpr_intersects_text_with(
+            &self.pattern,
+            self.pattern_facts,
+            keyexpr,
+            keyexpr_facts,
+        )
     }
 }
 
@@ -1991,12 +2005,14 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
                 }
             };
         let id = QueryableId(self.next_id);
+        let pattern_facts = crate::keyexpr_match::KeyFacts::of(&pattern);
         // Push first; only consume the id counter on success so a
         // rejected (table-full) registration leaves no id gap.
         self.queryables
             .push(Queryable {
                 id,
                 pattern,
+                pattern_facts,
                 allowed_origin,
                 complete,
                 sink,
@@ -2217,8 +2233,9 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
     ) -> usize {
         let mut fired: usize = 0;
         let keyexpr = view.keyexpr();
+        let keyexpr_facts = crate::keyexpr_match::KeyFacts::of(keyexpr);
         for queryable in self.queryables.iter_mut() {
-            if queryable.matches(keyexpr, is_remote, target) {
+            if queryable.matches(keyexpr, keyexpr_facts, is_remote, target) {
                 queryable.sink.handle(view, reply_out);
                 fired = fired.saturating_add(1);
             }
@@ -2766,12 +2783,14 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
             None => ReplyKeyExpr::MatchingQuery,
         };
         let mut matched = 0;
+        // The query's key is read once for every queryable it is matched against.
+        let keyexpr_facts = crate::keyexpr_match::KeyFacts::of(keyexpr);
         for queryable in self.queryables.iter_mut() {
             // R311gb (Track 2) — shared match SSOT with the no-heap
             // `dispatch_borrowed` path: locality predicate + target
             // completeness filter + bounded pattern split happen in
             // `Queryable::matches`.
-            if queryable.matches(keyexpr, is_remote, target) {
+            if queryable.matches(keyexpr, keyexpr_facts, is_remote, target) {
                 matched += 1;
                 // R311y834 — the acceptance mode comes from the QUERY's own
                 // selector parameters, the same token the requester's gate

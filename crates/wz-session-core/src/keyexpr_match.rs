@@ -618,22 +618,59 @@ fn has_star(text: &str) -> bool {
 /// Whether `text` splits into chunks the matchers accept: none empty (so not the empty text, not
 /// a leading or trailing `/`, no `//`), and on the fixed backing no more than it holds.
 fn text_is_a_key(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    if bytes.is_empty() || bytes[0] == b'/' || bytes[bytes.len() - 1] == b'/' {
-        return false;
-    }
-    let mut slashes = 0usize;
-    let mut previous = 0u8;
-    for &byte in bytes {
-        if byte == b'/' {
-            if previous == b'/' {
-                return false;
+    KeyFacts::of(text).key
+}
+
+/// What is true of a key's text, read in one pass and kept: whether it holds a wildcard, and
+/// whether it is a key the matchers accept ([`text_is_a_key`]'s rule).
+///
+/// A key that does not change between questions is asked about once. A queryable's pattern is
+/// fixed from its declaration and a query's key is fixed from its decode, and every match
+/// between the two used to scan both again (a wildcard search on each, then a validity pass on
+/// a hit). The facts are the same answers, computed where the text is made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct KeyFacts {
+    wild: bool,
+    key: bool,
+}
+
+impl KeyFacts {
+    /// The facts of `text`.
+    pub fn of(text: &str) -> Self {
+        let bytes = text.as_bytes();
+        let mut wild = false;
+        let mut doubled = false;
+        let mut slashes = 0usize;
+        let mut previous = 0u8;
+        for &byte in bytes {
+            wild |= byte == b'*';
+            if byte == b'/' {
+                doubled |= previous == b'/';
+                slashes += 1;
             }
-            slashes += 1;
+            previous = byte;
         }
-        previous = byte;
+        let key = !bytes.is_empty()
+            && bytes[0] != b'/'
+            && bytes[bytes.len() - 1] != b'/'
+            && !doubled
+            && (!crate::bounded::ENFORCES_CAPACITY || slashes < MAX_KEYEXPR_CHUNKS);
+        Self { wild, key }
     }
-    !crate::bounded::ENFORCES_CAPACITY || slashes < MAX_KEYEXPR_CHUNKS
+}
+
+/// [`keyexpr_intersects_text`] for two keys whose [`KeyFacts`] are already known: the same
+/// answer, with no scan of either text unless a wildcard makes the walk necessary.
+pub fn keyexpr_intersects_text_with(
+    candidate: &str,
+    candidate_facts: KeyFacts,
+    target: &str,
+    target_facts: KeyFacts,
+) -> bool {
+    if !(candidate_facts.wild || target_facts.wild) {
+        return candidate == target && target_facts.key;
+    }
+    keyexpr_intersects_text(candidate, target)
 }
 
 /// Whether `chunks` joined by `/` is `text`, compared without building the join.
@@ -930,6 +967,92 @@ fn chunk_includes(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The scan `text_is_a_key` was before the facts were read in one pass, kept here as the
+    /// reference the facts are held to.
+    fn text_is_a_key_by_the_old_scan(text: &str) -> bool {
+        let bytes = text.as_bytes();
+        if bytes.is_empty() || bytes[0] == b'/' || bytes[bytes.len() - 1] == b'/' {
+            return false;
+        }
+        let mut slashes = 0usize;
+        let mut previous = 0u8;
+        for &byte in bytes {
+            if byte == b'/' {
+                if previous == b'/' {
+                    return false;
+                }
+                slashes += 1;
+            }
+            previous = byte;
+        }
+        !crate::bounded::ENFORCES_CAPACITY || slashes < MAX_KEYEXPR_CHUNKS
+    }
+
+    const FACT_KEYS: [&str; 18] = [
+        "",
+        "/",
+        "//",
+        "a",
+        "a/",
+        "/a",
+        "a//b",
+        "a/b",
+        "a/b/c",
+        "a/*",
+        "*",
+        "**",
+        "a/**",
+        "a/*/c",
+        "a$*",
+        "demo/status/node-0001",
+        "demo/config/node-0001",
+        "@/zid/query",
+    ];
+
+    #[test]
+    fn the_facts_of_a_key_are_what_the_separate_scans_say() {
+        for key in FACT_KEYS {
+            let facts = KeyFacts::of(key);
+            assert_eq!(facts.wild, has_star(key), "wild of {key:?}");
+            assert_eq!(
+                facts.key,
+                text_is_a_key_by_the_old_scan(key),
+                "key of {key:?}"
+            );
+        }
+        // A key as deep as the backing holds, and one past it.
+        for depth in [
+            MAX_KEYEXPR_CHUNKS - 1,
+            MAX_KEYEXPR_CHUNKS,
+            MAX_KEYEXPR_CHUNKS + 1,
+        ] {
+            let key = ["k"; MAX_KEYEXPR_CHUNKS + 1][..depth].join("/");
+            assert_eq!(
+                KeyFacts::of(&key).key,
+                text_is_a_key_by_the_old_scan(&key),
+                "depth {depth}"
+            );
+        }
+    }
+
+    #[test]
+    fn two_keys_with_their_facts_intersect_as_the_text_form_says() {
+        for candidate in FACT_KEYS {
+            for target in FACT_KEYS {
+                assert_eq!(
+                    keyexpr_intersects_text_with(
+                        candidate,
+                        KeyFacts::of(candidate),
+                        target,
+                        KeyFacts::of(target)
+                    ),
+                    keyexpr_intersects_text(candidate, target),
+                    "{candidate:?} against {target:?}"
+                );
+            }
+        }
+    }
 
     /// The stack view holds exactly the chunks `str::split('/')` yields, at every depth around its
     /// own bound (it spills past `STACK_KEY_CHUNKS`) and the backing's (`MAX_KEYEXPR_CHUNKS`), and
