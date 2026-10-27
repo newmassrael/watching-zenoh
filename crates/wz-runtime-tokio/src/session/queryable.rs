@@ -432,9 +432,11 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                 None
             };
             cell.stage(&queue, move |handler| {
-                // Declared first so it is dropped last: after the replies
-                // below have been delivered to the requester.
-                let _job_hold = job_hold;
+                // Held for the whole job and released at its end, after the replies
+                // below have been delivered to the requester: a job that ends any
+                // other way (unrun, or unwinding) drops it and releases it as a
+                // held query that is let go of is.
+                let job_hold = job_hold;
                 let borrowed = owned.borrowed();
                 // R3061 -- lent as the buffer when the query held it as one.
                 let shared_view = owned.lent();
@@ -485,6 +487,12 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                     for reply in ReplyStaging::drain_staged(&mut replies) {
                         route.send_reply(reply);
                     }
+                }
+                // The Final this job owes is staged behind those replies, and taken by the
+                // loop that runs the job once the job has returned: a drain made here would
+                // run the requester's callbacks inside the call of this handler's cell.
+                if let Some(hold) = job_hold {
+                    hold.release_within_job();
                 }
             });
         };

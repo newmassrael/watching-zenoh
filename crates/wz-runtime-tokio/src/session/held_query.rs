@@ -121,6 +121,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         HandlerJobHold {
             session: self.downgrade(),
             key,
+            settled: false,
         }
     }
 
@@ -132,6 +133,28 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     /// is simply gone and that job finds no hold and emits normally — both
     /// orders end with exactly one Final.
     fn release_query_final(&self, key: FinalKey) {
+        self.release_query_final_in(key, true);
+    }
+
+    /// [`Self::release_query_final`] for a release made at the end of a deferred job, which
+    /// STAGES the Final and leaves it to the drain loop that is running the job.
+    ///
+    /// A job runs inside [`DeferredFireQueue::drain`], whose loop takes what the job staged once
+    /// the job has returned, in order. Draining here as well would run the requester's fires, its
+    /// reply callbacks among them, inside the call of the handler's cell: a callback that asks a
+    /// get of the same queryable and waits for it then finds the cell mid-call, and its call is
+    /// parked behind the one that is waiting. The release that follows a job a second thread
+    /// took (the thread that asked finalised and handed the Final to the hold) is the one that
+    /// ran there.
+    ///
+    /// [`DeferredFireQueue::drain`]: wz_session_core::deferred_fire::DeferredFireQueue::drain
+    fn release_query_final_staged(&self, key: FinalKey) {
+        self.release_query_final_in(key, false);
+    }
+
+    /// The release itself; `drain` says whether the fires it stages are run before it returns
+    /// (under a [`LocalDeliveryDrain::Caller`] session) or are left to the loop that is running.
+    fn release_query_final_in(&self, key: FinalKey, drain: bool) {
         let due = match self.final_holds.lock() {
             Ok(mut map) => {
                 let Some(hold) = map.get_mut(&key) else {
@@ -160,7 +183,14 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                     observer.replies.deliver_local_final(key.rid);
                 });
             }));
-            self.drain_or_wake_local();
+            if drain {
+                self.drain_or_wake_local();
+            } else if let (LocalDeliveryDrain::DriveTask, Some(wake)) =
+                (self.local_delivery, &self.local_stage_wake)
+            {
+                // The drive task is not the loop that is running: it is owed its wake.
+                wake.notify_one();
+            }
         } else {
             Tp::reply_route(&self.transport).send_final(key.rid, qos);
         }
@@ -315,10 +345,28 @@ pub(super) struct HandlerJobHold<
 > {
     session: WeakSession<R, T, Tp>,
     key: FinalKey,
+    /// Whether the hold has been released already, by [`Self::release_within_job`].
+    settled: bool,
+}
+
+impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> HandlerJobHold<R, T, Tp> {
+    /// Release the hold at the end of the job that took it: the Final it owes is STAGED, and the
+    /// loop that is running the job takes it once the job has returned (see
+    /// [`Session::release_query_final_staged`]). Dropped any other way, the hold releases and
+    /// runs what it staged, as a held query that is let go of does.
+    pub(super) fn release_within_job(mut self) {
+        self.settled = true;
+        if let Some(session) = self.session.upgrade() {
+            session.release_query_final_staged(self.key);
+        }
+    }
 }
 
 impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Drop for HandlerJobHold<R, T, Tp> {
     fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
         // A session already gone has no GET left to terminate.
         if let Some(session) = self.session.upgrade() {
             session.release_query_final(self.key);

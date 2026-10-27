@@ -3687,6 +3687,102 @@ fn a_local_get_hears_every_reply_while_another_thread_drains_the_plane() {
     );
 }
 
+/// A callback of a GET may ask a GET of the very queryable that answered it, and wait for it,
+/// whichever thread ran the handler's job.
+///
+/// When a second thread took the handler's job, the thread that asked had already finalised and
+/// handed the GET's Final to the job's hold. The job released the hold from inside its own call
+/// and drained what it staged right there, so the requester's final callback ran inside the call
+/// of the queryable's cell; its GET of the same queryable found the cell mid-call, was parked
+/// behind the call that waited for it, and never ended. The hold is now released by staging the
+/// Final for the loop that runs the job, which takes it once the job has returned.
+///
+/// The second drainer stands for the drive task, as in the test above; the session is the
+/// caller-drained one the Rust API opens, in which the asking thread runs the callbacks.
+#[cfg(all(feature = "query-get", feature = "query-queryable"))]
+#[test]
+fn a_callback_may_ask_the_queryable_that_answered_it_while_another_thread_drains_the_plane() {
+    use std::sync::atomic::AtomicBool;
+
+    const ASKS: usize = 1500;
+
+    let (session, _driver) = build_session();
+    let session = session.with_local_delivery_drain(LocalDeliveryDrain::Caller);
+    let _queryable = session
+        .declare_queryable(
+            "home/nest",
+            QueryableOptions::default(),
+            move |_query, out| {
+                out.reply(b"r");
+            },
+        )
+        .expect("query-queryable is ON in this test build");
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let drainer = {
+        let session = session.clone();
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                session.drain_deferred_fires();
+            }
+        })
+    };
+
+    fn local() -> QueryOptions {
+        QueryOptions::get().with_allowed_destination(Locality::SessionLocal)
+    }
+    let mut stuck: Vec<usize> = Vec::new();
+    for ask in 0..ASKS {
+        let (told, outcome) = std::sync::mpsc::channel::<bool>();
+        let told = Mutex::new(told);
+        let again = session.clone();
+        session
+            .query(
+                "home/nest",
+                local(),
+                |_| {},
+                move |_| {
+                    // The final of the GET asks the same queryable once more and waits for the
+                    // final of that one.
+                    let inner = Arc::new(AtomicUsize::new(0));
+                    let counted = inner.clone();
+                    again
+                        .query(
+                            "home/nest",
+                            local(),
+                            |_| {},
+                            move |_| {
+                                counted.fetch_add(1, Ordering::SeqCst);
+                            },
+                        )
+                        .expect("query-get is ON in this test build");
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                    while inner.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline
+                    {
+                        std::thread::yield_now();
+                    }
+                    let _ = told.lock().unwrap().send(inner.load(Ordering::SeqCst) == 1);
+                },
+            )
+            .expect("query-get is ON in this test build");
+        // The outer final may be the other thread's to deliver.
+        if outcome.recv_timeout(std::time::Duration::from_secs(5)) != Ok(true) {
+            stuck.push(ask);
+            if stuck.len() >= 3 {
+                break;
+            }
+        }
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    drainer.join().expect("the second drainer does not panic");
+
+    assert!(
+        stuck.is_empty(),
+        "the GET a callback asked of the queryable that answered it did not end, at asks {stuck:?}"
+    );
+}
+
 /// R2953 (open-debt item 836) — a query this session asked of ITSELF and a
 /// handler kept is waited for, as upstream's is: the GET's final comes when
 /// the held query is dropped, not when the handler returns, and a reply the
