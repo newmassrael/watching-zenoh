@@ -104,7 +104,7 @@ extern "C" {
  * without moving this number is red rather than shipped.
  * ------------------------------------------------------------------ */
 
-#define WZ_CAPI_C_ABI_REVISION 6
+#define WZ_CAPI_C_ABI_REVISION 7
 
 /* The revision the LOADED library reports. See the block above for why
  * this exists beside the macro. */
@@ -243,8 +243,8 @@ z_result_t wz_capi_c_config_validate(const z_loaned_config_t *config,
 z_result_t wz_capi_c_config_validate_for_build(const z_loaned_config_t *config,
                                                z_owned_string_t *out_defects);
 
-/* What an open of this config would ask of the operating system, as ONE
- * JSON object with the keys of the target-build manifest
+/* What an open of this config would ask of the operating system (revision 7),
+ * as ONE JSON object with the keys of the target-build manifest
  * (docs/target-build-contract.md T9):
  *
  *     {"requires": [...], "may_require": [...] or null, "unknown": [...]}

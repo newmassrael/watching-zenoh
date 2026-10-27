@@ -1592,7 +1592,10 @@ pub extern "C" fn wz_capi_c_abi_version() -> i32 {
 /// and for the code `z_put`, `z_delete` and the publisher's put and delete answer
 /// with when a message is larger than the session sends
 /// (`WZ_CAPI_C_E_VALUE_TOO_LARGE`, which was `Z_EINVAL` before).
-pub const WZ_CAPI_C_ABI_REVISION: i32 = 6;
+///
+/// It moves to 7 for what an open of a configuration would ask of the operating system
+/// (`wz_capi_c_config_device_requires`), one new symbol.
+pub const WZ_CAPI_C_ABI_REVISION: i32 = 7;
 
 // The same revision, carried as an ELF note for a tool that describes this library for a device it
 // cannot run on and so cannot call `wz_capi_c_abi_version` (`wz-abi-stamp`;
