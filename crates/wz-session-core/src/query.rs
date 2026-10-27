@@ -946,6 +946,10 @@ pub struct QueryResponder<'a> {
     /// `keyexpr_literal` itself, which always intersects itself, so they are
     /// deliberately not routed through the gate.
     accept: ReplyKeyExpr,
+    /// What is true of [`Self::keyexpr_literal`], read once where the query's key is made: a reply
+    /// keyed as its query (every reply of a node that answers under the key it was asked) is
+    /// admitted by these and not by a scan of the same text.
+    keyexpr_facts: crate::keyexpr_match::KeyFacts,
     /// R2594 — the QUERY's QoS, stamped onto every reply this responder
     /// stages. Upstream seeds `reply`, `reply_del` and `reply_err` alike from
     /// it (`zenoh/src/api/builders/reply.rs` @ `qos: query.inner.qos.into(),`),
@@ -1026,6 +1030,7 @@ impl<'a> QueryResponder<'a> {
     ) -> Self {
         Self {
             rid,
+            keyexpr_facts: crate::keyexpr_match::KeyFacts::of(&keyexpr_literal),
             keyexpr_literal: alloc::borrow::Cow::Owned(keyexpr_literal),
             replies,
             responder: None,
@@ -1039,12 +1044,14 @@ impl<'a> QueryResponder<'a> {
     fn over(
         rid: u64,
         keyexpr: &'a str,
+        keyexpr_facts: crate::keyexpr_match::KeyFacts,
         accept: ReplyKeyExpr,
         qos: QosLevel,
         replies: &'a mut ReplyStage,
     ) -> Self {
         Self {
             rid,
+            keyexpr_facts,
             keyexpr_literal: literal_key(keyexpr),
             replies,
             responder: None,
@@ -1068,12 +1075,16 @@ impl<'a> QueryResponder<'a> {
     /// instead, because the `ReplyOut` seam was `()`-returning; nothing read
     /// that count, and the handler that made the mistake could not.
     fn admit(&self, keyexpr: &str) -> Result<(), ReplyError> {
-        if self.accept == ReplyKeyExpr::Any
-            || crate::reply_acceptance::reply_keyexpr_intersects(
-                key_str(&self.keyexpr_literal),
-                keyexpr,
-            )
-        {
+        let query = key_str(&self.keyexpr_literal);
+        // A reply keyed exactly as its query is the usual one: it intersects when the query's
+        // own key does, which the facts already say.
+        let admitted = self.accept == ReplyKeyExpr::Any
+            || if keyexpr == query {
+                self.keyexpr_facts.intersects_itself(query)
+            } else {
+                crate::reply_acceptance::reply_keyexpr_intersects(query, keyexpr)
+            };
+        if admitted {
             return Ok(());
         }
         Err(ReplyError::KeyExprNotMatch)
@@ -2798,7 +2809,8 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
                 // `query-selector-parameters`-gated projection, so a build that
                 // cannot see parameters reads `MatchingQuery` — the guarantee,
                 // never the opt-out — which is the safe direction.
-                let mut responder = QueryResponder::over(rid, keyexpr, accept_mode, qos, replies);
+                let mut responder =
+                    QueryResponder::over(rid, keyexpr, keyexpr_facts, accept_mode, qos, replies);
                 // R311gb-3b-cleanup — dispatch through the QuerySink seam
                 // with no intermediate wrapper: `QueryResponder` impls
                 // `ReplyOut` directly, and the inbound view is a

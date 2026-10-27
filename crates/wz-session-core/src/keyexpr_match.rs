@@ -657,6 +657,17 @@ impl KeyFacts {
             && (!crate::bounded::ENFORCES_CAPACITY || slashes < MAX_KEYEXPR_CHUNKS);
         Self { wild, key }
     }
+
+    /// Whether the key of these facts intersects ITSELF, which is what a reply keyed exactly as
+    /// its query is asked: the answer [`keyexpr_intersects_text`] gives for the same text on both
+    /// sides, with no scan unless a wildcard makes the walk necessary.
+    pub fn intersects_itself(self, text: &str) -> bool {
+        if self.wild {
+            keyexpr_intersects_text(text, text)
+        } else {
+            self.key
+        }
+    }
 }
 
 /// [`keyexpr_intersects_text`] for two keys whose [`KeyFacts`] are already known: the same
@@ -1032,6 +1043,17 @@ mod tests {
                 KeyFacts::of(&key).key,
                 text_is_a_key_by_the_old_scan(&key),
                 "depth {depth}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_key_intersects_itself_as_the_text_form_says() {
+        for key in FACT_KEYS {
+            assert_eq!(
+                KeyFacts::of(key).intersects_itself(key),
+                keyexpr_intersects_text(key, key),
+                "{key:?}"
             );
         }
     }
