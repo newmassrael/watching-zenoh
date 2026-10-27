@@ -46,7 +46,8 @@ feature over a bare crate does not compile a referrer gated on two.
 
 A configuration matters only through what it changes, so two that compile the same items of the
 crate are one. Which items the crate compiles depends on the features its own sources and build
-script name (`feature = "x"`, `CARGO_FEATURE_X`), so a configuration is identified by that set,
+script name (a `feature = "x"` cfg, or the variable cargo gives a build script for a feature),
+so a configuration is identified by that set,
 and one with the identity of a largest set measures nothing the largest set has not. The scan
 over-reads (a name in a comment counts), which costs a build and never a configuration.
 
