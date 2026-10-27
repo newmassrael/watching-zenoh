@@ -72,6 +72,7 @@ use crate::api::{
     handlers::{Callback, DefaultHandler},
     info::SessionInfo,
     key_expr::{KeyExpr, KeyExprUndeclaration, SessionAnchor, WireAnchor},
+    matching::{MatchingStatus, MatchingStatusType},
     publisher::Priority,
     query::{ConsolidationMode, QueryConsolidation, Reply, ReplyKeyExpr},
     queryable::Query,
@@ -554,6 +555,71 @@ impl Engine {
                 .undeclare_write_filter(u64::from(id)),
         }
     }
+
+    /// Tell `callback` whether anything `kind` counts matches `key` among the declarations
+    /// `destination` admits, now if it does and each time that changes, until
+    /// [`Engine::undeclare_matching_listener`] is called with the id returned. `notifier` is let go
+    /// with the callback.
+    fn declare_matching_listener(
+        &self,
+        kind: MatchingStatusType,
+        key: &str,
+        destination: Locality,
+        callback: Callback<MatchingStatus>,
+        notifier: Option<SyncGroupNotifier>,
+    ) -> ZResult<Id> {
+        match self {
+            Engine::Tokio(state) => {
+                let id = state
+                    .shared
+                    .as_engine()
+                    .declare_matching_listener_in(
+                        tokio_engine::plane_of(kind),
+                        key.to_owned(),
+                        tokio_engine::matching_sink(callback, notifier),
+                        tokio_engine::engine_locality(destination),
+                    )
+                    .ok_or_else(|| zerror!("this engine has no matching listener"))?;
+                Id::try_from(id).map_err(|_| {
+                    zerror!(
+                        "the engine numbered a matching listener {id}, which is more than an id \
+                         holds"
+                    )
+                    .into()
+                })
+            }
+        }
+    }
+
+    /// Stop the matching listener `id` and let go of its callback.
+    fn undeclare_matching_listener(&self, id: Id) {
+        match self {
+            Engine::Tokio(state) => state
+                .shared
+                .as_engine()
+                .undeclare_matching_listener(u64::from(id)),
+        }
+    }
+
+    /// Whether anything `kind` counts matches `key` among the declarations `destination` admits.
+    fn matching_status(
+        &self,
+        kind: MatchingStatusType,
+        key: &str,
+        destination: Locality,
+    ) -> ZResult<bool> {
+        match self {
+            Engine::Tokio(state) => state
+                .shared
+                .as_engine()
+                .matching_status(
+                    tokio_engine::plane_of(kind),
+                    key,
+                    tokio_engine::engine_locality(destination),
+                )
+                .ok_or_else(|| zerror!("this engine has no matching status").into()),
+        }
+    }
 }
 
 #[cfg(not(feature = "engine-tokio"))]
@@ -629,6 +695,30 @@ impl Engine {
     fn undeclare_querier(&self, _id: Id) {
         match *self {}
     }
+
+    fn declare_matching_listener(
+        &self,
+        _kind: MatchingStatusType,
+        _key: &str,
+        _destination: Locality,
+        _callback: Callback<MatchingStatus>,
+        _notifier: Option<SyncGroupNotifier>,
+    ) -> ZResult<Id> {
+        match *self {}
+    }
+
+    fn undeclare_matching_listener(&self, _id: Id) {
+        match *self {}
+    }
+
+    fn matching_status(
+        &self,
+        _kind: MatchingStatusType,
+        _key: &str,
+        _destination: Locality,
+    ) -> ZResult<bool> {
+        match *self {}
+    }
 }
 
 /// The reading of a configuration for the tokio engine: its role, its endpoints, the document its
@@ -660,7 +750,9 @@ mod tokio_engine {
         },
     };
     use wz_capi_port::cancellation::CancellableFan;
-    use wz_capi_port::{HeldQuery, QueryHolder, QueryableSink, ReplyCallback, SessionEngine};
+    use wz_capi_port::{
+        HeldQuery, MatchingSink, QueryHolder, QueryableSink, ReplyCallback, SessionEngine,
+    };
     use zenoh_config::{wrappers::ZenohId, ExpandedConfig, ModeDependent};
     use zenoh_protocol::{
         core::{CongestionControl, EndPoints, ExprId, Parameters, WhatAmI},
@@ -676,6 +768,7 @@ mod tokio_engine {
         encoding::Encoding,
         handlers::Callback,
         key_expr::KeyExpr,
+        matching::{MatchingStatus, MatchingStatusType},
         query::{Reply, ReplyError},
         queryable::{Answer, Query, QueryInner, Replier},
         sample::{Locality, QoS, Sample, SampleKind},
@@ -1350,6 +1443,34 @@ mod tokio_engine {
         })
     }
 
+    /// The declarations a matching status of `kind` counts, as the engine names them.
+    pub(super) fn plane_of(kind: MatchingStatusType) -> wz_capi_core::faces::FilterPlane {
+        match kind {
+            MatchingStatusType::Subscribers => wz_capi_core::faces::FilterPlane::Subscribers,
+            MatchingStatusType::Queryables(complete_required) => {
+                wz_capi_core::faces::FilterPlane::Queryables { complete_required }
+            }
+        }
+    }
+
+    /// What the engine hands the verdicts of a matching listener to: the callback, called with
+    /// the status each time it changes, from whichever thread the change is seen on. The notifier
+    /// is let go with the last hold on it (and with a call that is still running).
+    pub(super) fn matching_sink(
+        callback: Callback<MatchingStatus>,
+        notifier: Option<SyncGroupNotifier>,
+    ) -> MatchingSink {
+        struct Delivery {
+            callback: Callback<MatchingStatus>,
+            _notifier: Option<SyncGroupNotifier>,
+        }
+        let delivery = Arc::new(Delivery {
+            callback,
+            _notifier: notifier,
+        });
+        Arc::new(move |matching| delivery.callback.call(MatchingStatus { matching }))
+    }
+
     /// A publication the engine refused.
     pub(super) fn publish_error(
         refusal: FanoutError,
@@ -1406,9 +1527,76 @@ pub(crate) struct SessionInner {
     /// The queriers declared on the session and not undeclared, which a close lets go of, each
     /// with the queries it has asked that may still be under way.
     queriers: std::sync::Mutex<Vec<QuerierEntry>>,
+    /// The matching listeners declared on the session and not undeclared, which a close lets go
+    /// of.
+    matching_listeners: std::sync::Mutex<Vec<Id>>,
 }
 
 impl SessionInner {
+    fn matching_listeners(&self) -> std::sync::MutexGuard<'_, Vec<Id>> {
+        self.matching_listeners
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Undeclare every matching listener that is left: those of a session that has closed.
+    fn release_matching_listeners(&self) {
+        let left = std::mem::take(&mut *self.matching_listeners());
+        for id in left {
+            self.engine.undeclare_matching_listener(id);
+        }
+    }
+
+    /// Declare a matching listener on the engine and record it, so that a close lets go of it. A
+    /// status that already matches is given to the callback before this returns, as upstream's
+    /// declaration does.
+    fn declare_matches_listener_inner(
+        &self,
+        key_expr: &KeyExpr,
+        destination: Locality,
+        kind: MatchingStatusType,
+        callback: Callback<MatchingStatus>,
+        notifier: Option<SyncGroupNotifier>,
+    ) -> ZResult<Id> {
+        if self.engine.is_closed() {
+            return Err(SessionClosedError.into());
+        }
+        tracing::trace!("declare_matches_listener({kind:?}: {key_expr:?})");
+        let id = self.engine.declare_matching_listener(
+            kind,
+            key_expr.as_str(),
+            destination,
+            callback,
+            notifier,
+        )?;
+        self.matching_listeners().push(id);
+        // A close that ran between the check and the record has not seen this listener.
+        if self.engine.is_closed() {
+            self.release_matching_listeners();
+            return Err(SessionClosedError.into());
+        }
+        Ok(id)
+    }
+
+    /// Undeclare the matching listener `id`: a closed session has none, and undeclaring on it is
+    /// no error; an id the session does not hold is one.
+    fn undeclare_matches_listener_inner(&self, id: Id) -> ZResult<()> {
+        if self.engine.is_closed() {
+            return Ok(());
+        }
+        let known = {
+            let mut listeners = self.matching_listeners();
+            let before = listeners.len();
+            listeners.retain(|held| *held != id);
+            before != listeners.len()
+        };
+        if !known {
+            return Err(zerror!("Unable to find MatchingListener").into());
+        }
+        self.engine.undeclare_matching_listener(id);
+        Ok(())
+    }
+
     fn subscriptions(&self) -> std::sync::MutexGuard<'_, Vec<Id>> {
         self.subscriptions
             .lock()
@@ -1826,6 +2014,7 @@ impl Session {
             publishers: std::sync::Mutex::new(vec![]),
             queryables: std::sync::Mutex::new(vec![]),
             queriers: std::sync::Mutex::new(vec![]),
+            matching_listeners: std::sync::Mutex::new(vec![]),
         })))
     }
 }
@@ -1918,6 +2107,40 @@ impl WeakSession {
             }
             None => Err(zerror!("Unable to find queryable").into()),
         }
+    }
+
+    /// Whether anything `kind` counts matches `key_expr` among the declarations `destination`
+    /// admits: the session's own, the peers', or either.
+    pub(crate) fn matching_status(
+        &self,
+        key_expr: &KeyExpr,
+        destination: Locality,
+        kind: MatchingStatusType,
+    ) -> ZResult<MatchingStatus> {
+        self.0
+            .engine
+            .matching_status(kind, key_expr.as_str(), destination)
+            .map(|matching| MatchingStatus { matching })
+    }
+
+    /// Declare a matching listener, whose callback is given the status each time it changes. The
+    /// id of the engine's listener, released at undeclare or at close.
+    pub(crate) fn declare_matches_listener_inner(
+        &self,
+        key_expr: &KeyExpr,
+        destination: Locality,
+        kind: MatchingStatusType,
+        callback: Callback<MatchingStatus>,
+        notifier: Option<SyncGroupNotifier>,
+    ) -> ZResult<Id> {
+        self.0
+            .declare_matches_listener_inner(key_expr, destination, kind, callback, notifier)
+    }
+
+    /// Undeclare the matching listener `id`. A closed session has none, and undeclaring on it is
+    /// no error; an id the session does not hold is one.
+    pub(crate) fn undeclare_matches_listener_inner(&self, id: Id) -> ZResult<()> {
+        self.0.undeclare_matches_listener_inner(id)
     }
 
     /// Undeclare the querier `qid` with the queries it has under way. A closed session has none,
@@ -2742,6 +2965,7 @@ impl Closee for WeakSession {
                 session.release_publishers();
                 session.release_queryables();
                 session.release_queriers();
+                session.release_matching_listeners();
             })
             .await;
     }
@@ -4746,6 +4970,530 @@ mod tests {
             let (done_tx, done) = mpsc::channel();
             std::thread::spawn(move || {
                 let _ = done_tx.send(querier.undeclare().wait_callbacks().wait());
+            });
+            assert!(
+                done.recv_timeout(Duration::from_millis(300)).is_err(),
+                "the undeclaration returned while a callback was running"
+            );
+            release_tx.send(()).expect("the callback is waiting");
+            done.recv_timeout(WAIT)
+                .expect("the undeclaration returned once the callback had")
+                .expect("undeclares");
+        }
+    }
+
+    /// What a publisher and a querier say of the subscribers and the queryables that match them.
+    mod matching {
+        use std::{sync::mpsc, time::Duration};
+
+        use super::*;
+        use crate::api::query::QueryTarget;
+
+        const WAIT: Duration = Duration::from_secs(5);
+
+        /// Every status a listener is told of, in the order it is told them.
+        fn statuses() -> (
+            impl Fn(MatchingStatus) + Send + Sync + 'static,
+            mpsc::Receiver<bool>,
+        ) {
+            let (sender, received) = mpsc::channel();
+            let sender = std::sync::Mutex::new(sender);
+            (
+                move |status: MatchingStatus| {
+                    let _ = sender.lock().unwrap().send(status.matching());
+                },
+                received,
+            )
+        }
+
+        fn status_of(publisher: &crate::api::publisher::Publisher<'_>) -> bool {
+            publisher
+                .matching_status()
+                .wait()
+                .expect("a status")
+                .matching()
+        }
+
+        #[test]
+        fn a_publisher_matches_the_subscribers_of_its_own_session_and_says_when_they_go() {
+            let session = open(peer("a1b2f1")).wait().expect("opens");
+            let publisher = session
+                .declare_publisher("demo/m/p")
+                .wait()
+                .expect("declares");
+            assert!(!status_of(&publisher));
+            let subscriber = session
+                .declare_subscriber("demo/m/*")
+                .wait()
+                .expect("declares");
+            assert!(status_of(&publisher));
+            // A subscriber on a key that does not meet the publisher's does not match it.
+            let apart = session
+                .declare_subscriber("demo/other")
+                .wait()
+                .expect("declares");
+            subscriber.undeclare().wait().expect("undeclares");
+            assert!(!status_of(&publisher));
+            drop(apart);
+        }
+
+        #[test]
+        fn the_destination_of_a_publisher_says_whose_subscribers_match_it() {
+            let session = open(peer("a1b2f2")).wait().expect("opens");
+            let local = session
+                .declare_publisher("demo/m/d")
+                .allowed_destination(Locality::SessionLocal)
+                .wait()
+                .expect("declares");
+            let remote = session
+                .declare_publisher("demo/m/d")
+                .allowed_destination(Locality::Remote)
+                .wait()
+                .expect("declares");
+            let _subscriber = session
+                .declare_subscriber("demo/m/d")
+                .wait()
+                .expect("declares");
+            assert!(status_of(&local));
+            assert!(
+                !status_of(&remote),
+                "a subscriber of the session is not a remote one"
+            );
+        }
+
+        #[test]
+        fn a_listener_is_told_each_change_and_what_already_matches_at_its_declaration() {
+            let session = open(peer("a1b2f3")).wait().expect("opens");
+            let publisher = session
+                .declare_publisher("demo/m/l")
+                .wait()
+                .expect("declares");
+            let (callback, told) = statuses();
+            let listener = publisher
+                .matching_listener()
+                .callback(callback)
+                .wait()
+                .expect("declares");
+            // Nothing matches, and nothing is said of it.
+            assert_eq!(
+                told.recv_timeout(Duration::from_millis(200)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            );
+            let first = session
+                .declare_subscriber("demo/m/l")
+                .wait()
+                .expect("declares");
+            assert_eq!(told.recv_timeout(WAIT), Ok(true));
+            // A second subscriber changes nothing, and the loss of the first one nothing either.
+            let second = session
+                .declare_subscriber("demo/m/**")
+                .wait()
+                .expect("declares");
+            first.undeclare().wait().expect("undeclares");
+            second.undeclare().wait().expect("undeclares");
+            assert_eq!(told.recv_timeout(WAIT), Ok(false));
+            assert_eq!(
+                told.recv_timeout(Duration::from_millis(200)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            );
+            // A listener declared on what already matches is told so before it returns.
+            let _kept = session
+                .declare_subscriber("demo/m/l")
+                .wait()
+                .expect("declares");
+            let (late_callback, late) = statuses();
+            let _late_listener = publisher
+                .matching_listener()
+                .callback(late_callback)
+                .wait()
+                .expect("declares");
+            assert_eq!(late.try_recv(), Ok(true));
+            listener.undeclare().wait().expect("undeclares");
+        }
+
+        #[test]
+        fn a_listener_ends_with_its_publisher_its_undeclaration_and_its_session() {
+            let session = open(peer("a1b2f4")).wait().expect("opens");
+            let publisher = session
+                .declare_publisher("demo/m/e")
+                .wait()
+                .expect("declares");
+            let channel = publisher.matching_listener().wait().expect("declares");
+            let (callback, _told) = statuses();
+            publisher
+                .matching_listener()
+                .callback(callback)
+                .background()
+                .wait()
+                .expect("declares");
+            assert_eq!(session.0.matching_listeners().len(), 2);
+            // The channel of a listener ends when the publisher that holds it is undeclared.
+            publisher.undeclare().wait().expect("undeclares");
+            assert_eq!(session.0.matching_listeners().len(), 0);
+            assert!(channel.recv_timeout(WAIT).is_err());
+            // And a session that closes lets go of what is left.
+            let other = session
+                .declare_publisher("demo/m/e2")
+                .wait()
+                .expect("declares");
+            let held = other.matching_listener().wait().expect("declares");
+            session.close().wait().expect("closes");
+            assert_eq!(session.0.matching_listeners().len(), 0);
+            assert!(held.recv_timeout(WAIT).is_err());
+            let error = other
+                .matching_listener()
+                .wait()
+                .expect_err("a closed session");
+            assert!(error.downcast_ref::<SessionClosedError>().is_some());
+            held.undeclare()
+                .wait()
+                .expect("no error on a closed session");
+        }
+
+        #[test]
+        fn a_querier_matches_the_queryables_of_its_target() {
+            let session = open(peer("a1b2f5")).wait().expect("opens");
+            let any = session
+                .declare_querier("demo/m/q/**")
+                .wait()
+                .expect("declares");
+            let complete = session
+                .declare_querier("demo/m/q/**")
+                .target(QueryTarget::AllComplete)
+                .wait()
+                .expect("declares");
+            let status = |querier: &crate::api::querier::Querier<'_>| {
+                querier
+                    .matching_status()
+                    .wait()
+                    .expect("a status")
+                    .matching()
+            };
+            assert!(!status(&any) && !status(&complete));
+            // A queryable that meets the key matches a querier that takes any, and one that does
+            // not say it is complete matches no querier that asks for the complete ones.
+            let partial = session
+                .declare_queryable("demo/m/q/a")
+                .wait()
+                .expect("declares");
+            assert!(status(&any));
+            assert!(!status(&complete));
+            // A complete queryable counts for the complete ones only when its key includes the
+            // querier's, which a narrower one does not.
+            let narrow = session
+                .declare_queryable("demo/m/q/a")
+                .complete(true)
+                .wait()
+                .expect("declares");
+            assert!(!status(&complete));
+            let wide = session
+                .declare_queryable("demo/m/**")
+                .complete(true)
+                .wait()
+                .expect("declares");
+            assert!(status(&complete));
+            drop((partial, narrow, wide));
+            assert!(!status(&any) && !status(&complete));
+        }
+
+        #[test]
+        fn a_listener_of_a_querier_is_told_when_a_queryable_comes_and_goes() {
+            let session = open(peer("a1b2f6")).wait().expect("opens");
+            let querier = session
+                .declare_querier("demo/m/ql")
+                .wait()
+                .expect("declares");
+            let (callback, told) = statuses();
+            let _listener = querier
+                .matching_listener()
+                .callback(callback)
+                .wait()
+                .expect("declares");
+            let queryable = session
+                .declare_queryable("demo/m/ql")
+                .wait()
+                .expect("declares");
+            assert_eq!(told.recv_timeout(WAIT), Ok(true));
+            queryable.undeclare().wait().expect("undeclares");
+            assert_eq!(told.recv_timeout(WAIT), Ok(false));
+        }
+
+        #[test]
+        fn a_subscriber_of_another_node_matches_a_publisher_that_admits_remote_ones() {
+            let port = unautoselected_port();
+            let on = |id: &str, listen: &str, connect: &str| {
+                open(
+                    Config::from_json5(&format!(
+                        r#"{{ id: "{id}", mode: "peer",
+                              listen: {{ endpoints: [{listen}] }},
+                              connect: {{ endpoints: [{connect}] }},
+                              scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                    ))
+                    .expect("a configuration zenoh reads"),
+                )
+                .wait()
+                .expect("opens")
+            };
+            let writer = on("a1b2f7", &format!(r#""tcp/127.0.0.1:{port}""#), "");
+            let reader = on("a1b2f8", "", &format!(r#""tcp/127.0.0.1:{port}""#));
+            let any = writer
+                .declare_publisher("demo/m/r")
+                .wait()
+                .expect("declares");
+            let local = writer
+                .declare_publisher("demo/m/r")
+                .allowed_destination(Locality::SessionLocal)
+                .wait()
+                .expect("declares");
+            let remote = writer
+                .declare_publisher("demo/m/r")
+                .allowed_destination(Locality::Remote)
+                .wait()
+                .expect("declares");
+            let (callback, told) = statuses();
+            let _listener = any
+                .matching_listener()
+                .callback(callback)
+                .wait()
+                .expect("declares");
+            // A publisher that writes to the session itself is told of nothing another node does.
+            let (local_callback, local_told) = statuses();
+            let _local_listener = local
+                .matching_listener()
+                .callback(local_callback)
+                .wait()
+                .expect("declares");
+            let subscriber = reader
+                .declare_subscriber("demo/m/r")
+                .wait()
+                .expect("declares");
+            assert_eq!(told.recv_timeout(WAIT), Ok(true));
+            assert_eq!(
+                local_told.try_recv(),
+                Err(mpsc::TryRecvError::Empty),
+                "a listener of the session's own entities was told of a peer's"
+            );
+            assert!(status_of(&any) && status_of(&remote));
+            assert!(
+                !status_of(&local),
+                "a subscriber of another node is not the session's own"
+            );
+            subscriber.undeclare().wait().expect("undeclares");
+            assert_eq!(told.recv_timeout(WAIT), Ok(false));
+            assert!(!status_of(&any) && !status_of(&remote));
+            // With a peer connected, a listener of remote subscribers alone is still not told of
+            // one of the session's own, which the publisher that admits both is.
+            let (remote_callback, remote_told) = statuses();
+            let _remote_listener = remote
+                .matching_listener()
+                .callback(remote_callback)
+                .wait()
+                .expect("declares");
+            let own = writer
+                .declare_subscriber("demo/m/r")
+                .wait()
+                .expect("declares");
+            assert_eq!(told.recv_timeout(WAIT), Ok(true));
+            assert_eq!(
+                remote_told.recv_timeout(Duration::from_millis(300)),
+                Err(mpsc::RecvTimeoutError::Timeout),
+                "a listener of remote subscribers was told of a local one"
+            );
+            drop(own);
+            assert_eq!(told.recv_timeout(WAIT), Ok(false));
+        }
+
+        #[test]
+        fn a_publisher_counts_the_subscribers_of_its_session_by_whatever_origin_they_take() {
+            let session = open(peer("a1b2fa")).wait().expect("opens");
+            let publisher = session
+                .declare_publisher("demo/m/o")
+                .wait()
+                .expect("declares");
+            let remote_only = session
+                .declare_publisher("demo/m/o")
+                .allowed_destination(Locality::Remote)
+                .wait()
+                .expect("declares");
+            let (callback, told) = statuses();
+            let _listener = remote_only
+                .matching_listener()
+                .callback(callback)
+                .wait()
+                .expect("declares");
+            let (any_callback, any_told) = statuses();
+            let _any_listener = publisher
+                .matching_listener()
+                .callback(any_callback)
+                .wait()
+                .expect("declares");
+            let subscriber = session
+                .declare_subscriber("demo/m/o")
+                .allowed_origin(Locality::Remote)
+                .wait()
+                .expect("declares");
+            // Upstream counts a subscriber of the session whatever origin it takes, and a
+            // publisher that asks for remote ones alone is not told of it.
+            assert!(status_of(&publisher));
+            assert!(!status_of(&remote_only));
+            assert_eq!(any_told.recv_timeout(WAIT), Ok(true));
+            assert_eq!(
+                told.recv_timeout(Duration::from_millis(300)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            );
+            drop(subscriber);
+            assert_eq!(any_told.recv_timeout(WAIT), Ok(false));
+            assert!(!status_of(&publisher));
+        }
+
+        #[test]
+        fn a_queryable_of_another_node_matches_a_querier_only_when_its_key_includes_the_queriers() {
+            let port = unautoselected_port();
+            let on = |id: &str, listen: &str, connect: &str| {
+                open(
+                    Config::from_json5(&format!(
+                        r#"{{ id: "{id}", mode: "peer",
+                              listen: {{ endpoints: [{listen}] }},
+                              connect: {{ endpoints: [{connect}] }},
+                              scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                    ))
+                    .expect("a configuration zenoh reads"),
+                )
+                .wait()
+                .expect("opens")
+            };
+            let asker = on("a1b2fb", &format!(r#""tcp/127.0.0.1:{port}""#), "");
+            let answerer = on("a1b2fc", "", &format!(r#""tcp/127.0.0.1:{port}""#));
+            let querier = asker
+                .declare_querier("demo/m/k/**")
+                .wait()
+                .expect("declares");
+            let settled = |expected: bool| {
+                let deadline = std::time::Instant::now() + WAIT;
+                loop {
+                    let matching = querier
+                        .matching_status()
+                        .wait()
+                        .expect("a status")
+                        .matching();
+                    if matching == expected || std::time::Instant::now() > deadline {
+                        return matching;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            };
+            let (callback, told) = statuses();
+            let _listener = querier
+                .matching_listener()
+                .callback(callback)
+                .wait()
+                .expect("declares");
+            // A queryable that answers a narrower key meets the querier's, and does not match it:
+            // a router's tables count the queryables of a peer by the inclusion of the key.
+            let narrow = answerer
+                .declare_queryable("demo/m/k/a")
+                .wait()
+                .expect("declares");
+            std::thread::sleep(Duration::from_millis(400));
+            assert!(!settled(false), "a queryable that is narrower than the key");
+            assert_eq!(
+                told.try_recv(),
+                Err(mpsc::TryRecvError::Empty),
+                "a listener was told of a queryable that is narrower than the key"
+            );
+            let wide = answerer
+                .declare_queryable("demo/m/**")
+                .wait()
+                .expect("declares");
+            assert!(settled(true), "a queryable that includes the key");
+            assert_eq!(told.recv_timeout(WAIT), Ok(true));
+            drop((narrow, wide));
+            assert!(!settled(false));
+        }
+
+        /// A listener declared before a peer is connected is installed on the face when it comes up:
+        /// a listener of remote subscribers hears the peer, one of the session's own does not.
+        #[test]
+        fn a_peer_that_connects_after_the_listeners_is_counted_by_the_remote_ones_only() {
+            let port = unautoselected_port();
+            let on = |id: &str, listen: &str, connect: &str| {
+                open(
+                    Config::from_json5(&format!(
+                        r#"{{ id: "{id}", mode: "peer",
+                              listen: {{ endpoints: [{listen}] }},
+                              connect: {{ endpoints: [{connect}] }},
+                              scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                    ))
+                    .expect("a configuration zenoh reads"),
+                )
+                .wait()
+                .expect("opens")
+            };
+            let writer = on("a1b2fd", &format!(r#""tcp/127.0.0.1:{port}""#), "");
+            let remote = writer
+                .declare_publisher("demo/m/late")
+                .allowed_destination(Locality::Remote)
+                .wait()
+                .expect("declares");
+            let local = writer
+                .declare_publisher("demo/m/late")
+                .allowed_destination(Locality::SessionLocal)
+                .wait()
+                .expect("declares");
+            let (remote_callback, remote_told) = statuses();
+            let _remote_listener = remote
+                .matching_listener()
+                .callback(remote_callback)
+                .wait()
+                .expect("declares");
+            let (local_callback, local_told) = statuses();
+            let _local_listener = local
+                .matching_listener()
+                .callback(local_callback)
+                .wait()
+                .expect("declares");
+            let reader = on("a1b2fe", "", &format!(r#""tcp/127.0.0.1:{port}""#));
+            let _subscriber = reader
+                .declare_subscriber("demo/m/late")
+                .wait()
+                .expect("declares");
+            assert_eq!(remote_told.recv_timeout(WAIT), Ok(true));
+            assert_eq!(
+                local_told.recv_timeout(Duration::from_millis(300)),
+                Err(mpsc::RecvTimeoutError::Timeout),
+                "a listener of the session's own entities was told of a peer's"
+            );
+        }
+
+        #[cfg(feature = "unstable")]
+        #[test]
+        fn the_wait_of_a_listener_undeclaration_holds_for_a_callback_that_is_running() {
+            let session = open(peer("a1b2f9")).wait().expect("opens");
+            let publisher = session
+                .declare_publisher("demo/m/w")
+                .wait()
+                .expect("declares");
+            let (inside_tx, inside) = mpsc::channel();
+            let (release_tx, release) = mpsc::channel::<()>();
+            let release = std::sync::Mutex::new(release);
+            let listener = publisher
+                .matching_listener()
+                .callback(move |_| {
+                    let _ = inside_tx.send(());
+                    let _ = release.lock().unwrap().recv_timeout(WAIT);
+                })
+                .wait()
+                .expect("declares");
+            // The status is told on the thread that declares the subscriber, which blocks, so it
+            // is declared on one of its own.
+            let declaring = session.clone();
+            std::thread::spawn(move || {
+                let _ = declaring.declare_subscriber("demo/m/w").wait();
+            });
+            inside.recv_timeout(WAIT).expect("the callback is running");
+            let (done_tx, done) = mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = done_tx.send(listener.undeclare().wait_callbacks().wait());
             });
             assert!(
                 done.recv_timeout(Duration::from_millis(300)).is_err(),

@@ -621,7 +621,36 @@ Each lands whole with its surface lines, tests and faults in one round.
     needed: nothing in the top crate keeps a table that the engine owns, except the lists of ids
     that a close lets go of. Z4 takes up the list again with the one-shot matching status
     (`matching_status(plane, key, locality)`), which decision D1's table already names.
-- **Z4. Liveliness and matching.**
+- **Z4. Liveliness and matching.** Cut in two, each landing whole: **Z4a** matching, **Z4b**
+  liveliness.
+  - **Z4a (landed).** `MatchingStatus`, `MatchingListener` with its builder (`callback`,
+    `callback_mut`, `with`, `background`), its undeclaration with the wait on the callbacks, and
+    the `matching_status` and `matching_listener` of `Publisher` and `Querier`, the status being
+    read through the destination each was declared with and, for a querier, its target. A listener
+    is declared on the engine by the session, which lists them and lets go of them at close, as a
+    publisher and a querier undeclare theirs; a status that already matches is told before the
+    declaration returns, and none is told that does not. The port gains two defaulted operations:
+    `declare_matching_listener_in` and `matching_status`, which take a locality (the peers', the
+    session's own, or both) where the existing listener took a flag, and nothing else; D1 stands.
+    The differential found what the engine did not do as upstream does, and each is mended in
+    the engine for the Rust API alone, as an opt-in that leaves the pico and C ABIs as they were.
+    A face's watch counted what the session itself declared as well as what its peer did, so a
+    listener of remote subscribers was told of a local one; the watch is now pinned to the peer's
+    declarations, and the session's own are counted by the fold the listener asks for. Upstream
+    counts the session's own subscribers and queryables whatever origin each accepts, where the
+    engine counted by the origin as zenoh-pico does, and reads the declaration of such an entity
+    as a change whatever its origin. And upstream's router tables count a queryable of a peer
+    only when its key includes the querier's, complete or not, where its own session counts its
+    own by intersection for an ordinary target (`zenoh/src/net/routing/hat/broker/queries.rs` @
+    `ke.includes(key_expr)`); the criterion of the engine gains `remote_includes`, set by the
+    options of the querier the listener is made through. The differential has an upstream node
+    declare and undeclare subscribers and queryables (narrow, wide, apart, complete) and the node
+    of each side declare its own, by every origin, and compares after each step the status of
+    three publishers and three queriers and every status their listeners were told: the
+    transcripts are equal when each change is given its own step, because upstream's listener
+    reads the status when its task runs and so merges a change that is undone before then. 32 of
+    the default lines and 33 and 33 of the other two arms, 11 injected faults, none missed (three
+    were not seen at first or did not compile, and were strengthened or redone).
 - **Z5. Scouting.** Scouting is not in the port; it is the slice that decides whether the port
   gains it or the crate reaches it through the engine, and it contradicts "names no runtime" unless
   the port gains it.

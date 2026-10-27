@@ -198,6 +198,7 @@ impl Wait for QuerierBuilder<'_, '_> {
             consolidation: self.consolidation,
             timeout: self.timeout,
             accept_replies: self.accept_replies,
+            matching_listeners: Default::default(),
             callback_sync_group: SyncGroup::default(),
         })
     }

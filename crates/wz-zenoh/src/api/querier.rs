@@ -15,18 +15,18 @@
 // Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
 // src/api/querier.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). A partial derivative:
 // `QuerierState`, the entry of the table a session keeps of its queriers, is not here, since the
-// engine keeps the declarations (docs/zenoh-api-on-the-engine.md, decision D3), and what concerns
-// the matching of a querier (`matching_status`, `matching_listener` and the listeners it holds)
-// arrives with slice Z4.
+// engine keeps the declarations (docs/zenoh-api-on-the-engine.md, decision D3).
 
 use core::fmt;
 use std::{
+    collections::HashSet,
     future::{IntoFuture, Ready},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
 use tracing::error;
-use zenoh_core::{Resolvable, Wait};
+use zenoh_core::{Resolvable, Resolve, Wait};
 use zenoh_protocol::{
     core::{CongestionControl, Parameters},
     network::request::ext::QueryTarget,
@@ -44,7 +44,13 @@ use super::{
     Id,
 };
 use crate::{
-    api::{cancellation::SyncGroup, handlers::DefaultHandler, query::ReplyKeyExpr},
+    api::{
+        builders::matching_listener::MatchingListenerBuilder,
+        cancellation::SyncGroup,
+        handlers::DefaultHandler,
+        matching::{MatchingStatus, MatchingStatusType},
+        query::ReplyKeyExpr,
+    },
     qos::Priority,
 };
 
@@ -76,6 +82,7 @@ pub struct Querier<'a> {
     pub(crate) timeout: Duration,
     pub(crate) accept_replies: ReplyKeyExpr,
     pub(crate) undeclare_on_drop: bool,
+    pub(crate) matching_listeners: Arc<Mutex<HashSet<Id>>>,
     pub(crate) callback_sync_group: SyncGroup,
 }
 
@@ -181,7 +188,76 @@ impl<'a> Querier<'a> {
     fn undeclare_impl(&mut self) -> ZResult<()> {
         // set the flag first to avoid double panic if this function panics
         self.undeclare_on_drop = false;
+        let ids: Vec<Id> = zlock!(self.matching_listeners).drain().collect();
+        for id in ids {
+            self.session.undeclare_matches_listener_inner(id)?
+        }
         self.session.undeclare_querier_inner(self.id)
+    }
+
+    /// Return the [`MatchingStatus`] of the querier.
+    ///
+    /// [`MatchingStatus::matching`] will return true if there are Queryables
+    /// matching the Querier's key expression and target, and false otherwise.
+    ///
+    /// # Examples
+    /// ```
+    /// # #[tokio::main]
+    /// # async fn main() {
+    ///
+    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// let querier = session.declare_querier("key/expression").await.unwrap();
+    /// let matching_queriers: bool = querier
+    ///     .matching_status()
+    ///     .await
+    ///     .unwrap()
+    ///     .matching();
+    /// # }
+    /// ```
+    pub fn matching_status(&self) -> impl Resolve<ZResult<MatchingStatus>> + '_ {
+        zenoh_core::ResolveFuture::new(async move {
+            self.session.matching_status(
+                self.key_expr(),
+                self.destination,
+                MatchingStatusType::Queryables(self.target == QueryTarget::AllComplete),
+            )
+        })
+    }
+
+    /// Return a [`MatchingListener`](crate::api::matching::MatchingListener) for this Querier.
+    ///
+    /// The [`MatchingListener`](crate::api::matching::MatchingListener) will send a notification each time the [`MatchingStatus`](crate::api::matching::MatchingStatus) of
+    /// the Querier changes.
+    ///
+    /// # Examples
+    /// ```no_run
+    /// # #[tokio::main]
+    /// # async fn main() {
+    ///
+    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// let querier = session.declare_querier("key/expression").await.unwrap();
+    /// let matching_listener = querier.matching_listener().await.unwrap();
+    /// while let Ok(matching_status) = matching_listener.recv_async().await {
+    ///     if matching_status.matching() {
+    ///         println!("Querier has matching queryables.");
+    ///     } else {
+    ///         println!("Querier has NO MORE matching queryables.");
+    ///     }
+    /// }
+    /// # }
+    /// ```
+    pub fn matching_listener(&self) -> MatchingListenerBuilder<'_, DefaultHandler> {
+        MatchingListenerBuilder {
+            session: &self.session,
+            key_expr: &self.key_expr,
+            destination: self.destination,
+            matching_listeners: &self.matching_listeners,
+            matching_status_type: MatchingStatusType::Queryables(
+                self.target == QueryTarget::AllComplete,
+            ),
+            handler: DefaultHandler::default(),
+            parent_callback_sync_group_notifier: self.callback_sync_group.notifier(),
+        }
     }
 
     #[zenoh_macros::internal]

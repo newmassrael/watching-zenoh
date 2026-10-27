@@ -234,8 +234,7 @@ pub mod key_expr {
 /// # Query/reply primitives
 ///
 /// This module provides the query/reply API of Zenoh. Of it, the selector, its parameters and the
-/// time range they carry, the queryable, the get, its replies and the querier are here; the
-/// matching status of a querier arrives with slice Z4.
+/// time range they carry, the queryable, the get, its replies and the querier are here.
 ///
 /// The selector syntax is a key expression followed by a question mark and the list of parameters in
 /// the format "name=value" separated by ';'. For example `key/expression?param1=value1;param2=value2`.
@@ -447,6 +446,44 @@ pub mod internal {
 /// ```
 pub mod time {
     pub use zenoh_protocol::core::{Timestamp, TimestampId, NTP64};
+}
+
+/// # Matching primitives
+///
+/// The matching API allows the active side of communication (publisher, querier) to know
+/// whether there are any interested parties on the other side (subscriber, queryable), which
+/// can save bandwidth and CPU resources.
+///
+/// A [`MatchingListener`](crate::matching::MatchingListener) can be declared via the
+/// [`Publisher::matching_listener`](crate::pubsub::Publisher::matching_listener) or
+/// [`Querier::matching_listener`](crate::query::Querier::matching_listener) methods.
+///
+/// The matching listener behaves like a subscriber, but instead of producing data samples it
+/// yields [`MatchingStatus`](crate::matching::MatchingStatus) instances whenever the matching
+/// status changes, i.e., when the first matching subscriber or queryable appears, or when the
+/// last one disappears.
+///
+/// # Example
+/// ```no_run
+/// # #[tokio::main]
+/// # async fn main() {
+/// # let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// let publisher = session.declare_publisher("key/expression").await.unwrap();
+/// let mut listener = publisher.matching_listener().await.unwrap();
+/// while let Ok(status) = listener.recv_async().await {
+///     if status.matching() {
+///         println!(">> Publisher has at least one matching subscriber");
+///     } else {
+///         println!(">> Publisher has no matching subscribers");
+///     }
+/// }
+/// # }
+/// ```
+pub mod matching {
+    pub use crate::api::{
+        builders::matching_listener::MatchingListenerBuilder,
+        matching::{MatchingListener, MatchingListenerUndeclaration, MatchingStatus},
+    };
 }
 
 /// # Publish/subscribe primitives

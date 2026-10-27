@@ -472,6 +472,7 @@ impl Wait for PublisherBuilder<'_, '_> {
             #[cfg(feature = "unstable")]
             reliability: self.reliability,
             undeclare_on_drop: true,
+            matching_listeners: Default::default(),
             sync_group: SyncGroup::default(),
         })
     }

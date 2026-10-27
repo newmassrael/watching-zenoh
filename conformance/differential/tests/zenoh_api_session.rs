@@ -530,6 +530,57 @@ mod observer {
         }
     }
 
+    /// An upstream node that dials `port` and declares and undeclares subscribers and queryables
+    /// as a test says, each under a label, so that the entities of the node it dials can be seen
+    /// to match them or not.
+    pub struct Declarer {
+        session: Session,
+        subscribers: std::sync::Mutex<std::collections::HashMap<String, up_zenoh::pubsub::Subscriber<()>>>,
+        queryables: std::sync::Mutex<std::collections::HashMap<String, up_zenoh::query::Queryable<()>>>,
+    }
+
+    /// An upstream node that dials the node of `port` and declares what it is told to.
+    pub fn declarer(id: &str, port: u16) -> Result<Declarer, String> {
+        Ok(Declarer {
+            session: open(id, "peer", None, Some(port))?,
+            subscribers: Default::default(),
+            queryables: Default::default(),
+        })
+    }
+
+    impl Declarer {
+        pub fn subscribe(&self, label: &str, key: &str) {
+            let subscriber = self
+                .session
+                .declare_subscriber(key)
+                .callback(|_| {})
+                .wait()
+                .expect("declares");
+            self.subscribers.lock().unwrap().insert(label.to_owned(), subscriber);
+        }
+
+        pub fn unsubscribe(&self, label: &str) {
+            let subscriber = self.subscribers.lock().unwrap().remove(label).expect("a subscriber");
+            subscriber.undeclare().wait().expect("undeclares");
+        }
+
+        pub fn queryable(&self, label: &str, key: &str, complete: bool) {
+            let queryable = self
+                .session
+                .declare_queryable(key)
+                .complete(complete)
+                .callback(|_| {})
+                .wait()
+                .expect("declares");
+            self.queryables.lock().unwrap().insert(label.to_owned(), queryable);
+        }
+
+        pub fn unqueryable(&self, label: &str) {
+            let queryable = self.queryables.lock().unwrap().remove(label).expect("a queryable");
+            queryable.undeclare().wait().expect("undeclares");
+        }
+    }
+
     /// [`seen`] once the session sees `count` transports, or after five seconds.
     pub fn seen_with(session: &Session, count: usize) -> String {
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -1331,6 +1382,158 @@ macro_rules! session_cases {
                 out
             }
 
+            /// What the publishers and the queriers of a node of this crate say of the subscribers
+            /// and the queryables that match them, as an upstream node and the node itself declare
+            /// and undeclare them: the status of each after every step, and every status each
+            /// matching listener was told.
+            pub fn matchings() -> Vec<String> {
+                use std::sync::{Arc, Mutex};
+
+                use $z::query::QueryTarget;
+
+                let port = free_port();
+                let subject = $z::open(peer("5a0050", port)).wait().expect("opens");
+                let remote = observer::declarer("b00050", port).expect("the declarer opens");
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                while subject.info().peers_zid().wait().count() < 1
+                    && std::time::Instant::now() < deadline
+                {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let events = Arc::new(Mutex::new(Vec::<String>::new()));
+                let told = |name: &'static str| {
+                    let events = events.clone();
+                    move |status: $z::matching::MatchingStatus| {
+                        events.lock().unwrap().push(format!("{name}={}", status.matching()));
+                    }
+                };
+                let key = "demo/mm/*";
+                let any = subject.declare_publisher(key).wait().expect("declares");
+                let only_remote = subject
+                    .declare_publisher(key)
+                    .allowed_destination($z::sample::Locality::Remote)
+                    .wait()
+                    .expect("declares");
+                let only_local = subject
+                    .declare_publisher(key)
+                    .allowed_destination($z::sample::Locality::SessionLocal)
+                    .wait()
+                    .expect("declares");
+                let qkey = "demo/mm/q/**";
+                let best = subject.declare_querier(qkey).wait().expect("declares");
+                let complete = subject
+                    .declare_querier(qkey)
+                    .target(QueryTarget::AllComplete)
+                    .wait()
+                    .expect("declares");
+                let everyone = subject
+                    .declare_querier(qkey)
+                    .target(QueryTarget::All)
+                    .allowed_destination($z::sample::Locality::Remote)
+                    .wait()
+                    .expect("declares");
+                let _listeners = (
+                    any.matching_listener().callback(told("any")).wait().expect("declares"),
+                    only_remote.matching_listener().callback(told("remote")).wait().expect("declares"),
+                    only_local.matching_listener().callback(told("local")).wait().expect("declares"),
+                    best.matching_listener().callback(told("best")).wait().expect("declares"),
+                    complete.matching_listener().callback(told("complete")).wait().expect("declares"),
+                    everyone.matching_listener().callback(told("everyone")).wait().expect("declares"),
+                );
+                let mut out = vec![];
+                let mut step = |label: &str| {
+                    // What a change does is seen by every node after it has crossed a link.
+                    std::thread::sleep(Duration::from_millis(400));
+                    let status = |matching: Result<$z::matching::MatchingStatus, $z::Error>| match matching {
+                        Ok(status) => status.matching().to_string(),
+                        Err(error) => format!("error: {}", plain(&error.to_string())),
+                    };
+                    let mut told = std::mem::take(&mut *events.lock().unwrap());
+                    told.sort();
+                    out.push(format!(
+                        "{label}: publishers any={} remote={} local={} | queriers best={} complete={} \
+                         everyone={} | told {told:?}",
+                        status(any.matching_status().wait()),
+                        status(only_remote.matching_status().wait()),
+                        status(only_local.matching_status().wait()),
+                        status(best.matching_status().wait()),
+                        status(complete.matching_status().wait()),
+                        status(everyone.matching_status().wait()),
+                    ));
+                };
+                step("nothing declared");
+                // Subscribers of another node: one that meets the key, a wider one, one apart.
+                remote.subscribe("s1", "demo/mm/x");
+                step("a remote subscriber that meets the key");
+                remote.subscribe("s2", "demo/mm/**");
+                step("a second, wider one");
+                remote.unsubscribe("s1");
+                step("the first gone");
+                remote.unsubscribe("s2");
+                step("the second gone");
+                remote.subscribe("far", "demo/other");
+                step("a remote subscriber that does not meet the key");
+                remote.unsubscribe("far");
+                // Subscribers of the node itself, by the origin they accept.
+                let local = subject.declare_subscriber("demo/mm/x").wait().expect("declares");
+                step("a local subscriber");
+                local.undeclare().wait().expect("undeclares");
+                step("the local subscriber gone");
+                let from_remote = subject
+                    .declare_subscriber("demo/mm/x")
+                    .allowed_origin($z::sample::Locality::Remote)
+                    .wait()
+                    .expect("declares");
+                step("a local subscriber that takes remote publications only");
+                from_remote.undeclare().wait().expect("undeclares");
+                step("that one gone");
+                let from_local = subject
+                    .declare_subscriber("demo/mm/x")
+                    .allowed_origin($z::sample::Locality::SessionLocal)
+                    .wait()
+                    .expect("declares");
+                step("a local subscriber that takes its own publications only");
+                from_local.undeclare().wait().expect("undeclares");
+                step("the local ones gone");
+                // Queryables of another node: partial, complete and narrow, complete and wide.
+                remote.queryable("q1", "demo/mm/q/a", false);
+                step("a remote queryable");
+                remote.queryable("q2", "demo/mm/q/b", true);
+                step("a complete remote queryable that is narrower than the key");
+                remote.queryable("q3", "demo/mm/q/**", true);
+                step("a complete remote queryable that is as wide as the key");
+                remote.unqueryable("q3");
+                step("that one gone");
+                remote.queryable("q4", "demo/mm/**", true);
+                step("a complete remote queryable that is wider than the key");
+                remote.unqueryable("q1");
+                remote.unqueryable("q2");
+                remote.unqueryable("q4");
+                step("the remote queryables gone");
+                // Queryables of the node itself.
+                let local_partial = subject.declare_queryable("demo/mm/q/a").wait().expect("declares");
+                step("a local queryable");
+                let local_complete = subject
+                    .declare_queryable("demo/mm/**")
+                    .complete(true)
+                    .wait()
+                    .expect("declares");
+                step("a complete local queryable that is wider than the key");
+                local_partial.undeclare().wait().expect("undeclares");
+                step("the partial local queryable gone");
+                local_complete.undeclare().wait().expect("undeclares");
+                step("the complete local queryable gone");
+                let from_remote_only = subject
+                    .declare_queryable("demo/mm/q/a")
+                    .allowed_origin($z::sample::Locality::Remote)
+                    .wait()
+                    .expect("declares");
+                step("a local queryable that answers remote queries only");
+                from_remote_only.undeclare().wait().expect("undeclares");
+                step("everything gone");
+                out
+            }
+
             /// What a sample says, as one line: every field of it that crosses a link.
             fn describe(sample: &$z::sample::Sample) -> String {
                 let timestamp = sample.timestamp().map(|t| format!("{t}"));
@@ -1983,6 +2186,18 @@ fn what_a_querier_asks_is_what_an_upstream_queryable_receives_and_answers() {
     assert!(u.iter().any(|l| l == "on a declared key: 1 reply(ies)"), "{u:#?}");
     assert!(u.iter().any(|l| l == "never answered: 1 reply(ies)"), "{u:#?}");
     compare("queriers", &u, &w);
+}
+
+#[test]
+fn what_matches_a_publisher_or_a_querier_is_what_upstream_says_matches_it() {
+    // The log of upstream's nodes, for a run that is asked for it with `RUST_LOG`.
+    up_zenoh::try_init_log_from_env();
+    let (u, w) = (up::matchings(), wz::matchings());
+    assert!(
+        u.iter().any(|l| l.starts_with("a remote subscriber that meets the key: publishers any=true remote=true local=false")),
+        "{u:#?}"
+    );
+    compare("matchings", &u, &w);
 }
 
 #[test]

@@ -15,15 +15,15 @@
 // Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
 // src/api/publisher.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). A partial derivative:
 // `PublisherState`, the entry of the table a session keeps of its publishers, is not here, since the
-// engine keeps the declarations (docs/zenoh-api-on-the-engine.md, decision D3), and what concerns
-// the matching of a publisher (`matching_status`, `matching_listener` and the listeners it holds)
-// arrives with slice Z4.
+// engine keeps the declarations (docs/zenoh-api-on-the-engine.md, decision D3).
 
 use std::{
+    collections::HashSet,
     convert::TryFrom,
     fmt,
     future::{IntoFuture, Ready},
     pin::Pin,
+    sync::{Arc, Mutex},
     task::{Context, Poll},
 };
 
@@ -31,7 +31,7 @@ use futures::Sink;
 use serde::Deserialize;
 use tracing::error;
 use zenoh_config::qos::PriorityConf;
-use zenoh_core::{Resolvable, Wait};
+use zenoh_core::{Resolvable, Resolve, Wait};
 use zenoh_protocol::core::CongestionControl;
 use zenoh_result::{Error, ZResult};
 #[cfg(feature = "unstable")]
@@ -41,14 +41,19 @@ use {
 };
 
 use crate::api::{
-    builders::publisher::{
-        PublicationBuilder, PublicationBuilderDelete, PublicationBuilderPut,
-        PublisherDeleteBuilder, PublisherPutBuilder,
+    builders::{
+        matching_listener::MatchingListenerBuilder,
+        publisher::{
+            PublicationBuilder, PublicationBuilderDelete, PublicationBuilderPut,
+            PublisherDeleteBuilder, PublisherPutBuilder,
+        },
     },
     bytes::ZBytes,
     cancellation::SyncGroup,
     encoding::Encoding,
+    handlers::DefaultHandler,
     key_expr::KeyExpr,
+    matching::{MatchingStatus, MatchingStatusType},
     sample::{Locality, Sample, SampleFields},
     session::{UndeclarableSealed, WeakSession},
     Id,
@@ -104,6 +109,7 @@ pub struct Publisher<'a> {
     #[cfg(feature = "unstable")]
     pub(crate) reliability: Reliability,
     pub(crate) undeclare_on_drop: bool,
+    pub(crate) matching_listeners: Arc<Mutex<HashSet<Id>>>,
     pub(crate) sync_group: SyncGroup,
 }
 
@@ -305,7 +311,74 @@ impl<'a> Publisher<'a> {
     fn undeclare_impl(&mut self) -> ZResult<()> {
         // set the flag first to avoid double panic if this function panics
         self.undeclare_on_drop = false;
+        let ids: Vec<Id> = zlock!(self.matching_listeners).drain().collect();
+        for id in ids {
+            self.session.undeclare_matches_listener_inner(id)?
+        }
         self.session.undeclare_publisher_inner(self.id)
+    }
+
+    /// Return the [`MatchingStatus`] of the publisher.
+    ///
+    /// [`MatchingStatus::matching`] will return true if there exist Subscribers
+    /// matching the Publisher's key expression and false otherwise.
+    ///
+    /// # Examples
+    /// ```
+    /// # #[tokio::main]
+    /// # async fn main() {
+    ///
+    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// let publisher = session.declare_publisher("key/expression").await.unwrap();
+    /// let matching_subscribers: bool = publisher
+    ///     .matching_status()
+    ///     .await
+    ///     .unwrap()
+    ///     .matching();
+    /// # }
+    /// ```
+    pub fn matching_status(&self) -> impl Resolve<ZResult<MatchingStatus>> + '_ {
+        zenoh_core::ResolveFuture::new(async move {
+            self.session.matching_status(
+                self.key_expr(),
+                self.destination,
+                MatchingStatusType::Subscribers,
+            )
+        })
+    }
+
+    /// Return a [`MatchingListener`](crate::api::matching::MatchingListener) for this Publisher.
+    ///
+    /// The [`MatchingListener`](crate::api::matching::MatchingListener) will send a notification each time the [`MatchingStatus`](crate::api::matching::MatchingStatus) of
+    /// the Publisher changes.
+    ///
+    /// # Examples
+    /// ```no_run
+    /// # #[tokio::main]
+    /// # async fn main() {
+    ///
+    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// let publisher = session.declare_publisher("key/expression").await.unwrap();
+    /// let matching_listener = publisher.matching_listener().await.unwrap();
+    /// while let Ok(matching_status) = matching_listener.recv_async().await {
+    ///     if matching_status.matching() {
+    ///         println!("Publisher has matching subscribers.");
+    ///     } else {
+    ///         println!("Publisher has NO MORE matching subscribers.");
+    ///     }
+    /// }
+    /// # }
+    /// ```
+    pub fn matching_listener(&self) -> MatchingListenerBuilder<'_, DefaultHandler> {
+        MatchingListenerBuilder {
+            session: &self.session,
+            key_expr: &self.key_expr,
+            destination: self.destination,
+            matching_listeners: &self.matching_listeners,
+            matching_status_type: MatchingStatusType::Subscribers,
+            handler: DefaultHandler::default(),
+            parent_callback_sync_group_notifier: self.sync_group.notifier(),
+        }
     }
 
     #[zenoh_macros::internal]

@@ -85,6 +85,15 @@ fn zenoh::key_expr::KeyExpr::from_string_unchecked(alloc::string::String) -> Sel
 fn zenoh::key_expr::KeyExpr::into_owned(Self) -> zenoh::key_expr::KeyExpr<'static> ; in impl<'0> zenoh::key_expr::KeyExpr<'0>
 fn zenoh::key_expr::KeyExpr::join<S: ?core::marker::Sized + core::convert::AsRef<str>>(&Self, &S) -> zenoh::Result<zenoh::key_expr::KeyExpr<'static>> ; in impl<'0> zenoh::key_expr::KeyExpr<'0>
 fn zenoh::key_expr::KeyExpr::new<T, E>(T) -> core::result::Result<Self, E> where Self: core::convert::TryFrom<T, Error = E> ; in impl<'0> zenoh::key_expr::KeyExpr<'0>
+fn zenoh::matching::MatchingListener::handler(&Self) -> &Handler ; in impl<Handler> zenoh::matching::MatchingListener<Handler>
+fn zenoh::matching::MatchingListener::handler_mut(&mut Self) -> &mut Handler ; in impl<Handler> zenoh::matching::MatchingListener<Handler>
+fn zenoh::matching::MatchingListener::undeclare(Self) -> zenoh::matching::MatchingListenerUndeclaration<Handler> where Handler: core::marker::Send ; in impl<Handler> zenoh::matching::MatchingListener<Handler>
+fn zenoh::matching::MatchingListenerBuilder::background(Self) -> zenoh::matching::MatchingListenerBuilder<'0, zenoh::handlers::Callback<zenoh::matching::MatchingStatus>, true> ; in impl<'0> zenoh::matching::MatchingListenerBuilder<'0, zenoh::handlers::Callback<zenoh::matching::MatchingStatus>>
+fn zenoh::matching::MatchingListenerBuilder::callback<F>(Self, F) -> zenoh::matching::MatchingListenerBuilder<'0, zenoh::handlers::Callback<zenoh::matching::MatchingStatus>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::Fn(zenoh::matching::MatchingStatus) ; in impl<'0> zenoh::matching::MatchingListenerBuilder<'0, zenoh::handlers::DefaultHandler>
+fn zenoh::matching::MatchingListenerBuilder::callback_mut<F>(Self, F) -> zenoh::matching::MatchingListenerBuilder<'0, zenoh::handlers::Callback<zenoh::matching::MatchingStatus>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::FnMut(zenoh::matching::MatchingStatus) ; in impl<'0> zenoh::matching::MatchingListenerBuilder<'0, zenoh::handlers::DefaultHandler>
+fn zenoh::matching::MatchingListenerBuilder::with<Handler>(Self, Handler) -> zenoh::matching::MatchingListenerBuilder<'0, Handler> where Handler: zenoh::handlers::IntoHandler<zenoh::matching::MatchingStatus> ; in impl<'0> zenoh::matching::MatchingListenerBuilder<'0, zenoh::handlers::DefaultHandler>
+fn zenoh::matching::MatchingListenerUndeclaration::wait_callbacks(Self) -> Self ; in impl<Handler> zenoh::matching::MatchingListenerUndeclaration<Handler>
+fn zenoh::matching::MatchingStatus::matching(&Self) -> bool ; in impl zenoh::matching::MatchingStatus
 fn zenoh::open<TryIntoConfig>(TryIntoConfig) -> zenoh::session::OpenBuilder<TryIntoConfig> where <TryIntoConfig as core::convert::TryInto<zenoh::config::Config>>::Error: core::fmt::Debug, TryIntoConfig: 'static + core::convert::TryInto<zenoh::config::Config> + core::marker::Send
 fn zenoh::pubsub::PublicationBuilder::allowed_destination(Self, zenoh::sample::Locality) -> Self ; in impl<T> zenoh::pubsub::PublicationBuilder<zenoh::pubsub::PublisherBuilder<'_, '_>, T>
 fn zenoh::pubsub::PublicationBuilder::attachment<TA: core::convert::Into<zenoh::bytes::OptionZBytes>>(Self, TA) -> Self ; in impl<P, T> zenoh::pubsub::PublicationBuilder<P, T>
@@ -101,6 +110,8 @@ fn zenoh::pubsub::Publisher::delete(&Self) -> zenoh::pubsub::PublisherDeleteBuil
 fn zenoh::pubsub::Publisher::encoding(&Self) -> &zenoh::bytes::Encoding ; in impl<'0> zenoh::pubsub::Publisher<'0>
 fn zenoh::pubsub::Publisher::id(&Self) -> zenoh::session::EntityGlobalId ; in impl<'0> zenoh::pubsub::Publisher<'0>
 fn zenoh::pubsub::Publisher::key_expr(&Self) -> &zenoh::key_expr::KeyExpr<'0> ; in impl<'0> zenoh::pubsub::Publisher<'0>
+fn zenoh::pubsub::Publisher::matching_listener(&Self) -> zenoh::matching::MatchingListenerBuilder<'_, zenoh::handlers::DefaultHandler> ; in impl<'0> zenoh::pubsub::Publisher<'0>
+fn zenoh::pubsub::Publisher::matching_status(&Self) -> impl '_ + zenoh::Resolve<zenoh::Result<zenoh::matching::MatchingStatus>> ; in impl<'0> zenoh::pubsub::Publisher<'0>
 fn zenoh::pubsub::Publisher::priority(&Self) -> zenoh::qos::Priority ; in impl<'0> zenoh::pubsub::Publisher<'0>
 fn zenoh::pubsub::Publisher::put<IntoZBytes>(&Self, IntoZBytes) -> zenoh::pubsub::PublisherPutBuilder<'_> where IntoZBytes: core::convert::Into<zenoh::bytes::ZBytes> ; in impl<'0> zenoh::pubsub::Publisher<'0>
 fn zenoh::pubsub::Publisher::reliability(&Self) -> zenoh::qos::Reliability ; in impl<'0> zenoh::pubsub::Publisher<'0>
@@ -128,6 +139,8 @@ fn zenoh::query::Querier::congestion_control(&Self) -> zenoh::qos::CongestionCon
 fn zenoh::query::Querier::get(&Self) -> zenoh::query::QuerierGetBuilder<'_, '_, zenoh::handlers::DefaultHandler> ; in impl<'0> zenoh::query::Querier<'0>
 fn zenoh::query::Querier::id(&Self) -> zenoh::session::EntityGlobalId ; in impl<'0> zenoh::query::Querier<'0>
 fn zenoh::query::Querier::key_expr(&Self) -> &zenoh::key_expr::KeyExpr<'0> ; in impl<'0> zenoh::query::Querier<'0>
+fn zenoh::query::Querier::matching_listener(&Self) -> zenoh::matching::MatchingListenerBuilder<'_, zenoh::handlers::DefaultHandler> ; in impl<'0> zenoh::query::Querier<'0>
+fn zenoh::query::Querier::matching_status(&Self) -> impl '_ + zenoh::Resolve<zenoh::Result<zenoh::matching::MatchingStatus>> ; in impl<'0> zenoh::query::Querier<'0>
 fn zenoh::query::Querier::priority(&Self) -> zenoh::qos::Priority ; in impl<'0> zenoh::query::Querier<'0>
 fn zenoh::query::Querier::undeclare(Self) -> zenoh::query::QuerierUndeclaration<'0> ; in impl<'0> zenoh::query::Querier<'0>
 fn zenoh::query::QuerierBuilder::accept_replies(Self, zenoh::query::ReplyKeyExpr) -> Self ; in impl zenoh::query::QuerierBuilder<'_, '_>
@@ -289,6 +302,7 @@ impl core::clone::Clone for zenoh::handlers::Callback
 impl core::clone::Clone for zenoh::handlers::fifo::FifoChannelHandler
 impl core::clone::Clone for zenoh::handlers::fifo::RecvStream
 impl core::clone::Clone for zenoh::key_expr::KeyExpr
+impl core::clone::Clone for zenoh::matching::MatchingStatus
 impl core::clone::Clone for zenoh::pubsub::PublicationBuilder
 impl core::clone::Clone for zenoh::pubsub::PublicationBuilderDelete
 impl core::clone::Clone for zenoh::pubsub::PublicationBuilderPut
@@ -427,6 +441,10 @@ impl core::fmt::Debug for zenoh::handlers::fifo::RecvStream
 impl core::fmt::Debug for zenoh::handlers::fifo::TryIter
 impl core::fmt::Debug for zenoh::key_expr::KeyExpr
 impl core::fmt::Debug for zenoh::key_expr::KeyExprUndeclaration
+impl core::fmt::Debug for zenoh::matching::MatchingListener
+impl core::fmt::Debug for zenoh::matching::MatchingListenerBuilder
+impl core::fmt::Debug for zenoh::matching::MatchingListenerUndeclaration
+impl core::fmt::Debug for zenoh::matching::MatchingStatus
 impl core::fmt::Debug for zenoh::pubsub::PublicationBuilder
 impl core::fmt::Debug for zenoh::pubsub::PublicationBuilderDelete
 impl core::fmt::Debug for zenoh::pubsub::PublicationBuilderPut
@@ -488,6 +506,8 @@ impl core::fmt::Display for zenoh::sample::SampleKind
 impl core::fmt::Display for zenoh::session::SessionClosedError
 impl core::future::future::Future for zenoh::handlers::fifo::RecvFut
 impl core::future::into_future::IntoFuture for zenoh::key_expr::KeyExprUndeclaration
+impl core::future::into_future::IntoFuture for zenoh::matching::MatchingListenerBuilder
+impl core::future::into_future::IntoFuture for zenoh::matching::MatchingListenerUndeclaration
 impl core::future::into_future::IntoFuture for zenoh::pubsub::PublicationBuilder
 impl core::future::into_future::IntoFuture for zenoh::pubsub::PublisherBuilder
 impl core::future::into_future::IntoFuture for zenoh::pubsub::PublisherUndeclaration
@@ -518,6 +538,7 @@ impl core::iter::traits::iterator::Iterator for zenoh::handlers::fifo::Drain
 impl core::iter::traits::iterator::Iterator for zenoh::handlers::fifo::IntoIter
 impl core::iter::traits::iterator::Iterator for zenoh::handlers::fifo::Iter
 impl core::iter::traits::iterator::Iterator for zenoh::handlers::fifo::TryIter
+impl core::marker::Copy for zenoh::matching::MatchingStatus
 impl core::marker::Copy for zenoh::qos::Priority
 impl core::marker::Copy for zenoh::query::QueryConsolidation
 impl core::marker::Copy for zenoh::query::ReplyKeyExpr
@@ -545,12 +566,15 @@ impl core::ops::arith::Div for &zenoh::key_expr::KeyExpr
 impl core::ops::arith::Div for zenoh::key_expr::KeyExpr
 impl core::ops::deref::Deref for zenoh::config::Config
 impl core::ops::deref::Deref for zenoh::key_expr::KeyExpr
+impl core::ops::deref::Deref for zenoh::matching::MatchingListener
 impl core::ops::deref::Deref for zenoh::pubsub::Subscriber
 impl core::ops::deref::Deref for zenoh::query::Queryable
 impl core::ops::deref::DerefMut for zenoh::config::Config
+impl core::ops::deref::DerefMut for zenoh::matching::MatchingListener
 impl core::ops::deref::DerefMut for zenoh::pubsub::Subscriber
 impl core::ops::deref::DerefMut for zenoh::query::Queryable
 impl core::ops::drop::Drop for zenoh::handlers::CallbackDrop
+impl core::ops::drop::Drop for zenoh::matching::MatchingListener
 impl core::ops::drop::Drop for zenoh::pubsub::Publisher
 impl core::ops::drop::Drop for zenoh::pubsub::Subscriber
 impl core::ops::drop::Drop for zenoh::query::Querier
@@ -579,6 +603,8 @@ impl std::io::Read for zenoh::bytes::ZBytesReader
 impl std::io::Seek for zenoh::bytes::ZBytesReader
 impl std::io::Write for zenoh::bytes::ZBytesWriter
 impl zenoh::Resolvable for zenoh::key_expr::KeyExprUndeclaration
+impl zenoh::Resolvable for zenoh::matching::MatchingListenerBuilder
+impl zenoh::Resolvable for zenoh::matching::MatchingListenerUndeclaration
 impl zenoh::Resolvable for zenoh::pubsub::PublicationBuilder
 impl zenoh::Resolvable for zenoh::pubsub::PublisherBuilder
 impl zenoh::Resolvable for zenoh::pubsub::PublisherUndeclaration
@@ -598,6 +624,8 @@ impl zenoh::Resolvable for zenoh::session::RoutersZenohIdBuilder
 impl zenoh::Resolvable for zenoh::session::SessionGetBuilder
 impl zenoh::Resolvable for zenoh::session::ZenohIdBuilder
 impl zenoh::Wait for zenoh::key_expr::KeyExprUndeclaration
+impl zenoh::Wait for zenoh::matching::MatchingListenerBuilder
+impl zenoh::Wait for zenoh::matching::MatchingListenerUndeclaration
 impl zenoh::Wait for zenoh::pubsub::PublicationBuilder
 impl zenoh::Wait for zenoh::pubsub::PublisherBuilder
 impl zenoh::Wait for zenoh::pubsub::PublisherUndeclaration
@@ -630,6 +658,7 @@ mod zenoh::key_expr
 mod zenoh::key_expr::format
 mod zenoh::key_expr::format::macro_support
 mod zenoh::key_expr::keyexpr_tree
+mod zenoh::matching
 mod zenoh::pubsub
 mod zenoh::qos
 mod zenoh::query
@@ -708,6 +737,10 @@ struct zenoh::handlers::fifo::RecvStream
 struct zenoh::handlers::fifo::TryIter
 struct zenoh::key_expr::KeyExpr
 struct zenoh::key_expr::KeyExprUndeclaration
+struct zenoh::matching::MatchingListener
+struct zenoh::matching::MatchingListenerBuilder
+struct zenoh::matching::MatchingListenerUndeclaration
+struct zenoh::matching::MatchingStatus
 struct zenoh::pubsub::PublicationBuilder
 struct zenoh::pubsub::PublicationBuilderDelete
 struct zenoh::pubsub::PublicationBuilderPut
