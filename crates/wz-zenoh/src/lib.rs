@@ -458,8 +458,8 @@ pub mod session {
     #[zenoh_macros::unstable]
     pub use zenoh_protocol::core::EntityId;
 
-    // Of upstream's module the builders of a put, a delete and a get, `Undeclarable`, the link and
-    // transport events and `WeakSession` arrive with the slices Z2, Z3 and Z6a.
+    // Of upstream's module the builders of a put, a delete and a get, the link and transport
+    // events and `WeakSession` arrive with the slices Z2, Z3 and Z6a.
     pub use crate::api::{
         builders::{
             close::CloseBuilder,
@@ -467,7 +467,7 @@ pub mod session {
             session::OpenBuilder,
         },
         info::SessionInfo,
-        session::{open, Session, SessionClosedError},
+        session::{open, Session, SessionClosedError, Undeclarable},
     };
 }
 

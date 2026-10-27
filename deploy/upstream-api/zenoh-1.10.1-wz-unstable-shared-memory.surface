@@ -125,9 +125,11 @@ fn zenoh::sample::SourceInfo::source_id(&Self) -> &zenoh::session::EntityGlobalI
 fn zenoh::sample::SourceInfo::source_sn(&Self) -> zenoh::sample::SourceSn ; in impl zenoh::sample::SourceInfo
 fn zenoh::session::CloseBuilder::wait_callbacks(Self) -> Self ; in impl zenoh::session::CloseBuilder<zenoh::session::Session>
 fn zenoh::session::Session::close(&Self) -> zenoh::session::CloseBuilder<Self> ; in impl zenoh::session::Session
+fn zenoh::session::Session::declare_keyexpr<'0, '1: '0, TryIntoKeyExpr>(&'0 Self, TryIntoKeyExpr) -> impl '0 + zenoh::Resolve<zenoh::Result<zenoh::key_expr::KeyExpr<'1>>> where <TryIntoKeyExpr as core::convert::TryInto<zenoh::key_expr::KeyExpr<'1>>>::Error: core::convert::Into<zenoh::Error>, TryIntoKeyExpr: core::convert::TryInto<zenoh::key_expr::KeyExpr<'1>> ; in impl zenoh::session::Session
 fn zenoh::session::Session::id(&Self) -> zenoh::session::EntityGlobalId ; in impl zenoh::session::Session
 fn zenoh::session::Session::info(&Self) -> zenoh::session::SessionInfo ; in impl zenoh::session::Session
 fn zenoh::session::Session::is_closed(&Self) -> bool ; in impl zenoh::session::Session
+fn zenoh::session::Session::undeclare<'0, T>(&'0 Self, T) -> impl '0 + zenoh::Resolve<zenoh::Result<()>> where T: '0 + zenoh::session::Undeclarable<&'0 zenoh::session::Session> ; in impl zenoh::session::Session
 fn zenoh::session::Session::zid(&Self) -> zenoh::session::ZenohId ; in impl zenoh::session::Session
 fn zenoh::session::SessionInfo::peers_zid(&Self) -> zenoh::session::PeersZenohIdBuilder<'_> ; in impl zenoh::session::SessionInfo
 fn zenoh::session::SessionInfo::routers_zid(&Self) -> zenoh::session::RoutersZenohIdBuilder<'_> ; in impl zenoh::session::SessionInfo
@@ -545,4 +547,5 @@ struct zenoh::timestamp_stack::TimestampStack
 struct zenoh::timestamp_stack::TimestampStackRecord
 trait zenoh::handlers::IntoHandler
 trait zenoh::query::ZenohParameters
+trait zenoh::session::Undeclarable
 type zenoh::sample::SourceSn

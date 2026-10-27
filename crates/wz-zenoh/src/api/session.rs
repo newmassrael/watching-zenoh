@@ -15,13 +15,13 @@
 // Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
 // src/api/session.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). This is a partial
 // derivative and a modified one. What is here is the handle (`Session`, its clone, equality and
-// drop), its opening from a configuration, `close`, `is_closed`, `zid` and `id`, the error of a
-// closed session, and the size of the channel that data is received on, which the default handlers
-// read. The session of upstream is a table of declarations over a runtime of its own; this one is
-// a handle over an engine (docs/zenoh-api-on-the-engine.md, decisions D1 and D3), so the tables are
-// not copied, and the entities that read them (publishers, subscribers, queries, liveliness,
-// matching and the undeclaration) arrive with slices Z2 to Z6, and
-// the three other channel sizes with Z3.
+// drop), its opening from a configuration, `close`, `is_closed`, `zid`, `id` and `info`, the error
+// of a closed session, the declaration of a key expression and `undeclare` with the traits that
+// say what can be undeclared, and the size of the channel that data is received on, which the
+// default handlers read. The session of upstream is a table of declarations over a runtime of its
+// own; this one is a handle over an engine (docs/zenoh-api-on-the-engine.md, decisions D1 and D3),
+// so the tables are not copied, and the entities that read them (publishers, subscribers, queries,
+// liveliness and matching) arrive with slices Z2 to Z6, and the three other channel sizes with Z3.
 
 use std::{
     fmt,
@@ -35,7 +35,7 @@ use async_trait::async_trait;
 #[cfg(feature = "unstable")]
 use zenoh_config::wrappers::EntityGlobalId;
 use zenoh_config::wrappers::ZenohId;
-use zenoh_core::Wait;
+use zenoh_core::{Resolve, ResolveClosure, Wait};
 use zenoh_protocol::core::{EntityId, ExprId};
 use zenoh_result::ZResult;
 use zenoh_runtime::ZRuntime;
@@ -47,7 +47,7 @@ use crate::api::{
     },
     config::Config,
     info::SessionInfo,
-    key_expr::{SessionAnchor, WireAnchor},
+    key_expr::{KeyExpr, KeyExprUndeclaration, SessionAnchor, WireAnchor},
 };
 
 zconfigurable! {
@@ -162,6 +162,14 @@ impl Engine {
     fn peer_identities(&self) -> Vec<(Vec<u8>, u8)> {
         match self {
             Engine::Tokio(state) => state.shared.as_engine().peer_identities(),
+        }
+    }
+
+    /// The key expression declarations the engine holds, `(id, key)` in declaration order.
+    #[cfg(test)]
+    fn keyexpr_declarations(&self) -> Vec<(u64, String)> {
+        match self {
+            Engine::Tokio(state) => state.shared.as_engine().keyexpr_declarations(),
         }
     }
 }
@@ -411,7 +419,6 @@ impl Session {
     }
 
     /// The handle by which a key expression is declared on this session.
-    #[allow(dead_code)] // the declaration of a key expression is slice Z2
     pub(crate) fn anchor(&self) -> SessionAnchor {
         self.0.clone()
     }
@@ -514,6 +521,39 @@ impl fmt::Display for SessionClosedError {
 
 impl std::error::Error for SessionClosedError {}
 
+/// A trait implemented by types that can be undeclared.
+pub trait UndeclarableSealed<S> {
+    type Undeclaration: Resolve<ZResult<()>> + Send;
+    fn undeclare_inner(self, session: S) -> Self::Undeclaration;
+}
+
+impl<'a, T> UndeclarableSealed<&'a Session> for T
+where
+    T: UndeclarableSealed<()>,
+{
+    type Undeclaration = <T as UndeclarableSealed<()>>::Undeclaration;
+
+    fn undeclare_inner(self, _session: &'a Session) -> Self::Undeclaration {
+        self.undeclare_inner(())
+    }
+}
+
+// NOTE: `UndeclarableInner` is only pub(crate) to hide the `undeclare_inner` method. So we don't
+// care about the `private_bounds` lint in this particular case.
+#[allow(private_bounds)]
+/// A trait implemented by types that can be undeclared.
+pub trait Undeclarable<S = ()>: UndeclarableSealed<S> {}
+
+impl<T, S> Undeclarable<S> for T where T: UndeclarableSealed<S> {}
+
+impl<'a> UndeclarableSealed<&'a Session> for KeyExpr<'a> {
+    type Undeclaration = KeyExprUndeclaration<'a>;
+
+    fn undeclare_inner(self, session: &'a Session) -> Self::Undeclaration {
+        KeyExprUndeclaration::new(&session.anchor(), self)
+    }
+}
+
 impl Session {
     /// Returns the identifier of the current session. `zid()` is a convenient shortcut.
     /// See [`Session::info()`](`Session::info()`) and [`SessionInfo::zid()`](`SessionInfo::zid()`) for more details.
@@ -583,6 +623,55 @@ impl Session {
         }
     }
 
+    /// Undeclare a zenoh entity declared by the session.
+    ///
+    /// # Examples
+    /// ```
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// let keyexpr = session.declare_keyexpr("key/expression").await.unwrap();
+    /// let subscriber = session
+    ///     .declare_subscriber(&keyexpr)
+    ///     .await
+    ///     .unwrap();
+    /// session.undeclare(subscriber).await.unwrap();
+    /// session.undeclare(keyexpr).await.unwrap();
+    /// # }
+    /// ```
+    pub fn undeclare<'a, T>(&'a self, decl: T) -> impl Resolve<ZResult<()>> + 'a
+    where
+        T: Undeclarable<&'a Session> + 'a,
+    {
+        UndeclarableSealed::undeclare_inner(decl, self)
+    }
+
+    /// Informs Zenoh that you intend to use `key_expr` multiple times and that it should optimize its transmission.
+    ///
+    /// The returned `KeyExpr`'s internal structure may differ from what you would have obtained through a simple
+    /// `key_expr.try_into()`, to save time on detecting the optimizations that have been associated with it.
+    ///
+    /// # Examples
+    /// ```
+    /// # #[tokio::main]
+    /// # async fn main() {
+    ///
+    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// let key_expr = session.declare_keyexpr("key/expression").await.unwrap();
+    /// # }
+    /// ```
+    pub fn declare_keyexpr<'a, 'b: 'a, TryIntoKeyExpr>(
+        &'a self,
+        key_expr: TryIntoKeyExpr,
+    ) -> impl Resolve<ZResult<KeyExpr<'b>>> + 'a
+    where
+        TryIntoKeyExpr: TryInto<KeyExpr<'b>>,
+        <TryIntoKeyExpr as TryInto<KeyExpr<'b>>>::Error: Into<zenoh_result::Error>,
+    {
+        let key_expr: ZResult<KeyExpr> = key_expr.try_into().map_err(Into::into);
+        ResolveClosure::new(move || key_expr?.declare(&self.anchor(), true))
+    }
+
     /// Check if the session has been closed.
     ///
     /// # Examples
@@ -608,10 +697,19 @@ impl WireAnchor for SessionInner {
         }
         // The engine holds a declaration once and counts the holders, so a prefix that is already
         // declared is held again and a forced declaration is the same call.
-        Ok(self
-            .engine
-            .acquire_keyexpr(prefix)
-            .and_then(|id| ExprId::try_from(id).ok()))
+        let Some(id) = self.engine.acquire_keyexpr(prefix) else {
+            return Ok(None);
+        };
+        // The wire names a declaration by sixteen bits where the engine counts in sixty-four. An id
+        // that does not fit cannot be named, so the hold just taken is let go and the key is used
+        // whole, as one that is not worth a declaration is.
+        match ExprId::try_from(id) {
+            Ok(expr_id) => Ok(Some(expr_id)),
+            Err(_) => {
+                self.engine.release_keyexpr(id);
+                Ok(None)
+            }
+        }
     }
 
     fn undeclare_prefix(&self, expr_id: ExprId) -> ZResult<()> {
@@ -952,6 +1050,118 @@ mod tests {
         // A closed session is connected to no one.
         dialler.close().wait().expect("closes");
         assert_eq!(dialler.info().peers_zid().wait().count(), 0);
+    }
+
+    /// The keys the engine of `session` holds a declaration of.
+    fn declared(session: &Session) -> Vec<String> {
+        session
+            .0
+            .engine
+            .keyexpr_declarations()
+            .into_iter()
+            .map(|(_, key)| key)
+            .collect()
+    }
+
+    #[test]
+    fn a_declared_key_is_held_by_the_engine_until_it_is_dropped() {
+        let session = open(peer("a1b2e1")).wait().expect("opens");
+        assert!(declared(&session).is_empty());
+        let key = session
+            .declare_keyexpr("demo/declared")
+            .wait()
+            .expect("an open session declares");
+        assert_eq!(key.as_str(), "demo/declared");
+        assert_eq!(declared(&session), ["demo/declared"]);
+        drop(key);
+        assert!(
+            declared(&session).is_empty(),
+            "the last hold let go retracts it"
+        );
+    }
+
+    #[test]
+    fn a_declared_key_is_held_once_per_holder_and_retracted_with_the_last() {
+        let session = open(peer("a1b2e2")).wait().expect("opens");
+        let first = session
+            .declare_keyexpr("demo/twice")
+            .wait()
+            .expect("declares");
+        // The second declaration of the same key is the same declaration, held again.
+        let second = session
+            .declare_keyexpr("demo/twice")
+            .wait()
+            .expect("declares");
+        assert_eq!(declared(&session), ["demo/twice"]);
+        drop(first);
+        assert_eq!(declared(&session), ["demo/twice"], "one holder is left");
+        drop(second);
+        assert!(declared(&session).is_empty());
+    }
+
+    #[test]
+    fn undeclaring_the_only_holder_of_a_key_retracts_it_at_once() {
+        let session = open(peer("a1b2e3")).wait().expect("opens");
+        let key = session
+            .declare_keyexpr("demo/undeclared")
+            .wait()
+            .expect("declares");
+        session.undeclare(key).wait().expect("undeclares");
+        assert!(declared(&session).is_empty());
+    }
+
+    #[test]
+    fn undeclaring_a_key_that_has_a_clone_leaves_the_declaration_to_the_last_clone() {
+        // Upstream retracts only when the caller holds the one reference: a clone keeps the
+        // declaration, and it goes with the clone.
+        let session = open(peer("a1b2e8")).wait().expect("opens");
+        let key = session
+            .declare_keyexpr("demo/cloned")
+            .wait()
+            .expect("declares");
+        let clone = key.clone();
+        session.undeclare(key).wait().expect("undeclares");
+        assert_eq!(declared(&session), ["demo/cloned"]);
+        drop(clone);
+        assert!(declared(&session).is_empty());
+    }
+
+    #[test]
+    fn a_key_declared_by_another_session_is_refused_by_undeclare() {
+        let one = open(peer("a1b2e4")).wait().expect("opens");
+        let two = open(peer("a1b2e5")).wait().expect("opens");
+        let key = one.declare_keyexpr("demo/other").wait().expect("declares");
+        assert!(two.undeclare(key.clone()).wait().is_err());
+        assert_eq!(
+            declared(&one),
+            ["demo/other"],
+            "the refusal changed nothing"
+        );
+        one.undeclare(key)
+            .wait()
+            .expect("its own session undeclares it");
+    }
+
+    #[test]
+    fn a_closed_session_declares_nothing() {
+        let session = open(peer("a1b2e6")).wait().expect("opens");
+        session.close().wait().expect("closes");
+        let error = session
+            .declare_keyexpr("demo/closed")
+            .wait()
+            .expect_err("a closed session");
+        assert!(error.to_string().starts_with("session closed"), "{error}");
+    }
+
+    #[test]
+    fn a_key_that_is_not_a_key_expression_is_refused_and_a_wild_one_is_declared() {
+        let session = open(peer("a1b2e7")).wait().expect("opens");
+        assert!(session.declare_keyexpr("demo//double").wait().is_err());
+        let wild = session
+            .declare_keyexpr("demo/*/wild")
+            .wait()
+            .expect("wild is a key");
+        assert_eq!(wild.as_str(), "demo/*/wild");
     }
 
     #[test]

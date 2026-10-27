@@ -44,9 +44,10 @@ pub(crate) mod publisher;
 // constructor from a frame and the builders' crate-private methods have no caller.
 #[allow(dead_code)]
 pub(crate) mod sample;
-// R3702: the session's declaration of a key (`declare`, `to_wire`) and `KeyExprUndeclaration::new`
-// are slice Z1 of docs/zenoh-api-on-the-engine.md, and the anchor is implemented there; until then
-// the functions that take it have no caller.
+// R3702: the session declares and undeclares a key since slice Z2a; what a key puts on the wire
+// (`to_wire`, the prefix tests) is used by the builders of a publication and a subscription, which
+// are slices Z2b and Z2c of docs/zenoh-api-on-the-engine.md, so until then those functions have no
+// caller.
 #[allow(dead_code)]
 pub(crate) mod key_expr;
 // R3702: the selector's users, the builders of `get` and the querier, are slice Z3.

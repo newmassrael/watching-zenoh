@@ -18,7 +18,8 @@
 // declaration holds a `WeakSession` and calls its methods, this one holds a `Weak` of the trait
 // `WireAnchor`, which the session of slice Z1 implements, so that the module names no session. The
 // functions that took a `&Session` take the anchor of one, and the `UndeclarableSealed` impl, which
-// is the session's machinery, joins `Session::undeclare` in Z1.
+// is the session's machinery, is in the session module beside `Session::undeclare`. The
+// undeclaration holds its anchor, where upstream's borrows the session.
 use std::{
     convert::{TryFrom, TryInto},
     fmt,
@@ -622,14 +623,20 @@ impl<'a> KeyExpr<'a> {
 /// ```
 #[must_use = "Resolvables do nothing unless you resolve them using `.await` or `zenoh::Wait::wait`"]
 pub struct KeyExprUndeclaration<'a> {
-    session: &'a SessionAnchor,
+    // Owned, where upstream's borrows the `Session`: a handle on the session here is made by the
+    // call that undeclares (the anchor is the `Arc` the handle counts), so there is no `Session`
+    // field to borrow it from.
+    session: SessionAnchor,
     expr: KeyExpr<'a>,
 }
 
 impl<'a> KeyExprUndeclaration<'a> {
-    /// What the session's `undeclare` makes of a key expression it is given (slice Z1).
-    pub(crate) fn new(session: &'a SessionAnchor, expr: KeyExpr<'a>) -> Self {
-        Self { session, expr }
+    /// What the session's `undeclare` makes of a key expression it is given (slice Z2a).
+    pub(crate) fn new(session: &SessionAnchor, expr: KeyExpr<'a>) -> Self {
+        Self {
+            session: session.clone(),
+            expr,
+        }
     }
 }
 
@@ -649,7 +656,7 @@ impl Resolvable for KeyExprUndeclaration<'_> {
 impl Wait for KeyExprUndeclaration<'_> {
     fn wait(self) -> <Self as Resolvable>::To {
         let KeyExprUndeclaration { session, mut expr } = self;
-        expr.undeclare_with_session_check(Some(session))
+        expr.undeclare_with_session_check(Some(&session))
     }
 }
 

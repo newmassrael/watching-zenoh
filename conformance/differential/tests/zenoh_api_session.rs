@@ -259,6 +259,69 @@ macro_rules! session_cases {
                 out
             }
 
+            /// What declaring a key expression on a session and undeclaring it come to, as text.
+            pub fn declarations() -> Vec<String> {
+                let mut out = vec![];
+                let session = $z::open(peer("a1b2d0", free_port())).wait().expect("opens");
+                let other = $z::open(peer("a1b2d1", free_port())).wait().expect("opens");
+                // A key declared: what it says, wild or not, and what it says of an invalid one.
+                let key = session.declare_keyexpr("demo/declared").wait();
+                out.push(format!("declare: {}", text(key.as_ref().map(|k| k.to_string()))));
+                let wild = session.declare_keyexpr("demo/*/wild").wait();
+                out.push(format!("declare wild: {}", text(wild.as_ref().map(|k| k.to_string()))));
+                out.push(format!(
+                    "declare invalid: {}",
+                    text(session.declare_keyexpr("demo//double").wait().map(|k| k.to_string()))
+                ));
+                out.push(format!(
+                    "declare empty: {}",
+                    text(session.declare_keyexpr("").wait().map(|k| k.to_string()))
+                ));
+                // The declared key is the key: it joins and concatenates as the plain one does.
+                if let Ok(key) = &key {
+                    out.push(format!("join: {}", text(key.join("leaf"))));
+                    out.push(format!("concat: {}", text(key.concat("/leaf"))));
+                    out.push(format!("intersects itself: {}", key.intersects(key)));
+                }
+                // Undeclared by its own session: the one reference, and a clone beside it.
+                if let Ok(key) = key {
+                    out.push(format!("undeclare: {}", text(session.undeclare(key).wait())));
+                }
+                if let Ok(wild) = wild {
+                    let clone = wild.clone();
+                    out.push(format!("undeclare with a clone: {}", text(session.undeclare(wild).wait())));
+                    out.push(format!("the clone still reads: {}", clone));
+                }
+                // Declared twice, undeclared each.
+                let first = session.declare_keyexpr("demo/twice").wait();
+                let second = session.declare_keyexpr("demo/twice").wait();
+                if let (Ok(first), Ok(second)) = (first, second) {
+                    out.push(format!("twice, first: {}", text(session.undeclare(first).wait())));
+                    out.push(format!("twice, second: {}", text(session.undeclare(second).wait())));
+                }
+                // A key that was never declared, and one declared by another session.
+                let plain: $z::key_expr::KeyExpr = "demo/plain".try_into().expect("a key");
+                out.push(format!("undeclare a plain key: {}", text(session.undeclare(plain).wait())));
+                if let Ok(foreign) = other.declare_keyexpr("demo/foreign").wait() {
+                    out.push(format!(
+                        "undeclare another session's key: {}",
+                        text(session.undeclare(foreign.clone()).wait())
+                    ));
+                    out.push(format!("then its own: {}", text(other.undeclare(foreign).wait())));
+                }
+                // A closed session declares nothing, and undeclares nothing.
+                let kept = session.declare_keyexpr("demo/kept").wait();
+                session.close().wait().expect("closes");
+                out.push(format!(
+                    "declare after close: {}",
+                    text(session.declare_keyexpr("demo/after").wait().map(|k| k.to_string()))
+                ));
+                if let Ok(kept) = kept {
+                    out.push(format!("undeclare after close: {}", text(session.undeclare(kept).wait())));
+                }
+                out
+            }
+
             pub fn identity() -> Vec<String> {
                 let mut out = vec![];
                 let (port_a, port_b) = (free_port(), free_port());
@@ -553,6 +616,17 @@ fn the_role_a_node_plays_is_what_upstream_nodes_see_of_it() {
     assert!(u.iter().any(|l| l.starts_with("client dials") && l.contains("Client")), "{u:#?}");
     assert!(u.iter().any(|l| l.starts_with("peer dials") && l.contains("Peer")), "{u:#?}");
     compare("roles", &u, &w);
+}
+
+#[test]
+fn the_declaration_of_a_key_on_a_session() {
+    let (u, w) = (up::declarations(), wz::declarations());
+    assert!(u.iter().any(|l| l == "declare: Ok(\"demo/declared\")"), "{u:#?}");
+    assert!(u.iter().any(|l| l.starts_with("declare invalid: Err(")), "{u:#?}");
+    assert!(u.iter().any(|l| l == "undeclare: Ok(())"), "{u:#?}");
+    assert!(u.iter().any(|l| l.starts_with("undeclare another session's key: Err(")), "{u:#?}");
+    assert!(u.iter().any(|l| l.starts_with("undeclare a plain key: Err(")), "{u:#?}");
+    compare("declarations", &u, &w);
 }
 
 #[test]
