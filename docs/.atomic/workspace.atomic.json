@@ -292978,6 +292978,40 @@
         "No hosted run holds a verdict for this round; the arena tests were run on the build host only."
       ]
     },
+    "Round 3770": {
+      "decision_summary": "D7 step 8, D: each lifecycle verb of the fixed-memory node is a capability of the build. The features lifecycle-close, lifecycle-reset and lifecycle-status each turn on lifecycle-verbs, the machinery they share, and gate what is theirs: reset the record of generations and reset_node, status the mirrored machine state and its read, close the withdrawal and the manager carrying it out. LifecycleNode gains binds(verb); StoreNode binds and permits only what its build names. A transport serves only bound verbs: the in-band query lists exactly them in the capability document and gives an unbound verb's key no reply, and the function refuses an unbound verb by its own name. Held by tests that run for any subset, by a compile and clippy check of all nine subsets, and by CI legs for each verb alone and for all three. Measured: the four unbound Zephyr client images have the same worst chain and size as the parent, to the byte.",
+      "changes_bullets": [
+        "crates/wz-session-core: LifecycleNode::binds (default true).",
+        "crates/wz-session-mcu: features lifecycle-close, lifecycle-reset, lifecycle-status over lifecycle-verbs; connect_manager gates the generation record, reset_node, the mirrored state and the bodies of NodeDesk per verb, and StoreNode binds from the features; admin_fixed serves and lists only the bound verbs; tests/admin_open_query.rs gains the binding module and its all-three module moves to the three features.",
+        "deploy/host-slot-node: the control feature turns the three verbs on.",
+        "scripts: run-ci.sh legs (C1m mcu lifecycle verbs on the three features, C1m admin verbs query 10, and one leg of 8 for each verb alone); the census and the nondefault-tests claim name the features. docs/session-lifecycle-intent.md sections 6.4 and 6.10."
+      ],
+      "verification_bullets": [
+        "On the build host: cargo check and clippy with -D warnings of wz-session-mcu for all nine subsets of the verb features (none, the machinery alone, each verb, each pair, all three); admin_open_query for each verb alone (8 tests) and for all three (10); the manager tests with each verb alone (22) and with all three (26); the host node's control channel (4 tests) and its clippy. Kit lane build and stack gate on the four Zephyr client images before and after: chains 6956, 6956, 7108 and 7448 bytes and sizes identical. The reason pin, census, feature model, gate diagnostic and count guard gates after the rebase. Not measured: the cost of binding one verb against all three, since no image binds any."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Next: bind Verbs on a Zephyr admin image and record the chain and flash of the verbs it takes, which also measures one verb against three; who may close, reset and read the status of a fixed image is the image owner's and none does by default. The hosted runs holding rounds 3697, 3715, 3749, 3764 and 3768 were not read: each was cancelled by a later push."
+      ],
+      "publishable_decision_summary": "D7 step 8, D: each lifecycle verb of the fixed-memory node is a capability of the build. The features lifecycle-close, lifecycle-reset and lifecycle-status each turn on lifecycle-verbs, the machinery they share, and gate what is theirs: reset the record of generations and reset_node, status the mirrored machine state and its read, close the withdrawal and the manager carrying it out. LifecycleNode gains binds(verb); StoreNode binds and permits only what its build names. A transport serves only bound verbs: the in-band query lists exactly them in the capability document and gives an unbound verb's key no reply, and the function refuses an unbound verb by its own name. Held by tests that run for any subset, by a compile and clippy check of all nine subsets, and by CI legs for each verb alone and for all three. Measured: the four unbound Zephyr client images have the same worst chain and size as the parent, to the byte.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core: LifecycleNode::binds (default true).",
+        "crates/wz-session-mcu: features lifecycle-close, lifecycle-reset, lifecycle-status over lifecycle-verbs; connect_manager gates the generation record, reset_node, the mirrored state and the bodies of NodeDesk per verb, and StoreNode binds from the features; admin_fixed serves and lists only the bound verbs; tests/admin_open_query.rs gains the binding module and its all-three module moves to the three features.",
+        "deploy/host-slot-node: the control feature turns the three verbs on.",
+        "scripts: run-ci.sh legs (C1m mcu lifecycle verbs on the three features, C1m admin verbs query 10, and one leg of 8 for each verb alone); the census and the nondefault-tests claim name the features. docs/session-lifecycle-intent.md sections 6.4 and 6.10."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host: cargo check and clippy with -D warnings of wz-session-mcu for all nine subsets of the verb features (none, the machinery alone, each verb, each pair, all three); admin_open_query for each verb alone (8 tests) and for all three (10); the manager tests with each verb alone (22) and with all three (26); the host node's control channel (4 tests) and its clippy. Kit lane build and stack gate on the four Zephyr client images before and after: chains 6956, 6956, 7108 and 7448 bytes and sizes identical. The reason pin, census, feature model, gate diagnostic and count guard gates after the rebase. Not measured: the cost of binding one verb against all three, since no image binds any."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next: bind Verbs on a Zephyr admin image and record the chain and flash of the verbs it takes, which also measures one verb against three; who may close, reset and read the status of a fixed image is the image owner's and none does by default. The hosted runs holding rounds 3697, 3715, 3749, 3764 and 3768 were not read: each was cancelled by a later push."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
