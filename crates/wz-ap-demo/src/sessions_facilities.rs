@@ -119,14 +119,13 @@ mod tests {
             [
                 "entropy",
                 "filesystem",
-                "interface-list",
                 "multicast",
                 "sockets-tcp",
                 "sockets-udp",
                 "threads"
             ]
         );
-        assert_eq!(got.may_require, Some(vec!["wall-clock"]));
+        assert_eq!(got.may_require, Some(vec!["interface-list", "wall-clock"]));
     }
 
     #[cfg(feature = "scouting-responder")]
@@ -142,12 +141,12 @@ mod tests {
             [
                 "entropy",
                 "filesystem",
-                "interface-list",
                 "multicast",
                 "sockets-udp",
                 "threads",
                 "unix-sockets"
             ]
         );
+        assert_eq!(got.may_require, Some(vec!["interface-list", "wall-clock"]));
     }
 }

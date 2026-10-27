@@ -448,9 +448,9 @@ def library_scenarios(driver: Driver) -> tuple[Scenario, ...]:
 def configuration_corpus(driver: Driver) -> tuple[Scenario, ...]:
     """The zenoh-c runs that hold each branch of a configuration's derivation to a run
     (`OpenPlan::device_requires`): a TLS dial whose material is files, a client that can only find
-    its node by scouting, and a listener allowed to fail. The peer is the driver itself, on the same
-    library. Scouting goes to a group port of the run's own (`{port2}`), so no other node on the
-    network can answer it."""
+    its node by scouting, a listener allowed to fail, and a peer alone on a group named by its
+    interface. The peer is the driver itself, on the same library. Scouting and the group go to a
+    port of the run's own (`{port2}`), so no other node on the network can answer them."""
     peer_lib = "{bin}"
     group = 'scouting/multicast/address="224.0.0.224:{port2}"'
     return (
@@ -468,6 +468,10 @@ def configuration_corpus(driver: Driver) -> tuple[Scenario, ...]:
         Scenario("a listener allowed to fail its bind",
                  (peer_lib, "listen", "tcp/127.0.0.1:{port}", "3", "listen/exit_on_failure=false"),
                  ("{package}/bin/wz-ap-demo", "--connect", "tcp/127.0.0.1:{port}", "--key", "demo/x"),
+                 seconds=15.0, driver=driver),
+        Scenario("a peer that joins a group on a named interface",
+                 (peer_lib, "listen", "udp/224.0.0.224:{port2}#iface=lo", "3",
+                  "scouting/multicast/enabled=false"),
                  seconds=15.0, driver=driver),
     )
 

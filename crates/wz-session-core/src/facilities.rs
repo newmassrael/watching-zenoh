@@ -30,7 +30,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use crate::locator::{parse_any_locator, AnyLocator, LinkSocketOptions, Proto};
+use crate::locator::{parse_any_locator, AnyLocator, Proto};
 
 /// The facility vocabulary, in `OS_FACILITIES`' order.
 pub const FACILITIES: [&str; 11] = [
@@ -164,19 +164,18 @@ struct EndpointNeeds {
 }
 
 /// The socket an IP link of `proto` opens, and what its link may ask besides.
-fn ip_link(proto: Proto, socket: Option<&LinkSocketOptions>) -> EndpointNeeds {
+fn ip_link(proto: Proto) -> EndpointNeeds {
     let mut needs = EndpointNeeds::default();
     needs.strict.insert(match proto {
         Proto::Tcp | Proto::Tls | Proto::Ws => "sockets-tcp",
         Proto::Udp | Proto::Quic | Proto::QuicDatagram | Proto::UdpReliable => "sockets-udp",
     });
-    // `#iface=` names the interface the socket is bound to, looked up by name: no interface, no
-    // link.
-    if socket.is_some_and(|options| options.iface.is_some()) {
-        needs.strict.insert("interface-list");
-    }
     // Every IP link reads the interfaces its local address sits on, for the access-control
-    // subject, and goes on with an indeterminate set when it cannot.
+    // subject, and goes on with an indeterminate set when it cannot. An `#iface=` asks nothing
+    // stricter: a unicast link hands the name to the kernel (`SO_BINDTODEVICE`) and lists nothing,
+    // and a group looks a named interface up in the listing but, when the listing cannot be made,
+    // joins on the kernel's default interface and goes on (`wz-host-net`'s
+    // `multicast_iface_selector_v4` and `_v6`).
     needs.loose.insert("interface-list");
     // The certificate-bearing links check a peer certificate's validity against the calendar.
     if matches!(proto, Proto::Tls | Proto::Quic | Proto::QuicDatagram) {
@@ -198,10 +197,10 @@ fn endpoint_needs(endpoint: &str) -> Result<EndpointNeeds, String> {
         });
     }
     match parse_any_locator(endpoint) {
-        Ok(AnyLocator::Ip(parsed)) => Ok(ip_link(parsed.proto, parsed.socket.as_deref())),
-        Ok(AnyLocator::Named { proto, socket, .. }) => {
+        Ok(AnyLocator::Ip(parsed)) => Ok(ip_link(parsed.proto)),
+        Ok(AnyLocator::Named { proto, .. }) => {
             // A host rather than an address goes through the resolver before any socket.
-            let mut needs = ip_link(proto, socket.as_deref());
+            let mut needs = ip_link(proto);
             needs.strict.insert("name-resolution");
             Ok(needs)
         }

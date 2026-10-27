@@ -190,7 +190,10 @@ mod tests {
             "udp/224.0.0.224:7447#iface=lo",
         )]))
         .unwrap();
-        assert!(got.contains("\"multicast\""), "{got}");
-        assert!(got.contains("\"interface-list\""), "{got}");
+        assert_eq!(
+            got,
+            "{\"requires\": [\"entropy\", \"multicast\", \"sockets-udp\", \"threads\"], \
+             \"may_require\": [\"interface-list\"], \"unknown\": []}"
+        );
     }
 }

@@ -126,7 +126,7 @@ mod tests {
     }
 
     #[test]
-    fn an_interface_named_by_the_endpoint_is_required_with_it() {
+    fn an_interface_named_by_the_endpoint_lists_nothing_it_cannot_go_without() {
         let got = plan(
             WhatAmI::Client,
             &["tcp/192.0.2.1:7447#iface=eth0"],
@@ -134,7 +134,8 @@ mod tests {
             NO_SCOUT,
         )
         .device_requires();
-        assert!(got.requires.contains(&"interface-list"), "{got:?}");
+        assert_eq!(got.requires, ["entropy", "sockets-tcp", "threads"]);
+        assert_eq!(got.may_require, Some(vec!["interface-list"]));
     }
 
     #[test]

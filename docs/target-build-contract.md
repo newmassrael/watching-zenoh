@@ -358,10 +358,14 @@ For the zenoh-c open, `requires` is the engine's
 `threads` and `entropy`, `filesystem` when the plan read a certificate or credential file
 (an unreadable one is refused), each listener and group's socket under
 `listen/exit_on_failure`, what EVERY dial target needs under `connect/exit_on_failure`
-(one success suffices, so the intersection: a host-named target needs `name-resolution`,
-an `#iface=` target `interface-list`), and `sockets-udp` and `multicast` for a client
-whose only way to a node is scouting. Everything else a run of it may ask is
-`may_require`; a serial or vsock endpoint makes it `null`. The vocabulary and the engine's
+(one success suffices, so the intersection: a host-named target needs `name-resolution`),
+and `sockets-udp` and `multicast` for a client whose only way to a node is scouting.
+Everything else a run of it may ask is `may_require`; a serial or vsock endpoint makes it
+`null`. An `#iface=` puts `interface-list` in `may_require` and not in `requires`: a
+unicast link hands the name to the kernel (`SO_BINDTODEVICE`) and lists nothing, and a
+group that cannot list the interfaces joins on the kernel's default one and goes on. A
+raw Ethernet endpoint does require it: its socket cannot be bound without the
+interface's index. The vocabulary and the engine's
 part are spelled again in Rust and `wz_config.py --check` holds them to this declaration.
 The library drivers print their door's answer for the configuration they open, the
 ap-demo scenario asks `--device-requires` for the document it runs, and Layer C1st holds
