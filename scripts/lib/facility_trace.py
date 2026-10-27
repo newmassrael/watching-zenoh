@@ -133,10 +133,14 @@ STRING_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
 @dataclasses.dataclass
 class Observation:
     """What one run asked for: each facility with the first event that witnessed it, each exemption
-    with how often it applied, and every unclassified event."""
+    with how often it applied, and every unclassified event; and how the run ended: `stopped` when
+    the oracle ended it, otherwise its exit status, with the tail of what it wrote to stderr."""
     facilities: dict[str, str] = dataclasses.field(default_factory=dict)
     exempt: dict[str, int] = dataclasses.field(default_factory=dict)
     unclassified: list[str] = dataclasses.field(default_factory=list)
+    stopped: bool = False
+    exit_status: int | None = None
+    stderr_tail: str = ""
 
     def add(self, kind: str, name: str, evidence: str) -> None:
         if kind == "facility":
@@ -350,11 +354,17 @@ def observe(command: list[str], seconds: float | None = None, env: dict[str, str
                 "-o", str(prefix), "-E", f"LD_PRELOAD={shim}"]
         for key, value in (env or {}).items():
             argv += ["-E", f"{key}={value}"]
-        proc = subprocess.Popen(argv + ["--", *command], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        try:
-            proc.wait(timeout=seconds)
-        except subprocess.TimeoutExpired:
-            stop_tracee(proc)
+        # strace writes the trace to its files and passes the program's own stderr through, so what
+        # the stderr file holds is the program's; strace's exit status is the program's.
+        stderr_path = work / "stderr"
+        with stderr_path.open("wb") as stderr:
+            proc = subprocess.Popen(argv + ["--", *command], stdout=subprocess.DEVNULL, stderr=stderr)
+            stopped = False
+            try:
+                proc.wait(timeout=seconds)
+            except subprocess.TimeoutExpired:
+                stop_tracee(proc)
+                stopped = True
         files = sorted(work.glob("trace.*"), key=lambda p: int(p.suffix[1:]))
         threads = [p.read_text(encoding="utf-8", errors="backslashreplace").splitlines() for p in files]
         binary = pathlib.Path(shutil.which(command[0]) or command[0]).resolve()
@@ -362,29 +372,63 @@ def observe(command: list[str], seconds: float | None = None, env: dict[str, str
                   if line.startswith(("open", "openat")) and not re.search(r"= -1 ", line)
                   for s in [first_string(line) or ""] if s.endswith(".so") or ".so." in s]
         names = loader_closure(binary, opened)
-        seen = Observation()
+        seen = Observation(stopped=stopped, exit_status=None if stopped else proc.returncode,
+                           stderr_tail=stderr_path.read_text(encoding="utf-8", errors="replace")[-600:])
         for lines in threads:
             classify_thread(lines, names, seen)
         return seen
 
 
+DRIVERS = pathlib.Path(__file__).resolve().parent / "facility_drivers"
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+
+@dataclasses.dataclass(frozen=True)
+class Driver:
+    """The program a library runs inside: a C source of `facility_drivers/`, compiled against the
+    packaged library itself (and the include directory of the tree, when the source includes a
+    header of it) and run with the library's directory on the loader's path."""
+    source: str
+    include: str = ""
+
+
 @dataclasses.dataclass(frozen=True)
 class Scenario:
     """One run of a packaged artifact under the oracle: the traced command and, when the run needs
-    a counterpart to open a session, the untraced peer's (`{bin}` is the artifact's file, `{port}` a
-    free local port). A peer that listens starts first; one that dials starts after the traced run
-    has had time to listen. The run is stopped after `seconds`."""
+    a counterpart to open a session, the untraced peer's. `{bin}` is the artifact's file, or the
+    driver compiled against it for a library; `{package}` is the package's directory, so a peer can
+    be another artifact of the same package; `{port}` is a free local port. A peer that listens
+    starts first; one that dials starts after the traced run has had time to listen. A run that has
+    not ended by itself is stopped after `seconds`."""
     name: str
     traced: tuple[str, ...]
     peer: tuple[str, ...] = ()
     peer_listens: bool = False
     seconds: float = 5.0
+    driver: Driver | None = None
+
+
+def library_scenarios(driver: Driver) -> tuple[Scenario, ...]:
+    """A library's two runs, as a peer that the package's ap-demo dials and as a client that dials
+    the package's ap-demo; the driver puts for three seconds and closes the session itself."""
+    demo = "{package}/bin/wz-ap-demo"
+    return (
+        Scenario("a peer that listens and that ap-demo subscribes to",
+                 ("{bin}", "listen", "tcp/127.0.0.1:{port}", "3"),
+                 (demo, "--connect", "tcp/127.0.0.1:{port}", "--key", "demo/x"), seconds=15.0, driver=driver),
+        Scenario("a client that dials ap-demo and publishes",
+                 ("{bin}", "connect", "tcp/127.0.0.1:{port}", "3"),
+                 (demo, "--listen", "tcp/127.0.0.1:{port}", "--key", "demo/x"), peer_listens=True,
+                 seconds=15.0, driver=driver),
+    )
 
 
 # The runs each artifact is judged on, by its manifest id. A scenario must reach what `requires`
 # claims every run asks for, so each opens a session (or, for a node whose router is a lab address,
 # reaches its dial), and it may reach any part of the bound.
 SCENARIOS = {
+    "capi-pico": library_scenarios(Driver("pico_session.c", "crates/wz-capi-pico/include")),
+    "capi-c": library_scenarios(Driver("c_session.c")),
     "ap-demo": (
         Scenario("a listener that a peer publishes to",
                  ("{bin}", "--listen", "tcp/127.0.0.1:{port}", "--key", "demo/x"),
@@ -405,12 +449,32 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
-def run_scenario(scenario: Scenario, binary: pathlib.Path) -> Observation:
+def build_driver(driver: Driver, library: pathlib.Path, work: pathlib.Path) -> pathlib.Path:
+    """The driver compiled against `library` (linked by its file name, so no other copy of it on the
+    machine can stand in)."""
+    out = work / pathlib.Path(driver.source).stem
+    argv = ["cc", "-std=c11", "-Wall", "-Wextra", "-Werror"]
+    if driver.include:
+        argv += ["-I", str(ROOT / driver.include)]
+    argv += [str(DRIVERS / driver.source), "-L", str(library.parent), f"-l:{library.name}", "-o", str(out)]
+    subprocess.run(argv, check=True)
+    return out
+
+
+def run_scenario(scenario: Scenario, artifact: pathlib.Path, package: pathlib.Path) -> Observation:
     """The observation of one scenario: the peer is started and stopped around the traced run."""
+    with tempfile.TemporaryDirectory(prefix="wz-facility-driver-") as tmp:
+        if scenario.driver is None:
+            return _run(scenario, artifact, package, {})
+        binary = build_driver(scenario.driver, artifact, pathlib.Path(tmp))
+        return _run(scenario, binary, package, {"LD_LIBRARY_PATH": str(artifact.parent)})
+
+
+def _run(scenario: Scenario, binary: pathlib.Path, package: pathlib.Path, env: dict[str, str]) -> Observation:
     port = free_port()
 
     def argv(words: tuple[str, ...]) -> list[str]:
-        return [w.format(bin=binary, port=port) for w in words]
+        return [w.format(bin=binary, package=package, port=port) for w in words]
 
     peer: list[subprocess.Popen] = []
 
@@ -425,7 +489,7 @@ def run_scenario(scenario: Scenario, binary: pathlib.Path) -> Observation:
         late = threading.Timer(1.5, start_peer)
         late.start()
     try:
-        return observe(argv(scenario.traced), scenario.seconds)
+        return observe(argv(scenario.traced), scenario.seconds, env)
     finally:
         if late is not None:
             late.cancel()
@@ -454,7 +518,7 @@ def judge_package(directory: pathlib.Path) -> tuple[list[str], list[str]]:
         requires = art.get("requires", [])
         may = art.get("may_require", art["device_requires"]) if "requires" in art else art["device_requires"]
         for scenario in scenarios:
-            seen = run_scenario(scenario, directory / art["path"])
+            seen = run_scenario(scenario, directory / art["path"], directory)
             found = judge(seen, requires, may)
             findings += [f"{art['id']} ({scenario.name}): {f}" for f in found]
             report.append(f"{art['id']} ({scenario.name}): observed {sorted(seen.facilities)}, "
@@ -466,8 +530,13 @@ def judge(seen: Observation, requires: list[str], may_require: list[str] | None)
     """What an observation refutes of a derivation: a required facility the run never asked for (the
     must analysis claimed too much), a facility asked for outside the bound (the may analysis
     claimed too little), and each unclassified event. `may_require` None is UNKNOWN: the bound
-    cannot be refuted."""
-    out = [f"requires {f} and the run never asked for it" for f in requires if f not in seen.facilities]
+    cannot be refuted. A run that ended by itself with a failure is a finding first: it stopped
+    short of what a run does, so what it asked for stands for nothing."""
+    out = []
+    if seen.exit_status not in (None, 0):
+        out.append(f"the run failed by itself (exit {seen.exit_status}), so it stands for no run: "
+                   f"{seen.stderr_tail.strip() or 'it wrote nothing to stderr'}")
+    out += [f"requires {f} and the run never asked for it" for f in requires if f not in seen.facilities]
     if may_require is not None:
         bound = set(requires) | set(may_require)
         out += [f"the run asked for {f} outside requires and may_require ({seen.facilities[f]})"
@@ -603,6 +672,10 @@ def _selftest() -> int:
                "the run asked for sockets-udp outside requires and may_require (u)"])
     expect("an unknown bound cannot be refuted, a lower bound still can",
            judge(seen, ["entropy"], None) == [])
+    failed_run = dataclasses.replace(seen, exit_status=1, stderr_tail="z_open returned -1\n")
+    expect("a run that failed by itself is a finding, with what it said",
+           judge(failed_run, ["entropy"], None)
+           == ["the run failed by itself (exit 1), so it stands for no run: z_open returned -1"])
 
     missing = missing_tools()
     if missing:
@@ -621,7 +694,8 @@ def _selftest() -> int:
 
             base = observed("none")
             expect(f"a program that does nothing asks for nothing ({base.as_json()})",
-                   base.facilities == {} and base.unclassified == [] and base.exempt.get("loader", 0) > 0)
+                   base.facilities == {} and base.unclassified == [] and base.exempt.get("loader", 0) > 0
+                   and not base.stopped and base.exit_status == 0)
             for facility, args, also in (
                 ("threads", (), set()),
                 ("sockets-tcp", (), set()),
@@ -651,8 +725,8 @@ def _selftest() -> int:
                 stopped = observe([str(probe), what], seconds=0.5)
                 expect(f"a run that does not end by itself ({what}) is stopped and read "
                        f"({stopped.as_json()}, {time.monotonic() - started:.1f}s)",
-                       stopped.facilities == {} and stopped.unclassified == []
-                       and time.monotonic() - started < 25)
+                       stopped.facilities == {} and stopped.unclassified == [] and stopped.stopped
+                       and stopped.exit_status is None and time.monotonic() - started < 25)
 
     for label in failures:
         print(f"facility-trace: FAIL -- selftest: {label}")

@@ -292,8 +292,13 @@ reason; or unclassified, which is a finding
 each packaged artifact that has scenarios and holds the runs to the manifest's own
 entry: every facility in `requires` was asked for, nothing outside `requires` and
 `may_require` was, and nothing is unclassified. Its first run found the demo's log
-timestamps outside the bound. The libraries have no scenario yet (a C program must
-drive them) and are reported NOT JUDGED.
+timestamps outside the bound. A library runs inside a program, so its scenarios compile a
+driver (`scripts/lib/facility_drivers/`) against the packaged library itself and run it as
+a listening peer and as a dialling client, with the package's own `wz-ap-demo` as the
+counterpart. The zenoh-c driver declares the calls it makes instead of including
+`zenoh.h`: every one passes its objects by pointer, so storage larger than any arm's type
+is right for all four arms, where a header of the wrong arm would be the wrong size. A run
+that fails by itself is a finding of its own: it stands for no run.
 
 The bound is split in two keys beside it. `requires` is what every run asks for and
 cannot go on without, whatever its configuration: a device that measurably lacks one
