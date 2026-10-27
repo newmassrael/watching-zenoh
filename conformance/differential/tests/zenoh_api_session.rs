@@ -582,6 +582,140 @@ macro_rules! session_cases {
                 out
             }
 
+            /// A publisher declared on a session that an upstream observer is connected to: the
+            /// settings it says, what it publishes with and without overriding them, the sink it
+            /// is, what undeclaring it does, and what a closed session leaves of it. Everything a
+            /// publisher writes is for the observer's subscription, which says what arrived.
+            pub fn publishers() -> Vec<String> {
+                use $z::internal::traits::{EncodingBuilderTrait, QoSBuilderTrait, SampleBuilderTrait};
+                let mut out = vec![];
+                let port = free_port();
+                let subject = $z::open(config(&format!(
+                    r#"{{ id: "5a0011", mode: "peer",
+                          listen: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                          scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                )))
+                .wait()
+                .expect("opens");
+                let watcher = observer::watch("b00011", port, true).expect("the observer opens");
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                while !watcher.is_ready() && std::time::Instant::now() < deadline {
+                    subject.put("demo/ready", "").wait().expect("a probe");
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                out.push(format!("subscription known: {}", watcher.is_ready()));
+                let mut delivered = 0usize;
+                let mut record = |label: &str, result: Result<(), _>, arrives: bool| {
+                    out.push(format!("{label}: {}", text(result)));
+                    delivered += usize::from(arrives);
+                };
+                let plain = subject.declare_publisher("demo/pub/plain").wait().expect("declares");
+                let settings = subject
+                    .declare_publisher("demo/pub/settings")
+                    .encoding($z::bytes::Encoding::TEXT_PLAIN)
+                    .priority($z::qos::Priority::RealTime)
+                    .congestion_control($z::qos::CongestionControl::Block)
+                    .express(true)
+                    .reliability($z::qos::Reliability::BestEffort)
+                    .wait()
+                    .expect("declares");
+                let says = format!(
+                    "plain says: {} {} {:?} {:?} {:?}",
+                    plain.key_expr(),
+                    plain.encoding(),
+                    plain.congestion_control(),
+                    plain.priority(),
+                    plain.reliability(),
+                );
+                let also = format!(
+                    "settings says: {} {} {:?} {:?} {:?}",
+                    settings.key_expr(),
+                    settings.encoding(),
+                    settings.congestion_control(),
+                    settings.priority(),
+                    settings.reliability(),
+                );
+                record("plain put", plain.put("p1").wait(), true);
+                record("put of a publisher with settings", settings.put("p2").attachment("a").wait(), true);
+                record(
+                    "put overriding the encoding",
+                    plain.put("p3").encoding($z::bytes::Encoding::APPLICATION_JSON).wait(),
+                    true,
+                );
+                record("delete", plain.delete().wait(), true);
+                record("delete with an attachment", plain.delete().attachment("gone").wait(), true);
+                let remote = subject
+                    .declare_publisher("demo/pub/remote")
+                    .allowed_destination($z::sample::Locality::Remote)
+                    .wait()
+                    .expect("declares");
+                record("put to remote only", remote.put("p4").wait(), true);
+                let local = subject
+                    .declare_publisher("demo/pub/local")
+                    .allowed_destination($z::sample::Locality::SessionLocal)
+                    .wait()
+                    .expect("declares");
+                record("put to the session only", local.put("p5").wait(), false);
+                // A key declared on the session is held by the publisher declared for it.
+                let mut kept = vec![];
+                if let Ok(declared) = subject.declare_keyexpr("demo/pub/declared").wait() {
+                    let on_declared = subject.declare_publisher(declared.clone()).wait().expect("declares");
+                    drop(declared);
+                    record("put of a publisher on a declared key", on_declared.put("p6").wait(), true);
+                    kept.push(on_declared);
+                }
+                // The publisher is a sink of the samples of a subscriber.
+                let source = subject.declare_subscriber("demo/pub/in").wait().expect("declares");
+                record(
+                    "put for the sink",
+                    subject
+                        .put("demo/pub/in", "p7")
+                        .encoding($z::bytes::Encoding::TEXT_PLAIN)
+                        .attachment("sunk")
+                        .wait(),
+                    true,
+                );
+                let mut sink = subject
+                    .declare_publisher("demo/pub/out")
+                    .priority($z::qos::Priority::DataLow)
+                    .wait()
+                    .expect("declares");
+                match source.recv_timeout(Duration::from_secs(5)) {
+                    Ok(Some(sample)) => record(
+                        "sink",
+                        futures::executor::block_on(futures::SinkExt::send(&mut sink, sample)),
+                        true,
+                    ),
+                    other => record("sink", Err(format!("no sample ({other:?})").into()), false),
+                }
+                // What undeclaring a publisher says.
+                let gone = subject.declare_publisher("demo/pub/gone").wait().expect("declares");
+                record("undeclare", gone.undeclare().wait(), false);
+                record(
+                    "publisher on an invalid key",
+                    subject.declare_publisher("demo//bad").wait().map(|_| ()),
+                    false,
+                );
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                while watcher.lines().len() < delivered && std::time::Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                std::thread::sleep(Duration::from_millis(300));
+                drop(kept);
+                let mut received = watcher.lines();
+                received.sort();
+                out.push(says);
+                out.push(also);
+                out.push(format!("received {} of {delivered}", received.len()));
+                out.extend(received.into_iter().map(|line| format!("sample: {line}")));
+                subject.close().wait().expect("closes");
+                out.push(format!("put after close: {}", text(plain.put("x").wait())));
+                out.push(format!("delete after close: {}", text(plain.delete().wait())));
+                out.push(format!("declare after close: {}", text(subject.declare_publisher("demo/after").wait().map(|_| ()))));
+                out.push(format!("undeclare after close: {}", text(plain.undeclare().wait())));
+                out
+            }
+
             /// What a sample says, as one line: every field of it that crosses a link.
             fn describe(sample: &$z::sample::Sample) -> String {
                 let timestamp = sample.timestamp().map(|t| format!("{t}"));
@@ -1176,6 +1310,20 @@ fn what_a_session_with_a_clock_publishes_carries_its_stamps() {
         "{u:#?}"
     );
     compare("publications with a clock", &u, &w);
+}
+
+#[test]
+fn what_a_publisher_publishes_is_what_an_upstream_subscriber_receives() {
+    // The log of upstream's nodes, for a run that is asked for it with `RUST_LOG`.
+    up_zenoh::try_init_log_from_env();
+    let (u, w) = (up::publishers(), wz::publishers());
+    assert!(u.iter().any(|l| l == "subscription known: true"), "{u:#?}");
+    assert!(u.iter().any(|l| l.starts_with("received 9 of 9")), "{u:#?}");
+    assert!(
+        u.iter().any(|l| l.starts_with("sample: demo/pub/settings Put len=2 p2 encoding=text/plain priority=RealTime congestion=Block express=true")),
+        "{u:#?}"
+    );
+    compare("publishers", &u, &w);
 }
 
 #[test]

@@ -120,6 +120,20 @@ pub(crate) struct Subscription<'a> {
     pub(crate) keeps: Arc<dyn Send + Sync>,
 }
 
+/// What the declaration of a publisher asks of the engine, in the types of this crate: the key as
+/// the wire names it and who the publisher writes to.
+// A build with no engine has nothing that reads the fields.
+#[cfg_attr(not(feature = "engine-tokio"), allow(dead_code))]
+pub(crate) struct PublisherDeclaration<'a> {
+    /// The key expression the publisher writes to.
+    pub(crate) key: &'a str,
+    /// The declaration of a prefix of the key that the wire names it by, `0` when it names none.
+    pub(crate) scope: ExprId,
+    /// What follows the declared prefix, `None` when the declaration covers the whole key.
+    pub(crate) suffix: Option<String>,
+    pub(crate) destination: Locality,
+}
+
 /// What a session is run by: the engine that holds its faces, its declarations and its clock.
 ///
 /// One engine is selected by a feature of the build (decision D5). A build that selects none has no
@@ -294,6 +308,47 @@ impl Engine {
             Engine::Tokio(state) => state.shared.as_engine().undeclare_subscriber(u64::from(id)),
         }
     }
+
+    /// Declare the publisher `publisher` says: the engine keeps the interest in the subscribers
+    /// matching its key, and asks every peer for them as upstream's declaration does, unless the
+    /// publisher writes to the session itself. The id is released by
+    /// [`Engine::undeclare_publisher`].
+    fn declare_publisher(&self, publisher: PublisherDeclaration<'_>) -> ZResult<Id> {
+        match self {
+            Engine::Tokio(state) => {
+                let PublisherDeclaration {
+                    key,
+                    scope,
+                    suffix,
+                    destination,
+                } = publisher;
+                let wire = tokio_engine::wire_key_of(scope, suffix.clone());
+                let ask = tokio_engine::interest_of(scope, suffix, destination);
+                let id = state.shared.as_engine().declare_write_filter(
+                    wz_capi_core::faces::FilterPlane::Subscribers,
+                    key.to_owned(),
+                    &wire,
+                    ask,
+                    destination != Locality::Remote,
+                );
+                Id::try_from(id).map_err(|_| {
+                    zerror!("the engine numbered a publisher {id}, which is more than an id holds")
+                        .into()
+                })
+            }
+        }
+    }
+
+    /// Let go of the publisher `id`: the engine retracts its interest once no other publisher on
+    /// the key holds it.
+    fn undeclare_publisher(&self, id: Id) {
+        match self {
+            Engine::Tokio(state) => state
+                .shared
+                .as_engine()
+                .undeclare_write_filter(u64::from(id)),
+        }
+    }
 }
 
 #[cfg(not(feature = "engine-tokio"))]
@@ -337,6 +392,14 @@ impl Engine {
     fn undeclare_subscriber(&self, _id: Id) {
         match *self {}
     }
+
+    fn declare_publisher(&self, _publisher: PublisherDeclaration<'_>) -> ZResult<Id> {
+        match *self {}
+    }
+
+    fn undeclare_publisher(&self, _id: Id) {
+        match *self {}
+    }
 }
 
 /// The reading of a configuration for the tokio engine: its role, its endpoints, the document its
@@ -358,7 +421,7 @@ mod tokio_engine {
             locality::Locality as EngineLocality,
             qos::{CongestionControl as EngineCongestion, Priority as EnginePriority},
             sample::{EncodingHint, SampleKind as EngineSampleKind, TimestampHint},
-            session::PublishOptions,
+            session::{InterestForm, PublishOptions},
             sink::SampleView,
         },
     };
@@ -572,6 +635,21 @@ mod tokio_engine {
         }
     }
 
+    /// How the peers are asked for the subscribers matching a publisher's key, or `None` when the
+    /// publisher writes to the session itself and nobody is asked. Upstream asks for the key as
+    /// the wire names it, once and for the future, with no aggregation.
+    pub(super) fn interest_of(
+        scope: ExprId,
+        suffix: Option<String>,
+        destination: Locality,
+    ) -> Option<InterestForm> {
+        (destination != Locality::SessionLocal).then(|| InterestForm {
+            mapping_id: u64::from(scope),
+            suffix,
+            aggregate: false,
+        })
+    }
+
     /// The locality of the engine that is `locality`.
     pub(super) fn engine_locality(locality: Locality) -> EngineLocality {
         match locality {
@@ -717,11 +795,19 @@ pub(crate) struct SessionInner {
     zid: ZenohId,
     /// The subscriptions declared on the session and not undeclared, which a close lets go of.
     subscriptions: std::sync::Mutex<Vec<Id>>,
+    /// The publishers declared on the session and not undeclared, which a close lets go of.
+    publishers: std::sync::Mutex<Vec<Id>>,
 }
 
 impl SessionInner {
     fn subscriptions(&self) -> std::sync::MutexGuard<'_, Vec<Id>> {
         self.subscriptions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn publishers(&self) -> std::sync::MutexGuard<'_, Vec<Id>> {
+        self.publishers
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -732,6 +818,97 @@ impl SessionInner {
         for id in left {
             self.engine.undeclare_subscriber(id);
         }
+    }
+
+    /// Undeclare every publisher that is left: those of a session that has closed.
+    fn release_publishers(&self) {
+        let left = std::mem::take(&mut *self.publishers());
+        for id in left {
+            self.engine.undeclare_publisher(id);
+        }
+    }
+
+    /// Declare a publisher for `key_expr` on the engine and record it, so that a close lets go of it.
+    fn declare_publisher_inner(
+        self: &Arc<Self>,
+        key_expr: &KeyExpr,
+        destination: Locality,
+    ) -> ZResult<Id> {
+        if self.engine.is_closed() {
+            return Err(SessionClosedError.into());
+        }
+        tracing::trace!("declare_publisher({:?})", key_expr);
+        let anchor: SessionAnchor = self.clone();
+        let wire = key_expr.to_wire(&anchor);
+        let suffix = (!wire.suffix.is_empty()).then(|| wire.suffix.to_string());
+        let id = self.engine.declare_publisher(PublisherDeclaration {
+            key: key_expr.as_str(),
+            scope: wire.scope,
+            suffix,
+            destination,
+        })?;
+        self.publishers().push(id);
+        // A close that ran between the check and the record has not seen this publisher.
+        if self.engine.is_closed() {
+            self.release_publishers();
+            return Err(SessionClosedError.into());
+        }
+        Ok(id)
+    }
+
+    /// Hand a publication to the engine. The session behind `self` is the anchor the key is named
+    /// by.
+    #[allow(clippy::too_many_arguments)] // the arguments of upstream's function, kept as they are
+    fn resolve_put(
+        self: &Arc<Self>,
+        key_expr: &KeyExpr,
+        payload: ZBytes,
+        kind: SampleKind,
+        encoding: Encoding,
+        congestion_control: CongestionControl,
+        priority: Priority,
+        is_express: bool,
+        destination: Locality,
+        #[cfg(feature = "unstable")] reliability: Reliability,
+        timestamp: Option<uhlc::Timestamp>,
+        #[cfg(feature = "unstable")] source_info: Option<SourceInfo>,
+        attachment: Option<ZBytes>,
+        #[cfg(feature = "unstable")] timestamp_instrumentation: Option<TimestampInstrumentation>,
+    ) -> ZResult<()> {
+        if self.engine.is_closed() {
+            return Err(SessionClosedError.into());
+        }
+        // The instrumentation of a message at each node it crosses is the model of slice Z6b: an
+        // engine without it would send the message without the stamps asked for, which is the
+        // silent fallback this crate refuses everywhere else.
+        #[cfg(feature = "unstable")]
+        if timestamp_instrumentation.is_some() {
+            bail!(
+                "the timestamp instrumentation of a publication is not carried by this engine yet \
+                 (slice Z6b of docs/zenoh-api-on-the-engine.md)"
+            );
+        }
+        let anchor: SessionAnchor = self.clone();
+        let wire = key_expr.to_wire(&anchor);
+        let suffix = (!wire.suffix.is_empty()).then(|| wire.suffix.to_string());
+        self.engine.publish(&Publication {
+            key: key_expr.as_str(),
+            scope: wire.scope,
+            suffix,
+            payload,
+            kind,
+            encoding,
+            congestion_control,
+            priority,
+            is_express,
+            destination,
+            #[cfg(feature = "unstable")]
+            reliability,
+            timestamp,
+            #[cfg(feature = "unstable")]
+            source_info,
+            attachment,
+        })
     }
 }
 
@@ -813,6 +990,7 @@ impl Session {
             id,
             zid,
             subscriptions: std::sync::Mutex::new(vec![]),
+            publishers: std::sync::Mutex::new(vec![]),
         })))
     }
 }
@@ -866,6 +1044,63 @@ impl WeakSession {
                 Ok(())
             }
         }
+    }
+
+    /// Retract the publisher `pid`. A closed session has none, and undeclaring on it is no error;
+    /// an id the session does not hold is one.
+    pub(crate) fn undeclare_publisher_inner(&self, pid: Id) -> ZResult<()> {
+        if self.0.engine.is_closed() {
+            return Ok(());
+        }
+        let known = {
+            let mut publishers = self.0.publishers();
+            let before = publishers.len();
+            publishers.retain(|id| *id != pid);
+            before != publishers.len()
+        };
+        if !known {
+            return Err(zerror!("Unable to find publisher").into());
+        }
+        self.0.engine.undeclare_publisher(pid);
+        Ok(())
+    }
+
+    /// What [`Session::resolve_put`] is, for an entity that holds the session by this reference.
+    #[allow(clippy::too_many_arguments)] // the arguments of upstream's function, kept as they are
+    pub(crate) fn resolve_put(
+        &self,
+        key_expr: &KeyExpr,
+        payload: ZBytes,
+        kind: SampleKind,
+        encoding: Encoding,
+        congestion_control: CongestionControl,
+        priority: Priority,
+        is_express: bool,
+        destination: Locality,
+        #[cfg(feature = "unstable")] reliability: Reliability,
+        timestamp: Option<uhlc::Timestamp>,
+        #[cfg(feature = "unstable")] source_info: Option<SourceInfo>,
+        attachment: Option<ZBytes>,
+        #[cfg(feature = "unstable")] timestamp_instrumentation: Option<TimestampInstrumentation>,
+    ) -> ZResult<()> {
+        self.0.resolve_put(
+            key_expr,
+            payload,
+            kind,
+            encoding,
+            congestion_control,
+            priority,
+            is_express,
+            destination,
+            #[cfg(feature = "unstable")]
+            reliability,
+            timestamp,
+            #[cfg(feature = "unstable")]
+            source_info,
+            attachment,
+            #[cfg(feature = "unstable")]
+            timestamp_instrumentation,
+        )
     }
 
     /// The ids of the nodes this session is connected to that play the role `whatami`.
@@ -1151,9 +1386,36 @@ impl Session {
         Ok(id)
     }
 
-    /// The builder of the settings a publication carries, for `put` and `delete`. Resolving it into
-    /// a publisher is `declare_publisher` and arrives with slice Z2d.
-    pub(crate) fn publisher_builder<'b, TryIntoKeyExpr>(
+    /// Declare the publisher `key_expr` was declared for: the interest in the subscribers matching
+    /// it that the peers are asked for, unless the destination is the session itself. The id of
+    /// the engine's declaration, released at undeclare or at close.
+    pub(crate) fn declare_publisher_inner(
+        &self,
+        key_expr: &KeyExpr,
+        destination: Locality,
+    ) -> ZResult<Id> {
+        self.0.declare_publisher_inner(key_expr, destination)
+    }
+
+    /// Create a [`Publisher`](crate::pubsub::Publisher) for the given key expression.
+    ///
+    /// # Arguments
+    ///
+    /// * `key_expr` - The key expression matching resources to write
+    ///
+    /// # Examples
+    /// ```
+    /// # #[tokio::main]
+    /// # async fn main() {
+    ///
+    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// let publisher = session.declare_publisher("key/expression")
+    ///     .await
+    ///     .unwrap();
+    /// publisher.put("value").await.unwrap();
+    /// # }
+    /// ```
+    pub fn declare_publisher<'b, TryIntoKeyExpr>(
         &self,
         key_expr: TryIntoKeyExpr,
     ) -> PublisherBuilder<'_, 'b>
@@ -1209,7 +1471,7 @@ impl Session {
         IntoZBytes: Into<ZBytes>,
     {
         SessionPutBuilder {
-            publisher: self.publisher_builder(key_expr),
+            publisher: self.declare_publisher(key_expr),
             kind: PublicationBuilderPut {
                 payload: payload.into(),
                 encoding: Encoding::default(),
@@ -1249,7 +1511,7 @@ impl Session {
         <TryIntoKeyExpr as TryInto<KeyExpr<'b>>>::Error: Into<zenoh_result::Error>,
     {
         SessionDeleteBuilder {
-            publisher: self.publisher_builder(key_expr),
+            publisher: self.declare_publisher(key_expr),
             kind: PublicationBuilderDelete,
             timestamp: None,
             attachment: None,
@@ -1277,26 +1539,8 @@ impl Session {
         attachment: Option<ZBytes>,
         #[cfg(feature = "unstable")] timestamp_instrumentation: Option<TimestampInstrumentation>,
     ) -> ZResult<()> {
-        if self.0.engine.is_closed() {
-            return Err(SessionClosedError.into());
-        }
-        // The instrumentation of a message at each node it crosses is the model of slice Z6b: an
-        // engine without it would send the message without the stamps asked for, which is the
-        // silent fallback this crate refuses everywhere else.
-        #[cfg(feature = "unstable")]
-        if timestamp_instrumentation.is_some() {
-            bail!(
-                "the timestamp instrumentation of a publication is not carried by this engine yet \
-                 (slice Z6b of docs/zenoh-api-on-the-engine.md)"
-            );
-        }
-        let anchor = self.anchor();
-        let wire = key_expr.to_wire(&anchor);
-        let suffix = (!wire.suffix.is_empty()).then(|| wire.suffix.to_string());
-        self.0.engine.publish(&Publication {
-            key: key_expr.as_str(),
-            scope: wire.scope,
-            suffix,
+        self.0.resolve_put(
+            key_expr,
             payload,
             kind,
             encoding,
@@ -1310,7 +1554,9 @@ impl Session {
             #[cfg(feature = "unstable")]
             source_info,
             attachment,
-        })
+            #[cfg(feature = "unstable")]
+            timestamp_instrumentation,
+        )
     }
 
     /// Check if the session has been closed.
@@ -1386,6 +1632,7 @@ impl Closee for WeakSession {
                 // A closed session takes nothing more, and lets go of the callbacks it was to
                 // call: the channel of a subscriber ends with its session, as upstream's does.
                 session.release_subscriptions();
+                session.release_publishers();
             })
             .await;
     }
@@ -2292,6 +2539,9 @@ mod tests {
                         in_callback.put("demo/reenter/other", "v").wait()?;
                         inner.undeclare().wait()?;
                         in_callback.put(&key, "v").wait()?;
+                        let publisher = in_callback.declare_publisher("demo/reenter/pub").wait()?;
+                        publisher.put("v").wait()?;
+                        publisher.undeclare().wait()?;
                         in_callback.undeclare(key).wait()
                     })();
                     done_tx.send(outcome).expect("the test is listening");
@@ -2304,6 +2554,316 @@ mod tests {
                 .expect("the callback used the session and came back")
                 .expect("each thing it did worked");
             assert_eq!(inner_count.load(Ordering::SeqCst), 2);
+        }
+    }
+
+    mod publishing {
+        use std::time::Duration;
+
+        use futures::SinkExt;
+
+        use super::*;
+
+        const WAIT: Duration = Duration::from_secs(5);
+
+        /// Whether the engine still holds the publisher `id`: a filter it holds says nothing
+        /// matches when no subscriber does, and one it does not hold says nothing.
+        fn held(session: &Session, id: Id) -> bool {
+            match &session.0.engine {
+                Engine::Tokio(state) => state.shared.as_engine().write_filter_active(u64::from(id)),
+            }
+        }
+
+        #[test]
+        fn a_publisher_says_the_settings_it_was_declared_with() {
+            let session = open(peer("a1b2f0")).wait().expect("opens");
+            let publisher = session
+                .declare_publisher("demo/settings")
+                .encoding(Encoding::TEXT_PLAIN)
+                .congestion_control(CongestionControl::Block)
+                .priority(Priority::RealTime)
+                .express(true)
+                .wait()
+                .expect("declares");
+            assert_eq!(publisher.key_expr().as_str(), "demo/settings");
+            assert_eq!(publisher.encoding(), &Encoding::TEXT_PLAIN);
+            assert_eq!(publisher.congestion_control(), CongestionControl::Block);
+            assert_eq!(publisher.priority(), Priority::RealTime);
+            let plain = session
+                .declare_publisher("demo/plain")
+                .wait()
+                .expect("declares");
+            assert_eq!(plain.encoding(), &Encoding::default());
+            assert_eq!(plain.congestion_control(), CongestionControl::DEFAULT);
+            assert_eq!(plain.priority(), Priority::DEFAULT);
+        }
+
+        #[test]
+        fn a_publication_of_a_publisher_carries_its_settings_and_what_it_overrides() {
+            let session = open(peer("a1b2f1")).wait().expect("opens");
+            let subscriber = session
+                .declare_subscriber("demo/**")
+                .wait()
+                .expect("declares");
+            let publisher = session
+                .declare_publisher("demo/p")
+                .encoding(Encoding::TEXT_PLAIN)
+                .priority(Priority::DataHigh)
+                .express(true)
+                .wait()
+                .expect("declares");
+            publisher.put("v").attachment("a").wait().expect("puts");
+            let sample = subscriber
+                .recv_timeout(WAIT)
+                .expect("a channel")
+                .expect("a sample");
+            assert_eq!(sample.key_expr().as_str(), "demo/p");
+            assert_eq!(sample.kind(), SampleKind::Put);
+            assert_eq!(sample.encoding(), &Encoding::TEXT_PLAIN);
+            assert_eq!(sample.priority(), Priority::DataHigh);
+            assert!(sample.express());
+            assert!(sample.attachment().is_some());
+            publisher
+                .put("w")
+                .encoding(Encoding::APPLICATION_JSON)
+                .wait()
+                .expect("puts");
+            let sample = subscriber
+                .recv_timeout(WAIT)
+                .expect("a channel")
+                .expect("a sample");
+            assert_eq!(sample.encoding(), &Encoding::APPLICATION_JSON);
+            publisher.delete().wait().expect("deletes");
+            let sample = subscriber
+                .recv_timeout(WAIT)
+                .expect("a channel")
+                .expect("a sample");
+            assert_eq!(sample.kind(), SampleKind::Delete);
+            assert_eq!(sample.priority(), Priority::DataHigh);
+        }
+
+        #[test]
+        fn the_destination_of_a_publisher_says_whose_subscribers_it_reaches() {
+            let session = open(peer("a1b2f2")).wait().expect("opens");
+            let seen = Arc::new(AtomicUsize::new(0));
+            let counted = Arc::clone(&seen);
+            let _subscriber = session
+                .declare_subscriber("demo/destination")
+                .callback(move |_| {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                })
+                .wait()
+                .expect("declares");
+            let remote = session
+                .declare_publisher("demo/destination")
+                .allowed_destination(Locality::Remote)
+                .wait()
+                .expect("declares");
+            remote.put("v").wait().expect("puts");
+            assert_eq!(seen.load(Ordering::SeqCst), 0, "a remote one skips its own");
+            let local = session
+                .declare_publisher("demo/destination")
+                .allowed_destination(Locality::SessionLocal)
+                .wait()
+                .expect("declares");
+            local.put("v").wait().expect("puts");
+            assert_eq!(seen.load(Ordering::SeqCst), 1);
+            let any = session
+                .declare_publisher("demo/destination")
+                .wait()
+                .expect("declares");
+            any.put("v").wait().expect("puts");
+            assert_eq!(seen.load(Ordering::SeqCst), 2);
+        }
+
+        #[test]
+        fn a_publisher_is_a_sink_of_samples() {
+            let session = open(peer("a1b2f3")).wait().expect("opens");
+            let subscriber = session
+                .declare_subscriber("demo/sink/**")
+                .wait()
+                .expect("declares");
+            let mut publisher = session
+                .declare_publisher("demo/sink/out")
+                .priority(Priority::DataLow)
+                .wait()
+                .expect("declares");
+            let source = session
+                .declare_subscriber("demo/sink/in")
+                .wait()
+                .expect("declares");
+            session
+                .put("demo/sink/in", "one")
+                .encoding(Encoding::TEXT_PLAIN)
+                .attachment("a")
+                .wait()
+                .expect("puts");
+            let sample = source
+                .recv_timeout(WAIT)
+                .expect("a channel")
+                .expect("a sample");
+            futures::executor::block_on(publisher.send(sample)).expect("sends");
+            // The subscriber sees what the session put on `in` and what the sink put on `out`.
+            let mut seen = vec![];
+            for _ in 0..2 {
+                let sample = subscriber
+                    .recv_timeout(WAIT)
+                    .expect("a channel")
+                    .expect("a sample");
+                seen.push((
+                    sample.key_expr().as_str().to_owned(),
+                    sample.priority(),
+                    sample.encoding().clone(),
+                    sample.attachment().is_some(),
+                ));
+            }
+            seen.sort_by(|a, b| a.0.cmp(&b.0));
+            assert_eq!(
+                seen,
+                vec![
+                    (
+                        "demo/sink/in".to_owned(),
+                        Priority::Data,
+                        Encoding::TEXT_PLAIN,
+                        true
+                    ),
+                    (
+                        "demo/sink/out".to_owned(),
+                        Priority::DataLow,
+                        Encoding::TEXT_PLAIN,
+                        true
+                    ),
+                ]
+            );
+        }
+
+        #[test]
+        fn undeclaring_and_dropping_a_publisher_let_go_of_it_and_a_stranger_is_refused() {
+            let session = open(peer("a1b2f4")).wait().expect("opens");
+            assert_eq!(session.0.publishers().len(), 0);
+            let first = session
+                .declare_publisher("demo/undeclare")
+                .wait()
+                .expect("declares");
+            let second = session
+                .declare_publisher("demo/undeclare")
+                .wait()
+                .expect("declares");
+            assert_eq!(session.0.publishers().len(), 2);
+            let (first_id, second_id) = (first.id, second.id);
+            assert!(held(&session, first_id) && held(&session, second_id));
+            first.undeclare().wait().expect("undeclares");
+            assert_eq!(session.0.publishers().len(), 1);
+            assert!(!held(&session, first_id), "the engine let go of it");
+            assert!(held(&session, second_id), "and of no other");
+            drop(second);
+            assert_eq!(session.0.publishers().len(), 0);
+            assert!(!held(&session, second_id), "a drop undeclares");
+            let error = session
+                .downgrade()
+                .undeclare_publisher_inner(Id::MAX)
+                .expect_err("not a publisher of the session");
+            assert!(
+                error.to_string().contains("Unable to find publisher"),
+                "{error}"
+            );
+        }
+
+        #[test]
+        fn a_closed_session_declares_and_publishes_nothing_and_lets_its_publishers_go() {
+            let session = open(peer("a1b2f5")).wait().expect("opens");
+            let publisher = session
+                .declare_publisher("demo/closed")
+                .wait()
+                .expect("declares");
+            let id = publisher.id;
+            assert!(held(&session, id));
+            session.close().wait().expect("closes");
+            assert_eq!(session.0.publishers().len(), 0);
+            assert!(!held(&session, id), "a close lets go of what it holds");
+            let error = publisher.put("v").wait().expect_err("a closed session");
+            assert!(error.downcast_ref::<SessionClosedError>().is_some());
+            let error = session
+                .declare_publisher("demo/closed")
+                .wait()
+                .expect_err("a closed session");
+            assert!(error.downcast_ref::<SessionClosedError>().is_some());
+            publisher
+                .undeclare()
+                .wait()
+                .expect("no error on a closed session");
+        }
+
+        #[test]
+        fn a_publisher_is_refused_for_a_key_that_is_not_one() {
+            let session = open(peer("a1b2f6")).wait().expect("opens");
+            let error = session
+                .declare_publisher("demo//bad")
+                .wait()
+                .expect_err("not a key");
+            assert!(error.to_string().contains("demo//bad"), "{error}");
+        }
+
+        #[test]
+        fn the_peers_are_asked_for_the_subscribers_of_a_key_unless_the_publisher_stays_in_the_session(
+        ) {
+            use super::super::tokio_engine::interest_of;
+
+            for destination in [Locality::Any, Locality::Remote] {
+                let ask = interest_of(7, Some("leaf".to_owned()), destination)
+                    .expect("the peers are asked");
+                assert_eq!(ask.mapping_id, 7);
+                assert_eq!(ask.suffix.as_deref(), Some("leaf"));
+                assert!(!ask.aggregate, "upstream asks for no aggregation");
+            }
+            assert!(
+                interest_of(7, None, Locality::SessionLocal).is_none(),
+                "nobody is asked for a publisher that writes to the session itself"
+            );
+        }
+
+        #[test]
+        fn a_publisher_declares_its_key_on_the_session_until_it_is_dropped() {
+            let session = open(peer("a1b2f8")).wait().expect("opens");
+            let declared = |session: &Session| -> Vec<String> {
+                session
+                    .0
+                    .engine
+                    .keyexpr_declarations()
+                    .into_iter()
+                    .map(|(_, key)| key)
+                    .collect()
+            };
+            assert!(declared(&session).is_empty());
+            let publisher = session
+                .declare_publisher("demo/declared/by/publisher")
+                .wait()
+                .expect("declares");
+            assert_eq!(declared(&session), ["demo/declared/by/publisher"]);
+            drop(publisher);
+            assert!(declared(&session).is_empty());
+        }
+
+        #[test]
+        fn a_publisher_keeps_the_declaration_of_its_key_until_it_is_undeclared() {
+            let session = open(peer("a1b2f7")).wait().expect("opens");
+            let key = session
+                .declare_keyexpr("demo/held")
+                .wait()
+                .expect("declares");
+            let publisher = session
+                .declare_publisher(key.clone())
+                .wait()
+                .expect("declares");
+            let before = session.0.engine.keyexpr_declarations().len();
+            drop(key);
+            assert_eq!(
+                session.0.engine.keyexpr_declarations().len(),
+                before,
+                "the publisher still holds the key"
+            );
+            publisher.undeclare().wait().expect("undeclares");
+            assert_eq!(session.0.engine.keyexpr_declarations().len(), before - 1);
         }
     }
 }

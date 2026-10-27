@@ -39,8 +39,6 @@ pub(crate) mod encoding;
 #[allow(dead_code)]
 pub(crate) mod handlers;
 pub(crate) mod info;
-// R3706: the publisher and its undeclaration are slice Z2 of docs/zenoh-api-on-the-engine.md; of the
-// file only the priority is here, which the sample reads.
 pub(crate) mod publisher;
 // R3706: the sample's remaining user, the reply, is slice Z3; until it lands the constructor from a
 // frame (`from_push`) has no caller.

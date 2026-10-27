@@ -13,15 +13,434 @@
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 // Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
-// src/api/publisher.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). Only the priority of a
-// message is here, which the sample and the quality of service read; the publisher, its
-// undeclaration, its sink, and the two tests that open a session, arrive with slice Z2 of
-// docs/zenoh-api-on-the-engine.md.
+// src/api/publisher.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). A partial derivative:
+// `PublisherState`, the entry of the table a session keeps of its publishers, is not here, since the
+// engine keeps the declarations (docs/zenoh-api-on-the-engine.md, decision D3), and what concerns
+// the matching of a publisher (`matching_status`, `matching_listener` and the listeners it holds)
+// arrives with slice Z4.
 
-use std::convert::TryFrom;
+use std::{
+    convert::TryFrom,
+    fmt,
+    future::{IntoFuture, Ready},
+    pin::Pin,
+    task::{Context, Poll},
+};
 
+use futures::Sink;
 use serde::Deserialize;
+use tracing::error;
 use zenoh_config::qos::PriorityConf;
+use zenoh_core::{Resolvable, Wait};
+use zenoh_protocol::core::CongestionControl;
+use zenoh_result::{Error, ZResult};
+#[cfg(feature = "unstable")]
+use {
+    zenoh_config::wrappers::EntityGlobalId, zenoh_protocol::core::EntityGlobalIdProto,
+    zenoh_protocol::core::Reliability,
+};
+
+use crate::api::{
+    builders::publisher::{
+        PublicationBuilder, PublicationBuilderDelete, PublicationBuilderPut,
+        PublisherDeleteBuilder, PublisherPutBuilder,
+    },
+    bytes::ZBytes,
+    cancellation::SyncGroup,
+    encoding::Encoding,
+    key_expr::KeyExpr,
+    sample::{Locality, Sample, SampleFields},
+    session::{UndeclarableSealed, WeakSession},
+    Id,
+};
+
+/// A publisher that allows sending data through a stream.
+/// A Publisher is declared by a [`Session`](crate::api::session::Session) for a given key expression
+/// with method [`Session::declare_publisher`](crate::api::session::Session::declare_publisher).
+///
+/// Publishers are automatically undeclared when dropped.
+///
+/// # Examples
+/// ```
+/// # #[tokio::main]
+/// # async fn main() {
+///
+/// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// let publisher = session.declare_publisher("key/expression").await.unwrap();
+/// publisher.put("value").await.unwrap();
+/// # format!("{publisher:?}");
+/// # }
+/// ```
+///
+///
+/// `Publisher` implements the `Sink` trait which is useful for forwarding
+/// streams to zenoh.
+/// ```
+/// # #[tokio::main]
+/// # async fn main() {
+/// use futures::StreamExt;
+///
+/// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// let mut subscriber = session.declare_subscriber("key/expression").await.unwrap();
+/// let publisher = session.declare_publisher("another/key/expression").await.unwrap();
+/// # tokio::task::spawn(async move {
+/// #     session.put("key/expression", "value").await.unwrap();
+/// #     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+/// #     session.close().await.unwrap();
+/// # });
+/// subscriber.stream().map(Ok).forward(publisher).await.unwrap();
+/// # }
+/// ```
+#[derive(Debug)]
+pub struct Publisher<'a> {
+    pub(crate) session: WeakSession,
+    pub(crate) id: Id,
+    pub(crate) key_expr: KeyExpr<'a>,
+    pub(crate) encoding: Encoding,
+    pub(crate) congestion_control: CongestionControl,
+    pub(crate) priority: Priority,
+    pub(crate) is_express: bool,
+    pub(crate) destination: Locality,
+    #[cfg(feature = "unstable")]
+    pub(crate) reliability: Reliability,
+    pub(crate) undeclare_on_drop: bool,
+    pub(crate) sync_group: SyncGroup,
+}
+
+impl<'a> Publisher<'a> {
+    /// Returns the [`EntityGlobalId`] of this Publisher.
+    ///
+    /// # Examples
+    /// ```
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// let publisher = session.declare_publisher("key/expression")
+    ///     .await
+    ///     .unwrap();
+    /// let publisher_id = publisher.id();
+    /// # }
+    /// ```
+    #[zenoh_macros::unstable]
+    pub fn id(&self) -> EntityGlobalId {
+        EntityGlobalIdProto {
+            zid: self.session.zid().into(),
+            eid: self.id,
+        }
+        .into()
+    }
+
+    /// Returns the [`KeyExpr`] of this Publisher.
+    ///
+    /// # Examples
+    /// ```
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// let publisher = session.declare_publisher("key/expression")
+    ///     .await
+    ///     .unwrap();
+    /// let key_expr = publisher.key_expr();
+    /// # }
+    /// ```
+    #[inline]
+    pub fn key_expr(&self) -> &KeyExpr<'a> {
+        &self.key_expr
+    }
+
+    /// Get the [`Encoding`] used when publishing data.
+    ///
+    /// # Examples
+    /// ```
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// let publisher = session.declare_publisher("key/expression")
+    ///     .await
+    ///     .unwrap();
+    /// let encoding = publisher.encoding();
+    /// # }
+    /// ```
+    #[inline]
+    pub fn encoding(&self) -> &Encoding {
+        &self.encoding
+    }
+
+    /// Get the [`CongestionControl`] applied when routing the data.
+    ///
+    /// # Examples
+    /// ```
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// let publisher = session.declare_publisher("key/expression")
+    ///     .await
+    ///     .unwrap();
+    /// let congestion_control = publisher.congestion_control();
+    /// # }
+    /// ```
+    #[inline]
+    pub fn congestion_control(&self) -> CongestionControl {
+        self.congestion_control
+    }
+
+    /// Get the [`Priority`] of the written data.
+    ///
+    /// # Examples
+    /// ```
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// let publisher = session.declare_publisher("key/expression")
+    ///     .await
+    ///     .unwrap();
+    /// let priority = publisher.priority();
+    /// # }
+    /// ```
+    #[inline]
+    pub fn priority(&self) -> Priority {
+        self.priority
+    }
+
+    /// Get the [`Reliability`] applied when routing the data.
+    ///
+    /// # Examples
+    /// ```
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// let publisher = session.declare_publisher("key/expression")
+    ///     .await
+    ///     .unwrap();
+    /// let reliability = publisher.reliability();
+    /// # }
+    /// ```
+    #[zenoh_macros::unstable]
+    #[inline]
+    pub fn reliability(&self) -> Reliability {
+        self.reliability
+    }
+
+    /// Publish the data. The subscribers matching the Publisher's key expression will receive the
+    /// [`Sample`] with [`kind`](crate::sample::Sample::kind) [SampleKind::Put](crate::sample::SampleKind::Put).
+    ///
+    /// The builder allows customizing the publication: add the timestamp,
+    /// attachment, etc. Some fields are pre-filled with the Publisher's configuration and can
+    /// be overridden.
+    ///
+    /// # Examples
+    /// ```
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// let publisher = session.declare_publisher("key/expression").await.unwrap();
+    /// publisher.put("value").await.unwrap();
+    /// # }
+    /// ```
+    #[inline]
+    pub fn put<IntoZBytes>(&self, payload: IntoZBytes) -> PublisherPutBuilder<'_>
+    where
+        IntoZBytes: Into<ZBytes>,
+    {
+        PublicationBuilder {
+            publisher: self,
+            kind: PublicationBuilderPut {
+                payload: payload.into(),
+                encoding: self.encoding.clone(),
+            },
+            timestamp: None,
+            #[cfg(feature = "unstable")]
+            source_info: None,
+            attachment: None,
+            #[cfg(feature = "unstable")]
+            timestamp_instrumentation: None,
+        }
+    }
+
+    /// Declare that the data associated with the Publisher's key expression is deleted.
+    /// The subscribers will receive the [`Sample`] with
+    /// [`kind`](crate::sample::Sample::kind) [SampleKind::Delete](crate::sample::SampleKind::Delete).
+    ///
+    /// The builder allows customizing the publication: add the timestamp, attachment, etc.
+    ///
+    /// # Examples
+    /// ```
+    /// # #[tokio::main]
+    /// # async fn main() {
+    ///
+    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// let publisher = session.declare_publisher("key/expression").await.unwrap();
+    /// publisher.delete().await.unwrap();
+    /// # }
+    /// ```
+    pub fn delete(&self) -> PublisherDeleteBuilder<'_> {
+        PublicationBuilder {
+            publisher: self,
+            kind: PublicationBuilderDelete,
+            timestamp: None,
+            #[cfg(feature = "unstable")]
+            source_info: None,
+            attachment: None,
+            #[cfg(feature = "unstable")]
+            timestamp_instrumentation: None,
+        }
+    }
+
+    /// Undeclare the [`Publisher`], informing the network that it needn't optimize publications for its key expression anymore.
+    ///
+    /// # Examples
+    /// ```
+    /// # #[tokio::main]
+    /// # async fn main() {
+    ///
+    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// let publisher = session.declare_publisher("key/expression").await.unwrap();
+    /// publisher.undeclare().await.unwrap();
+    /// # }
+    /// ```
+    pub fn undeclare(self) -> PublisherUndeclaration<'a> {
+        UndeclarableSealed::undeclare_inner(self, ())
+    }
+
+    fn undeclare_impl(&mut self) -> ZResult<()> {
+        // set the flag first to avoid double panic if this function panics
+        self.undeclare_on_drop = false;
+        self.session.undeclare_publisher_inner(self.id)
+    }
+
+    #[zenoh_macros::internal]
+    pub fn session(&self) -> &WeakSession {
+        &self.session
+    }
+}
+
+impl<'a> UndeclarableSealed<()> for Publisher<'a> {
+    type Undeclaration = PublisherUndeclaration<'a>;
+
+    fn undeclare_inner(self, _: ()) -> Self::Undeclaration {
+        PublisherUndeclaration {
+            publisher: self,
+            wait_callbacks: false,
+        }
+    }
+}
+
+/// A [`Resolvable`] returned by [`Publisher::undeclare`]
+///
+/// # Examples
+/// ```
+/// # #[tokio::main]
+/// # async fn main() {
+///
+/// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+/// let publisher = session.declare_publisher("key/expression").await.unwrap();
+/// publisher.undeclare().await.unwrap();
+/// # }
+/// ```
+#[must_use = "Resolvables do nothing unless you resolve them using `.await` or `zenoh::Wait::wait`"]
+pub struct PublisherUndeclaration<'a> {
+    publisher: Publisher<'a>,
+    wait_callbacks: bool,
+}
+
+impl fmt::Debug for PublisherUndeclaration<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PublisherUndeclaration")
+            .field("publisher", &self.publisher)
+            .field("wait_callbacks", &self.wait_callbacks)
+            .finish()
+    }
+}
+
+impl<'a> PublisherUndeclaration<'a> {
+    #[zenoh_macros::internal_or_unstable]
+    /// Block in undeclare operation until all currently running instances of matching listeners' callbacks (if any) return.
+    pub fn wait_callbacks(mut self) -> Self {
+        self.wait_callbacks = true;
+        self
+    }
+}
+
+impl Resolvable for PublisherUndeclaration<'_> {
+    type To = ZResult<()>;
+}
+
+impl Wait for PublisherUndeclaration<'_> {
+    fn wait(mut self) -> <Self as Resolvable>::To {
+        self.publisher.undeclare_impl()?;
+        if self.wait_callbacks {
+            self.publisher.sync_group.wait();
+        }
+        Ok(())
+    }
+}
+
+impl IntoFuture for PublisherUndeclaration<'_> {
+    type Output = <Self as Resolvable>::To;
+    type IntoFuture = Ready<<Self as Resolvable>::To>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        std::future::ready(self.wait())
+    }
+}
+
+impl Drop for Publisher<'_> {
+    fn drop(&mut self) {
+        if self.undeclare_on_drop {
+            if let Err(error) = self.undeclare_impl() {
+                error!(error);
+            }
+        }
+    }
+}
+
+impl Sink<Sample> for Publisher<'_> {
+    type Error = Error;
+
+    #[inline]
+    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    #[inline]
+    fn start_send(self: Pin<&mut Self>, item: Sample) -> Result<(), Self::Error> {
+        let SampleFields {
+            payload,
+            kind,
+            encoding,
+            attachment,
+            ..
+        } = item.into();
+        self.session.resolve_put(
+            &self.key_expr,
+            payload,
+            kind,
+            encoding,
+            self.congestion_control,
+            self.priority,
+            self.is_express,
+            self.destination,
+            #[cfg(feature = "unstable")]
+            self.reliability,
+            None,
+            #[cfg(feature = "unstable")]
+            None,
+            attachment,
+            #[cfg(feature = "unstable")]
+            None,
+        )
+    }
+
+    #[inline]
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    #[inline]
+    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+}
 
 /// Message priority.
 ///
@@ -150,6 +569,8 @@ impl TryFrom<ProtocolPriority> for Priority {
 
 #[cfg(test)]
 mod tests {
+    use crate::{sample::SampleKind, Config, Wait};
+
     #[cfg(feature = "internal")]
     #[test]
     fn priority_from() {
@@ -175,5 +596,60 @@ mod tests {
             let t: TPrio = p.into();
             assert_eq!(p as u8, t as u8);
         }
+    }
+
+    #[test]
+    fn sample_kind_integrity_in_publication() {
+        use crate::api::session::open;
+
+        const KEY_EXPR: &str = "test/sample_kind_integrity/publication";
+        const VALUE: &str = "zenoh";
+
+        fn sample_kind_integrity_in_publication_with(kind: SampleKind) {
+            let session = open(Config::default()).wait().unwrap();
+            let sub = session.declare_subscriber(KEY_EXPR).wait().unwrap();
+            let pub_ = session.declare_publisher(KEY_EXPR).wait().unwrap();
+
+            match kind {
+                SampleKind::Put => pub_.put(VALUE).wait().unwrap(),
+                SampleKind::Delete => pub_.delete().wait().unwrap(),
+            }
+            let sample = sub.recv().unwrap();
+
+            assert_eq!(sample.kind, kind);
+            if let SampleKind::Put = kind {
+                assert_eq!(sample.payload.try_to_string().unwrap(), VALUE);
+            }
+        }
+
+        sample_kind_integrity_in_publication_with(SampleKind::Put);
+        sample_kind_integrity_in_publication_with(SampleKind::Delete);
+    }
+
+    #[test]
+    fn sample_kind_integrity_in_put_builder() {
+        use crate::api::session::open;
+
+        const KEY_EXPR: &str = "test/sample_kind_integrity/put_builder";
+        const VALUE: &str = "zenoh";
+
+        fn sample_kind_integrity_in_put_builder_with(kind: SampleKind) {
+            let session = open(Config::default()).wait().unwrap();
+            let sub = session.declare_subscriber(KEY_EXPR).wait().unwrap();
+
+            match kind {
+                SampleKind::Put => session.put(KEY_EXPR, VALUE).wait().unwrap(),
+                SampleKind::Delete => session.delete(KEY_EXPR).wait().unwrap(),
+            }
+            let sample = sub.recv().unwrap();
+
+            assert_eq!(sample.kind, kind);
+            if let SampleKind::Put = kind {
+                assert_eq!(sample.payload.try_to_string().unwrap(), VALUE);
+            }
+        }
+
+        sample_kind_integrity_in_put_builder_with(SampleKind::Put);
+        sample_kind_integrity_in_put_builder_with(SampleKind::Delete);
     }
 }

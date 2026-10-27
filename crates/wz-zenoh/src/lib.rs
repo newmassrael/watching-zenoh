@@ -437,18 +437,17 @@ pub mod time {
 
 /// # Publish/subscribe primitives
 ///
-/// The builders of a publication and of a publisher, and the subscriber. Of upstream's module the
-/// publisher, its undeclaration and the builders that resolve into it arrive with slice Z2d
-/// (docs/zenoh-api-on-the-engine.md).
+/// The builders of a publication and of a publisher, the publisher and the subscriber.
 pub mod pubsub {
     pub use crate::api::{
         builders::{
             publisher::{
                 PublicationBuilder, PublicationBuilderDelete, PublicationBuilderPut,
-                PublisherBuilder,
+                PublisherBuilder, PublisherDeleteBuilder, PublisherPutBuilder,
             },
             subscriber::SubscriberBuilder,
         },
+        publisher::{Publisher, PublisherUndeclaration},
         subscriber::{Subscriber, SubscriberUndeclaration},
     };
 }

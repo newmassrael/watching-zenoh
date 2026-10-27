@@ -114,3 +114,15 @@ token-cell = { version = "2", default-features = false }
 # calls of two dynamic programs; optimised, they take seconds.
 [profile.test]
 opt-level = 3
+
+# Upstream's own peer routing asserts, in a build with debug assertions, that the face an Interest
+# came from is on its south side (`zenoh/src/net/routing/hat/peer/interests.rs` @
+# `fn send_current_subscribers(`). A peer that declares a publisher sends exactly such an Interest to
+# the peer it is connected to, so an upstream peer receiving it panics in the receive thread and
+# poisons its routing tables, whichever node sent it (the panic text is `assertion failed:
+# ctx.src_face.region.bound().is_south()`). A release build skips the assertion and answers the
+# Interest. The assertion is about upstream's routing, not about anything compared here, so upstream's
+# crate is built without it; the crate of this family keeps its own. The name is the registry's
+# because both crates are the package `zenoh` of this version.
+[profile.test.package."https://github.com/rust-lang/crates.io-index#zenoh@1.10.1"]
+debug-assertions = false

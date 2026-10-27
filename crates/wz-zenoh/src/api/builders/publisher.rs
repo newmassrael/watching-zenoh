@@ -14,12 +14,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 // Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
 // src/api/builders/publisher.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). A partial
-// derivative: it holds the publication builder and the settings it carries (`PublisherBuilder`)
-// with what resolves a put or a delete from the session. What needs a `Publisher` (the builders of
-// a publisher's own put and delete, their aliases, and the resolution of `PublisherBuilder` into
-// a publisher) arrives with slice Z2d (docs/zenoh-api-on-the-engine.md). `apply_qos_overwrites`
-// is not here: it reads the configuration key `qos/publication`, which a session of this crate
-// refuses to open with a value of its own (decision D6), so there is no overwrite to apply.
+// derivative: `apply_qos_overwrites` is not here. It reads the configuration key
+// `qos/publication`, which a session of this crate refuses to open with a value of its own
+// (decision D6, docs/zenoh-api-on-the-engine.md), so there is no overwrite to apply. The matching
+// listener of a publisher and the state it keeps arrive with slice Z4.
 
 use std::future::{IntoFuture, Ready};
 
@@ -39,9 +37,10 @@ use crate::{
             TimestampInstrumentationBuilderTrait,
         },
         bytes::{OptionZBytes, ZBytes},
+        cancellation::SyncGroup,
         encoding::Encoding,
         key_expr::KeyExpr,
-        publisher::Priority,
+        publisher::{Priority, Publisher},
         sample::{Locality, SampleKind},
     },
     Session,
@@ -56,6 +55,15 @@ pub type SessionPutBuilder<'a, 'b> =
 /// returned by the [`Session::delete`](crate::session::Session::delete) method.
 pub type SessionDeleteBuilder<'a, 'b> =
     PublicationBuilder<PublisherBuilder<'a, 'b>, PublicationBuilderDelete>;
+
+/// The alias for [`PublicationBuilder`]
+/// returned by the [`Publisher::put`](crate::pubsub::Publisher::put) method.
+pub type PublisherPutBuilder<'a> = PublicationBuilder<&'a Publisher<'a>, PublicationBuilderPut>;
+
+/// The alias for [`PublicationBuilder`]
+/// returned by the [`Publisher::delete`](crate::pubsub::Publisher::delete) method.
+pub type PublisherDeleteBuilder<'a> =
+    PublicationBuilder<&'a Publisher<'a>, PublicationBuilderDelete>;
 
 /// The type-modifier for a [`PublicationBuilder`] for a `Put` operation.
 ///
@@ -438,5 +446,106 @@ impl PublisherBuilder<'_, '_> {
             reliability,
             ..self
         }
+    }
+}
+
+impl<'b> Resolvable for PublisherBuilder<'_, 'b> {
+    type To = ZResult<Publisher<'b>>;
+}
+
+impl Wait for PublisherBuilder<'_, '_> {
+    fn wait(self) -> <Self as Resolvable>::To {
+        let mut key_expr = self.key_expr?;
+        key_expr = self.session.declare_keyexpr(key_expr).wait()?;
+        let id = self
+            .session
+            .declare_publisher_inner(&key_expr, self.destination)?;
+        Ok(Publisher {
+            session: self.session.downgrade(),
+            id,
+            key_expr,
+            encoding: self.encoding,
+            congestion_control: self.congestion_control,
+            priority: self.priority,
+            is_express: self.is_express,
+            destination: self.destination,
+            #[cfg(feature = "unstable")]
+            reliability: self.reliability,
+            undeclare_on_drop: true,
+            sync_group: SyncGroup::default(),
+        })
+    }
+}
+
+impl IntoFuture for PublisherBuilder<'_, '_> {
+    type Output = <Self as Resolvable>::To;
+    type IntoFuture = Ready<<Self as Resolvable>::To>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        std::future::ready(self.wait())
+    }
+}
+
+impl Wait for PublicationBuilder<&Publisher<'_>, PublicationBuilderPut> {
+    fn wait(self) -> <Self as Resolvable>::To {
+        self.publisher.session.resolve_put(
+            &self.publisher.key_expr,
+            self.kind.payload,
+            SampleKind::Put,
+            self.kind.encoding,
+            self.publisher.congestion_control,
+            self.publisher.priority,
+            self.publisher.is_express,
+            self.publisher.destination,
+            #[cfg(feature = "unstable")]
+            self.publisher.reliability,
+            self.timestamp,
+            #[cfg(feature = "unstable")]
+            self.source_info,
+            self.attachment,
+            #[cfg(feature = "unstable")]
+            self.timestamp_instrumentation,
+        )
+    }
+}
+
+impl Wait for PublicationBuilder<&Publisher<'_>, PublicationBuilderDelete> {
+    fn wait(self) -> <Self as Resolvable>::To {
+        self.publisher.session.resolve_put(
+            &self.publisher.key_expr,
+            ZBytes::new(),
+            SampleKind::Delete,
+            Encoding::ZENOH_BYTES,
+            self.publisher.congestion_control,
+            self.publisher.priority,
+            self.publisher.is_express,
+            self.publisher.destination,
+            #[cfg(feature = "unstable")]
+            self.publisher.reliability,
+            self.timestamp,
+            #[cfg(feature = "unstable")]
+            self.source_info,
+            self.attachment,
+            #[cfg(feature = "unstable")]
+            self.timestamp_instrumentation,
+        )
+    }
+}
+
+impl IntoFuture for PublicationBuilder<&Publisher<'_>, PublicationBuilderPut> {
+    type Output = <Self as Resolvable>::To;
+    type IntoFuture = Ready<<Self as Resolvable>::To>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        std::future::ready(self.wait())
+    }
+}
+
+impl IntoFuture for PublicationBuilder<&Publisher<'_>, PublicationBuilderDelete> {
+    type Output = <Self as Resolvable>::To;
+    type IntoFuture = Ready<<Self as Resolvable>::To>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        std::future::ready(self.wait())
     }
 }
