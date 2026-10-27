@@ -293394,6 +293394,36 @@
         "The measured records stay unsplit until they are re-recorded on their SDK hosts, which needs the owner's approval per host."
       ]
     },
+    "Round 3780": {
+      "decision_summary": "Open-debt item 751, step (b), step 2 of docs/peer-region-hats.md: the region-hat forwarder can be built at node mode Peer, and the placement is tested. RouterForwarder::peer is cfg(test) only, because no plane has been held equal to LinkstateForwarder for a peer yet (step 3), so no host can reach a peer forwarder. Three tests carry the step. The hats are auto_regions(Peer) exactly: the peer hat in North running gossip, broker hats for the clients' region and Local, no south peer region. A router and a peer remote land in North with a link in the peer hat's graph, a client in the clients' region with none, where a router node puts the same peer south. With a gateway/south subregion the hats are regions_of(Peer, partition) and the rules place a named peer in South{id,Peer}. The finding: on a peer node North is the first peer-hat region, so first_peers_net answers the north graph.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward.rs: the cfg(test) constructor RouterForwarder::peer and three placement tests. scripts/run-ci.sh: all eight C1AY router_forward count guards move by 3 (236 238 261 241 244 283 236 238 in file order), each the number its command printed. docs/peer-region-hats.md: section 6 records the step and what the tests showed."
+      ],
+      "verification_bullets": [
+        "On pc2: the three new tests pass (one assertion of mine was wrong first, the peers' graph count on a peer node, and was corrected after reading why). 261 router_forward tests pass with routing-router-hat and router-multicast-faces, 12 routing_region tests pass, clippy with -D warnings is clean on wz-runtime-tokio under all features and under the defaults. The other seven count-guard arms were run one by one and each printed its old number plus 3. rustfmt is clean and the debt census exits 0. The hosted run was not read."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Item 751 step (b) continues at step 3: the data plane for a peer node, held equal to LinkstateForwarder by a differential gate over the existing peer E2E files, and then the constructor becomes public. Until then a peer forwarder exists only in tests, and the first_peers_net accessors answer the north graph on a peer node, which step 6 must not read as the south peers. The register of a peer face ran the router's flood and replay paths without a panic, but no data, query or token plane has been checked for a peer."
+      ],
+      "publishable_decision_summary": "Open-debt item 751, step (b), step 2 of docs/peer-region-hats.md: the region-hat forwarder can be built at node mode Peer, and the placement is tested. RouterForwarder::peer is cfg(test) only, because no plane has been held equal to LinkstateForwarder for a peer yet (step 3), so no host can reach a peer forwarder. Three tests carry the step. The hats are auto_regions(Peer) exactly: the peer hat in North running gossip, broker hats for the clients' region and Local, no south peer region. A router and a peer remote land in North with a link in the peer hat's graph, a client in the clients' region with none, where a router node puts the same peer south. With a gateway/south subregion the hats are regions_of(Peer, partition) and the rules place a named peer in South{id,Peer}. The finding: on a peer node North is the first peer-hat region, so first_peers_net answers the north graph.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward.rs: the cfg(test) constructor RouterForwarder::peer and three placement tests. scripts/run-ci.sh: all eight C1AY router_forward count guards move by 3 (236 238 261 241 244 283 236 238 in file order), each the number its command printed. docs/peer-region-hats.md: section 6 records the step and what the tests showed."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2: the three new tests pass (one assertion of mine was wrong first, the peers' graph count on a peer node, and was corrected after reading why). 261 router_forward tests pass with routing-router-hat and router-multicast-faces, 12 routing_region tests pass, clippy with -D warnings is clean on wz-runtime-tokio under all features and under the defaults. The other seven count-guard arms were run one by one and each printed its old number plus 3. rustfmt is clean and the debt census exits 0. The hosted run was not read."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Item 751 step (b) continues at step 3: the data plane for a peer node, held equal to LinkstateForwarder by a differential gate over the existing peer E2E files, and then the constructor becomes public. Until then a peer forwarder exists only in tests, and the first_peers_net accessors answer the north graph on a peer node, which step 6 must not read as the south peers. The register of a peer face ran the router's flood and replay paths without a panic, but no data, query or token plane has been checked for a peer."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
