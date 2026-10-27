@@ -292374,6 +292374,44 @@
         "Open-debt item 925 (the accepting side's handshake bound and concurrent accepts) is the next item of this track; ask the session that holds the accept loop first."
       ]
     },
+    "Round 3755": {
+      "decision_summary": "The field document's context.parameters now bounds the batch size and the SN ring from below by what a capture's bytes show, as the analyzer design asked (fields 47). Where nothing states the value the entry carries at_least: the longest framing unit either direction sent, and the narrowest ring a session can negotiate (127, 16383, 268435455 or 2^63-1) that holds the largest sequence number, left out at 127 which every session holds. Where a handshake stated a value the bytes exceed, the basis is conflicting, value is null and evidence carries the stated value and the floor. A floor counts only units that read whole and hold no Init or Open, which are sent before the batch is agreed. The anonymiser gains DHCPv4 and WS-Discovery parsers, so a busier LAN's captures can enter the corpus.",
+      "changes_bullets": [
+        "`passive.rs`: `UnitExtents` and `FloorReading` on `PassiveSession` (`batch_size_floor`, `sn_mask_floor`), fed by `UnitJudge::note_unit_extent` at the end of the unit walk; `sn.rs`: `narrowest_mask_covering`.",
+        "`fields_json.rs`: `ParameterGrounds` replaces `CompressionGrounds`; `floored` writes `at_least` and, under conflicting, `evidence`; `doc_revision.rs`, `wz_dissect.h`, the C consumer and `json_integer_cell_gate.py` move to fields 47 (`at_least` and `stated` take the integer rule).",
+        "`capture_anonymise.py`: DHCPv4 (BOOTP header, address and name options, client id) and WS-Discovery (markup kept, text and attribute values scrubbed) parsers; selftest 52 to 71 checks."
+      ],
+      "verification_bullets": [
+        "Measured: no zenoh session of the corpus (1.10.1, 1.5.0, zenoh-pico; stream and datagram; whole and joined mid-session) reads conflicting, and a mid-session capture gets its floor from its bytes.",
+        "wz-capture 1609 tests, wz-session-core passive and sn tests, wz-capi-dissect with its C consumer pass; clippy -D warnings on wz-capture; the 21 corpus files stay fixed points of the anonymiser; the round-fed static gate array passed."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "A busier LAN's DHCP, NTP, LLMNR and WS-Discovery from real implementations in containers are still to capture and enter the corpus, with their measured counts; the office Wi-Fi held only two NTP packets in twenty minutes.",
+        "Zenoh versions other than 1.10.1 and 1.5.0 and links other than loopback and one emulated lossy link are still to measure; no lower bound is offered for a lease."
+      ],
+      "publishable_decision_summary": "The field document's context.parameters now bounds the batch size and the SN ring from below by what a capture's bytes show, as the analyzer design asked (fields 47). Where nothing states the value the entry carries at_least: the longest framing unit either direction sent, and the narrowest ring a session can negotiate (127, 16383, 268435455 or 2^63-1) that holds the largest sequence number, left out at 127 which every session holds. Where a handshake stated a value the bytes exceed, the basis is conflicting, value is null and evidence carries the stated value and the floor. A floor counts only units that read whole and hold no Init or Open, which are sent before the batch is agreed. The anonymiser gains DHCPv4 and WS-Discovery parsers, so a busier LAN's captures can enter the corpus.",
+      "publishable_changes_bullets": [
+        "`passive.rs`: `UnitExtents` and `FloorReading` on `PassiveSession` (`batch_size_floor`, `sn_mask_floor`), fed by `UnitJudge::note_unit_extent` at the end of the unit walk; `sn.rs`: `narrowest_mask_covering`.",
+        "`fields_json.rs`: `ParameterGrounds` replaces `CompressionGrounds`; `floored` writes `at_least` and, under conflicting, `evidence`; `doc_revision.rs`, `wz_dissect.h`, the C consumer and `json_integer_cell_gate.py` move to fields 47 (`at_least` and `stated` take the integer rule).",
+        "`capture_anonymise.py`: DHCPv4 (BOOTP header, address and name options, client id) and WS-Discovery (markup kept, text and attribute values scrubbed) parsers; selftest 52 to 71 checks."
+      ],
+      "publishable_verification_bullets": [
+        "Measured: no zenoh session of the corpus (1.10.1, 1.5.0, zenoh-pico; stream and datagram; whole and joined mid-session) reads conflicting, and a mid-session capture gets its floor from its bytes.",
+        "wz-capture 1609 tests, wz-session-core passive and sn tests, wz-capi-dissect with its C consumer pass; clippy -D warnings on wz-capture; the 21 corpus files stay fixed points of the anonymiser; the round-fed static gate array passed."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A busier LAN's DHCP, NTP, LLMNR and WS-Discovery from real implementations in containers are still to capture and enter the corpus, with their measured counts; the office Wi-Fi held only two NTP packets in twenty minutes.",
+        "Zenoh versions other than 1.10.1 and 1.5.0 and links other than loopback and one emulated lossy link are still to measure; no lower bound is offered for a lease."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
