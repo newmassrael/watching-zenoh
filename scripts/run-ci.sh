@@ -13220,6 +13220,9 @@ layer_c1bz_docs_resolve() {
     # BEFORE the loop, because a bad subset name would otherwise select nothing
     # and the loop would report clean over an empty population.
     _c1bz_check_subset || return 1
+    # The control group first: the function that decides what to measure is held in both
+    # directions (a hole in the sets refused, a stale refusal refused) before it is trusted.
+    python3 scripts/lib/doc_feature_sets.py --selftest || return 1
     # crate:expected-broken-links. Absent from this list means ZERO is expected.
     #
     # ONE `crate:count` PER LINE AND NOTHING ELSE -- this string is read
@@ -13625,10 +13628,12 @@ layer_c1bz_docs_resolve() {
     # redundant by a name in scope, dropped) and one more: zenoh-pico-sys documents the C
     # headers bindgen reads, whose diagrams and `[x]` text rustdoc took for links, so its build
     # script now hands every header comment through `rustdoc_safe` (`rustdoc_comment.rs`, tested)
-    # and the generated docs carry no finding of their own. `wz` stays at 4: its lane runs into
-    # the `compile_error!` that `--all-features` selects on purpose, which no doc edit moves.
+    # and the generated docs carry no finding of their own.
+    # wz 4 -> 0, COUNTED on this lane's command. The four findings were never in a doc: they were
+    # the four `compile_error!` refusals of its `src/lib.rs`, which `--all-features` selects
+    # together. The crate now declares four consistent configurations in its manifest and the lane
+    # documents each (`_c1bz_count_findings`), so the budget is empty and a missing line reads as 0.
     budget="
-        wz:4
     "
     while read -r crate; do
         [[ -n "$crate" ]] || continue
@@ -13652,8 +13657,14 @@ layer_c1bz_docs_resolve() {
         # which is item 400's prescription: a ceiling moved on a different
         # measurement than the one that will be checked against it is a ceiling
         # nobody can reason about.
-        count="$( (cd crates && cargo doc -p "$crate" --no-deps --quiet --all-features 2>&1) |
-            grep -E '^error' | grep -cvE '^error: could not document' || true)"
+        #
+        # A crate that refuses some combination of its own features declares its documentation
+        # sets in its manifest (`scripts/lib/doc_feature_sets.py`), and is documented once per
+        # set; every other crate is documented once, under `--all-features`, as above.
+        count="$(_c1bz_count_findings "$crate")" || {
+            failed=1
+            continue
+        }
         expected="$(grep -oE "\b${crate}:[0-9]+" <<<"$budget" | cut -d: -f2)"
         expected="${expected:-0}"
         seen="$seen $crate"
@@ -13699,6 +13710,25 @@ layer_c1bz_docs_resolve() {
 
     [[ $failed -eq 0 ]] || return 1
     echo "  C1bz: every workspace crate's docs resolve, or spend exactly their budget"
+}
+
+# The rustdoc findings of one crate, summed over the feature configurations it is documented
+# under. The configurations come from `scripts/lib/doc_feature_sets.py`, which refuses a manifest
+# whose sets leave a feature in none of them; that refusal fails the lane here and is not read as
+# a count, because "could not decide what to measure" must never print as "measured clean".
+_c1bz_count_findings() {
+    local crate=$1 sets arg n total=0
+    sets="$(python3 scripts/lib/doc_feature_sets.py "$crate")" || {
+        echo "  C1bz FAIL: $crate declares documentation sets that do not hold together" >&2
+        return 1
+    }
+    while IFS= read -r arg; do
+        [[ -n "$arg" ]] || continue
+        n="$( (cd crates && cargo doc -p "$crate" --no-deps --quiet "$arg" 2>&1) |
+            grep -E '^error' | grep -cvE '^error: could not document' || true)"
+        total=$((total + n))
+    done <<<"$sets"
+    echo "$total"
 }
 
 # R311y792 — which crates C1bz measures. Every workspace member by default;

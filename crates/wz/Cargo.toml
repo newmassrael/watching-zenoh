@@ -48,6 +48,34 @@ path = "src/lib.rs"
 [lints]
 workspace = true
 
+# How this crate's documentation is built, read by Layer C1bz (`scripts/lib/doc_feature_sets.py`).
+#
+# A crate whose features are all compatible is documented once with every feature on. This one
+# has four combinations its `src/lib.rs` refuses with `compile_error!` (the AP runtime with an MCU
+# platform, the two RTOS platforms together, the two C ABIs together), so no single build holds
+# every feature and `--all-features` stops at the first refusal. Each set below is therefore one
+# CONSISTENT configuration: every feature of the crate except those that reach (by implication)
+# a feature the set lists in `except`. The lane documents each set and adds the findings up, and
+# refuses a manifest whose sets, taken together, leave a feature in none of them, so a feature
+# cannot be left undocumented by being left out of every list. A new refusal in `src/lib.rs` is a
+# new set (or a wider `except`) here, in the same commit.
+#
+# `refused` names the features no set can hold because they ARE a refused combination: an
+# aggregate that turns on both C ABIs, or two RTOS platforms. No build can enable one, and its
+# members are documented in the sets above. The lane checks the list both ways.
+[package.metadata.wz-docs]
+refused = ["domain-api", "domain-platform"]
+feature-sets = [
+    # The AP profile with the zenoh-pico C ABI.
+    { name = "ap-pico", except = ["platform-freertos", "platform-zephyr", "platform-zephyr-fixed", "api-compat-c"] },
+    # The AP profile with the zenoh-c C ABI.
+    { name = "ap-c", except = ["platform-freertos", "platform-zephyr", "platform-zephyr-fixed", "api-compat-pico"] },
+    # The MCU profile on FreeRTOS.
+    { name = "mcu-freertos", except = ["runtime-tokio", "platform-zephyr", "platform-zephyr-fixed", "api-compat-c"] },
+    # The MCU profile on Zephyr.
+    { name = "mcu-zephyr", except = ["runtime-tokio", "platform-freertos", "api-compat-c"] },
+]
+
 # R302b — wz-runtime-tokio enters the facade as an OPTIONAL dependency
 # with default-features = false. The forwarding rules below decide
 # which wz-runtime-tokio features get enabled based on which wz
