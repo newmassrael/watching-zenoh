@@ -294070,6 +294070,34 @@
         "Read the first completed hosted run for the router's end-to-end legs that attach a client after a subscription: the face-up replay no longer tells a client face, in a router as in a peer, and a leg that needed it would be red there and not here. Item 751 step (b) continues at step 5, the token and interest planes, which the network gate now carries as it carried the others; then step 6, the node surfaces. The owner question of step 3 stands: a ROUTER node's south peer region relays nothing between link-state peers."
       ]
     },
+    "Round 3798": {
+      "decision_summary": "Repays the reds of the hosted run at the tip of round 3785, each read from its job log. The multi-link wait of wz-runtime-coop named alloc::sync::Arc for every build and broke the thumbv6m cross-compile; it now exists only where a pointer is atomic, and a stack without that waits on one link. The queryable file kept 2024 where upstream's file at the pin says 2023. The demo help did not print --accept-pending and --accept-timeout-ms, so the flag sweep failed; it prints them and names upstream's keys as prose, not as the cited zenoh keys the reader would owe. Two expected counts follow the legs: accept_loop 14, slot_node 29. Two files of the Zephyr admin crate are formatted. The pin of the coop file moved after re-reading the clause on SessionPump::step.",
+      "changes_bullets": [
+        "crates/wz-runtime-coop/src/session_drive.rs, crates/wz-zenoh/src/api/queryable.rs, crates/wz-ap-demo/src/usage.rs, scripts/run-ci.sh (C1v 14, C1m slot node 29 twice), docs/reason-review-pins.md (one row to R3798), two files under deploy/zephyr-admin-node/rust/src formatted."
+      ],
+      "verification_bullets": [
+        "On the build host: thumbv6m session-unicast build of wz-runtime-coop passes; clippy of wz-runtime-coop, wz-capi-coop and wz-runtime-posix is clean; wz-ap-demo tests pass under three feature sets (48, 42, 154 ran); accept_loop runs 14, 13 and 18 and slot_node 29 and 29. Locally: family_notice_gate and reason_review_pin_gate pass; rustfmt check of the touched files passes."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "The accept bound keys stay argv-only in the demo: the C ABI session honours them and the demo's reader does not, so moving them across needs the honoured-key ledgers to move together. The hosted run of this tip is the next read, per job."
+      ],
+      "publishable_decision_summary": "Repays the reds of the hosted run at the tip of round 3785, each read from its job log. The multi-link wait of wz-runtime-coop named alloc::sync::Arc for every build and broke the thumbv6m cross-compile; it now exists only where a pointer is atomic, and a stack without that waits on one link. The queryable file kept 2024 where upstream's file at the pin says 2023. The demo help did not print --accept-pending and --accept-timeout-ms, so the flag sweep failed; it prints them and names upstream's keys as prose, not as the cited zenoh keys the reader would owe. Two expected counts follow the legs: accept_loop 14, slot_node 29. Two files of the Zephyr admin crate are formatted. The pin of the coop file moved after re-reading the clause on SessionPump::step.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-coop/src/session_drive.rs, crates/wz-zenoh/src/api/queryable.rs, crates/wz-ap-demo/src/usage.rs, scripts/run-ci.sh (C1v 14, C1m slot node 29 twice), docs/reason-review-pins.md (one row to R3798), two files under deploy/zephyr-admin-node/rust/src formatted."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host: thumbv6m session-unicast build of wz-runtime-coop passes; clippy of wz-runtime-coop, wz-capi-coop and wz-runtime-posix is clean; wz-ap-demo tests pass under three feature sets (48, 42, 154 ran); accept_loop runs 14, 13 and 18 and slot_node 29 and 29. Locally: family_notice_gate and reason_review_pin_gate pass; rustfmt check of the touched files passes."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The accept bound keys stay argv-only in the demo: the C ABI session honours them and the demo's reader does not, so moving them across needs the honoured-key ledgers to move together. The hosted run of this tip is the next read, per job."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
