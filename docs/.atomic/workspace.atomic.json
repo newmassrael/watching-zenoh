@@ -292588,6 +292588,58 @@
         "ADR 0058 (encode from borrowed parts) moves the send stack; scxml-core-engine-37 will name the header bits it derives, and 323 hand-set header sites are the population to check then."
       ]
     },
+    "Round 3760": {
+      "decision_summary": "Open-debt item 925 is paid for the accept bound and the pending count. An accepting node now gives an inbound link ONE bound over the whole accept, as upstream wraps its accept in a single timeout: the link's own handshake (ws, tls) spends from it and the session machine's Accepting window is what is left, where the machine used a fixed second (zenoh-pico's) for every node. AcceptBounds carries upstream's transport/unicast/accept_timeout (10 s) and accept_pending (100) side by side, as its manager does; one link past the pending count is closed unanswered and counted in AcceptLoopSummary::refused_over_pending. The zenoh-c interface reads both keys; the pico interface states Z_TRANSPORT_ACCEPT_TIMEOUT from the new limit PICO_ACCEPT_TIMEOUT_MS (1000), so its C7 row maps. The question of whether a peer held by zid counts against the cap did not arise: upstream counts handshakes in flight, not peers. The router and the demo run upstream's defaults and do not read the keys yet.",
+      "changes_bullets": [
+        "wz-runtime-tokio accept_loop.rs: AcceptBounds (timeout, pending, timeouts_after); FaceSources::accept; open_face and open_face_multilink bound the link handshake and hand the rest to the machine; the Accepted arm refuses past the pending count; the spawned helper loops take the bounds. session_open.rs: drive_open_loop_within, and the staging entry points take SessionTimeouts. config.rs: the two upstream defaults.",
+        "wz-runtime-tokio zenoh_config.rs: ZenohNodeConfig accept_timeout_ms and accept_pending, read, emitted, validated (ZeroAcceptTimeout, ZeroAcceptPending); both keys left the unhonoured lists and the citation ledger for the C ABI session's list.",
+        "wz-capi-core: LinkConf and OpenStance carry accept; the listening roles hand it to the accept loops; the zenoh-c plan reads the keys. wz-capi-pico states PICO_ACCEPT, from the limit PICO_ACCEPT_TIMEOUT_MS (deploy/wz-config.toml, caps.rs, generated files); the C7 row is maps.",
+        "Tests: two accept-loop tests on real sockets (pending cap, timeout both ways) with controls; one witness per C interface on a bare listener socket; the open-plan, config and verdict tests carry the keys. docs/session-fsm.md section 2.5 names who states the window.",
+        "docs/reason-review-pins.md: seven pins of session-close-ingress re-read and moved. Two files are this round's (accept_loop, session_open); five were left stale by round 3753 (keepalive literals and accessor in session-core, lwip, coop, session_glue); none of the hunks touches the close-request seam the reason is about."
+      ],
+      "verification_bullets": [
+        "On a build host: clippy -D warnings, no lint allowed, of wz-session-core, wz-runtime-tokio, wz-capi-core, wz-capi-pico, wz-capi-c and wz-ap-demo, one at a time; the accept-loop tests with routing-peer (the two new among them), the zenoh_config tests with their feature, wz-capi-core lib, and the whole of wz-capi-pico and wz-capi-c: pass. wz-runtime-tokio with all features and no-fail-fast ran once earlier in the round and failed only two wz-capi-core tests, which named accept_timeout as their unmapped example; they name open_timeout now.",
+        "Mutation controls, each by breaking the behaviour and reading the test go red: without the pending guard the pending test fails ([false,false,false] for [false,false,true]); with the machine's fixed second restored the timeout test fails; with the C ABI handing the loop upstream's defaults the zenoh-c timeout, the zenoh-c pending and the pico timeout witnesses all fail and the no-key control stays green.",
+        "wz_config --check, upstream_switch_map, config_key_fixture_gate, prose_named_identifier_gate, prose_feature_gate, store_reason_citation_gate, count_guard_lint, runtime_mutable_surface_gate, reason_review_pin_gate: pass. upstream_carries_the_surface and deepenable_audit pass against the pinned zenohd (113 of 113 carried).",
+        "Layer C1bz FAILS for wz-session-core, 6 broken links, all in lifecycle_node.rs and lifecycle_contract.rs, files this round does not touch; the other five crates are within budget. Not repaired here.",
+        "Not measured: a real zenoh-pico peer held past the one second by a build that states another value; the five deploy firmware crates were not built (same one-line edits as round 3753)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Layer C1bz is red for wz-session-core on main: six redundant explicit link targets in lifecycle_node.rs and lifecycle_contract.rs. The owner of the lifecycle contract repairs it; this round did not touch those files.",
+        "The router and the demo keep upstream's defaults and do not read transport/unicast/accept_timeout and accept_pending (the keys are the C ABI session's list); route them through WzConfig when a deployment needs another bound.",
+        "The ws and tls server handshake now spends from the accept bound, but a tls handshake that stalls inside rustls is only bounded by that timer, not by a measurement of it; measure one against a stalled client.",
+        "Open-debt item 925 is closed by this round; the sequence-number policy and the keepalive of the router (capacity model) remain."
+      ],
+      "publishable_decision_summary": "Open-debt item 925 is paid for the accept bound and the pending count. An accepting node now gives an inbound link ONE bound over the whole accept, as upstream wraps its accept in a single timeout: the link's own handshake (ws, tls) spends from it and the session machine's Accepting window is what is left, where the machine used a fixed second (zenoh-pico's) for every node. AcceptBounds carries upstream's transport/unicast/accept_timeout (10 s) and accept_pending (100) side by side, as its manager does; one link past the pending count is closed unanswered and counted in AcceptLoopSummary::refused_over_pending. The zenoh-c interface reads both keys; the pico interface states Z_TRANSPORT_ACCEPT_TIMEOUT from the new limit PICO_ACCEPT_TIMEOUT_MS (1000), so its C7 row maps. The question of whether a peer held by zid counts against the cap did not arise: upstream counts handshakes in flight, not peers. The router and the demo run upstream's defaults and do not read the keys yet.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio accept_loop.rs: AcceptBounds (timeout, pending, timeouts_after); FaceSources::accept; open_face and open_face_multilink bound the link handshake and hand the rest to the machine; the Accepted arm refuses past the pending count; the spawned helper loops take the bounds. session_open.rs: drive_open_loop_within, and the staging entry points take SessionTimeouts. config.rs: the two upstream defaults.",
+        "wz-runtime-tokio zenoh_config.rs: ZenohNodeConfig accept_timeout_ms and accept_pending, read, emitted, validated (ZeroAcceptTimeout, ZeroAcceptPending); both keys left the unhonoured lists and the citation ledger for the C ABI session's list.",
+        "wz-capi-core: LinkConf and OpenStance carry accept; the listening roles hand it to the accept loops; the zenoh-c plan reads the keys. wz-capi-pico states PICO_ACCEPT, from the limit PICO_ACCEPT_TIMEOUT_MS (deploy/wz-config.toml, caps.rs, generated files); the C7 row is maps.",
+        "Tests: two accept-loop tests on real sockets (pending cap, timeout both ways) with controls; one witness per C interface on a bare listener socket; the open-plan, config and verdict tests carry the keys. docs/session-fsm.md section 2.5 names who states the window.",
+        "docs/reason-review-pins.md: seven pins of session-close-ingress re-read and moved. Two files are this round's (accept_loop, session_open); five were left stale by round 3753 (keepalive literals and accessor in session-core, lwip, coop, session_glue); none of the hunks touches the close-request seam the reason is about."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: clippy -D warnings, no lint allowed, of wz-session-core, wz-runtime-tokio, wz-capi-core, wz-capi-pico, wz-capi-c and wz-ap-demo, one at a time; the accept-loop tests with routing-peer (the two new among them), the zenoh_config tests with their feature, wz-capi-core lib, and the whole of wz-capi-pico and wz-capi-c: pass. wz-runtime-tokio with all features and no-fail-fast ran once earlier in the round and failed only two wz-capi-core tests, which named accept_timeout as their unmapped example; they name open_timeout now.",
+        "Mutation controls, each by breaking the behaviour and reading the test go red: without the pending guard the pending test fails ([false,false,false] for [false,false,true]); with the machine's fixed second restored the timeout test fails; with the C ABI handing the loop upstream's defaults the zenoh-c timeout, the zenoh-c pending and the pico timeout witnesses all fail and the no-key control stays green.",
+        "wz_config --check, upstream_switch_map, config_key_fixture_gate, prose_named_identifier_gate, prose_feature_gate, store_reason_citation_gate, count_guard_lint, runtime_mutable_surface_gate, reason_review_pin_gate: pass. upstream_carries_the_surface and deepenable_audit pass against the pinned zenohd (113 of 113 carried).",
+        "Layer C1bz FAILS for wz-session-core, 6 broken links, all in lifecycle_node.rs and lifecycle_contract.rs, files this round does not touch; the other five crates are within budget. Not repaired here.",
+        "Not measured: a real zenoh-pico peer held past the one second by a build that states another value; the five deploy firmware crates were not built (same one-line edits as round 3753)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Layer C1bz is red for wz-session-core on main: six redundant explicit link targets in lifecycle_node.rs and lifecycle_contract.rs. The owner of the lifecycle contract repairs it; this round did not touch those files.",
+        "The router and the demo keep upstream's defaults and do not read transport/unicast/accept_timeout and accept_pending (the keys are the C ABI session's list); route them through WzConfig when a deployment needs another bound.",
+        "The ws and tls server handshake now spends from the accept bound, but a tls handshake that stalls inside rustls is only bounded by that timer, not by a measurement of it; measure one against a stalled client.",
+        "Open-debt item 925 is closed by this round; the sequence-number policy and the keepalive of the router (capacity model) remain."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
