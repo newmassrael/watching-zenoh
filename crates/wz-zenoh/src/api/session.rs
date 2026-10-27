@@ -945,6 +945,70 @@ mod tokio_engine {
         }
     }
 
+    /// Start a scout for the roles `what` names, on the group, the interface and the hop limit
+    /// the configuration states, handing each Hello to `callback` as it arrives, until what this
+    /// returns is dropped.
+    ///
+    /// Upstream's `scout` reads only the scouting group of its configuration
+    /// (`zenoh/src/api/scouting.rs` @ `.multicast.address()`): the node it would be is not
+    /// asked, so the engine is given the document as a peer's, which changes nothing it reads.
+    /// A Hello that names no role, an id of no length or no locator that parses is a Hello that
+    /// cannot be told in this crate's words, and is left out as one that does not decode is.
+    pub(super) fn start_scout(
+        what: zenoh_protocol::core::WhatAmIMatcher,
+        config: &crate::api::config::Config,
+        callback: Callback<zenoh_config::wrappers::Hello>,
+    ) -> ZResult<Box<dyn Send>> {
+        use wz_capi_core::{
+            runtime::zenoh_config::ZenohNodeConfig,
+            scouting::fresh_scout_zid,
+            scouting_node::{ScoutStream, ScoutingPlan},
+        };
+        use zenoh_protocol::{
+            core::{Locator, ZenohIdProto},
+            scouting::HelloProto,
+        };
+
+        let expanded = config.0.clone().expanded();
+        let document = document_of(&expanded, EngineWhatAmI::Peer, &expanded.id())?;
+        let node = ZenohNodeConfig::from_json5(&document.to_string())
+            .map_err(|error| zerror!("the configuration cannot be scouted with: {error:?}"))?
+            .config;
+        let asked = [WhatAmI::Router, WhatAmI::Peer, WhatAmI::Client]
+            .into_iter()
+            .filter(|role| what.matches(*role))
+            .fold(0u8, |bits, role| bits | role as u8);
+        let plan = ScoutingPlan::for_scout(&node, asked)
+            .map_err(|error| zerror!("the configuration cannot be scouted with: {error:?}"))?;
+        let stream = ScoutStream::start(plan, asked, fresh_scout_zid(), move |hello| {
+            let whatami = match hello.whatami.map(|role| role.to_api()) {
+                Some(1) => WhatAmI::Router,
+                Some(2) => WhatAmI::Peer,
+                Some(4) => WhatAmI::Client,
+                _ => return,
+            };
+            let Ok(zid) = ZenohIdProto::try_from(hello.zid.as_slice()) else {
+                return;
+            };
+            let locators = hello
+                .locators
+                .iter()
+                .filter_map(|text| Locator::try_from(text.as_str()).ok())
+                .collect();
+            callback.call(
+                HelloProto {
+                    version: hello.version,
+                    whatami,
+                    zid,
+                    locators,
+                }
+                .into(),
+            );
+        })
+        .map_err(|error| zerror!("the scout cannot be started: {error}"))?;
+        Ok(Box::new(stream))
+    }
+
     /// The endpoints the configuration says to connect to as `mode`, each one dialled on its own.
     ///
     /// An entry that names a strategy over a group of locators is refused, by the key: the engine
@@ -3462,6 +3526,28 @@ where
     <TryIntoConfig as std::convert::TryInto<crate::config::Config>>::Error: std::fmt::Debug,
 {
     OpenBuilder::new(config)
+}
+
+/// Start a scout on the engine this build selects: what it returns scouts until it is dropped. A
+/// scout is no session's, so it is not an operation of the port; the crate reaches the engine for
+/// it as it does for the open (decision D1 of the seam note, taken again at the end of Z5).
+#[cfg(feature = "engine-tokio")]
+pub(crate) fn start_scout(
+    what: zenoh_protocol::core::WhatAmIMatcher,
+    config: &crate::api::config::Config,
+    callback: Callback<zenoh_config::wrappers::Hello>,
+) -> ZResult<Box<dyn Send>> {
+    tokio_engine::start_scout(what, config, callback)
+}
+
+/// A build that selects no engine has none to scout with, and says so as its open does.
+#[cfg(not(feature = "engine-tokio"))]
+pub(crate) fn start_scout(
+    _what: zenoh_protocol::core::WhatAmIMatcher,
+    _config: &crate::api::config::Config,
+    _callback: Callback<zenoh_config::wrappers::Hello>,
+) -> ZResult<Box<dyn Send>> {
+    bail!("this build selects no engine to scout with")
 }
 
 #[cfg(all(test, feature = "engine-tokio"))]

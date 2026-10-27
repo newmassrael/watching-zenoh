@@ -41,10 +41,10 @@ pub use zenoh_result::ZResult as Result;
 #[doc(inline)]
 pub use zenoh_util::{init_log_from_env_or, try_init_log_from_env};
 
-// Upstream's root also re-exports `scout`, which arrives with slice Z5.
 #[doc(inline)]
 pub use crate::{
     config::Config,
+    scouting::scout,
     session::{open, Session},
 };
 
@@ -446,6 +446,33 @@ pub mod internal {
 /// ```
 pub mod time {
     pub use zenoh_protocol::core::{Timestamp, TimestampId, NTP64};
+}
+
+/// # Scouting primitives
+///
+/// Scouting is the process of discovering Zenoh nodes in the network.
+/// The scouting process depends on the transport layer and the Zenoh configuration.
+///
+/// See more details at <https://zenoh.io/docs/getting-started/deployment/#scouting>.
+///
+/// # Example
+/// ```no_run
+/// # #[tokio::main]
+/// # async fn main() {
+/// use zenoh::config::WhatAmI;
+/// let scout = zenoh::scout(WhatAmI::Peer | WhatAmI::Router, zenoh::Config::default()).await.unwrap();
+/// while let Ok(hello) = scout.recv_async().await {
+///     println!("Discovered node: {}", hello);
+/// }
+/// # }
+/// ```
+pub mod scouting {
+    pub use zenoh_config::wrappers::Hello;
+
+    pub use crate::api::{
+        builders::scouting::ScoutBuilder,
+        scouting::{scout, Scout},
+    };
 }
 
 /// # Liveliness primitives

@@ -54,6 +54,7 @@ pub(crate) mod sample;
 // is used by the builder of `get`, slice Z3, so until then it has no caller.
 #[allow(dead_code)]
 pub(crate) mod key_expr;
+pub(crate) mod scouting;
 // R3702: the selector's users, the builders of `get` and the querier, are slice Z3.
 #[allow(dead_code)]
 pub(crate) mod selector;

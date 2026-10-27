@@ -211,6 +211,12 @@ fn zenoh::sample::SampleBuilder::payload<IntoZBytes>(Self, IntoZBytes) -> Self w
 fn zenoh::sample::SampleBuilder::priority(Self, zenoh::qos::Priority) -> Self ; in impl<T> zenoh::sample::SampleBuilder<T>
 fn zenoh::sample::SampleBuilder::put<IntoKeyExpr, IntoZBytes>(IntoKeyExpr, IntoZBytes) -> zenoh::sample::SampleBuilder<zenoh::sample::SampleBuilderPut> where IntoKeyExpr: core::convert::Into<zenoh::key_expr::KeyExpr<'static>>, IntoZBytes: core::convert::Into<zenoh::bytes::ZBytes> ; in impl zenoh::sample::SampleBuilder<zenoh::sample::SampleBuilderPut>
 fn zenoh::sample::SampleBuilder::timestamp<U: core::convert::Into<core::option::Option<zenoh::time::Timestamp>>>(Self, U) -> Self ; in impl<T> zenoh::sample::SampleBuilder<T>
+fn zenoh::scout<I: core::convert::Into<zenoh::config::WhatAmIMatcher>, TryIntoConfig>(I, TryIntoConfig) -> zenoh::scouting::ScoutBuilder<zenoh::handlers::DefaultHandler> where <TryIntoConfig as core::convert::TryInto<zenoh::config::Config>>::Error: core::convert::Into<zenoh::Error>, TryIntoConfig: 'static + core::convert::TryInto<zenoh::config::Config> + core::marker::Send
+fn zenoh::scouting::Scout::stop(Self) ; in impl<Receiver> zenoh::scouting::Scout<Receiver>
+fn zenoh::scouting::ScoutBuilder::callback<F>(Self, F) -> zenoh::scouting::ScoutBuilder<zenoh::handlers::Callback<zenoh::scouting::Hello>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::Fn(zenoh::scouting::Hello) ; in impl zenoh::scouting::ScoutBuilder<zenoh::handlers::DefaultHandler>
+fn zenoh::scouting::ScoutBuilder::callback_mut<F>(Self, F) -> zenoh::scouting::ScoutBuilder<zenoh::handlers::Callback<zenoh::scouting::Hello>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::FnMut(zenoh::scouting::Hello) ; in impl zenoh::scouting::ScoutBuilder<zenoh::handlers::DefaultHandler>
+fn zenoh::scouting::ScoutBuilder::with<Handler>(Self, Handler) -> zenoh::scouting::ScoutBuilder<Handler> where Handler: zenoh::handlers::IntoHandler<zenoh::scouting::Hello> ; in impl zenoh::scouting::ScoutBuilder<zenoh::handlers::DefaultHandler>
+fn zenoh::scouting::scout<I: core::convert::Into<zenoh::config::WhatAmIMatcher>, TryIntoConfig>(I, TryIntoConfig) -> zenoh::scouting::ScoutBuilder<zenoh::handlers::DefaultHandler> where <TryIntoConfig as core::convert::TryInto<zenoh::config::Config>>::Error: core::convert::Into<zenoh::Error>, TryIntoConfig: 'static + core::convert::TryInto<zenoh::config::Config> + core::marker::Send
 fn zenoh::session::Session::close(&Self) -> zenoh::session::CloseBuilder<Self> ; in impl zenoh::session::Session
 fn zenoh::session::Session::declare_keyexpr<'0, '1: '0, TryIntoKeyExpr>(&'0 Self, TryIntoKeyExpr) -> impl '0 + zenoh::Resolve<zenoh::Result<zenoh::key_expr::KeyExpr<'1>>> where <TryIntoKeyExpr as core::convert::TryInto<zenoh::key_expr::KeyExpr<'1>>>::Error: core::convert::Into<zenoh::Error>, TryIntoKeyExpr: core::convert::TryInto<zenoh::key_expr::KeyExpr<'1>> ; in impl zenoh::session::Session
 fn zenoh::session::Session::declare_publisher<'0, TryIntoKeyExpr>(&Self, TryIntoKeyExpr) -> zenoh::pubsub::PublisherBuilder<'_, '0> where <TryIntoKeyExpr as core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>>>::Error: core::convert::Into<zenoh::Error>, TryIntoKeyExpr: core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>> ; in impl zenoh::session::Session
@@ -407,6 +413,8 @@ impl core::fmt::Debug for zenoh::sample::SampleBuilderDelete
 impl core::fmt::Debug for zenoh::sample::SampleBuilderPut
 impl core::fmt::Debug for zenoh::sample::SampleFields
 impl core::fmt::Debug for zenoh::sample::SampleKind
+impl core::fmt::Debug for zenoh::scouting::Scout
+impl core::fmt::Debug for zenoh::scouting::ScoutBuilder
 impl core::fmt::Debug for zenoh::session::CloseBuilder
 impl core::fmt::Debug for zenoh::session::OpenBuilder
 impl core::fmt::Debug for zenoh::session::PeersZenohIdBuilder
@@ -444,6 +452,7 @@ impl core::future::into_future::IntoFuture for zenoh::query::QueryableBuilder
 impl core::future::into_future::IntoFuture for zenoh::query::QueryableUndeclaration
 impl core::future::into_future::IntoFuture for zenoh::query::ReplyBuilder
 impl core::future::into_future::IntoFuture for zenoh::query::ReplyErrBuilder
+impl core::future::into_future::IntoFuture for zenoh::scouting::ScoutBuilder
 impl core::future::into_future::IntoFuture for zenoh::session::CloseBuilder
 impl core::future::into_future::IntoFuture for zenoh::session::OpenBuilder
 impl core::future::into_future::IntoFuture for zenoh::session::PeersZenohIdBuilder
@@ -484,6 +493,7 @@ impl core::ops::deref::Deref for zenoh::key_expr::KeyExpr
 impl core::ops::deref::Deref for zenoh::matching::MatchingListener
 impl core::ops::deref::Deref for zenoh::pubsub::Subscriber
 impl core::ops::deref::Deref for zenoh::query::Queryable
+impl core::ops::deref::Deref for zenoh::scouting::Scout
 impl core::ops::deref::DerefMut for zenoh::matching::MatchingListener
 impl core::ops::deref::DerefMut for zenoh::pubsub::Subscriber
 impl core::ops::deref::DerefMut for zenoh::query::Queryable
@@ -536,6 +546,7 @@ impl zenoh::Resolvable for zenoh::query::QueryableBuilder
 impl zenoh::Resolvable for zenoh::query::QueryableUndeclaration
 impl zenoh::Resolvable for zenoh::query::ReplyBuilder
 impl zenoh::Resolvable for zenoh::query::ReplyErrBuilder
+impl zenoh::Resolvable for zenoh::scouting::ScoutBuilder
 impl zenoh::Resolvable for zenoh::session::CloseBuilder
 impl zenoh::Resolvable for zenoh::session::OpenBuilder
 impl zenoh::Resolvable for zenoh::session::PeersZenohIdBuilder
@@ -561,6 +572,7 @@ impl zenoh::Wait for zenoh::query::QueryableBuilder
 impl zenoh::Wait for zenoh::query::QueryableUndeclaration
 impl zenoh::Wait for zenoh::query::ReplyBuilder
 impl zenoh::Wait for zenoh::query::ReplyErrBuilder
+impl zenoh::Wait for zenoh::scouting::ScoutBuilder
 impl zenoh::Wait for zenoh::session::CloseBuilder
 impl zenoh::Wait for zenoh::session::OpenBuilder
 impl zenoh::Wait for zenoh::session::PeersZenohIdBuilder
@@ -583,6 +595,7 @@ mod zenoh::pubsub
 mod zenoh::qos
 mod zenoh::query
 mod zenoh::sample
+mod zenoh::scouting
 mod zenoh::session
 mod zenoh::time
 reexport enum zenoh::config::EndPoints = zenoh_protocol::core::endpoint::EndPoints
@@ -601,6 +614,7 @@ reexport struct zenoh::key_expr::OwnedNonWildKeyExpr = zenoh_keyexpr::key_expr::
 reexport struct zenoh::key_expr::keyexpr = zenoh_keyexpr::key_expr::borrowed::keyexpr
 reexport struct zenoh::key_expr::nonwild_keyexpr = zenoh_keyexpr::key_expr::borrowed::nonwild_keyexpr
 reexport struct zenoh::query::Parameters = zenoh_protocol::core::parameters::Parameters
+reexport struct zenoh::scouting::Hello = zenoh_config::wrappers::Hello
 reexport struct zenoh::session::ZenohId = zenoh_config::wrappers::ZenohId
 reexport struct zenoh::time::NTP64 = uhlc::ntp64::NTP64
 reexport struct zenoh::time::Timestamp = uhlc::timestamp::Timestamp
@@ -678,6 +692,8 @@ struct zenoh::sample::SampleBuilderAny
 struct zenoh::sample::SampleBuilderDelete
 struct zenoh::sample::SampleBuilderPut
 struct zenoh::sample::SampleFields
+struct zenoh::scouting::Scout
+struct zenoh::scouting::ScoutBuilder
 struct zenoh::session::CloseBuilder
 struct zenoh::session::OpenBuilder
 struct zenoh::session::PeersZenohIdBuilder
