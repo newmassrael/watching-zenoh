@@ -57,6 +57,21 @@ enum Seen {
     DeclareFinal,
     /// An `UndeclareSubscriber`.
     UndeclareSubscriber,
+    /// A `DeclareQueryable` and the completeness it carries.
+    DeclareQueryable { keyexpr: String, complete: bool },
+    /// A `Request` forwarded to a queryable. Its request id is left out: each
+    /// forwarder numbers the queries it relays by its own table, and the
+    /// reply is matched to it through [`Node::last_request`].
+    Request { keyexpr: String },
+    /// A `Response` as the querier sees it, so the request id is the
+    /// querier's own, which both forwarders must restore.
+    Response {
+        request_id: u64,
+        keyexpr: String,
+        payload: Option<Vec<u8>>,
+    },
+    /// A `ResponseFinal` as the querier sees it.
+    ResponseFinal { request_id: u64 },
     /// A link-state list, as the (zid, sorted link zids) of each entry that
     /// names its node, so the psid numbering is not compared.
     LinkState {
@@ -82,6 +97,15 @@ enum Step {
     Unsubscribe(u64, &'static str),
     /// A `Put` arrives on a face.
     Put(u64, &'static str, &'static [u8]),
+    /// A `DeclareQueryable` arrives on a face: keyexpr, completeness.
+    Queryable(u64, &'static str, bool),
+    /// A `Request` arrives on a face: the querier's request id, keyexpr.
+    Query(u64, u64, &'static str),
+    /// The queryable on a face answers the last `Request` that was forwarded
+    /// to it, with a `Reply` under the keyexpr.
+    Reply(u64, &'static str, &'static [u8]),
+    /// The queryable on a face ends the last `Request` forwarded to it.
+    Final(u64),
     /// A face goes down.
     Down(u64),
     /// The periodic tick.
@@ -94,6 +118,12 @@ struct Node {
     sinks: BTreeMap<u64, Arc<RecordingLinkDriver>>,
     /// How many frames of each face were already read.
     read: BTreeMap<u64, usize>,
+    /// The request id the node used on the last `Request` it forwarded to each
+    /// face and that is not yet ended, which is what that face's answer must
+    /// carry. A queryable that was sent no `Request` has nothing to answer: its
+    /// `Reply` and `Final` steps do nothing, and that shows as a difference on
+    /// the `Query` step when only one of two nodes forwarded the request.
+    last_request: BTreeMap<u64, u64>,
     self_zid: u8,
 }
 
@@ -103,6 +133,7 @@ impl Node {
             fwd,
             sinks: BTreeMap::new(),
             read: BTreeMap::new(),
+            last_request: BTreeMap::new(),
             self_zid,
         }
     }
@@ -145,6 +176,41 @@ impl Node {
                     .expect("push");
                 self.deliver(*id, NetworkMessage::Push(Box::new(push)));
             }
+            Step::Queryable(id, keyexpr, complete) => {
+                let declare = build_declare_queryable_with_info(
+                    keyexpr,
+                    QueryableInfo {
+                        complete: *complete,
+                        distance: 0,
+                    },
+                )
+                .expect("declare queryable");
+                self.deliver(*id, NetworkMessage::Declare(Box::new(declare)));
+            }
+            Step::Query(id, rid, keyexpr) => {
+                let request =
+                    wz_session_core::request_build::build_request_query(*rid, 0, Some(keyexpr))
+                        .expect("request");
+                self.deliver(*id, NetworkMessage::Request(Box::new(request)));
+            }
+            Step::Reply(id, keyexpr, payload) => {
+                if let Some(rid) = self.last_request.get(id).copied() {
+                    let response = wz_session_core::response_build::build_response_reply_literal(
+                        rid, keyexpr, payload,
+                    )
+                    .expect("response");
+                    self.deliver(*id, NetworkMessage::Response(Box::new(response)));
+                }
+            }
+            Step::Final(id) => {
+                if let Some(rid) = self.last_request.remove(id) {
+                    let end = wz_session_core::response_final_build::build_response_final(
+                        rid,
+                        wz_session_core::sample::QosLevel::DEFAULT,
+                    );
+                    self.deliver(*id, NetworkMessage::ResponseFinal(end));
+                }
+            }
             Step::Down(id) => self.fwd.deregister(FaceId(*id)),
             Step::Tick => self.fwd.tick(),
         }
@@ -170,9 +236,15 @@ impl Node {
         for (id, sink) in &self.sinks {
             let from = self.read[id];
             let total = sink.frame_count();
-            let mut seen: Vec<Seen> = (from..total)
-                .flat_map(|i| decode(&sink.frame_bytes(i)))
-                .collect();
+            let mut seen: Vec<Seen> = Vec::new();
+            for i in from..total {
+                for (s, rid) in decode(&sink.frame_bytes(i)) {
+                    if let Some(rid) = rid {
+                        self.last_request.insert(*id, rid);
+                    }
+                    seen.push(s);
+                }
+            }
             seen.sort();
             if !seen.is_empty() {
                 out.insert(*id, seen);
@@ -183,16 +255,32 @@ impl Node {
     }
 }
 
-fn decode(frame: &[u8]) -> Vec<Seen> {
+/// What a frame carried and, for a `Request`, the request id it was sent with.
+fn decode(frame: &[u8]) -> Vec<(Seen, Option<u64>)> {
     use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
     let Ok(InboundFrame::Frame { payload, .. }) = parse_inbound(frame) else {
-        return vec![Seen::Other("non-frame")];
+        return vec![(Seen::Other("non-frame"), None)];
     };
     parse_frame_payload(&payload)
         .expect("a frame payload")
         .iter()
-        .map(seen_of)
+        .map(|message| {
+            let rid = match message {
+                NetworkMessage::Request(request) => Some(request.rid),
+                _ => None,
+            };
+            (seen_of(message), rid)
+        })
         .collect()
+}
+
+/// The literal keyexpr of a wire expression the scenes built.
+fn literal<S: sce_forge_runtime::codec::CodecStorage>(
+    body: &wz_codecs::wireexpr::WireexprOwnedVariant<S>,
+) -> String {
+    let (id, suffix) = id_and_suffix(body);
+    assert_eq!(id, 0, "the scenes use literal key expressions");
+    suffix.unwrap_or_default().to_owned()
 }
 
 fn seen_of(message: &NetworkMessage) -> Seen {
@@ -221,7 +309,35 @@ fn seen_of(message: &NetworkMessage) -> Seen {
             }
             DeclareOwnedVariant::CodecZenohDeclFinal(_) => Seen::DeclareFinal,
             DeclareOwnedVariant::CodecZenohUndeclSubscriber(_) => Seen::UndeclareSubscriber,
+            DeclareOwnedVariant::CodecZenohDeclQueryable(q) => Seen::DeclareQueryable {
+                keyexpr: literal(&q.keyexpr.body),
+                complete: read_queryable_info(q.extensions.as_ref()).complete,
+            },
             _ => Seen::Other("declare"),
+        },
+        NetworkMessage::Request(request) => Seen::Request {
+            keyexpr: literal(&request.keyexpr.body),
+        },
+        NetworkMessage::Response(response) => {
+            let payload = match &response.body {
+                wz_session_core::wire::ResponseOwnedVariant::CodecZenohReply(reply) => {
+                    match &reply.body {
+                        wz_session_core::wire::parts::ReplyOwnedVariant::CodecZenohMsgPut(put) => {
+                            wz_session_core::put_payload::inline_bytes(put).map(<[u8]>::to_vec)
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            Seen::Response {
+                request_id: response.request_id,
+                keyexpr: literal(&response.keyexpr.body),
+                payload,
+            }
+        }
+        NetworkMessage::ResponseFinal(end) => Seen::ResponseFinal {
+            request_id: end.request_id,
         },
         NetworkMessage::Oam(oam) => match try_parse_linkstate_oam(oam) {
             LinkstateOam::Decoded(list) => Seen::LinkState {
@@ -442,8 +558,85 @@ fn a_client_puts() -> Vec<Step> {
     ]
 }
 
+/// Queries between a peer, a client and a router, each querying a queryable of
+/// another kind: the Request is forwarded, the Reply returns to the querier under
+/// its own request id and the final ends it.
+fn queries_between_peers_clients_and_a_router() -> Vec<Step> {
+    vec![
+        Step::Up(0, 0xAA, Wire::Peer),
+        Step::Up(1, 0xCC, Wire::Peer),
+        Step::Up(2, 0xDD, Wire::Client),
+        Step::Up(3, 0xEE, Wire::Router),
+        Step::LinkBack(0, 0xAA, 5),
+        Step::LinkBack(1, 0xCC, 5),
+        Step::LinkBack(3, 0xEE, 5),
+        Step::Tick,
+        Step::Queryable(1, "demo/q", true),
+        Step::Queryable(2, "demo/c", false),
+        Step::Tick,
+        Step::Query(0, 99, "demo/q"),
+        Step::Reply(1, "demo/q", b"from a peer"),
+        Step::Final(1),
+        Step::Query(0, 100, "demo/c"),
+        Step::Reply(2, "demo/c", b"from a client"),
+        Step::Final(2),
+        Step::Query(2, 7, "demo/q"),
+        Step::Reply(1, "demo/q", b"for a client"),
+        Step::Final(1),
+        Step::Query(3, 8, "demo/c"),
+        Step::Reply(2, "demo/c", b"for a router"),
+        Step::Final(2),
+    ]
+}
+
+/// A client declares a queryable first; a peer and a router come up after it and
+/// each queries it.
+fn a_queryable_declared_before_the_faces_come_up() -> Vec<Step> {
+    vec![
+        Step::Up(0, 0xDD, Wire::Client),
+        Step::Queryable(0, "demo/q", true),
+        Step::Up(1, 0xAA, Wire::Peer),
+        Step::LinkBack(1, 0xAA, 5),
+        Step::Up(2, 0xEE, Wire::Router),
+        Step::LinkBack(2, 0xEE, 5),
+        Step::Tick,
+        Step::Query(1, 5, "demo/q"),
+        Step::Reply(0, "demo/q", b"to the peer"),
+        Step::Final(0),
+        Step::Query(2, 6, "demo/q"),
+        Step::Reply(0, "demo/q", b"to the router"),
+        Step::Final(0),
+    ]
+}
+
+/// The queryable's face goes down while its query is open: the querier is owed
+/// the end of the query.
+fn a_queryable_face_goes_down_mid_query() -> Vec<Step> {
+    vec![
+        Step::Up(0, 0xAA, Wire::Peer),
+        Step::Up(1, 0xDD, Wire::Client),
+        Step::LinkBack(0, 0xAA, 5),
+        Step::Tick,
+        Step::Queryable(1, "demo/q", true),
+        Step::Query(0, 5, "demo/q"),
+        Step::Down(1),
+    ]
+}
+
 fn scenes() -> Vec<(&'static str, Vec<Step>)> {
     vec![
+        (
+            "queries between peers, clients and a router",
+            queries_between_peers_clients_and_a_router(),
+        ),
+        (
+            "a queryable before the faces",
+            a_queryable_declared_before_the_faces_come_up(),
+        ),
+        (
+            "a queryable face goes down mid-query",
+            a_queryable_face_goes_down_mid_query(),
+        ),
         ("two peers", two_peers_one_subscribes()),
         (
             "a peer, a router and a client",
@@ -465,6 +658,12 @@ fn scenes() -> Vec<(&'static str, Vec<Step>)> {
 /// peer sent over all scenes in `mode`: a gate whose scenes send nothing
 /// compares nothing.
 fn data_messages_sent(mode: Mode) -> usize {
+    messages_sent(mode, |_| true)
+}
+
+/// How many of the data messages the region-hat peer sent over all scenes in
+/// `mode` satisfy `wanted`.
+fn messages_sent(mode: Mode, wanted: impl Fn(&Seen) -> bool) -> usize {
     scenes()
         .iter()
         .map(|(_, scene)| {
@@ -475,12 +674,19 @@ fn data_messages_sent(mode: Mode) -> usize {
                     split(node.apply(step))
                         .0
                         .values()
-                        .map(Vec::len)
-                        .sum::<usize>()
+                        .flatten()
+                        .filter(|s| wanted(s))
+                        .count()
                 })
                 .sum::<usize>()
         })
         .sum()
+}
+
+/// A query reached a queryable and its answer reached the querier: the half of
+/// the query plane a scene set that only sent Requests would not exercise.
+fn answers_delivered(mode: Mode) -> usize {
+    messages_sent(mode, |s| matches!(s, Seen::Response { .. }))
 }
 
 /// The two reasons the gate lets the planes differ in gossip mode, each a place
@@ -510,10 +716,12 @@ fn explained(mode: Mode, d: &Divergence) -> Option<&'static str> {
         // told the face at face-up when the tick recomputes its tree.
         ("data", Step::Tick)
             if d.region_hat.is_empty()
-                && d.linkstate
-                    .values()
-                    .flatten()
-                    .all(|s| matches!(s, Seen::DeclareSubscriber { .. })) =>
+                && d.linkstate.values().flatten().all(|s| {
+                    matches!(
+                        s,
+                        Seen::DeclareSubscriber { .. } | Seen::DeclareQueryable { .. }
+                    )
+                }) =>
         {
             Some(TREE_READVERTISE)
         }
@@ -557,6 +765,10 @@ fn in_gossip_mode_the_two_peer_planes_differ_only_where_the_pin_says() {
     assert!(
         data_messages_sent(Mode::Gossip) >= 8,
         "the scenes must send something for the comparison to mean anything"
+    );
+    assert!(
+        answers_delivered(Mode::Gossip) >= 2,
+        "the query scenes must deliver an answer to a querier for the comparison to mean anything"
     );
 }
 
@@ -607,5 +819,9 @@ fn in_link_state_mode_the_two_peer_planes_send_the_same_data_and_topology() {
         data_messages_sent(Mode::LinkState) > data_messages_sent(Mode::Gossip),
         "the extension relays between peers, which gossip does not: \
          a scene set that sends as much in both would not exercise the tree"
+    );
+    assert!(
+        answers_delivered(Mode::LinkState) > answers_delivered(Mode::Gossip),
+        "the extension answers a query across peers, which gossip does not"
     );
 }

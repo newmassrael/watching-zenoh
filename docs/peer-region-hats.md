@@ -210,7 +210,35 @@ What the gate does not cover and step 3 therefore does not claim: priorities
 and reliability channels, ids and aliases, attachments and timestamps, a
 three-hop tree, and every plane other than publish and subscribe.
 
-## 8. Open
+## 8. Step 4, queries, as landed
+
+The same gate carries the query plane: three more scenes (queries between a
+peer, a client and a router; a queryable declared before the faces come up; a
+queryable's face going down mid-query), with `Queryable`, `Query`, `Reply` and
+`Final` steps. A forwarder numbers the queries it relays by its own table, so a
+`Reply` or `Final` answers the last `Request` that was forwarded to that face
+and is still open, and the compared `Request` leaves its id out; the `Response`
+and `ResponseFinal` a querier receives carry the querier's own id, which both
+planes must restore, and are compared with it.
+
+- **Link-state: equal, with no code change in the forwarder.** The tree rule of
+  step 3 already carried the query route, the reply return and the final. The
+  gate is sensitive to it: with the query rule (`mesh_query_block`) put back to
+  the pin's face-based form the link-state test fails on the first peer-to-peer
+  query, the Request not being forwarded and the querier being sent a final.
+- **Gossip: the same single difference, now for queryables too.**
+  `LinkstateForwarder` re-advertises a `DeclareQueryable` at the recompute as it
+  does a `DeclareSubscriber`; the explained difference covers both. A query from
+  a peer to a peer's queryable is forwarded by neither plane in gossip, which is
+  the pin's rule for a query inside one region
+  (`zenoh/src/net/routing/hat/peer/queries.rs` @ `if self.region() != *src_region {`).
+- Non-vacuity: the scenes must deliver answers to a querier in gossip mode, and
+  more of them in link-state mode.
+
+Not covered: query targets and consolidation, a query's timeout, an error
+reply, and the pending table across a recompute.
+
+## 9. Open
 
 - The size of step 1's list is unknown until it is made, and the number of
   rounds after it follows from it. The router's own program ran from round 2865
