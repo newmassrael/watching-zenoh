@@ -461,6 +461,17 @@ impl PublishOptions {
     }
 }
 
+/// Whether this build sends a plain Put from borrowed bytes, which is the one answer
+/// [`PublishOptions::plain_put_params`] gives for a plain Put in it: `Some` when this is `true`,
+/// `None` when it is `false`. A holder of the answer in a crate that does not see this crate's
+/// features (the engine of the C ABIs, whose tests exercise the plain lane) reads the build from
+/// here and not from a `cfg` of its own, which would be a second copy of the condition.
+pub const SENDS_PLAIN_PUTS: bool = cfg!(all(
+    feature = "codec-push",
+    not(feature = "transport-stats"),
+    not(feature = "routing-namespace")
+));
+
 /// The facts a plain Put is sent from ([`PublishOptions::plain_put_params`]).
 #[derive(Debug, Clone, Copy)]
 pub struct PlainPutParams {
@@ -628,3 +639,19 @@ metadata_gated!(gated_encoding, "pubsub-encoding", EncodingHint);
 metadata_gated!(gated_source_info, "pubsub-source-info", SourceInfo);
 metadata_gated!(gated_attachment, "pubsub-attachment", Vec<u8>);
 metadata_gated!(gated_qos, "pubsub-qos", QosLevel);
+
+#[cfg(test)]
+mod plain_put_tests {
+    use super::*;
+
+    /// The constant the engine's tests read the build from is the answer of the function it
+    /// stands for, and a Put that is not plain is no plain Put in any build.
+    #[test]
+    fn the_build_says_what_a_plain_put_gets() {
+        assert_eq!(
+            PublishOptions::put().plain_put_params().is_some(),
+            SENDS_PLAIN_PUTS
+        );
+        assert!(PublishOptions::del().plain_put_params().is_none());
+    }
+}

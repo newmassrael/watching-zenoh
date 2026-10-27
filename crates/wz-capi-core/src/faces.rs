@@ -5174,6 +5174,23 @@ mod matching_aggregate_tests {
         );
     }
 
+    /// The plain-put parameters of `options` in a build that sends plain puts, and `None` in one
+    /// that does not, after asserting that this is what the build says of itself
+    /// (`SENDS_PLAIN_PUTS`: a build that counts or rewrites the owned message, or has no Push
+    /// codec, has no plain lane). A test of the lane has nothing to run in the second kind of
+    /// build, and what it holds there is this assertion: the build answers that it has none.
+    fn plain_params(
+        options: &PublishOptions,
+    ) -> Option<wz_session_core::publish_options::PlainPutParams> {
+        let params = options.plain_put_params();
+        assert_eq!(
+            params.is_some(),
+            wz_session_core::publish_options::SENDS_PLAIN_PUTS,
+            "the build's answer for a plain Put is the build's one answer"
+        );
+        params
+    }
+
     /// The plain lane of a declared key answers for a put that nothing in this node wants (it
     /// is sent to the faces, here none, and delivers to nobody), and STEPS ASIDE for one that
     /// this node's own subscriber wants, sending nothing, so that the general publish keeps
@@ -5185,9 +5202,9 @@ mod matching_aggregate_tests {
         let mapping = shared
             .declare_keyexpr("wz/plain/target".to_owned())
             .expect("the first alias id is not exhausted");
-        let params = PublishOptions::put()
-            .plain_put_params()
-            .expect("this build sends plain puts");
+        let Some(params) = plain_params(&PublishOptions::put()) else {
+            return;
+        };
 
         // Nobody here wants it: the lane answers, and the answer is the general publish's.
         assert!(
@@ -5239,10 +5256,8 @@ mod matching_aggregate_tests {
         );
 
         // A destination that leaves this node out is plain whatever subscribes here.
-        let remote_only = PublishOptions::put()
-            .with_locality(Locality::Remote)
-            .plain_put_params()
-            .expect("this build sends plain puts");
+        let remote_only = plain_params(&PublishOptions::put().with_locality(Locality::Remote))
+            .expect("a build that sends a plain put sends this one");
         assert!(matches!(
             shared.put_plain_declared("wz/plain/target", mapping, b"z", &remote_only),
             Some(Ok(0))
@@ -5274,11 +5289,15 @@ mod matching_aggregate_tests {
             let mapping = shared
                 .declare_keyexpr("wz/plain/target".to_owned())
                 .expect("the first alias id is not exhausted");
-            let params = PublishOptions::put()
-                .plain_put_params()
+            let params = plain_params(&PublishOptions::put())
                 .expect("a build that can enforce still sends plain puts");
             shared.put_plain_declared("wz/plain/target", mapping, b"x", &params)
         };
+        if !wz_session_core::publish_options::SENDS_PLAIN_PUTS {
+            // No plain lane in this build, for the node with a policy and the node without one.
+            assert!(PublishOptions::put().plain_put_params().is_none());
+            return;
+        }
         let stated = ZenohNodeConfig::from_json5(
             r#"{ low_pass_filter: [ { messages: ["put"], key_exprs: ["wz/**"], size_limit: 4 } ] }"#,
         )
@@ -5306,10 +5325,10 @@ mod matching_aggregate_tests {
         let mapping = shared
             .declare_keyexpr("wz/plain/filtered".to_owned())
             .expect("the first alias id is not exhausted");
-        let params = PublishOptions::put()
-            .with_locality(Locality::Remote)
-            .plain_put_params()
-            .expect("this build sends plain puts");
+        let Some(params) = plain_params(&PublishOptions::put().with_locality(Locality::Remote))
+        else {
+            return;
+        };
         let filter = shared.declare_write_filter(
             FilterPlane::Subscribers,
             "wz/plain/filtered".to_owned(),
@@ -5349,10 +5368,8 @@ mod matching_aggregate_tests {
         // A put this node's own subscriber wants steps aside, sending nothing.
         let sink: SubscriberSink = Arc::new(|| Box::new(move |_sample: &dyn SampleView| {}));
         shared.declare_subscriber("wz/plain/filtered".to_owned(), Locality::Any, sink);
-        let local = PublishOptions::put()
-            .with_locality(Locality::Any)
-            .plain_put_params()
-            .expect("this build sends plain puts");
+        let local = plain_params(&PublishOptions::put().with_locality(Locality::Any))
+            .expect("a build that sends a plain put sends this one");
         assert_eq!(
             shared.put_plain_filtered(
                 filter.wrapping_add(1000),
