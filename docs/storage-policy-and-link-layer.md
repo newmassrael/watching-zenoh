@@ -246,6 +246,21 @@ reads each chain once, so a view would take about 600 B out of `dispatch_copied`
 That is a moderate change to the readers of `Init`, `Open` and `Close` for about
 a tenth of the stack, and is left until something needs the bytes.
 
+Since then (2026-10-27, the kit's reading and the bench host's chain of the same
+image, each change measured on its own): the console line's buffer left
+`wz_app_main` (`log_args` is never inlined; chain 7,296 to 7,152 B, peak 6,480 to
+6,336 B); the dispatch of a unit that is not a `Frame` became three steps, decode,
+judge and the engine's event, so that the decoded message is the only copy held
+across them (chain 6,940 B, peak 6,060 B); and the SCE pin `6dbfa6a521` sizes the
+engine's microstep buffers to each document's state tree (chain 6,372 B, peak
+5,880 B, at +336 B of text in the plain image). Two cuts that were tried and not
+kept lowered the chain and raised the peak (7,032 and 7,760 B): a function taken
+out of line grew the frame under it, so the reading is the figure to follow and the
+chain is the one to hold. The deepest chain is the dial path now, not the
+handshake's dispatch: `ConnectManager::reconcile` 1,280 B and two frames of its own,
+`SlotDialer::dial_expecting` 1,216 B, the pump, the engine's open step and the
+initial-SN hash (`keccak::f1600`, 432 B).
+
 D5 is built for the stack. `scripts/lib/stack_frame_gate.py` reads the worst
 chain of direct calls from the image's disassembly, with the polled tasks as
 roots below the thread's entry and a panic's tail not counted, and holds it: it

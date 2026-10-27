@@ -1027,8 +1027,21 @@ declare -A BASELINE_MC_TEXT=(
     # path bytes per forward 2939 -> 569 for one subscriber). The alternative, trimming it, would
     # trade the exact upper bound (a slot too small is a refused send on the lend path) for
     # bytes of ROM, and was not taken. data is 4 and bss 270120 on both. Old: 69776/69864.
-    ["thumbv7m-none-eabi"]=70172
-    ["thumbv7em-none-eabihf"]=70304
+    #
+    # 2026-10-27 -- thumbv7m 70172 -> 68712, thumbv7em-hf 70304 -> 68772, from one change, the SCE
+    # pin move `c244f4e171` -> `6dbfa6a521` (a list is typed by its walk marker, the engine's
+    # procedures run over bounded buffers sized to each document's state tree). Measured by Layer Q
+    # on one build host and one toolchain (rustc 1.97.0 / gcc 13.2.1) at the commit before the pin
+    # (`fbbdc7098`: 70128 / 70272) and at the pin (68712 / 68772): -1416 / -1500, a SHRINK, which
+    # this gate also refuses because its band is symmetric. The `qemu-demo` figures of the same two
+    # builds are identical, so the change is in what the multicast profile links, not in the lwIP
+    # floor. The hosted read of the commit before the pin (run `40405271962`, `65d07530d`) is
+    # 70132 / 70304, +4 / +32 over this host, so the hosted figure for the pin is expected near
+    # 68716 / 68804, inside the band. The figures here are this host's; the next hosted read
+    # corrects them if it differs by more than the usual spread. data is 4 and bss 270120 on both.
+    # Old: 70172/70304.
+    ["thumbv7m-none-eabi"]=68712
+    ["thumbv7em-none-eabihf"]=68772
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck

@@ -198,6 +198,15 @@ IMAGES = (
     # answer to a handshake under that dispatch (2,432 bytes of frame) but the connect manager's
     # dial path: `wz_app_main` 1,784, `ConnectManager::reconcile` 1,280 and two frames of its own
     # (416, 112), `SlotDialer::dial_expecting` 1,216, the pump's `PumpSlots` 64.
+    #
+    # 6,372 bytes after the SCE pin moved to `6dbfa6a521` (576 less, the bench host's build, 15
+    # frames, 10 calls through a register not followed). The engine's microstep buffers are sized
+    # to each document's state tree there, which took `decide_unit_in` from 3,024 to 936 bytes, and
+    # the worst chain is still the dial path, now through the pump into the engine's open step:
+    # `wz_app_main` 1,784, `ConnectManager::reconcile` 1,280 with its two frames (416, 112),
+    # `SlotDialer::dial_expecting` 1,216, `PumpSlots` 64, `SessionPump` 216, four engine frames
+    # (40, 56, 40, 112), `enter_entry_set` 40, `SessionActionsBinding` 544 and the initial-SN hash
+    # (`Shake128::absorb` 20, `keccak::f1600` 432).
     Image(
         key="zephyr-client-fixed",
         elf=None,
@@ -205,7 +214,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=6940,
+        peak=6372,
     ),
     # The same client with the session coalescing a send window into one datagram
     # (`overlays/t2g_client_batching.conf`). The batch writer and its flush path are two more
@@ -221,6 +230,10 @@ IMAGES = (
     # sessions a peer opened beside the dialled ones (+64), the connect manager is held by the
     # shared planner and by nodes' zids (+88), a few smaller steps, and the log lines are not
     # inlined into the main frame (-144).
+    #
+    # 6,372 bytes after the SCE pin moved to `6dbfa6a521`, the same chain as the client without
+    # batching (see the fixed client's row); the kit's reading, 5,904 bytes, is 24 over that
+    # client's.
     Image(
         key="zephyr-client-fixed-batching",
         elf=None,
@@ -228,7 +241,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=6940,
+        peak=6372,
     ),
     # The fixed client that ASKS (`overlays/t2g_client_get.conf`): the getter of
     # `wz_session_mcu::slot_getter` is the application layer the observer's drain runs inside, and
@@ -246,6 +259,14 @@ IMAGES = (
     # handshake no longer, and the worst chain is the connect manager's dial path (see the fixed
     # client's row). The resource budget's row for this image no longer carries `chain_misses`:
     # the chain is a bound again, for as long as the reading stays under it.
+    #
+    # 6,524 bytes after the SCE pin moved to `6dbfa6a521` (568 less, 15 frames, 10 calls through a
+    # register not followed), the fixed client's chain with the getter's larger main frame (1,856
+    # against 1,784) and `dial_expecting` at 1,296 (1,216 there). ⚠ The kit's reading did not move
+    # with it: it is still 6,648 bytes, 124 OVER the chain again, so the resource budget's row
+    # carries `chain_misses` once more and the chain is not a bound on this image. The path that
+    # sets the reading is not the one the pin shortened, and the reader cannot follow it; it was
+    # not identified.
     Image(
         key="zephyr-client-fixed-get",
         elf=None,
@@ -253,7 +274,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=7092,
+        peak=6524,
     ),
     # The fixed client over the secure channel (`overlays/t2g_client_tls.conf`, decision D9):
     # the dial completes a TLS 1.3 handshake in Mbed TLS before the session sees a byte, and every
