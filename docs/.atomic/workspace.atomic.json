@@ -293748,6 +293748,42 @@
         "pico and wz-ap-demo have no configuration door until they open through OpenPlan."
       ]
     },
+    "Round 3789": {
+      "decision_summary": "The three QNX measured records are recorded again in the split form, with the owner's clearance to build under the account that holds the QNX SDP. Each was built from a fresh clone of a28aedc8b, a commit on origin, with its submodules, by the same pinned nightly and SDP as the records they replace, through scripts/with-sdk-env.sh, and verified again from its bytes here before it was recorded: qnx710-iosock-aarch64, qnx710-iopkt-aarch64 and the io-sock slot-answerer node. Every measured record now carries requires and may_require; the unsplit form stays valid for packages built before the split, held by the synthetic host-unsplit-bound fixture. The entry's import check passed on both QNX stacks. The clone and the package directories made on that host were removed; its toolchain and build cache are as they were, less a nightly an earlier probe had installed there, which was removed on the owner's word.",
+      "changes_bullets": [
+        "deploy/fixtures/manifests/measured: qnx710-iosock-aarch64.json, qnx710-iopkt-aarch64.json and qnx710-iosock-aarch64-slot-answerer.json from a28aedc8b, in the split form, with the index rewritten.",
+        "docs/target-build-contract.md T9 and the UNSPLIT_ARTIFACT_KEYS comment of scripts/lib/wz_package.py: every measured record is in the split form; the unsplit one stays valid for older packages."
+      ],
+      "verification_bullets": [
+        "On the QNX host: a fresh clone at a28aedc8b, submodules initialised, git status empty; three packages built with the pinned nightly (rustc 1.98.0-nightly 61d7280f3) under the SDP through with-sdk-env.sh, each manifest verified there by the entry; the SDP linker's GNU_PROPERTY_TYPE notes on Rust metadata are warnings, as in the records replaced.",
+        "Here: wz_package.py --record-measured on each copied package directory, every file re-measured from its bytes, built_from a28aedc8b with tree_clean true; capi-pico, capi-c and ap-demo require entropy and threads on both stacks, the node entropy and sockets-tcp; wz_package.py --selftest OK over the eight records.",
+        "After the run the host holds its workspace's three directories and the pinned nightly alone."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "pico and wz-ap-demo have no configuration door until they open through OpenPlan.",
+        "The configuration corpus is three capi-c scenarios; a TLS, a scouting-only and a listen-may-fail configuration would each hold a branch of the derivation to a run."
+      ],
+      "publishable_decision_summary": "The three QNX measured records are recorded again in the split form, with the owner's clearance to build under the account that holds the QNX SDP. Each was built from a fresh clone of a28aedc8b, a commit on origin, with its submodules, by the same pinned nightly and SDP as the records they replace, through scripts/with-sdk-env.sh, and verified again from its bytes here before it was recorded: qnx710-iosock-aarch64, qnx710-iopkt-aarch64 and the io-sock slot-answerer node. Every measured record now carries requires and may_require; the unsplit form stays valid for packages built before the split, held by the synthetic host-unsplit-bound fixture. The entry's import check passed on both QNX stacks. The clone and the package directories made on that host were removed; its toolchain and build cache are as they were, less a nightly an earlier probe had installed there, which was removed on the owner's word.",
+      "publishable_changes_bullets": [
+        "deploy/fixtures/manifests/measured: qnx710-iosock-aarch64.json, qnx710-iopkt-aarch64.json and qnx710-iosock-aarch64-slot-answerer.json from a28aedc8b, in the split form, with the index rewritten.",
+        "docs/target-build-contract.md T9 and the UNSPLIT_ARTIFACT_KEYS comment of scripts/lib/wz_package.py: every measured record is in the split form; the unsplit one stays valid for older packages."
+      ],
+      "publishable_verification_bullets": [
+        "On the QNX host: a fresh clone at a28aedc8b, submodules initialised, git status empty; three packages built with the pinned nightly (rustc 1.98.0-nightly 61d7280f3) under the SDP through with-sdk-env.sh, each manifest verified there by the entry; the SDP linker's GNU_PROPERTY_TYPE notes on Rust metadata are warnings, as in the records replaced.",
+        "Here: wz_package.py --record-measured on each copied package directory, every file re-measured from its bytes, built_from a28aedc8b with tree_clean true; capi-pico, capi-c and ap-demo require entropy and threads on both stacks, the node entropy and sockets-tcp; wz_package.py --selftest OK over the eight records.",
+        "After the run the host holds its workspace's three directories and the pinned nightly alone."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "pico and wz-ap-demo have no configuration door until they open through OpenPlan.",
+        "The configuration corpus is three capi-c scenarios; a TLS, a scouting-only and a listen-may-fail configuration would each hold a branch of the derivation to a run."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
