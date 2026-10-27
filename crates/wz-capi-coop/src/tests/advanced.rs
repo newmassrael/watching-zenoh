@@ -189,6 +189,14 @@ fn a_late_publisher_is_detected_and_its_cache_is_recovered() {
         .with_recovery(RecoveryConfig::new())
         .with_history(HistoryConfig::new().detect_late_publishers());
     let (_subscriber, delivered) = subscribe(&engine, &router, options);
+    // The host sends the startup get and the late-publisher Interest after the subscription, before
+    // it returns; the cache is held only once the router has seen both, so what the control says
+    // about a cache nobody announced is about the cache and not about which packet came first.
+    until(
+        &engine,
+        "the router to see the startup get and the Interest",
+        || router.seen(|s| s.queries >= 1 && s.interests >= 1),
+    );
     router.send(Command::HoldCache(&[0, 1]));
     for _ in 0..20 {
         let _ = wz_capi_port::SessionDrive::read(&*engine, false);
