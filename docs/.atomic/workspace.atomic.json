@@ -292412,6 +292412,36 @@
         "Zenoh versions other than 1.10.1 and 1.5.0 and links other than loopback and one emulated lossy link are still to measure; no lower bound is offered for a lease."
       ]
     },
+    "Round 3756": {
+      "decision_summary": "wz-session-mcu's documentation now builds under every feature set, not only all features. Three links named modules a feature gates: the group plane in slot_plane and slot_node (group) and connect_manager in the crate doc (dial), so a build without that feature could not document the crate. Each is now named as code with the feature that owns it, the convention the crate doc's list already follows. This pays round 3751's carry.",
+      "changes_bullets": [
+        "crates/wz-session-mcu/src/slot_plane.rs, slot_node.rs: slot_group and slot_group::SlotGroup named as code with the group feature.",
+        "crates/wz-session-mcu/src/lib.rs: connect_manager named as code with the dial feature."
+      ],
+      "verification_bullets": [
+        "On the build machine cargo doc of wz-session-mcu passes with default features, with client-slot alone, with group and with all features; before the change the default and client-slot builds failed on these three links."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "No gate builds wz-session-mcu's documentation under reduced features; C1bz measures all features only, so a link to a gated module can come back unseen."
+      ],
+      "publishable_decision_summary": "wz-session-mcu's documentation now builds under every feature set, not only all features. Three links named modules a feature gates: the group plane in slot_plane and slot_node (group) and connect_manager in the crate doc (dial), so a build without that feature could not document the crate. Each is now named as code with the feature that owns it, the convention the crate doc's list already follows. This pays round 3751's carry.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-mcu/src/slot_plane.rs, slot_node.rs: slot_group and slot_group::SlotGroup named as code with the group feature.",
+        "crates/wz-session-mcu/src/lib.rs: connect_manager named as code with the dial feature."
+      ],
+      "publishable_verification_bullets": [
+        "On the build machine cargo doc of wz-session-mcu passes with default features, with client-slot alone, with group and with all features; before the change the default and client-slot builds failed on these three links."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "No gate builds wz-session-mcu's documentation under reduced features; C1bz measures all features only, so a link to a gated module can come back unseen."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
