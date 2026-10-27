@@ -433,7 +433,7 @@ Each lands whole with its surface lines, tests and faults in one round.
   `declare_keyexpr` and `undeclare` (a key declared by another session is an error upstream).
   Cut in four, each landing whole: **Z2a** the declaration of a key, **Z2b** `put` and `delete`
   from the session (the publication builder with its setters), **Z2c** `declare_subscriber` with
-  the five handlers and the test of D4, **Z2d** `Publisher`.
+  the five handlers and the test of D4, **Z2d** `Publisher` and `declare_publisher`.
   - **Z2a (landed).** `Session::declare_keyexpr`, `Session::undeclare` with `Undeclarable` and its
     sealed trait, and the impl for `KeyExpr`, over the anchor of Z1: a declared key is held by
     the engine once per holder (`acquire_keyexpr`) and let go with the last, and a key declared by
@@ -498,6 +498,29 @@ Each lands whole with its surface lines, tests and faults in one round.
     an engine round of its own: end a frame's payload at a transport message id and park the
     residue as the next one, on the strict, the best-effort, the in-place and the plain-put paths.
     Not done here, and it is the owner's to decide.
+  - **Z2d (landed).** `Session::declare_publisher` resolves into `Publisher` (the settings it was
+    declared with, `put` and `delete` with their builders and aliases, `undeclare` and its
+    `wait_callbacks`, a drop that undeclares, and the `Sink` of samples), and the key is declared on
+    the session first, so a publication names it by the declaration. The engine is handed a
+    `PublisherDeclaration` and holds it as the write filter of its subscriber plane, which already
+    asks the peers as upstream's declaration does: one Interest for the key, now and for the
+    future, with no aggregation, none when the publisher writes to the session itself
+    (`interest_of`, held by a unit test because nothing on the API shows an Interest before the
+    matching status of Z4). A session lists its publishers beside its subscriptions and lets go of
+    them at close, which a unit test reads from the engine's answer for the filter. `resolve_put`
+    now lives on the session's state so that a publisher, which holds the session by a weak
+    reference, reaches it. Left out: the matching status and listener of a publisher and the state
+    they keep, which are Z4's. The differential has a publisher of each side write to an upstream
+    subscriber, 9 operations (the settings it says, the overrides of one publication, the
+    destinations, a declared key, the sink, an undeclaration and the refusals of a closed session),
+    and the transcripts are equal. One finding is upstream's: in a build with debug assertions an
+    upstream peer that receives the Interest of another peer's publisher panics in its receive
+    thread (`zenoh/src/net/routing/hat/peer/interests.rs` @ `fn send_current_subscribers(`, the
+    assertion `ctx.src_face.region.bound().is_south()`) and poisons its routing tables; a release
+    build skips the assertion and answers. The differential builds upstream's `zenoh` without debug assertions for that
+    reason and says so in its manifest. 22 of the default lines and 25 and 25 of the other two
+    arms, 9 injected faults, none missed (one was not seen until its test read the engine's answer
+    for the filter).
 - **Z3. Queries.** `get`, `declare_queryable`, `Query`, `Reply`, `declare_querier`, consolidation,
   targets, timeouts. (The cancellation token is already in, Z0b; the builders of `get` that take
   it join here.)
