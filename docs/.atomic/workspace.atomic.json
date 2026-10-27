@@ -292832,6 +292832,42 @@
         "Comments in scripts/run-ci.sh at Layers E3 and E5 still describe a NoOpForwarder and a RouteTable that no longer exist; they were not touched."
       ]
     },
+    "Round 3766": {
+      "decision_summary": "The zenoh verdict's corpus gains the protocols a busy network carries, from real implementations in containers on a bridge of their own: DHCP between a dnsmasq server and twelve udhcpc clients, NTP between a chrony server and six clients, and LLMNR with WS-Discovery between a wsdd2 file server and four askers. No flow of them reads yes: DHCP reads 21 no and 2 undecided, WS-Discovery 8 no, and NTP's 94 flows stay undecided. Their framing units (DHCP 16/98/133, NTP 5/183/0, WS-Discovery 5/12/155 read whole, residual, undecoded) join the null protocols of the measured weights, which moves only the no sum of the unit check: a unit read whole +3663 to +3858, a residual unit -8144 to -8406, an undecoded unit -9365 to -9260. The yes sum, the stream framing weights and every zenoh weight are unchanged, because the largest null bounds and the zenoh counts did not move. The new files are fixed points of the anonymiser.",
+      "changes_bullets": [
+        "`captures/corpus/`: `busylan-dhcp`, `busylan-ntp` and `busylan-wsd`, listed in `corpus.json5`; the README table and its pending sentence follow; the corpus holds 29 files, all fixed points of the anonymiser.",
+        "`zenoh_evidence.rs`: three more members of `measured::NULL` and the three no-sum unit weights computed from them; `zenoh_corpus_tests.rs` pins the three tallies.",
+        "The header example, the session-table tests, the fold test (which counts frames against the no sum's threshold) and the design note 6.2 follow the new weights."
+      ],
+      "verification_bullets": [
+        "Measured: no flow of the three new files reads yes, and the zenoh files' tallies are as before. wz-capture 1263 tests pass (6 ignored as before), wz-capi-dissect with its C consumer passes, clippy -D warnings on wz-capture is clean, and the corpus verifies as 29 fixed points.",
+        "The pre-push static gate array passed except `round_fed_gate_reach.py` (it wants `debt_plane_census.py` run in the hook or deferred) and `gate_provenance_lint.py` (`doc_feature_sets.py` has no provenance line); both come from the feature-set commit already on main and neither reads a file this round touched."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "Zenoh versions other than 1.10.1 and 1.5.0, and links other than loopback, one emulated lossy link and one Wi-Fi link, are still to measure; structured TCP such as HTTP and TLS is still to add to the null side."
+      ],
+      "publishable_decision_summary": "The zenoh verdict's corpus gains the protocols a busy network carries, from real implementations in containers on a bridge of their own: DHCP between a dnsmasq server and twelve udhcpc clients, NTP between a chrony server and six clients, and LLMNR with WS-Discovery between a wsdd2 file server and four askers. No flow of them reads yes: DHCP reads 21 no and 2 undecided, WS-Discovery 8 no, and NTP's 94 flows stay undecided. Their framing units (DHCP 16/98/133, NTP 5/183/0, WS-Discovery 5/12/155 read whole, residual, undecoded) join the null protocols of the measured weights, which moves only the no sum of the unit check: a unit read whole +3663 to +3858, a residual unit -8144 to -8406, an undecoded unit -9365 to -9260. The yes sum, the stream framing weights and every zenoh weight are unchanged, because the largest null bounds and the zenoh counts did not move. The new files are fixed points of the anonymiser.",
+      "publishable_changes_bullets": [
+        "`captures/corpus/`: `busylan-dhcp`, `busylan-ntp` and `busylan-wsd`, listed in `corpus.json5`; the README table and its pending sentence follow; the corpus holds 29 files, all fixed points of the anonymiser.",
+        "`zenoh_evidence.rs`: three more members of `measured::NULL` and the three no-sum unit weights computed from them; `zenoh_corpus_tests.rs` pins the three tallies.",
+        "The header example, the session-table tests, the fold test (which counts frames against the no sum's threshold) and the design note 6.2 follow the new weights."
+      ],
+      "publishable_verification_bullets": [
+        "Measured: no flow of the three new files reads yes, and the zenoh files' tallies are as before. wz-capture 1263 tests pass (6 ignored as before), wz-capi-dissect with its C consumer passes, clippy -D warnings on wz-capture is clean, and the corpus verifies as 29 fixed points.",
+        "The pre-push static gate array passed except `round_fed_gate_reach.py` (it wants `debt_plane_census.py` run in the hook or deferred) and `gate_provenance_lint.py` (`doc_feature_sets.py` has no provenance line); both come from the feature-set commit already on main and neither reads a file this round touched."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Zenoh versions other than 1.10.1 and 1.5.0, and links other than loopback, one emulated lossy link and one Wi-Fi link, are still to measure; structured TCP such as HTTP and TLS is still to add to the null side."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
