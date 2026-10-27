@@ -212,9 +212,12 @@ one the bytes can infer, with the counts it rests on per direction
 holds the handshake states its compression and every one joined mid-session
 infers the same value.
 
-Still to come for step 2: LLMNR, WS-Discovery, NTP
-and DHCP on a busier network, and several zenoh versions and zenoh-pico on the
-zenoh side.
+A busier network's own protocols are in the corpus too, from real
+implementations in containers: DHCP between twelve clients and a server, NTP
+between six clients and a server, LLMNR and WS-Discovery between a file server
+and four askers. No flow of them reads `yes`.
+
+Still to come for step 2: further zenoh versions and links on the zenoh side.
 
 ### 6.2 Model 2: measured weights, two sums (step 3, 2026-10-26)
 
@@ -250,9 +253,9 @@ the weights by `model_weights_are_their_stated_probabilities`):
 
 | outcome | `yes` sum | `no` sum | model 1 |
 |---|---|---|---|
-| unit read whole | +964 | +3663 | +2603 |
-| unit residual | -9998 | -8144 | -6745 |
-| unit undecoded | -9998 | -9365 | -7000 |
+| unit read whole | +964 | +3858 | +2603 |
+| unit residual | -9998 | -8406 | -6745 |
+| unit undecoded | -9998 | -9260 | -7000 |
 | stream framing held | +4819 | +7393 | (none) |
 | stream framing lost | -6491 | -6483 | (none) |
 | cookie matched (8 bytes) | +63984 | +63984 | +63999 |

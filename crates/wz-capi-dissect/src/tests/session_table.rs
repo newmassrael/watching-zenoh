@@ -155,7 +155,7 @@ fn a_session_crosses_the_boundary_with_every_cell_stated() {
         doc.contains(&format!(
             "\"frames\":6,\"bytes\":{want_bytes},\"zenoh\":\"yes\",\
              \"announced_version\":\"own\",\"zenoh_evidence\":{{\
-             \"log2_lr_millibits\":22752,\"log2_lr_no_millibits\":38946,\
+             \"log2_lr_millibits\":22752,\"log2_lr_no_millibits\":40116,\
              \"yes_at_millibits\":20000,\
              \"no_at_millibits\":-20000,\"model\":2,\"checks\":[\
              {{\"check\":\"init_roles\",\"strength\":\"handshake\",\"confirmed\":1,\
@@ -165,7 +165,7 @@ fn a_session_crosses_the_boundary_with_every_cell_stated() {
              \"violated\":0,\"millibits\":15984,\"no_millibits\":15984,\
              \"q_basis\":\"derived\",\"eps_basis\":\"measured\"}},\
              {{\"check\":\"unit_reading\",\"strength\":\"unit\",\"confirmed\":6,\
-             \"violated\":0,\"millibits\":5784,\"no_millibits\":21978,\
+             \"violated\":0,\"millibits\":5784,\"no_millibits\":23148,\
              \"q_basis\":\"measured\",\"eps_basis\":\"measured\"}}]}},\
              \"unit_readings\":{{\"explained\":{{\"units\":6,\"bytes\":{want_bytes}}},\
              \"residual\":{{\"units\":0,\"bytes\":0}},\

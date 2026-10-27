@@ -62,11 +62,13 @@ The original captures are not kept anywhere.
 | `stack-coap.pcap` | other | CoAP | libcoap 4.3.1 server and client, containers |
 | `stack-someip.pcap` | other | SOME/IP, SOME/IP-SD | upstream vsomeip 3.7.6 service and client, containers |
 | `stack-quic.pcap` | other | QUIC v1 and v2, HTTP/3 | aioquic 1.2.0 server and client, containers |
+| `busylan-dhcp.pcap` | other | DHCPv4 | dnsmasq 2.90 and twelve udhcpc clients, containers |
+| `busylan-ntp.pcap` | other | NTP | a chrony 4.3 server and six clients, containers |
+| `busylan-wsd.pcap` | other | LLMNR, WS-Discovery | wsdd2 1.8.7 and four askers, containers |
 
 ## What it does not hold yet
 
-LLMNR, WS-Discovery, NTP and DHCP from a busier network,
-structured TCP such as HTTP and TLS, and on the zenoh side versions other than
+Structured TCP such as HTTP and TLS, and on the zenoh side versions other than
 1.10.1 and 1.5.0 and links other than loopback, an emulated lossy one and one
 office Wi-Fi link.
 Each is added the same way: captured from the real

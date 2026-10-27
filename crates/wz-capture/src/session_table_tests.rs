@@ -1873,7 +1873,7 @@ fn the_headers_example_is_the_document_of_a_real_session() {
     // without a SYN, so its framing is not weighed.
     let zenoh = "\"zenoh\":\"yes\",\"announced_version\":\"own\",\
                  \"zenoh_evidence\":{\"log2_lr_millibits\":26608,\
-                 \"log2_lr_no_millibits\":53598,\
+                 \"log2_lr_no_millibits\":55548,\
                  \"yes_at_millibits\":20000,\"no_at_millibits\":-20000,\"model\":2,\
                  \"checks\":[{\"check\":\"init_roles\",\"strength\":\"handshake\",\
                  \"confirmed\":1,\"violated\":0,\"millibits\":984,\"no_millibits\":984,\
@@ -1882,7 +1882,7 @@ fn the_headers_example_is_the_document_of_a_real_session() {
                  \"confirmed\":2,\"violated\":0,\"millibits\":15984,\"no_millibits\":15984,\
                  \"q_basis\":\"derived\",\"eps_basis\":\"measured\"},\
                  {\"check\":\"unit_reading\",\"strength\":\"unit\",\
-                 \"confirmed\":10,\"violated\":0,\"millibits\":9640,\"no_millibits\":36630,\
+                 \"confirmed\":10,\"violated\":0,\"millibits\":9640,\"no_millibits\":38580,\
                  \"q_basis\":\"measured\",\"eps_basis\":\"measured\"}]}";
     let want = alloc::format!(
         "{{\"document\":{{\"name\":\"session_table\",\"revision\":6}},\"ok\":true,\

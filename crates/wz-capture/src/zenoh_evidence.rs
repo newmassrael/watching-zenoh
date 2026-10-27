@@ -333,21 +333,21 @@ pub mod model {
     /// mDNS's bound, 13 of 36 units; `no`: the members' average.
     pub const UNIT_EXPLAINED: Weight = Weight {
         yes: 964,
-        no: 3_663,
+        no: 3_858,
     };
 
     /// A unit with bytes left over. Zenoh: the bound of 0 in 3062 units;
     /// `yes`: QUIC's 22 of 22; `no`: the members' average.
     pub const UNIT_RESIDUAL: Weight = Weight {
         yes: -9_998,
-        no: -8_144,
+        no: -8_406,
     };
 
     /// A unit that did not decode. Zenoh: as residual; `yes`: SSDP's 26 of
     /// 26; `no`: the members' average.
     pub const UNIT_UNDECODED: Weight = Weight {
         yes: -9_998,
-        no: -9_365,
+        no: -9_260,
     };
 
     /// A stream direction, captured from its start, that framed a unit before
@@ -388,7 +388,7 @@ pub mod model {
         }
 
         /// The null protocols.
-        pub const NULL: [Member; 8] = [
+        pub const NULL: [Member; 11] = [
             Member {
                 file: "lan-dns.pcap",
                 units: [26, 32, 320],
@@ -427,6 +427,21 @@ pub mod model {
             Member {
                 file: "stack-quic.pcap",
                 units: [0, 22, 0],
+                framing: [0, 0],
+            },
+            Member {
+                file: "busylan-dhcp.pcap",
+                units: [16, 98, 133],
+                framing: [0, 0],
+            },
+            Member {
+                file: "busylan-ntp.pcap",
+                units: [5, 183, 0],
+                framing: [0, 0],
+            },
+            Member {
+                file: "busylan-wsd.pcap",
+                units: [5, 12, 155],
                 framing: [0, 0],
             },
         ];

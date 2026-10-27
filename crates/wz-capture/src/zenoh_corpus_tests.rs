@@ -297,6 +297,14 @@ const EXPECTED: &[(&str, Tally, Tally)] = &[
     // and a protected flow carries nothing that tells the two apart. The two
     // `no` are the host's own mDNS on the bridge.
     ("stack-quic.pcap", (0, 2, 23), (0, 2, 23)),
+    // A busy network's own protocols (2026-10-27): DHCP between twelve
+    // clients and a server, NTP between six clients and a server, LLMNR and
+    // WS-Discovery between a file server and four askers. No flow reads
+    // `yes`; NTP's 94 flows stay `undecided`, each a pair of 48-byte
+    // datagrams, which leaves too little to say `no` at 2^-20.
+    ("busylan-dhcp.pcap", (0, 21, 2), (0, 21, 2)),
+    ("busylan-ntp.pcap", (0, 0, 94), (0, 0, 94)),
+    ("busylan-wsd.pcap", (0, 8, 0), (0, 8, 0)),
 ];
 
 #[test]
