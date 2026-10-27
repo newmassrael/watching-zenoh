@@ -365,6 +365,15 @@ pub mod verbs {
         pub fixed: Option<(&'static [&'static str], u32)>,
     }
 
+    impl SessionCase {
+        /// Whether a node that holds one session for a peer can be put in this case's world: the
+        /// fixed-memory node holds a peer in a row of its own with one session, so a world of two
+        /// links to one peer is one it cannot be put in, and says so by name.
+        pub const fn reachable_with_one_link_per_peer(&self) -> bool {
+            self.world.open_links <= 1
+        }
+    }
+
     const ALL: Permits = Permits {
         close: true,
         reset: true,
@@ -392,6 +401,8 @@ pub mod verbs {
         in_intent: false,
     };
 
+    const CLOSING_1: &str = "{\"verdict\":\"closing\",\"links\":1}";
+    const LEFT_THE_INTENT_ONE: &str = "{\"verdict\":\"status\",\"links\":{\"open\":0,\"closing\":1},\"intent\":false,\"machines\":[]}";
     const CLOSING_2: &str = "{\"verdict\":\"closing\",\"links\":2}";
     const ALREADY_CLOSED: &str = "{\"verdict\":\"already_closed\"}";
     const NOT_FOUND: &str = "{\"verdict\":\"not_found\"}";
@@ -424,6 +435,19 @@ pub mod verbs {
                 Request::Status(HELD),
             ],
             answers: &[HELD_2_OPEN, CLOSING_2, ALREADY_CLOSED, LEFT_THE_INTENT],
+            orders: 2,
+            fixed: None,
+        },
+        SessionCase {
+            name: "a held peer with one link is closed, told once, and leaves the intent",
+            world: HELD_BY_ONE,
+            requests: &[
+                Request::Status(HELD),
+                Request::Close(HELD),
+                Request::Close(HELD),
+                Request::Status(HELD),
+            ],
+            answers: &[HELD_1_OPEN, CLOSING_1, ALREADY_CLOSED, LEFT_THE_INTENT_ONE],
             orders: 2,
             fixed: None,
         },
@@ -708,7 +732,10 @@ mod tests {
     #[test]
     fn the_session_judge_refuses_a_transport_that_drifts() {
         use verbs::{judge_session, Profile, SESSION_CASES};
-        let case = &SESSION_CASES[1];
+        let case = SESSION_CASES
+            .iter()
+            .find(|case| case.requests.len() == 2 && case.fixed.is_none())
+            .expect("a case of two requests");
         let [first, second] = [case.answers[0], case.answers[1]];
         assert!(judge_session(case, Profile::Heap, &[Some(first), Some(second)], 1).is_ok());
         assert!(judge_session(case, Profile::Heap, &[Some(second), Some(first)], 1).is_err());

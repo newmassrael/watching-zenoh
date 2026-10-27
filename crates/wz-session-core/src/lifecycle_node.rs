@@ -153,7 +153,7 @@ where
 {
     match command {
         Command::Open { peer } => {
-            let verdict = open(node, peer);
+            let verdict = open_verdict(node, peer);
             verdict.write_json(out);
             Verdict::Open(verdict)
         }
@@ -173,7 +173,10 @@ where
 
 /// Open: the peer joins the intent and the node's machine connects. A peer already held is
 /// unchanged, so a retransmission is safe.
-fn open<N: LifecycleNode + ?Sized>(node: &N, peer: &str) -> OpenVerdict {
+///
+/// Public so that a node which binds only this verb (the fixed-memory in-band query asks nothing
+/// else) decides it with the same function, and no profile owns a copy of the order of checks.
+pub fn open_verdict<N: LifecycleNode + ?Sized>(node: &N, peer: &str) -> OpenVerdict {
     if !node.permits(Verb::Open) {
         return OpenVerdict::Refused(RefusedReason::OpenNotPermitted);
     }

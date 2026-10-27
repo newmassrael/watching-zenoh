@@ -27,6 +27,8 @@ struct Agent {
     child: Child,
     stdin: ChildStdin,
     answers: Receiver<String>,
+    /// The zid the node said it has, in the spelling the READY line prints.
+    zid: String,
 }
 
 impl Agent {
@@ -48,12 +50,13 @@ impl Agent {
         let (ready_tx, ready) = channel();
         thread::spawn(move || {
             for line in BufReader::new(err).lines().map_while(Result::ok) {
-                if line.contains("HOST-WZ-CLIENT READY") {
-                    let _ = ready_tx.send(());
+                if let Some(rest) = line.split("HOST-WZ-CLIENT READY ").nth(1) {
+                    let zid = rest.split_whitespace().next().unwrap_or_default();
+                    let _ = ready_tx.send(zid.to_string());
                 }
             }
         });
-        ready.recv_timeout(WAIT).expect("the node says it is ready");
+        let zid = ready.recv_timeout(WAIT).expect("the node says it is ready");
 
         let (tx, answers) = channel();
         thread::spawn(move || {
@@ -67,6 +70,7 @@ impl Agent {
             child,
             stdin,
             answers,
+            zid,
         }
     }
 
@@ -135,12 +139,65 @@ fn the_channel_conforms_to_the_contract_on_the_cases_a_node_with_no_room_can_sho
     );
 }
 
+/// The other verbs, through the process. The node holds no peer and has no room for one, so what
+/// it can be seen to say is what a node with nothing says: a peer it never held is not found, a
+/// status of it reads none, and a reset is refused for want of a place to remember its generation
+/// (decision of 2026-10-26: the sender learns why, and the record is never grown or evicted).
+/// `whoami` is the zid the node printed when it said it was ready.
+#[test]
+fn a_node_that_holds_nothing_says_so_for_close_status_and_reset_and_names_itself() {
+    let mut agent = Agent::start();
+
+    let own = format!("{{\"zid\":\"{}\"}}", agent.zid);
+    assert!(
+        !agent.zid.is_empty() && agent.zid.len() <= 32,
+        "{}",
+        agent.zid
+    );
+    assert_eq!(agent.ask("whoami"), own);
+    assert_eq!(agent.ask("whoami"), own, "it names itself again");
+
+    for _ in 0..2 {
+        assert_eq!(agent.ask("close 1f"), "{\"verdict\":\"not_found\"}");
+        assert_eq!(
+            agent.ask("status 1f"),
+            "{\"verdict\":\"status\",\"links\":{\"open\":0,\"closing\":0},\"intent\":false,\"machines\":[]}"
+        );
+        assert_eq!(agent.ask("reset 1f 1"), refused(RefusedReason::NoRoom));
+    }
+
+    // The permit is read first, then the peer, then the generation.
+    assert_eq!(
+        agent.ask("reset 0abc 1"),
+        refused(RefusedReason::PeerNotAZid)
+    );
+    assert_eq!(
+        agent.ask("reset 1f x"),
+        refused(RefusedReason::GenerationNotANumber)
+    );
+    assert_eq!(agent.ask("close 0abc"), refused(RefusedReason::PeerNotAZid));
+    assert_eq!(
+        agent.ask("status 0abc"),
+        refused(RefusedReason::PeerNotAZid)
+    );
+}
+
 #[test]
 fn a_line_that_is_no_command_is_answered_with_an_error_word_and_opens_nothing() {
     let mut agent = Agent::start();
     assert_eq!(agent.ask("hold abc"), "{\"error\":\"unknown-command\"}");
     assert_eq!(agent.ask("open"), "{\"error\":\"open-takes-one-peer\"}");
     assert_eq!(agent.ask("open a b"), "{\"error\":\"open-takes-one-peer\"}");
+    assert_eq!(agent.ask("close"), "{\"error\":\"close-takes-one-peer\"}");
+    assert_eq!(
+        agent.ask("reset 1f"),
+        "{\"error\":\"reset-takes-a-peer-and-a-generation\"}"
+    );
+    assert_eq!(agent.ask("status"), "{\"error\":\"status-takes-one-peer\"}");
+    assert_eq!(
+        agent.ask("whoami now"),
+        "{\"error\":\"whoami-takes-nothing\"}"
+    );
     let overlong = format!("open {}", "a".repeat(400));
     assert_eq!(agent.ask(&overlong), "{\"error\":\"line-too-long\"}");
 

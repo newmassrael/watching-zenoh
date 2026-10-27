@@ -626,6 +626,9 @@ fn run() -> i32 {
         log("wz: FAIL - the zenoh id does not fit");
         return 2;
     };
+    // What `whoami` answers on the control channel.
+    #[cfg(feature = "control")]
+    let own_zid = identity.zid_hex();
     let (documents, taken) = match documents_of(&BODY, &chosen()) {
         Ok(found) => found,
         Err(why) => {
@@ -729,9 +732,8 @@ fn run() -> i32 {
     #[cfg(feature = "control")]
     let report = host_slot_node_glue::control::WithControl::new(
         report,
-        host_slot_node_glue::control::HostOpener::new(
-            wz_session_mcu::connect_manager::NodeOpener::in_store(&NODE.peers),
-        ),
+        host_slot_node_glue::control::host_node(&NODE.peers),
+        own_zid,
     );
     let mut report = report;
     node.run(

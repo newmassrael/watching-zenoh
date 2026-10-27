@@ -91,7 +91,7 @@ mod tests {
     extern crate std;
     use super::*;
     use crate::control_port;
-    use crate::node_opening::{open_verdict, NoOpening};
+    use crate::node_opening::{open_verdict, NoOpening, OpeningOnly};
     use std::string::{String, ToString};
     use std::vec::Vec;
     use wz_session_core::text_out::FixedText;
@@ -130,8 +130,10 @@ mod tests {
             let line = std::format!("open {}", case.peer_text);
             let mut out = FixedText::<192>::new();
             match case.binding {
-                Binding::Bound => control_port::answer(opener, &line, &mut out),
-                Binding::Unbound => control_port::answer(&NoOpening, &line, &mut out),
+                Binding::Bound => control_port::answer(&OpeningOnly(opener), None, &line, &mut out),
+                Binding::Unbound => {
+                    control_port::answer(&OpeningOnly(&NoOpening), None, &line, &mut out)
+                }
             }
             assert!(!out.overflowed());
             Some(out.prefix().to_string())

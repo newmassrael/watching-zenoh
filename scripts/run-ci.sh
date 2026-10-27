@@ -11495,21 +11495,29 @@ layer_c1m_session_lwip() {
     # lives in `wz-session-core` as `lifecycle_contract`; `contract` here runs it through the
     # verdict function and the control port, and checks the recorder it serves through) adds THREE
     # to the same five legs: 14 -> 17, 15 -> 18, 42 -> 45, 18 -> 21, 52 -> 55.
-    _runci_guarded_test "C1m mcu default" 17 \
+    # Decision D7 step 8 step C adds to them: the control port reads and answers four more commands
+    # (`close`, `reset`, `status`, `whoami`) and says so in two more tests (the port holds the other
+    # verbs of a node that binds only open to refusals by name, and `whoami`): TWO in every leg that
+    # runs the crate's own tests, 17 -> 19, 18 -> 20, 45 -> 47, 21 -> 23, 55 -> 57. The connect
+    # manager's store gains the typed requests, the record of generations and the node's lifecycle
+    # verbs, and four tests in the three legs that compile it: the fixed node held to the table of
+    # every verb, a reset that dials again and a close that does not, the order of requests made
+    # outside the loop, and the record of generations: 47 -> 51, 57 -> 61, peer nodes 22 -> 26.
+    _runci_guarded_test "C1m mcu default" 19 \
         cargo test -p wz-session-mcu --quiet || return 1
-    _runci_guarded_test "C1m mcu unicast app layer" 18 \
+    _runci_guarded_test "C1m mcu unicast app layer" 20 \
         cargo test -p wz-session-mcu \
         --features query-queryable,codec-response,codec-response-final,pubsub-put \
         --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace-write" 45 \
+    _runci_guarded_test "C1m mcu adminspace-write" 51 \
         cargo test -p wz-session-mcu --features adminspace-write --quiet || return 1
-    _runci_guarded_test "C1m mcu peer nodes" 22 \
+    _runci_guarded_test "C1m mcu peer nodes" 26 \
         env WZ_LIMIT_MAX_PEER_NODES=2 \
         cargo test -p wz-session-mcu --features adminspace-write --lib connect_manager \
         --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace-core" 21 \
+    _runci_guarded_test "C1m mcu adminspace-core" 23 \
         cargo test -p wz-session-mcu --features adminspace-core --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace read+write" 55 \
+    _runci_guarded_test "C1m mcu adminspace read+write" 61 \
         cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
     # The fixed-memory client node's shared mechanism (`slot_node`, compiled only on the slot profile
     # with the client core): no leg above selects both, so its tests ran in none until this one. 28 =
@@ -11983,7 +11991,7 @@ layer_c1m_session_lwip() {
     # the channel read again after one, and the channel held to the conformance table of decision D7
     # on the cases a node with no room can show: 3 = what that command PRINTED. The node is built
     # for no peers by their zid, so a hold that succeeds over a secure channel is not run here.
-    _runci_guarded_test "C1m host node control channel" 3 \
+    _runci_guarded_test "C1m host node control channel" 4 \
         cargo test --locked --manifest-path ../deploy/host-slot-node/Cargo.toml \
         --features control --test control_channel --quiet || return 1
     # The group plane of the client node (`slot_group`, the slot profile with `group`): what a

@@ -12,7 +12,10 @@
 //! spelling of the zid, the outcomes, and their words are the same on every one.
 
 use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
-use wz_session_core::lifecycle_wire::{OpenOutcome, OpenVerdict, RefusedReason};
+use wz_session_core::lifecycle_node::{self, Generation, LifecycleNode, Verb, Zid};
+use wz_session_core::lifecycle_wire::{
+    CloseOrder, MachineReport, OpenOutcome, OpenVerdict, SessionLinks,
+};
 
 /// What an open request asks of the node: whether it may be asked, and to hold a peer by its zid
 /// (decision D6, `docs/session-lifecycle-intent.md`).
@@ -65,13 +68,46 @@ impl NodeOpening for NoOpening {
 /// The verdict on a request to hold the peer `peer_text`, spelled as a key carries it (the text
 /// zenoh prints; `zid_from_key_text`): refused when the node does not permit it, refused when
 /// the text names no zid, else what the node's opener made of it.
+///
+/// Decided by `lifecycle_node::open_verdict`, the function every verb of every profile is decided
+/// by, over [`OpeningOnly`]: a node that binds this verb alone.
 pub fn open_verdict<O: NodeOpening + ?Sized>(opener: &O, peer_text: &str) -> OpenVerdict {
-    if !opener.permitted() {
-        return OpenVerdict::Refused(RefusedReason::OpenNotPermitted);
+    lifecycle_node::open_verdict(&OpeningOnly(opener), peer_text)
+}
+
+/// A node that binds the open verb alone, as the fixed in-band query and the first control port
+/// served it: the verbs of the other three are not permitted and ask the node nothing.
+///
+/// The effects of those verbs are not reached, since the function reads the permit first; they
+/// answer what a node with nothing to close, nothing to read and no room for a generation would.
+#[derive(Debug, Clone, Copy)]
+pub struct OpeningOnly<'a, O: ?Sized>(pub &'a O);
+
+impl<O: NodeOpening + ?Sized> LifecycleNode for OpeningOnly<'_, O> {
+    fn permits(&self, verb: Verb) -> bool {
+        matches!(verb, Verb::Open) && self.0.permitted()
     }
-    match wz_session_core::credential_identity::zid_from_key_text(peer_text) {
-        Some(peer) => OpenVerdict::of(opener.open(&peer)),
-        None => OpenVerdict::Refused(RefusedReason::PeerNotAZid),
+
+    fn open(&self, zid: &Zid) -> OpenOutcome {
+        self.0.open(zid)
+    }
+
+    fn withdraw(&self, _zid: &Zid) {}
+
+    fn order_close(&self, _zid: &Zid) -> CloseOrder {
+        CloseOrder::default()
+    }
+
+    fn take_generation(&self, _zid: &Zid, _generation: u64) -> Generation {
+        Generation::NoRoom
+    }
+
+    fn links(&self, _zid: &Zid) -> SessionLinks {
+        SessionLinks::default()
+    }
+
+    fn read_machines(&self, _zid: &Zid, read: &mut dyn FnMut(&[MachineReport<'_>])) {
+        read(&[]);
     }
 }
 
@@ -80,6 +116,7 @@ mod tests {
     extern crate std;
     use super::*;
     use core::cell::Cell;
+    use wz_session_core::lifecycle_wire::RefusedReason;
 
     struct Counting {
         permit: bool,
