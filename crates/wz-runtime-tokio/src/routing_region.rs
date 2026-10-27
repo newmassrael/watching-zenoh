@@ -287,12 +287,28 @@ impl<Z: Ord> InterRegionFilter<'_, Z> {
             log::error!("inter-region filter: the message's source is unknown");
             return true;
         };
-        // A gateway source already reached this boundary itself.
-        if gwys.contains(src_zid) {
-            return false;
-        }
-        gwys.iter().max() == Some(self_zid)
+        is_primary_gateway(self_zid, &gwys, Some(src_zid))
     }
+}
+
+/// The choice the pin's inter-region filter ends in, on its own: of the
+/// `gateways` that could carry a message across a boundary, the largest zid does,
+/// and a message that a gateway itself originated is carried by nobody else
+/// (`zenoh/src/net/routing/dispatcher/tables.rs` @ `// NOTE(regions): in this case, we cannot have a link with`).
+///
+/// Taken out of [`InterRegionFilter::resolve`] so that every crossing decides by
+/// ONE rule. The router's multicast group is a crossing of its own kind, with
+/// its own candidates (the routers that share the group), and it asks here
+/// rather than electing a bridge by another means.
+///
+/// `src_zid` is `None` for a message whose originator the caller cannot name,
+/// which no gateway is.
+pub fn is_primary_gateway<Z: Ord>(self_zid: &Z, gateways: &[Z], src_zid: Option<&Z>) -> bool {
+    // A gateway source already reached this boundary itself.
+    if src_zid.is_some_and(|src| gateways.contains(src)) {
+        return false;
+    }
+    gateways.iter().max() == Some(self_zid)
 }
 
 #[cfg(test)]
@@ -556,5 +572,26 @@ mod tests {
         let down = filter(Region::North, PEERS, Some(&5), Some(&5), None);
         assert!(!down.resolve(&1, &view) && down.resolve(&2, &view));
         assert!(filter(PEERS, Region::North, None, Some(&9), None).resolve(&1, &view));
+    }
+
+    /// The rule the filter ends in, asked without a filter: the largest of the
+    /// candidates is primary, whoever else is among them, and a candidate that
+    /// originated the message is not asked to carry it again.
+    #[test]
+    fn the_primary_gateway_is_the_largest_and_never_a_message_s_own_origin() {
+        assert!(is_primary_gateway(&3, &[1, 3, 2], Some(&9)));
+        assert!(!is_primary_gateway(&2, &[1, 3, 2], Some(&9)));
+        assert!(
+            !is_primary_gateway(&3, &[1, 3, 2], Some(&1)),
+            "gateway 1 originated it, so even the largest does not carry it again"
+        );
+        assert!(
+            is_primary_gateway(&3, &[1, 3, 2], None),
+            "an originator the caller cannot name is no gateway"
+        );
+        assert!(
+            !is_primary_gateway(&3, &[], Some(&9)),
+            "with no candidates nobody is primary; callers put themselves in the set"
+        );
     }
 }

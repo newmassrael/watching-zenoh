@@ -3,18 +3,22 @@
 
 //! P4 §5.21 router-multicast-faces — CROSS-IMPL validation of the wz router-hat's
 //! LOOP-SAFE multicast-ingress -> mesh FEDERATION (I3c, the real-socket proof of
-//! I3b's per-keyexpr Designated-Router election).
+//! I3b's primary-gateway rule for a group that several routers share).
 //!
 //! I3b (committed R311y197) made a wz `--router-hat` federate a multicast-ingress
 //! Push into the unicast linkstate mesh, loop-safe when TWO wz routers share one
-//! UDP-multicast group AND are mesh-peered, via a per-keyexpr Designated-Router (DR)
-//! election: `elect_router` (seedless HRW) over the on-group `whatami=Router`
-//! members U self picks exactly ONE on-group router to bridge group <-> mesh. That
-//! is UNIT-proven + IMPL-traced, but the JOIN-whatami -> `router_member_zids` ->
-//! snapshot-diff relay -> `set_mcast_group_members` membership chain is only
-//! exercised by unit tests that INJECT members directly. I3c closes both: it stands
-//! the two-router-shared-group topology up over real sockets and proves the DR
-//! election converges cross-process + stays loop-safe.
+//! UDP-multicast group AND are mesh-peered. It first did so by a per-keyexpr
+//! Designated-Router (DR) election (seedless HRW over the on-group `whatami=Router`
+//! members U self); item 751 replaced the hash with the rule the pin's inter-region
+//! filter ends in (`routing_region::is_primary_gateway`): of the on-group routers
+//! the LARGEST zid is primary, so exactly ONE on-group router bridges group <->
+//! mesh, and none carries a Put that one of them sent. The demo still prints the
+//! `(DR)` / `(not DR)` markers asserted below. That is UNIT-proven + IMPL-traced,
+//! but the JOIN-whatami -> `router_member_zids` -> snapshot-diff relay ->
+//! `set_mcast_group_members` membership chain is only exercised by unit tests that
+//! INJECT members directly. I3c closes both: it stands the two-router-shared-group
+//! topology up over real sockets and proves the rule converges cross-process +
+//! stays loop-safe.
 //!
 //! Topology (four processes):
 //!
@@ -28,14 +32,14 @@
 //!
 //! R1 + R2 both `--router-hat`: each draws a DISTINCT random zid (R2883; it
 //! was `0x7268 ++ ephemeral listen port` before), so on the shared group neither's RX
-//! self-zid gate drops the other's JOIN and the DR election has a real 2-member
-//! candidate set. R2 `--connect`s R1, so they mesh-peer (both `WhatAmI::Router` ->
+//! self-zid gate drops the other's JOIN and the primary-gateway rule has a real
+//! 2-member candidate set. R2 `--connect`s R1, so they mesh-peer (both `WhatAmI::Router` ->
 //! each in the other's `routers_net`). P is a `--peer` subscriber `--connect`ing
 //! BOTH routers; it never joins the multicast group. The group is in each router's
 //! south peer region, as its unicast peers are, so neither router relays the Put to
 //! P directly (`wz_router_hat_multicast_region_zenohd_interop` pins that against
-//! zenohd). P receives it ONLY through the OTHER router: the DR carries the Put
-//! north into the router mesh, and the router that receives it there relays it down
+//! zenohd). P receives it ONLY through the OTHER router: the primary router carries
+//! the Put north into the router mesh, and the router that receives it there relays it down
 //! into its own peer region, where P is. That is not a router's local client
 //! delivery (that reaches only `--key` CLIENT faces), so P firing proves
 //! FEDERATION, not the I1/I2 local-delivery path. pico `z_pub -m peer` is a
@@ -43,24 +47,24 @@
 //!
 //! ## What this proves — and what it does NOT (honest scope)
 //!
-//! - PROVES (a) the JOIN -> member-relay -> DR-election chain converges over real
+//! - PROVES (a) the JOIN -> member-relay -> primary-gateway chain converges over real
 //!   sockets between two wz routers (the leg the I3b unit tests inject past), and
 //!   (b) it is LOOP-SAFE: EXACTLY ONE of the two routers federates the group-ingress
 //!   Put into the mesh (the deterministic single-bridge witness — assertion C), so
 //!   the two-router-shared-group echo zenoh's `WhatAmI::Client` "Quick hack" leaves
 //!   undefended cannot occur; and (c) the federated copy crosses the router mesh to
 //!   the other router (delivery — assertion D).
-//! - The loop-safety is a wz-vs-wz property (two wz ROUTERS electing one DR). The
-//!   pico is a `whatami=Peer` INJECTOR — it is filtered OUT of the DR candidate set
-//!   (`router_member_zids` keeps only `whatami=Router`), so it does NOT participate
-//!   in the election. I3c proves the wz superset stays loop-safe AROUND a foreign
-//!   group publisher, NOT "cross-impl DR election."
-//! - SUPERSET, not a mirror: zenoh has NO reference behavior here (its multicast is a
-//!   peer-leaf "Quick hack", never two federated routers on a shared group). I3c
-//!   proves a wz structural superset works, built from zenoh's own `elect_router`
-//!   HRW primitive; the mcast peer stays a faithful `WhatAmI::Client` leaf.
+//! - The loop-safety is a wz-vs-wz property (two wz ROUTERS, the larger zid primary).
+//!   The pico is a `whatami=Peer` INJECTOR — it is filtered OUT of the candidate set
+//!   (`router_member_zids` keeps only `whatami=Router`), so it does NOT take part in
+//!   the choice. I3c proves the wz superset stays loop-safe AROUND a foreign group
+//!   publisher, NOT "cross-impl primary-gateway choice."
+//! - SUPERSET, not a mirror: zenoh has NO reference behavior here (it refuses a router
+//!   on a router's group, `compute_multicast_region_of`, and its multicast peer is a
+//!   leaf). I3c proves a wz structural superset works, built from the primitive of
+//!   the pin's own inter-region filter; the mcast peer stays a faithful leaf.
 //! - Assertion C is DETERMINISTIC (a 1-of-2 log partition), NOT a packet count —
-//!   `elect_router` returns self on an EMPTY candidate set, so "exactly one
+//!   with an EMPTY candidate set a router is trivially primary, so "exactly one
 //!   federates" is satisfiable only if the membership relay populated each router's
 //!   set; it proves loop-safety AND the relay wiring in one, with no timing
 //!   threshold ([[feedback_no_flaky_ever]]).
@@ -70,7 +74,7 @@
 //! Every barrier is crossed BEFORE pico publishes: both routers join the group +
 //! bind TCP, the router mesh converges (routers-net = 2), BOTH routers relay the
 //! OTHER as an on-group router member (the loop-safety barrier — kills the startup
-//! double-DR transient where an empty candidate set makes both self-elect DR), and
+//! double-primary transient where an empty candidate set makes both self-primary), and
 //! both routers install P's peer-native subscription. pico then `z_pub -n 30`
 //! (1/s, 30 s) so no single JOIN-admission window is raced. Same-host loopback
 //! multicast (`set_multicast_loop_v4(true)` + SO_REUSEADDR/REUSEPORT) carries the
@@ -79,8 +83,8 @@
 //!
 //! Shared-group caveat: the group+port (224.0.0.225:7452) is the demo default, also
 //! used by I2/S4. A STRAY `whatami=Router` beacon on it (a leaked prior-run process)
-//! would enter the DR pool and could out-hash both R1 and R2 -> neither federates ->
-//! assertion C fails LOUD (never a flaky pass). run-ci runs the Layer-M interop
+//! would enter the candidate pool and could out-rank both R1 and R2 (a larger zid)
+//! -> neither federates -> assertion C fails LOUD (never a flaky pass). run-ci runs the Layer-M interop
 //! tests as separate sequential `cargo test` invocations, so an in-CI collision does
 //! not occur.
 //!
@@ -135,7 +139,7 @@ fn spawn_peer(label: &str, args: &[&str]) -> (ChildGuard, std::fs::File, u16) {
 
 /// I3c — two wz router-hats sharing one multicast group + mesh-peered carry a
 /// foreign pico's group-injected Put into the router mesh, loop-free: EXACTLY ONE
-/// router (the elected DR) bridges the group into the mesh.
+/// router (the primary gateway) bridges the group into the mesh.
 // wz-proves: router-multicast-faces pico->wz
 // wz-proves: transport-multicast pico->wz
 // wz-proves: session-multicast pico->wz partial
@@ -228,7 +232,7 @@ fn wz_router_hat_multicast_ingress_federates_loop_safe_from_pico_zpub() {
             panic!(
                 "{label} never converged its on-group router members within 15s — the \
                  A<->B group JOIN exchange did not complete (asymmetric loopback \
-                 multicast?), so the DR election has no candidate set\n--- stderr ---\n{c}"
+                 multicast?), so the primary-gateway rule has no candidate set\n--- stderr ---\n{c}"
             );
         }
     }
@@ -293,7 +297,7 @@ fn wz_router_hat_multicast_ingress_federates_loop_safe_from_pico_zpub() {
 
     // Success gate: a router carried the group Put north (the DR's witness). pico
     // publishes ~1/s; the 25 s budget is generous margin. Both routers' captures
-    // are polled, since which of them is the DR is the election's to decide.
+    // are polled, since which of them is the DR is the zids' to decide (the larger).
     let dr_marker = "router-hat: federated a mcast-ingress push into the mesh (DR)";
     let gate_deadline = std::time::Instant::now() + Duration::from_secs(25);
     let received = loop {
@@ -362,7 +366,7 @@ fn wz_router_hat_multicast_ingress_federates_loop_safe_from_pico_zpub() {
         );
     }
 
-    // Assertion B — the JOIN -> member-relay -> DR-election chain ran e2e on both
+    // Assertion B — the JOIN -> member-relay -> primary-gateway chain ran e2e on both
     // routers (the unit-uncovered leg). Presence, NOT an exact count: a router may
     // list the peer's zid twice (its egress + ingress group sockets are distinct
     // src-addrs), so the peak can be 1 or 2 — either witnesses the relay ran.
@@ -375,8 +379,8 @@ fn wz_router_hat_multicast_ingress_federates_loop_safe_from_pico_zpub() {
     }
 
     // Assertion C — the deterministic LOOP-SAFETY proof: EXACTLY ONE router federated
-    // the mcast-ingress into the mesh (the elected DR) and the OTHER suppressed it
-    // (non-DR). Because `elect_router` returns self on an empty candidate set, this
+    // the mcast-ingress into the mesh (the primary) and the OTHER suppressed it
+    // (non-DR). Because a router with an empty candidate set is trivially primary, this
     // partition is satisfiable ONLY if the membership relay fed each router the
     // other's zid — so it proves single-bridge loop-safety AND the relay wiring, with
     // no packet counting.

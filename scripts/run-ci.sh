@@ -6425,7 +6425,13 @@ layer_c1ay_cargo_test_router_hat() {
     # resolves to `FaceForwarder`'s no-op default. No arm here pulled the atom's
     # own feature, so the witness would have existed while no lane ran it --
     # "a test exists" and "a lane runs it" being different facts.
-    _runci_guarded_test "C1AY router_forward mcast-faces 256" 256 \
+    # Open-debt item 751 (the multicast designated router) -- 256 -> 258, and ONLY
+    # this arm: the election's unit test went with `elect_router` (-1) and three
+    # `router-multicast-faces` witnesses of the primary-gateway rule came in (+3,
+    # a larger router stands down, the largest one carries, a router's own Put is
+    # not carried again). No other arm pulls the atom. 258 is what the command
+    # PRINTED on the build host, not 256 - 1 + 3 counted off the diff.
+    _runci_guarded_test "C1AY router_forward mcast-faces 258" 258 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,router-multicast-faces --lib router_forward --quiet || return 1
     # R2346 — 140 -> 141, and ONLY this arm moves: the added test is
     # `#[cfg(feature = "access-acl")]`, so the five sibling resolutions that do
