@@ -28,10 +28,10 @@ use crate::CoopConfig;
 
 /// A session whose read task is running, closed when it is let go of: a test's session is stepped
 /// by a thread of its own, and one never closed would keep its port and its task.
-struct Stepped(Arc<Engine>);
+pub(super) struct Stepped(Arc<Engine>);
 
 impl Stepped {
-    fn new(engine: Arc<Engine>) -> Self {
+    pub(super) fn new(engine: Arc<Engine>) -> Self {
         SessionDrive::start_read_task(&*engine).expect("the read task starts");
         Self(engine)
     }
@@ -53,7 +53,7 @@ impl Drop for Stepped {
 
 /// Wait, for at most five seconds, until `done`: every session is stepped by its own thread, so
 /// the test only looks.
-fn eventually(what: &str, mut done: impl FnMut() -> bool) {
+pub(super) fn eventually(what: &str, mut done: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while !done() {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
@@ -63,7 +63,7 @@ fn eventually(what: &str, mut done: impl FnMut() -> bool) {
 
 /// A session that listens on a loopback port the kernel picks and dials nothing, stepped by its
 /// read task, with the endpoint it is bound to. `tune` states what a test changes.
-fn listening(tune: impl FnOnce(&mut CoopConfig)) -> (Stepped, String) {
+pub(super) fn listening(tune: impl FnOnce(&mut CoopConfig)) -> (Stepped, String) {
     let mut config = CoopConfig {
         whatami: WhatAmI::Peer,
         zid: Some(vec![0xa1; 4]),
@@ -77,7 +77,7 @@ fn listening(tune: impl FnOnce(&mut CoopConfig)) -> (Stepped, String) {
 }
 
 /// A client session that dials `endpoint`, stepped by its read task.
-fn client(endpoint: &str, id: u8) -> Stepped {
+pub(super) fn client(endpoint: &str, id: u8) -> Stepped {
     Stepped::new(open_with(CoopConfig {
         endpoints: vec![endpoint.to_owned()],
         zid: Some(vec![id; 4]),

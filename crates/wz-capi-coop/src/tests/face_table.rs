@@ -23,6 +23,10 @@ use wz_session_core::sink::SampleView;
 use super::get::remote_get;
 use super::{open, until, CatchAll, Command, Engine, Router};
 
+/// The second router is another node: a session holds one face for each zid, and two routers of
+/// one zid would be the one node dialled twice (`tests::one_face`).
+const SECOND_ROUTER_ZID: u8 = 0xc4;
+
 /// A session opened to `first`, which then dials `second` as a face of its own and waits for both
 /// links to complete their handshakes.
 fn on_two_faces(first: &Router, second: &Router) -> Arc<Engine> {
@@ -47,7 +51,7 @@ fn step_for(engine: &Engine, ms: u64) {
 #[test]
 fn a_declaration_and_a_put_reach_every_face() {
     let first = Router::start(CatchAll::Held);
-    let second = Router::start(CatchAll::Held);
+    let second = Router::start_as(SECOND_ROUTER_ZID, CatchAll::Held);
     let engine = open(&first);
     let subscribe = |keyexpr: &str| {
         engine.declare_subscriber_on_wire(
@@ -101,7 +105,7 @@ fn a_declaration_and_a_put_reach_every_face() {
 #[test]
 fn a_get_is_asked_of_every_face_and_ends_with_the_last_final() {
     let first = Router::start(CatchAll::None);
-    let second = Router::start(CatchAll::None);
+    let second = Router::start_as(SECOND_ROUTER_ZID, CatchAll::None);
     let engine = on_two_faces(&first, &second);
     first.send(Command::Answer("demo/g/**", b"from-first"));
     second.send(Command::Answer("demo/g/**", b"from-second"));
@@ -168,7 +172,7 @@ fn a_get_is_asked_of_every_face_and_ends_with_the_last_final() {
 #[test]
 fn a_filter_and_a_listener_count_the_peers_of_every_face() {
     let first = Router::start(CatchAll::None);
-    let second = Router::start(CatchAll::None);
+    let second = Router::start_as(SECOND_ROUTER_ZID, CatchAll::None);
     let engine = on_two_faces(&first, &second);
     let plane = FilterPlane::Queryables {
         complete_required: false,
@@ -232,7 +236,7 @@ fn a_filter_and_a_listener_count_the_peers_of_every_face() {
 #[test]
 fn a_query_is_answered_to_its_face_and_a_lost_face_leaves_the_other() {
     let first = Router::start(CatchAll::None);
-    let second = Router::start(CatchAll::None);
+    let second = Router::start_as(SECOND_ROUTER_ZID, CatchAll::None);
     let engine = on_two_faces(&first, &second);
     engine
         .declare_queryable_on_wire(

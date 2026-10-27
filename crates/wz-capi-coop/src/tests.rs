@@ -155,6 +155,10 @@ enum CatchAll {
     None,
 }
 
+/// The zid every router stand-in has unless a test gives it another: a session holds one face for
+/// each zid, so a test that holds two routers at once gives them two (`Router::start_as`).
+const ROUTER_ZID: u8 = 0xc3;
+
 struct Router {
     port: u16,
     commands: std::sync::mpsc::Sender<Command>,
@@ -164,21 +168,30 @@ struct Router {
 
 impl Router {
     fn start(catch_all: CatchAll) -> Self {
+        Self::start_as(ROUTER_ZID, catch_all)
+    }
+
+    /// A router that is the node `zid` (four bytes of it).
+    fn start_as(zid: u8, catch_all: CatchAll) -> Self {
         let port = UdpSocket::bind("127.0.0.1:0")
             .and_then(|s| s.local_addr())
             .expect("a free port")
             .port();
-        Self::start_on(port, catch_all)
+        Self::start_on_as(port, zid, catch_all)
     }
 
     /// A router on `port`, which a router before it may have held.
     fn start_on(port: u16, catch_all: CatchAll) -> Self {
+        Self::start_on_as(port, ROUTER_ZID, catch_all)
+    }
+
+    fn start_on_as(port: u16, zid: u8, catch_all: CatchAll) -> Self {
         let (commands, inbox) = channel();
         let (ready, bound) = channel();
         let seen = Arc::new(Mutex::new(Seen::default()));
         let reported = seen.clone();
         let thread =
-            std::thread::spawn(move || run_router(port, catch_all, inbox, reported, ready));
+            std::thread::spawn(move || run_router(port, zid, catch_all, inbox, reported, ready));
         bound.recv().expect("the router bound its port");
         Self {
             port,
@@ -213,6 +226,7 @@ impl Drop for Router {
 
 fn run_router(
     port: u16,
+    zid: u8,
     catch_all: CatchAll,
     inbox: Receiver<Command>,
     seen: Arc<Mutex<Seen>>,
@@ -226,7 +240,7 @@ fn run_router(
     // An acceptor mints a cookie per InitAck, from the entropy it is handed.
     let actions = new_session_actions(
         sink,
-        params(WhatAmI::Router, 0xc3),
+        params(WhatAmI::Router, zid),
         CoopTime::new(&runtime),
         PosixEntropy,
     );
@@ -970,6 +984,8 @@ mod liveliness;
 mod local;
 #[cfg(feature = "local-queryable")]
 mod local_query;
+#[cfg(all(feature = "listen", feature = "query", feature = "queryable"))]
+mod one_face;
 #[cfg(feature = "queryable")]
 mod queryable;
 mod replay;
