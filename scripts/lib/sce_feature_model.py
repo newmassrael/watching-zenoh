@@ -40,6 +40,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import xml.etree.ElementTree
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -58,8 +59,9 @@ HEADER = """<?xml version="1.0" encoding="UTF-8"?>
   SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 -->
 <!--
-  GENERATED from crates/{crate}/Cargo.toml by scripts/lib/sce_feature_model.py --write.
-  Do not edit: `sce_feature_model.py --check` fails when this file is stale.
+  GENERATED from crates/{crate}/Cargo.toml by scripts/lib/sce_feature_model.py in its write mode.
+  Do not edit: the same script in its check mode fails when this file is stale. (No two
+  hyphens in a row appear in this comment: an XML comment cannot hold them, and SCE parses it.)
 
   The features the state machines {crate} compiles may be gated on (SCE's ADR 0057,
   docs/upstream-parity.md decision D7): the crate's cargo features, each with the features of
@@ -186,6 +188,15 @@ def selftest() -> int:
            '<sce:feature name="session-unicast" requires="alloc"/>' in doc)
     expect("a feature that implies nothing has no requires", '<sce:feature name="alloc"/>' in doc)
     expect("the document is a feature model", 'sce:kind="feature-model" name="demo"' in doc)
+    # SCE parses this file (`<sce:import kind="feature-model">`), and a comment holding two
+    # hyphens in a row is not well-formed XML: the first header of this script had one, and no
+    # check read the file as XML until a machine imported it.
+    try:
+        xml.etree.ElementTree.fromstring(doc)
+        well_formed = True
+    except xml.etree.ElementTree.ParseError:
+        well_formed = False
+    expect("the document is well-formed XML", well_formed)
     expect("no cycle in an acyclic manifest", cycle(features) is None)
     expect("a cycle is found", cycle({"a": ["b"], "b": ["c"], "c": ["a"]}) == ["a", "b", "c", "a"])
     expect("every model's crate is a crate of the workspace",

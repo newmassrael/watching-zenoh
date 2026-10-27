@@ -4,8 +4,9 @@
   SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 -->
 <!--
-  GENERATED from crates/wz-session-core/Cargo.toml by scripts/lib/sce_feature_model.py --write.
-  Do not edit: `sce_feature_model.py --check` fails when this file is stale.
+  GENERATED from crates/wz-session-core/Cargo.toml by scripts/lib/sce_feature_model.py in its write mode.
+  Do not edit: the same script in its check mode fails when this file is stale. (No two
+  hyphens in a row appear in this comment: an XML comment cannot hold them, and SCE parses it.)
 
   The features the state machines wz-session-core compiles may be gated on (SCE's ADR 0057,
   docs/upstream-parity.md decision D7): the crate's cargo features, each with the features of
