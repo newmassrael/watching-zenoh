@@ -2100,6 +2100,27 @@ states it without the feature does not compile, and an open build has neither th
 nor its bytes.
 '''
 
+[[policy]]
+id = "sn-resolution"
+kind = "choice"
+kconfig = "WZ_POLICY_SN_RESOLUTION"
+choices = ["bits-32", "bits-8", "bits-16", "bits-64"]
+default = "bits-32"
+upstream = "Advertises the 32-bit sequence-number resolution in its InitSyn and in the Join of a group, and has no setting for another: zenoh's `Resolution` default and zenoh-pico's `Z_SN_RESOLUTION 0x02`."
+since = 2
+help = '''
+The width of the sequence numbers the sessions of the C interfaces advertise: in
+the InitSyn of a unicast session, where the two sides take the smaller of the
+two advertised widths, and in the Join of a multicast group, where a member
+refuses a Join that states another width than its own, so every member of a
+group states the same. `bits-32` is what zenoh and zenoh-pico advertise.
+`bits-8`, `bits-16` and `bits-64` state that width instead, for a peer built
+with a sequence-number width of its own. A session that negotiates a width
+below its peer's runs the narrower ring of the two; a ring of 8 bits wraps
+after 128 frames in flight, so a narrow width asks a deployment to know its
+traffic. The request-id resolution is not part of this policy.
+'''
+
 # The role of a node in a zenoh network: upstream's `mode`. A global axis (it names no image),
 # so that every tree that sources the capabilities can state it, and each option selects the
 # capabilities it needs: the role pulls what it requires, and nothing else. What an image also

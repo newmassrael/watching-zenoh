@@ -35,10 +35,13 @@ const FLAG_ACK: u8 = 0x20;
 const FLAG_SIZE: u8 = 0x40;
 /// The batch size an InitSyn without `S` stands for: zenoh's protocol default.
 const PROTOCOL_DEFAULT_BATCH: u16 = 65535;
+/// The resolutions an InitSyn without `S` stands for: 32 bits for both, `0x02 | (0x02 << 2)`.
+const PROTOCOL_DEFAULT_RESOLUTIONS: u8 = 0x0A;
 
-/// The batch size the first InitSyn on `stream` advertises: the frame after the stream link's
-/// two-byte length.
-fn advertised_batch(stream: &mut std::net::TcpStream) -> u16 {
+/// What the first InitSyn on `stream` advertises: the frame after the stream link's two-byte
+/// length. The batch size, and the byte of the two resolutions (`|x|x|x|x|RID|FSN|`, zenoh's
+/// default `0x0A` when `S` is clear) that follows the zid.
+fn advertised_numbers(stream: &mut std::net::TcpStream) -> (u16, u8) {
     let mut len = [0u8; 2];
     stream.read_exact(&mut len).expect("the frame's length");
     let mut frame = vec![0u8; u16::from_le_bytes(len) as usize];
@@ -55,11 +58,12 @@ fn advertised_batch(stream: &mut std::net::TcpStream) -> u16 {
         "it is an InitSyn, not an InitAck: {frame:02x?}"
     );
     if header & FLAG_SIZE == 0 {
-        return PROTOCOL_DEFAULT_BATCH;
+        return (PROTOCOL_DEFAULT_BATCH, PROTOCOL_DEFAULT_RESOLUTIONS);
     }
     let zid_len = ((frame[2] >> 4) as usize) + 1;
+    let resolutions = frame[3 + zid_len];
     let at = 3 + zid_len + 1;
-    u16::from_le_bytes([frame[at], frame[at + 1]])
+    (u16::from_le_bytes([frame[at], frame[at + 1]]), resolutions)
 }
 
 /// A build that states no number states pico's own default (`vendor/zenoh-pico/CMakeLists.txt` @
@@ -74,7 +78,7 @@ fn a_build_that_states_no_number_states_picos_default() {
 }
 
 #[test]
-fn the_init_syn_advertises_the_unicast_batch_size_the_build_states() {
+fn the_init_syn_advertises_the_numbers_the_build_states() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("a listener");
     let port = listener.local_addr().expect("its port").port();
 
@@ -103,7 +107,7 @@ fn the_init_syn_advertises_the_unicast_batch_size_the_build_states() {
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .expect("a read timeout");
-    let batch = advertised_batch(&mut stream);
+    let (batch, resolutions) = advertised_numbers(&mut stream);
     drop(stream);
     drop(listener);
     done_rx
@@ -114,5 +118,30 @@ fn the_init_syn_advertises_the_unicast_batch_size_the_build_states() {
     assert_eq!(
         batch, PICO_UNICAST_BATCH_BYTES as u16,
         "the InitSyn advertises the batch size the build states for pico's BATCH_UNICAST_SIZE"
+    );
+    // The sequence-number width is the build's `sn-resolution` policy: 32 bits unless it states
+    // another, and the request-id width beside it is pico's fixed 32 bits whatever it states.
+    let stated = wz_session_core::policy::SessionPolicy::from_build().sn_resolution;
+    // The code is looked up by the width's id and not by `wire_code`, so the table that maps a
+    // width to its code is held by the wire too and not by the function that wrote it.
+    let expected = match stated.id() {
+        "bits-8" => 0x00,
+        "bits-16" => 0x01,
+        "bits-32" => 0x02,
+        "bits-64" => 0x03,
+        other => panic!("a width the declaration does not state: {other}"),
+    };
+    // Named in the output, so a run of this test shows the width its build was made with.
+    eprintln!("sn-resolution under test: {}", stated.id());
+    assert_eq!(
+        resolutions & 0x03,
+        expected,
+        "the InitSyn advertises the sequence-number width the build states ({})",
+        stated.id()
+    );
+    assert_eq!(
+        resolutions >> 2 & 0x03,
+        0x02,
+        "the request-id width is pico's fixed 32 bits"
     );
 }

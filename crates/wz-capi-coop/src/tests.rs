@@ -472,6 +472,7 @@ fn config(router: &Router) -> CoopConfig {
         batch_size: 1024,
         lease_ms: 10_000,
         keep_alive: KeepAliveConf::PICO,
+        sn_resolution: wz_session_core::policy::SnResolution::default(),
         link_rx: LinkRxConf::default(),
         tx_queue: TxQueueConf::pico(),
         timeouts: SessionTimeouts::spec_defaults(),

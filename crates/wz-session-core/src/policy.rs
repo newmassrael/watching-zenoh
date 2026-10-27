@@ -35,6 +35,24 @@ mod generated;
 
 pub use generated::*;
 
+impl SnResolution {
+    /// The two-bit code the width has in an InitSyn and a Join (`seq_num_res`): zenoh's
+    /// `Resolution` for a frame's sequence number, and zenoh-pico's `Z_SN_RESOLUTION`, which it
+    /// puts in its InitSyn and its Join (`vendor/zenoh-pico/src/protocol/definitions/transport.c` @
+    /// `msg._body._init._seq_num_res = Z_SN_RESOLUTION;`) and has fixed at `0x02`.
+    pub const fn wire_code(self) -> u8 {
+        match self {
+            Self::Bits8 => 0x00,
+            Self::Bits16 => 0x01,
+            Self::Bits32 => 0x02,
+            Self::Bits64 => 0x03,
+        }
+    }
+
+    /// Every width, in the order a test walks them.
+    pub const WIDTHS: [Self; 4] = [Self::Bits32, Self::Bits8, Self::Bits16, Self::Bits64];
+}
+
 /// The value of a bool policy: `on` or `off` as the build states it, or `off`, which is
 /// upstream's behaviour for every bool policy, when it states none.
 #[doc(hidden)]
@@ -123,6 +141,23 @@ mod tests {
     #[should_panic(expected = "not one of its policy's choices")]
     fn a_choice_value_that_is_not_a_choice_stops_the_build() {
         policy_choice(Some("sometimes"), &CHOICES, 0);
+    }
+
+    /// Every width is its own two-bit code, in the order of the width, and the widths walked by
+    /// the tests are all the declaration states.
+    #[test]
+    fn each_sn_width_is_its_own_two_bit_code() {
+        // Each code 0..=3 is taken by exactly one width.
+        for code in 0..=3u8 {
+            let owners = SnResolution::WIDTHS
+                .iter()
+                .filter(|width| width.wire_code() == code)
+                .count();
+            assert_eq!(owners, 1, "code {code}");
+        }
+        assert_eq!(SnResolution::Bits8.wire_code(), 0);
+        assert_eq!(SnResolution::Bits64.wire_code(), 3);
+        assert_eq!(SnResolution::Bits16.id(), "bits-16");
     }
 
     #[test]

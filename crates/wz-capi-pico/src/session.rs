@@ -149,16 +149,27 @@ const fn pico_socket_timeout(ms: usize) -> u32 {
 /// the numbers this build states for them ([`wz_session_core::caps::PICO_LEASE_MS`],
 /// [`wz_session_core::caps::PICO_MULTICAST_BATCH_BYTES`]), pico's own by default: pico refuses a
 /// member whose Join states another batch size. The join interval and the two resolutions are
-/// fixed in pico's config template, not switches.
+/// fixed in pico's config template, not switches; the build's `sn-resolution` policy
+/// ([`wz_session_core::policy::SnResolution`]) states another width of the sequence number for a
+/// group whose members are built with one, as pico refuses a Join that states another than its own.
 #[cfg(feature = "multicast-transport")]
-const PICO_GROUP: wz_capi_core::drive::GroupProfile = wz_capi_core::drive::GroupProfile {
-    lease_ms: wz_session_core::caps::PICO_LEASE_MS as u64,
-    join_interval_ms: 2_500,
-    seq_num_res: 0x02,
-    req_id_res: 0x02,
-    batch_size: pico_batch(wz_session_core::caps::PICO_MULTICAST_BATCH_BYTES),
-    is_qos: false,
-};
+const fn pico_group(
+    sn_resolution: wz_session_core::policy::SnResolution,
+) -> wz_capi_core::drive::GroupProfile {
+    wz_capi_core::drive::GroupProfile {
+        lease_ms: wz_session_core::caps::PICO_LEASE_MS as u64,
+        join_interval_ms: 2_500,
+        seq_num_res: sn_resolution.wire_code(),
+        req_id_res: 0x02,
+        batch_size: pico_batch(wz_session_core::caps::PICO_MULTICAST_BATCH_BYTES),
+        is_qos: false,
+    }
+}
+
+/// The group profile of this build.
+#[cfg(feature = "multicast-transport")]
+const PICO_GROUP: wz_capi_core::drive::GroupProfile =
+    pico_group(wz_session_core::policy::SessionPolicy::from_build().sn_resolution);
 
 /// Resolve one certificate value from its PATH key or its `*_BASE64` inline key.
 ///
@@ -618,6 +629,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             batch_size: pico_batch(wz_session_core::caps::PICO_UNICAST_BATCH_BYTES),
             lease_ms: wz_session_core::caps::PICO_LEASE_MS as u64,
             keep_alive: PICO_KEEP_ALIVE,
+            sn_resolution: wz_session_core::policy::SessionPolicy::from_build().sn_resolution,
             link_rx: PICO_LINK_RX,
             // pico negotiates no transport capability on unicast: its InitSyn
             // carries the patch ext and nothing else
@@ -761,6 +773,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
             batch_size: pico_batch(wz_session_core::caps::PICO_UNICAST_BATCH_BYTES),
             lease_ms: wz_session_core::caps::PICO_LEASE_MS as u64,
             keep_alive: PICO_KEEP_ALIVE,
+            sn_resolution: wz_session_core::policy::SessionPolicy::from_build().sn_resolution,
             link_rx: PICO_LINK_RX,
             tx_queue: TxQueueConf::pico(),
             timeouts: wz_session_core::session_timeouts::SessionTimeouts::spec_defaults(),
@@ -1748,5 +1761,27 @@ mod build_numbers {
             KeepAliveConf::zenoh(factor as u32).interval_ms(own, adopted),
             PICO_KEEP_ALIVE.interval_ms(own, adopted)
         );
+    }
+
+    /// Pico's group Join states the width the `sn-resolution` policy states, each value its own
+    /// code, and nothing else of pico's Join moves with it: pico refuses a member whose Join
+    /// states another batch size or width than its own.
+    #[cfg(feature = "multicast-transport")]
+    #[test]
+    fn the_join_states_the_width_the_sn_resolution_policy_states() {
+        use wz_session_core::policy::SnResolution;
+        let default = pico_group(SnResolution::Bits32);
+        for (width, code) in [
+            (SnResolution::Bits32, 0x02),
+            (SnResolution::Bits8, 0x00),
+            (SnResolution::Bits16, 0x01),
+            (SnResolution::Bits64, 0x03),
+        ] {
+            let profile = pico_group(width);
+            assert_eq!(profile.seq_num_res, code, "{}", width.id());
+            assert_eq!(profile.req_id_res, default.req_id_res);
+            assert_eq!(profile.batch_size, default.batch_size);
+            assert_eq!(profile.lease_ms, default.lease_ms);
+        }
     }
 }

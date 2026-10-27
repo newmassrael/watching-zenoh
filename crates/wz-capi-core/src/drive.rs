@@ -35,6 +35,7 @@ use wz_runtime_tokio::accept_loop::{
     DialIntentSender, FaceExecutor, SpawnedDrive,
 };
 use wz_runtime_tokio::node_clock::{NodeHlc, TimestampingEnabled};
+use wz_runtime_tokio::policy::SnResolution;
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session::LocalDeliveryDrain;
@@ -1202,6 +1203,9 @@ pub struct LinkTx {
     /// How often the session's keepalive speaks on an idle link: see
     /// [`OpenStance::keep_alive`].
     pub keep_alive: KeepAliveConf,
+    /// The width of the sequence numbers advertised in the InitSyn or InitAck: see
+    /// [`OpenStance::sn_resolution`].
+    pub sn_resolution: SnResolution,
 }
 
 /// What a session's links are told, as upstream's `transport/link` block holds it: the transmit
@@ -1245,7 +1249,7 @@ pub(crate) fn init_params(
     Ok(SessionInitParams {
         whatami,
         zid,
-        seq_num_res: 2,
+        seq_num_res: link_conf.tx.sn_resolution.wire_code(),
         req_id_res: 2,
         batch_size: link_conf.tx.batch_size,
         lease_ms: link_conf.tx.lease_ms,
@@ -3842,6 +3846,11 @@ pub struct OpenStance {
     /// number its build states for pico's `Z_TRANSPORT_LEASE_EXPIRE_FACTOR`, which divides the
     /// adopted lease.
     pub keep_alive: KeepAliveConf,
+    /// The width of the sequence numbers the session advertises at its handshake: the
+    /// `sn-resolution` policy of the build (`SessionPolicy::sn_resolution`), which is the 32
+    /// bits both zenoh and zenoh-pico advertise unless the build states another. The two sides
+    /// of a unicast session run the narrower of the two advertised widths.
+    pub sn_resolution: SnResolution,
     /// What the session's links, unicast and every group's, rejoin from fragments; see
     /// [`LinkConf`]. A zenoh-c session reads it from `transport/link/rx/max_message_size` and one
     /// whose config states none passes [`LinkRxConf::default`]; zenoh-pico's ABI has no such key
@@ -4137,6 +4146,7 @@ pub fn open_blocking(
         batch_size,
         lease_ms,
         keep_alive,
+        sn_resolution,
         link_rx,
         offer,
         zid,
@@ -4185,6 +4195,7 @@ pub fn open_blocking(
             batch_size,
             lease_ms,
             keep_alive,
+            sn_resolution,
         },
         rx: link_rx,
     };
@@ -4398,12 +4409,14 @@ mod tests {
                 batch_size: 2048,
                 lease_ms: 4000,
                 keep_alive: KeepAliveConf::ZENOH,
+                sn_resolution: SnResolution::Bits8,
             },
             rx: LinkRxConf {
                 max_message_size: 4096,
             },
         };
         let params = init_params(WhatAmI::Client, vec![0xC1; 4], stated).expect("entropy");
+        assert_eq!(params.seq_num_res, SnResolution::Bits8.wire_code());
         assert_eq!(params.batch_size, 2048);
         assert_eq!(params.lease_ms, 4000);
         assert_eq!(params.keep_alive, KeepAliveConf::ZENOH);
@@ -4610,6 +4623,7 @@ mod tests {
                             batch_size: 1024,
                             lease_ms: DEFAULT_LEASE_MS,
                             keep_alive: KeepAliveConf::default(),
+                            sn_resolution: SnResolution::default(),
                         },
                         rx: LinkRxConf::default(),
                     },
@@ -5192,6 +5206,7 @@ mod tests {
             batch_size: DEFAULT_BATCH_SIZE,
             lease_ms: DEFAULT_LEASE_MS,
             keep_alive: KeepAliveConf::PICO,
+            sn_resolution: SnResolution::default(),
             link_rx: LinkRxConf::default(),
             offer: SessionOffer::universal(),
             zid: None,
@@ -5207,6 +5222,79 @@ mod tests {
             auth: None,
             policy: crate::node_policy::NodePolicy::default(),
             groups: Vec::new(),
+        }
+    }
+
+    /// The `seq_num_res` code of the first InitSyn a session dialling `stance` puts on the wire,
+    /// read off a bare TCP listener that closes after the frame, so what is compared is the byte
+    /// a peer receives and not a value the session reports of itself.
+    ///
+    /// The frame is the stream link's two-byte length and then the INIT: a header with the `S`
+    /// flag (`0x40`) when sizes follow, the version, a byte whose high nibble is the zid's length
+    /// less one, the zid, and the byte `|x|x|x|x|RID|FSN|` of the two resolutions.
+    #[cfg(feature = "peer")]
+    fn advertised_sn_code(stance: OpenStance) -> u8 {
+        use std::io::Read as _;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a listener");
+        let port = listener.local_addr().expect("its port").port();
+        let opener = std::thread::spawn(move || {
+            // The peer closes after the InitSyn, so the open fails: what it sent is the subject.
+            let _ = open_blocking(
+                vec![format!("tcp/127.0.0.1:{port}")],
+                Vec::new(),
+                CapiTlsConfig::default(),
+                WhatAmI::Peer,
+                DialPhase::ONCE,
+                stance,
+            );
+        });
+        let (mut stream, _) = listener.accept().expect("the session dials");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("a read timeout");
+        let mut length = [0u8; 2];
+        stream.read_exact(&mut length).expect("the frame's length");
+        let mut frame = vec![0u8; u16::from_le_bytes(length) as usize];
+        stream.read_exact(&mut frame).expect("the frame");
+        assert_eq!(frame[0] & 0x1F, 0x01, "the first message is an INIT");
+        assert_eq!(frame[0] & 0x20, 0, "it is an InitSyn, not an InitAck");
+        assert_ne!(
+            frame[0] & 0x40,
+            0,
+            "a session that states its sizes sets the S flag: {frame:02x?}"
+        );
+        let zid_len = usize::from(frame[2] >> 4) + 1;
+        let resolutions = frame[3 + zid_len];
+        drop(stream);
+        drop(listener);
+        opener.join().expect("the opener thread");
+        resolutions & 0x03
+    }
+
+    /// Each width of the `sn-resolution` policy reaches the wire as its own code in the InitSyn,
+    /// and the default is the 32 bits both originals advertise. One test names every value, so a
+    /// width that a build could state and the session did not carry has a row that fails.
+    #[cfg(feature = "peer")]
+    #[test]
+    fn the_init_syn_advertises_the_width_the_sn_resolution_policy_states() {
+        let expected = [
+            (SnResolution::Bits32, 0x02),
+            (SnResolution::Bits8, 0x00),
+            (SnResolution::Bits16, 0x01),
+            (SnResolution::Bits64, 0x03),
+        ];
+        assert_eq!(expected.len(), SnResolution::WIDTHS.len());
+        for (width, code) in expected {
+            let stance = OpenStance {
+                sn_resolution: width,
+                ..peer_stance()
+            };
+            assert_eq!(
+                advertised_sn_code(stance),
+                code,
+                "{} is advertised as the two-bit code {code}",
+                width.id()
+            );
         }
     }
 

@@ -66,6 +66,7 @@ use wz_session_core::entropy::EntropySource;
 use wz_session_core::interest_build::InterestKinds;
 use wz_session_core::locality::Locality;
 use wz_session_core::network_message::NetworkMessage;
+use wz_session_core::policy::SnResolution;
 use wz_session_core::publish_options::{PlainPutParams, PublishError, PublishOptions};
 use wz_session_core::pubsub::SubscriptionId;
 use wz_session_core::push_build;
@@ -153,6 +154,8 @@ pub struct CoopConfig {
     pub lease_ms: u64,
     /// How often the session's keepalive speaks on an idle link.
     pub keep_alive: KeepAliveConf,
+    /// The width of the sequence numbers the session advertises at its handshake.
+    pub sn_resolution: SnResolution,
     /// What the session rejoins from fragments: a chain a fragment would take past its
     /// `max_message_size` is dropped.
     pub link_rx: LinkRxConf,
@@ -636,7 +639,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             let params = SessionInitParams {
                 whatami: self.config.whatami,
                 zid: self.wire_zid.clone(),
-                seq_num_res: 2,
+                seq_num_res: self.config.sn_resolution.wire_code(),
                 req_id_res: 2,
                 batch_size: self.config.batch_size,
                 lease_ms: self.config.lease_ms,

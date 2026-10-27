@@ -31,6 +31,7 @@
 //! the characterization table in `wz-capi-c` (`tests/open_refusals.rs`).
 
 use wz_runtime_tokio::node_clock::TimestampingEnabled;
+use wz_runtime_tokio::policy::{SessionPolicy, SnResolution};
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::session::LocalDeliveryDrain;
 use wz_runtime_tokio::session_glue::{KeepAliveConf, LinkRxConf, TxQueueConf, WhatAmI};
@@ -350,16 +351,21 @@ const ZENOH_MULTICAST_BATCH: u16 = 8_192;
 /// `join_interval: self.manager.config.multicast.join_interval,`, beside the batch capped at
 /// `batch_size::MULTICAST`): the link lease of `transport/link/tx/lease`, the beacon interval of
 /// `transport/multicast/join_interval`, the default resolution of both sequence numbers and
-/// request ids (32 bits), the session's batch size held to the multicast cap (the UDP link's own
+/// request ids (32 bits; the build's `sn-resolution` policy states another width of the
+/// sequence number), the session's batch size held to the multicast cap (the UDP link's own
 /// MTU is above it on every target zenoh names), and per-priority conduits when
 /// `transport/multicast/qos/enabled` asks for them.
-fn zenoh_group_profile(node: &ZenohNodeConfig, batch_size: u16) -> GroupProfile {
-    // The 2-bit code of a 32-bit resolution, zenoh's default for both fields.
+fn zenoh_group_profile(
+    node: &ZenohNodeConfig,
+    batch_size: u16,
+    sn_resolution: SnResolution,
+) -> GroupProfile {
+    // The 2-bit code of a 32-bit resolution, zenoh's default for the request id.
     const BITS_32: u8 = 0x02;
     GroupProfile {
         lease_ms: node.lease_ms,
         join_interval_ms: node.multicast_join_interval_ms,
-        seq_num_res: BITS_32,
+        seq_num_res: sn_resolution.wire_code(),
         req_id_res: BITS_32,
         batch_size: batch_size.min(ZENOH_MULTICAST_BATCH),
         is_qos: node.multicast_qos,
@@ -505,6 +511,9 @@ pub struct OpenPlan {
     /// keepalives in the session's own lease, as upstream divides it. A config that states none
     /// is zenoh's default.
     pub keep_alive: KeepAliveConf,
+    /// The width of the sequence numbers the session advertises, unicast and in a group's Join:
+    /// the build's `sn-resolution` policy, 32 bits unless it states another.
+    pub sn_resolution: SnResolution,
     /// What the session's links rejoin from fragments: `transport/link/rx/max_message_size`. A
     /// config that states none is zenoh's default.
     pub link_rx: LinkRxConf,
@@ -731,8 +740,11 @@ impl OpenPlan {
                 pool_size: node.shm_pool_size,
             },
         );
+        // The width of the sequence numbers the build advertises (`sn-resolution`); the document
+        // has no key for it, since neither zenoh nor zenoh-pico does.
+        let sn_resolution = SessionPolicy::from_build().sn_resolution;
         let groups = node.as_ref().map_or_else(Vec::new, |node| {
-            let profile = zenoh_group_profile(node, batch_size);
+            let profile = zenoh_group_profile(node, batch_size, sn_resolution);
             // zenoh announces each subscriber on the groups it holds, on every target but
             // Windows, where the announcement is compiled out (`#[cfg(not(windows))]` above
             // `zenoh/src/net/routing/hat/peer/pubsub.rs` @
@@ -765,6 +777,7 @@ impl OpenPlan {
             batch_size,
             lease_ms,
             keep_alive,
+            sn_resolution,
             link_rx,
             offer,
             shm,
@@ -871,6 +884,7 @@ impl OpenPlan {
                 batch_size: self.batch_size,
                 lease_ms: self.lease_ms,
                 keep_alive: self.keep_alive,
+                sn_resolution: self.sn_resolution,
                 link_rx: self.link_rx,
                 offer,
                 zid: self.zid,
@@ -1142,6 +1156,25 @@ mod tests {
         assert_eq!(silent.lease_ms, DEFAULT_LEASE_MS);
         assert_eq!(silent.keep_alive, KeepAliveConf::ZENOH);
         assert_eq!(silent.link_rx, LinkRxConf::default());
+    }
+
+    /// The width of the sequence numbers a group's Join states is the `sn-resolution` policy's,
+    /// each value its own code, and the request-id resolution is not moved by it: a member of a
+    /// group built with another width refuses a Join that states a different one, so the
+    /// width has to reach the Join and nothing beside it.
+    #[test]
+    fn a_groups_join_states_the_width_the_sn_resolution_policy_states() {
+        let node = ZenohNodeConfig::default();
+        for (width, code) in [
+            (SnResolution::Bits32, 0x02),
+            (SnResolution::Bits8, 0x00),
+            (SnResolution::Bits16, 0x01),
+            (SnResolution::Bits64, 0x03),
+        ] {
+            let profile = zenoh_group_profile(&node, 65535, width);
+            assert_eq!(profile.seq_num_res, code, "{}", width.id());
+            assert_eq!(profile.req_id_res, 0x02, "the request id is untouched");
+        }
     }
 
     /// The role is read from the `mode` key, and the default is the build's.

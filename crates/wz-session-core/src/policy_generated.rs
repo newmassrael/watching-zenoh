@@ -140,6 +140,57 @@ impl Default for KeySet {
     }
 }
 
+/// `sn-resolution`: The width of the sequence numbers the sessions of the C interfaces
+/// advertise: in the InitSyn of a unicast session, where the two sides take the smaller of
+/// the two advertised widths, and in the Join of a multicast group, where a member refuses
+/// a Join that states another width than its own, so every member of a group states the
+/// same. `bits-32` is what zenoh and zenoh-pico advertise. `bits-8`, `bits-16` and
+/// `bits-64` state that width instead, for a peer built with a sequence-number width of its
+/// own. A session that negotiates a width below its peer's runs the narrower ring of the
+/// two; a ring of 8 bits wraps after 128 frames in flight, so a narrow width asks a
+/// deployment to know its traffic. The request-id resolution is not part of this policy.
+/// Upstream: Advertises the 32-bit sequence-number resolution in its InitSyn and in the
+/// Join of a group, and has no setting for another: zenoh's `Resolution` default and zenoh-
+/// pico's `Z_SN_RESOLUTION 0x02`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnResolution {
+    /// `bits-32`.
+    Bits32,
+    /// `bits-8`.
+    Bits8,
+    /// `bits-16`.
+    Bits16,
+    /// `bits-64`.
+    Bits64,
+}
+
+impl SnResolution {
+    /// The value as the declaration, the Kconfig and the environment spell it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Bits32 => "bits-32",
+            Self::Bits8 => "bits-8",
+            Self::Bits16 => "bits-16",
+            Self::Bits64 => "bits-64",
+        }
+    }
+
+    const CHOICES: [&str; 4] = ["bits-32", "bits-8", "bits-16", "bits-64"];
+    const ALL: [Self; 4] = [Self::Bits32, Self::Bits8, Self::Bits16, Self::Bits64];
+
+    const fn stated() -> Self {
+        let stated = option_env!("WZ_POLICY_SN_RESOLUTION");
+        let index = policy_choice(stated, &Self::CHOICES, 0);
+        Self::ALL[index]
+    }
+}
+
+impl Default for SnResolution {
+    fn default() -> Self {
+        Self::stated()
+    }
+}
+
 /// What this build decided beyond upstream's behaviour.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -169,6 +220,10 @@ pub struct SessionPolicy {
     /// subscribers it reaches by matching that key against each subscription's pattern as
     /// text.
     pub key_set: KeySet,
+    /// `sn-resolution`. Upstream: Advertises the 32-bit sequence-number resolution in its
+    /// InitSyn and in the Join of a group, and has no setting for another: zenoh's
+    /// `Resolution` default and zenoh-pico's `Z_SN_RESOLUTION 0x02`.
+    pub sn_resolution: SnResolution,
 }
 
 impl SessionPolicy {
@@ -181,6 +236,7 @@ impl SessionPolicy {
         let entity_timestamp_opt_in = policy_bool(option_env!("WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN"));
         let subscriber_overload = SubscriberOverload::stated();
         let key_set = KeySet::stated();
+        let sn_resolution = SnResolution::stated();
         Self {
             multicast_loopback,
             tx_no_progress_deadline,
@@ -189,6 +245,7 @@ impl SessionPolicy {
             entity_timestamp_opt_in,
             subscriber_overload,
             key_set,
+            sn_resolution,
         }
     }
 }
