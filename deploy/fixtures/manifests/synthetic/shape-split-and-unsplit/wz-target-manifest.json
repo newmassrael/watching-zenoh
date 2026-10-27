@@ -88,9 +88,11 @@
         "entropy",
         "interface-list",
         "multicast",
+        "name-resolution",
         "sockets-tcp",
         "sockets-udp",
-        "threads"
+        "threads",
+        "wall-clock"
       ],
       "requires": [
         "entropy",
@@ -99,8 +101,10 @@
       "may_require": [
         "interface-list",
         "multicast",
+        "name-resolution",
         "sockets-tcp",
-        "sockets-udp"
+        "sockets-udp",
+        "wall-clock"
       ],
       "unassessed_features": []
     },
@@ -235,6 +239,7 @@
         "filesystem",
         "interface-list",
         "multicast",
+        "name-resolution",
         "sockets-tcp",
         "sockets-udp",
         "threads",

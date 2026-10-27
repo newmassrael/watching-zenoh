@@ -239,7 +239,7 @@ It is an upper bound: a device
 that lacks one is told which capability to turn off, and it does not say a given
 configuration uses it (a TLS plane reads certificate files when its keys name files and
 not when they hold the PEM inline). `[os] base` is what every host build asks for
-(`threads`, `sockets-tcp`, `entropy`, `interface-list`). Every capability states `os_needs`, an empty
+(`threads`, `sockets-tcp`, `entropy`, `interface-list`, `name-resolution`). Every capability states `os_needs`, an empty
 list when it asks for nothing beyond the base: a capability nobody assessed has no
 entry and `--check` refuses it. The manifest lists the union for the resolved
 capability set (`os_needs_of`), and `platform_gaps` names what a platform lacks and
@@ -272,7 +272,7 @@ crate. The demo's own row is `filesystem` (a file its `--config`, `--sessions` o
 `--check-topology` names) and `wall-clock` (env_logger stamps each log line), which the
 facility oracle found missing (below). The default `wz-ap-demo` enables 54 runtime
 features, all assessed, and is `entropy`, `filesystem`, `interface-list`, `multicast`,
-`sockets-tcp`, `sockets-udp`, `threads`, `wall-clock`. Not
+`name-resolution`, `sockets-tcp`, `sockets-udp`, `threads`, `wall-clock`. Not
 assessed: any runtime feature outside those 54 (the TLS, QUIC, WebSocket, serial,
 storage and access-control planes), whose first use in an executable's build is an
 `unassessed_features` entry until its row is written. A row is an upper bound read from
@@ -299,6 +299,21 @@ counterpart. The zenoh-c driver declares the calls it makes instead of including
 `zenoh.h`: every one passes its objects by pointer, so storage larger than any arm's type
 is right for all four arms, where a header of the wrong arm would be the wrong size. A run
 that fails by itself is a finding of its own: it stands for no run.
+
+What a file can ask for is also read from its bytes, without running it, so it holds for
+a cross build too. The functions a file binds by a dynamic relocation
+(`elf_facts.py imported_symbols`) are what its linked code can call in the C library: the
+linker drops code a feature left out, and a function left in the symbol table with no
+slot cannot be reached (a pico library listed `fork` and `execvp` that way). A function
+whose every call requests one facility (`pthread_create`, `getifaddrs`, `if_nametoindex`,
+`getrandom`, `gettimeofday`, `getaddrinfo`, ...: `FACILITY_IMPORTS` in `wz_config.py`)
+proves the file may ask for it, and the entry refuses to describe a file whose bound
+lacks a facility its imports prove, or that imports a request no facility names
+(starting a process). A function that serves several facilities by its arguments
+(`socket`, `open`, `clock_gettime`) proves none and refutes nothing. The census found
+`name-resolution` missing from the vocabulary: every host artifact binds `getaddrinfo`,
+which the TCP and UDP links call through `tokio::net::lookup_host` when a locator names a
+host rather than an address.
 
 The bound is split in two keys beside it. `requires` is what every run asks for and
 cannot go on without, whatever its configuration: a device that measurably lacks one
@@ -336,7 +351,8 @@ entry writes the split one.
 | `filesystem` | read files by path, and write them for a plane that stores data |
 | `entropy` | draw cryptographic random bytes from the operating system (`getrandom`, `/dev/urandom`) |
 | `wall-clock` | read the calendar time (`CLOCK_REALTIME`, `SystemTime`); it is never set, and a wrong reading makes certificate validity and timestamps wrong |
-| `interface-list` | list the network interfaces and their addresses (`getifaddrs`, `GetAdaptersAddresses`) |
+| `interface-list` | list the network interfaces and their addresses, or look one up by name or index (`getifaddrs`, `if_nametoindex`, `GetAdaptersAddresses`) |
+| `name-resolution` | resolve a host name to addresses through the operating system's resolver (`getaddrinfo`): its files (`/etc/hosts`, nsswitch) and its DNS servers |
 
 A device provides a facility when an unprivileged process of the artifact may do it
 there, so a facility that needs a privilege includes the privilege. The two encrypted
@@ -435,10 +451,11 @@ keys, their order and their values are the entry's own output.
                            "local_subscriber": false, "local_queryable": false } },
       "provides": [ { "role": "pico-library" } ],
       "features": ["advanced", "...", "unstable-api"],
-      "device_requires": ["entropy", "interface-list", "multicast", "sockets-tcp", "sockets-udp",
-                          "threads", "wall-clock"],
+      "device_requires": ["entropy", "interface-list", "multicast", "name-resolution", "sockets-tcp",
+                          "sockets-udp", "threads", "wall-clock"],
       "requires": ["entropy", "threads"],
-      "may_require": ["interface-list", "multicast", "sockets-tcp", "sockets-udp", "wall-clock"]
+      "may_require": ["interface-list", "multicast", "name-resolution", "sockets-tcp", "sockets-udp",
+                      "wall-clock"]
     },
     { "id": "capi-c", "name": "libwz_capi_c.so", "...": "the same keys; provides zenoh-c-dropin,
       abi layout { unstable_api: true, shared_memory: false }, revision 6" },
@@ -455,11 +472,11 @@ keys, their order and their values are the entry's own output.
       "features": ["..."],
       "resolved_features": { "wz-ap-demo": ["default", "..."],
                              "wz-runtime-tokio": ["codec-close", "...", "transport-unicast"] },
-      "device_requires": ["entropy", "filesystem", "interface-list", "multicast", "sockets-tcp",
-                          "sockets-udp", "threads", "wall-clock"],
+      "device_requires": ["entropy", "filesystem", "interface-list", "multicast", "name-resolution",
+                          "sockets-tcp", "sockets-udp", "threads", "wall-clock"],
       "requires": ["entropy", "threads"],
-      "may_require": ["filesystem", "interface-list", "multicast", "sockets-tcp", "sockets-udp",
-                      "wall-clock"],
+      "may_require": ["filesystem", "interface-list", "multicast", "name-resolution", "sockets-tcp",
+                      "sockets-udp", "wall-clock"],
       "unassessed_features": []
     }
   ]
@@ -470,8 +487,10 @@ What the example shows about this build, and does not: the default `wz-ap-demo` 
 `session-node` role because `zenoh-config` is off in `preset-ap-client`, and its driver
 roles are the ones its table marks available, read from the file (its facts note). A
 library's `device_requires` is the union of what the capabilities its features turn on
-may ask for; an executable's is the base plus what the runtime features cargo resolved
-for it may ask for, or `null` with the unassessed ones named (see T9). The
+may ask for and what its own surface asks whatever they are (the pico library's
+`z_time_now` reads the calendar in every build: its `[[assessed_package]]` row); an
+executable's is the base plus its assessed packages and what the runtime features cargo
+resolved for it may ask for, or `null` with the unassessed ones named (see T9). The
 glibc floor `GLIBC_2.39` is the host's own, which is the measured reason a library built
 on this host does not run on an older glibc: the manifest of a cross build records the
 SDK's. The host row bundles nothing (it names no SDK), so `bundled` is empty and every

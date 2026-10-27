@@ -37,6 +37,10 @@ SHT_DYNAMIC = 6
 SHT_PROGBITS = 1
 SHT_STRTAB = 3
 SHT_GNU_VERNEED = 0x6FFFFFFE
+SHT_DYNSYM = 11
+SHT_RELA = 4
+SHT_REL = 9
+SHN_UNDEF = 0
 
 DT_NULL, DT_NEEDED, DT_SONAME, DT_RPATH, DT_RUNPATH = 0, 1, 14, 15, 29
 
@@ -324,6 +328,55 @@ def version_tags(data: bytes) -> list[str]:
     return sorted(tags)
 
 
+def imported_symbols(data: bytes) -> list[str]:
+    """The symbols the file's code can call in another object (the C library, for an artifact of
+    this tree), sorted: each is undefined in the dynamic symbol table AND bound by a dynamic
+    relocation, the GOT or PLT slot a call goes through.
+
+    The relocation is what makes it a call. The linker can leave an undefined symbol in the table
+    after dropping the only code that used it (measured: a pico library listed `fork` and `execvp`
+    with no relocation naming either), and no code can reach a shared object's function without a
+    slot. Both tables survive `strip`, since the loader binds through them, and they hold only what
+    the linker kept, so a call in code a feature left out is in neither."""
+    end = _byte_order(data)
+    secs = sections(data)
+    table_index = next((i for i, s in enumerate(secs) if s.kind == SHT_DYNSYM), None)
+    if table_index is None:
+        return []
+    table = secs[table_index]
+    strings = _linked_strings(data, secs, table)
+    body = section_bytes(data, table)
+    wide = data[4] == 2
+    if wide:
+        size, layout = 24, end + "IBBHQQ"  # name, info, other, shndx, value, size
+    else:
+        size, layout = 16, end + "IIIBBH"  # name, value, size, info, other, shndx
+    if len(body) % size:
+        raise ElfError(f"the dynamic symbol table is {len(body)} bytes, not a whole number of {size}-byte entries")
+    count = len(body) // size
+    bound: set[int] = set()
+    for section in secs:
+        if section.kind not in (SHT_REL, SHT_RELA) or section.link != table_index:
+            continue
+        entry = (24 if section.kind == SHT_RELA else 16) if wide else (12 if section.kind == SHT_RELA else 8)
+        rel = section_bytes(data, section)
+        if len(rel) % entry:
+            raise ElfError(f"relocation section {section.name} is not a whole number of {entry}-byte entries")
+        for pos in range(0, len(rel), entry):
+            (info,) = struct.unpack_from(end + ("Q" if wide else "I"), rel, pos + (8 if wide else 4))
+            index = info >> 32 if wide else info >> 8
+            if index >= count:
+                raise ElfError(f"relocation section {section.name} names symbol {index} of {count}")
+            bound.add(index)
+    names: set[str] = set()
+    for index in sorted(bound - {0}):  # symbol 0 is the null symbol
+        fields = struct.unpack_from(layout, body, index * size)
+        name, shndx = fields[0], (fields[3] if wide else fields[5])
+        if shndx == SHN_UNDEF and name:
+            names.add(_cstring(strings, name, "a dynamic symbol name"))
+    return sorted(names)
+
+
 def glibc_floor(tags: list[str]) -> str | None:
     """The highest `GLIBC_x.y[.z]` tag, compared as numbers, or None when there is none."""
     best: tuple[int, ...] | None = None
@@ -441,16 +494,18 @@ def build_test_elf(
     order: str = "<",
     machine: int = 183,
     dynamic: bool | None = None,
+    symbols: list[tuple[str, bool, bool]] | None = None,
 ) -> bytes:
     """A test ELF: notes as (section, owner, type, desc), a dynamic section when any of its fields is
-    given (or `dynamic=True`), an interpreter, and version needs as (file, [tags])."""
+    given (or `dynamic=True`), an interpreter, version needs as (file, [tags]) and dynamic symbols
+    as (name, defined, bound by a relocation)."""
     parts: list[tuple[str, int, bytes, str | None]] = []
     for section, owner, kind, desc in notes_ or []:
         parts.append((section, SHT_NOTE, note_blob(owner, kind, desc, order), None))
     if interp is not None:
         parts.append((".interp", SHT_PROGBITS, interp.encode() + b"\x00", None))
     wants_dynamic = dynamic if dynamic is not None else any(
-        x for x in (needed, soname, runpath, rpath, verneed))
+        x for x in (needed, soname, runpath, rpath, verneed, symbols))
     if wants_dynamic:
         strings_ref = [b"\x00"]
         offsets: dict[str, int] = {}
@@ -480,10 +535,23 @@ def build_test_elf(
             for ti, tag in enumerate(tags):
                 anext = 16 if ti + 1 < len(tags) else 0
                 vn += struct.pack(order + "IHHII", 0, 0, 2 + ti, intern(tag), anext)
+        sym_layout = order + ("IBBHQQ" if cls == 64 else "IIIBBH")
+        syms = struct.pack(sym_layout, *([0] * 6))
+        relocs = b""
+        for index, (name, defined, relocated) in enumerate(symbols or [], start=1):
+            shndx = 1 if defined else SHN_UNDEF
+            fields = (intern(name), 0x12, 0, shndx, 0, 0) if cls == 64 else (intern(name), 0, 0, 0x12, 0, shndx)
+            syms += struct.pack(sym_layout, *fields)
+            if relocated:  # a GLOB_DAT slot (type 6), as a call through the GOT has
+                relocs += (struct.pack(order + "QQq", 0, index << 32 | 6, 0) if cls == 64
+                           else struct.pack(order + "IIi", 0, index << 8 | 6, 0))
         parts.append((".dynstr", SHT_STRTAB, strings_ref[0], None))
         parts.append((".dynamic", SHT_DYNAMIC, entries, ".dynstr"))
         if files:
             parts.append((".gnu.version_r", SHT_GNU_VERNEED, vn, ".dynstr"))
+        if symbols:
+            parts.append((".dynsym", SHT_DYNSYM, syms, ".dynstr"))
+            parts.append((".rela.dyn", SHT_RELA, relocs, ".dynsym"))
     return build_elf(parts, cls, order, machine)
 
 
@@ -561,6 +629,15 @@ def _selftest() -> int:
         except ElfError:
             continue
         raise AssertionError(f"selftest: a file cut at {cut} bytes was described")
+    for cls, order in ((64, "<"), (32, "<"), (64, ">"), (32, ">")):
+        with_syms = build_test_elf(needed=["libc.so.6"], cls=cls, order=order,
+                                   symbols=[("socket", False, True), ("wz_export", True, True),
+                                            ("fork", False, False), ("getifaddrs", False, True)])
+        expect(f"the {cls}-bit {order} file imports its undefined, relocated symbols, sorted, "
+               "and not an undefined one no slot binds",
+               imported_symbols(with_syms) == ["getifaddrs", "socket"])
+    expect("a file with no dynamic symbol table imports nothing",
+           imported_symbols(build_test_elf(needed=["libc.so.6"])) == [])
     print("elf-facts: selftest OK")
     return 0
 

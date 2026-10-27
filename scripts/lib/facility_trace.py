@@ -87,9 +87,12 @@ WITNESSES = {
     "filesystem": "an open of a path that no exemption and no other witness explains",
     "entropy": "getrandom of one byte or more, or an open of /dev/urandom or /dev/random",
     "wall-clock": "the shim's mark of clock_gettime(CLOCK_REALTIME, _COARSE or CLOCK_TAI), "
-                  "gettimeofday or time",
+                  "gettimeofday or time, or its scope of localtime, localtime_r or tzset (the zone "
+                  "database they read is inside it)",
     "interface-list": "the shim's scope of getifaddrs, if_nametoindex or if_indextoname, or an "
                       "interface ioctl (SIOCGIF*)",
+    "name-resolution": "the shim's scope of getaddrinfo (the files it reads and the DNS it asks are "
+                       "inside it)",
 }
 
 # What the C library, the loader and the language runtime do for themselves, and why each is not
@@ -119,7 +122,7 @@ LOADER_PATHS = ("/etc/ld.so.cache", "/etc/ld.so.preload")
 ENTROPY_DEVICES = ("/dev/urandom", "/dev/random")
 
 # A scope of the shim is given to a facility, to an exemption, or (a name in neither) is itself the
-# unclassified finding: name resolution is not in the vocabulary.
+# unclassified finding. Name resolution was the first such finding, and is a facility since.
 SCOPE_EXEMPTIONS = {"thread-stack-probe"}
 
 MEMBERSHIP_OPTIONS = ("IP_ADD_MEMBERSHIP", "IP_ADD_SOURCE_MEMBERSHIP", "IPV6_ADD_MEMBERSHIP",
@@ -610,6 +613,10 @@ int main(int argc, char **argv) {
         pthread_attr_t a;
         pthread_getattr_np(pthread_self(), &a);
         pthread_attr_destroy(&a);
+    } else if (!strcmp(what, "local-time")) {
+        time_t now = 0;
+        struct tm parts;
+        localtime_r(&now, &parts);
     } else if (!strcmp(what, "monotonic")) {
         struct timespec ts;
         clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -658,11 +665,14 @@ def _selftest() -> int:
     stacked = Observation()
     classify_thread([f'faccessat(AT_FDCWD, "{MARK_ROOT}enter/name-resolution", F_OK) = -1 ENOENT',
                      'openat(AT_FDCWD, "/etc/hosts", O_RDONLY) = 3',
-                     f'faccessat(AT_FDCWD, "{MARK_ROOT}leave/name-resolution", F_OK) = -1 ENOENT'],
+                     f'faccessat(AT_FDCWD, "{MARK_ROOT}leave/name-resolution", F_OK) = -1 ENOENT',
+                     f'faccessat(AT_FDCWD, "{MARK_ROOT}enter/mount-table", F_OK) = -1 ENOENT',
+                     'openat(AT_FDCWD, "/proc/self/mounts", O_RDONLY) = 3',
+                     f'faccessat(AT_FDCWD, "{MARK_ROOT}leave/mount-table", F_OK) = -1 ENOENT'],
                     set(), stacked)
     expect("what a scope brackets is the scope's, and a scope outside the vocabulary is unclassified once",
-           stacked.facilities == {} and len(stacked.unclassified) == 1
-           and stacked.unclassified[0].startswith("name-resolution"))
+           list(stacked.facilities) == ["name-resolution"] and len(stacked.unclassified) == 1
+           and stacked.unclassified[0].startswith("mount-table"))
     seen = Observation()
     seen.add("facility", "entropy", "e")
     seen.add("facility", "sockets-udp", "u")
@@ -707,17 +717,20 @@ def _selftest() -> int:
                 ("entropy", (), set()),
                 ("wall-clock", (), set()),
                 ("interface-list", (), set()),
+                ("name-resolution", (), set()),
             ):
                 got = observed(facility, *args)
                 expect(f"the witness of {facility} sees it and nothing else ({got.as_json()})",
                        set(got.facilities) == {facility} | also and got.unclassified == [])
-            for what in ("name-resolution", "process"):
-                got = observed(what)
-                expect(f"{what} is outside the vocabulary and is a finding ({got.as_json()})",
-                       got.facilities == {} and len(got.unclassified) == 1 and got.unclassified[0].startswith(what))
+            got = observed("process")
+            expect(f"starting a process is outside the vocabulary and is a finding ({got.as_json()})",
+                   got.facilities == {} and len(got.unclassified) == 1 and got.unclassified[0].startswith("process"))
             stack = observed("stack-probe")
             expect(f"the C library's stack probe is exempt ({stack.as_json()})",
                    stack.facilities == {} and stack.unclassified == [] and stack.exempt.get("thread-stack-probe") == 1)
+            local = observed("local-time")
+            expect(f"a local time is the calendar's, zone file and all ({local.as_json()})",
+                   set(local.facilities) == {"wall-clock"} and local.unclassified == [])
             mono = observed("monotonic")
             expect(f"a monotonic clock is not the calendar ({mono.as_json()})", mono.facilities == {})
             for what in ("wait", "stubborn"):

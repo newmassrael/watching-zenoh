@@ -229,14 +229,22 @@ def executable_requires(decl: dict, platform: dict, row: dict,
 
 
 def device_requires(decl: dict, platform: dict, row: dict, features: list[str]) -> list[str] | None:
-    """The facilities a library's capabilities may ask for. A facility the platform lacks is a
-    refusal naming the capability. (An executable's come from `executable_requires`.)"""
+    """The facilities a library may ask for: what its capabilities may ask, and what its ABI surface
+    asks whatever they are (its own package's `[[assessed_package]]` row, when it has one, as an
+    executable's own package does). A facility the platform lacks is a refusal naming who asks.
+    (An executable's come from `executable_requires`.)"""
     on = {f for f in features if f in decl["caps"]}
-    gaps = wz_config.platform_gaps(decl, platform["id"], on)
+    asks = wz_config.os_needs_of(decl, on)
+    for assessed in decl["assessed_packages"]:
+        if assessed["package"] == row["package"]:
+            for facility in assessed["os_needs"]:
+                asks.setdefault(facility, []).append(row["package"])
+    provided = set(platform["os_provides"])
+    gaps = {facility: who for facility, who in asks.items() if facility not in provided}
     if gaps:
         why = "; ".join(f"{facility} (asked by {', '.join(who)})" for facility, who in sorted(gaps.items()))
         raise Refusal(f"{row['id']} may ask for facilities platform {platform['id']} does not provide: {why}")
-    return sorted(wz_config.os_needs_of(decl, on))
+    return sorted(asks)
 
 
 def node_of_file(row: dict, measured: dict, features: list[str], declarations: dict[str, dict]) -> dict:
@@ -345,6 +353,11 @@ def artifact_entry(decl: dict, platform: dict, row: dict, relpath: str, blob: by
             upper, unassessed = device_requires(decl, platform, row, features), []
         required, may = split_requires(decl, upper)
     union = None if may is None else sorted(set(required) | set(may))
+    # The file's own imports against the bound derived for it: a definite import the bound lacks, or
+    # one no facility names, is a refusal, so no manifest describes a file its bytes contradict.
+    refuted = wz_config.import_findings(elf_facts.imported_symbols(blob), union)
+    if refuted:
+        raise Refusal(f"{row['id']}'s file contradicts its declared bound: " + "; ".join(refuted))
     return {
         "id": row["id"],
         "name": pathlib.PurePosixPath(relpath).name,
@@ -1250,7 +1263,7 @@ SYNTHETIC_TARGETS = {
 
 def _synthetic(row: dict, needed: list[str], roles: list[str] | None = None, family: str | None = None,
                revision: int = 1, facts_lists: dict[str, list[str]] | None = None,
-               triple: str = "x86_64-unknown-linux-gnu") -> bytes:
+               triple: str = "x86_64-unknown-linux-gnu", imports: list[str] | None = None) -> bytes:
     machine, interp, verneed = SYNTHETIC_TARGETS[triple]
     notes = [(elf_facts.STAMP_SECTION, "wz", 1, _stamp(family or row["family"], revision))]
     if roles is not None:
@@ -1261,7 +1274,7 @@ def _synthetic(row: dict, needed: list[str], roles: list[str] | None = None, fam
         notes_=notes, needed=needed, machine=machine,
         soname=f"lib{row['file']}.so" if row["kind"] == "shared-library" else None,
         interp=interp if row["kind"] == "executable" else None,
-        verneed=verneed)
+        verneed=verneed, symbols=[(name, False, True) for name in imports or []] or None)
 
 
 # ---------------------------------------------------------------------------
@@ -1578,19 +1591,21 @@ def _selftest() -> int:
                [p["role"] for p in demo_entry["provides"]] == ["session-node", "traffic-driver"])
         expect("the driver roles are the facts note's, in the manifest",
                demo_entry["provides"][1]["driver_roles"] == ["publish", "subscribe"])
-        expect("a library's device_requires is the union of what its capabilities may ask",
+        expect("a library's device_requires is what its capabilities and its own surface may ask",
                entries[0]["device_requires"]
-               == ["entropy", "interface-list", "multicast", "sockets-tcp", "sockets-udp", "threads"])
+               == ["entropy", "interface-list", "multicast", "name-resolution", "sockets-tcp", "sockets-udp",
+                   "threads", "wall-clock"])
         expect("an executable's is the base, its own package's and what its runtime features may ask",
                demo_entry["device_requires"]
-               == ["entropy", "filesystem", "interface-list", "multicast", "sockets-tcp", "sockets-udp",
-                   "threads", "wall-clock"]
+               == ["entropy", "filesystem", "interface-list", "multicast", "name-resolution", "sockets-tcp",
+                   "sockets-udp", "threads", "wall-clock"]
                and demo_entry["unassessed_features"] == [])
         expect("what every run asks for is required, and the rest of the bound may be asked",
                all(e["requires"] == ["entropy", "threads"] for e in entries)
-               and entries[0]["may_require"] == ["interface-list", "multicast", "sockets-tcp", "sockets-udp"]
-               and demo_entry["may_require"] == ["filesystem", "interface-list", "multicast", "sockets-tcp",
-                                                 "sockets-udp", "wall-clock"])
+               and entries[0]["may_require"] == ["interface-list", "multicast", "name-resolution", "sockets-tcp",
+                                                 "sockets-udp", "wall-clock"]
+               and demo_entry["may_require"] == ["filesystem", "interface-list", "multicast", "name-resolution",
+                                                 "sockets-tcp", "sockets-udp", "wall-clock"])
         unknown = artifact_entry(decl, platform, demo, "bin/wz-ap-demo", demo_blob, demo_features,
                                  {"wz-runtime-tokio": [*demo_resolved["wz-runtime-tokio"], "transport-link-ws"]})
         expect("an enabled runtime feature nobody assessed makes it unknown and is named",
@@ -1619,6 +1634,27 @@ def _selftest() -> int:
         bare = artifact_entry(decl, platform, demo, "bin/wz-ap-demo", demo_blob, demo_features)
         expect("an executable with no resolved runtime features asks for the base and its own package's",
                bare["device_requires"] == sorted(set(decl["os_base"]) | {"filesystem", "wall-clock"}))
+        expect("a file whose imports its bound covers is described",
+               artifact_entry(decl, platform, pico, "lib/libwz_capi_pico.so",
+                              _synthetic(pico, needs, imports=["getaddrinfo", "pthread_create", "socket"]),
+                              pico_features)["device_requires"] is not None)
+        # Without the pico surface's own row, its clock read is outside the bound.
+        unassessed_surface = copy.deepcopy(decl)
+        unassessed_surface["assessed_packages"] = [p for p in decl["assessed_packages"]
+                                                   if p["package"] != pico["package"]]
+        for imports, words, dec in ((["getaddrinfo", "unix_only_call"], None, decl),
+                                    (["gettimeofday"], None, decl),
+                                    (["gettimeofday"], "so it may ask for wall-clock, which its bound lacks",
+                                     unassessed_surface),
+                                    (["fork"], "a request no facility of the vocabulary names", decl)):
+            blob = _synthetic(pico, needs, imports=imports)
+            try:
+                artifact_entry(dec, platform, pico, "lib/libwz_capi_pico.so", blob, ["peer"])
+            except Refusal as err:
+                expect(f"imports {imports} refute the bound with {words!r} ({err})",
+                       words is not None and words in str(err))
+            else:
+                expect(f"imports {imports} are within the bound", words is None)
         expect("the glibc floor is measured", entries[0]["elf"]["os_floor"]["glibc"] == "GLIBC_2.34")
         no_config = artifact_entry(decl, platform, demo, "bin/wz-ap-demo", demo_blob, ["other"], demo_resolved)
         expect("the session node is absent when its feature is off",

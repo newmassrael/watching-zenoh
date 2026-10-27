@@ -95,6 +95,12 @@ c = []
 # Windows) to honour a locator's `#iface=` and the interface rules of access control. A platform
 # whose C library lacks it cannot run a host build at all, which is why it is not a capability.
 #
+# `name-resolution` is in it for the same reason: the TCP and UDP links resolve a locator's host
+# through `tokio::net::lookup_host` (`link_pipeline.rs`, `udp_pipeline.rs`, `link_socket.rs`), which
+# calls the C library's `getaddrinfo` when the locator names a host rather than an address. Every
+# host artifact binds `getaddrinfo` by a relocation (measured from its bytes, `elf_facts.py
+# imported_symbols`), and the entry refuses a bound its file's imports refute.
+#
 # `always` is the part of the base that every run of a host build asks for and cannot go on
 # without, whatever its configuration: the manifest's `requires` (T9). `threads` because the
 # runtime pool is a multi-threaded tokio runtime and fails to build without them
@@ -103,7 +109,7 @@ c = []
 # a node with no TCP endpoint opens no TCP socket, and a failed interface listing leaves a link's
 # interface set indeterminate and the link open (`interface_names_for`).
 [os]
-base = ["threads", "sockets-tcp", "entropy", "interface-list"]
+base = ["threads", "sockets-tcp", "entropy", "interface-list", "name-resolution"]
 always = ["threads", "entropy"]
 
 # ─── Platforms (docs/target-build-contract.md T3) ─────────────────────────────────────────────
@@ -140,7 +146,7 @@ sdk_kind = "yocto"
 # membership, AF_UNIX, files, getrandom, getifaddrs, the wall clock. `raw-ethernet` is the kernel's
 # packet socket and needs CAP_NET_RAW, so a build that asks for it needs a service that holds it.
 # Read from the standard C library's interface, NOT run on a board.
-os_provides = ["threads", "sockets-tcp", "sockets-udp", "multicast", "raw-ethernet", "unix-sockets", "filesystem", "entropy", "wall-clock", "interface-list"]
+os_provides = ["threads", "sockets-tcp", "sockets-udp", "multicast", "raw-ethernet", "unix-sockets", "filesystem", "entropy", "wall-clock", "interface-list", "name-resolution"]
 system_assumed = ["libgcc_s.so.1", "libm.so.6", "libc.so.6", "ld-linux-aarch64.so.1"]
 # The C++ runtime is in a Yocto image only when one of its packages needs it, so it is bundled from
 # the SDK's sysroot, never assumed. `--sdk-bundle-check` read it from the glibc 2.35 SDK: it needs
@@ -162,7 +168,7 @@ sdk_kind = "android-ndk"
 # API 24), getrandom, files. `raw-ethernet` is left out because an app cannot open a packet socket,
 # and `multicast` is the socket option only: a device on Wi-Fi may also need the platform's multicast
 # lock, which no wz build takes.
-os_provides = ["threads", "sockets-tcp", "sockets-udp", "multicast", "unix-sockets", "filesystem", "entropy", "wall-clock", "interface-list"]
+os_provides = ["threads", "sockets-tcp", "sockets-udp", "multicast", "unix-sockets", "filesystem", "entropy", "wall-clock", "interface-list", "name-resolution"]
 system_assumed = ["libdl.so", "libm.so", "libc.so"]
 # The NDK's C++ runtime: an app that links it carries the file (the NDK's own rule), so it is
 # bundled and never assumed. `--sdk-bundle-check` read it from NDK 30: SONAME libc++_shared.so,
@@ -187,7 +193,7 @@ sdk_kind = "qnx-sdp"
 # getentropy), so it rests on that service running. `raw-ethernet` is left out: SOCK_RAW is an IP raw
 # socket, and the link level on QNX is BPF. `multicast` is the IPv4 group join: the IPv6 one answers
 # Unsupported (see the help).
-os_provides = ["threads", "sockets-tcp", "sockets-udp", "multicast", "unix-sockets", "filesystem", "entropy", "wall-clock", "interface-list"]
+os_provides = ["threads", "sockets-tcp", "sockets-udp", "multicast", "unix-sockets", "filesystem", "entropy", "wall-clock", "interface-list", "name-resolution"]
 system_assumed = ["libsocket.so.4", "libgcc_s.so.1", "libc.so.5", "libm.so.3"]
 # The SDP's C++ runtime and the message catalog it needs: a board of this stack was measured without
 # each, so they are bundled, never assumed. `--sdk-bundle-check` read them from the QNX 7.1 SDP:
@@ -208,7 +214,7 @@ support = "verified"
 sdk_kind = "qnx-sdp"
 # What the QNX 7.1 SDP headers declare for the io-pkt stack, read from them and NOT run on a board;
 # the same set as the io-sock row (IP_ADD_MEMBERSHIP and getifaddrs are declared in usr/include).
-os_provides = ["threads", "sockets-tcp", "sockets-udp", "multicast", "unix-sockets", "filesystem", "entropy", "wall-clock", "interface-list"]
+os_provides = ["threads", "sockets-tcp", "sockets-udp", "multicast", "unix-sockets", "filesystem", "entropy", "wall-clock", "interface-list", "name-resolution"]
 system_assumed = ["libsocket.so.3", "libgcc_s.so.1", "libc.so.5", "libm.so.3"]
 # The SDP's C++ runtime and the message catalog it needs, as for the io-sock row: an image carries
 # them only when its integrator chose to. Read from the same SDP by `--sdk-bundle-check`.
@@ -227,7 +233,7 @@ libc = "glibc"
 std = "prebuilt"
 lane = "none"
 support = "built"
-os_provides = ["threads", "sockets-tcp", "sockets-udp", "multicast", "raw-ethernet", "unix-sockets", "filesystem", "entropy", "wall-clock", "interface-list"]
+os_provides = ["threads", "sockets-tcp", "sockets-udp", "multicast", "raw-ethernet", "unix-sockets", "filesystem", "entropy", "wall-clock", "interface-list", "name-resolution"]
 system_assumed = ["libgcc_s.so.1", "libm.so.6", "libc.so.6", "ld-linux-x86-64.so.2"]
 help = "The x86_64 Linux host the workspace is built and tested on; the one platform the entry has run on."
 
@@ -250,6 +256,17 @@ help = "The runtime: every socket, thread and file read of a session. What every
 # says otherwise. The demo reads a file only when `--config`, `--sessions` or `--check-topology`
 # names one (`main.rs`). Its threads (the worker in `main.rs`, the stop watcher in `stop_event.rs`)
 # are the base's. `wz-ap-demo-app`, which `switchboard` pulls, takes none of its own.
+# The pico library's ABI surface reads the calendar whatever its capabilities: `z_time_now` is
+# `gettimeofday`, and `z_time_now_as_str` a local time (`localtime`, the zone database). The entry's
+# import check found it (a profile build without the timestamping capability imports
+# `gettimeofday`); a library's own package adds its row to its capabilities' bound. Its features
+# select capabilities, whose rows assess them, so the package is assessed whole.
+[[assessed_package]]
+package = "wz-capi-pico"
+by_feature = false
+os_needs = ["wall-clock"]
+help = "The pico C ABI's own surface: z_time_now and z_time_now_as_str read the calendar and the local zone."
+
 [[assessed_package]]
 package = "wz-ap-demo"
 by_feature = false

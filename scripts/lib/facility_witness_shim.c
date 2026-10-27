@@ -77,6 +77,40 @@ time_t time(time_t *out) {
     return real(out);
 }
 
+// A local time reads the zone database (/etc/localtime) inside the C library: that read is the
+// calendar's, so the conversion is a scope of `wall-clock` and not a file the program asked for.
+struct tm *localtime(const time_t *t) {
+    static struct tm *(*real)(const time_t *);
+    if (!real) {
+        real = (struct tm * (*)(const time_t *)) dlsym(RTLD_NEXT, "localtime");
+    }
+    mark(MARK_ROOT "enter/wall-clock");
+    struct tm *out = real(t);
+    mark(MARK_ROOT "leave/wall-clock");
+    return out;
+}
+
+struct tm *localtime_r(const time_t *restrict t, struct tm *restrict out) {
+    static struct tm *(*real)(const time_t *restrict, struct tm *restrict);
+    if (!real) {
+        real = (struct tm * (*)(const time_t *restrict, struct tm *restrict)) dlsym(RTLD_NEXT, "localtime_r");
+    }
+    mark(MARK_ROOT "enter/wall-clock");
+    struct tm *got = real(t, out);
+    mark(MARK_ROOT "leave/wall-clock");
+    return got;
+}
+
+void tzset(void) {
+    static void (*real)(void);
+    if (!real) {
+        real = (void (*)(void))dlsym(RTLD_NEXT, "tzset");
+    }
+    mark(MARK_ROOT "enter/wall-clock");
+    real();
+    mark(MARK_ROOT "leave/wall-clock");
+}
+
 int getifaddrs(struct ifaddrs **out) {
     static int (*real)(struct ifaddrs **);
     if (!real) {

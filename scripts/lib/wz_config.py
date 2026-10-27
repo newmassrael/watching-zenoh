@@ -471,11 +471,60 @@ OS_FACILITIES = {
     "unix-sockets": "open Unix domain stream sockets by a file system path",
     "filesystem": "read files by path, and write them for a plane that stores data",
     "entropy": "draw cryptographic random bytes from the operating system (getrandom, /dev/urandom)",
-    "wall-clock": "read the calendar time (CLOCK_REALTIME, SystemTime); it is never set, and a "
-                  "wrong reading makes certificate validity and timestamps wrong",
+    "wall-clock": "read the calendar time (CLOCK_REALTIME, SystemTime), and the local time zone "
+                  "when a local time is asked for (localtime); it is never set, and a wrong reading "
+                  "makes certificate validity and timestamps wrong",
     "interface-list": "list the network interfaces and their addresses, or look one up by name or "
                       "index (getifaddrs, if_nametoindex, GetAdaptersAddresses)",
+    "name-resolution": "resolve a host name to addresses through the operating system's resolver "
+                       "(getaddrinfo): its files (/etc/hosts, nsswitch) and its DNS servers",
 }
+# What a built file's imports prove (docs/target-build-contract.md T9). A C-library function whose
+# every call is a request for one facility is a witness of it in the file's bytes: a file that binds
+# it by a relocation (`elf_facts.imported_symbols`) may ask for that facility, whatever the
+# declaration says, so the entry refuses a bound that lacks it. A function that serves several
+# facilities by its arguments (`socket`, `open`, `clock_gettime`, `setsockopt`) proves none and is
+# not listed: it cannot refute a bound, and listing it would refute every bound.
+FACILITY_IMPORTS = {
+    "pthread_create": "threads",
+    "getifaddrs": "interface-list",
+    "if_nametoindex": "interface-list",
+    "if_indextoname": "interface-list",
+    "if_nameindex": "interface-list",
+    "getrandom": "entropy",
+    "getentropy": "entropy",
+    "gettimeofday": "wall-clock",
+    "localtime": "wall-clock",
+    "localtime_r": "wall-clock",
+    "tzset": "wall-clock",
+    "mktime": "wall-clock",
+    "getaddrinfo": "name-resolution",
+    "getnameinfo": "name-resolution",
+    "gethostbyname": "name-resolution",
+    "gethostbyname_r": "name-resolution",
+}
+# The functions whose call is a request no facility names: a file that binds one is refused until
+# the vocabulary has a word for it, since a consumer could not be told the device needs it.
+UNNAMED_IMPORTS = {
+    "fork": "starting a process", "vfork": "starting a process", "posix_spawn": "starting a process",
+    "posix_spawnp": "starting a process", "execv": "starting a process", "execve": "starting a process",
+    "execvp": "starting a process", "system": "starting a process", "popen": "starting a process",
+}
+
+
+def import_findings(imports: list[str], bound: list[str] | None) -> list[str]:
+    """What a file's imports refute of its bound: each facility a definite import proves and the
+    bound lacks, and each import no facility names. An UNKNOWN bound (`None`) is refuted only by
+    the second."""
+    out = [f"it imports {name}, a request no facility of the vocabulary names ({what})"
+           for name, what in sorted(UNNAMED_IMPORTS.items()) if name in imports]
+    if bound is not None:
+        out += [f"it imports {name}, so it may ask for {facility}, which its bound lacks"
+                for name, facility in sorted(FACILITY_IMPORTS.items())
+                if name in imports and facility not in bound]
+    return out
+
+
 # The packages assessed for the facilities their code asks of the operating system
 # (`[[assessed_package]]`), declared rather than written here so the set is data the entry and the
 # facility oracle read alike. A package's `os_needs` is what its own code may ask for: whatever its
@@ -2766,6 +2815,16 @@ def cmd_selftest() -> int:
            caps_refused('always = ["threads", "entropy"]', 'always = ["threadz"]', "not a facility"))
     expect("every facility of the vocabulary says what it means, in one line",
            all(isinstance(m, str) and m and "\n" not in m for m in OS_FACILITIES.values()))
+    expect("every import a facility is proved by names a facility of the vocabulary",
+           set(FACILITY_IMPORTS.values()) <= set(OS_FACILITIES)
+           and not set(FACILITY_IMPORTS) & set(UNNAMED_IMPORTS))
+    expect("an import refutes a bound that lacks its facility, and not one that has it",
+           import_findings(["getaddrinfo", "socket"], ["threads"])
+           == ["it imports getaddrinfo, so it may ask for name-resolution, which its bound lacks"]
+           and import_findings(["getaddrinfo", "socket"], ["name-resolution"]) == [])
+    expect("an import no facility names is refuted whatever the bound, even an unknown one",
+           import_findings(["fork"], None)
+           == ["it imports fork, a request no facility of the vocabulary names (starting a process)"])
     expect("a platform needs every required key",
            caps_refused('lane = "none"\n', "", "has no `lane`"))
     expect("a platform with an unknown key is refused",
