@@ -294470,6 +294470,50 @@
         "Read the hosted run of round 3795 and of this one at the start of the next round: C1co builds the pico CLI and runs stdbuf there for the first time."
       ]
     },
+    "Round 3807": {
+      "decision_summary": "The fixed client's turnaround at the wire against single-threaded zenoh-pico goes from a loss (1.062) to a win (0.970, interval 0.970 to 0.974, twelve boots of each image). The software round trip was split by the zeth driver's cycle-counter stamps into three gaps; the application's part of a query (recvfrom to sendto) was 53.2 us against pico's 45.6, and is 42.0 us now. Named points of the query path showed that the tick-sampled program-counter profile had aliased against the periodic probe (it put key matching at 17% of the time; the stamps put it at 1.9 us), so five steps were taken from the stamps and each kept because it measured better: key facts read once, the plain reply stored in one window of the transmit slot (the generic encoder is the reference and the fallback), the Request's target and QoS read in one walk of its extension chain, a reply keyed as its query admitted from the query's facts, and the tick conversion without a 64-bit division. A generic encoder inlined into the reply closure had set a 2.5 KB frame for every reply and raised the stack peak by 368 B until it was left out of line. The text of the fixed image widened by about 2.4 KB (1.2132 of pico) and stays a loss.",
+      "changes_bullets": [
+        "crates/wz-session-core: keyexpr_match.rs (KeyFacts, the text matcher with known facts), query.rs (a queryable's pattern facts at declare, the query's once per query, the reply admitted from them), query/in_place.rs with ext_nodeid.rs, declare_ext_qos.rs and request_routing_context.rs (target and QoS in one walk, one mapping rule each), lent_response.rs with tx_buf.rs, tx_lease.rs and session_actions.rs (the plain reply measured and stored in one window; TxBuf::reserve).",
+        "crates/wz-runtime-zephyr/src/lib.rs: ticks to microseconds as a multiplication for a rate that divides a million.",
+        "deploy/upstream_parity.json: run 20261028T005644 (twelve boots) replaces run 20261027T201540; docs/query-answer-path.md (new), docs/upstream-parity.md (D7: the SCE element gate exists for the accept path), docs/storage-policy-and-link-layer.md section 5.8."
+      ],
+      "verification_bullets": [
+        "Kit stamps (scripts/kit-lane.sh, CONFIG_WZ_ZETH_STAMPS, 500-query lines agreeing to 0.1 us): recvfrom to sendto 53.2, 53.0, 48.4, 46.2, 44.0, 42.0 us after each step; rx to tx 129.4 to 117.1 us against pico 124.3; the other two gaps are ahead of pico (30.4 against 33.1, 44.8 against 45.7).",
+        "The matrix: scripts/kit-lane.sh compare --boots 12 over the four images; the file's rows equal kit_compare.py's output. The three gated fixed images build, hold the stack gate and read inside their rows of the resource budget (the stack peak 5,888 B as before).",
+        "Tests: the reply writer against the codec's own encoder and the owned path over rids, key lengths, payload lengths either side of each VLE width, encodings, Put and Del, default and non-default QoS, through a slice window, a capped one and a vector, and a reply that does not fit refused whole (4 to 5 tests by feature set); the key facts against the old scans; the pair reader against two single reads; the lent dispatch against the owned one. wz-session-core lib 1032 passed on codec-declare, alloc, query-queryable, transport-tx-lend; the fixed node 29 passed."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "Against the single-threaded pico the fixed client is still behind in text (176,352 B against 145,364, 1.2132), flash (1.2102), stack used (9,188 B against 6,060) and stack reserved (1.06); ram, heap peak and turnaround win. The heap client's turnaround ties (1.0).",
+        "Requests to the codec generator: an encoder that gives its length and stores into a window (what the plain reply does by hand), and a fold over a list's entries; the Request's decode is 9.2 us of the 42.0 and is the generated codec's.",
+        "The reply is still staged and drained back (design L3, a direct reply); the static queryable table (L2) and the event routing (L4) of docs/query-answer-path.md are not built.",
+        "The kit's timing moves by a few tenths of a microsecond with the layout of unreached code (41.4 and 42.0 us with 392 B between them); the batching row (361 us) and the other GET rows were not re-measured."
+      ],
+      "publishable_decision_summary": "The fixed client's turnaround at the wire against single-threaded zenoh-pico goes from a loss (1.062) to a win (0.970, interval 0.970 to 0.974, twelve boots of each image). The software round trip was split by the zeth driver's cycle-counter stamps into three gaps; the application's part of a query (recvfrom to sendto) was 53.2 us against pico's 45.6, and is 42.0 us now. Named points of the query path showed that the tick-sampled program-counter profile had aliased against the periodic probe (it put key matching at 17% of the time; the stamps put it at 1.9 us), so five steps were taken from the stamps and each kept because it measured better: key facts read once, the plain reply stored in one window of the transmit slot (the generic encoder is the reference and the fallback), the Request's target and QoS read in one walk of its extension chain, a reply keyed as its query admitted from the query's facts, and the tick conversion without a 64-bit division. A generic encoder inlined into the reply closure had set a 2.5 KB frame for every reply and raised the stack peak by 368 B until it was left out of line. The text of the fixed image widened by about 2.4 KB (1.2132 of pico) and stays a loss.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core: keyexpr_match.rs (KeyFacts, the text matcher with known facts), query.rs (a queryable's pattern facts at declare, the query's once per query, the reply admitted from them), query/in_place.rs with ext_nodeid.rs, declare_ext_qos.rs and request_routing_context.rs (target and QoS in one walk, one mapping rule each), lent_response.rs with tx_buf.rs, tx_lease.rs and session_actions.rs (the plain reply measured and stored in one window; TxBuf::reserve).",
+        "crates/wz-runtime-zephyr/src/lib.rs: ticks to microseconds as a multiplication for a rate that divides a million.",
+        "deploy/upstream_parity.json: run 20261028T005644 (twelve boots) replaces run 20261027T201540; docs/query-answer-path.md (new), docs/upstream-parity.md (D7: the SCE element gate exists for the accept path), docs/storage-policy-and-link-layer.md section 5.8."
+      ],
+      "publishable_verification_bullets": [
+        "Kit stamps (scripts/kit-lane.sh, CONFIG_WZ_ZETH_STAMPS, 500-query lines agreeing to 0.1 us): recvfrom to sendto 53.2, 53.0, 48.4, 46.2, 44.0, 42.0 us after each step; rx to tx 129.4 to 117.1 us against pico 124.3; the other two gaps are ahead of pico (30.4 against 33.1, 44.8 against 45.7).",
+        "The matrix: scripts/kit-lane.sh compare --boots 12 over the four images; the file's rows equal kit_compare.py's output. The three gated fixed images build, hold the stack gate and read inside their rows of the resource budget (the stack peak 5,888 B as before).",
+        "Tests: the reply writer against the codec's own encoder and the owned path over rids, key lengths, payload lengths either side of each VLE width, encodings, Put and Del, default and non-default QoS, through a slice window, a capped one and a vector, and a reply that does not fit refused whole (4 to 5 tests by feature set); the key facts against the old scans; the pair reader against two single reads; the lent dispatch against the owned one. wz-session-core lib 1032 passed on codec-declare, alloc, query-queryable, transport-tx-lend; the fixed node 29 passed."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Against the single-threaded pico the fixed client is still behind in text (176,352 B against 145,364, 1.2132), flash (1.2102), stack used (9,188 B against 6,060) and stack reserved (1.06); ram, heap peak and turnaround win. The heap client's turnaround ties (1.0).",
+        "Requests to the codec generator: an encoder that gives its length and stores into a window (what the plain reply does by hand), and a fold over a list's entries; the Request's decode is 9.2 us of the 42.0 and is the generated codec's.",
+        "The reply is still staged and drained back (design L3, a direct reply); the static queryable table (L2) and the event routing (L4) of docs/query-answer-path.md are not built.",
+        "The kit's timing moves by a few tenths of a microsecond with the layout of unreached code (41.4 and 42.0 us with 392 B between them); the batching row (361 us) and the other GET rows were not re-measured."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
