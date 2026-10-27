@@ -293424,6 +293424,52 @@
         "Item 751 step (b) continues at step 3: the data plane for a peer node, held equal to LinkstateForwarder by a differential gate over the existing peer E2E files, and then the constructor becomes public. Until then a peer forwarder exists only in tests, and the first_peers_net accessors answer the north graph on a peer node, which step 6 must not read as the south peers. The register of a peer face ran the router's flood and replay paths without a panic, but no data, query or token plane has been checked for a peer."
       ]
     },
+    "Round 3781": {
+      "decision_summary": "The fixed client's console lines and numbers are written without core::fmt: the text sink gains the decimal and hex writers, a console line is a slice of parts, and the formatting code in the kit image falls from 3,842 to 742 B (text 176,192 to 173,808 B). The batching client's GET median then read 494 us against 361 us the build before; with the instruction cache off the three builds read 610, 600 and 593 us, so the cause was where the linker put the functions, not the logic. A PC sample through the debug port put about 60% of the samples in the receive thread's polling loop, and linking the kernel files that loop runs into the board's ITCM (CONFIG_WZ_POLL_PATH_IN_ITCM, on for the wz images and the pico compare image alike) brought the spread between three builds from 133 to 42 us. The parity matrix is re-run with the option on both sides, six boots of four images: the fixed client's text goes 1.2124 to 1.2053 of the single-threaded pico, no verdict moves, and the turnaround ratio goes 1.0432 to 1.0623 because pico's median fell and the wz median did not.",
+      "changes_bullets": [
+        "crates/wz-session-core, wz-runtime-coop, wz-runtime-zephyr, wz-runtime-posix, wz-session-mcu and the kit nodes: push_u64, push_hex_u128, LogPart and log_parts replace fmt::Arguments on every console line, the zid hex and the UDP locator.",
+        "deploy/zephyr-common (Kconfig.wz, wz_zephyr_board.cmake), the zeth overlay and the pico compare prj.conf: CONFIG_WZ_POLL_PATH_IN_ITCM; scripts/kit-lane.sh KIT_PROFILE_OUT with scripts/lib/pc_sample.tcl and pc_profile.py.",
+        "deploy/resource_budget.json and scripts/lib/stack_frame_gate.py: the get image's chain 6,524 to 6,492 and reading 6,648 to 6,600, moved together.",
+        "deploy/upstream_parity.json: run 20261027T201540 replaces run 20261027T122709; docs/storage-policy-and-link-layer.md section 5.8."
+      ],
+      "verification_bullets": [
+        "Each new writer is held equal to what the formatter prints for the same value by a test (text_out 11, udp_link 20, slot_node 29 and zephyr 30 tests read); the console lines the scripts match are the same bytes on the kit in two boots.",
+        "The batching GET median on the kit, cache on: 388, 361, 494 us for three builds before, 333, 319, 361 with the option; the spread fell from 133 to 42 us. The four wz images build and pass the stack gate with the option; the stack gate and the budget gate selftests pass.",
+        "The matrix: scripts/kit-lane.sh compare --boots 6 over the four images; the file's rows equal kit_compare.py's output. prose_named_identifier_gate.py --check passes."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "Against the single-threaded pico the fixed client is still behind in text (175,240 B against 145,388, about 30 KB), flash, stack used (9,188 B against 6,060) and turnaround (1.0623); only heap and ram win.",
+        "The turnaround at the wire did not follow the GET figures: find what the answer path spends outside the polling loop (the Rust half of it, wz_zeth_receive, rx_ready and poll_link, is not in the ITCM).",
+        "Text: six copies of dispatch_network_message_at (about 4.25 KB) and two sets of SCE microstep helpers (about 4 KB) are the largest repeats found; the stack gate follows direct calls only, so merging them needs its indirect roots declared.",
+        "The batching row (361 us) is above what the image now measures (about 330) and the TLS image built with the option was not run on the kit."
+      ],
+      "publishable_decision_summary": "The fixed client's console lines and numbers are written without core::fmt: the text sink gains the decimal and hex writers, a console line is a slice of parts, and the formatting code in the kit image falls from 3,842 to 742 B (text 176,192 to 173,808 B). The batching client's GET median then read 494 us against 361 us the build before; with the instruction cache off the three builds read 610, 600 and 593 us, so the cause was where the linker put the functions, not the logic. A PC sample through the debug port put about 60% of the samples in the receive thread's polling loop, and linking the kernel files that loop runs into the board's ITCM (CONFIG_WZ_POLL_PATH_IN_ITCM, on for the wz images and the pico compare image alike) brought the spread between three builds from 133 to 42 us. The parity matrix is re-run with the option on both sides, six boots of four images: the fixed client's text goes 1.2124 to 1.2053 of the single-threaded pico, no verdict moves, and the turnaround ratio goes 1.0432 to 1.0623 because pico's median fell and the wz median did not.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core, wz-runtime-coop, wz-runtime-zephyr, wz-runtime-posix, wz-session-mcu and the kit nodes: push_u64, push_hex_u128, LogPart and log_parts replace fmt::Arguments on every console line, the zid hex and the UDP locator.",
+        "deploy/zephyr-common (Kconfig.wz, wz_zephyr_board.cmake), the zeth overlay and the pico compare prj.conf: CONFIG_WZ_POLL_PATH_IN_ITCM; scripts/kit-lane.sh KIT_PROFILE_OUT with scripts/lib/pc_sample.tcl and pc_profile.py.",
+        "deploy/resource_budget.json and scripts/lib/stack_frame_gate.py: the get image's chain 6,524 to 6,492 and reading 6,648 to 6,600, moved together.",
+        "deploy/upstream_parity.json: run 20261027T201540 replaces run 20261027T122709; docs/storage-policy-and-link-layer.md section 5.8."
+      ],
+      "publishable_verification_bullets": [
+        "Each new writer is held equal to what the formatter prints for the same value by a test (text_out 11, udp_link 20, slot_node 29 and zephyr 30 tests read); the console lines the scripts match are the same bytes on the kit in two boots.",
+        "The batching GET median on the kit, cache on: 388, 361, 494 us for three builds before, 333, 319, 361 with the option; the spread fell from 133 to 42 us. The four wz images build and pass the stack gate with the option; the stack gate and the budget gate selftests pass.",
+        "The matrix: scripts/kit-lane.sh compare --boots 6 over the four images; the file's rows equal kit_compare.py's output. prose_named_identifier_gate.py --check passes."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Against the single-threaded pico the fixed client is still behind in text (175,240 B against 145,388, about 30 KB), flash, stack used (9,188 B against 6,060) and turnaround (1.0623); only heap and ram win.",
+        "The turnaround at the wire did not follow the GET figures: find what the answer path spends outside the polling loop (the Rust half of it, wz_zeth_receive, rx_ready and poll_link, is not in the ITCM).",
+        "Text: six copies of dispatch_network_message_at (about 4.25 KB) and two sets of SCE microstep helpers (about 4 KB) are the largest repeats found; the stack gate follows direct calls only, so merging them needs its indirect roots declared.",
+        "The batching row (361 us) is above what the image now measures (about 330) and the TLS image built with the option was not run on the kit."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
