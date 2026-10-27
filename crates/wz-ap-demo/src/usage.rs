@@ -316,6 +316,12 @@ pub(crate) fn print_usage() {
     eprintln!("                             this node holds at once. A peer arriving at the bound");
     eprintln!("                             is refused before it enters the table; default 1000,");
     eprintln!("                             which is zenoh's own.");
+    eprintln!("    --accept-pending <N>     --router-hat: how many inbound links may be");
+    eprintln!("                             mid-handshake at once, upstream's accept_pending. A");
+    eprintln!("                             link past it is closed at once; default 100.");
+    eprintln!("    --accept-timeout-ms <ms> --router-hat: how long one inbound handshake may");
+    eprintln!("                             take, upstream's accept_timeout, before its link is");
+    eprintln!("                             closed; default 10000.");
     eprintln!("    --cpu-share <percent>    --router-hat: the CPU, in percent of one core, this");
     eprintln!("                             router may count on. Declaring it lowers the sessions");
     eprintln!("                             admitted to what the keepalives can serve at that");
