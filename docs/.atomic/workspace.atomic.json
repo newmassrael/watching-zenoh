@@ -293262,6 +293262,56 @@
         "The hosted result of this push is read per job at the start of the next round."
       ]
     },
+    "Round 3777": {
+      "decision_summary": "A manifest entry splits its device bound in two (docs/target-build-contract.md T9), asked for by the analyzer's design so that it can block on what a device measurably lacks and only warn on the rest. requires is what every run asks for and cannot go on without; may_require is the rest of the upper bound; device_requires stays their union, within schema 1. requires is a lower bound: a facility in it is certain, one outside it is not proved optional. A host build requires [os] always (threads, entropy); sockets-tcp and interface-list moved to may_require. A declared node requires entropy and its endpoints' sockets and no thread. A manifest written before the split carries neither key and stays valid. The vocabulary states each facility's meaning, and the TLS and QUIC rows now ask for wall-clock.",
+      "changes_bullets": [
+        "deploy/wz-config.toml: [os] always = threads, entropy (a subset of base); transport_tls and transport_quic os_needs gain wall-clock (rustls checks certificate validity against the current time).",
+        "scripts/lib/wz_config.py: OS_FACILITIES maps each facility to its one-line meaning; validate_os requires always, from the vocabulary and inside base; decl carries os_always.",
+        "scripts/lib/wz_node.py: the slot target states os_always (entropy) and group_may (interface-list); view_of derives a node's requires and may_require from them and its endpoints.",
+        "scripts/lib/wz_package.py: artifact keys requires and may_require; split_requires, node_requires on the node's own split, requires_findings (disjoint, union, null together with unassessed) held by shape_findings; UNSPLIT_ARTIFACT_KEYS accepts a manifest written before the split.",
+        "deploy/fixtures/manifests: regenerated; host-unsplit-bound (valid) and three shape cases of the invariant added.",
+        "docs/target-build-contract.md T9: the split, the null rule, the unsplit form and the table of facility meanings."
+      ],
+      "verification_bullets": [
+        "wz_package.py --selftest OK with kconfiglib provisioned (the real-profile arms ran), including the invariant arms: both sides overlapping, a union that is not the two, one null side, an unknown bound with no unassessed feature, a known bound with one.",
+        "wz_config.py --selftest 220/220 arms pass (always missing, outside base, outside the vocabulary; every meaning one line); wz_config.py --check and --check-presets rc 0.",
+        "wz_node.py --selftest OK: a tcp node requires entropy and sockets-tcp and nothing more, a udp node no stream socket, a group member may list the interfaces.",
+        "Read from the code: the tokio runtime pool is multi-threaded, every handshake draws from getrandom, a failed getifaddrs leaves a link open, the slot node starts no thread, reads no calendar time and stops without entropy.",
+        "gate_reason_claims, store_reasons_resolve, upstream_feature_census and reason_review_pin_gate --check rc 0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "The measured records under deploy/fixtures/manifests/measured are of the unsplit form; recording them again from builds on their SDK hosts (owner approval per host) brings them to the split form.",
+        "requires is a lower bound: an assessed runtime feature or capability that every run of it uses is still in may_require, since rows state only what a feature may ask for; a per-row always would raise it.",
+        "Deriving requires from a node's configuration document (not only a declared node) is the next step the consumer named, and is not started."
+      ],
+      "publishable_decision_summary": "A manifest entry splits its device bound in two (docs/target-build-contract.md T9), asked for by the analyzer's design so that it can block on what a device measurably lacks and only warn on the rest. requires is what every run asks for and cannot go on without; may_require is the rest of the upper bound; device_requires stays their union, within schema 1. requires is a lower bound: a facility in it is certain, one outside it is not proved optional. A host build requires [os] always (threads, entropy); sockets-tcp and interface-list moved to may_require. A declared node requires entropy and its endpoints' sockets and no thread. A manifest written before the split carries neither key and stays valid. The vocabulary states each facility's meaning, and the TLS and QUIC rows now ask for wall-clock.",
+      "publishable_changes_bullets": [
+        "deploy/wz-config.toml: [os] always = threads, entropy (a subset of base); transport_tls and transport_quic os_needs gain wall-clock (rustls checks certificate validity against the current time).",
+        "scripts/lib/wz_config.py: OS_FACILITIES maps each facility to its one-line meaning; validate_os requires always, from the vocabulary and inside base; decl carries os_always.",
+        "scripts/lib/wz_node.py: the slot target states os_always (entropy) and group_may (interface-list); view_of derives a node's requires and may_require from them and its endpoints.",
+        "scripts/lib/wz_package.py: artifact keys requires and may_require; split_requires, node_requires on the node's own split, requires_findings (disjoint, union, null together with unassessed) held by shape_findings; UNSPLIT_ARTIFACT_KEYS accepts a manifest written before the split.",
+        "deploy/fixtures/manifests: regenerated; host-unsplit-bound (valid) and three shape cases of the invariant added.",
+        "docs/target-build-contract.md T9: the split, the null rule, the unsplit form and the table of facility meanings."
+      ],
+      "publishable_verification_bullets": [
+        "wz_package.py --selftest OK with kconfiglib provisioned (the real-profile arms ran), including the invariant arms: both sides overlapping, a union that is not the two, one null side, an unknown bound with no unassessed feature, a known bound with one.",
+        "wz_config.py --selftest 220/220 arms pass (always missing, outside base, outside the vocabulary; every meaning one line); wz_config.py --check and --check-presets rc 0.",
+        "wz_node.py --selftest OK: a tcp node requires entropy and sockets-tcp and nothing more, a udp node no stream socket, a group member may list the interfaces.",
+        "Read from the code: the tokio runtime pool is multi-threaded, every handshake draws from getrandom, a failed getifaddrs leaves a link open, the slot node starts no thread, reads no calendar time and stops without entropy.",
+        "gate_reason_claims, store_reasons_resolve, upstream_feature_census and reason_review_pin_gate --check rc 0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The measured records under deploy/fixtures/manifests/measured are of the unsplit form; recording them again from builds on their SDK hosts (owner approval per host) brings them to the split form.",
+        "requires is a lower bound: an assessed runtime feature or capability that every run of it uses is still in may_require, since rows state only what a feature may ask for; a per-row always would raise it.",
+        "Deriving requires from a node's configuration document (not only a declared node) is the next step the consumer named, and is not started."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
