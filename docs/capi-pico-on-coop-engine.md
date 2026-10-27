@@ -752,8 +752,11 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
   faces attached to it), which nothing there can reach twice, and read 5,000 to 8,000 bytes more
   when the rule was in it. Each decision of the step:
   - A link that is a second to a node the session holds is closed with the reason `MaxLinks`
-    (what zenoh names it), and its face goes. The tables its frames filled between the handshake
-    and the step that saw it are flushed as a lost link's are.
+    (what zenoh names it), and its face goes. The link gives its session nothing between its
+    handshake and the decision (`admission_gate`, which wraps each link of a session that
+    listens): the frames the peer sent after the handshake wait in the link, are read in order
+    once the link is admitted, and go with a link that is refused. What a frame in the very batch
+    that completed the handshake put in the tables is flushed as a lost link's is.
   - Two links that went the same way (both dialled, or both taken off a port) are the first one
     up and the one after. Two that went opposite ways are two nodes that dialled each other at
     once, which "the first up" decides differently at the two ends (each keeps the link that
@@ -774,7 +777,12 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
   the even rounds and the second's in the odd ones, and each ends holding one face that it keeps
   and that carries what each puts; a second dial to a node held is refused with one face at each
   end; a node whose dial role stands by for a held node reaches it again when that node has gone
-  and come back. Not done: a cooperative node against a tokio peer that races it (the two keep
+  and come back. The gate has its own test on two sessions over the in-memory network and one
+  thread: the handshake completes through it, a put sent the moment after waits in the link, and
+  is delivered once after the admission; with the gate shut off the test fails. A test over
+  loopback sockets could not make that window (the acceptor decides before its peer's first frame
+  can arrive, and a dialler's window depends on the order two threads read), which is why the
+  proof is not there. Not done: a cooperative node against a tokio peer that races it (the two keep
   different rules, and a race can close both links until the next redial), and a pico ABI test of
   a session that listens and dials a peer that dials it (the engine's tests are the proof).
 
