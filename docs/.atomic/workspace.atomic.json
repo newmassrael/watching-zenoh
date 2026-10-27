@@ -293844,6 +293844,48 @@
         "Item 751 step (b) continues at step 5, the token and interest planes, then step 6, the node surfaces listed in section 5 of the note. Still not covered, and for the publish plane too: a tree of more than one hop. The owner question of step 3 stands: a ROUTER node's south peer region relays nothing between link-state peers."
       ]
     },
+    "Round 3792": {
+      "decision_summary": "The configuration-aware device requirement is one derivation for every reader of a configuration. device_requires and OpenFacts move to wz-session-core::facilities, so the pico library (which may run on the cooperative engine without wz-capi-core) and wz-ap-demo use the same function as the zenoh-c open plan. Each artifact gets a door that answers one JSON object with requires, may_require and unknown: wz_ext_config_device_requires for pico (wz_ext.h, unstable-api, refusing what z_open refuses with the same code) and wz-ap-demo --device-requires for a sessions document (every session is required by the run; a scouting responder is a group the session joins). Layer C1st holds a traced run to its door's answer for the pico drivers and for an ap-demo sessions run, beside the zenoh-c configuration corpus (TLS file, scouting only, a listener allowed to fail).",
+      "changes_bullets": [
+        "crates/wz-session-core/src/facilities.rs (new; moved from wz-capi-port): OpenFacts, device_requires, DeviceRequires::all_of; wz-runtime-tokio re-exports it, wz-capi-core open_facilities reads OpenPlan into it.",
+        "crates/wz-capi-pico: wz_ext_config_device_requires (device_requires.rs, unstable-api, declared in wz_ext.h); session.rs reads z_open's locators through open_config and names the TLS files the config reads.",
+        "crates/wz-ap-demo: --device-requires <file> (sessions_facilities.rs, main.rs, usage.rs), with a binary test in check_sessions_binary.rs.",
+        "scripts/lib/facility_trace.py: the zenoh-c configuration corpus (TLS file, scouting only, listener allowed to fail), a sessions scenario judged against --device-requires, documents and stated_by on a scenario; the drivers print their door's answer.",
+        "scripts/lib/wz_config.py points its check at the new file; docs/target-build-contract.md T9 names the derivation and the three doors."
+      ],
+      "verification_bullets": [
+        "On pc2: unit tests of wz-session-core facilities (6), wz-capi-core open_facilities (10), wz-capi-pico device_requires (4; 3 in the engine-coop build), wz-ap-demo sessions_facilities (2; 3 with scouting-responder) and the --device-requires binary test, all passing with the count read from the log.",
+        "clippy -D warnings over all targets of wz-session-core, wz-capi-port, wz-runtime-tokio, wz-capi-core, wz-capi-pico, wz-ap-demo, and of wz-capi-pico with engine-coop,link-udp,unstable-api.",
+        "Layer C1st pass: ten traced runs agree with their own configuration's door (three pico, six zenoh-c including the TLS, scouting-only and listen-may-fail corpus, one ap-demo sessions run) and with the build's bound. The first C1st run found a pico profile without unstable-api refusing tls_files_named as dead code; the function is now unstable-api only. Here: facility_trace.py --selftest, wz_config.py --check, the drop-in header gate and the hook's 121 static gates with the citation resolve, all rc 0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "The pico coop build reads no TLS, so its door names no file; a coop build that gains TLS must name the files the same way tls_files_named does.",
+        "An ap-demo session whose scouting interface is an address, not a name, is still read as an #iface= group, which requires interface-list: the same reading a group endpoint gets."
+      ],
+      "publishable_decision_summary": "The configuration-aware device requirement is one derivation for every reader of a configuration. device_requires and OpenFacts move to wz-session-core::facilities, so the pico library (which may run on the cooperative engine without wz-capi-core) and wz-ap-demo use the same function as the zenoh-c open plan. Each artifact gets a door that answers one JSON object with requires, may_require and unknown: wz_ext_config_device_requires for pico (wz_ext.h, unstable-api, refusing what z_open refuses with the same code) and wz-ap-demo --device-requires for a sessions document (every session is required by the run; a scouting responder is a group the session joins). Layer C1st holds a traced run to its door's answer for the pico drivers and for an ap-demo sessions run, beside the zenoh-c configuration corpus (TLS file, scouting only, a listener allowed to fail).",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/facilities.rs (new; moved from wz-capi-port): OpenFacts, device_requires, DeviceRequires::all_of; wz-runtime-tokio re-exports it, wz-capi-core open_facilities reads OpenPlan into it.",
+        "crates/wz-capi-pico: wz_ext_config_device_requires (device_requires.rs, unstable-api, declared in wz_ext.h); session.rs reads z_open's locators through open_config and names the TLS files the config reads.",
+        "crates/wz-ap-demo: --device-requires <file> (sessions_facilities.rs, main.rs, usage.rs), with a binary test in check_sessions_binary.rs.",
+        "scripts/lib/facility_trace.py: the zenoh-c configuration corpus (TLS file, scouting only, listener allowed to fail), a sessions scenario judged against --device-requires, documents and stated_by on a scenario; the drivers print their door's answer.",
+        "scripts/lib/wz_config.py points its check at the new file; docs/target-build-contract.md T9 names the derivation and the three doors."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2: unit tests of wz-session-core facilities (6), wz-capi-core open_facilities (10), wz-capi-pico device_requires (4; 3 in the engine-coop build), wz-ap-demo sessions_facilities (2; 3 with scouting-responder) and the --device-requires binary test, all passing with the count read from the log.",
+        "clippy -D warnings over all targets of wz-session-core, wz-capi-port, wz-runtime-tokio, wz-capi-core, wz-capi-pico, wz-ap-demo, and of wz-capi-pico with engine-coop,link-udp,unstable-api.",
+        "Layer C1st pass: ten traced runs agree with their own configuration's door (three pico, six zenoh-c including the TLS, scouting-only and listen-may-fail corpus, one ap-demo sessions run) and with the build's bound. The first C1st run found a pico profile without unstable-api refusing tls_files_named as dead code; the function is now unstable-api only. Here: facility_trace.py --selftest, wz_config.py --check, the drop-in header gate and the hook's 121 static gates with the citation resolve, all rc 0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The pico coop build reads no TLS, so its door names no file; a coop build that gains TLS must name the files the same way tls_files_named does.",
+        "An ap-demo session whose scouting interface is an address, not a name, is still read as an #iface= group, which requires interface-list: the same reading a group endpoint gets."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
