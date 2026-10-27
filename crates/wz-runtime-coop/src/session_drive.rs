@@ -36,7 +36,11 @@
 use alloc::boxed::Box;
 #[cfg(not(feature = "session-slot"))]
 use alloc::rc::Rc;
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+#[cfg(all(
+    feature = "alloc",
+    not(feature = "session-slot"),
+    target_has_atomic = "ptr"
+))]
 use alloc::sync::Arc;
 #[cfg(feature = "session-slot")]
 use core::cell::{Cell, UnsafeCell};
@@ -217,7 +221,9 @@ pub trait LinkReadiness: Send + Sync {
     /// Block until this or any of `others` is ready, or `timeout_ms` has passed. A stack that
     /// can wait on several handles at once overrides it; the answer of one that cannot is a
     /// bounded look at this alone, a millisecond at most, and the step that follows reads every
-    /// link whether or not it was the one waited on.
+    /// link whether or not it was the one waited on. Only where a pointer is atomic: the shared
+    /// handle is an `Arc`, which ARMv6-M does not have, and a stack there waits on one link.
+    #[cfg(target_has_atomic = "ptr")]
     fn wait_readable_among(&self, others: &[Arc<dyn LinkReadiness>], timeout_ms: u32) {
         let _ = others;
         self.wait_readable(timeout_ms.min(1));
@@ -226,7 +232,11 @@ pub trait LinkReadiness: Send + Sync {
 
 /// Block until one of `waits` is ready or `timeout_ms` has passed. Nothing to wait on returns at
 /// once, and the wait of one is that wait's own.
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+#[cfg(all(
+    feature = "alloc",
+    not(feature = "session-slot"),
+    target_has_atomic = "ptr"
+))]
 pub fn wait_any(waits: &[Arc<dyn LinkReadiness>], timeout_ms: u32) {
     match waits {
         [] => {}
