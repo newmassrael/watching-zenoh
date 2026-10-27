@@ -6747,9 +6747,10 @@ layer_c1ay_cargo_test_router_hat() {
     # this build, with nothing started. The same argv -> exit status seam as the
     # topology check above, and its own test target for the same reason. Four
     # cases (accepted 0, refused 2 with `--sessions`' own sentences, unreadable
-    # 3, stands alone), pinned so a test that stops being compiled leaves no
-    # green run behind it.
-    _runci_guarded_test "C1AY check_sessions_binary 4" 4 \
+    # 3, stands alone) and a fifth, the document's device requirement answered as
+    # the check (`device_requires_answers_an_accepted_document_and_refuses_as_the_check`),
+    # pinned so a test that stops being compiled leaves no green run behind it.
+    _runci_guarded_test "C1AY check_sessions_binary 5" 5 \
         cargo test -p wz-ap-demo --test check_sessions_binary --quiet || return 1
     # The `driver` key of a `--sessions` session: roles that run on the session the
     # document names, over a real loopback link (a listener holding a subscriber and
@@ -11072,14 +11073,17 @@ layer_c1k_cargo_test_scouting_static() {
 # catching exactly the "implemented-but-not-excludable" drift this
 # round closed. The no_std MCU strip is Layer G's cross-compile job.
 layer_c1o_keyexpr_gating_behavior() {
-    _runci_guarded_test "C1o keyexpr alloc" 9 \
+    # 9 -> 12, 20 -> 23, 20 -> 23: three tests more in every arm, measured on 2026-10-28. Two of
+    # them are the tests of the key facts (`KeyFacts`) that `keyexpr_match` gained; the third was
+    # not attributed to a commit.
+    _runci_guarded_test "C1o keyexpr alloc" 12 \
         cargo test -p wz-session-core --no-default-features --features alloc \
         --lib keyexpr_match --quiet || return 1
-    _runci_guarded_test "C1o keyexpr alloc+wildcards" 20 \
+    _runci_guarded_test "C1o keyexpr alloc+wildcards" 23 \
         cargo test -p wz-session-core --no-default-features \
         --features alloc,keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-dollar-star,keyexpr-includes \
         --lib keyexpr_match --quiet || return 1
-    _runci_guarded_test "C1o keyexpr wildcards-no-alloc" 20 \
+    _runci_guarded_test "C1o keyexpr wildcards-no-alloc" 23 \
         cargo test -p wz-session-core --no-default-features \
         --features keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-dollar-star,keyexpr-includes \
         --lib keyexpr_match --quiet || return 1
@@ -16856,11 +16860,16 @@ layer_e_ap_demo_round_trip() {
     # demo is not (and cannot become: its `inert` tests assert absent features). Layer Z
     # builds the demo they need and runs `wz_ap_demo_query_timeout_from_a_config_file`;
     # the other files of the family already carry `wz_peer` or `wz_router`.
+    # `held_listener`, for the three tests that dial the `hold_a_listener` example with upstream's
+    # z_pub, z_sub and z_get. That example is built for each engine by Layer C1co, which names
+    # it in WZ_PICO_LISTENER_BIN and runs them; this job builds none, so the sweep took them and
+    # they panicked on the unset variable (hosted run of round 3809). The helper they call is
+    # in `layer_e_oracle_scope_gate.py`, and every fn of that file carries the token.
     (cd crates && cargo test -p wz-integration-tests --quiet -- --ignored \
         --skip wz_e2e_ --skip multicast --skip zenohd --skip wz_router --skip wz_peer \
         --skip wz_storage_host --skip zenoh_ext --skip inert --skip apfull \
         --skip wz_plugin --skip capi_c --skip analyzer --skip zenoh_zget \
-        --skip fs_shared_dir --skip sce_b6 --skip from_a_config_file)
+        --skip fs_shared_dir --skip sce_b6 --skip from_a_config_file --skip held_listener)
 }
 
 # ─── Layer E2 — facade-subset behavioural e2e vs zenoh-pico ──────────

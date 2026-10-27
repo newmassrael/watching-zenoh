@@ -65,10 +65,17 @@ RUN_CI = pathlib.Path("scripts/run-ci.sh")
 #: and E8t's `future-stamp` legs stayed out of the sweep only because their
 #: names happen to carry `wz_router`. A third file reaching an oracle this job
 #: lacks would have been adopted in silence.
+#:
+#: `wz_held_listener_binary` joins: the `hold_a_listener` example of a build that
+#: listens, which Layer C1co builds for each engine and names in
+#: `WZ_PICO_LISTENER_BIN`. Layer E's sweep adopted the three tests that drive it
+#: (L4 of docs/capi-pico-on-coop-engine.md) and they panicked on the unset
+#: variable on the hosted run of round 3809, the same class as the families above.
 UNPROVISIONED_HELPERS = (
     "zenoh_core_example_binary",
     "zenoh_ext_example_binary",
     "wz_zenoh_oracle_binary",
+    "wz_held_listener_binary",
 )
 
 #: The sweep line is found by the crate it runs, so a rename of the lane

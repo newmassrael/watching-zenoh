@@ -192,6 +192,11 @@ WZ_BINARY_ROOTS = {
     # that PRODUCES the .so, not against this test crate's own dev-dep graph
     # (which cannot contain the atom -- see feature_closure.binary_closure).
     "wz_capi_pico_cdylib": "wz-capi-pico",
+    # The `hold_a_listener` example of `wz-capi-pico` (L4 of docs/capi-pico-on-coop-engine.md):
+    # a node of wz's that LISTENS, which upstream's z_pub, z_sub and z_get dial. Registered for
+    # the reason the entry above is: the implementation answering them is wz-capi-pico's, so
+    # A4-5 checks the claim against that build's closure and not this crate's dev-dep graph.
+    "wz_held_listener_binary": "wz-capi-pico",
     # R311y500 — the §5.27 `api-compat-c` artifact, the zenoh-c ABI twin of the
     # entry above and here for the identical reason: a foreign C program linked
     # against WZ's cdylib is external-but-not-foreign, because the implementation

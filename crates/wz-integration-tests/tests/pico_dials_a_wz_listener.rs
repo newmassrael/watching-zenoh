@@ -45,19 +45,28 @@ struct Listener {
     endpoint: String,
 }
 
+/// The `hold_a_listener` example of the build under test, which Layer C1co builds once for each
+/// engine and names in `WZ_PICO_LISTENER_BIN`. Layer E's sweep builds no such example, so the
+/// tests that call this carry `held_listener` in their names and are skipped there
+/// (`scripts/lib/layer_e_oracle_scope_gate.py` lists this helper).
+fn wz_held_listener_binary() -> PathBuf {
+    let binary: PathBuf = std::env::var("WZ_PICO_LISTENER_BIN")
+        .expect(
+            "WZ_PICO_LISTENER_BIN names the `hold_a_listener` example of the build under test \
+             (`cargo build -p wz-capi-pico --example hold_a_listener`)",
+        )
+        .into();
+    assert!(
+        binary.is_file(),
+        "{} is missing: build the example and name it in WZ_PICO_LISTENER_BIN",
+        binary.display()
+    );
+    binary
+}
+
 impl Listener {
     fn start() -> Self {
-        let binary: PathBuf = std::env::var("WZ_PICO_LISTENER_BIN")
-            .expect(
-                "WZ_PICO_LISTENER_BIN names the `hold_a_listener` example of the build under test \
-                 (`cargo build -p wz-capi-pico --example hold_a_listener`)",
-            )
-            .into();
-        assert!(
-            binary.is_file(),
-            "{} is missing: build the example and name it in WZ_PICO_LISTENER_BIN",
-            binary.display()
-        );
+        let binary = wz_held_listener_binary();
         let port = free_port();
         let mut child = Command::new(&binary)
             .arg(port.to_string())
@@ -114,7 +123,7 @@ fn stdout_file() -> File {
 // wz-proves: api-compat-pico pico->wz partial
 #[test]
 #[ignore = "runs upstream's z_pub against a built listener; run by run-ci Layer C1co"]
-fn a_zenoh_pico_publisher_reaches_a_wz_listener() {
+fn a_zenoh_pico_publisher_reaches_a_held_listener() {
     let listener = Listener::start();
     let z_pub = zenoh_pico_cli_binary("z_pub");
     let mut publisher = spawn_publishing_zpub(
@@ -134,7 +143,7 @@ fn a_zenoh_pico_publisher_reaches_a_wz_listener() {
 // wz-proves: api-compat-pico pico->wz partial
 #[test]
 #[ignore = "runs upstream's z_sub against a built listener; run by run-ci Layer C1co"]
-fn a_zenoh_pico_subscriber_hears_a_wz_listener() {
+fn a_zenoh_pico_subscriber_hears_a_held_listener() {
     let listener = Listener::start();
     let z_sub = zenoh_pico_cli_binary("z_sub");
     let (mut subscriber, mut output) = spawn_subscribed_zsub(
@@ -161,7 +170,7 @@ fn a_zenoh_pico_subscriber_hears_a_wz_listener() {
 // wz-proves: api-compat-pico pico->wz partial
 #[test]
 #[ignore = "runs upstream's z_get against a built listener; run by run-ci Layer C1co"]
-fn a_zenoh_pico_get_is_answered_by_a_wz_listener() {
+fn a_zenoh_pico_get_is_answered_by_a_held_listener() {
     let listener = Listener::start();
     let z_get = zenoh_pico_cli_binary("z_get");
     let mut output = stdout_file();
