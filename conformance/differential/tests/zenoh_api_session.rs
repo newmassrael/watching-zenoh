@@ -665,6 +665,45 @@ mod observer {
         }
     }
 
+    /// An upstream peer that listens on `port` of the loopback and answers the Scouts sent to
+    /// `group` by the loopback.
+    pub fn scoutable(id: &str, port: u16, group: &str) -> Result<Session, String> {
+        let config = Config::from_json5(&format!(
+            r#"{{ id: "{id}", mode: "peer",
+                  listen: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                  scouting: {{ multicast: {{ enabled: true, address: "{group}",
+                                             interface: "127.0.0.1" }} }} }}"#
+        ))
+        .expect("a configuration zenoh reads");
+        up_zenoh::open(config).wait().map_err(|error| error.to_string())
+    }
+
+    /// What an upstream scout for the roles of `what` hears on `group` of the loopback in
+    /// `seconds`, as lines: each Hello is its id, its role and its sorted locators.
+    pub fn scouted(group: &str, what: up_zenoh::config::WhatAmIMatcher, seconds: f64) -> Vec<String> {
+        let heard = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let kept = heard.clone();
+        let config = Config::from_json5(&format!(
+            r#"{{ scouting: {{ multicast: {{ address: "{group}", interface: "127.0.0.1" }} }} }}"#
+        ))
+        .expect("a configuration zenoh reads");
+        let scout = up_zenoh::scout(what, config)
+            .callback(move |hello| {
+                let mut locators: Vec<String> =
+                    hello.locators().iter().map(|l| l.to_string()).collect();
+                locators.sort();
+                kept.lock()
+                    .unwrap()
+                    .push(format!("{} {:?} {locators:?}", hello.zid(), hello.whatami()));
+            })
+            .wait()
+            .expect("scouts");
+        std::thread::sleep(Duration::from_secs_f64(seconds));
+        scout.stop();
+        let lines = heard.lock().unwrap().clone();
+        lines
+    }
+
     /// [`seen`] once the session sees `count` transports, or after five seconds.
     pub fn seen_with(session: &Session, count: usize) -> String {
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -1787,6 +1826,115 @@ macro_rules! session_cases {
                 )
             }
 
+            /// Scouting, each way: what a scout of this crate hears of an upstream node that listens
+            /// and answers on a group, for the roles it asks for and whether its configuration
+            /// enables multicast scouting, how often it hears it and what it hears after it is
+            /// stopped; and what an upstream scout hears of a node of this crate that does the same.
+            pub fn scoutings() -> Vec<String> {
+                use std::sync::{Arc, Mutex};
+
+                use $z::config::WhatAmI;
+
+                /// A group and port of the loopback of this run's own.
+                fn a_group() -> String {
+                    let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("a port");
+                    format!("224.0.0.231:{}", socket.local_addr().expect("an address").port())
+                }
+
+                /// What a Hello is, as a line.
+                fn line(hello: &$z::scouting::Hello) -> String {
+                    let mut locators: Vec<String> =
+                        hello.locators().iter().map(|l| l.to_string()).collect();
+                    locators.sort();
+                    format!("{} {:?} {locators:?}", hello.zid(), hello.whatami())
+                }
+
+                /// What a scout of this crate hears for `seconds`, and then what it hears in the
+                /// `after` seconds after it is stopped.
+                fn heard(group: &str, what: WhatAmI, enabled: bool, seconds: f64, after: f64) -> (Vec<String>, usize) {
+                    let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+                    let kept = lines.clone();
+                    let config = Config::from_json5(&format!(
+                        r#"{{ scouting: {{ multicast: {{ enabled: {enabled}, address: "{group}",
+                                                        interface: "127.0.0.1" }} }} }}"#
+                    ))
+                    .expect("a configuration zenoh reads");
+                    let scout = $z::scout(what, config)
+                        .callback(move |hello| kept.lock().unwrap().push(line(&hello)))
+                        .wait()
+                        .expect("scouts");
+                    std::thread::sleep(Duration::from_secs_f64(seconds));
+                    scout.stop();
+                    let at_stop = lines.lock().unwrap().len();
+                    std::thread::sleep(Duration::from_secs_f64(after));
+                    let late = lines.lock().unwrap().len() - at_stop;
+                    let out = lines.lock().unwrap().clone();
+                    (out, late)
+                }
+
+                let distinct = |lines: &[String]| {
+                    let mut distinct = lines.to_vec();
+                    distinct.sort();
+                    distinct.dedup();
+                    distinct
+                };
+                let mut out = vec![];
+
+                // This crate's scout, and an upstream node that answers.
+                let (group, port) = (a_group(), free_port());
+                let _found = observer::scoutable("b00070", port, &group).expect("the node opens");
+                for (label, what, enabled) in [
+                    ("peers", WhatAmI::Peer, true),
+                    ("routers", WhatAmI::Router, true),
+                    ("peers, multicast scouting off", WhatAmI::Peer, false),
+                ] {
+                    let (lines, late) = heard(&group, what, enabled, 2.5, 1.5);
+                    out.push(
+                        format!("a scout for {label} hears {:?}", distinct(&lines))
+                            .replace(&port.to_string(), "PORT"),
+                    );
+                    out.push(format!(
+                        "a scout for {label} hears it again in the next window: {}",
+                        if lines.is_empty() {
+                            "nothing to hear".to_owned()
+                        } else {
+                            (lines.len() >= 2).to_string()
+                        }
+                    ));
+                    out.push(format!("a scout for {label} hears {late} after it is stopped"));
+                }
+
+                // An upstream scout, and a node of this crate that answers.
+                let (group, port) = (a_group(), free_port());
+                let node = $z::open(
+                    Config::from_json5(&format!(
+                        r#"{{ id: "5a0070", mode: "peer",
+                              listen: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                              scouting: {{ multicast: {{ enabled: true, address: "{group}",
+                                                         interface: "127.0.0.1" }} }} }}"#
+                    ))
+                    .expect("a configuration zenoh reads"),
+                )
+                .wait()
+                .expect("opens");
+                for (label, what) in [
+                    ("peers", up_zenoh::config::WhatAmI::Peer.into()),
+                    ("routers", up_zenoh::config::WhatAmI::Router.into()),
+                    (
+                        "routers and peers",
+                        up_zenoh::config::WhatAmI::Router | up_zenoh::config::WhatAmI::Peer,
+                    ),
+                ] {
+                    let lines = observer::scouted(&group, what, 2.5);
+                    out.push(
+                        format!("an upstream scout for {label} hears {:?}", distinct(&lines))
+                            .replace(&port.to_string(), "PORT"),
+                    );
+                }
+                drop(node);
+                out
+            }
+
             /// What a node of this crate receives, from an upstream node that dials it and from
             /// itself: every setting of a put and a delete, a key the publisher declared, a payload
             /// larger than a batch, the origins a subscriber can ask for, what a callback may do
@@ -2434,6 +2582,25 @@ fn what_liveliness_tells_is_what_upstream_nodes_tell_each_other() {
         "{u:#?}"
     );
     compare("livelinesses", &u, &w);
+}
+
+#[test]
+fn what_a_scout_hears_is_what_an_upstream_scout_hears() {
+    // The log of upstream's nodes, for a run that is asked for it with `RUST_LOG`.
+    up_zenoh::try_init_log_from_env();
+    let (u, w) = (up::scoutings(), wz::scoutings());
+    assert!(
+        u.iter().any(|l| l.starts_with("a scout for peers hears [\"b00070 Peer [")),
+        "{u:#?}"
+    );
+    assert!(u.iter().any(|l| l == "a scout for peers hears it again in the next window: true"), "{u:#?}");
+    assert!(u.iter().any(|l| l == "a scout for routers hears []"), "{u:#?}");
+    assert!(u.iter().any(|l| l == "a scout for peers hears 0 after it is stopped"), "{u:#?}");
+    assert!(
+        u.iter().any(|l| l.starts_with("an upstream scout for peers hears [\"5a0070 Peer [")),
+        "{u:#?}"
+    );
+    compare("scoutings", &u, &w);
 }
 
 #[test]
