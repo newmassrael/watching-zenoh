@@ -141,6 +141,36 @@ pub trait SessionEngine: Send + Sync + 'static {
         count_local: bool,
     ) -> MatchId;
 
+    /// [`Self::declare_matching_listener`] for an entity whose `locality` says whose declarations
+    /// count: the peers' (`Remote`), the session's own (`SessionLocal`), or both (`Any`), as
+    /// upstream's matching status reads an entity by the destination it was declared with. A
+    /// listener of the session's own entities alone asks no peer. `None` from an engine with no
+    /// such listener in this build, which is the provided answer.
+    fn declare_matching_listener_in(
+        &self,
+        plane: FilterPlane,
+        keyexpr: String,
+        sink: MatchingSink,
+        locality: Locality,
+    ) -> Option<MatchId> {
+        let _ = (plane, keyexpr, sink, locality);
+        None
+    }
+
+    /// Whether anything `plane` counts matches `keyexpr`, from the declarations `locality` admits,
+    /// read now: the one-shot twin of [`Self::declare_matching_listener_in`], which never says
+    /// otherwise than its listener last did. `None` from an engine with no such status in this
+    /// build, which is the provided answer.
+    fn matching_status(
+        &self,
+        plane: FilterPlane,
+        keyexpr: &str,
+        locality: Locality,
+    ) -> Option<bool> {
+        let _ = (plane, keyexpr, locality);
+        None
+    }
+
     /// Stop the matching listener `id`.
     fn undeclare_matching_listener(&self, id: MatchId);
 

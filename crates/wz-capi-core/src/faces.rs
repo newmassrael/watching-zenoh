@@ -832,6 +832,14 @@ struct MatchEntry {
     /// member of the aggregate ([`LOCAL_PLANE_MEMBER`]) beside the faces — see
     /// [`FilterEntry::count_local`].
     count_local: bool,
+    /// Whether the peers' declarations count: a listener of the session's own entities alone
+    /// (a locality of `SessionLocal`) installs no watch on a face, now or when one comes up.
+    count_remote: bool,
+    /// Whether the listener counts as zenoh's Rust session does and not as zenoh-pico: the
+    /// session's own entities whatever origin each accepts (and not only those that admit
+    /// session-local traffic), and a queryable of a peer only when its key includes the
+    /// querier's (and not when it merely intersects it).
+    upstream_rule: bool,
 }
 
 /// The member a [`MatchAggregate`] files the session's own entities under, beside the
@@ -848,15 +856,26 @@ fn install_matching_watch(
     plane: FilterPlane,
     session: &TokioSession,
     keyexpr: &str,
+    upstream_rule: bool,
     callback: impl FnMut(MatchingStatus) + Send + 'static,
 ) -> Option<MatchingListener<TokioRuntime>> {
+    // What a face's watch counts is what the peer behind the face declares: a subscriber or a
+    // queryable of the session itself is also declared on the face's session, and counts through
+    // the local fold of the aggregate when the listener asks for it, not here, so that a listener
+    // of remote declarations alone is never told of a local one.
     match plane {
         FilterPlane::Subscribers => session
-            .declare_publisher(keyexpr.to_owned(), PublishOptions::put())
+            .declare_publisher(
+                keyexpr.to_owned(),
+                PublishOptions::put().with_locality(Locality::Remote),
+            )
             .declare_matching_listener(callback)
             .ok(),
         FilterPlane::Queryables { complete_required } => session
-            .declare_querier(keyexpr.to_owned(), querier_watching(complete_required))
+            .declare_querier(
+                keyexpr.to_owned(),
+                querier_watching_remote(complete_required, upstream_rule),
+            )
             .declare_matching_listener(callback)
             .ok(),
     }
@@ -872,6 +891,14 @@ fn querier_watching(complete_required: bool) -> QueryOptions {
     } else {
         QueryOptions::default()
     }
+}
+
+/// [`querier_watching`] for the watch of a face, which counts what the peer behind the face
+/// declares and nothing of the session itself: see [`install_matching_watch`].
+fn querier_watching_remote(complete_required: bool, upstream_rule: bool) -> QueryOptions {
+    querier_watching(complete_required)
+        .with_allowed_destination(Locality::Remote)
+        .with_remote_inclusion(upstream_rule)
 }
 
 /// Fold `update` into one entry's aggregate and, when the SESSION verdict
@@ -1268,14 +1295,19 @@ impl Inner {
     /// whose key meets `keyexpr` — complete and including it, for a querier whose target
     /// requires completeness. zenoh-pico's local half of the write filter
     /// (`vendor/zenoh-pico/src/net/filtering.c` @ `_z_write_filter_session_register`).
-    fn local_entity_matches(&self, plane: FilterPlane, keyexpr: &str) -> bool {
+    ///
+    /// With `any_origin` the origin an entity accepts is not read and every entity counts, as
+    /// upstream's matching status counts them: `Session::matching_status_local` walks the
+    /// session's subscribers and queryables whatever origin each was declared for.
+    fn local_entity_matches(&self, plane: FilterPlane, keyexpr: &str, any_origin: bool) -> bool {
         use wz_runtime_tokio::keyexpr_match::{keyexpr_includes_target, keyexpr_intersects_text};
         match plane {
             FilterPlane::Subscribers => self.subs.iter().any(|sub| {
-                sub.allowed_origin.allows_local() && keyexpr_intersects_text(keyexpr, &sub.keyexpr)
+                (any_origin || sub.allowed_origin.allows_local())
+                    && keyexpr_intersects_text(keyexpr, &sub.keyexpr)
             }),
             FilterPlane::Queryables { complete_required } => self.qbls.iter().any(|qbl| {
-                qbl.allowed_origin.allows_local()
+                (any_origin || qbl.allowed_origin.allows_local())
                     && if complete_required {
                         let target: Vec<&str> = keyexpr.split('/').collect();
                         qbl.complete && keyexpr_includes_target(&qbl.keyexpr, &target)
@@ -2013,11 +2045,12 @@ impl SharedSession {
         // `false`. A future refactor that hands `face_up` an already-populated
         // observer must move this replay out of the lock.
         let mut matches = BTreeMap::new();
-        for entry in &guard.matches {
+        for entry in guard.matches.iter().filter(|entry| entry.count_remote) {
             if let Some(listener) = install_matching_watch(
                 entry.plane,
                 &session,
                 &entry.keyexpr,
+                entry.upstream_rule,
                 face_matching_callback(id, entry),
             ) {
                 matches.insert(entry.id, listener);
@@ -3663,7 +3696,9 @@ impl SharedSession {
                 face.subs.insert(id, sub);
             }
         }
-        let local_key = allowed_origin.allows_local().then(|| keyexpr.clone());
+        // Every listener that counts the session's own entities reads it again, whatever origin
+        // this one accepts: a listener of upstream's rule counts it either way.
+        let local_key = Some(keyexpr.clone());
         let entry = SubEntry {
             id,
             keyexpr,
@@ -3737,6 +3772,48 @@ impl SharedSession {
         sink: MatchingSink,
         count_local: bool,
     ) -> MatchId {
+        // What the peers declare always counts for this form of the call, and the session's own
+        // entities when `count_local` says so, by the origin each accepts.
+        self.declare_matching_listener_counting(
+            plane,
+            keyexpr,
+            sink,
+            if count_local {
+                Locality::Any
+            } else {
+                Locality::Remote
+            },
+            false,
+        )
+    }
+
+    /// The matching listener of an entity whose `locality` says whose declarations count:
+    /// the peers' (`Remote`), the session's own (`SessionLocal`) or both (`Any`), which is what
+    /// upstream's matching status asks of an entity by the destination it was declared with.
+    /// A listener of the session's own entities alone installs no watch on any face.
+    pub fn declare_matching_listener_in(
+        &self,
+        plane: FilterPlane,
+        keyexpr: String,
+        sink: MatchingSink,
+        locality: Locality,
+    ) -> MatchId {
+        self.declare_matching_listener_counting(plane, keyexpr, sink, locality, true)
+    }
+
+    /// The listener of [`Self::declare_matching_listener_in`] and of
+    /// [`Self::declare_plane_matching_listener`], which differ in whether the session's own
+    /// entities count whatever origin each accepts and a peer's queryable only by inclusion
+    /// (`upstream_rule`, zenoh's Rust session) or by the origin and by intersection (zenoh-pico's).
+    fn declare_matching_listener_counting(
+        &self,
+        plane: FilterPlane,
+        keyexpr: String,
+        sink: MatchingSink,
+        locality: Locality,
+        upstream_rule: bool,
+    ) -> MatchId {
+        let (count_local, count_remote) = (locality.allows_local(), locality.allows_remote());
         // R311y535 — the sink moves INTO the aggregate, which is now its ONE
         // owner. The `MatchEntry` keeps only the shared handle.
         let state = Arc::new(StdMutex::new(MatchAggregate::new(sink)));
@@ -3748,6 +3825,7 @@ impl SharedSession {
             let faces: Vec<(u64, TokioSession)> = guard
                 .faces
                 .iter()
+                .filter(|_| count_remote)
                 .map(|(fid, face)| (*fid, face.session.clone()))
                 .collect();
             guard.matches.push(MatchEntry {
@@ -3756,6 +3834,8 @@ impl SharedSession {
                 state: state.clone(),
                 plane,
                 count_local,
+                count_remote,
+                upstream_rule,
             });
             (id, faces)
         };
@@ -3776,7 +3856,8 @@ impl SharedSession {
                 .collect();
             drop(guard);
             for ((fid, session), callback) in faces.into_iter().zip(callbacks) {
-                if let Some(listener) = install_matching_watch(plane, &session, &keyexpr, callback)
+                if let Some(listener) =
+                    install_matching_watch(plane, &session, &keyexpr, upstream_rule, callback)
                 {
                     installed.push((fid, listener));
                 }
@@ -3800,7 +3881,7 @@ impl SharedSession {
         // Phase 4 — the session's own entities, for a listener that counts them. No lock
         // is held here, as the matching lock order requires.
         if count_local {
-            self.fold_local_match(&state, plane, &keyexpr);
+            self.fold_local_match(&state, plane, &keyexpr, upstream_rule);
         }
         id
     }
@@ -3818,9 +3899,10 @@ impl SharedSession {
         state: &StdMutex<MatchAggregate>,
         plane: FilterPlane,
         keyexpr: &str,
+        any_origin: bool,
     ) {
         deliver_matching_flip(state, |agg| {
-            let matching = self.lock().local_entity_matches(plane, keyexpr);
+            let matching = self.lock().local_entity_matches(plane, keyexpr, any_origin);
             agg.apply(LOCAL_PLANE_MEMBER, matching)
         });
     }
@@ -3836,7 +3918,7 @@ impl SharedSession {
     /// after it is released, by the matching lock order.
     fn refresh_local_matches(&self, plane: FilterPlane, keyexpr: &str) {
         use wz_runtime_tokio::keyexpr_match::keyexpr_intersects_text;
-        let affected: Vec<(Arc<StdMutex<MatchAggregate>>, FilterPlane, String)> = {
+        let affected: Vec<(Arc<StdMutex<MatchAggregate>>, FilterPlane, String, bool)> = {
             let guard = self.lock();
             guard
                 .matches
@@ -3846,11 +3928,18 @@ impl SharedSession {
                         && entry.plane.same_kind(plane)
                         && keyexpr_intersects_text(&entry.keyexpr, keyexpr)
                 })
-                .map(|entry| (entry.state.clone(), entry.plane, entry.keyexpr.clone()))
+                .map(|entry| {
+                    (
+                        entry.state.clone(),
+                        entry.plane,
+                        entry.keyexpr.clone(),
+                        entry.upstream_rule,
+                    )
+                })
                 .collect()
         };
-        for (state, plane, key) in affected {
-            self.fold_local_match(&state, plane, &key);
+        for (state, plane, key, any_origin) in affected {
+            self.fold_local_match(&state, plane, &key, any_origin);
         }
     }
 
@@ -3934,6 +4023,30 @@ impl SharedSession {
                 .declare_publisher(keyexpr.to_owned(), PublishOptions::put())
                 .get_matching_status()
                 .matching
+        })
+    }
+
+    /// Whether anything `plane` counts matches `keyexpr`, from the declarations `locality` admits:
+    /// the session's own (`SessionLocal`), the peers' (`Remote`), or either (`Any`). The one-shot
+    /// twin of [`Self::declare_matching_listener_in`], read fresh from the registries and so
+    /// never at odds with what a listener of the same locality last said.
+    ///
+    /// The sessions are snapshotted out of the lock before they are consulted, as everywhere here.
+    pub fn matching_verdict(&self, plane: FilterPlane, keyexpr: &str, locality: Locality) -> bool {
+        if locality.allows_local() && self.lock().local_entity_matches(plane, keyexpr, true) {
+            return true;
+        }
+        if !locality.allows_remote() {
+            return false;
+        }
+        self.face_sessions().iter().any(|session| match plane {
+            FilterPlane::Subscribers => session.remote_subscribers_match(keyexpr, Locality::Remote),
+            FilterPlane::Queryables { complete_required } => session.remote_queryables_match_by(
+                keyexpr,
+                Locality::Remote,
+                complete_required,
+                true,
+            ),
         })
     }
 
@@ -4080,7 +4193,7 @@ impl SharedSession {
             };
             // The session's own entity is a match whatever the peers say, and it is
             // read here rather than kept: no peer's counter moves when it comes or goes.
-            if entry.count_local && guard.local_entity_matches(entry.plane, &entry.keyexpr) {
+            if entry.count_local && guard.local_entity_matches(entry.plane, &entry.keyexpr, false) {
                 return false;
             }
             #[cfg(target_has_atomic = "64")]
@@ -4266,10 +4379,7 @@ impl SharedSession {
         // `drop(context)`, which must not run under the registry lock (a drop
         // that re-enters the session would deadlock the non-reentrant mutex).
         // A subscriber the session's own traffic reached is a match no more.
-        let local_key = dropped_entry
-            .as_ref()
-            .filter(|entry| entry.allowed_origin.allows_local())
-            .map(|entry| entry.keyexpr.clone());
+        let local_key = dropped_entry.as_ref().map(|entry| entry.keyexpr.clone());
         drop(dropped);
         #[cfg(feature = "multicast-transport")]
         drop(dropped_groups);
@@ -4423,7 +4533,7 @@ impl SharedSession {
                 face.qbls.insert(id, qbl);
             }
         }
-        let local_key = allowed_origin.allows_local().then(|| keyexpr.clone());
+        let local_key = Some(keyexpr.clone());
         let entry = QblEntry {
             id,
             keyexpr,
@@ -4481,10 +4591,7 @@ impl SharedSession {
             }
         }
         // A queryable the session's own gets reached is a match no more.
-        let local_key = dropped_entry
-            .as_ref()
-            .filter(|entry| entry.allowed_origin.allows_local())
-            .map(|entry| entry.keyexpr.clone());
+        let local_key = dropped_entry.as_ref().map(|entry| entry.keyexpr.clone());
         // Drop OUTSIDE the lock — see `undeclare_subscriber`: the last
         // `Arc<CQueryClosure>` release runs the C `drop(context)`.
         drop(dropped);

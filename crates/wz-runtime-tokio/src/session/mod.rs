@@ -5360,6 +5360,20 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         locality: Locality,
         complete_required: bool,
     ) -> bool {
+        self.remote_queryables_match_by(keyexpr, locality, complete_required, false)
+    }
+
+    /// [`Self::remote_queryables_match`] under the rule of zenoh's router tables when
+    /// `by_inclusion` says so: a queryable of the peer answers only if its key includes
+    /// `keyexpr`, complete or not (see
+    /// [`QuerierCriterion::remote_includes`](wz_session_core::declare::queryable::QuerierCriterion::remote_includes)).
+    pub fn remote_queryables_match_by(
+        &self,
+        keyexpr: &str,
+        locality: Locality,
+        complete_required: bool,
+        by_inclusion: bool,
+    ) -> bool {
         #[cfg(feature = "declare-queryable")]
         {
             R::with_mutex_mut(&self.observer, |obs| {
@@ -5368,13 +5382,14 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                         keyexpr,
                         locality,
                         complete_required,
-                    ),
+                    )
+                    .with_remote_inclusion(by_inclusion),
                 )
             })
         }
         #[cfg(not(feature = "declare-queryable"))]
         {
-            let _ = (keyexpr, locality, complete_required);
+            let _ = (keyexpr, locality, complete_required, by_inclusion);
             false
         }
     }

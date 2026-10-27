@@ -221,6 +221,29 @@ impl SessionEngine for SharedSession {
         SharedSession::declare_plane_matching_listener(self, plane, keyexpr, sink, count_local)
     }
 
+    fn declare_matching_listener_in(
+        &self,
+        plane: FilterPlane,
+        keyexpr: String,
+        sink: MatchingSink,
+        locality: Locality,
+    ) -> Option<MatchId> {
+        Some(SharedSession::declare_matching_listener_in(
+            self, plane, keyexpr, sink, locality,
+        ))
+    }
+
+    fn matching_status(
+        &self,
+        plane: FilterPlane,
+        keyexpr: &str,
+        locality: Locality,
+    ) -> Option<bool> {
+        Some(SharedSession::matching_verdict(
+            self, plane, keyexpr, locality,
+        ))
+    }
+
     fn undeclare_matching_listener(&self, id: MatchId) {
         SharedSession::undeclare_matching_listener(self, id)
     }

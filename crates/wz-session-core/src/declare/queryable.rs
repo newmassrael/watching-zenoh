@@ -124,6 +124,13 @@ pub struct QuerierCriterion {
     /// (`zenoh/src/api/querier.rs:225`), pico's `ctx->is_complete`
     /// (`vendor/zenoh-pico/src/api/api.c:1843-1844`).
     pub complete_required: bool,
+    /// Whether a queryable a PEER declared answers the querier only when its keyexpr INCLUDES
+    /// the querier's, complete or not. That is how zenoh's router tables count the queryables of
+    /// the peers a session is connected to (`zenoh/src/net/routing/hat/broker/queries.rs` @
+    /// `ke.includes(key_expr)`), where its own session counts its own by intersection for an
+    /// ordinary target; pico's rule is intersection for both. A consumer that answers to
+    /// zenoh's rule sets it; the default is the pico rule.
+    pub remote_includes: bool,
 }
 
 #[cfg(feature = "alloc")]
@@ -134,7 +141,14 @@ impl QuerierCriterion {
             keyexpr: String::from(keyexpr),
             locality,
             complete_required,
+            remote_includes: false,
         }
+    }
+
+    /// This criterion with the rule of [`Self::remote_includes`] set as `includes` says.
+    pub fn with_remote_inclusion(mut self, includes: bool) -> Self {
+        self.remote_includes = includes;
+        self
     }
 
     /// The plain criterion a locality-blind caller means: any origin, any
@@ -188,6 +202,7 @@ where
         &criterion.keyexpr,
         criterion.locality,
         criterion.complete_required,
+        criterion.remote_includes,
     )
 }
 
@@ -200,6 +215,7 @@ fn declared_answers_for<M, V>(
     keyexpr: &str,
     locality: Locality,
     complete_required: bool,
+    remote_includes: bool,
 ) -> bool
 where
     M: IdMap<V>,
@@ -223,11 +239,11 @@ where
             return false;
         }
     }
-    if complete_required {
+    if complete_required || remote_includes {
         #[cfg(feature = "keyexpr-includes")]
         {
             declared.entries().any(|(_, candidate)| {
-                candidate.complete()
+                (candidate.complete() || !complete_required)
                     && crate::keyexpr_match::keyexpr_includes_target(
                         candidate.keyexpr(),
                         &target_chunks,
@@ -506,7 +522,7 @@ impl<P: Storage> RemoteQueryablePeer<P> {
     /// registry now stores.
     #[cfg(feature = "storage-profile")]
     pub fn has_matching(&self, query_keyexpr: &str) -> bool {
-        declared_answers_for(&self.declared, query_keyexpr, Locality::Any, false)
+        declared_answers_for(&self.declared, query_keyexpr, Locality::Any, false, false)
     }
 
     /// R311y797 — the criterion-aware consult behind

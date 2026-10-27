@@ -680,7 +680,8 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
                         &self.keyexpr,
                         locality,
                         complete_required,
-                    ),
+                    )
+                    .with_remote_inclusion(self.options.remote_inclusion()),
                 );
                 #[cfg(not(feature = "declare-queryable"))]
                 let remote = false;
@@ -772,7 +773,8 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
                         &self.keyexpr,
                         locality,
                         complete_required,
-                    ),
+                    )
+                    .with_remote_inclusion(self.options.remote_inclusion()),
                     local,
                     sink,
                 )
@@ -1050,7 +1052,8 @@ impl<R: SessionRuntime, T: TimeSource> QuerierAliased<R, T> {
                         &_effective_keyexpr,
                         locality,
                         complete_required,
-                    ),
+                    )
+                    .with_remote_inclusion(self.options.remote_inclusion()),
                 );
                 #[cfg(not(feature = "declare-queryable"))]
                 let remote = false;

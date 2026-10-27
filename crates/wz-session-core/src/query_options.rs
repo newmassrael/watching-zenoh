@@ -279,6 +279,9 @@ pub struct QueryOptions {
     pub qos: Option<QosLevel>,
     /// Whether the callback sees the timestamp of the replies: see [`Self::with_expose_timestamp`].
     expose_timestamp: crate::timestamp_visibility::ExposeTimestamp,
+    /// Whether the matching status of a querier made with these options counts a queryable of a
+    /// peer only when its key includes the querier's: see [`Self::with_remote_inclusion`].
+    remote_inclusion: bool,
 }
 
 impl QueryOptions {
@@ -304,6 +307,20 @@ impl QueryOptions {
     /// See [`Self::with_expose_timestamp`].
     pub fn expose_timestamp(&self) -> bool {
         self.expose_timestamp.0
+    }
+
+    /// Count a queryable a PEER declared toward the matching status of a querier made with these
+    /// options only when its key includes the querier's, as zenoh's router tables count them,
+    /// and not when it merely intersects it, as zenoh-pico does and as is the default. See
+    /// [`QuerierCriterion::remote_includes`](crate::declare::queryable::QuerierCriterion::remote_includes).
+    pub fn with_remote_inclusion(mut self, includes: bool) -> Self {
+        self.remote_inclusion = includes;
+        self
+    }
+
+    /// See [`Self::with_remote_inclusion`].
+    pub fn remote_inclusion(&self) -> bool {
+        self.remote_inclusion
     }
 
     /// Pin the query-side locality predicate.
