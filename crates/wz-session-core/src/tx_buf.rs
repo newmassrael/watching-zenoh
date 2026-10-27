@@ -69,6 +69,19 @@ pub trait TxBuf {
     fn append_byte(&mut self, byte: u8) -> Result<(), CodecError> {
         self.append(&[byte])
     }
+
+    /// Take the next `n` bytes as a window the caller fills: the length grows by `n` and the
+    /// caller must write all of them. A writer that knows how long its message is checks the
+    /// room once and stores each byte where it goes, where [`Self::append_byte`] checks it and
+    /// is called through the trait object at every byte.
+    ///
+    /// `Ok(None)` means this buffer does not hand windows out and nothing was taken; the writer
+    /// appends instead. [`CodecError::BufferOverflow`] means the `n` bytes do not fit, and the
+    /// length is as it was, as for [`Self::append`].
+    fn reserve(&mut self, n: usize) -> Result<Option<&mut [u8]>, CodecError> {
+        let _ = n;
+        Ok(None)
+    }
 }
 
 #[cfg(feature = "alloc")]
@@ -93,6 +106,12 @@ impl TxBuf for alloc::vec::Vec<u8> {
     fn append_byte(&mut self, byte: u8) -> Result<(), CodecError> {
         self.push(byte);
         Ok(())
+    }
+
+    fn reserve(&mut self, n: usize) -> Result<Option<&mut [u8]>, CodecError> {
+        let at = alloc::vec::Vec::len(self);
+        self.resize(at + n, 0);
+        Ok(Some(&mut self[at..]))
     }
 }
 
@@ -145,6 +164,15 @@ impl TxBuf for SliceTxBuf<'_> {
         self.storage[self.len..end].copy_from_slice(bytes);
         self.len = end;
         Ok(())
+    }
+
+    fn reserve(&mut self, n: usize) -> Result<Option<&mut [u8]>, CodecError> {
+        if self.remaining() < n {
+            return Err(CodecError::BufferOverflow);
+        }
+        let start = self.len;
+        self.len += n;
+        Ok(Some(&mut self.storage[start..start + n]))
     }
 }
 
@@ -199,6 +227,14 @@ impl TxBuf for CappedTxBuf<'_, '_> {
             return Err(CodecError::BufferOverflow);
         }
         self.inner.append_byte(byte)
+    }
+
+    /// The cap is checked as an append checks it, then the window is the buffer's own.
+    fn reserve(&mut self, n: usize) -> Result<Option<&mut [u8]>, CodecError> {
+        if self.inner.len().saturating_add(n) > self.cap {
+            return Err(CodecError::BufferOverflow);
+        }
+        self.inner.reserve(n)
     }
 }
 
@@ -255,6 +291,21 @@ impl<'a> TxSink<'a, EncodeBuf<'a>> {
     pub fn new(buf: &'a mut EncodeBuf<'a>) -> Self {
         let start = buf.len();
         Self { buf, start }
+    }
+}
+
+impl<'a, B: TxBuf + ?Sized> TxSink<'a, B> {
+    /// Wrap a buffer of any type; the position starts at its current length. [`Self::new`] is
+    /// this for the one buffer type the build's encoders are written against.
+    pub fn over(buf: &'a mut B) -> Self {
+        let start = buf.len();
+        Self { buf, start }
+    }
+
+    /// The next `n` bytes of the buffer as a window to fill, or `None` when the buffer hands
+    /// none out (see [`TxBuf::reserve`]). The sink's position counts the window as written.
+    pub fn reserve(&mut self, n: usize) -> Result<Option<&mut [u8]>, CodecError> {
+        self.buf.reserve(n)
     }
 }
 

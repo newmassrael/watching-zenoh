@@ -249,6 +249,20 @@ impl TxBuf for TxLease<'_> {
         self.len += 1;
         Ok(())
     }
+
+    /// The next `n` bytes of the slot as a window: the room is checked once, here.
+    fn reserve(&mut self, n: usize) -> Result<Option<&mut [u8]>, CodecError> {
+        if self.capacity() - self.len < n {
+            return Err(CodecError::BufferOverflow);
+        }
+        // SAFETY: the window `[headroom + len, headroom + len + n)` lies in the slot (checked
+        // above), the slot is this lease's alone (see `as_slice`), and the borrow of the
+        // window is the borrow of `self`, so nothing else touches the slot while it lives.
+        let window =
+            unsafe { slice::from_raw_parts_mut(self.base.add(self.headroom + self.len), n) };
+        self.len += n;
+        Ok(Some(window))
+    }
 }
 
 impl Drop for TxLease<'_> {

@@ -2924,7 +2924,7 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
             qos,
             wz_codecs::response::Response::MAX_ENCODED_BYTES,
             crate::stats::NetworkStatsClass::unread(),
-            |sink| writer.encode(sink),
+            |sink| writer.encode_tx(sink),
         );
         #[cfg(feature = "transport-batching")]
         if qos.is_express() {
