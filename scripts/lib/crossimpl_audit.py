@@ -1131,7 +1131,14 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # It was pushed WITHOUT the `wz-proves` line and hosted Layer A4 redded for it (run
 # 39916164318), the class the R2790 note above records; measured by `audit-crossimpl-proof.sh`
 # (`measured 1075, declared 1074`).
-FOREIGN_ADJUDICATOR_LINKS = 1075
+# L4 of docs/capi-pico-on-coop-engine.md -- 1075 -> 1078, RISING by three: `pico_dials_a_wz_listener.rs`,
+# upstream's `z_pub`, `z_sub` and `z_get` dialling wz's listener (the `hold_a_listener` example of
+# `wz-capi-pico`), each adjudicating `api-compat-pico` in the `pico->wz` direction: 3 tests x 1 atom
+# = 3. They were never counted, because the audit resolved their binary to this test crate, whose
+# closure lacks the atom and refused the claim (hosted Layer A4, run 40551486881); the helper
+# `wz_held_listener_binary` now maps to `wz-capi-pico`. Measured by Layer A4 (`measured 1078,
+# declared 1075`).
+FOREIGN_ADJUDICATOR_LINKS = 1078
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
