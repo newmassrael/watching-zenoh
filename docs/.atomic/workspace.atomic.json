@@ -292944,6 +292944,40 @@
         "Step D leaves the capability per verb: lifecycle-verbs is one feature and Verbs lists all four, so an image that wants only status needs the store's flags and the permit split by verb. No Zephyr image binds Verbs yet, and who may close, reset and read the status of a fixed image is still the image owner's. The hosted runs holding rounds 3697, 3715, 3749 and 3764 were not read: each was cancelled by a later push."
       ]
     },
+    "Round 3769": {
+      "decision_summary": "Open-debt item 796 is closed. It said the RX pool slot could not be a FrameArena destination, because the slot accessors lend the pool and the arena's buffer type has no lifetime. Round 2741 decided to give the buffer a lifetime. Round 2742 did something else and the item stayed open: LinkRxArena is the third FrameArena, and its LinkRxFrame owns the slot address and its home table and returns the slot on drop, which is the pinned zenoh's RxBuffer. Its Hold states carry the generated lifecycle's handles, so the compile-time guarantee is kept. The claim is refuted by code that runs in production under runtime-zero-copy. Two leftovers: section 2.3 still said a frame borrows its slot, now corrected; and the pool constructors still rely on a zero-pattern allocation, registered as item 927 for the SCE emit.",
+      "changes_bullets": [
+        "Store section runtime-crate--sce_link_runtime_tokio/2-3-rx-borrows-from-pool-slot: set-section-intent now states an owned handle. The debt register marks item 796 closed and registers item 927 (the zero-pattern pool construction); its roster sweep moves to 927. No code changed."
+      ],
+      "verification_bullets": [
+        "On the build host: cargo test -p wz-runtime-tokio --features runtime-zero-copy --lib link_rx_arena:: ran 8 tests, 8 passed, 680 filtered out, among them a_production_read_half_draws_its_frames_from_the_table. Read from the tree: LinkRxArena implements FrameArena with Buf = LinkRxFrame (link_rx_arena.rs), and both heap_pool functions (link_rx_pool.rs, zero_copy.rs) allocate zeroed and guard with debug_assert only. validate-workspace shows no new orphan; debt_plane_census passes after the register edit."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "runtime-crate--sce_link_runtime_tokio/2-3-rx-borrows-from-pool-slot"
+      ],
+      "carry_forward_bullets": [
+        "Item 927: ask the SCE side for an in-place pool constructor, then delete both heap_pool functions; until then consider raising the debug_assert to an assert, which costs one check per pool built.",
+        "The decision recorded in item 796 (give the buffer a lifetime) was overtaken by a different design and the item stayed open for 1000 rounds of the census clock. A decision recorded on an item should be re-read at the end of the round that builds the feature.",
+        "No hosted run holds a verdict for this round; the arena tests were run on the build host only."
+      ],
+      "publishable_decision_summary": "Open-debt item 796 is closed. It said the RX pool slot could not be a FrameArena destination, because the slot accessors lend the pool and the arena's buffer type has no lifetime. Round 2741 decided to give the buffer a lifetime. Round 2742 did something else and the item stayed open: LinkRxArena is the third FrameArena, and its LinkRxFrame owns the slot address and its home table and returns the slot on drop, which is the pinned zenoh's RxBuffer. Its Hold states carry the generated lifecycle's handles, so the compile-time guarantee is kept. The claim is refuted by code that runs in production under runtime-zero-copy. Two leftovers: section 2.3 still said a frame borrows its slot, now corrected; and the pool constructors still rely on a zero-pattern allocation, registered as item 927 for the SCE emit.",
+      "publishable_changes_bullets": [
+        "Store section runtime-crate--sce_link_runtime_tokio/2-3-rx-borrows-from-pool-slot: set-section-intent now states an owned handle. The debt register marks item 796 closed and registers item 927 (the zero-pattern pool construction); its roster sweep moves to 927. No code changed."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host: cargo test -p wz-runtime-tokio --features runtime-zero-copy --lib link_rx_arena:: ran 8 tests, 8 passed, 680 filtered out, among them a_production_read_half_draws_its_frames_from_the_table. Read from the tree: LinkRxArena implements FrameArena with Buf = LinkRxFrame (link_rx_arena.rs), and both heap_pool functions (link_rx_pool.rs, zero_copy.rs) allocate zeroed and guard with debug_assert only. validate-workspace shows no new orphan; debt_plane_census passes after the register edit."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "runtime-crate--sce_link_runtime_tokio/2-3-rx-borrows-from-pool-slot"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Item 927: ask the SCE side for an in-place pool constructor, then delete both heap_pool functions; until then consider raising the debug_assert to an assert, which costs one check per pool built.",
+        "The decision recorded in item 796 (give the buffer a lifetime) was overtaken by a different design and the item stayed open for 1000 rounds of the census clock. A decision recorded on an item should be re-read at the end of the round that builds the feature.",
+        "No hosted run holds a verdict for this round; the arena tests were run on the build host only."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
