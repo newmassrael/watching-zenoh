@@ -200,7 +200,127 @@ impl<'a> ResponseWriter<'a> {
     }
 
     /// Encode the `Response` into `sink`.
+    ///
+    /// The reply nearly every query gets (a QoS at most, no responder identity, no timestamp,
+    /// attachment or source info, no error) is written byte by byte where it lies. Building the
+    /// codec's `Response` for it moves a record that holds a chain of eight extension entries
+    /// inline at every level, and encodes it through the generic variant walk; the bytes are the
+    /// same ([`Self::encode_generic`] is the reference the tests hold this path to) and the time
+    /// of the two on the kit is in `docs/query-answer-path.md`.
     pub fn encode<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError> {
+        if self.is_plain() {
+            self.encode_plain(sink)
+        } else {
+            self.encode_generic(sink)
+        }
+    }
+
+    /// Whether the reply is one [`Self::encode_plain`] writes: the envelope with no extension
+    /// but the QoS, around a Put or a Del with at most an encoding.
+    fn is_plain(&self) -> bool {
+        let parts = &self.parts;
+        if parts.responder.is_some() {
+            return false;
+        }
+        match &parts.kind {
+            PartsKind::Reply {
+                timestamp,
+                attachment,
+                ..
+            } => {
+                let _ = (timestamp, attachment);
+                #[cfg(feature = "pubsub-timestamp")]
+                if timestamp.is_some() {
+                    return false;
+                }
+                #[cfg(feature = "pubsub-attachment")]
+                if attachment.is_some() {
+                    return false;
+                }
+                #[cfg(feature = "reply-source-info")]
+                if self.source_info.len != 0 {
+                    return false;
+                }
+                true
+            }
+            #[cfg(feature = "query-reply-err")]
+            PartsKind::Err { .. } => false,
+        }
+    }
+
+    /// The plain reply's bytes, in the order the generated encoders write them: the envelope's
+    /// header (the `Local` arm of the key sets its bit), the request id, the key as an id of 0
+    /// and a suffix, the Reply body's header, then the Put's header, its encoding and its
+    /// payload, or the Del's header.
+    fn encode_plain<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError> {
+        let parts = &self.parts;
+        let (body, encoding) = match &parts.kind {
+            PartsKind::Reply { body, encoding, .. } => (body, encoding),
+            #[cfg(feature = "query-reply-err")]
+            PartsKind::Err { .. } => return Err(CodecError::PresentIfMismatch),
+        };
+        // The bit the generated `Response::encode` derives from the key's `Local` arm.
+        const LOCAL_KEY: u8 = 0x40;
+        // The envelope's one possible extension is the QoS unless it is the default; as the
+        // only entry of the chain it is the last, so its own `Z` bit is clear and the
+        // message header's is set.
+        let qos_extension = parts.qos != QosLevel::DEFAULT;
+        let header = if qos_extension {
+            with_z(RESPONSE_HEADER)
+        } else {
+            RESPONSE_HEADER
+        };
+        sink.write_u8(header | LOCAL_KEY)?;
+        sink.write_vle_u64(parts.rid)?;
+        sink.write_vle_u64(0)?;
+        sink.write_vle_u64(parts.keyexpr.len() as u64)?;
+        sink.write_bytes(parts.keyexpr.as_bytes())?;
+        if qos_extension {
+            sink.write_u8(qos_entry(parts.qos).header & !EXT_FLAG_Z)?;
+            sink.write_vle_u64(u64::from(parts.qos.raw))?;
+        }
+        sink.write_u8(REPLY_HEADER)?;
+        let payload: Option<&[u8]> = match body {
+            PartsBody::Put(bytes) => Some(bytes),
+            PartsBody::Del => None,
+            #[cfg(feature = "transport-shm")]
+            PartsBody::Shared(handle) => Some(handle.bytes()),
+        };
+        let Some(bytes) = payload else {
+            return sink.write_u8(DEL_HEADER);
+        };
+        // An encoding is a Put's only, and only a build that emits it.
+        #[cfg(feature = "pubsub-encoding")]
+        let encoding = *encoding;
+        #[cfg(not(feature = "pubsub-encoding"))]
+        let encoding: Option<crate::reply_stage::EncodingParts<'a>> = {
+            let _ = encoding;
+            None
+        };
+        let mut header = PUT_HEADER;
+        if encoding.is_some() {
+            header |= wire_const::FLAG_Z_PUT_E;
+        }
+        sink.write_u8(header)?;
+        if let Some(encoding) = encoding {
+            sink.write_vle_u32(encoding.packed_id)?;
+            if let Some(schema) = encoding.schema {
+                sink.write_vle_u64(schema.len() as u64)?;
+                sink.write_bytes(schema.as_bytes())?;
+            }
+        }
+        sink.write_vle_u64(bytes.len() as u64)?;
+        sink.write_bytes(bytes)
+    }
+
+    /// The `Response` through the codec's own encoder: the reference for [`Self::encode_plain`]
+    /// and the path of every reply that carries more than the plain one.
+    ///
+    /// Not inlined: the `Response` it builds holds chains of eight extension entries at three
+    /// levels, a frame of over two kilobytes, and inlined into the closure that encodes a reply
+    /// it set the frame of every reply, the plain ones too, which never enter it.
+    #[inline(never)]
+    pub(crate) fn encode_generic<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError> {
         let parts = &self.parts;
         // The envelope's extensions: the QoS unless it is the default, then the
         // responder.
@@ -499,6 +619,67 @@ mod tests {
             }
         }
         assert_eq!(compared, 3 * 2 * 3 * 3 * 2 * 2 * 2, "the matrix ran whole");
+    }
+
+    /// The plain reply is taken by the direct path, and the direct path writes the bytes the
+    /// codec's own encoder writes, for payloads either side of every length a VLE changes width at.
+    #[test]
+    fn the_plain_reply_is_written_directly_and_as_the_codec_writes_it() {
+        let big = [0xA5u8; 1000];
+        let mut taken = 0usize;
+        for rid in [0u64, 1, 127, 128, 16_384, u64::from(u32::MAX) + 1] {
+            for keyexpr in ["a", "demo/status/node-0001", &"k".repeat(200)] {
+                for payload_len in [0usize, 1, 127, 128, 255, 1000] {
+                    for with_encoding in [false, true] {
+                        for (del, qos) in [
+                            (false, QosLevel::DEFAULT),
+                            (true, QosLevel::DEFAULT),
+                            (false, QOS_DECLARE),
+                            (true, QOS_DECLARE),
+                        ] {
+                            let encoding = with_encoding.then_some(EncodingParts {
+                                packed_id: (5 << 1) | 1,
+                                schema: Some("v=1"),
+                            });
+                            let parts = ReplyParts {
+                                rid,
+                                keyexpr,
+                                responder: None,
+                                qos,
+                                kind: PartsKind::Reply {
+                                    body: if del {
+                                        PartsBody::Del
+                                    } else {
+                                        PartsBody::Put(&big[..payload_len])
+                                    },
+                                    encoding,
+                                    timestamp: None,
+                                    attachment: None,
+                                    source_info: None,
+                                },
+                            };
+                            let writer = ResponseWriter::new(parts).expect("writable");
+                            assert!(writer.is_plain(), "rid {rid}, {keyexpr:?}, {payload_len}");
+                            let mut plain = [0u8; 2048];
+                            let mut sink = SliceSink::new(&mut plain);
+                            writer.encode(&mut sink).expect("fits");
+                            let plain_len = sink.position();
+                            let mut generic = [0u8; 2048];
+                            let mut sink = SliceSink::new(&mut generic);
+                            writer.encode_generic(&mut sink).expect("fits");
+                            let generic_len = sink.position();
+                            assert_eq!(
+                                &plain[..plain_len],
+                                &generic[..generic_len],
+                                "rid {rid}, {keyexpr:?}, {payload_len}, encoding {with_encoding}, del {del}"
+                            );
+                            taken += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(taken, 6 * 3 * 6 * 2 * 4, "the matrix ran whole");
     }
 
     #[cfg(feature = "query-reply-err")]
