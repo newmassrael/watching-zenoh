@@ -575,11 +575,13 @@ routing-router = [
     "routing-router-hat",
     "routing-token-tables",
 ]
-# R311qc — routing-routes now composes REAL library code (the data-plane
-# forwarding kernel + the tokio RoutingForwarder), no longer a hollow marker:
-# it forwards the wz-runtime-tokio `routing-routes` atom on top of the
-# `routing-router` accept-and-hold foundation. `?/` activates only on the AP
-# path (runtime-tokio profile pulls wz-runtime-tokio).
+# R311qc — routing-routes composed the data-plane forwarding kernel and the
+# single-hop tokio RoutingForwarder. R2912 retired both (no run-mode built them
+# since R2886), so this atom now gates no code of its own: a routing node's
+# routes are the router hat's route cache, which `routing-router` already
+# carries. It stays as the name a build selects the routed data plane by, on top
+# of the `routing-router` foundation. `?/` activates only on the AP path
+# (runtime-tokio profile pulls wz-runtime-tokio).
 routing-routes = ["routing-router", "wz-runtime-tokio?/routing-routes"]
 routing-static-routes = ["routing-router"]
 # P4 §5.21 — routing-router-hat forwards the wz-runtime-tokio `routing-router-hat`
