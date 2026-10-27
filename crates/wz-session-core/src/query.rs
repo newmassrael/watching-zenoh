@@ -5662,6 +5662,7 @@ mod tests {
         let mut responder = QueryResponder {
             rid: 7,
             keyexpr_literal: "a/b".into(),
+            keyexpr_facts: crate::keyexpr_match::KeyFacts::of("a/b"),
             replies: &mut replies,
             responder: None,
             accept: ReplyKeyExpr::MatchingQuery,
