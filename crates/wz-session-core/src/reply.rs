@@ -468,6 +468,23 @@ fn retained_attachment(view: &dyn ReplyView) -> Option<crate::link::RxBytes> {
     })
 }
 
+/// The responder a `Response` names: the read twin of `response_build::encode_responder_ext_body`,
+/// over the bytes the ZBuf extension carries (`network_eid::RESPONDER`), as upstream reads them
+/// (`commons/zenoh-codec/src/network/mod.rs` @ `RCodec<(ext::EntityGlobalIdType<{ ID }>, bool), &mut R>`).
+///
+/// `None` for a body that is cut short or whose entity id does not fit the 32 bits an entity
+/// id has: a Response whose responder cannot be read is read as one that names none, as
+/// upstream's codec drops an extension it cannot read and goes on. The id of the node is a
+/// range of `body`, so the read allocates nothing, and a build with no allocator reads it.
+#[cfg(all(feature = "codec-response", feature = "storage-profile"))]
+pub fn decode_responder_ext_body(body: &[u8]) -> Option<(&[u8], u32)> {
+    let (&flags, rest) = body.split_first()?;
+    let zid_len = usize::from(flags >> 4) + 1;
+    let zid = rest.get(..zid_len)?;
+    let (eid, _) = crate::vle::read_vle_u64(rest.get(zid_len..)?)?;
+    Some((zid, u32::try_from(eid).ok()?))
+}
+
 /// The responder a `Response` names in its own extension chain, as a range of that chain: the
 /// zid with its own length and the entity id, or `None` when the chain holds no responder
 /// extension, or one that cannot be read. One reader for the owned chain and for the chain of
@@ -478,7 +495,7 @@ pub(crate) fn response_responder<E: crate::ext_view::ExtEntryView>(
     extensions: &[E],
 ) -> Option<(&[u8], u32)> {
     let ext = crate::ext_view::find_by_eid(extensions, crate::ext_header::network_eid::RESPONDER)?;
-    crate::response_build::decode_responder_ext_body(ext.plain_zbuf()?)
+    decode_responder_ext_body(ext.plain_zbuf()?)
 }
 
 /// A8b — gate a loopback Put reply's staged attachment on the SAME inner

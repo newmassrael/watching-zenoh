@@ -1382,22 +1382,10 @@ pub fn encode_responder_ext_body(zid: &[u8], eid: u32) -> Vec<u8> {
     out
 }
 
-/// The responder a `Response` names: the read twin of [`encode_responder_ext_body`], over the
-/// bytes the ZBuf extension carries (`network_eid::RESPONDER`), as upstream reads them
-/// (`commons/zenoh-codec/src/network/mod.rs` @ `RCodec<(ext::EntityGlobalIdType<{ ID }>, bool), &mut R>`).
-///
-/// `None` for a body that is cut short or whose entity id does not fit the 32 bits an entity
-/// id has: a Response whose responder cannot be read is read as one that names none, as
-/// upstream's codec drops an extension it cannot read and goes on. The id of the node is a
-/// range of `body`, so the read allocates nothing.
+/// The read twin of [`encode_responder_ext_body`] lives in `reply`, where a build with no
+/// allocator reads it too: this module is the allocating profile's.
 #[cfg(feature = "codec-response")]
-pub fn decode_responder_ext_body(body: &[u8]) -> Option<(&[u8], u32)> {
-    let (&flags, rest) = body.split_first()?;
-    let zid_len = usize::from(flags >> 4) + 1;
-    let zid = rest.get(..zid_len)?;
-    let (eid, _) = crate::vle::read_vle_u64(rest.get(zid_len..)?)?;
-    Some((zid, u32::try_from(eid).ok()?))
-}
+pub use crate::reply::decode_responder_ext_body;
 
 // R311fs — the byte-stable Response reply/err builder regression
 // tests, relocated from wz-runtime-tokio::session_glue to their SSOT
