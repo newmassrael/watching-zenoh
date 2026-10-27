@@ -293470,6 +293470,56 @@
         "The batching row (361 us) is above what the image now measures (about 330) and the TLS image built with the option was not run on the kit."
       ]
     },
+    "Round 3782": {
+      "decision_summary": "The static half of the facility analysis is read from the built file, not from source: the functions a file binds by a dynamic relocation are what its linked code can call in the C library, after cfg and the linker dropped what a build does not contain, on any platform and without running it. A function whose every call requests one facility proves the file may ask for it; the entry refuses a bound that lacks it, and a file that imports a request no facility names. The first census refuted the vocabulary: every host artifact binds getaddrinfo (tokio::net::lookup_host on a host-named locator), so name-resolution is a facility, in the host base, on every platform. It refuted a bound: the pico ABI's z_time_now and z_time_now_as_str read the calendar and the local zone in every build, which a profile without timestamping did not declare. Both C libraries are now judged by traced runs through a driver compiled against the packaged file.",
+      "changes_bullets": [
+        "scripts/lib/elf_facts.py: imported_symbols (undefined dynamic symbols bound by a REL or RELA relocation, both classes and byte orders); build_test_elf takes symbols with a relocation flag.",
+        "scripts/lib/wz_config.py: name-resolution in OS_FACILITIES; wall-clock covers the local zone; FACILITY_IMPORTS, UNNAMED_IMPORTS and import_findings.",
+        "scripts/lib/wz_package.py: artifact_entry refuses a file whose imports refute its bound; a library's bound adds its own package's assessed row.",
+        "deploy/wz-config.toml: name-resolution in [os] base and in the five platforms' os_provides; [[assessed_package]] wz-capi-pico (wall-clock).",
+        "scripts/lib/facility_trace.py and facility_witness_shim.c: name-resolution witness; localtime, localtime_r and tzset as wall-clock scopes; library scenarios with drivers; a run that fails by itself is a finding.",
+        "scripts/lib/facility_drivers/pico_session.c and c_session.c (new). Fixtures regenerated; docs/target-build-contract.md T9."
+      ],
+      "verification_bullets": [
+        "Layer C1st on the build machine (32 cores) passes: the host package, the declared node and the host-client-tcp-query profile are each described and verified under the import check; capi-pico and capi-c, as a listening peer and as a dialling client, agree with their bounds; ap-demo and the declared node agree.",
+        "The first C1st run with the check refused the profile's capi-pico (it imports gettimeofday, its bound lacked wall-clock); the pico surface row closes it.",
+        "Measured on a release capi-pico: 216 undefined dynamic symbols, 124 bound by a relocation; fork and execvp are in the table with no slot.",
+        "The zenoh-c config is 2064 bytes in the installed unstable-shm arm; the driver's storage is 16 KiB.",
+        "elf_facts.py, facility_trace.py, wz_package.py and wz_node.py --selftest OK; wz_config.py --selftest 231/231, --check; the hook's gate 2z array rc 0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "Configuration-aware derivation (the consumer's claim 3): a condition over the configuration per facility, requires and may_require of a configuration as must and may sets within the build's bound, held to a corpus of configurations by the oracle.",
+        "The import check refutes only through definite imports; socket, open and clock_gettime prove nothing, so the socket kinds, files and clocks of a file stay the declaration's and the oracle's to judge.",
+        "The measured records stay unsplit until they are re-recorded on their SDK hosts (owner approval per host); the import check will then also run on the cross builds."
+      ],
+      "publishable_decision_summary": "The static half of the facility analysis is read from the built file, not from source: the functions a file binds by a dynamic relocation are what its linked code can call in the C library, after cfg and the linker dropped what a build does not contain, on any platform and without running it. A function whose every call requests one facility proves the file may ask for it; the entry refuses a bound that lacks it, and a file that imports a request no facility names. The first census refuted the vocabulary: every host artifact binds getaddrinfo (tokio::net::lookup_host on a host-named locator), so name-resolution is a facility, in the host base, on every platform. It refuted a bound: the pico ABI's z_time_now and z_time_now_as_str read the calendar and the local zone in every build, which a profile without timestamping did not declare. Both C libraries are now judged by traced runs through a driver compiled against the packaged file.",
+      "publishable_changes_bullets": [
+        "scripts/lib/elf_facts.py: imported_symbols (undefined dynamic symbols bound by a REL or RELA relocation, both classes and byte orders); build_test_elf takes symbols with a relocation flag.",
+        "scripts/lib/wz_config.py: name-resolution in OS_FACILITIES; wall-clock covers the local zone; FACILITY_IMPORTS, UNNAMED_IMPORTS and import_findings.",
+        "scripts/lib/wz_package.py: artifact_entry refuses a file whose imports refute its bound; a library's bound adds its own package's assessed row.",
+        "deploy/wz-config.toml: name-resolution in [os] base and in the five platforms' os_provides; [[assessed_package]] wz-capi-pico (wall-clock).",
+        "scripts/lib/facility_trace.py and facility_witness_shim.c: name-resolution witness; localtime, localtime_r and tzset as wall-clock scopes; library scenarios with drivers; a run that fails by itself is a finding.",
+        "scripts/lib/facility_drivers/pico_session.c and c_session.c (new). Fixtures regenerated; docs/target-build-contract.md T9."
+      ],
+      "publishable_verification_bullets": [
+        "Layer C1st on the build machine (32 cores) passes: the host package, the declared node and the host-client-tcp-query profile are each described and verified under the import check; capi-pico and capi-c, as a listening peer and as a dialling client, agree with their bounds; ap-demo and the declared node agree.",
+        "The first C1st run with the check refused the profile's capi-pico (it imports gettimeofday, its bound lacked wall-clock); the pico surface row closes it.",
+        "Measured on a release capi-pico: 216 undefined dynamic symbols, 124 bound by a relocation; fork and execvp are in the table with no slot.",
+        "The zenoh-c config is 2064 bytes in the installed unstable-shm arm; the driver's storage is 16 KiB.",
+        "elf_facts.py, facility_trace.py, wz_package.py and wz_node.py --selftest OK; wz_config.py --selftest 231/231, --check; the hook's gate 2z array rc 0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Configuration-aware derivation (the consumer's claim 3): a condition over the configuration per facility, requires and may_require of a configuration as must and may sets within the build's bound, held to a corpus of configurations by the oracle.",
+        "The import check refutes only through definite imports; socket, open and clock_gettime prove nothing, so the socket kinds, files and clocks of a file stay the declaration's and the oracle's to judge.",
+        "The measured records stay unsplit until they are re-recorded on their SDK hosts (owner approval per host); the import check will then also run on the cross builds."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
