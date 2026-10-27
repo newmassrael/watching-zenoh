@@ -293630,6 +293630,56 @@
         "Item 751 step (b) continues at step 4, the query plane, with the same gate extended by Query, Reply and ResponseFinal steps, then step 5 (tokens and interests) and step 6 (the node surfaces listed in section 5 of the note). Not covered by step 3: priorities and reliability, ids and aliases, a three-hop tree, and LinkstateForwarder's two gossip-mode deviations from the pin, which are recorded rather than fixed because that plane retires at step 7. Open for the owner: the link-state extension on a ROUTER node's south peer region still relays nothing between its peers (R2896 turned the flag on there for topology only); if a deployment of link-state peers behind a router needs the router to relay, that is a decision, not a gap this gate can find."
       ]
     },
+    "Round 3786": {
+      "decision_summary": "The consumer's claim 3: a manifest bounds every run of a build, and a configuration narrows it. The answer is computed from the OpenPlan the open itself runs, never from a second reading of the document, so it cannot read a config differently from the open. requires is the engine's threads and entropy, filesystem when the plan read a certificate or credential file, each listener and group under listen/exit_on_failure, the intersection of what every dial target needs under connect/exit_on_failure (one success suffices, so the intersection is a sound lower bound), and the group scouting of a client that has nothing else to dial; may_require is the rest, null with a reason for a serial or vsock endpoint. The zenoh-c drop-in exposes it as wz_capi_c_config_device_requires, one JSON object with the manifest's keys. The proof is the oracle: each capi-c run is held to the answer its own configuration got.",
+      "changes_bullets": [
+        "crates/wz-capi-core/src/open_facilities.rs (new): FACILITIES, DeviceRequires with to_json, OpenPlan::device_requires over the runtime's parse_any_locator; ten unit tests.",
+        "crates/wz-capi-core/src/open_plan.rs: OpenPlan.read_files, filled by files_read_by_resolve under the features that read them.",
+        "crates/wz-capi-c/src/session.rs: plan_of, shared by z_open and the new door wz_capi_c_config_device_requires; include/wz_capi_c.h declares it.",
+        "scripts/lib/wz_config.py: check_open_facilities_rs holds the Rust FACILITIES to OS_FACILITIES and ENGINE to [os] always.",
+        "scripts/lib/facility_trace.py: the oracle keeps a run's stdout; a run that prints device_requires <json> is judged against it too; a library scenario dials by host name. facility_drivers/c_session.c prints the door's answer before it opens; docs/target-build-contract.md T9.",
+        "Red on origin, repaired: scripts/lib/barrier_needle_gate.py reads a console line handed over as LogPart parts as one template (a literal Str part is text, any other part one value), in the tree search and in a declared producer; the declared server test names its listen line by the new template."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-capi-core --lib open_facilities on the build machine (32 cores): 10 passed (an address target, a host-named one, two targets of which only the common part is required, a dial allowed to fail, a listener, #iface=, a scouting-only client, a unix socket, a serial endpoint left unknown, the JSON).",
+        "cargo clippy -D warnings, all targets, wz-capi-core and wz-capi-c each: clean; cargo fmt applied.",
+        "Layer C1st on the build machine passes: each capi-c run agrees with its own configuration's answer, the peer and the address client requiring entropy, sockets-tcp and threads, the host-named client also name-resolution, which the trace showed it asking for.",
+        "barrier_needle_gate.py --check was red on origin's tip (nine e2e barriers waiting on slot-node and host-slot-node lines handed over as parts, one stale declaration) and is green with the part-array reader; its selftest holds the template reading and the coverage both ways.",
+        "capi_c_wz_door_header.py: 79 doors declared both ways; wz_config.py --selftest 234/234 and --check; facility_trace.py --selftest OK; the hook's gate 2z array rc 0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "The pico library and wz-ap-demo open through readers other than OpenPlan, so they have no configuration door; moving their opens onto the same plan is what gives them one, and is not started.",
+        "The configuration corpus is the three capi-c scenarios; a TLS, a scouting-only and a listen-may-fail configuration would each hold a branch of the derivation to a run.",
+        "The measured records stay unsplit until they are re-recorded on their SDK hosts, which is the next step."
+      ],
+      "publishable_decision_summary": "The consumer's claim 3: a manifest bounds every run of a build, and a configuration narrows it. The answer is computed from the OpenPlan the open itself runs, never from a second reading of the document, so it cannot read a config differently from the open. requires is the engine's threads and entropy, filesystem when the plan read a certificate or credential file, each listener and group under listen/exit_on_failure, the intersection of what every dial target needs under connect/exit_on_failure (one success suffices, so the intersection is a sound lower bound), and the group scouting of a client that has nothing else to dial; may_require is the rest, null with a reason for a serial or vsock endpoint. The zenoh-c drop-in exposes it as wz_capi_c_config_device_requires, one JSON object with the manifest's keys. The proof is the oracle: each capi-c run is held to the answer its own configuration got.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-core/src/open_facilities.rs (new): FACILITIES, DeviceRequires with to_json, OpenPlan::device_requires over the runtime's parse_any_locator; ten unit tests.",
+        "crates/wz-capi-core/src/open_plan.rs: OpenPlan.read_files, filled by files_read_by_resolve under the features that read them.",
+        "crates/wz-capi-c/src/session.rs: plan_of, shared by z_open and the new door wz_capi_c_config_device_requires; include/wz_capi_c.h declares it.",
+        "scripts/lib/wz_config.py: check_open_facilities_rs holds the Rust FACILITIES to OS_FACILITIES and ENGINE to [os] always.",
+        "scripts/lib/facility_trace.py: the oracle keeps a run's stdout; a run that prints device_requires <json> is judged against it too; a library scenario dials by host name. facility_drivers/c_session.c prints the door's answer before it opens; docs/target-build-contract.md T9.",
+        "Red on origin, repaired: scripts/lib/barrier_needle_gate.py reads a console line handed over as LogPart parts as one template (a literal Str part is text, any other part one value), in the tree search and in a declared producer; the declared server test names its listen line by the new template."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-capi-core --lib open_facilities on the build machine (32 cores): 10 passed (an address target, a host-named one, two targets of which only the common part is required, a dial allowed to fail, a listener, #iface=, a scouting-only client, a unix socket, a serial endpoint left unknown, the JSON).",
+        "cargo clippy -D warnings, all targets, wz-capi-core and wz-capi-c each: clean; cargo fmt applied.",
+        "Layer C1st on the build machine passes: each capi-c run agrees with its own configuration's answer, the peer and the address client requiring entropy, sockets-tcp and threads, the host-named client also name-resolution, which the trace showed it asking for.",
+        "barrier_needle_gate.py --check was red on origin's tip (nine e2e barriers waiting on slot-node and host-slot-node lines handed over as parts, one stale declaration) and is green with the part-array reader; its selftest holds the template reading and the coverage both ways.",
+        "capi_c_wz_door_header.py: 79 doors declared both ways; wz_config.py --selftest 234/234 and --check; facility_trace.py --selftest OK; the hook's gate 2z array rc 0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The pico library and wz-ap-demo open through readers other than OpenPlan, so they have no configuration door; moving their opens onto the same plan is what gives them one, and is not started.",
+        "The configuration corpus is the three capi-c scenarios; a TLS, a scouting-only and a listen-may-fail configuration would each hold a branch of the derivation to a run.",
+        "The measured records stay unsplit until they are re-recorded on their SDK hosts, which is the next step."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
