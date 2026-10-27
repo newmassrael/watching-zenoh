@@ -4142,9 +4142,12 @@ int main(void) {
      * arrive; nothing retires.
      * 5: `zenoh` is a sequential test's verdict, and every row and every flow
      * of a row carries `announced_version` and `zenoh_evidence`. Values move
-     * and keys arrive; nothing retires. */
+     * and keys arrive; nothing retires.
+     * 6: model 2 of the zenoh test: two sums (`log2_lr_no_millibits`, each
+     * check's `no_millibits`), the `stream_framing` check and the `measured`
+     * basis. `zenoh` keeps its words and its values move; nothing retires. */
     revisioned[12].name = "session_table";
-    revisioned[12].revision = 5;
+    revisioned[12].revision = 6;
     revisioned[12].doc = NULL;
     rc = wz_dissect_pcap_session_table((const unsigned char *)"not a capture", 13,
                                        WZ_DISSECT_LIMITS_NONE,
