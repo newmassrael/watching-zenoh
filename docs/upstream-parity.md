@@ -136,10 +136,13 @@ derived from the declaration and never chosen by hand:
      `#[cfg(feature = ...)]`: the enum variant, the transition arm, the host action's trait
      method. One committed emit serves every configuration; turning a capability off removes
      its states, transitions and actions from the build and from the trait a host implements.
-     This does not exist: today a generated machine is included or not as a whole
+     This exists since 2026-10-27 for one machine and two elements: the unicast session's
+     accept path carries `sce:requires="session-unicast-accept"` on a state and a transition
+     (`sources/session/session_fsm_unicast.scxml`, commit d809de495), and the committed emit
+     holds the gated variants. Every other machine is still included or not as a whole
      (`crates/wz-session-core/src/lib.rs`, `#[cfg(feature = "session-unicast")]` around the
-     `include!`), and SCE has no element gate (`docs/feature_inventory.md` section 8 is a
-     sketch). SCE took it (its ADR 0057, proposed 2026-10-26): an attribute `sce:requires`
+     `include!`), so K2 has started and is not done (`docs/feature_inventory.md` section 8 is
+     the old sketch). SCE took it (its ADR 0057, accepted): an attribute `sce:requires`
      whose predicate is a name, `all(..)` or `any(..)` (no `not`: a build is a union of
      features, which only adds), on states, transitions, executable content, entry and exit,
      invocations, static data and imports; an event's variant and a host action's method
