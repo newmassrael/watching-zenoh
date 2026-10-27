@@ -292766,6 +292766,40 @@
         "The digests of the field walk (8 bytes a row on a stream capture) stay by decision of the D10 round."
       ]
     },
+    "Round 3764": {
+      "decision_summary": "D7 step 8, C: the fixed-memory node serves close, reset and status through the one function (lifecycle_verdict) that the heap profile uses. The connect manager's store keeps one entry per node (open, withdraw, closing, reopen) so the table is the size of the room and no request is lost or reordered, a mirror of each node's links and machine state, and a record of reset generations that is the size of the room, never grows and never evicts: a peer outside it is refused by NoRoom. reset_node ends the session and keeps the intent. The control port reads close, reset, status and whoami beside open; the host node answers them over its pipe. All of it is behind the feature lifecycle-verbs: measured on the four Zephyr client images, the ungated code cost 352 bytes of worst chain and 1988 of flash, and gated they equal the parent. Table: ten cases; the fixed node conforms to the eight it can be put in.",
+      "changes_bullets": [
+        "crates/wz-session-mcu: connect_manager (Pending, HeldNode, generations, reset_node, NodeDesk, LifecyclePermits, StoreNode, WritePermit; all behind lifecycle-verbs), node_opening (OpeningOnly; open_verdict is lifecycle_node::open_verdict), control_port (close, reset, status, whoami and their error words), contract (adapter wraps OpeningOnly); feature lifecycle-verbs in its manifest.",
+        "crates/wz-session-core: lifecycle_node::open_verdict public; lifecycle_contract::verbs gains one case and reachable_with_one_link_per_peer.",
+        "deploy/host-slot-node: control.rs on StoreNode with the host's zid, the control feature turns lifecycle-verbs on, control_channel test gains the other verbs.",
+        "scripts: run-ci.sh counts and a leg C1m mcu lifecycle verbs; feature_public_surface_census.py and nondefault-tests-gate.sh name the feature. docs/session-lifecycle-intent.md section 6.8."
+      ],
+      "verification_bullets": [
+        "On the build host: the six mcu legs as the CI runs them (19, 20, 47, 22, 23, 57 tests), the new lifecycle-verbs leg (26 tests, MAX_PEER_NODES 2) and the host control channel (4 tests, one process per test); clippy with -D warnings for wz-session-mcu, host-slot-node and wz-session-core; cargo check with the feature off and on. Kit lane build and stack gate on the four Zephyr client images at the parent and at the gated commit: chains 6956, 6956, 7108 and 7448 bytes in both, text 4 bytes smaller. The reason pin, census, feature model and gate diagnostic gates after the rebase. Not verified: nondefault-tests-gate.sh ran out of disk locally, so the new row is read from hosted C1bnl; debt_plane_census and doc_feature_sets are red in the hook's extended array on the origin tip and are not this round's."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Step C leaves: the fixed in-band query does not serve close, reset and status keys, so no Zephyr image has the verbs; step D splits lifecycle-verbs into one capability per verb and writes the capability document; who may close, reset and read the status of a fixed image is the image owner's and none does by default. The tls client image's worst chain rose 168 bytes at the slot node's latest-sample commit and more after it, not isolated. The four-in-flight stack peak of the asking client was not re-measured. The hosted runs holding rounds 3697, 3715 and 3749 were not read."
+      ],
+      "publishable_decision_summary": "D7 step 8, C: the fixed-memory node serves close, reset and status through the one function (lifecycle_verdict) that the heap profile uses. The connect manager's store keeps one entry per node (open, withdraw, closing, reopen) so the table is the size of the room and no request is lost or reordered, a mirror of each node's links and machine state, and a record of reset generations that is the size of the room, never grows and never evicts: a peer outside it is refused by NoRoom. reset_node ends the session and keeps the intent. The control port reads close, reset, status and whoami beside open; the host node answers them over its pipe. All of it is behind the feature lifecycle-verbs: measured on the four Zephyr client images, the ungated code cost 352 bytes of worst chain and 1988 of flash, and gated they equal the parent. Table: ten cases; the fixed node conforms to the eight it can be put in.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-mcu: connect_manager (Pending, HeldNode, generations, reset_node, NodeDesk, LifecyclePermits, StoreNode, WritePermit; all behind lifecycle-verbs), node_opening (OpeningOnly; open_verdict is lifecycle_node::open_verdict), control_port (close, reset, status, whoami and their error words), contract (adapter wraps OpeningOnly); feature lifecycle-verbs in its manifest.",
+        "crates/wz-session-core: lifecycle_node::open_verdict public; lifecycle_contract::verbs gains one case and reachable_with_one_link_per_peer.",
+        "deploy/host-slot-node: control.rs on StoreNode with the host's zid, the control feature turns lifecycle-verbs on, control_channel test gains the other verbs.",
+        "scripts: run-ci.sh counts and a leg C1m mcu lifecycle verbs; feature_public_surface_census.py and nondefault-tests-gate.sh name the feature. docs/session-lifecycle-intent.md section 6.8."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host: the six mcu legs as the CI runs them (19, 20, 47, 22, 23, 57 tests), the new lifecycle-verbs leg (26 tests, MAX_PEER_NODES 2) and the host control channel (4 tests, one process per test); clippy with -D warnings for wz-session-mcu, host-slot-node and wz-session-core; cargo check with the feature off and on. Kit lane build and stack gate on the four Zephyr client images at the parent and at the gated commit: chains 6956, 6956, 7108 and 7448 bytes in both, text 4 bytes smaller. The reason pin, census, feature model and gate diagnostic gates after the rebase. Not verified: nondefault-tests-gate.sh ran out of disk locally, so the new row is read from hosted C1bnl; debt_plane_census and doc_feature_sets are red in the hook's extended array on the origin tip and are not this round's."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step C leaves: the fixed in-band query does not serve close, reset and status keys, so no Zephyr image has the verbs; step D splits lifecycle-verbs into one capability per verb and writes the capability document; who may close, reset and read the status of a fixed image is the image owner's and none does by default. The tls client image's worst chain rose 168 bytes at the slot node's latest-sample commit and more after it, not isolated. The four-in-flight stack peak of the asking client was not re-measured. The hosted runs holding rounds 3697, 3715 and 3749 were not read."
+      ]
+    },
     "Round 38": {
       "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
       "changes_bullets": [
