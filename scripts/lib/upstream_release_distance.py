@@ -189,11 +189,18 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 # behind. The gate named both from the run after they were added (Layer U, which runs at the
 # end of the validate job and so was behind a red it did not cause); the rows say what it
 # observes, and a release either fork publishes later moves them like any other row.
+#
+# R3865 (open-debt item 711) — zenoh 0 -> 1, zenoh-c 0 -> 1, zenoh-pico 0 -> 1: upstream
+# published 1.10.2 for all three after the pin 1.10.1. This is the OBSERVATION half the
+# clause above separates from the bump, exactly as R3359 did for FreeRTOS-Kernel: the rows
+# move to what the gate measures, the grade it prints is `patch`, and `BUMP_GRADE` opens at
+# `minor`, so no bump round is owed by this observation. The pins are unchanged, and the
+# bump to 1.10.2 stays with item 711.
 PINNED: dict[str, tuple[str, int]] = {
     "FreeRTOS/FreeRTOS-Kernel": ("MEASURED", 0),
-    "eclipse-zenoh/zenoh": ("MEASURED", 0),
-    "eclipse-zenoh/zenoh-c": ("MEASURED", 0),
-    "eclipse-zenoh/zenoh-pico": ("MEASURED", 0),
+    "eclipse-zenoh/zenoh": ("MEASURED", 1),
+    "eclipse-zenoh/zenoh-c": ("MEASURED", 1),
+    "eclipse-zenoh/zenoh-pico": ("MEASURED", 1),
     "lwip-tcpip/lwip": ("NO_RELEASES", 0),
     "newmassrael/scxml-core-engine": ("NO_RELEASES", 0),
     "zephyrproject-rtos/mbedtls": ("NO_RELEASES", 0),
