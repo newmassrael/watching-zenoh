@@ -547,9 +547,7 @@ row of every leg, the tiers included, except the node itself:
   declarations. Both leave the pin, whose broker hat serves the `Local` region and
   names the node's own face among the `clients`
   (`zenoh/src/net/routing/hat/broker/pubsub.rs` @ `srcs.clients.push(face.zid);`).
-  This is not decided here: the router's own test asserts the absence, and
-  `wz_peer_adminspace_to_pico_zget` asserts `peers: [<own zid>]` for a peer. See
-  the open question below.
+  Decided in section 12: the pin's two rules, built at steps 6d and 6e.
 - **The graph of a gossip peer** reaches the `linkview` plane too, as it does the
   `graph` plane (`GOSSIP_GRAPH`).
 
@@ -564,19 +562,69 @@ has a twin on the region-hat forwarder already.
 
 With part three the list of section 5 is answered: each surface is moved, already
 there, or declared absent with its reason. What step 6 leaves for step 7 is a
-call-site migration, not a missing surface, and the two decisions below.
+call-site migration, not a missing surface, and the admin output and structure of
+section 12 (steps 6d and 6e).
 
-## 12. Open
+## 12. Decision: the node's own face, and the north source (owner direction, 2026-10-28)
 
-- **Who a node's own declarations name as their source in the admin legs.** The
-  pin 1.10.1 names the node's own face among the `clients` of the legs the broker
-  hat serves for `Local`. `LinkstateForwarder` names it among the `peers`, and
-  `wz_peer_adminspace_to_pico_zget` pins that. The region-hat forwarder, as the
-  router, names it nowhere, and a router unit test pins that. Moving the
-  region-hat forwarder to the pin changes what an admin GET of a router and of a
-  peer returns for the node's own hosted declarations. It needs a stock zenohd
-  read, which this tree cannot do, and it is the owner's decision because two
-  pinned tests say otherwise.
+The question part three left open was who a node's own declarations name as their
+source in the admin legs. It is decided by the pin's structure and not by any of
+the three behaviours the tree has, none of which follows it. Cost is not weighed;
+the structure is the pin's.
+
+What the pin does, read from the pinned checkout and not from a running zenohd:
+
+1. A node's own session is a FACE of the dispatcher in the `Local` region, whose
+   mode is client (`zenoh/src/net/routing/gateway.rs` @ `Region::Local,` and
+   `commons/zenoh-protocol/src/core/region.rs` @ `Region::Local => Some(WhatAmI::Client),`).
+   The broker hat serves it, so its declarations are the face's declarations like
+   a client's, and the legs list the face's zid among the `clients`
+   (`zenoh/src/net/routing/hat/broker/pubsub.rs` @ `srcs.clients.push(face.zid);`).
+2. The dispatcher's merge adds the NODE's own zid to the north bucket of every
+   entity a SOUTH region sourced, by the mode of the north hat, and the `Local` and
+   every client region are south
+   (`zenoh/src/net/routing/dispatcher/tables.rs` @ `fn add_north_source(`): `peers`
+   on a peer node, `routers` on a router. It applies to subscribers, queryables and
+   tokens and not to publishers and queriers.
+
+So on a peer node a subscription the node hosts is
+`{routers: [], peers: [self], clients: [self]}`, and one a client c holds is
+`{routers: [], peers: [self], clients: [c]}`; a neighbouring peer's is
+`{routers: [], peers: [that peer], clients: []}` and gets no north source, because
+the north region is not south. A router node does the same with `routers`.
+
+Against it, as measured by the gate and by reading: `LinkstateForwarder` has the
+second rule (its `peers` carry the node for a client's subscription, which is what
+the e2e files pin) and lacks the first for a hosted one; the region-hat forwarder
+has neither, which is also the router's state, and a router unit test pins it from
+a reading of the router hat's own filter that is about the router hat's table and
+not about the merge.
+
+The structure that follows, in the order it is built:
+
+- **Step 6d, the output.** The admin fold of the region-hat forwarder applies the
+  merge rule: for the entities a south-bound hat sourced, the node is added to the
+  north bucket by the north hat's mode. The node's own hosted declarations are
+  listed among the `clients` under its own zid. The router host changes with it, as
+  it shares the view, and its unit test and the three e2e files that pin
+  `clients: []` for a hosted declaration (`wz_peer_adminspace_to_pico_zget`,
+  `wz_peer_adminspace_introspection`, `apfull_adminspace_pico_interop`) are changed
+  in the same commit to the pin's body. None of those legs can be run here: the
+  first hosted run is read for them.
+- **Step 6e, the structure.** The hosted entries stop being a side list. They
+  become the declarations of the `Local` face in the `Local` broker hat, with the
+  handler held by the declaration, so that routing, the fold of what the node
+  advertises, the client delivery and the admin legs read one table for the node's
+  own declarations and for a client's, as the pin does, and the `host` contributors
+  of the fold (`local_subscribers`, `local_queryables`) go. The output of 6d does
+  not move; the gates hold it.
+
+The gate's reason `HOSTED_IN_ADMIN_LEGS` is therefore not a standing allowance: at
+6d it is replaced by the two rules above, graded on the region-hat forwarder
+against the pin, and the `LinkstateForwarder` side is a departure recorded as the
+others are (the first rule missing for a hosted declaration).
+
+## 13. Open
 
 - The size of step 1's list is unknown until it is made, and the number of
   rounds after it follows from it. The router's own program ran from round 2865
