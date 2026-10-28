@@ -2223,6 +2223,79 @@ macro_rules! session_cases {
                 out
             }
 
+            /// What a session says of its configuration (`Session::config`): the values it reads,
+            /// the error of a key that is not there, the text of the whole, the typed reads, and
+            /// what a write does for a key of a plugin and for one that is not; and the shape of
+            /// the version the crate names itself with.
+            pub fn configurations() -> Vec<String> {
+                let port = free_port();
+                let session = $z::open(peer("5a00d0", port)).wait().expect("opens");
+                let config = session.config();
+                let mut out = vec![];
+                // Each side listens on a port of its own choosing; the transcripts name it alike.
+                let alike = |line: String| line.replace(&port.to_string(), "PORT");
+                for key in [
+                    "id",
+                    "mode",
+                    "listen/endpoints",
+                    "connect/endpoints",
+                    "scouting/multicast/enabled",
+                    "queries_default_timeout",
+                    "no/such/key",
+                ] {
+                    out.push(alike(format!(
+                        "get {key}: {:?}",
+                        config.get(key).map_err(|e| e.to_string())
+                    )));
+                }
+                out.push(alike(format!("text: {}", config.to_json())));
+                out.push(format!("display is the text: {}", config.to_string() == config.to_json()));
+                out.push(format!("default timeout: {}", config.queries_default_timeout_ms()));
+                out.push(format!("typed mode: {:?}", config.get_typed::<String>("mode").map_err(|e| e.to_string())));
+                out.push(alike(format!(
+                    "typed endpoints: {:?}",
+                    config.get_typed::<Vec<String>>("listen/endpoints").map_err(|e| e.to_string())
+                )));
+                out.push(format!(
+                    "typed against the wrong type: {:?}",
+                    config.get_typed::<u64>("mode").map_err(|e| e.to_string())
+                ));
+                out.push(format!(
+                    "write of a key that is not a plugin's: {:?}",
+                    config.insert_json5("mode", r#""client""#).map_err(|e| e.to_string())
+                ));
+                out.push(format!("mode after: {:?}", config.get("mode").map_err(|e| e.to_string())));
+                out.push(format!(
+                    "write of a plugin's key: {:?}",
+                    config.insert_json5("plugins/demo", r#"{ answer: 42 }"#).map_err(|e| e.to_string())
+                ));
+                out.push(format!(
+                    "plugin config: {:?}",
+                    config.get_plugin_config("demo").map_err(|e| e.to_string())
+                ));
+                out.push(format!(
+                    "a second handle sees the write: {:?}",
+                    session.config().get("plugins/demo").map_err(|e| e.to_string())
+                ));
+
+                // The version: `v`, the version of the crate, `-`, and a commit of 40 digits (with
+                // `-modified` for a tree with changes) or `release`, whichever the build asks for.
+                let version = $z::GIT_VERSION;
+                let commit = version.strip_prefix("v1.10.1-");
+                out.push(format!("version names the crate: {}", commit.is_some()));
+                out.push(format!(
+                    "version names a commit or a release: {}",
+                    commit.is_some_and(|rest| {
+                        let digits = rest.strip_suffix("-modified").unwrap_or(rest);
+                        rest == "release"
+                            || (digits.len() == 40 && digits.bytes().all(|b| b.is_ascii_hexdigit()))
+                    })
+                ));
+                // An error names the file and the line of the source it came from, which each
+                // side has its own of.
+                out.into_iter().map(|line| plain(&line)).collect()
+            }
+
             /// The timestamps a session gives: with the id of the session, of the time of now, and
             /// strictly one after the other when the node holds a clock, for a node that does and
             /// one that does not.
@@ -3342,6 +3415,14 @@ fn what_a_query_and_its_replies_carry_in_their_timestamp_stack_is_what_upstream_
     let (u, w) = (up::instrumented_queries(), wz::instrumented_queries());
     assert!(u.iter().any(|l| l.contains("Receive:uhlc:")), "{u:#?}");
     compare("instrumented_queries", &u, &w);
+}
+
+#[test]
+fn what_a_session_says_of_its_configuration_is_what_upstream_says() {
+    let (u, w) = (up::configurations(), wz::configurations());
+    assert!(u.iter().any(|l| l == "version names the crate: true"), "{u:#?}");
+    assert!(u.iter().any(|l| l.starts_with("get id: Ok(")), "{u:#?}");
+    compare("configurations", &u, &w);
 }
 
 #[test]

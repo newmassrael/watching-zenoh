@@ -787,7 +787,24 @@ Each lands whole with its surface lines, tests and faults in one round.
   at a time, none missed in the end (the first test of a plain Put could not tell, and one assertion
   was changed so that it can; one fault that deleted a fallback failed to compile and was redone as
   a condition that never holds).
-- **Z6c. The unstable arm: the rest.** `Session::config` and `GIT_VERSION`.
+- **Z6c (landed). The unstable arm: the rest.** `Session::config` and `GIT_VERSION`.
+  **Decision: the session holds the configuration it was opened with, and the crate names its own
+  build.** The session keeps a `Notifier<ExpandedConfig>` made from its `Config` when it opens
+  (upstream's runtime holds the same), and `Session::config` hands out a `GenericConfig` over it:
+  the reads (`get`, `get_typed`, `get_plugin_config`, the text, the default timeout of a query)
+  and the one write the configuration allows a running node, a key of a plugin, which every handle
+  of the session sees. `IConfig` is implemented for that notifier in `crate::api::config`, as
+  upstream's runtime implements it, so that the trait of the configuration crate is the interface
+  and nothing else is exposed. `GIT_VERSION` is `v`, the version of the crate, `-` and a commit, as
+  upstream composes it, and a build script (`crates/wz-zenoh/build.rs`) asks `git describe` for the
+  commit with the arguments upstream's `git_version!` takes, and says `release` where there is no
+  history to ask, so that no crate joins the graph for it. The differential compares what the two
+  sessions say of the same configuration, key by key, the error of a key that is not there, the
+  typed reads, the writes that are accepted and refused and what a second handle sees, and the
+  text of the whole; the version is compared by its shape, since the commit is each crate's own. 4
+  faults were injected one at a time, none missed. The surface falls to 0, 0 and 3 lines of the
+  three arms: the default and the unstable arms are whole, and what is left is three lines of the
+  shared-memory arm (Z7).
 - **Z7. The shared-memory arm.** `get_shm_provider`, the provider state and the transport.
 - **Z8. The graph.** Upstream's tests and examples and `zenoh-ext` built and run against the
   patched graph, on Linux and on Windows. A test that cannot pass is a recorded difference with its

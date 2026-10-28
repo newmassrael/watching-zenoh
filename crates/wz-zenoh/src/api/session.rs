@@ -2285,6 +2285,10 @@ pub(crate) struct SessionInner {
     zid: ZenohId,
     /// How long a query waits for its replies when it does not say, from the configuration.
     queries_default_timeout: Duration,
+    /// The configuration the session was opened with, as the application reads it
+    /// ([`Session::config`]).
+    #[cfg(feature = "unstable")]
+    config: crate::api::config::Notifier<zenoh_config::ExpandedConfig>,
     /// What a node records on a message it intercepts: its role, the callback of the user if the
     /// session was opened with one, and the clock of a node that holds none.
     #[cfg(feature = "unstable")]
@@ -3123,6 +3127,8 @@ impl Session {
             zid,
             queries_default_timeout,
             #[cfg(feature = "unstable")]
+            config: crate::api::config::Notifier::new(config.0.clone().expanded()),
+            #[cfg(feature = "unstable")]
             timestamps: Arc::new(TimestampSource::new(
                 zid,
                 whatami,
@@ -3529,6 +3535,27 @@ impl Session {
     /// See [`Session::info()`](`Session::info()`) and [`SessionInfo::zid()`](`SessionInfo::zid()`) for more details.
     pub fn zid(&self) -> ZenohId {
         self.0.zid
+    }
+
+    /// Get the current configuration of the zenoh [`Session`](Session).
+    ///
+    /// The returned configuration [`Notifier`](crate::config::Notifier) can be used to read the current
+    /// zenoh configuration through the `get` function or
+    /// modify the zenoh configuration through the `insert`
+    /// or `insert_json5` function.
+    ///
+    /// # Examples
+    /// ```
+    /// # #[tokio::main]
+    /// # async fn main() {
+    ///
+    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// let peers = session.config().get("connect/endpoints").unwrap();
+    /// # }
+    /// ```
+    #[zenoh_macros::unstable]
+    pub fn config(&self) -> zenoh_config::GenericConfig {
+        zenoh_config::GenericConfig::new(Arc::new(self.0.config.clone()))
     }
 
     /// Get a new Timestamp from a Zenoh [`Session`].
@@ -7546,6 +7573,86 @@ mod tests {
                 .wait();
             assert!(declared.is_err(), "a closed session takes no listener");
             drop(writer);
+        }
+    }
+
+    /// What a session says of its configuration, and the version the crate names itself with.
+    #[cfg(feature = "unstable")]
+    mod configuration {
+        use super::connectivity::on;
+
+        /// A session reads the configuration it was opened with, by key and as a whole, as the
+        /// values of its own and not of the default one.
+        #[test]
+        fn a_session_reads_the_configuration_it_was_opened_with() {
+            let session = on("a1b2e0", "", "");
+            let config = session.config();
+            assert_eq!(config.get("id").expect("a key"), r#""a1b2e0""#);
+            assert_eq!(config.get("mode").expect("a key"), r#""peer""#);
+            assert_eq!(
+                config.get_typed::<String>("mode").expect("a typed key"),
+                "peer"
+            );
+            assert!(
+                config.get_typed::<u64>("mode").is_err(),
+                "a string is no number"
+            );
+            assert!(config.get("no/such/key").is_err());
+            assert_eq!(config.queries_default_timeout_ms(), 10_000);
+            assert!(config.to_json().contains(r#""mode":"peer""#));
+            assert_eq!(config.to_string(), config.to_json());
+        }
+
+        /// A key of a plugin is written, and every handle of the session sees it; a key that is not
+        /// a plugin's is refused and stays as it was.
+        #[test]
+        fn a_plugin_key_is_written_for_every_handle_and_another_key_is_refused() {
+            let session = on("a1b2e1", "", "");
+            let config = session.config();
+            config
+                .insert_json5("plugins/demo", "{ answer: 42 }")
+                .expect("a plugin's key");
+            assert_eq!(
+                session.config().get("plugins/demo").expect("the write"),
+                r#"{"answer":42}"#
+            );
+            assert_eq!(
+                config.get_plugin_config("demo").expect("the plugin"),
+                serde_json::json!({ "answer": 42 })
+            );
+            let refused = config.insert_json5("mode", r#""client""#).unwrap_err();
+            assert!(refused
+                .to_string()
+                .contains("keys starting with `plugins/`"));
+            assert_eq!(config.get("mode").expect("a key"), r#""peer""#);
+        }
+
+        /// Another session has a configuration of its own.
+        #[test]
+        fn each_session_has_its_own_configuration() {
+            let (first, second) = (on("a1b2e2", "", ""), on("a1b2e3", "", ""));
+            first
+                .config()
+                .insert_json5("plugins/only-first", "1")
+                .expect("a plugin's key");
+            assert!(first.config().get("plugins/only-first").is_ok());
+            assert!(second.config().get("plugins/only-first").is_err());
+            assert_eq!(second.config().get("id").expect("a key"), r#""a1b2e3""#);
+        }
+
+        /// The version is upstream's composition: `v`, the version of the crate, `-` and a commit of
+        /// 40 digits (with `-modified` for a tree with changes), or `release`.
+        #[test]
+        fn the_version_names_the_crate_and_the_commit() {
+            let rest = crate::GIT_VERSION
+                .strip_prefix(concat!("v", env!("CARGO_PKG_VERSION"), "-"))
+                .expect("the version of the crate");
+            let digits = rest.strip_suffix("-modified").unwrap_or(rest);
+            assert!(
+                rest == "release"
+                    || (digits.len() == 40 && digits.bytes().all(|b| b.is_ascii_hexdigit())),
+                "{rest}"
+            );
         }
     }
 

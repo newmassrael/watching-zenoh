@@ -275,6 +275,32 @@ impl Notifier<ExpandedConfig> {
     }
 }
 
+/// What a session hands out as its configuration ([`Session::config`](crate::Session::config)):
+/// the notifier of the configuration the session was opened with, read and written through the
+/// interface the configuration crate names.
+#[cfg(feature = "unstable")]
+impl zenoh_config::IConfig for Notifier<ExpandedConfig> {
+    fn get(&self, key: &str) -> ZResult<String> {
+        self.lock()
+            .get_json(key)
+            .map_err(|err| zerror!("{err}").into())
+    }
+
+    fn queries_default_timeout_ms(&self) -> u64 {
+        let guard = self.lock();
+        let config = &guard;
+        zenoh_config::unwrap_or_default!(config.queries_default_timeout())
+    }
+
+    fn insert_json5(&self, key: &str, value: &str) -> ZResult<()> {
+        self.insert_json5(key, value)
+    }
+
+    fn to_json(&self) -> String {
+        self.lock().to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use zenoh_config::{InterceptorFlow, QosOverwriteItemConf};

@@ -2,6 +2,7 @@
 # compatibility crate: zenoh 1.10.1
 # toolchain: nightly-2026-06-07
 # format_version: 57
+const zenoh::GIT_VERSION
 enum zenoh::qos::Priority
 enum zenoh::query::ReplyKeyExpr
 enum zenoh::sample::Locality
@@ -293,6 +294,7 @@ fn zenoh::session::LinkEventsListenerUndeclaration::wait_callbacks(Self) -> Self
 fn zenoh::session::LinksBuilder::transport(Self, zenoh::session::Transport) -> Self ; in impl<'0> zenoh::session::LinksBuilder<'0>
 fn zenoh::session::OpenBuilder::with_timestamp_callback<F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::Fn(zenoh::timestamp_stack::TimestampContext) -> alloc::vec::Vec<u8>>(Self, F) -> Self ; in impl<TryIntoConfig> zenoh::session::OpenBuilder<TryIntoConfig> where <TryIntoConfig as core::convert::TryInto<zenoh::config::Config>>::Error: core::fmt::Debug, TryIntoConfig: 'static + core::convert::TryInto<zenoh::config::Config> + core::marker::Send
 fn zenoh::session::Session::close(&Self) -> zenoh::session::CloseBuilder<Self> ; in impl zenoh::session::Session
+fn zenoh::session::Session::config(&Self) -> zenoh_config::GenericConfig ; in impl zenoh::session::Session
 fn zenoh::session::Session::declare_keyexpr<'0, '1: '0, TryIntoKeyExpr>(&'0 Self, TryIntoKeyExpr) -> impl '0 + zenoh::Resolve<zenoh::Result<zenoh::key_expr::KeyExpr<'1>>> where <TryIntoKeyExpr as core::convert::TryInto<zenoh::key_expr::KeyExpr<'1>>>::Error: core::convert::Into<zenoh::Error>, TryIntoKeyExpr: core::convert::TryInto<zenoh::key_expr::KeyExpr<'1>> ; in impl zenoh::session::Session
 fn zenoh::session::Session::declare_publisher<'0, TryIntoKeyExpr>(&Self, TryIntoKeyExpr) -> zenoh::pubsub::PublisherBuilder<'_, '0> where <TryIntoKeyExpr as core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>>>::Error: core::convert::Into<zenoh::Error>, TryIntoKeyExpr: core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>> ; in impl zenoh::session::Session
 fn zenoh::session::Session::declare_querier<'0, TryIntoKeyExpr>(&Self, TryIntoKeyExpr) -> zenoh::query::QuerierBuilder<'_, '0> where <TryIntoKeyExpr as core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>>>::Error: core::convert::Into<zenoh::Error>, TryIntoKeyExpr: core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>> ; in impl zenoh::session::Session

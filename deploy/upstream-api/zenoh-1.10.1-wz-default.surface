@@ -2,6 +2,7 @@
 # compatibility crate: zenoh 1.10.1
 # toolchain: nightly-2026-06-07
 # format_version: 57
+const zenoh::GIT_VERSION
 enum zenoh::qos::Priority
 enum zenoh::query::ReplyKeyExpr
 enum zenoh::sample::Locality

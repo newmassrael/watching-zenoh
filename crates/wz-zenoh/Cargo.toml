@@ -30,6 +30,8 @@ authors.workspace = true
 repository.workspace = true
 readme.workspace = true
 description = "The public Rust API of the zenoh crate (1.10.1), as a drop-in over watching-zenoh."
+# Records the commit the crate is built from, which `GIT_VERSION` names (as upstream's does).
+build = "build.rs"
 
 [lib]
 name = "zenoh"

@@ -48,6 +48,11 @@ pub use crate::{
     session::{open, Session},
 };
 
+/// The version of this crate and the commit it was built from, composed as upstream composes it:
+/// `v`, the version of the crate, `-`, and the 40 digits of the commit, followed by `-modified`
+/// for a tree that has changes (or `release` where the build has no history to ask).
+pub const GIT_VERSION: &str = env!("WZ_ZENOH_GIT_VERSION");
+
 /// # Payload primitives and encoding
 ///
 /// The [`ZBytes`](crate::bytes::ZBytes) type is Zenoh's representation of raw byte data.
