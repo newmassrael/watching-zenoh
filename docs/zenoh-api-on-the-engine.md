@@ -825,8 +825,48 @@ Each lands whole with its surface lines, tests and faults in one round.
   text of the whole; the version is compared by its shape, since the commit is each crate's own. 4
   faults were injected one at a time, none missed. The surface falls to 0, 0 and 3 lines of the
   three arms: the default and the unstable arms are whole, and what is left is three lines of the
-  shared-memory arm (Z7).
-- **Z7. The shared-memory arm.** `get_shm_provider`, the provider state and the transport.
+  shared-memory arm (Z7, which closes them).
+- **Z7a (landed). The shared-memory arm of the surface.** `Session::get_shm_provider`,
+  `zenoh::shm::ShmProviderState` and `OpenBuilder::with_shm_clients`. **Decision: the provider of
+  the session is made by the crate from the configuration, as upstream's transport manager makes
+  it, and it is not the engine's.** The session reads the `transport/shared_memory` section as it
+  opens: shared memory off, or its transport optimisation off, is no provider (`Disabled`); otherwise
+  the pool the section names (`transport_optimization/pool_size`) is made on a thread of its own the
+  first time the provider is asked for, and the asker is given the receiver of the result
+  (`Initializing`), which a later ask turns into the provider (`Ready`) or into an error that stays
+  (`Error`), the state machine of upstream's `LazyShmProvider` with the quirk that a receiver taken
+  by one asker is not seen by the next. The state is the enum, `into_option`, `Wait` and
+  `IntoFuture` of upstream's, re-exported from `net::runtime`, a hidden module of a module the crate
+  does not publish, as upstream does, because rustdoc records a re-export from a hidden module as a
+  re-export and inlines an item that is not. `mode` = `init` initialises the subsystem as the
+  session opens (`api::shm::init_if_asked`), which is why the engine's refusal of a key it does not
+  act on lets that key through when the crate acts on it itself. `with_shm_clients` hands the
+  session the storage of clients; **the session negotiates no shared memory with its peers and so
+  reads no segment through them, and the storage is kept, unread, for the transport (Z7t)**: an
+  accepted option that does nothing, named here and in the doc of the method. The differential
+  (`conformance/differential-shm/tests/zenoh_session_shm.rs`) opens an upstream session and a wz
+  one with six configurations of the section (the default, a small pool, shared memory off, the
+  optimisation off, `init`, a pool no system gives) and compares the state at the first ask, after
+  waiting, at a later ask and as a future, what the provider holds and hands out, `into_option` at
+  once and a moment later, and a session opened with clients: equal. 7 faults were injected, none
+  missed (one that left a variant unused did not compile and was redone twice as a condition that
+  never holds). The surface of `zenoh` is whole in all three arms: 709, 965 and 1,025 lines, none
+  missing, none extra.
+- **Z7t. The shared-memory transport (carried).** What the three lines do not make: a payload in
+  shared memory that crosses a link without a copy, in both directions, and the implicit promotion
+  of a large payload into the provider of the session. **The process holds two shared-memory
+  systems that share no type**: `zenoh::shm` is `wz-zenoh-shm`, the family crate, and the engine's
+  is its own (`wz_runtime_tokio::shm_*`, with its provider, its clients, its relay and its
+  watchdog), so a `ZShm` cannot be handed to the engine's `publish_shm_all`, and a received
+  shared-memory payload reaches a subscriber as a view that has no descriptor to rebuild a `ZShm`
+  from. Today `put` copies a `ZBytes` that wraps a `ZShm`, the received sample is always plain
+  bytes, the session offers no shared memory in its handshake and the two keys of the
+  optimisation that decide when to promote (`message_size_threshold`, `messages`) are refused by
+  name when they are not the defaults. Each is a recorded difference, not a gap that is hidden.
+  Closing it takes a change of the engine port and not of this crate: a publish that takes a
+  handle (`ShmSendBuffer` of the session core has the seam, which only the relay uses), a receive
+  that carries the descriptor, an adapter from the clients of `zenoh::shm` to the engine's, the
+  handshake offer, and the promotion, each held by a differential over a link to an upstream node.
 - **Z8. The graph.** Upstream's tests and examples and `zenoh-ext` built and run against the
   patched graph, on Linux and on Windows. A test that cannot pass is a recorded difference with its
   reason, never a deleted test.

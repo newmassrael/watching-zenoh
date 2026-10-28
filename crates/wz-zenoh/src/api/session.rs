@@ -1231,6 +1231,7 @@ mod tokio_engine {
         let unmapped: Vec<String> = ignored
             .iter()
             .filter(|key| key_state(key) != Some(KeyState::Inert))
+            .filter(|key| !acted_on_by_the_session(key))
             .filter(|key| {
                 let pointer = format!("/{key}");
                 document.pointer(&pointer) != default.pointer(&pointer)
@@ -1248,6 +1249,13 @@ mod tokio_engine {
                 unmapped.join(", ")
             )
         }
+    }
+
+    /// Whether a key the engine does not act on is one this crate acts on itself, so that the
+    /// engine's ignoring it is no reason to refuse it. `transport/shared_memory/mode`, which the
+    /// session reads as it opens (`api::shm::init_if_asked`) in a build with shared memory.
+    fn acted_on_by_the_session(key: &str) -> bool {
+        cfg!(feature = "shared-memory") && key == "transport/shared_memory/mode"
     }
 
     /// An open the plan refuses, in the words upstream refuses it in where it does, and by the key
@@ -2283,6 +2291,17 @@ pub(crate) struct SessionInner {
     /// session was opened with one, and the clock of a node that holds none.
     #[cfg(feature = "unstable")]
     timestamps: Arc<TimestampSource>,
+    /// The provider of shared memory the configuration asks the session to have, made when it is
+    /// first asked for ([`Session::get_shm_provider`]); `None` when it asks for none.
+    #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+    shm_provider: Option<Arc<crate::api::shm::LazyShmProvider>>,
+    /// The clients of shared memory segments the application opened the session with
+    /// ([`OpenBuilder::with_shm_clients`](crate::session::OpenBuilder::with_shm_clients)). The
+    /// session negotiates no shared memory with its peers yet, so no segment is read through them:
+    /// they are kept for the transport that will (slice Z7).
+    #[cfg(feature = "shared-memory")]
+    #[allow(dead_code)]
+    shm_clients: Option<Arc<zenoh_shm::api::client_storage::ShmClientStorage>>,
     /// The subscriptions declared on the session and not undeclared, which a close lets go of.
     subscriptions: std::sync::Mutex<Vec<Id>>,
     /// The publishers declared on the session and not undeclared, which a close lets go of.
@@ -3097,8 +3116,15 @@ impl Session {
     pub(crate) fn open(
         config: Config,
         #[cfg(feature = "unstable")] timestamp_callback: Option<GetTimestampCallback>,
+        #[cfg(feature = "shared-memory")] shm_clients: Option<
+            Arc<zenoh_shm::api::client_storage::ShmClientStorage>,
+        >,
     ) -> ZResult<Session> {
         let (engine, zid) = Engine::open(&config)?;
+        #[cfg(feature = "shared-memory")]
+        let expanded = config.0.clone().expanded();
+        #[cfg(feature = "shared-memory")]
+        crate::api::shm::init_if_asked(&expanded);
         #[cfg(feature = "unstable")]
         let whatami = config.0.clone().expanded().mode();
         #[cfg(feature = "unstable")]
@@ -3125,6 +3151,10 @@ impl Session {
                 timestamp_callback,
                 node_clock,
             )),
+            #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+            shm_provider: crate::api::shm::provider_of(&expanded),
+            #[cfg(feature = "shared-memory")]
+            shm_clients,
             subscriptions: std::sync::Mutex::new(vec![]),
             publishers: std::sync::Mutex::new(vec![]),
             queryables: std::sync::Mutex::new(vec![]),
@@ -3546,6 +3576,43 @@ impl Session {
     #[zenoh_macros::unstable]
     pub fn config(&self) -> zenoh_config::GenericConfig {
         zenoh_config::GenericConfig::new(Arc::new(self.0.config.clone()))
+    }
+
+    /// Returns the [`ShmProviderState`](ShmProviderState) associated with the current [`Session`](Session).
+    ///
+    /// Each session may create its own provider to manage internal optimizations.
+    /// This method exposes that provider so it can also be accessed at the application level.
+    ///
+    /// Note that the provider may not be immediately available or may be disabled via configuration.
+    /// Provider initialization is concurrent and triggered by access events.
+    ///
+    /// To use this provider, both *shared_memory* and *transport_optimization* config sections
+    /// must be enabled.
+    ///
+    /// This provider is not the one the transport of this crate allocates from: the engine keeps
+    /// shared memory of its own, so a large payload is not put into this provider implicitly as
+    /// upstream's transport does (see slice Z7 of `docs/zenoh-api-on-the-engine.md`).
+    ///
+    /// # Examples
+    /// ```
+    /// # #[tokio::main]
+    /// # async fn main() {
+    ///
+    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// let shm_provider = session.get_shm_provider();
+    /// assert!(shm_provider.into_option().is_none());
+    /// std::thread::sleep(std::time::Duration::from_millis(100));
+    /// let shm_provider = session.get_shm_provider();
+    /// assert!(shm_provider.into_option().is_some());
+    /// # }
+    /// ```
+    #[cfg(feature = "shared-memory")]
+    #[zenoh_macros::unstable]
+    pub fn get_shm_provider(&self) -> crate::net::runtime::ShmProviderState {
+        match &self.0.shm_provider {
+            Some(provider) => provider.state(),
+            None => crate::net::runtime::ShmProviderState::Disabled,
+        }
     }
 
     /// Get a new Timestamp from a Zenoh [`Session`].
@@ -4552,6 +4619,75 @@ mod tests {
         open(peer_with("transport/auth/pubkey/key_size", "4096"))
             .wait()
             .expect("an inert key");
+    }
+
+    /// The shared memory provider of a session: what the configuration decides, and that it is
+    /// made when it is first asked for.
+    #[cfg(all(feature = "shared-memory", feature = "unstable"))]
+    mod shm_provider {
+        use std::time::{Duration, Instant};
+
+        use super::*;
+        use crate::shm::ShmProviderState;
+
+        #[test]
+        fn a_session_with_the_default_configuration_has_a_provider_that_is_there_a_moment_later() {
+            let session = open(peer("a1b2e0")).wait().expect("opens");
+            let first = session.get_shm_provider();
+            assert!(
+                matches!(first, ShmProviderState::Initializing(_)),
+                "{first:?}"
+            );
+            assert!(first.into_option().is_none(), "it is not made yet");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while session.get_shm_provider().into_option().is_none() {
+                assert!(Instant::now() < deadline, "the provider was never made");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        #[test]
+        fn a_session_that_is_configured_with_no_provider_has_none() {
+            for (key, value) in [
+                ("transport/shared_memory/enabled", "false"),
+                (
+                    "transport/shared_memory/transport_optimization/enabled",
+                    "false",
+                ),
+            ] {
+                let session = open(peer_with(key, value)).wait().expect("opens");
+                let state = session.get_shm_provider();
+                assert!(
+                    matches!(state, ShmProviderState::Disabled),
+                    "{key}: {state:?}"
+                );
+                assert!(state.wait().is_none());
+            }
+        }
+
+        #[test]
+        fn the_init_mode_is_acted_on_and_not_refused() {
+            open(peer_with("transport/shared_memory/mode", "\"init\""))
+                .wait()
+                .expect("a key the session acts on itself opens");
+        }
+
+        #[test]
+        fn a_session_opens_with_the_clients_of_the_application() {
+            let clients = Arc::new(
+                zenoh_shm::api::client_storage::ShmClientStorage::builder()
+                    .with_default_client_set()
+                    .build(),
+            );
+            let session = open(peer("a1b2e1"))
+                .with_shm_clients(clients)
+                .wait()
+                .expect("opens");
+            assert!(matches!(
+                session.get_shm_provider(),
+                ShmProviderState::Initializing(_)
+            ));
+        }
     }
 
     /// The ids a session sees as routers and as peers, once it sees `expected` of them or after

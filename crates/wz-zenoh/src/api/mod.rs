@@ -55,6 +55,8 @@ pub(crate) mod sample;
 #[allow(dead_code)]
 pub(crate) mod key_expr;
 pub(crate) mod scouting;
+#[cfg(feature = "shared-memory")]
+pub(crate) mod shm;
 // R3702: the selector's users, the builders of `get` and the querier, are slice Z3.
 #[allow(dead_code)]
 pub(crate) mod selector;

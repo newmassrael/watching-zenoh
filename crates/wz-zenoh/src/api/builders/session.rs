@@ -18,6 +18,8 @@
 // plugins' door to a runtime that another session already holds, which is `internal` and names a
 // runtime this crate does not have (docs/zenoh-api-on-the-engine.md, slice Z1).
 
+#[cfg(feature = "shared-memory")]
+use std::sync::Arc;
 use std::{
     fmt,
     future::{IntoFuture, Ready},
@@ -25,6 +27,8 @@ use std::{
 
 use zenoh_core::{Resolvable, Wait};
 use zenoh_result::ZResult;
+#[cfg(feature = "shared-memory")]
+use zenoh_shm::api::client_storage::ShmClientStorage;
 
 use crate::api::session::Session;
 #[cfg(feature = "unstable")]
@@ -47,6 +51,8 @@ where
     <TryIntoConfig as std::convert::TryInto<crate::config::Config>>::Error: std::fmt::Debug,
 {
     config: TryIntoConfig,
+    #[cfg(feature = "shared-memory")]
+    shm_clients: Option<Arc<ShmClientStorage>>,
     #[cfg(feature = "unstable")]
     timestamp_callback: Option<GetTimestampCallback>,
 }
@@ -71,9 +77,29 @@ where
     pub(crate) fn new(config: TryIntoConfig) -> Self {
         Self {
             config,
+            #[cfg(feature = "shared-memory")]
+            shm_clients: None,
             #[cfg(feature = "unstable")]
             timestamp_callback: None,
         }
+    }
+}
+
+#[cfg(feature = "shared-memory")]
+impl<TryIntoConfig> OpenBuilder<TryIntoConfig>
+where
+    TryIntoConfig: std::convert::TryInto<crate::config::Config> + Send + 'static,
+    <TryIntoConfig as std::convert::TryInto<crate::config::Config>>::Error: std::fmt::Debug,
+{
+    /// Open the session with `shm_clients`, the clients that read the shared memory segments of
+    /// the peers, in place of the global storage of the process.
+    ///
+    /// The session of this crate negotiates no shared memory with its peers yet, so no segment is
+    /// read through them: the session keeps them for the transport that will (see slice Z7 of
+    /// `docs/zenoh-api-on-the-engine.md`).
+    pub fn with_shm_clients(mut self, shm_clients: Arc<ShmClientStorage>) -> Self {
+        self.shm_clients = Some(shm_clients);
+        self
     }
 }
 
@@ -121,6 +147,8 @@ where
             config,
             #[cfg(feature = "unstable")]
             self.timestamp_callback,
+            #[cfg(feature = "shared-memory")]
+            self.shm_clients,
         )
     }
 }

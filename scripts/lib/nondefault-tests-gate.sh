@@ -307,6 +307,11 @@ transport-link-unixpipe,transport-link-ws|"
     # transport, or fails as its raw socket does where `CAP_NET_RAW` is absent. The target is
     # compiled only with `raweth-transport` on Linux, which no other leg turns on.
     "wz-capi-pico|hook|raweth-transport|--test=raweth_door"
+    # The clock a program registers (`wz_ext_clock_source_register` and its two siblings), which
+    # the stamp of `z_timestamp_new` reads: the unit tests of the module, and the target that opens a
+    # session over a registered clock (`clock_source_stamps`, which `Cargo.toml` requires the feature
+    # for). Off by default, as the pico oracle's build has no such door.
+    "wz-capi-pico|hook|clock-source|"
     # The two node-config features the zenoh-c ABI turns on: the usrpwd
     # credential machinery and the interceptor chain (`access_control`,
     # `low_pass_filter`, `downsampling`). Both are off here by default, so the
@@ -362,7 +367,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # features, 20 with the three, under 1 s. `pubsub-ts-stack` joins: the clock a node records the
     # interceptions of a timestamp stack with, and its four tests (the identity of the stamp, a peer
     # that stamps no data, the `trusted-only` policy not refusing one, a node with no identity).
-    "wz-node-time|hook|codec-push,pubsub-timestamp,pubsub-ts-stack,time-hlc|"
+    "wz-node-time|hook|clock-source,codec-push,pubsub-timestamp,pubsub-ts-stack,time-hlc|"
     # Open-debt item 913 -- the in-memory group every group test of the workspace runs over
     # (`multicast_bus`) holds a member's place while a send half of its link lives, as a socket
     # does, which the departure test of the group face depends on. The module exists only with
@@ -466,6 +471,8 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         adminspace-router-linkstate,\
         adminspace-write,\
         attachment-bytes,\
+        clock-quality,\
+        clock-source,\
         codec-close,\
         codec-declare,\
         codec-fragment,\
@@ -1037,6 +1044,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         locator-iface,\
         multicast-declarations,\
         plugin-dynamic-loading,\
+        pubsub-ts-stack,\
         reassembly,\
         reply-source-info,\
         router-connect-reconcile,\
@@ -1166,11 +1174,16 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # nothing. The hosted census said so: five tests, among them `api::cancellation::test::
     # concurrent_cancel`, claimed by no leg. The tests of the crate open sessions on the loopback
     # and run in a few seconds, so the leg is `hook` and its filter is empty: a test added under
-    # either feature is covered without touching this row. `shared-memory` is not named: it changes
-    # the types of the protocol and is held in its own package (`conformance/differential-shm`).
+    # either feature is covered without touching this row. `shared-memory` is not named here: it
+    # changes the types of the protocol and its differential is held in its own package
+    # (`conformance/differential-shm`); the tests of the crate that exist only with it (the provider
+    # of a session and what the configuration decides about it, slice Z7a, in two modules) are
+    # run by the row below, whose filter is empty so that a test added in a third is run too, and
+    # every other test of the crate runs with the feature on as well. MEASURED: 164 passed, 21 s.
     "zenoh|hook|\
         internal,\
         unstable|"
+    "zenoh|hook|shared-memory,unstable|"
 )
 
 # package|test-path|reason

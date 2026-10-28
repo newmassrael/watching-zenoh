@@ -32,6 +32,9 @@ extern crate zenoh_core;
 extern crate zenoh_result;
 
 mod api;
+// The path upstream re-exports `ShmProviderState` from; see the module.
+#[cfg(all(feature = "unstable", feature = "shared-memory"))]
+mod net;
 
 pub use zenoh_core::{Resolvable, Resolve, Wait};
 /// A Zenoh error.
@@ -144,9 +147,7 @@ pub mod shm {
         },
     };
 
-    // R3673: upstream's module ends with `pub use crate::net::runtime::ShmProviderState;`, the state
-    // of a session's provider, which belongs to the session and so to slice Z7 of
-    // docs/zenoh-api-on-the-engine.md; it joins this module there.
+    pub use crate::net::runtime::ShmProviderState;
 }
 
 /// Functionality for interrupting queries.
