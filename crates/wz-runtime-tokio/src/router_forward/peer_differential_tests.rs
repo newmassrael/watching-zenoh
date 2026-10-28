@@ -121,6 +121,10 @@ pub(super) enum Seen {
         entries: usize,
         nodes: Vec<(Vec<u8>, Vec<Vec<u8>>)>,
     },
+    /// The size of the graph the node holds: not a message but a witness read
+    /// after each step, so that a plane that sends the same frames while
+    /// learning a different topology is a difference.
+    Graph { nodes: usize, edges: usize },
     /// Anything else, by the name of its kind, so that a kind one node sends
     /// and the other does not is a difference and its contents are not.
     Other(&'static str),
@@ -174,6 +178,11 @@ enum Step {
     Down(u64),
     /// The periodic tick.
     Tick,
+    /// The node's own session puts: keyexpr, payload, priority, express.
+    NodePut(&'static str, &'static [u8], Priority, bool),
+    /// The node's own session deletes.
+    #[cfg(feature = "pubsub-delete")]
+    NodeDelete(&'static str),
 }
 
 /// What a querier asks beyond the keyexpr. Every field left `None` is absent
@@ -188,7 +197,7 @@ struct Asked {
 
 /// A node under test: the forwarder and what has been recorded on each face.
 struct Node {
-    fwd: Box<dyn FaceForwarder>,
+    fwd: Box<dyn NodeSession>,
     /// How far the node's injected clock has been moved from where it began,
     /// in milliseconds.
     clock_ms: Arc<AtomicU64>,
@@ -215,7 +224,7 @@ struct Node {
 }
 
 impl Node {
-    fn new(fwd: Box<dyn FaceForwarder>, clock_ms: Arc<AtomicU64>, self_zid: u8) -> Self {
+    fn new(fwd: Box<dyn NodeSession>, clock_ms: Arc<AtomicU64>, self_zid: u8) -> Self {
         Self {
             fwd,
             clock_ms,
@@ -396,8 +405,18 @@ impl Node {
             }
             Step::Down(id) => self.fwd.deregister(FaceId(*id)),
             Step::Tick => self.fwd.tick(),
+            Step::NodePut(keyexpr, payload, priority, express) => {
+                self.fwd.publish(keyexpr, payload, *priority, *express)
+            }
+            #[cfg(feature = "pubsub-delete")]
+            Step::NodeDelete(keyexpr) => self.fwd.publish_delete(keyexpr),
         }
         self.drain()
+    }
+
+    /// The size of the graph the node learned: nodes, then mutual links.
+    fn graph(&self) -> (usize, usize) {
+        (self.fwd.node_count(), self.fwd.edge_count())
     }
 
     fn deliver(&self, id: u64, message: NetworkMessage) {
@@ -649,6 +668,67 @@ pub(super) enum Plane {
     RegionHat,
 }
 
+/// What a node does as the owner of its own session, which the two planes spell
+/// the same way: publish, and read the size of the graph it learned. Step 6 of
+/// the note adds an entry here for each surface a plane has and a scene can
+/// observe.
+pub(super) trait NodeSession: FaceForwarder {
+    /// Put `payload` on `keyexpr` at `priority`.
+    fn publish(&self, keyexpr: &str, payload: &[u8], priority: Priority, express: bool);
+    /// Delete `keyexpr`.
+    #[cfg(feature = "pubsub-delete")]
+    fn publish_delete(&self, keyexpr: &str);
+    /// Advertise the node's dial locators on the floods it originates.
+    fn set_self_locators(&self, locators: Vec<String>);
+    /// Nodes in the graph of the peers, self included.
+    fn node_count(&self) -> usize;
+    /// Mutual links in that graph.
+    fn edge_count(&self) -> usize;
+}
+
+impl NodeSession for LinkstateForwarder {
+    fn publish(&self, keyexpr: &str, payload: &[u8], priority: Priority, express: bool) {
+        let _ = LinkstateForwarder::publish_qos(self, keyexpr, payload, priority, express);
+    }
+    #[cfg(feature = "pubsub-delete")]
+    fn publish_delete(&self, keyexpr: &str) {
+        let _ = LinkstateForwarder::publish_delete(self, keyexpr);
+    }
+    fn set_self_locators(&self, locators: Vec<String>) {
+        LinkstateForwarder::set_self_locators(self, locators)
+    }
+    fn node_count(&self) -> usize {
+        LinkstateForwarder::node_count(self)
+    }
+    fn edge_count(&self) -> usize {
+        LinkstateForwarder::edge_count(self)
+    }
+}
+
+impl NodeSession for RouterForwarder {
+    fn publish(&self, keyexpr: &str, payload: &[u8], priority: Priority, express: bool) {
+        let tables = self.on_tables();
+        let _ = if priority == Priority::DEFAULT && !express {
+            tables.publish(keyexpr, payload)
+        } else {
+            tables.publish_qos(keyexpr, payload, priority, express)
+        };
+    }
+    fn set_self_locators(&self, locators: Vec<String>) {
+        self.on_tables_mut().set_self_locators(locators)
+    }
+    #[cfg(feature = "pubsub-delete")]
+    fn publish_delete(&self, keyexpr: &str) {
+        let _ = self.on_tables().publish_delete(keyexpr);
+    }
+    fn node_count(&self) -> usize {
+        self.on_tables().north_net_node_count()
+    }
+    fn edge_count(&self) -> usize {
+        self.on_tables().north_net_edge_count()
+    }
+}
+
 /// One forwarder of `plane` at node zid byte `self_zid` in `mode`, and the handle
 /// that moves its clock. A node reads its own clock, which a scene moves by the
 /// same amount in both planes; `began` is the instant every clock starts from.
@@ -657,13 +737,13 @@ pub(super) fn make(
     self_zid: u8,
     mode: Mode,
     began: Instant,
-) -> (Box<dyn FaceForwarder>, Arc<AtomicU64>) {
+) -> (Box<dyn NodeSession>, Arc<AtomicU64>) {
     let full = matches!(mode, Mode::LinkState);
     let moved = Arc::new(AtomicU64::new(0));
     let read = Arc::clone(&moved);
     let now: Box<dyn Fn() -> Instant + Send + Sync> =
         Box::new(move || began + Duration::from_millis(read.load(Ordering::SeqCst)));
-    let forwarder: Box<dyn FaceForwarder> = match plane {
+    let forwarder: Box<dyn NodeSession> = match plane {
         Plane::LinkstateForwarder => {
             let linkstate = LinkstateForwarder::with_clock(zid(self_zid), WhatAmI::Peer, now);
             linkstate.set_full_linkstate(full);
@@ -715,9 +795,14 @@ fn diverge(scene: &[Step], self_zid: u8, mode: Mode) -> Vec<Divergence> {
     for step in scene {
         let (old_data, old_topology) = split(old.apply(step));
         let (new_data, new_topology) = split(new.apply(step));
+        let graph = |node: &Node| {
+            let (nodes, edges) = node.graph();
+            Sent::from([(0, vec![Seen::Graph { nodes, edges }])])
+        };
         for (plane, a, b) in [
             ("data", old_data, new_data),
             ("topology", old_topology, new_topology),
+            ("graph", graph(&old), graph(&new)),
         ] {
             if a != b {
                 out.push(Divergence {
@@ -1127,9 +1212,42 @@ fn liveliness_tokens() -> Vec<Step> {
     ]
 }
 
+/// The node's own session as a publisher (step 6): its Put goes to the peers and
+/// the clients that subscribed, to no one when no one did, banded and express
+/// when it asks, and stops reaching a subscriber that withdrew or left. Two
+/// peers and two clients, one client subscribing a narrower key than the peer.
+fn a_node_publishes() -> Vec<Step> {
+    #[allow(unused_mut)]
+    let mut scene = vec![
+        Step::Up(0, 0xAA, Wire::Peer),
+        Step::Up(1, 0xBB, Wire::Peer),
+        Step::Up(2, 0xC1, Wire::Client),
+        Step::Up(3, 0xC2, Wire::Client),
+        Step::LinkBack(0, 0xAA, 5),
+        Step::LinkBack(1, 0xBB, 5),
+        Step::Tick,
+        Step::NodePut("demo/none", b"n0", Priority::DEFAULT, false),
+        Step::Subscribe(0, "demo/**"),
+        Step::Subscribe(2, "demo/c/**"),
+        Step::NodePut("demo/a", b"n1", Priority::DEFAULT, false),
+        Step::NodePut("demo/c/x", b"n2", Priority::DEFAULT, false),
+        Step::NodePut("demo/a", b"n3", Priority::RealTime, true),
+        Step::Subscribe(1, "demo/a"),
+        Step::NodePut("demo/a", b"n4", Priority::DEFAULT, false),
+        Step::Unsubscribe(0, "demo/**"),
+        Step::NodePut("demo/a", b"n5", Priority::DEFAULT, false),
+        Step::Down(1),
+        Step::NodePut("demo/a", b"n6", Priority::DEFAULT, false),
+    ];
+    #[cfg(feature = "pubsub-delete")]
+    scene.push(Step::NodeDelete("demo/c/x"));
+    scene
+}
+
 fn scenes() -> Vec<(&'static str, Vec<Step>)> {
     #[allow(unused_mut)]
     let mut scenes = vec![
+        ("a node publishes", a_node_publishes()),
         (
             "a timeout shorter than the default",
             a_timeout_shorter_than_the_default(),
@@ -1224,6 +1342,72 @@ fn messages_sent(mode: Mode, wanted: impl Fn(&Seen) -> bool) -> usize {
 /// the query plane a scene set that only sent Requests would not exercise.
 fn answers_delivered(mode: Mode) -> usize {
     messages_sent(mode, |s| matches!(s, Seen::Response { .. }))
+}
+
+/// What the node-publish scene claims to exercise, counted in what the
+/// region-hat peer sent in `mode`: a Put of the node reaching a peer and a
+/// client, a banded one, a delete, and nothing after a subscriber left.
+fn assert_the_node_publish_scene_exercises_what_it_claims(mode: Mode) {
+    let (_, mut node) = both(0x01, mode);
+    let mut got: Vec<(u64, Seen)> = Vec::new();
+    for step in a_node_publishes() {
+        for (face, seen) in node.apply(&step) {
+            got.extend(seen.into_iter().map(|s| (face, s)));
+        }
+    }
+    let put = |face: u64, payload: &[u8]| {
+        got.iter().any(|(f, s)| {
+            *f == face && matches!(s, Seen::Push { payload: Some(p), .. } if p == payload)
+        })
+    };
+    assert!(
+        !put(0, b"n0") && !put(2, b"n0"),
+        "{mode:?}: n0 has no subscriber"
+    );
+    assert!(
+        put(0, b"n1") && !put(2, b"n1"),
+        "{mode:?}: n1 reaches the peer only"
+    );
+    assert!(
+        put(0, b"n2") && put(2, b"n2"),
+        "{mode:?}: n2 reaches the peer and the client"
+    );
+    assert!(put(0, b"n3"), "{mode:?}: the banded Put reaches the peer");
+    assert!(
+        put(0, b"n4") && put(1, b"n4"),
+        "{mode:?}: n4 reaches both peers"
+    );
+    assert!(
+        !put(0, b"n5") && put(1, b"n5"),
+        "{mode:?}: n5 follows the withdrawal"
+    );
+    assert!(!put(1, b"n6"), "{mode:?}: n6 follows the face going down");
+    #[cfg(feature = "pubsub-delete")]
+    assert!(
+        got.iter()
+            .any(|(f, s)| *f == 2 && matches!(s, Seen::Push { payload: None, .. })),
+        "{mode:?}: the delete reaches the client"
+    );
+}
+
+/// A node's dial locators ride the link-state it originates, in both planes:
+/// the pin asks its runtime for them whenever it builds a net's message.
+#[test]
+fn a_node_advertises_its_locators_in_the_flood_it_originates() {
+    let locator = "tcp/10.0.0.1:7447";
+    for plane in [Plane::LinkstateForwarder, Plane::RegionHat] {
+        let (fwd, clock) = make(plane, 0x01, Mode::LinkState, Instant::now());
+        let mut node = Node::new(fwd, clock, 0x01);
+        node.fwd.set_self_locators(vec![locator.to_string()]);
+        node.apply(&Step::Up(0, 0xAA, Wire::Peer));
+        let sink = &node.sinks[&0];
+        let carried = (0..sink.frame_count()).any(|i| {
+            sink.frame_bytes(i)
+                .windows(locator.len())
+                .any(|w| w == locator.as_bytes())
+        });
+        assert!(carried, "{plane:?}: the first flood carries the locator");
+    }
 }
 
 /// Each thing the query scenes claim to exercise, counted in what the region-hat
@@ -1322,13 +1506,30 @@ const TOKEN_TO_INTERESTED_CLIENT: &str = "a token pushed to a client that asked 
 ))]
 const TOKEN_INTEREST_BROKERED: &str = "a client's token interest brokered to the peers";
 
+/// Whether `step` is the node's own session putting or deleting.
+fn is_a_node_put(step: &Step) -> bool {
+    match step {
+        Step::NodePut(..) => true,
+        #[cfg(feature = "pubsub-delete")]
+        Step::NodeDelete(..) => true,
+        _ => false,
+    }
+}
+
+const NODE_PUT_TO_CLIENT: &str = "the node's own Put reaches a client that subscribed";
+const GOSSIP_GRAPH: &str = "the graph a gossip peer keeps";
+const LINK_DOWN_LIST: &str = "a link-state list sent when a link goes down";
+
 /// The reasons each mode must still produce: one no scene reaches any more is
 /// stale, and a stale allowance is a hole.
 fn expected_reasons(mode: Mode) -> std::collections::BTreeSet<&'static str> {
-    let mut reasons: std::collections::BTreeSet<&'static str> =
-        [INTEREST_ANSWER_DECLARATIONS, ROUTER_INTEREST_REFUSED]
-            .into_iter()
-            .collect();
+    let mut reasons: std::collections::BTreeSet<&'static str> = [
+        INTEREST_ANSWER_DECLARATIONS,
+        ROUTER_INTEREST_REFUSED,
+        NODE_PUT_TO_CLIENT,
+    ]
+    .into_iter()
+    .collect();
     #[cfg(feature = "routing-token-tables")]
     reasons.insert(TOKEN_TO_INTERESTED_CLIENT);
     #[cfg(all(
@@ -1339,6 +1540,8 @@ fn expected_reasons(mode: Mode) -> std::collections::BTreeSet<&'static str> {
     if matches!(mode, Mode::Gossip) {
         reasons.insert(FACE_UP_LIST);
         reasons.insert(TREE_READVERTISE);
+        reasons.insert(GOSSIP_GRAPH);
+        reasons.insert(LINK_DOWN_LIST);
     }
     reasons
 }
@@ -1348,10 +1551,49 @@ fn explained(mode: Mode, d: &Divergence) -> Option<&'static str> {
     if let Some(reason) = explained_interest_or_token(d) {
         return Some(reason);
     }
+    // The pin's broker hat routes a Put to every owned face that holds a
+    // matching subscription, whatever region the Put came from
+    // (`zenoh/src/net/routing/hat/broker/pubsub.rs` @ `if ctx.subs.is_some() {`),
+    // and the node's own session is such a source. The region-hat peer therefore
+    // reaches the clients that subscribed; `LinkstateForwarder::publish` reaches
+    // its tree children and its gateways and none of its client faces. Every
+    // face it does reach is reached with the same message.
+    if is_a_node_put(&d.step)
+        && d.plane == "data"
+        && d.region_hat.len() > d.linkstate.len()
+        && d.linkstate
+            .iter()
+            .all(|(face, seen)| d.region_hat.get(face) == Some(seen))
+    {
+        return Some(NODE_PUT_TO_CLIENT);
+    }
     if !matches!(mode, Mode::Gossip) {
         return None;
     }
     match (d.plane, &d.step) {
+        // The pin's gossip net adds a node to its graph for what a neighbour
+        // told it and not for a link coming up
+        // (`zenoh/src/net/protocol/network.rs` @ `if self.full_linkstate || self.gossip_multihop {`
+        // in `add_link`), and a gossip flood forms no edge. `LinkstateForwarder`
+        // adds the node at once and, after a recompute, an edge. Nothing routes
+        // by a gossip graph, so this is a count of what each plane keeps and not
+        // a routing difference; the link-state extension keeps the same graph
+        // in both planes, which the other mode's test holds.
+        ("graph", _) => Some(GOSSIP_GRAPH),
+        // The pin's gossip `remove_link` forgets the link and sends nothing:
+        // the flood to the remaining links is inside the `full_linkstate ||
+        // gossip_multihop` branch that follows
+        // (`zenoh/src/net/protocol/network.rs` @ `self.graph[self.idx].links.retain(|dest, _| dest != zid);`).
+        // `LinkstateForwarder` tells the faces that remain its own entry.
+        ("topology", Step::Down(..))
+            if d.region_hat.is_empty()
+                && d.linkstate
+                    .values()
+                    .flatten()
+                    .all(|s| matches!(s, Seen::LinkState { .. })) =>
+        {
+            Some(LINK_DOWN_LIST)
+        }
         // The pin's gossip `add_link` sends a new link the entries of the nodes
         // the graph holds AND that are linked neighbours, zid only
         // (`zenoh/src/net/protocol/network.rs` @ `// Send all nodes linkstate on new link`),
@@ -1551,6 +1793,7 @@ fn in_gossip_mode_the_two_peer_planes_differ_only_where_the_pin_says() {
         "the query scenes must deliver an answer to a querier for the comparison to mean anything"
     );
     assert_the_query_scenes_exercise_what_they_claim(Mode::Gossip);
+    assert_the_node_publish_scene_exercises_what_it_claims(Mode::Gossip);
 }
 
 /// What the pin's gossip peer tells a new link (`zenoh/src/net/protocol/network.rs`
@@ -1700,4 +1943,5 @@ fn in_link_state_mode_the_two_peer_planes_send_the_same_data_and_topology() {
         "the extension answers a query across peers, which gossip does not"
     );
     assert_the_query_scenes_exercise_what_they_claim(Mode::LinkState);
+    assert_the_node_publish_scene_exercises_what_it_claims(Mode::LinkState);
 }

@@ -21,7 +21,7 @@
 //! is a difference, and a pump that does not settle is a failure of its own (a
 //! loop), so loop freedom is graded by the same run that grades delivery.
 
-use super::peer_differential_tests::{decode, make, zid, Mode, Plane, Seen, Wire};
+use super::peer_differential_tests::{decode, make, zid, Mode, NodeSession, Plane, Seen, Wire};
 use super::*;
 use crate::runtime_impl::TokioRuntime;
 use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
@@ -52,7 +52,7 @@ struct Face {
 }
 
 struct NetNode {
-    fwd: Box<dyn FaceForwarder>,
+    fwd: Box<dyn NodeSession>,
     faces: BTreeMap<u64, Face>,
     next_face: u64,
 }
@@ -100,6 +100,8 @@ enum NetStep {
     Reply(u8, &'static str, &'static [u8]),
     /// An end point ends the request it was last sent.
     Final(u8),
+    /// The session of a node (named by its zid byte) puts.
+    NodePut(u8, &'static str, &'static [u8]),
 }
 
 struct Network {
@@ -381,6 +383,13 @@ impl Network {
                     .expect("push");
                 self.inject(*name, NetworkMessage::Push(Box::new(push)));
             }
+            NetStep::NodePut(node, keyexpr, payload) => {
+                self.nodes
+                    .get(node)
+                    .expect("a node of the network")
+                    .fwd
+                    .publish(keyexpr, payload, Priority::DEFAULT, false);
+            }
             NetStep::Queryable(name, keyexpr, complete) => {
                 let declare = build_declare_queryable_with_info(
                     keyexpr,
@@ -476,6 +485,32 @@ fn a_chain_of_four() -> Scene {
             NetStep::Reply(ep(4), "demo/q", b"answered across three links"),
             NetStep::Final(ep(4)),
             NetStep::Put(ep(4), "demo/y", b"again"),
+        ],
+    }
+}
+
+/// A node publishes (step 6): the session of the middle node of a chain puts, a
+/// subscriber at each end of it gets the Put across the links on its side, and a
+/// subscriber attached to the publishing node itself is a client of it.
+fn a_node_publishes_along_a_chain() -> Scene {
+    Scene {
+        name: "a node publishes along a chain",
+        nodes: vec![1, 2, 3, 4, 5],
+        script: vec![
+            NetStep::Link(1, 2),
+            NetStep::Link(2, 3),
+            NetStep::Link(3, 4),
+            NetStep::Link(4, 5),
+            NetStep::Attach(ep(1), 1),
+            NetStep::Attach(ep(3), 3),
+            NetStep::Attach(ep(5), 5),
+            NetStep::Subscribe(ep(1), "demo/**"),
+            NetStep::Subscribe(ep(3), "demo/**"),
+            NetStep::Subscribe(ep(5), "demo/**"),
+            NetStep::NodePut(3, "demo/x", b"from the middle"),
+            NetStep::NodePut(1, "demo/y", b"from the end"),
+            NetStep::Unsubscribe(ep(5), "demo/**"),
+            NetStep::NodePut(3, "demo/z", b"after a withdrawal"),
         ],
     }
 }
@@ -724,6 +759,7 @@ fn scenes() -> Vec<Scene> {
         a_ring_that_loses_a_link(),
         queries_along_a_line(),
         an_interest_across_a_chain(),
+        a_node_publishes_along_a_chain(),
     ];
     #[cfg(feature = "routing-token-tables")]
     scenes.push(liveliness_across_a_chain());
@@ -739,10 +775,11 @@ fn scenes() -> Vec<Scene> {
 /// [`is_a_token_pushed_to_an_interested_client`]) and a token interest brokered
 /// to the peers (see [`is_an_interest_brokered_to_the_peers`]); every other
 /// difference is a failure.
-fn differences(mode: Mode) -> (Vec<String>, usize, usize) {
+fn differences(mode: Mode) -> (Vec<String>, usize, usize, usize) {
     let mut out = Vec::new();
     let mut explained = 0;
     let mut brokered = 0;
+    let mut node_puts = 0;
     for scene in scenes() {
         let old = run(Plane::LinkstateForwarder, mode, &scene.nodes, &scene.script);
         let new = run(Plane::RegionHat, mode, &scene.nodes, &scene.script);
@@ -758,13 +795,17 @@ fn differences(mode: Mode) -> (Vec<String>, usize, usize) {
                 brokered += 1;
                 continue;
             }
+            if is_a_node_put_to_a_client(&scene.script[n], a, b) {
+                node_puts += 1;
+                continue;
+            }
             out.push(format!(
                 "{mode:?} / {} / step {n} {:?}\n  linkstate:  {a:?}\n  region-hat: {b:?}",
                 scene.name, scene.script[n]
             ));
         }
     }
-    (out, explained, brokered)
+    (out, explained, brokered, node_puts)
 }
 
 /// The one difference the network gate allows, and the same one the one-node gate
@@ -792,6 +833,22 @@ fn is_a_token_pushed_to_an_interested_client(step: &NetStep, a: &Outcome, b: &Ou
 #[cfg(not(feature = "routing-token-tables"))]
 fn is_a_token_pushed_to_an_interested_client(_: &NetStep, _: &Outcome, _: &Outcome) -> bool {
     false
+}
+
+/// The third difference the network gate allows, and the one the one-node gate does
+/// (`NODE_PUT_TO_CLIENT`): the pin's broker hat routes the node's own Put to every
+/// client face that subscribed
+/// (`zenoh/src/net/routing/hat/broker/pubsub.rs` @ `if ctx.subs.is_some() {`),
+/// and `LinkstateForwarder::publish` reaches its tree children and gateways and no
+/// client face. What `LinkstateForwarder` delivered must be a part of what the
+/// region-hat peer did, and the nodes carry as many messages between them.
+fn is_a_node_put_to_a_client(step: &NetStep, a: &Outcome, b: &Outcome) -> bool {
+    matches!(step, NetStep::NodePut(..))
+        && a.carried == b.carried
+        && b.received.keys().any(|ep| !a.received.contains_key(ep))
+        && a.received
+            .iter()
+            .all(|(ep, seen)| b.received.get(ep) == Some(seen))
 }
 
 /// The second difference the network gate allows, and the one the one-node gate does
@@ -831,8 +888,12 @@ fn received(mode: Mode, scene: &Scene, wanted: impl Fn(&Seen) -> bool) -> usize 
 
 #[test]
 fn in_gossip_mode_a_network_of_either_plane_delivers_the_same() {
-    let (differing, explained, brokered) = differences(Mode::Gossip);
+    let (differing, explained, brokered, node_puts) = differences(Mode::Gossip);
     assert!(differing.is_empty(), "{}", differing.join("\n"));
+    assert!(
+        node_puts > 0,
+        "the node's own Put reaches the client attached to it, and a stale allowance is a hole"
+    );
     assert_eq!(
         explained, 0,
         "gossip carries no token across a link to explain"
@@ -877,8 +938,12 @@ fn in_gossip_mode_a_network_of_either_plane_delivers_the_same() {
 
 #[test]
 fn in_link_state_mode_a_network_of_either_plane_delivers_the_same() {
-    let (differing, explained, brokered) = differences(Mode::LinkState);
+    let (differing, explained, brokered, node_puts) = differences(Mode::LinkState);
     assert!(differing.is_empty(), "{}", differing.join("\n"));
+    assert!(
+        node_puts > 0,
+        "the node's own Put reaches the client attached to it, and a stale allowance is a hole"
+    );
     assert_eq!(
         explained > 0,
         cfg!(feature = "routing-token-tables"),
@@ -908,6 +973,8 @@ fn in_link_state_mode_a_network_of_either_plane_delivers_the_same() {
         ("a line published from the middle", 2),
         ("a subscription withdrawn across three links", 1),
         ("a ring that loses a link", 2),
+        // 3 subscribers get the first, 3 the second, 2 the third.
+        ("a node publishes along a chain", 8),
         ("queries along a line", 0),
         ("an interest across a chain", 0),
         ("liveliness across a chain", 0),

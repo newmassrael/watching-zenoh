@@ -481,6 +481,26 @@ const NORTH_REGION: Region = Region::North;
 #[cfg(test)]
 const PEERS_REGION: Region = Region::default_south(WhatAmI::Peer);
 
+/// The face of this node's own session, in the `Local` region (item 751, step 6).
+/// The pin makes it a face like any other, with a client's mode and no wire
+/// (`zenoh/src/net/routing/gateway.rs` @ `.local(true)`); here it is only the
+/// name a message from the node itself is routed under, so that no other face
+/// is mistaken for its sender. It is never registered in `faces`, and no
+/// transport face is given this id, which counts up from zero.
+#[cfg(test)]
+const LOCAL_FACE: FaceId = FaceId(u64::MAX);
+
+/// How a data message leaves this node: the reliability of the frame that carries
+/// it, the band that frame is sent in, and whether it is sent express. The three
+/// travel together through every data egress, so they are one value and not three
+/// arguments (item 751, step 6, which added the third).
+#[derive(Clone, Copy)]
+struct Egress {
+    reliable: bool,
+    priority: Priority,
+    express: bool,
+}
+
 /// The region a router's CLIENTS land in, which a broker hat serves. It has no
 /// net: a client is a leaf, HELD (its send seam kept) but routing no topology.
 ///
@@ -3127,6 +3147,28 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         }
     }
 
+    /// Item 751, step 6 — advertise self's dial locators (its listen
+    /// addresses): they ride every FULL flood self originates, so a neighbour
+    /// learns where to reach this node. The twin of
+    /// [`LinkstateForwarder::set_self_locators`](crate::linkstate_forward::LinkstateForwarder::set_self_locators).
+    ///
+    /// Every mesh hat's net takes them: the pin asks the RUNTIME for self's
+    /// locators when it builds a net's link-state message
+    /// (`zenoh/src/net/protocol/network.rs` @ `get_locators_noloopback()`), and
+    /// the runtime has one answer for all of a node's nets. Set once at startup,
+    /// before the first face registers, so self's first flood already carries them.
+    #[cfg(test)]
+    pub fn set_self_locators(&mut self, locators: Vec<String>)
+    where
+        T: std::ops::DerefMut,
+    {
+        for (_, hat) in self.tables.hats.iter_mut() {
+            if let Some(hat) = hat.mesh_mut() {
+                hat.net.set_self_locators(locators.clone());
+            }
+        }
+    }
+
     /// R2896 (open-debt item 751, rules 8d+8e) — choose the south peer
     /// region's topology mode. Off is the pin's and the default: that region's
     /// hat is the peer hat, which builds its south net with `full_linkstate`
@@ -3344,7 +3386,24 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// count) so each mirrors the field it reads and a caller cannot transpose
     /// them. A single-router topology (no Router faces) reads 1 (self alone).
     pub fn routers_net_node_count(&self) -> usize {
+        self.north_net_node_count()
+    }
+
+    /// Number of nodes in the NORTH region's graph: the routers' on a router
+    /// node and the peers' on a peer node (item 751, step 6). The twin of
+    /// [`LinkstateForwarder::node_count`](crate::linkstate_forward::LinkstateForwarder::node_count),
+    /// which a peer reads as its one graph.
+    pub fn north_net_node_count(&self) -> usize {
         self.north_net().node_count()
+    }
+
+    /// Number of mutual links in the NORTH region's graph: a link counts only
+    /// when both of its ends advertise it, so a gossip peer's flood adds nodes
+    /// and no edge. The twin of
+    /// [`LinkstateForwarder::edge_count`](crate::linkstate_forward::LinkstateForwarder::edge_count).
+    #[cfg(test)]
+    pub fn north_net_edge_count(&self) -> usize {
+        self.north_net().edge_count()
     }
 
     /// Number of nodes in the PEER-tier graph (self + every learned Peer) — the
@@ -5780,7 +5839,16 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             && !is_leaf(tier, self.tables.node_mode)
             && !self.crosses(tier, NORTH_REGION, origin.0, origin.1, None);
         self.deliver_to_client_subscribers(
-            inbound, tier, reliable, priority, push, &keyexpr, defer,
+            inbound,
+            tier,
+            Egress {
+                reliable,
+                priority,
+                express: false,
+            },
+            push,
+            &keyexpr,
+            defer,
         );
         // Block 3b (R2393) — local HOST delivery: a subscriber this router itself
         // registered. Beside block 3 rather than inside it, because a client
@@ -5800,7 +5868,16 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // the south peer region ([`mcast_ingress_region`]), carried north by the
         // bridge above and nowhere into its own region.
         if is_leaf(tier, self.tables.node_mode) {
-            self.publish_client_push_into_meshes(tier, reliable, priority, push, &keyexpr);
+            self.publish_client_push_into_meshes(
+                tier,
+                Egress {
+                    reliable,
+                    priority,
+                    express: false,
+                },
+                push,
+                &keyexpr,
+            );
         }
         // EGRESS to any attached multicast group — UNCONDITIONAL, OUTSIDE the
         // sub-gated fan-out above (zenoh's flat `mcast_groups` append,
@@ -6139,9 +6216,17 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             if target_tier == inbound_tier {
                 continue;
             }
-            self.self_publish_into_tier(target_tier, reliable, priority, push, keyexpr, |dst| {
-                self.crosses(inbound_tier, target_tier, src_zid, fwd_zid, Some(dst))
-            });
+            self.self_publish_into_tier(
+                target_tier,
+                Egress {
+                    reliable,
+                    priority,
+                    express: false,
+                },
+                push,
+                keyexpr,
+                |dst| self.crosses(inbound_tier, target_tier, src_zid, fwd_zid, Some(dst)),
+            );
         }
     }
 
@@ -6251,20 +6336,22 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// (per broker hat's region) like every other router send, so it inherits the
     /// interceptor / egress-ACL gate once that plane lands on the seam (the y113
     /// obligation) rather than being a separate retrofit site.
-    // R311y225 added the `priority` band arg (client-egress band preservation),
-    // crossing the 7-arg lint; the args are the irreducible routing context
-    // (source, tier, reliability, band, payload, keyexpr, defer).
-    #[allow(clippy::too_many_arguments)]
+    // R311y225 added the band (client-egress band preservation); step 6 of item 751
+    // folded reliability, band and express into one [`Egress`].
     fn deliver_to_client_subscribers(
         &self,
         inbound: FaceId,
         inbound_tier: Region,
-        reliable: bool,
-        priority: Priority,
+        egress: Egress,
         push: &PushOwned,
         keyexpr: &str,
         defer: bool,
     ) {
+        let Egress {
+            reliable,
+            priority,
+            express,
+        } = egress;
         // The caller decides `defer` from the crossing filter: a router that
         // does not carry a peer-source Push north does not deliver it either,
         // since the carrier's copy comes back to it as a ROUTER source.
@@ -6342,7 +6429,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 &clients,
                 reliable,
                 priority,
-                false,
+                express,
                 |id, _zid| {
                     Ok((id != inbound).then(|| NetworkMessage::Push(Box::new(carrier.clone()))))
                 },
@@ -6374,8 +6461,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     fn publish_client_push_into_meshes(
         &self,
         source_tier: Region,
-        reliable: bool,
-        priority: Priority,
+        egress: Egress,
         push: &PushOwned,
         keyexpr: &str,
     ) {
@@ -6394,7 +6480,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             // dropped there, its source being a gateway itself. (Zenoh also
             // inserts `mcast_groups` faces -- an unbuilt wz plane, deferred with
             // multicast.)
-            self.self_publish_into_tier(tier, reliable, priority, push, keyexpr, |dst| {
+            self.self_publish_into_tier(tier, egress, push, keyexpr, |dst| {
                 self.crosses(source_tier, tier, None, None, Some(dst))
             });
         }
@@ -6416,12 +6502,16 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     fn self_publish_into_tier(
         &self,
         tier: Region,
-        reliable: bool,
-        priority: Priority,
+        egress: Egress,
         push: &PushOwned,
         keyexpr: &str,
         admits: impl Fn(&Zid) -> bool,
     ) {
+        let Egress {
+            reliable,
+            priority,
+            express,
+        } = egress;
         let Some(hat) = self.mesh_hat(tier) else {
             return;
         };
@@ -6454,7 +6544,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // C3b client->mesh re-inject preserves whatever band the client frame carried
         // (a pico client negotiates no unicast ext_qos, so that band is typically
         // DEFAULT — but the seam does not rely on it).
-        let _ = self.fan_out_tier_qos(tier, reliable, priority, false, |_id, zid| {
+        let _ = self.fan_out_tier_qos(tier, reliable, priority, express, |_id, zid| {
             Ok(zid
                 .filter(|z| children.contains(z) && admits(z))
                 .map(|_| NetworkMessage::Push(Box::new(carrier.clone()))))
@@ -7469,6 +7559,108 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 );
             }
         }
+    }
+
+    /// Item 751, step 6 — originate a Put as THIS node's own session. The twin of
+    /// [`LinkstateForwarder::publish`](crate::linkstate_forward::LinkstateForwarder::publish).
+    ///
+    /// The pin routes a node's own put as a message from a face of its own, in
+    /// the `Local` region (`zenoh/src/net/routing/gateway.rs` @
+    /// `Region::Local,`), a client of the node that holds no wire. This is that
+    /// face: [`LOCAL_FACE`] is never registered in `faces`, so nothing is sent
+    /// to it and nothing it sent is looked up, and the Put takes the route of a
+    /// leaf-region Put ([`route_local_push`](Self::route_local_push)).
+    ///
+    /// Unlike the peer twin this returns no reach count: the Put goes to client
+    /// faces, to hosted subscribers and into every mesh, and a single number
+    /// would fold those answers into one (the reason
+    /// [`register_local_subscriber`](Self::register_local_subscriber) returns
+    /// none either). The error is the build's.
+    #[cfg(test)]
+    pub fn publish(&self, keyexpr: &str, payload: &[u8]) -> Result<(), CodecError> {
+        self.publish_qos(keyexpr, payload, Priority::DEFAULT, false)
+    }
+
+    /// The priority-carrying twin of [`publish`](Self::publish): the band rides
+    /// BOTH wire halves of the pin's publisher, the per-message `Push` qos
+    /// extension a subscriber reads as `Sample::priority()` and the frame's
+    /// conduit that picks the link of an aggregated multilink session. A DEFAULT
+    /// publish carries no extension, so it is byte-identical to `publish`.
+    /// Congestion control is Drop, as for the peer twin: no knob is exposed.
+    #[cfg(test)]
+    pub fn publish_qos(
+        &self,
+        keyexpr: &str,
+        payload: &[u8],
+        priority: Priority,
+        express: bool,
+    ) -> Result<(), CodecError> {
+        let qos = wz_session_core::sample::QosLevel::from_parts(
+            priority,
+            wz_session_core::qos::CongestionControl::Drop,
+            express,
+        );
+        let push = if qos == wz_session_core::sample::QosLevel::DEFAULT {
+            wz_session_core::push_build::build_push_literal(keyexpr, payload)?
+        } else {
+            wz_session_core::push_build::build_push_literal_with_meta(
+                keyexpr,
+                payload,
+                &wz_session_core::metadata::PushMetadata {
+                    qos: Some(qos),
+                    ..Default::default()
+                },
+            )?
+        };
+        self.route_local_push(priority, express, &push, keyexpr);
+        Ok(())
+    }
+
+    /// The Del twin of [`publish`](Self::publish): a delete takes the route a
+    /// Put to the same key would, and has no payload slot and no qos twin (a
+    /// `MsgDel` carries neither, and QoS belongs to the publisher).
+    #[cfg(all(test, feature = "pubsub-delete"))]
+    pub fn publish_delete(&self, keyexpr: &str) -> Result<(), CodecError> {
+        let push = wz_session_core::push_build::build_push_del_literal(keyexpr)?;
+        self.route_local_push(Priority::DEFAULT, false, &push, keyexpr);
+        Ok(())
+    }
+
+    /// Route a Put of this node's own session: the blocks of
+    /// [`route_push`](Self::route_push) a leaf-region Put takes, with no inbound
+    /// face to resolve an alias on or to keep from an echo. The Put is stamped
+    /// once, as every Put is, and then goes to the client faces that subscribed,
+    /// to the subscribers this node hosts, into every mesh, and to a multicast
+    /// group.
+    #[cfg(test)]
+    fn route_local_push(&self, priority: Priority, express: bool, push: &PushOwned, keyexpr: &str) {
+        let Some(stamped) = self.node_hlc.stamp_for_every_destination(push) else {
+            return;
+        };
+        let push: &PushOwned = &stamped;
+        // Fresh data is reliable: `reliable` follows the inbound frame for a
+        // relayed message, and there is none here.
+        let reliable = true;
+        let egress = Egress {
+            reliable,
+            priority,
+            express,
+        };
+        self.deliver_to_client_subscribers(LOCAL_FACE, Region::Local, egress, push, keyexpr, false);
+        self.dispatch_local_subscribers(reliable, push, keyexpr);
+        self.publish_client_push_into_meshes(Region::Local, egress, push, keyexpr);
+        #[cfg(feature = "router-multicast-faces")]
+        self.broadcast_to_mcast_groups(
+            reliable,
+            priority,
+            push,
+            keyexpr,
+            GroupEgressSource {
+                from_group: false,
+                from_mesh: false,
+                origin: None,
+            },
+        );
     }
 
     /// R2685 — a read-only [`RouterDeclarationsView`] over the live declaration

@@ -381,7 +381,81 @@ peer graded against it by `the_region_hat_peer_answers_interests_and_tokens_as_t
 No defect was found in the region-hat peer in this step, and no forwarder code
 changed.
 
-## 11. Open
+## 11. Step 6, node surfaces, first part
+
+Step 6 is sized by what `run_peer` calls on `LinkstateForwarder` and the region-hat
+forwarder lacks, which is shorter than the 31 methods of section 5 because most of
+those are witnesses a test reads. It goes in parts, each judged by the two gates.
+
+What the region-hat forwarder already had, so nothing moves: autoconnect
+(`enable_autoconnect_into`), the lifecycle directory, `admin_sessions`, the hosted
+queryable and subscriber registrations, the interceptor install and its counters,
+the query timeout, and the topology mode (`set_peer_region_full_linkstate`, which
+at node mode Peer is the north peer hat).
+
+Moved in this part, all test-only until step 7 gives them a caller (as step 2 did
+for the constructor):
+
+- **The node's own Put** (`publish`, `publish_qos`, `publish_delete`). The pin
+  routes it as a message of a face in the `Local` region, a client of the node
+  that holds no wire (`zenoh/src/net/routing/gateway.rs` @ `Region::Local,`).
+  That face is `LOCAL_FACE`, never registered in `faces`, and the Put takes the
+  route of a leaf-region Put: the client faces that subscribed, the hosted
+  subscribers, every mesh, a multicast group. `express` is threaded to the egress
+  of those legs, which until now were always sent without it.
+- **The node's locators** (`set_self_locators`) on every mesh hat's net, because
+  the pin asks its runtime for them at every net's message
+  (`zenoh/src/net/protocol/network.rs` @ `get_locators_noloopback()`).
+- **The size of the north graph** (`north_net_node_count`, `north_net_edge_count`),
+  which a peer reads as its one graph. The router's `routers_net_node_count` is
+  the same read.
+
+The gates gained a `NodeSession` seam both planes implement, a `NodePut` and a
+`NodeDelete` step, a graph size compared after every step, a scene of a node
+publishing (two peers, two clients, a withdrawal, a face going down), and a scene
+of a node publishing along a chain of five. Three differences surfaced, each
+`LinkstateForwarder` leaving the pin, and none a defect of the region-hat peer:
+
+- **The node's Put reaches the clients that subscribed**, in both modes. The pin's
+  broker hat routes to every owned face with a subscription whatever region the
+  message came from (`zenoh/src/net/routing/hat/broker/pubsub.rs` @
+  `if ctx.subs.is_some() {`); `LinkstateForwarder::publish` reaches its tree
+  children and its gateways and no client face. The network gate allows it and
+  requires it to occur; every face the old plane reaches gets the same message.
+- **The graph a gossip peer keeps**, gossip mode only. The pin's `add_link` adds
+  a node for what a neighbour told it and not for a link coming up
+  (`zenoh/src/net/protocol/network.rs` @ `if self.full_linkstate || self.gossip_multihop {`),
+  and a gossip flood forms no edge; `LinkstateForwarder` adds the node at once
+  and an edge after a recompute. Nothing routes by it. The link-state extension
+  keeps the same graph in both planes.
+- **A list sent when a link goes down**, gossip mode only. The pin's
+  `remove_link` forgets the link and sends nothing in gossip
+  (`zenoh/src/net/protocol/network.rs` @ `self.graph[self.idx].links.retain(|dest, _| dest != zid);`);
+  `LinkstateForwarder` tells the faces that remain its own entry.
+
+Declared absent, with the reason, so step 7 does not look for them:
+
+- **`set_gossip_target`.** In the pin the target gates which neighbours a node's
+  locators are told to (`zenoh/src/net/protocol/network.rs` @
+  `self.gossip_target.matches(target_whatami)`), and who receives a flood is
+  decided by the face's region. `LinkstateForwarder` uses it as a flood gate, and
+  nothing outside its own tests ever calls it, so no door carries the setting.
+  The router forwarder says the same of itself (`set_gossip_multihop`).
+- **The interest garbage collector** (`set_interest_timeout`,
+  `pending_interests_len`, `interests_timed_out`). It collects the copies of a
+  client's token interest that `LinkstateForwarder` brokers to its peers. The
+  pin's peer hat sends such an interest on only to south-bound faces and the
+  region-hat peer holds none, so there is nothing to collect
+  (section 10, `TOKEN_INTEREST_BROKERED`). Step 7 has to move
+  `wz_peer_interest_pending_gc_pico_interop`, which asserts the brokered copy.
+
+Still to do in step 6: the node's own declarations (`declare_subscription`,
+`undeclare_subscription`, `declare_queryable`, `undeclare_queryable`) and the
+unregistration and redelivery queue of a hosted handler, the admin sources
+(`publisher_sources` and `querier_sources` have no router twin), the north net
+view, and the counters `run_peer` prints.
+
+## 12. Open
 
 - The size of step 1's list is unknown until it is made, and the number of
   rounds after it follows from it. The router's own program ran from round 2865
