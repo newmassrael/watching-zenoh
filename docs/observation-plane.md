@@ -59,7 +59,8 @@ what that means for each instrument:
 | `timer` | One PERIODIC event with `<sce:period>`, `<sce:reset-on>` and `<sce:cancel-on state-exit>`. No one-shot (`SCE_FORGE.md` 4.10). The period is a build-time constant. | The cadence of the resource sampler (M4). NOT the supervision deadline: that is chosen by the application when it starts the supervision, at run time. |
 | `queue` | Bounded FIFO hand-off between contexts, with `producers`, `consumers` and `progress` declared. Documents no policy for a full queue. | The shape of the event ring (M2), except for its full policy: see the request below. |
 | `buffer-pool`, `bounded-collection` | Sized pools and tables; SCE emits the numbers (`SLOT_COUNT`, `SLOT_SIZE`). | The numbers of the plane (sizes of the ring and of the snapshot), as the session-slot pool states its own. |
-| `algorithm` | Pure functions generated for several backends, under an integer contract: an overflow or an out-of-range read is a named failure and never a value. | The deadline comparison and the HLC merge arithmetic, once, for the Rust and C11 backends. |
+| `algorithm` | Pure functions generated for several backends, under an integer contract: an overflow or an out-of-range read is a named failure and never a value. | The deadline comparison, once, for the Rust and C11 backends. |
+| `stdlib` (`sce:std/...`) | Algorithms SCE ships and tests against reference implementations. Read, not assumed: `merge/hlc_send`, `hlc_receive`, `hlc_compare`, `hlc_within_drift` (Kulkarni et al. 2014; wall time in milliseconds as `int64`, a `uint32` counter, a `uint64` node id) and `rate/gcra_admit` (a generic cell rate limiter). | `hlc_within_drift` is the drift bound of M1, as it is written. The HLC itself stays `uhlc` on the wire (below). `gcra_admit` is the candidate for a querier quota that is a rate and not a count. |
 
 Two honest limits, so that nothing is built on a feature SCE does not have:
 
@@ -124,8 +125,18 @@ stamps from whatever the host hands it.
 * `clock-quality-stamping = synchronized-only` makes a node with no good clock stamp nothing and
   say so, instead of stamping with a time it does not trust. The default stamps, as a node does
   today.
-* The deadline comparison and the merge are written once as SCE `algorithm`s, so the Rust host
-  and the C ABI use one text and the integer contract proves they cannot overflow.
+* The wire clock stays `uhlc`, zenoh's own crate, and is not replaced by SCE's `hlc_send` and
+  `hlc_receive`. They are the same algorithm in a different shape: SCE keeps wall time in
+  milliseconds, a `uint32` counter and a `uint64` node id as three fields, where zenoh packs the
+  counter into the low bits of an NTP64 word and carries a node id of up to 16 bytes. A node that
+  stamped with SCE's record would need a conversion into the wire form that `uhlc` does not make,
+  and a stamp that differs from zenoh's for the same inputs is a divergence in a replacement
+  whose point is not to diverge. SCE's algorithms are used where they are the same thing:
+  `hlc_within_drift` is the forward-step check (`CLOCK_MAX_FORWARD_STEP_MS`), generated once for
+  the Rust host and the C11 backend; and `hlc_send` / `hlc_receive` are a DIFFERENTIAL ORACLE,
+  run against `uhlc` over random clock traces, to show that the order the two produce agrees.
+  The comparison of a supervision deadline is written as a new `algorithm` in this repository's
+  sources, so the Rust host and the C ABI share one text under the integer contract.
 * Off, `NodeHlc` is zero-sized (it already is without `time-hlc`), and the per-message timestamp
   slot is the one `timestamping` already gates.
 
@@ -241,12 +252,23 @@ reads it.
 3. **Loss accounting in the ring.** Sequence gaps (recommended), or a counter as well.
 4. **Whether a missed `synchronized-only` stamp is an error to the sender or a silent omission.**
    Silent is upstream's behaviour for a missing timestamp, and the recommended default.
-5. **The SCE request.** Whether to ask for `sce:on-full` on the queue kind now or build the ring
-   as a Rust type and ask later.
+5. **The SCE request.** What wz needs from SCE is one thing, and nothing blocks on it:
+   `sce:on-full` (`reject`, `overwrite-oldest`) on the `queue` kind. SCE's documents for the kind
+   (`SCE_FORGE.md`, the queue admission note, `schemas/sce-forge-ext.xsd`) state no policy for a
+   full queue, and a search for one found none. The ring is built as a Rust type first, so the
+   request is for the day the ring should be an SCE artifact and not for the day it works.
+   Whether to file it now is the owner's call; SCE is read-only from wz, and this repository
+   records no channel for requests, so the text is written here and handed to whoever owns SCE.
+   Two things were considered and need no request: a one-shot timer (the supervision deadline is
+   a duty the host raises, as the session machines' are) and a build-time parameter for the
+   sampler's period (the generated-SCXML-with-`--check` pattern the feature model already uses).
+   A native build-time parameter would remove the generator and is worth asking for, but it is a
+   convenience.
 
 ## Not part of this
 
 * A log text format, a console, or a transport for events. The ring is read by a consumer that
   already exists on the node.
+* Replacing `uhlc` with SCE's HLC (see M1).
 * A hardware watchdog driver. The supervisor says when to feed it; a platform feeds it.
 * Per-key last-value caches, which are a different structure (see `docs/rx-delivery-lane.md`).
