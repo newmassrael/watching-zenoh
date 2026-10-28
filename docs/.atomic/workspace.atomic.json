@@ -295316,6 +295316,34 @@
         "The next owners the line table names: session_actions.rs (3.1 KB), drive.rs (1.7 KB), peer_planner.rs (1.3 KB), slot_node.rs (1.1 KB), and heapless::Vec (3.5 KB). The same lesson applies to the generic functions with many callers in them, which were not walked through."
       ]
     },
+    "Round 3829": {
+      "decision_summary": "Hosted run 40593418426 (91f7a8311) was read per job. Of its seven reds, three were already repaired at the tip (the abi stamp pin reads 7, the four peer forwarding tests pass, the home-path-range lines are the gate's own negative selftest). The other four are paid here. router-interest-qos charged an out-of-line cfg(test) module as production, so the gate now reads the parent's declaration. The C consumer pinned the old no-weight of the zenoh verdict. The zephyr lib guard lagged two tests. The reliable-dial QUIC leg raced the dialer once the accept bound became upstream's ten seconds.",
+      "changes_bullets": [
+        "scripts/lib/router_interest_qos_gate.py: declared_as_test_module, one selftest case. crates/wz-capi-dissect/tests/c_abi_consumer.c: 10989 to 11574 twice. scripts/run-ci.sh: C1ns 29 to 31. wz_mesh_quic_datagram_acceptor_zenohd_interop.rs: the leg states --accept-timeout-ms 3000."
+      ],
+      "verification_bullets": [
+        "router_interest_qos_gate.py --selftest and the real tree pass. The four peer forwarding tests pass on pc2 (11 passed). The C consumer and Layer Z leg were not run here; the hosted run is their verdict."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "The Layer Z leg and C1bo are judged by the next uncancelled hosted run. Binary-dep legs after the failed one in Layer Z never ran in run 40593418426 and may hold more reds."
+      ],
+      "publishable_decision_summary": "Hosted run 40593418426 (91f7a8311) was read per job. Of its seven reds, three were already repaired at the tip (the abi stamp pin reads 7, the four peer forwarding tests pass, the home-path-range lines are the gate's own negative selftest). The other four are paid here. router-interest-qos charged an out-of-line cfg(test) module as production, so the gate now reads the parent's declaration. The C consumer pinned the old no-weight of the zenoh verdict. The zephyr lib guard lagged two tests. The reliable-dial QUIC leg raced the dialer once the accept bound became upstream's ten seconds.",
+      "publishable_changes_bullets": [
+        "scripts/lib/router_interest_qos_gate.py: declared_as_test_module, one selftest case. crates/wz-capi-dissect/tests/c_abi_consumer.c: 10989 to 11574 twice. scripts/run-ci.sh: C1ns 29 to 31. wz_mesh_quic_datagram_acceptor_zenohd_interop.rs: the leg states --accept-timeout-ms 3000."
+      ],
+      "publishable_verification_bullets": [
+        "router_interest_qos_gate.py --selftest and the real tree pass. The four peer forwarding tests pass on pc2 (11 passed). The C consumer and Layer Z leg were not run here; the hosted run is their verdict."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The Layer Z leg and C1bo are judged by the next uncancelled hosted run. Binary-dep legs after the failed one in Layer Z never ran in run 40593418426 and may hold more reds."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
