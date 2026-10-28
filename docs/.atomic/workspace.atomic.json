@@ -295930,6 +295930,36 @@
         "The same split is not yet typed for an application callback: it can still send through the session handle from inside record. The three reds of origin's tip named in the verification, the test of the deferral, and the TLS image's kit run are open."
       ]
     },
+    "Round 3846": {
+      "decision_summary": "Three static gates the pre-push hook defers were red on origin's tip, none of them made by the change that was being landed, and all three were left by the retirement of the single-net peer forwarder (Round 3840). They are paid here, each by the gate's own sentence. (1) binary_freshness_lint: the fourth leg added to wz_peer_interest_pending_gc_pico_interop.rs ran the demo without the freshness check; the file's one helper that resolves the demo, spawn, now asserts it, so all four legs left the carried bucket (218 measured, 214 after) and the carried number went 217 to 214. (2) reason_citation_gate: the reason of access-acl cited a line of linkstate_forward.rs that the file, cut to 1130 lines, no longer has. The pointer now says where the line was and why it is gone, and a correction closes the reason; nothing else in the reason changed. (3) depth_axis_census: routing-interest-pending-gc was regraded from COMPLETE to PARTIAL when its broker moved to the region-hat forwarder, and arrived already reached; the reached pin went 2 to 3 with the atom named.\n\nThe reason of access-acl was replaced whole, as set-inventory-status replaces it, and the store's diff is one line; the other two reason gates (store-reason citations, store-reasons anchors) and validate-workspace read the same before and after.",
+      "changes_bullets": [
+        "crates/wz-integration-tests/tests/wz_peer_interest_pending_gc_pico_interop.rs: spawn resolves the demo once and calls assert_demo_binary_newer_than_sources before it runs it. scripts/lib/binary_freshness_lint.py: CARRIED_SUBJECT 217 to 214, with its history line. scripts/lib/depth_axis_census.py: PIN_REACHED 2 to 3, with the atom and the reason. docs/.atomic/workspace.atomic.json: the reason of access-acl, through set-inventory-status (one pointer and one closing correction)."
+      ],
+      "verification_bullets": [
+        "The three gates read red on origin's tip before this change (checked by putting the tree on origin's tip and running them there) and green after it; binary_freshness_lint and depth_axis_census also pass their selftests. The test file compiles (cargo check of the test target on pc2) and rustfmt is clean. The static gates the pre-push hook defers: 120 run, 120 passing. Not run: the test file's four legs against a real zenoh-pico (a hosted lane runs them), and whether the region-hat forwarder drops an unresolvable alias on the kinds the access-acl clause names (the correction says it was not re-measured)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "These three gates run in the deferred set and not in the pre-push hook, so the retiring commit could land with them red; a retirement that moves a grade, a file's length or a test's helper should run them before it lands. The access-acl clause about the lines other than the one re-pointed (bare forms of the same file) is not re-read and still cites the retired forwarder's lines."
+      ],
+      "publishable_decision_summary": "Three static gates the pre-push hook defers were red on origin's tip, none of them made by the change that was being landed, and all three were left by the retirement of the single-net peer forwarder (Round 3840). They are paid here, each by the gate's own sentence. (1) binary_freshness_lint: the fourth leg added to wz_peer_interest_pending_gc_pico_interop.rs ran the demo without the freshness check; the file's one helper that resolves the demo, spawn, now asserts it, so all four legs left the carried bucket (218 measured, 214 after) and the carried number went 217 to 214. (2) reason_citation_gate: the reason of access-acl cited a line of linkstate_forward.rs that the file, cut to 1130 lines, no longer has. The pointer now says where the line was and why it is gone, and a correction closes the reason; nothing else in the reason changed. (3) depth_axis_census: routing-interest-pending-gc was regraded from COMPLETE to PARTIAL when its broker moved to the region-hat forwarder, and arrived already reached; the reached pin went 2 to 3 with the atom named.\n\nThe reason of access-acl was replaced whole, as set-inventory-status replaces it, and the store's diff is one line; the other two reason gates (store-reason citations, store-reasons anchors) and validate-workspace read the same before and after.",
+      "publishable_changes_bullets": [
+        "crates/wz-integration-tests/tests/wz_peer_interest_pending_gc_pico_interop.rs: spawn resolves the demo once and calls assert_demo_binary_newer_than_sources before it runs it. scripts/lib/binary_freshness_lint.py: CARRIED_SUBJECT 217 to 214, with its history line. scripts/lib/depth_axis_census.py: PIN_REACHED 2 to 3, with the atom and the reason. docs/.atomic/workspace.atomic.json: the reason of access-acl, through set-inventory-status (one pointer and one closing correction)."
+      ],
+      "publishable_verification_bullets": [
+        "The three gates read red on origin's tip before this change (checked by putting the tree on origin's tip and running them there) and green after it; binary_freshness_lint and depth_axis_census also pass their selftests. The test file compiles (cargo check of the test target on pc2) and rustfmt is clean. The static gates the pre-push hook defers: 120 run, 120 passing. Not run: the test file's four legs against a real zenoh-pico (a hosted lane runs them), and whether the region-hat forwarder drops an unresolvable alias on the kinds the access-acl clause names (the correction says it was not re-measured)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "These three gates run in the deferred set and not in the pre-push hook, so the retiring commit could land with them red; a retirement that moves a grade, a file's length or a test's helper should run them before it lands. The access-acl clause about the lines other than the one re-pointed (bare forms of the same file) is not re-read and still cites the retired forwarder's lines."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
