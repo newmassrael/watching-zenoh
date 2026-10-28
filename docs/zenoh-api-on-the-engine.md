@@ -796,7 +796,13 @@ Each lands whole with its surface lines, tests and faults in one round.
   differential holds to upstream's codec in both directions. All of it is behind `pubsub-ts-stack`,
   which `wz-runtime-tokio` forwards to `wz-node-time`.
 
-  Carried: a subscriber offloaded to a lane is handed no stack. The surface falls to 1, 2 and 5
+  A subscriber of the C ABI that is offloaded to a lane is handed no stack, and owes none: the
+  stack is a Rust API of upstream's `zenoh` (`zenoh::timestamp_stack`) and zenoh-c does not bind
+  it. Measured on the oracle, zenoh-c 1.10.1 built with its unstable API: none of the dynamic
+  symbols of `libzenohc.so` is about a stack, an instrumentation or an interception, and its
+  timestamp surface is `z_sample_timestamp`, `z_timestamp_new`, `z_timestamp_id` and
+  `z_timestamp_ntp64_time`; the headers hold no such name either. There is nothing for the lane
+  to carry. The surface falls to 1, 2 and 5
   lines of
   the three arms; 15 faults were injected into the publish side and 24 into the query side, one
   at a time, none missed in the end (the first test of a plain Put could not tell, and one assertion
