@@ -69,6 +69,14 @@ carries about 6 KB of C library code wz does not, which is why the difference is
   `encode_generic` is called only where a timestamp, an attachment or a source info can be staged or a
   sink hands out no window (`GENERIC_REACHABLE`); elsewhere it is not linked. The fixed images fell
   1.5 to 2.2 KB. The responder and Err replies were not run on the kit (its queries get a Put).
+- TAKEN: the connect manager's planner call. The line table put `connect_manager.rs` at 4.0 KB, the
+  largest wz source file of the image, and the largest lines were `drive` and `ask`, generic over
+  the closure each of thirteen callers passes. They take the call as a trait object now (a few
+  cycles in the path that dials a router), so each is one copy. The fixed images fell 2.6 KB of
+  text (the main function and what it inlines, `c:wz_`, 2.6 KB of it), and the worst chain 384
+  bytes (the main frame 1,792 to 1,256). On the kit the get image's stack reading fell 440 bytes;
+  the others did not move. The lesson, in the shape of the first not-taken lever below: a generic
+  function with many callers is a copy for each, and the optimizer shares it only when it is small.
 - NOT TAKEN, measured: taking `judge_ext_chain`'s two helpers out of line (7 instances) moved the
   text by +16 bytes; the link-time optimizer already shares them.
 - `wz_session_core` is a long tail (525 symbols in a build without LTO, none over 1.6 KB) and the

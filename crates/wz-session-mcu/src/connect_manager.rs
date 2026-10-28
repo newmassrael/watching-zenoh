@@ -974,6 +974,13 @@ impl StoreRef {
 /// lost.
 type Actions = FixedVec<PeerAction<Key, u64, ()>, 6>;
 
+/// One call of the planner, given the planner, this profile's ports, the next face id and the sink
+/// of the actions it asks for. A trait object so that `drive` and `ask`, which run it, are one
+/// copy each and not one for every closure the manager passes.
+#[allow(type_alias_bounds)]
+type PlannerCall<'c, D: Dialer> =
+    dyn FnMut(&mut Planner, &mut Ports<'_, D>, &mut u64, &mut dyn FnMut(Action)) + 'c;
+
 /// A session a peer holds, with the face the planner knows it as.
 struct Held<S> {
     face: u64,
@@ -1441,7 +1448,7 @@ impl<D: Dialer> ConnectManager<D> {
             }
         }
         self.mirror_held();
-        self.drive(now_ms, |planner, ports, next_id, emit| {
+        self.drive(now_ms, &mut |planner, ports, next_id, emit| {
             // The table holds as many peers as the rows do.
             let _ = planner.open(key, ports, next_id, emit);
         });
@@ -1477,13 +1484,13 @@ impl<D: Dialer> ConnectManager<D> {
     /// dialled no more. The hints stay: they are the directory's, and a later `open` uses them.
     pub fn close_node(&mut self, zid: &DirectoryZid, now_ms: u64) {
         let key = Key::Node(*zid);
-        self.drive(now_ms, |planner, ports, next_id, emit| {
+        self.drive(now_ms, &mut |planner, ports, next_id, emit| {
             planner.withdraw(zid, key, ports, next_id, emit);
         });
         if let Some(held) = self.row_mut(&key).and_then(|row| row.held.take()) {
             let face = held.face;
             self.dialer.hang_up(held.session);
-            self.drive(now_ms, |planner, ports, next_id, emit| {
+            self.drive(now_ms, &mut |planner, ports, next_id, emit| {
                 planner.dial_ended(face, DialEnd::Failed, ports, next_id, emit);
             });
         }
@@ -1504,7 +1511,7 @@ impl<D: Dialer> ConnectManager<D> {
             self.dialer.hang_up(held.session);
             // As `observe` tells it: a session that was up is down, one still being dialled is a
             // dial that failed. Either way the machine waits and dials the node again.
-            self.drive(now_ms, |planner, ports, next_id, emit| {
+            self.drive(now_ms, &mut |planner, ports, next_id, emit| {
                 if up {
                     planner.face_down(face, ports, next_id, emit);
                 } else {
@@ -1539,11 +1546,12 @@ impl<D: Dialer> ConnectManager<D> {
     /// planner is told of in the next turn of this loop and answers with a wait and no further
     /// dial. It is a loop and not a call back into this function, so that no call of the
     /// manager is its own callee and the worst chain of calls under a tick is a bound.
-    fn drive(
-        &mut self,
-        now_ms: u64,
-        call: impl FnOnce(&mut Planner, &mut Ports<'_, D>, &mut u64, &mut dyn FnMut(Action)),
-    ) {
+    ///
+    /// The call is a trait object and not a type parameter: this function and `ask` hold the
+    /// loop, the ports and the table, and the thirteen calls of the manager would each have its
+    /// own copy of them, one for every closure type. A call through the object is a few cycles
+    /// in a path that dials a router, and the copies were 1.7 KB of text.
+    fn drive(&mut self, now_ms: u64, call: &mut PlannerCall<'_, D>) {
         let mut actions = self.ask(now_ms, call);
         let mut failed: FixedVec<u64, 6> = FixedVec::new();
         loop {
@@ -1552,18 +1560,14 @@ impl<D: Dialer> ConnectManager<D> {
                 return;
             };
             // The turn after a failed dial asks for no dial, so the list only shrinks.
-            actions = self.ask(now_ms, |planner, ports, next_id, emit| {
+            actions = self.ask(now_ms, &mut |planner, ports, next_id, emit| {
                 planner.dial_ended(id, DialEnd::Failed, ports, next_id, emit);
             });
         }
     }
 
     /// One call of the planner against this profile's ports, and what it asked for.
-    fn ask(
-        &mut self,
-        now_ms: u64,
-        call: impl FnOnce(&mut Planner, &mut Ports<'_, D>, &mut u64, &mut dyn FnMut(Action)),
-    ) -> Actions {
+    fn ask(&mut self, now_ms: u64, call: &mut PlannerCall<'_, D>) -> Actions {
         let mut actions = Actions::new();
         let next_id = &mut self.next_id;
         self.store.get().with(|tables| {
@@ -1705,7 +1709,7 @@ impl<D: Dialer> ConnectManager<D> {
                 if let Some(held) = self.rows[at].held.take() {
                     self.dialer.hang_up(held.session);
                 }
-                self.drive(now_ms, |planner, ports, next_id, emit| {
+                self.drive(now_ms, &mut |planner, ports, next_id, emit| {
                     planner.dial_ended(face, DialEnd::Mismatch, ports, next_id, emit);
                 });
                 continue;
@@ -1713,7 +1717,7 @@ impl<D: Dialer> ConnectManager<D> {
             let ended = self.dialer.ended(&mut held.session);
             let mut up = was_up || came_up;
             if came_up {
-                self.drive(now_ms, |planner, ports, next_id, emit| {
+                self.drive(now_ms, &mut |planner, ports, next_id, emit| {
                     planner.dial_ended(face, DialEnd::Established { remote }, ports, next_id, emit);
                 });
             }
@@ -1723,7 +1727,7 @@ impl<D: Dialer> ConnectManager<D> {
             if !up && how == Ended::AfterEstablished {
                 // A dialer that does not say when a session comes up says only that it did, at
                 // its end: the machine is told it was up, and then that it was lost.
-                self.drive(now_ms, |planner, ports, next_id, emit| {
+                self.drive(now_ms, &mut |planner, ports, next_id, emit| {
                     planner.dial_ended(
                         face,
                         DialEnd::Established { remote: None },
@@ -1737,11 +1741,11 @@ impl<D: Dialer> ConnectManager<D> {
             // The session is over: nothing is left to hang up, and its handle goes.
             self.rows[at].held = None;
             if up {
-                self.drive(now_ms, |planner, ports, next_id, emit| {
+                self.drive(now_ms, &mut |planner, ports, next_id, emit| {
                     planner.face_down(face, ports, next_id, emit);
                 });
             } else {
-                self.drive(now_ms, |planner, ports, next_id, emit| {
+                self.drive(now_ms, &mut |planner, ports, next_id, emit| {
                     planner.dial_ended(face, DialEnd::Failed, ports, next_id, emit);
                 });
             }
@@ -1761,7 +1765,7 @@ impl<D: Dialer> ConnectManager<D> {
             }
         }
         for (key, generation) in due {
-            self.drive(now_ms, |planner, ports, next_id, emit| {
+            self.drive(now_ms, &mut |planner, ports, next_id, emit| {
                 planner.retry_due(key, generation, ports, next_id, emit);
             });
         }
@@ -1801,7 +1805,7 @@ impl<D: Dialer> ConnectManager<D> {
             }
         }
         for key in gone {
-            self.drive(now_ms, |planner, ports, next_id, emit| {
+            self.drive(now_ms, &mut |planner, ports, next_id, emit| {
                 planner.stop(&key, ports, next_id, emit);
             });
             if let Some(held) = self.row_mut(&key).and_then(|row| row.held.take()) {
@@ -1809,7 +1813,7 @@ impl<D: Dialer> ConnectManager<D> {
                 self.dialer.hang_up(held.session);
                 // A dial the machine stopped is abandoned, and its end is the planner's to
                 // clear.
-                self.drive(now_ms, |planner, ports, next_id, emit| {
+                self.drive(now_ms, &mut |planner, ports, next_id, emit| {
                     planner.dial_ended(face, DialEnd::Failed, ports, next_id, emit);
                 });
             }
@@ -1851,7 +1855,7 @@ impl<D: Dialer> ConnectManager<D> {
             // machine refused resolves again.
             let state = self.store.get().with(|t| t.planner.state(&key));
             if state == Some(PeerConnectionState::NoLocator) || state.is_none() {
-                self.drive(now_ms, |planner, ports, next_id, emit| {
+                self.drive(now_ms, &mut |planner, ports, next_id, emit| {
                     let _ = planner.open(key, ports, next_id, emit);
                 });
             }

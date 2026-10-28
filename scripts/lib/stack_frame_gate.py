@@ -212,6 +212,12 @@ IMAGES = (
     # the initial-SN hash is a function of no frame of its own, so the two frames above are not
     # on the chain, 476 bytes less, at 17 frames and 12 calls through a register not followed.
     # The kit's reading did not move (5,904 in the resource budget's row).
+    #
+    # `peak` is 5,512 bytes once the connect manager's `drive` and `ask` take the planner's call as a
+    # trait object: each of the manager's thirteen calls had its own copy of both, and the main frame
+    # that held them fell from 1,792 to 1,256 bytes (the manager's frame 1,280 to 1,056, and the one
+    # under it 416 to 800, the loop of `drive` now being its own frame). The kit's reading did not
+    # move, so it is 392 bytes over the chain: the row carries `chain_misses`.
     Image(
         key="zephyr-client-fixed",
         elf=None,
@@ -219,7 +225,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=5896,
+        peak=5512,
     ),
     # The same client with the session coalescing a send window into one datagram
     # (`overlays/t2g_client_batching.conf`). The batch writer and its flush path are two more
@@ -246,7 +252,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=5904,
+        peak=5520,
     ),
     # The fixed client that ASKS (`overlays/t2g_client_get.conf`): the getter of
     # `wz_session_mcu::slot_getter` is the application layer the observer's drain runs inside, and
@@ -280,6 +286,10 @@ IMAGES = (
     # 6,064 bytes with `CONFIG_WZ_INITIAL_SN_COMPACT` (see the fixed client's row): 428 less. The
     # kit's reading did not move, 6,600, so it is 536 over the chain and the row still carries
     # `chain_misses`.
+    #
+    # 5,768 bytes with the connect manager's planner call taken as a trait object (see the fixed
+    # client's row): 296 less, and the kit's reading fell with it, 6,600 to 6,160, so it is 392 over
+    # the chain.
     Image(
         key="zephyr-client-fixed-get",
         elf=None,
@@ -287,7 +297,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=6064,
+        peak=5768,
     ),
     # The fixed client over the secure channel (`overlays/t2g_client_tls.conf`, decision D9):
     # the dial completes a TLS 1.3 handshake in Mbed TLS before the session sees a byte, and every
