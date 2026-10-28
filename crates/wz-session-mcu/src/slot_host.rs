@@ -42,6 +42,7 @@ use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntim
 use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
 use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
 use wz_session_core::entropy::EntropySource;
+use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::session_init_params::SessionInitParams;
 use wz_session_core::session_slot::SessionSlots;
 
@@ -70,14 +71,27 @@ pub enum DialRefused {
 }
 
 /// A session that was opened: its handle, and the task that runs it.
-pub struct OpenedSession<C: ClockSource + 'static> {
+pub struct OpenedSession<
+    C: ClockSource + 'static,
+    D: BoxedLinkDriver + ?Sized + 'static = dyn BoxedLinkDriver,
+> {
     /// The handle to the session in its slot. The session lives as long as any handle does, so
     /// dropping this one while the task runs ends nothing.
-    pub actions: SessionHandle<C>,
+    pub actions: SessionHandle<C, D>,
     /// The task that runs the session's pump. Aborting it, or its ending, frees the pump's cell
     /// and, with the last handle, the session's slot.
     pub task: CoopLocalJoinHandle<DriverOutcome>,
 }
+
+/// The session table of a host over the stack `T`: its slots hold `T`'s driver by value and the
+/// sessions in them are read through that type.
+type SessionTable<C, T, E, const S: usize> = SessionSlots<
+    CoopRuntime<C, <T as SlotStack>::Driver>,
+    CoopTime<C>,
+    <T as SlotStack>::Driver,
+    E,
+    S,
+>;
 
 /// The tables a node opens sessions in, and the means to run what it opens. All are `static`s
 /// the image declared, or handles to them, so the host is a few references and costs the heap
@@ -89,8 +103,8 @@ where
     E: EntropySource + Send + 'static,
 {
     local: CoopLocalSet<C>,
-    sessions: &'static SessionSlots<CoopRuntime<C>, CoopTime<C>, T::Driver, E, S>,
-    pumps: &'static PumpSlots<C, T::Pump, P>,
+    sessions: &'static SessionTable<C, T, E, S>,
+    pumps: &'static PumpSlots<C, T::Pump, P, T::Driver>,
     stack: T,
 }
 
@@ -104,8 +118,8 @@ where
     /// `stack`.
     pub fn new(
         local: CoopLocalSet<C>,
-        sessions: &'static SessionSlots<CoopRuntime<C>, CoopTime<C>, T::Driver, E, S>,
-        pumps: &'static PumpSlots<C, T::Pump, P>,
+        sessions: &'static SessionTable<C, T, E, S>,
+        pumps: &'static PumpSlots<C, T::Pump, P, T::Driver>,
         stack: T,
     ) -> Self {
         Self {
@@ -140,8 +154,8 @@ where
         entropy: E,
         params: SessionInitParams,
         config: SessionDriveConfig,
-        on_event: impl FnOnce(&SessionHandle<C>) -> F,
-    ) -> Result<OpenedSession<C>, OpenRefused>
+        on_event: impl FnOnce(&SessionHandle<C, T::Driver>) -> F,
+    ) -> Result<OpenedSession<C, T::Driver>, OpenRefused>
     where
         F: FnMut(IterationEvent<'_>) + 'static,
     {
@@ -154,7 +168,7 @@ where
         let pump_link = self.stack.pump(driver, lane);
         let on_event = on_event(&actions);
         let Ok(pump) = self.pumps.claim(
-            runtime.clone(),
+            runtime.with_driver(),
             pump_link,
             actions.clone(),
             CoopTime::new(runtime),
@@ -187,8 +201,8 @@ where
         entropy: E,
         params: SessionInitParams,
         config: SessionDriveConfig,
-        on_event: impl FnOnce(&SessionHandle<C>) -> F,
-    ) -> Result<OpenedSession<C>, DialRefused>
+        on_event: impl FnOnce(&SessionHandle<C, T::Driver>) -> F,
+    ) -> Result<OpenedSession<C, T::Driver>, DialRefused>
     where
         F: FnMut(IterationEvent<'_>) + 'static,
     {

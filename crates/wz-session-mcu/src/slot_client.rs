@@ -31,6 +31,7 @@ use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::bounded::{BoundedVec, CapacityFull};
 use wz_session_core::encoding::PACKED_APPLICATION_JSON;
+use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::locality::Locality;
 use wz_session_core::pubsub::SubscriberTable;
 use wz_session_core::query::QueryableRegistry;
@@ -108,7 +109,7 @@ where
     C: ClockSource + 'static,
     T: SlotStack,
     B: Bind<T::Driver>,
-    F: SessionFactory<C>,
+    F: SessionFactory<C, T::Driver>,
     X: Accept<T::Driver>,
 {
     manager: ConnectManager<SlotDialer<'a, C, T, B, F, S, P>>,
@@ -117,7 +118,7 @@ where
     factory: &'a RefCell<F>,
     timeouts: SessionTimeouts,
     acceptor: X,
-    accepted: BoundedVec<SlotSession<C>, A>,
+    accepted: BoundedVec<SlotSession<C, T::Driver>, A>,
     over_capacity: u32,
     /// How the declarations of a session go out: `None`, one turn for the whole list, unless the
     /// build's `declaration-sync-pacing` policy states a pace ([`ReplayPacing::from_build`]).
@@ -130,7 +131,7 @@ where
     C: ClockSource + 'static,
     T: SlotStack,
     B: Bind<T::Driver>,
-    F: SessionFactory<C>,
+    F: SessionFactory<C, T::Driver>,
     X: Accept<T::Driver>,
 {
     /// A node that dials `endpoints` through `host` (sockets from `bind`, sessions made by
@@ -176,7 +177,10 @@ where
     }
 
     /// Every session the node holds, accepted and dialled.
-    fn live(&self) -> impl Iterator<Item = &SlotSession<C>> + use<'_, 'a, C, T, B, F, X, S, P, A> {
+    fn live(
+        &self,
+    ) -> impl Iterator<Item = &SlotSession<C, T::Driver>> + use<'_, 'a, C, T, B, F, X, S, P, A>
+    {
         self.accepted
             .iter()
             .chain(self.manager.sessions().map(|(_, session)| session))
@@ -347,8 +351,8 @@ fn next_turn_after(pacing: Option<ReplayPacing>, finished: bool, now_ms: u64) ->
 /// wasted a frame each, and a node with many declarations on a busy stage could repeat them for as
 /// long as the stage stayed busy. A paced node sends a burst a turn and leaves the interval between
 /// turns, and does nothing at all at a time before the session's next turn.
-fn replay_declarations<C: ClockSource + 'static>(
-    session: &SlotSession<C>,
+fn replay_declarations<C: ClockSource + 'static, D: BoxedLinkDriver + ?Sized + 'static>(
+    session: &SlotSession<C, D>,
     declarations: &[Declaration],
     pacing: Option<ReplayPacing>,
     now_ms: u64,
@@ -469,8 +473,8 @@ mod tests {
 }
 
 /// Send one declaration under `id`: `true` once it went out.
-fn declare<C: ClockSource + 'static>(
-    actions: &SessionHandle<C>,
+fn declare<C: ClockSource + 'static, D: BoxedLinkDriver + ?Sized + 'static>(
+    actions: &SessionHandle<C, D>,
     id: u64,
     declaration: &Declaration,
 ) -> bool {

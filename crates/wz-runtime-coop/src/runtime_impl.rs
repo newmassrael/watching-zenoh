@@ -103,11 +103,13 @@ use alloc::boxed::Box;
 #[cfg(not(feature = "session-slot"))]
 use core::cell::RefCell;
 use core::future::Future;
+use core::marker::PhantomData;
 #[cfg(not(feature = "session-slot"))]
 use core::task::{Context, Poll};
 
 use critical_section::Mutex;
 use wz_runtime_core::Runtime;
+use wz_session_core::link::BoxedLinkDriver;
 
 #[cfg(not(feature = "session-slot"))]
 use crate::executor::make_waker;
@@ -166,14 +168,22 @@ pub(crate) struct RuntimeInner<C: ClockSource> {
 /// same task pool, timer queue, and clock; task closures may capture
 /// a `CoopRuntime` clone and call nested `spawn` (R311av-pre
 /// Decision 5).
-pub struct CoopRuntime<C: ClockSource> {
+///
+/// `D` is the link driver the sessions over this runtime send through. The runtime owns none: it
+/// is the type the session tier reads back as [`SessionRuntime::Driver`], so a profile that
+/// names its driver at build time (the fixed-memory profile, over the driver the image's
+/// Kconfig chose) gets direct calls through the link, and the default, the trait object, is the
+/// profile that picks its driver at run time.
+pub struct CoopRuntime<C: ClockSource, D: ?Sized = dyn BoxedLinkDriver> {
     pub(crate) inner: InnerRef<C>,
+    driver: PhantomData<fn() -> *const D>,
 }
 
-impl<C: ClockSource> Clone for CoopRuntime<C> {
+impl<C: ClockSource, D: ?Sized> Clone for CoopRuntime<C, D> {
     fn clone(&self) -> Self {
         Self {
             inner: share_inner(&self.inner),
+            driver: PhantomData,
         }
     }
 }
@@ -200,6 +210,19 @@ impl<C: ClockSource> CoopRuntime<C> {
                 timers: TimerQueue::new(),
                 clock,
             }),
+            driver: PhantomData,
+        }
+    }
+}
+
+impl<C: ClockSource, D: ?Sized> CoopRuntime<C, D> {
+    /// The same runtime read as one whose sessions send through `D2`. The driver is only a type
+    /// the session tier reads back; the runtime holds none, so a handle to the runtime serves for
+    /// any driver and the tables and the executor stay the one pair.
+    pub fn with_driver<D2: ?Sized>(&self) -> CoopRuntime<C, D2> {
+        CoopRuntime {
+            inner: share_inner(&self.inner),
+            driver: PhantomData,
         }
     }
 
@@ -333,7 +356,7 @@ impl<C: ClockSource + Default> Default for CoopRuntime<C> {
 }
 
 #[cfg(feature = "session-slot")]
-impl<C: ClockSource> CoopRuntime<C> {
+impl<C: ClockSource, D: ?Sized> CoopRuntime<C, D> {
     /// The spawns the task table refused, by reason.
     pub fn task_refusals(&self) -> crate::executor::Refusals {
         self.inner.executor.refusals()
@@ -405,7 +428,7 @@ impl<C: ClockSource, const TASKS: usize, const TASK_BYTES: usize, const TIMERS: 
 
     /// Start the runtime over `clock`, or `None` when this cell has already been
     /// started: one cell is one runtime, because a second would share the tables.
-    pub fn start(&'static self, clock: C) -> Option<CoopRuntime<C>> {
+    pub fn start<D: ?Sized>(&'static self, clock: C) -> Option<CoopRuntime<C, D>> {
         let first = crate::cs::with(|cs| {
             let started = self.started.borrow(cs);
             !started.replace(true)
@@ -422,7 +445,10 @@ impl<C: ClockSource, const TASKS: usize, const TASK_BYTES: usize, const TIMERS: 
         // here for this cell, so nothing else is writing `inner`, and nothing reads
         // it before this call returns the handle that does.
         let inner: &'static RuntimeInner<C> = unsafe { (*self.inner.get()).write(inner) };
-        Some(CoopRuntime { inner })
+        Some(CoopRuntime {
+            inner,
+            driver: PhantomData,
+        })
     }
 
     /// The bytes this cell takes in the image's `.bss`: both tables and the
@@ -441,7 +467,7 @@ impl<C: ClockSource, const TASKS: usize, const TASK_BYTES: usize, const TIMERS: 
     }
 }
 
-impl<C: ClockSource> Runtime for CoopRuntime<C> {
+impl<C: ClockSource, D: ?Sized + 'static> Runtime for CoopRuntime<C, D> {
     type JoinHandle<T>
         = CoopJoinHandle<T>
     where

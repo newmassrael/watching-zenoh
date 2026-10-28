@@ -120,7 +120,8 @@ pub type SessionPump<C, L> = coop_drive::SessionPump<C, LwipSessionLink<L>>;
 /// the pump of one session over an lwIP link held as `L` (a `&'static LwipLink`,
 /// the image's own). Declared in a `static`, as the session slot table is.
 #[cfg(feature = "session-slot")]
-pub type PumpSlots<C, L, const N: usize> = coop_drive::PumpSlots<C, LwipSessionLink<L>, N>;
+pub type PumpSlots<C, L, const N: usize> =
+    coop_drive::PumpSlots<C, LwipSessionLink<L>, N, crate::driver::LwipUdpDriver>;
 
 /// Drive one logical session over the lwIP link to a terminal FSM state (or
 /// the `config.max_iters` cap) — `wz_runtime_coop::session_drive::run_session`

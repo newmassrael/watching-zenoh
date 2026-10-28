@@ -111,9 +111,9 @@ impl wz_session_core::entropy::EntropySource for Counting {
     }
 }
 
-type Rt = CoopRuntime<Frozen>;
+type Rt = CoopRuntime<Frozen, LwipUdpDriver>;
 type Pump = SessionPump<Frozen, LwipSessionLink<Rc<LwipLink>>>;
-type Handle = SessionHandle<Frozen>;
+type Handle = SessionHandle<Frozen, LwipUdpDriver>;
 type Slots = SessionSlots<Rt, CoopTime<Frozen>, LwipUdpDriver, Counting, 2>;
 static SESSIONS: Slots = SessionSlots::new();
 

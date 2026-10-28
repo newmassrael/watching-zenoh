@@ -42,8 +42,11 @@ use crate::reliability::Reliability;
 use crate::tx_buf::TxBuf;
 
 /// A lent outbound slot being filled.
-pub struct TxLease<'a> {
-    driver: &'a dyn BoxedLinkDriver,
+///
+/// `D` is the driver that lent it: a profile that names its driver at build time gets direct
+/// calls through the lease, and the default is the trait object the run-time profiles use.
+pub struct TxLease<'a, D: BoxedLinkDriver + ?Sized = dyn BoxedLinkDriver> {
+    driver: &'a D,
     slot: TxSlot,
     /// First byte of the slot (the headroom's first byte).
     base: *mut u8,
@@ -93,23 +96,19 @@ impl HeldSlot {
 
     /// Give the slot back unsent, on `driver`, which must be the driver that
     /// lent it.
-    pub fn abort(self, driver: &dyn BoxedLinkDriver) {
+    pub fn abort<D: BoxedLinkDriver + ?Sized>(self, driver: &D) {
         driver.tx_slot_abort(self.slot);
     }
 }
 
-impl<'a> TxLease<'a> {
+impl<'a, D: BoxedLinkDriver + ?Sized> TxLease<'a, D> {
     /// Ask `driver` to lend a slot for a frame of up to `want` bytes.
     ///
     /// `None` means encode on the heap: the link lends nothing (the default),
     /// every slot is in flight, or the grant did not describe usable memory. A
     /// grant that does not (a null pointer, or headroom past the slot) is handed
     /// straight back, so a misbehaving driver costs a heap frame and not a slot.
-    pub fn acquire(
-        driver: &'a dyn BoxedLinkDriver,
-        want: usize,
-        priority: Priority,
-    ) -> Option<Self> {
+    pub fn acquire(driver: &'a D, want: usize, priority: Priority) -> Option<Self> {
         let grant = driver.tx_slot_acquire(want, priority)?;
         let (base, total) = driver.tx_slot_storage(grant.slot);
         if base.is_null() || grant.headroom > total {
@@ -137,7 +136,7 @@ impl<'a> TxLease<'a> {
     /// bytes already written), which only a driver breaking the
     /// [`BoxedLinkDriver::tx_slot_storage`] contract answers. The slot is then
     /// given back, so even that costs the open frame and not the slot.
-    pub fn resume(driver: &'a dyn BoxedLinkDriver, held: HeldSlot) -> Option<Self> {
+    pub fn resume(driver: &'a D, held: HeldSlot) -> Option<Self> {
         let (base, total) = driver.tx_slot_storage(held.slot);
         if base.is_null() || held.headroom + held.len > total {
             held.abort(driver);
@@ -193,7 +192,7 @@ impl<'a> TxLease<'a> {
     }
 }
 
-impl TxBuf for TxLease<'_> {
+impl<D: BoxedLinkDriver + ?Sized> TxBuf for TxLease<'_, D> {
     fn len(&self) -> usize {
         self.len
     }
@@ -265,7 +264,7 @@ impl TxBuf for TxLease<'_> {
     }
 }
 
-impl Drop for TxLease<'_> {
+impl<D: BoxedLinkDriver + ?Sized> Drop for TxLease<'_, D> {
     fn drop(&mut self) {
         if !self.sent {
             self.driver.tx_slot_abort(self.slot);

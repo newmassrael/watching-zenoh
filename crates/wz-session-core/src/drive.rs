@@ -26,6 +26,8 @@ use wz_runtime_core::TimeSource;
 use crate::driver_loop::DriverLoopOutcome;
 use crate::inbound::inbound_to_fsm_event;
 use crate::lease::LeaseCheckOutcome;
+#[cfg(feature = "transport-keepalive")]
+use crate::link::BoxedLinkDriver;
 #[cfg(feature = "alloc")]
 use crate::link::LinkEvent;
 use crate::link::SessionRuntime;

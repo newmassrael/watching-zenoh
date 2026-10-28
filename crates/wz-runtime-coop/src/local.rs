@@ -182,9 +182,9 @@ impl<C: ClockSource> CoopLocalSet<C> {
     /// Bind a local task pool to `runtime`. The runtime handle is cloned
     /// (it is `Arc`-backed), so the local set and any other holder of the
     /// same runtime share one executor and one timer queue.
-    pub fn new(runtime: &CoopRuntime<C>) -> Self {
+    pub fn new<D: ?Sized>(runtime: &CoopRuntime<C, D>) -> Self {
         Self {
-            runtime: runtime.clone(),
+            runtime: runtime.with_driver(),
             tasks: Rc::new(RefCell::new(Vec::new())),
         }
     }

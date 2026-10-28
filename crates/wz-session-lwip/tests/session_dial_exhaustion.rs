@@ -92,11 +92,11 @@ impl wz_session_core::entropy::EntropySource for Counting {
     }
 }
 
-type Rt = CoopRuntime<Frozen>;
+type Rt = CoopRuntime<Frozen, LwipUdpDriver>;
 type LinkRc = Rc<LwipLink>;
 type Slots<const S: usize> = SessionSlots<Rt, CoopTime<Frozen>, LwipUdpDriver, Counting, S>;
-type Pumps<const P: usize> = PumpSlots<Frozen, LwipSessionLink<LinkRc>, P>;
-type Opened = OpenedSession<Frozen>;
+type Pumps<const P: usize> = PumpSlots<Frozen, LwipSessionLink<LinkRc>, P, LwipUdpDriver>;
+type Opened = OpenedSession<Frozen, LwipUdpDriver>;
 
 fn params(zid: u8) -> SessionInitParams {
     SessionInitParams {

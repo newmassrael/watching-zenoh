@@ -286,11 +286,11 @@ impl wz_session_core::entropy::EntropySource for Counting {
     }
 }
 
-type Rt = CoopRuntime<Frozen>;
-type Pump = SessionPump<Frozen, LwipSessionLink<Rc<LwipLink>>>;
+type Rt = CoopRuntime<Frozen, LwipUdpDriver>;
+type Pump = SessionPump<Frozen, LwipSessionLink<Rc<LwipLink>>, LwipUdpDriver>;
 /// The handle to a session: an `Rc` of the bundle, or under `session-slot` a
 /// counted reference to the slot that holds it.
-type Handle = SessionHandle<Frozen>;
+type Handle = SessionHandle<Frozen, LwipUdpDriver>;
 
 /// The init parameters of a session whose zid is four bytes of `zid`, written
 /// the same way on every profile: the arrays of the slot profile, the vectors of
@@ -790,7 +790,9 @@ mod table {
         let link = Rc::new(link);
         static RUNTIME: wz_runtime_coop::RuntimeCell<Frozen, 1, 64, 1> =
             wz_runtime_coop::RuntimeCell::new();
-        let runtime = RUNTIME.start(Frozen).expect("the runtime is started once");
+        let runtime = RUNTIME
+            .start::<LwipUdpDriver>(Frozen)
+            .expect("the runtime is started once");
         let dropped = || DROPPED.with(Cell::get);
         let before = dropped();
 

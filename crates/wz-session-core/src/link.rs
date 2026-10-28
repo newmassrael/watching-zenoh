@@ -1405,12 +1405,16 @@ pub trait SessionRuntime: Runtime + Sized {
     ))]
     fn wrap_actions<T: TimeSource>(actions: SessionLinkActions<Self, T>) -> Self::ActionsHandle<T>;
 
-    /// Erase the per-profile refcount wrapper to the pure
-    /// `&dyn BoxedLinkDriver` the action methods send through. The
-    /// tokio impl is `&**sink` (dropping the `+ Send + Sync` auto
-    /// traits is an allowed reference coercion); the MCU impl is the
-    /// analogous `&**sink` over `Rc`.
-    fn link_driver(sink: &Self::LinkSink) -> &dyn BoxedLinkDriver;
+    /// The type of the link driver the action methods send through. A profile that picks its
+    /// driver at build time (the fixed-memory MCU profile: Kconfig names the link) says the
+    /// concrete type, so every call is a direct call the compiler can inline and the stack
+    /// analysis can follow; a profile that picks it at run time says a trait object.
+    type Driver: BoxedLinkDriver + ?Sized;
+
+    /// Erase the per-profile refcount wrapper to the driver the action methods send through.
+    /// The tokio impl is `&**sink` (dropping the `+ Send + Sync` auto traits is an allowed
+    /// reference coercion); the MCU impl is the analogous `&**sink` over `Rc`.
+    fn link_driver(sink: &Self::LinkSink) -> &Self::Driver;
 }
 
 /// Outbound payload to send over a link. The R51 baseline carries

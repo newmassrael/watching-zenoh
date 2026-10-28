@@ -70,7 +70,7 @@ const TIMERS: usize = 4;
 /// The table of session slots this image places: one type for the assertion below, the
 /// size constant and the probe.
 type Slots = SessionSlots<
-    CoopRuntime<SystickClockRef>,
+    CoopRuntime<SystickClockRef, LwipUdpDriver>,
     CoopTime<SystickClockRef>,
     LwipUdpDriver,
     ClockSeededXorshift,
@@ -128,7 +128,7 @@ type Node<'a> =
 struct Statics {
     runtime: RuntimeCell<SystickClockRef, TASKS, TASK_BYTES, TIMERS>,
     sessions: Slots,
-    pumps: PumpSlots<SystickClockRef, LwipSessionLink<&'static LwipLink>, SESSIONS>,
+    pumps: PumpSlots<SystickClockRef, LwipSessionLink<&'static LwipLink>, SESSIONS, LwipUdpDriver>,
     /// A cell for each session the node dials, and one for the listener's socket.
     sockets: SessionRxPool<{ SESSIONS + 1 }>,
     listener: SessionListener<LANES>,
@@ -187,9 +187,9 @@ struct Factory {
     observer: &'static ObserverCell<Sinks>,
 }
 
-impl SessionFactory<SystickClockRef> for Factory {
+impl SessionFactory<SystickClockRef, LwipUdpDriver> for Factory {
     type Entropy = ClockSeededXorshift;
-    type Events = SlotDispatch<SystickClockRef, NoReplies, NoReplies, Sinks>;
+    type Events = SlotDispatch<SystickClockRef, NoReplies, NoReplies, Sinks, LwipUdpDriver>;
 
     fn entropy(&mut self) -> ClockSeededXorshift {
         ClockSeededXorshift::seeded()
@@ -214,7 +214,7 @@ impl SessionFactory<SystickClockRef> for Factory {
         }
     }
 
-    fn events(&mut self, handle: &SessionHandle<SystickClockRef>) -> Self::Events {
+    fn events(&mut self, handle: &SessionHandle<SystickClockRef, LwipUdpDriver>) -> Self::Events {
         SlotDispatch::new(self.observer, handle.clone(), Requesters::new())
     }
 }
@@ -249,7 +249,7 @@ pub fn run() -> ! {
     let mut key = [0u8; 32];
     let _ = ClockSeededXorshift::seeded().try_fill_bytes(&mut key);
 
-    let Some(runtime) = NODE.runtime.start(SystickClockRef) else {
+    let Some(runtime) = NODE.runtime.start::<LwipUdpDriver>(SystickClockRef) else {
         fail("the runtime was started twice");
     };
     let local = CoopLocalSet::new(&runtime);

@@ -147,7 +147,7 @@ type Stack = crate::fixed_tls::Stack;
 /// The table of session slots this image places, as the node's storage holds it: one type for the
 /// assertion below and the probe.
 type Slots = SessionSlots<
-    CoopRuntime<Clock>,
+    CoopRuntime<Clock, <Stack as SlotStack>::Driver>,
     CoopTime<Clock>,
     <Stack as SlotStack>::Driver,
     ZephyrEntropy,

@@ -124,8 +124,14 @@ where
     /// `link`.
     pub fn new(
         local: CoopLocalSet<C>,
-        sessions: &'static SessionSlots<CoopRuntime<C>, CoopTime<C>, LwipUdpDriver, E, S>,
-        pumps: &'static PumpSlots<C, LwipSessionLink<L>, P>,
+        sessions: &'static SessionSlots<
+            CoopRuntime<C, LwipUdpDriver>,
+            CoopTime<C>,
+            LwipUdpDriver,
+            E,
+            S,
+        >,
+        pumps: &'static PumpSlots<C, LwipSessionLink<L>, P, LwipUdpDriver>,
         link: L,
     ) -> Self {
         Self {
@@ -141,8 +147,8 @@ where
         entropy: E,
         params: SessionInitParams,
         config: SessionDriveConfig,
-        on_event: impl FnOnce(&SessionHandle<C>) -> F,
-    ) -> Result<OpenedSession<C>, OpenRefused>
+        on_event: impl FnOnce(&SessionHandle<C, LwipUdpDriver>) -> F,
+    ) -> Result<OpenedSession<C, LwipUdpDriver>, OpenRefused>
     where
         F: FnMut(IterationEvent<'_>) + 'static,
     {
@@ -162,8 +168,8 @@ where
         entropy: E,
         params: SessionInitParams,
         config: SessionDriveConfig,
-        on_event: impl FnOnce(&SessionHandle<C>) -> F,
-    ) -> Result<OpenedSession<C>, DialRefused>
+        on_event: impl FnOnce(&SessionHandle<C, LwipUdpDriver>) -> F,
+    ) -> Result<OpenedSession<C, LwipUdpDriver>, DialRefused>
     where
         F: FnMut(IterationEvent<'_>) + 'static,
     {

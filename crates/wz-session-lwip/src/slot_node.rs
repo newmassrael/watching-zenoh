@@ -122,7 +122,7 @@ pub struct SlotAdminNode<'a, C, L, F, const S: usize, const P: usize, const LANE
 where
     C: ClockSource + 'static,
     L: Deref<Target = LwipLink> + Clone + 'static,
-    F: SessionFactory<C>,
+    F: SessionFactory<C, LwipUdpDriver>,
 {
     host: &'a SessionHost<C, L, F::Entropy, S, P>,
     links: &'a LwipLinks<L>,
@@ -133,7 +133,7 @@ where
     timeouts: SessionTimeouts,
     status: &'static FixedNodeStatus<S>,
     manager: ConnectManager<SlotDialer<'a, C, L, F, S, P>>,
-    accepted: BoundedVec<SlotSession<C>, LANES>,
+    accepted: BoundedVec<SlotSession<C, LwipUdpDriver>, LANES>,
     admin_key: KeyText,
     config_key: KeyText,
 }
@@ -143,7 +143,7 @@ impl<'a, C, L, F, const S: usize, const P: usize, const LANES: usize>
 where
     C: ClockSource + 'static,
     L: Deref<Target = LwipLink> + Clone + 'static,
-    F: SessionFactory<C>,
+    F: SessionFactory<C, LwipUdpDriver>,
 {
     /// A node that listens on `listen_port` through `listener`, dials what `control`
     /// names, answers as `zid_hex` / `whatami` and reports through `status`. `peers` is the
@@ -203,13 +203,13 @@ where
     }
 
     /// The sessions a host reached this node on, while there are any.
-    pub fn accepted(&self) -> impl Iterator<Item = &SlotSession<C>> {
+    pub fn accepted(&self) -> impl Iterator<Item = &SlotSession<C, LwipUdpDriver>> {
         self.accepted.iter()
     }
 
     /// Call `f` for each session this node dialled and holds, with the endpoint it was
     /// dialled for, in the list's order.
-    pub fn for_each_dialled(&self, mut f: impl FnMut(&str, &SlotSession<C>)) {
+    pub fn for_each_dialled(&self, mut f: impl FnMut(&str, &SlotSession<C, LwipUdpDriver>)) {
         for (endpoint, session) in self.manager.sessions() {
             f(endpoint, session);
         }
@@ -217,7 +217,10 @@ where
 
     /// Call `f` for each session this node holds with a node it was asked to open by its zid,
     /// with the zid it was dialled for, in the order the nodes were asked for.
-    pub fn for_each_dialled_node(&self, mut f: impl FnMut(&DirectoryZid, &SlotSession<C>)) {
+    pub fn for_each_dialled_node(
+        &self,
+        mut f: impl FnMut(&DirectoryZid, &SlotSession<C, LwipUdpDriver>),
+    ) {
         for (zid, session) in self.manager.node_sessions() {
             f(zid, session);
         }
@@ -398,7 +401,7 @@ where
 /// without these a stock zenohd connected to the node holds a live session and
 /// routes nothing to it.
 fn declare_admin<C: ClockSource + 'static>(
-    actions: &SessionHandle<C>,
+    actions: &SessionHandle<C, LwipUdpDriver>,
     admin_key: &str,
     config_key: &str,
 ) -> bool {

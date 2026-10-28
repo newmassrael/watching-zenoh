@@ -289,7 +289,7 @@ impl<R: SessionRuntime, T: TimeSource, D, E, const N: usize> SessionSlots<R, T, 
 
 impl<R, T, D, E, const N: usize> SessionSlots<R, T, D, E, N>
 where
-    R: SessionRuntime<LinkSink = SlotSink> + 'static,
+    R: SessionRuntime<LinkSink = SlotSink<D>, Driver = D> + 'static,
     T: TimeSource + 'static,
     D: BoxedLinkDriver + 'static,
     E: EntropySource + Send + 'static,
@@ -334,7 +334,7 @@ pub struct SlotClaim<R: SessionRuntime + 'static, T: TimeSource + 'static, D: 's
 
 impl<R, T, D, E> SlotClaim<R, T, D, E>
 where
-    R: SessionRuntime<LinkSink = SlotSink> + 'static,
+    R: SessionRuntime<LinkSink = SlotSink<D>, Driver = D> + 'static,
     T: TimeSource + 'static,
     D: BoxedLinkDriver + 'static,
     E: EntropySource + Send + 'static,
@@ -481,20 +481,23 @@ impl<R: SessionRuntime + 'static, T: TimeSource + 'static> Deref for SlotRef<R, 
 /// a clone does: `Clone` is what makes a copy that can leave the bundle, so it
 /// is the one that keeps the slot alive for as long as the copy is, and a sink
 /// is never a reference to a driver that has gone.
-pub struct SlotSink {
+///
+/// `D` is the driver's own type, which the profile that holds it in a slot knows: the sink names
+/// it so the session's calls through the link are direct.
+pub struct SlotSink<D: BoxedLinkDriver + ?Sized + 'static> {
     head: &'static SlotHead,
-    driver: &'static dyn BoxedLinkDriver,
+    driver: &'static D,
     counted: bool,
 }
 
-impl SlotSink {
+impl<D: BoxedLinkDriver + ?Sized + 'static> SlotSink<D> {
     /// The driver, for as long as this sink is borrowed.
-    pub fn driver(&self) -> &dyn BoxedLinkDriver {
+    pub fn driver(&self) -> &D {
         self.driver
     }
 }
 
-impl Clone for SlotSink {
+impl<D: BoxedLinkDriver + ?Sized + 'static> Clone for SlotSink<D> {
     fn clone(&self) -> Self {
         self.head.retain();
         Self {
@@ -505,7 +508,7 @@ impl Clone for SlotSink {
     }
 }
 
-impl Drop for SlotSink {
+impl<D: BoxedLinkDriver + ?Sized + 'static> Drop for SlotSink<D> {
     fn drop(&mut self) {
         if self.counted {
             self.head.drop_one();

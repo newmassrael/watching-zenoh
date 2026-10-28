@@ -218,6 +218,13 @@ IMAGES = (
     # that held them fell from 1,792 to 1,256 bytes (the manager's frame 1,280 to 1,056, and the one
     # under it 416 to 800, the loop of `drive` now being its own frame). The kit's reading did not
     # move, so it is 392 bytes over the chain: the row carries `chain_misses`.
+    #
+    # `peak` is 5,480 bytes with the session's link driver named by its type
+    # (`SessionRuntime::Driver`): the calls the session makes through the link are direct calls,
+    # 3 fewer through a register on the path (9), and 32 bytes less. The kit's reading did not move
+    # (5,904), so it is 424 bytes over the chain. The 5,512 before was not a bound either: the
+    # connect manager's trait object had put a register call in `ask`, which hid its callee's
+    # frame from this reader, so part of the fall to it was a call this reader cannot follow.
     Image(
         key="zephyr-client-fixed",
         elf=None,
@@ -225,7 +232,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=5512,
+        peak=5480,
     ),
     # The same client with the session coalescing a send window into one datagram
     # (`overlays/t2g_client_batching.conf`). The batch writer and its flush path are two more
@@ -245,6 +252,9 @@ IMAGES = (
     # 6,372 bytes after the SCE pin moved to `6dbfa6a521`, the same chain as the client without
     # batching (see the fixed client's row); the kit's reading, 5,904 bytes, is 24 over that
     # client's.
+    #
+    # 5,480 bytes with the session's link driver named by its type: the same chain as the client
+    # without batching (see the fixed client's row), 40 less than the 5,520 before.
     Image(
         key="zephyr-client-fixed-batching",
         elf=None,
@@ -252,7 +262,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=5520,
+        peak=5480,
     ),
     # The fixed client that ASKS (`overlays/t2g_client_get.conf`): the getter of
     # `wz_session_mcu::slot_getter` is the application layer the observer's drain runs inside, and

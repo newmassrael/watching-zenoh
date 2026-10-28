@@ -68,7 +68,7 @@ impl EntropySource for Fill {
     }
 }
 
-type Rt = CoopRuntime<Frozen>;
+type Rt = CoopRuntime<Frozen, LwipUdpDriver>;
 type Table = SessionSlots<Rt, CoopTime<Frozen>, LwipUdpDriver, Fill, 2>;
 
 fn params(zid: u8) -> SessionInitParams {

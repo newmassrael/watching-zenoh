@@ -74,9 +74,9 @@ impl<C: ClockSource> CoopLocalSet<C> {
     /// Bind a local task pool to `runtime`. The runtime handle is copied, so the
     /// local set and any other holder of the same runtime share one task table and
     /// one timer table.
-    pub fn new(runtime: &CoopRuntime<C>) -> Self {
+    pub fn new<D: ?Sized>(runtime: &CoopRuntime<C, D>) -> Self {
         Self {
-            runtime: runtime.clone(),
+            runtime: runtime.with_driver(),
             local: PhantomData,
         }
     }

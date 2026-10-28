@@ -24,6 +24,7 @@ use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle};
 use wz_session_core::close_reason::CloseReason;
 use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
 use wz_session_core::entropy::EntropySource;
+use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::replay_cursor::ReplayCursor;
 use wz_session_core::session_init_params::SessionInitParams;
 use wz_session_core::session_timeouts::SessionTimeouts;
@@ -37,7 +38,14 @@ use crate::slot_host::{DialRefused, OpenedSession, SessionHost};
 /// cookies are drawn from, its handshake parameters, and the application layer it reports to. One
 /// value for the three, because a node makes sessions two ways (it dials and it accepts) and the
 /// three must not differ between them.
-pub trait SessionFactory<C: ClockSource + 'static> {
+///
+/// `D` is the type of the link driver the sessions are made over: the stack's own driver type
+/// where the image names it, which is what lets the session's calls through the link be direct.
+pub trait SessionFactory<
+    C: ClockSource + 'static,
+    D: BoxedLinkDriver + ?Sized + 'static = dyn BoxedLinkDriver,
+>
+{
     /// The entropy source a session owns, in its slot.
     type Entropy: EntropySource + Send + 'static;
     /// The application layer a session reports its iterations to, kept in its task.
@@ -61,26 +69,30 @@ pub trait SessionFactory<C: ClockSource + 'static> {
     /// The application layer of the session whose handle this is, made after the session's slot
     /// is claimed and before its pump is
     /// ([`SessionHost::open`](crate::slot_host::SessionHost::open)).
-    fn events(&mut self, handle: &SessionHandle<C>) -> Self::Events;
+    fn events(&mut self, handle: &SessionHandle<C, D>) -> Self::Events;
 }
 
 /// The `on_event` closure a session driver takes, over the factory's application layer for the
 /// session `handle` names.
-pub fn events_of<C, F>(
+pub fn events_of<C, D, F>(
     factory: &RefCell<F>,
-    handle: &SessionHandle<C>,
+    handle: &SessionHandle<C, D>,
 ) -> impl FnMut(IterationEvent<'_>) + 'static
 where
     C: ClockSource + 'static,
-    F: SessionFactory<C>,
+    D: BoxedLinkDriver + ?Sized + 'static,
+    F: SessionFactory<C, D>,
 {
     let mut events = factory.borrow_mut().events(handle);
     move |event| events.on_event(event)
 }
 
 /// A session a node holds, with what the node remembers about it.
-pub struct SlotSession<C: ClockSource + 'static> {
-    opened: OpenedSession<C>,
+pub struct SlotSession<
+    C: ClockSource + 'static,
+    D: BoxedLinkDriver + ?Sized + 'static = dyn BoxedLinkDriver,
+> {
+    opened: OpenedSession<C, D>,
     /// Whether the session was ever seen established, sampled each time the manager asks (a
     /// session that establishes and drops between two ticks reads as never established, so its
     /// re-dial continues the old outage's period: it errs towards waiting longer, never towards
@@ -98,9 +110,9 @@ pub struct SlotSession<C: ClockSource + 'static> {
     next_turn_ms: Cell<u64>,
 }
 
-impl<C: ClockSource + 'static> SlotSession<C> {
+impl<C: ClockSource + 'static, D: BoxedLinkDriver + ?Sized + 'static> SlotSession<C, D> {
     /// A session just opened, not yet established and not yet declared on.
-    pub fn new(opened: OpenedSession<C>) -> Self {
+    pub fn new(opened: OpenedSession<C, D>) -> Self {
         Self {
             opened,
             established: false,
@@ -110,7 +122,7 @@ impl<C: ClockSource + 'static> SlotSession<C> {
     }
 
     /// The handle to the session, to publish or declare through.
-    pub fn actions(&self) -> &SessionHandle<C> {
+    pub fn actions(&self) -> &SessionHandle<C, D> {
         &self.opened.actions
     }
 
@@ -170,7 +182,7 @@ where
     C: ClockSource + 'static,
     T: SlotStack,
     B: Bind<T::Driver>,
-    F: SessionFactory<C>,
+    F: SessionFactory<C, T::Driver>,
 {
     host: &'a SessionHost<C, T, F::Entropy, S, P>,
     bind: B,
@@ -183,7 +195,7 @@ where
     C: ClockSource + 'static,
     T: SlotStack,
     B: Bind<T::Driver>,
-    F: SessionFactory<C>,
+    F: SessionFactory<C, T::Driver>,
 {
     /// A dialler over `host`, whose sockets `bind` opens, making its sessions through `factory`
     /// with the handshake deadlines `timeouts`.
@@ -207,7 +219,7 @@ where
     C: ClockSource + 'static,
     T: SlotStack,
     B: Bind<T::Driver>,
-    F: SessionFactory<C>,
+    F: SessionFactory<C, T::Driver>,
 {
     // Not inlined into the loop that ticks the manager: a dial holds the socket's driver (the two
     // buffers of a link, some 3 KB) and the session's parameters, by value, several times over on
@@ -220,7 +232,7 @@ where
         &mut self,
         endpoint: &str,
         expected_zid: Option<[u8; wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES]>,
-    ) -> Result<SlotSession<C>, DialFailed> {
+    ) -> Result<SlotSession<C, T::Driver>, DialFailed> {
         let to = parse_locator(endpoint).map_err(DialFailed::Refused)?;
         let entropy = self.factory.borrow_mut().entropy();
         let params = self.factory.borrow_mut().params();
@@ -259,9 +271,9 @@ where
     C: ClockSource + 'static,
     T: SlotStack,
     B: Bind<T::Driver>,
-    F: SessionFactory<C>,
+    F: SessionFactory<C, T::Driver>,
 {
-    type Session = SlotSession<C>;
+    type Session = SlotSession<C, T::Driver>;
 
     fn classify(endpoint: &str) -> Result<(), crate::connect_manager::DialRefused> {
         parse_locator(endpoint).map(|_| ())

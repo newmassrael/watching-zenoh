@@ -90,7 +90,7 @@ const TIMERS: usize = 4;
 /// The table of session slots this image places: one type for the assertion below, the
 /// size constant and the probe.
 type Slots = SessionSlots<
-    CoopRuntime<ZephyrClock<TICK_HZ>>,
+    CoopRuntime<ZephyrClock<TICK_HZ>, LwipUdpDriver>,
     CoopTime<ZephyrClock<TICK_HZ>>,
     LwipUdpDriver,
     ZephyrEntropy,
@@ -153,7 +153,7 @@ type Node<'a> = SlotAdminNode<'a, Clock, &'static LwipLink, Factory, SESSIONS, S
 struct Statics {
     runtime: RuntimeCell<Clock, TASKS, TASK_BYTES, TIMERS>,
     sessions: Slots,
-    pumps: PumpSlots<Clock, LwipSessionLink<&'static LwipLink>, SESSIONS>,
+    pumps: PumpSlots<Clock, LwipSessionLink<&'static LwipLink>, SESSIONS, LwipUdpDriver>,
     listener: SessionListener<LANES>,
     /// The machines of what the node dials, some 10 KB: here, with the other tables, and not on
     /// the stack of the thread that runs the node.
@@ -234,9 +234,9 @@ struct Factory {
     observer: &'static ObserverCell<Sinks>,
 }
 
-impl SessionFactory<Clock> for Factory {
+impl SessionFactory<Clock, LwipUdpDriver> for Factory {
     type Entropy = ZephyrEntropy;
-    type Events = SlotDispatch<Clock, NoReplies, NoReplies, Sinks>;
+    type Events = SlotDispatch<Clock, NoReplies, NoReplies, Sinks, LwipUdpDriver>;
 
     fn entropy(&mut self) -> ZephyrEntropy {
         ZephyrEntropy
@@ -260,7 +260,7 @@ impl SessionFactory<Clock> for Factory {
         }
     }
 
-    fn events(&mut self, handle: &SessionHandle<Clock>) -> Self::Events {
+    fn events(&mut self, handle: &SessionHandle<Clock, LwipUdpDriver>) -> Self::Events {
         SlotDispatch::new(self.observer, handle.clone(), Requesters::new())
     }
 }
@@ -332,7 +332,7 @@ pub fn run(mut net: LwipMacNet) -> i32 {
     }
 
     let clock = Clock::default();
-    let Some(runtime) = NODE.runtime.start(clock) else {
+    let Some(runtime) = NODE.runtime.start::<LwipUdpDriver>(clock) else {
         log(c"wz: FAIL - the runtime was started twice");
         return 3;
     };

@@ -52,6 +52,7 @@ use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeC
 use wz_session_core::byte_cells::ByteCells;
 use wz_session_core::connect_endpoints::{ConnectEndpoints, ConnectEntry, EndpointText};
 use wz_session_core::entropy::EntropySource;
+use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::session_init_params::{
     cookie_bytes, zid_bytes, LinkRxConf, SessionInitParams, TxQueueConf,
 };
@@ -109,9 +110,9 @@ pub struct NodeStorage<
     /// The runtime and the tables its tasks and timers live in.
     pub runtime: RuntimeCell<C, TASKS, TASK_BYTES, TIMERS>,
     /// The session slots.
-    pub sessions: SessionSlots<CoopRuntime<C>, CoopTime<C>, T::Driver, E, SESSIONS>,
+    pub sessions: SessionSlots<CoopRuntime<C, T::Driver>, CoopTime<C>, T::Driver, E, SESSIONS>,
     /// The pump cells.
-    pub pumps: PumpSlots<C, T::Pump, SESSIONS>,
+    pub pumps: PumpSlots<C, T::Pump, SESSIONS, T::Driver>,
     /// The observer, with the queryables.
     pub app: SlotApp<DocumentSinks>,
     /// The receive buffers the links claim, one batch long each.
@@ -614,7 +615,11 @@ impl NodeIdentity {
 /// What a session reports its iterations to: the layer the node builds for the session whose
 /// handle this is, over the process-wide observer. [`Answering`] is the node that asks nothing; a
 /// node that asks (`deploy/host-slot-node`'s getter) wraps the same dispatch in its own.
-pub trait SessionLayer<C: ClockSource + 'static> {
+pub trait SessionLayer<
+    C: ClockSource + 'static,
+    D: BoxedLinkDriver + ?Sized + 'static = dyn BoxedLinkDriver,
+>
+{
     /// The application layer of a session, kept in its task.
     type Events: SessionEvents + 'static;
 
@@ -622,7 +627,7 @@ pub trait SessionLayer<C: ClockSource + 'static> {
     fn events(
         &mut self,
         observer: &'static ObserverCell<DocumentSinks>,
-        handle: &SessionHandle<C>,
+        handle: &SessionHandle<C, D>,
     ) -> Self::Events;
 }
 
@@ -631,13 +636,15 @@ pub trait SessionLayer<C: ClockSource + 'static> {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Answering;
 
-impl<C: ClockSource + 'static> SessionLayer<C> for Answering {
-    type Events = SlotDispatch<C, NoReplies, NoReplies, DocumentSinks>;
+impl<C: ClockSource + 'static, D: BoxedLinkDriver + ?Sized + 'static> SessionLayer<C, D>
+    for Answering
+{
+    type Events = SlotDispatch<C, NoReplies, NoReplies, DocumentSinks, D>;
 
     fn events(
         &mut self,
         observer: &'static ObserverCell<DocumentSinks>,
-        handle: &SessionHandle<C>,
+        handle: &SessionHandle<C, D>,
     ) -> Self::Events {
         SlotDispatch::new(
             observer,
@@ -657,11 +664,12 @@ pub struct ClientFactory<E, L> {
     layer: L,
 }
 
-impl<C, E, L> SessionFactory<C> for ClientFactory<E, L>
+impl<C, D, E, L> SessionFactory<C, D> for ClientFactory<E, L>
 where
     C: ClockSource + 'static,
+    D: BoxedLinkDriver + ?Sized + 'static,
     E: EntropySource + Send + 'static,
-    L: SessionLayer<C>,
+    L: SessionLayer<C, D>,
 {
     type Entropy = E;
     type Events = L::Events;
@@ -678,7 +686,7 @@ where
         self.identity.accepted_params(self.batch_size)
     }
 
-    fn events(&mut self, handle: &SessionHandle<C>) -> Self::Events {
+    fn events(&mut self, handle: &SessionHandle<C, D>) -> Self::Events {
         self.layer.events(self.observer, handle)
     }
 }
@@ -820,7 +828,7 @@ where
     C: ClockSource + 'static,
     T: SlotStack,
     B: Bind<T::Driver>,
-    F: SessionFactory<C>,
+    F: SessionFactory<C, T::Driver>,
     X: Accept<T::Driver>,
 {
     fn is_established(&self) -> bool {
@@ -888,7 +896,7 @@ pub struct ClientNode<
     C: ClockSource + Copy + 'static,
     T: SlotStack + Bind<T::Driver> + Copy,
     E: EntropySource + Send + 'static,
-    L: SessionLayer<C>,
+    L: SessionLayer<C, T::Driver>,
     X: Accept<T::Driver>,
     W: Plane<C>,
 {
@@ -953,7 +961,7 @@ where
     C: ClockSource + Copy + 'static,
     T: SlotStack + Bind<T::Driver> + Copy,
     E: EntropySource + Send + 'static,
-    L: SessionLayer<C>,
+    L: SessionLayer<C, T::Driver>,
     X: Accept<T::Driver>,
     W: Plane<C>,
 {

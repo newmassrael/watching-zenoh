@@ -35,6 +35,7 @@ use core::ops::ControlFlow;
 
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::ClockSource;
+use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::reply_sink::{ReplyKind, ReplySink, ReplyView};
 use wz_session_core::sample::QosLevel;
 use wz_session_core::slot_observer::{ObserverCell, ObserverSinks, Requesters};
@@ -434,12 +435,18 @@ pub type Requests<C, const SAMPLES: usize, const INFLIGHT: usize, const ROWS: us
 
 /// The application layer of a getter session: the node's dispatch, and the queries asked as soon as
 /// a place is free (in the event), or the mailbox taken (mailbox mode).
-pub struct GetterEvents<C, K, const SAMPLES: usize, const INFLIGHT: usize, const ROWS: usize>
-where
+pub struct GetterEvents<
+    C,
+    K,
+    const SAMPLES: usize,
+    const INFLIGHT: usize,
+    const ROWS: usize,
+    D: BoxedLinkDriver + ?Sized + 'static = dyn BoxedLinkDriver,
+> where
     C: ClockSource + Default + 'static,
     K: ObserverSinks + 'static,
 {
-    inner: SlotDispatch<C, PlanSink<C, SAMPLES, INFLIGHT, ROWS>, NoReplies, K>,
+    inner: SlotDispatch<C, PlanSink<C, SAMPLES, INFLIGHT, ROWS>, NoReplies, K, D>,
     plan: &'static Plan<C, SAMPLES, INFLIGHT, ROWS>,
 }
 
@@ -457,17 +464,18 @@ impl<C: 'static, const SAMPLES: usize, const INFLIGHT: usize, const ROWS: usize>
     }
 }
 
-impl<C, const SAMPLES: usize, const INFLIGHT: usize, const ROWS: usize> SessionLayer<C>
+impl<C, D, const SAMPLES: usize, const INFLIGHT: usize, const ROWS: usize> SessionLayer<C, D>
     for GetterLayer<C, SAMPLES, INFLIGHT, ROWS>
 where
     C: ClockSource + Default + 'static,
+    D: BoxedLinkDriver + ?Sized + 'static,
 {
-    type Events = GetterEvents<C, DocumentSinks, SAMPLES, INFLIGHT, ROWS>;
+    type Events = GetterEvents<C, DocumentSinks, SAMPLES, INFLIGHT, ROWS, D>;
 
     fn events(
         &mut self,
         observer: &'static ObserverCell<DocumentSinks>,
-        handle: &SessionHandle<C>,
+        handle: &SessionHandle<C, D>,
     ) -> Self::Events {
         GetterEvents {
             inner: SlotDispatch::new(
@@ -480,11 +488,12 @@ where
     }
 }
 
-impl<C, K, const SAMPLES: usize, const INFLIGHT: usize, const ROWS: usize> SessionEvents
-    for GetterEvents<C, K, SAMPLES, INFLIGHT, ROWS>
+impl<C, K, D, const SAMPLES: usize, const INFLIGHT: usize, const ROWS: usize> SessionEvents
+    for GetterEvents<C, K, SAMPLES, INFLIGHT, ROWS, D>
 where
     C: ClockSource + Default + 'static,
     K: ObserverSinks + 'static,
+    D: BoxedLinkDriver + ?Sized + 'static,
 {
     fn on_event(&mut self, event: wz_session_core::driver_loop::IterationEvent<'_>) {
         self.inner.on_event(event);

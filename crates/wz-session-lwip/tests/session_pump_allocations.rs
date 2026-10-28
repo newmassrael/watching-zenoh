@@ -277,8 +277,8 @@ impl wz_session_core::entropy::EntropySource for Counting {
     }
 }
 
-type Rt = CoopRuntime<Clk>;
-type Handle = SessionHandle<Clk>;
+type Rt = CoopRuntime<Clk, LwipUdpDriver>;
+type Handle = SessionHandle<Clk, LwipUdpDriver>;
 
 /// The init parameters of a session whose zid is four bytes of `zid`, written the
 /// same way on every profile.
@@ -354,7 +354,7 @@ mod placing_in_slot {
     use wz_session_core::session_slot::SessionSlots;
 
     pub type LinkHandle = &'static LwipLink;
-    pub type Pump = PumpRef<Clk, LwipSessionLink<LinkHandle>>;
+    pub type Pump = PumpRef<Clk, LwipSessionLink<LinkHandle>, LwipUdpDriver>;
     pub type Slots = SessionSlots<Rt, CoopTime<Clk>, LwipUdpDriver, Counting, 3>;
 
     /// The runtime of the whole image: a task table, a timer table.
@@ -362,7 +362,8 @@ mod placing_in_slot {
     /// Three sessions' state (the third is the one the pump table refuses), and two
     /// pumps.
     pub static SESSIONS: Slots = SessionSlots::new();
-    pub static PUMPS: PumpSlots<Clk, LwipSessionLink<LinkHandle>, 2> = PumpSlots::new();
+    pub static PUMPS: PumpSlots<Clk, LwipSessionLink<LinkHandle>, 2, LwipUdpDriver> =
+        PumpSlots::new();
 
     /// The link of the node, which an image keeps in a `static`.
     pub fn link_handle(link: LwipLink) -> LinkHandle {
@@ -466,7 +467,7 @@ mod placing_on_the_heap {
     use wz_session_core::session_actions::SessionLinkActions;
 
     pub type LinkHandle = Rc<LwipLink>;
-    pub type Pump = SessionPump<Clk, LwipSessionLink<LinkHandle>>;
+    pub type Pump = SessionPump<Clk, LwipSessionLink<LinkHandle>, LwipUdpDriver>;
 
     pub fn link_handle(link: LwipLink) -> LinkHandle {
         Rc::new(link)
@@ -885,7 +886,7 @@ fn the_static_tables_report_their_size() {
     use wz_runtime_coop::RuntimeCell;
 
     type Cells = RuntimeCell<Clk, 6, 256, 4>;
-    type Pumps = PumpSlots<Clk, LwipSessionLink<placing::LinkHandle>, 2>;
+    type Pumps = PumpSlots<Clk, LwipSessionLink<placing::LinkHandle>, 2, LwipUdpDriver>;
     type OnePump = SessionPump<Clk, LwipSessionLink<placing::LinkHandle>>;
     let (runtime, pumps, pump) = (
         Cells::size_bytes(),

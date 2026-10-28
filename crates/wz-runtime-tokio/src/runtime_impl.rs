@@ -165,6 +165,10 @@ impl Runtime for TokioRuntime {
 impl SessionRuntime for TokioRuntime {
     type LinkSink = Arc<dyn BoxedLinkDriver + Send + Sync>;
 
+    // The AP profile picks its link at run time: the driver is the trait object, as the sink
+    // erases it (without the `+ Send + Sync` the sink stores it under).
+    type Driver = dyn BoxedLinkDriver;
+
     // R311y205 (transport-multilink IMPL-2b-i) — the AP shareable pointer is
     // `Arc`: the multilink aggregation core is shared across the per-link drive
     // loops the multi-thread runtime may move between worker threads, so the
@@ -220,7 +224,7 @@ impl SessionRuntime for TokioRuntime {
         actions
     }
 
-    fn link_driver(sink: &Self::LinkSink) -> &dyn BoxedLinkDriver {
+    fn link_driver(sink: &Self::LinkSink) -> &Self::Driver {
         // `&**sink` drops the `+ Send + Sync` auto traits from the
         // reference target — an allowed `&(dyn T + Send + Sync) ->
         // &dyn T` coercion at this return position. (`AsRef` does NOT

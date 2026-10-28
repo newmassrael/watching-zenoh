@@ -88,15 +88,20 @@ impl<U> core::ops::Deref for NoShared<U> {
 /// `Rc<dyn BoxedLinkDriver>` shared by the single-task drive loop and
 /// its synchronous `LwipUdpSocket` driver; `!Send` is the intended
 /// shape (see module doc).
-impl<C: ClockSource> SessionRuntime for CoopRuntime<C> {
+impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static> SessionRuntime for CoopRuntime<C, D> {
+    // The driver is the runtime's own `D`: the trait object for the profile that picks its link at
+    // run time (the default), the driver's own type where the build names it, which makes every
+    // call the session makes through the link a direct one.
+    type Driver = D;
+
     #[cfg(not(feature = "session-slot"))]
-    type LinkSink = Rc<dyn BoxedLinkDriver>;
+    type LinkSink = Rc<D>;
 
     // Fixed-memory step S5 — under `session-slot` the sink is a reference to the
     // driver the session's own slot holds (`wz_session_core::session_slot`), not
     // an `Rc` of one: there is nothing to allocate and the slot is what frees it.
     #[cfg(feature = "session-slot")]
-    type LinkSink = SlotSink;
+    type LinkSink = SlotSink<D>;
 
     // R311y205 (transport-multilink IMPL-2b-i) — the MCU shareable pointer is
     // `Rc`, not `Arc`: the single-task sync drive loop shares the aggregation
@@ -159,14 +164,14 @@ impl<C: ClockSource> SessionRuntime for CoopRuntime<C> {
         Rc::new(actions)
     }
 
-    fn link_driver(sink: &Self::LinkSink) -> &dyn BoxedLinkDriver {
+    fn link_driver(sink: &Self::LinkSink) -> &D {
         #[cfg(not(feature = "session-slot"))]
         {
-            // `&**sink` reborrows through `Rc<dyn BoxedLinkDriver>` to the
-            // pure `&dyn BoxedLinkDriver` the action methods send through.
-            // No auto-trait coercion is needed (the MCU sink carries none),
+            // The `Rc<D>` derefs to the driver the action methods send through: `dyn
+            // BoxedLinkDriver` for the profile that picks its link at run time, the driver's own
+            // type otherwise. No auto-trait coercion is needed (the MCU sink carries none),
             // unlike the AP `&**sink` which also drops `+ Send + Sync`.
-            &**sink
+            sink
         }
         #[cfg(feature = "session-slot")]
         {
@@ -179,7 +184,8 @@ impl<C: ClockSource> SessionRuntime for CoopRuntime<C> {
 /// under `session-slot` a counted reference to the slot that holds it. The type
 /// the drive loop, the FSM's action binding and the application layer each take,
 /// written once so the two spellings are one name.
-pub type SessionHandle<C> = <CoopRuntime<C> as SessionRuntime>::ActionsHandle<CoopTime<C>>;
+pub type SessionHandle<C, D = dyn BoxedLinkDriver> =
+    <CoopRuntime<C, D> as SessionRuntime>::ActionsHandle<CoopTime<C>>;
 
 // ───────────────────── compile-time preconditions ─────────────────────
 //
@@ -340,10 +346,10 @@ where
 /// the first handshake). Nothing is allocated.
 #[cfg(feature = "session-slot")]
 pub fn new_session_in_slot<C, D, E>(
-    claim: SlotClaim<CoopRuntime<C>, CoopTime<C>, D, E>,
+    claim: SlotClaim<CoopRuntime<C, D>, CoopTime<C>, D, E>,
     params: wz_session_core::session_init_params::SessionInitParams,
     clock: CoopTime<C>,
-) -> SlotRef<CoopRuntime<C>, CoopTime<C>>
+) -> SlotRef<CoopRuntime<C, D>, CoopTime<C>>
 where
     C: ClockSource + 'static,
     D: BoxedLinkDriver + 'static,

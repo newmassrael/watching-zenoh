@@ -59,13 +59,13 @@ impl wz_session_core::entropy::EntropySource for Counting {
 
 type LinkRc = Rc<LwipLink>;
 type Slots = SessionSlots<
-    wz_runtime_coop::CoopRuntime<Frozen>,
+    wz_runtime_coop::CoopRuntime<Frozen, LwipUdpDriver>,
     CoopTime<Frozen>,
     LwipUdpDriver,
     Counting,
     1,
 >;
-type Pumps = PumpSlots<Frozen, LwipSessionLink<LinkRc>, 1>;
+type Pumps = PumpSlots<Frozen, LwipSessionLink<LinkRc>, 1, LwipUdpDriver>;
 
 /// The dialler's sequence-number and request-id resolutions (2 and 2) and batch size: the
 /// InitAck answers them unchanged, so nothing but its zid can refuse it.
@@ -101,7 +101,9 @@ fn next_datagram_after_the_init_ack(
 ) -> Vec<u8> {
     let (_serial, link) = wz_link_lwip::lwip_test_link();
     let link: LinkRc = Rc::new(link);
-    let runtime = cell.start(Frozen).expect("the runtime starts once");
+    let runtime = cell
+        .start::<LwipUdpDriver>(Frozen)
+        .expect("the runtime starts once");
     let local = CoopLocalSet::new(&runtime);
     let host: SessionHost<Frozen, LinkRc, Counting, 1, 1> =
         SessionHost::new(CoopLocalSet::new(&runtime), sessions, pumps, link.clone());
@@ -109,7 +111,7 @@ fn next_datagram_after_the_init_ack(
     let mut sink: SessionRxSocket =
         wz_link_lwip::test_bind::session_rx(&link, sink_port).expect("bind the far end");
 
-    let _opened: OpenedSession<Frozen> = host
+    let _opened: OpenedSession<Frozen, LwipUdpDriver> = host
         .dial(
             &links,
             DialTarget::node(

@@ -2324,7 +2324,7 @@ impl<R: SessionRuntime> LinkState<R> {
     /// `send_blocking` on `self.driver` directly; this accessor erases
     /// the per-profile refcount wrapper through [`R::link_driver`]. Reached
     /// from [`SessionLinkActions::link_driver`], which forwards to this.
-    pub(crate) fn link_driver(&self) -> &dyn BoxedLinkDriver {
+    pub(crate) fn link_driver(&self) -> &R::Driver {
         R::link_driver(&self.driver)
     }
 
@@ -3523,7 +3523,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// inline (`self.link_driver().send_blocking(&wire, reliability)`).
     /// R311y205 (IMPL-2a) — forwards to [`LinkState::link_driver`] now that the
     /// `driver` field lives on the per-link `self.link`.
-    fn link_driver(&self) -> &dyn BoxedLinkDriver {
+    fn link_driver(&self) -> &R::Driver {
         self.link.link_driver()
     }
 
@@ -3613,7 +3613,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// admin node reads its endpoints in place ([`Self::with_admin_session`]).
     #[cfg(feature = "alloc")]
     pub fn link_endpoints_all(&self) -> Vec<crate::link::LinkEndpoints> {
-        let render = |driver: &dyn BoxedLinkDriver| match driver.link_endpoints() {
+        let render = |driver: &R::Driver| match driver.link_endpoints() {
             Some(e) => e.clone(),
             None => crate::link::LinkEndpoints::default(),
         };
@@ -3980,7 +3980,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         fill: F,
     ) -> Lend<E>
     where
-        F: FnOnce(&mut crate::tx_lease::TxLease<'_>) -> Result<(), E>,
+        F: FnOnce(&mut crate::tx_lease::TxLease<'_, R::Driver>) -> Result<(), E>,
     {
         self.with_conduit_link(reliability, priority, |link| {
             let Some(mut slot) =
@@ -4132,12 +4132,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // again to return it, and a stream appends a message to the same frame many times.
         // Nothing is run under the lock but the encode of the message into the slot, which
         // takes no other lock; the send an overflow owes happens after the lock is released.
-        enum Step<'l> {
+        enum Step<'l, D: BoxedLinkDriver + ?Sized> {
             /// The message is in the frame, which is back in the table.
             Appended,
             /// The frame is full (or of another reliability) and leaves as it is; the lease is
             /// the frame, out of the table.
-            Leaves(crate::tx_lease::TxLease<'l>, Reliability),
+            Leaves(crate::tx_lease::TxLease<'l, D>, Reliability),
             /// The link no longer describes the slot: the open frame is lost.
             Lost,
             /// This link holds no open frame: an aggregated session's other link may.
@@ -4273,7 +4273,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn resume_batch_slot<'l>(
         found: Option<(&'l LinkState<R>, crate::tx_lease::HeldSlot)>,
         lend: &mut BatchLendCounts,
-    ) -> Option<(&'l LinkState<R>, crate::tx_lease::TxLease<'l>)> {
+    ) -> Option<(&'l LinkState<R>, crate::tx_lease::TxLease<'l, R::Driver>)> {
         let resumed = found.and_then(|(link, held)| {
             crate::tx_lease::TxLease::resume(link.link_driver(), held).map(|slot| (link, slot))
         });
@@ -4294,7 +4294,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn send_lent_batch(
         &self,
         link: &LinkState<R>,
-        mut slot: crate::tx_lease::TxLease<'_>,
+        mut slot: crate::tx_lease::TxLease<'_, R::Driver>,
         channel: Reliability,
         priority: Priority,
         lend: &mut BatchLendCounts,
@@ -4772,7 +4772,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         &self,
         link: &LinkState<R>,
         bytes: &[u8],
-        lent: Option<&mut crate::tx_lease::TxLease<'_>>,
+        lent: Option<&mut crate::tx_lease::TxLease<'_, R::Driver>>,
         reliability: Reliability,
         priority: Priority,
         // The frame carries no sequence number and may overtake what the link has queued

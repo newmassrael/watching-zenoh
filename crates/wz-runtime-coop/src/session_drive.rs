@@ -64,7 +64,6 @@ use wz_session_core::drive::{check_lease_deadline, lease_wake_deadline, new_sess
 #[cfg(feature = "rx-in-place")]
 use wz_session_core::drive::{CopyReason, DatagramPath};
 use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
-#[cfg(not(feature = "session-slot"))]
 use wz_session_core::link::BoxedLinkDriver;
 #[cfg(all(not(feature = "rx-in-place"), feature = "alloc"))]
 use wz_session_core::link::LinkEvent;
@@ -585,12 +584,20 @@ where
 /// Generic over the link `L` it OWNS: the synchronous loop may hand it a
 /// borrow-backed link, while a spawned task must be `'static` and therefore
 /// hands it one that owns its shares.
-pub struct SessionPump<C: ClockSource, L: SessionDatagramLink> {
-    runtime: CoopRuntime<C>,
+///
+/// `D` is the type of the driver the session sends through: the trait object by default, the
+/// driver's own type for the profile whose image names it, which is what makes the calls the
+/// engine's actions make through the link direct ones.
+pub struct SessionPump<
+    C: ClockSource,
+    L: SessionDatagramLink,
+    D: BoxedLinkDriver + ?Sized + 'static = dyn BoxedLinkDriver,
+> {
+    runtime: CoopRuntime<C, D>,
     link: L,
-    actions: SessionHandle<C>,
+    actions: SessionHandle<C, D>,
     clock: CoopTime<C>,
-    engine: SessionEngine<CoopRuntime<C>, CoopTime<C>>,
+    engine: SessionEngine<CoopRuntime<C, D>, CoopTime<C>>,
     deadline_tracker: HandshakeDeadlineTracker,
     #[cfg(all(feature = "reassembly", not(feature = "rx-in-place")))]
     reasm: CoopReassembly,
@@ -696,7 +703,9 @@ impl RxPathCounts {
     }
 }
 
-impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
+impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'static>
+    SessionPump<C, L, D>
+{
     /// Build the engine, activate the configured role, and arm the
     /// handshake deadline tracker — everything `run_session` does before
     /// entering its loop.
@@ -727,9 +736,9 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
     #[cfg(not(all(feature = "session-slot", feature = "reassembly")))]
     #[inline(never)]
     pub fn new(
-        runtime: CoopRuntime<C>,
+        runtime: CoopRuntime<C, D>,
         link: L,
-        actions: SessionHandle<C>,
+        actions: SessionHandle<C, D>,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
     ) -> Self {
@@ -752,9 +761,9 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
     #[cfg(all(feature = "reassembly", feature = "rx-in-place"))]
     #[inline(never)]
     pub fn with_reassembly_arena(
-        runtime: CoopRuntime<C>,
+        runtime: CoopRuntime<C, D>,
         link: L,
-        actions: SessionHandle<C>,
+        actions: SessionHandle<C, D>,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
         arena: ReassemblyArena,
@@ -781,9 +790,9 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
     /// [`Self::build_in`] in a place of its own.
     #[inline(always)]
     fn build(
-        runtime: CoopRuntime<C>,
+        runtime: CoopRuntime<C, D>,
         link: L,
-        actions: SessionHandle<C>,
+        actions: SessionHandle<C, D>,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
         #[cfg(all(feature = "reassembly", not(feature = "rx-in-place")))] reasm: CoopReassembly,
@@ -818,9 +827,9 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
     #[inline(never)]
     fn build_in(
         place: &mut MaybeUninit<Self>,
-        runtime: CoopRuntime<C>,
+        runtime: CoopRuntime<C, D>,
         link: L,
-        actions: SessionHandle<C>,
+        actions: SessionHandle<C, D>,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
         #[cfg(all(feature = "reassembly", not(feature = "rx-in-place")))] reasm: CoopReassembly,
@@ -839,7 +848,7 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
             // The engine is made in its field (`MaybeUninit<T>` has the layout of `T`).
             let engine = new_session_engine_in(
                 &mut *core::ptr::addr_of_mut!((*at).engine)
-                    .cast::<MaybeUninit<SessionEngine<CoopRuntime<C>, CoopTime<C>>>>(),
+                    .cast::<MaybeUninit<SessionEngine<CoopRuntime<C, D>, CoopTime<C>>>>(),
                 &actions,
             );
             // `new_session_engine_in` yields an un-initialized engine (the AP
@@ -878,7 +887,7 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
     /// Borrow the runtime this session was built against. The synchronous
     /// driver uses it to take the executor pass that [`Self::step`] does
     /// not.
-    pub fn runtime(&self) -> &CoopRuntime<C> {
+    pub fn runtime(&self) -> &CoopRuntime<C, D> {
         &self.runtime
     }
 
@@ -1227,9 +1236,9 @@ pub enum SessionSpawnRefused {
 
 /// One cell of a [`PumpSlots`] table.
 #[cfg(feature = "session-slot")]
-struct PumpCell<C: ClockSource, L: SessionDatagramLink> {
+struct PumpCell<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'static> {
     taken: Mutex<Cell<bool>>,
-    pump: UnsafeCell<MaybeUninit<SessionPump<C, L>>>,
+    pump: UnsafeCell<MaybeUninit<SessionPump<C, L, D>>>,
     /// With `reassembly`, the table the pump's fragments are staged into: one per
     /// pump, in the pump's own cell.
     #[cfg(feature = "reassembly")]
@@ -1237,7 +1246,9 @@ struct PumpCell<C: ClockSource, L: SessionDatagramLink> {
 }
 
 #[cfg(feature = "session-slot")]
-impl<C: ClockSource, L: SessionDatagramLink> PumpCell<C, L> {
+impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'static>
+    PumpCell<C, L, D>
+{
     const fn new() -> Self {
         Self {
             taken: Mutex::new(Cell::new(false)),
@@ -1368,8 +1379,13 @@ impl<D: SessionDatagramLink + 'static> SessionDatagramLink for DriverPump<D> {
 /// means a compiler can check: a pump is driven by ONE cooperative task on one
 /// core, and claiming and freeing are critical sections.
 #[cfg(feature = "session-slot")]
-pub struct PumpSlots<C: ClockSource, L: SessionDatagramLink + 'static, const N: usize> {
-    cells: [PumpCell<C, L>; N],
+pub struct PumpSlots<
+    C: ClockSource,
+    L: SessionDatagramLink + 'static,
+    const N: usize,
+    D: BoxedLinkDriver + ?Sized + 'static = dyn BoxedLinkDriver,
+> {
+    cells: [PumpCell<C, L, D>; N],
     refused: Mutex<Cell<u32>>,
 }
 
@@ -1377,13 +1393,23 @@ pub struct PumpSlots<C: ClockSource, L: SessionDatagramLink + 'static, const N: 
 // one claimant of the cell (its `taken` flag, set inside a critical section) and
 // reached only through that claimant's `PumpRef`.
 #[cfg(feature = "session-slot")]
-unsafe impl<C: ClockSource, L: SessionDatagramLink + 'static, const N: usize> Sync
-    for PumpSlots<C, L, N>
+unsafe impl<
+        C: ClockSource,
+        L: SessionDatagramLink + 'static,
+        const N: usize,
+        D: BoxedLinkDriver + ?Sized + 'static,
+    > Sync for PumpSlots<C, L, N, D>
 {
 }
 
 #[cfg(feature = "session-slot")]
-impl<C: ClockSource, L: SessionDatagramLink + 'static, const N: usize> PumpSlots<C, L, N> {
+impl<
+        C: ClockSource,
+        L: SessionDatagramLink + 'static,
+        const N: usize,
+        D: BoxedLinkDriver + ?Sized + 'static,
+    > PumpSlots<C, L, N, D>
+{
     /// A table of free cells.
     pub const fn new() -> Self {
         Self {
@@ -1425,12 +1451,12 @@ impl<C: ClockSource, L: SessionDatagramLink + 'static, const N: usize> PumpSlots
     /// same cell, handed to the pump as `PoolStorage::Static`.
     pub fn claim(
         &'static self,
-        runtime: CoopRuntime<C>,
+        runtime: CoopRuntime<C, D>,
         link: L,
-        actions: SessionHandle<C>,
+        actions: SessionHandle<C, D>,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
-    ) -> Result<PumpRef<C, L>, PumpsFull> {
+    ) -> Result<PumpRef<C, L, D>, PumpsFull> {
         let cell = self.cells.iter().find(|cell| {
             crate::cs::with(|cs| {
                 let taken = cell.taken.borrow(cs);
@@ -1472,8 +1498,12 @@ impl<C: ClockSource, L: SessionDatagramLink + 'static, const N: usize> PumpSlots
 }
 
 #[cfg(feature = "session-slot")]
-impl<C: ClockSource, L: SessionDatagramLink + 'static, const N: usize> Default
-    for PumpSlots<C, L, N>
+impl<
+        C: ClockSource,
+        L: SessionDatagramLink + 'static,
+        const N: usize,
+        D: BoxedLinkDriver + ?Sized + 'static,
+    > Default for PumpSlots<C, L, N, D>
 {
     fn default() -> Self {
         Self::new()
@@ -1483,15 +1513,21 @@ impl<C: ClockSource, L: SessionDatagramLink + 'static, const N: usize> Default
 /// The exclusive handle to a pump in its cell. Dropping it drops the pump in place
 /// and frees the cell. The task that drives a pump ([`pump_task`]) owns it.
 #[cfg(feature = "session-slot")]
-pub struct PumpRef<C: ClockSource + 'static, L: SessionDatagramLink + 'static> {
-    cell: &'static PumpCell<C, L>,
+pub struct PumpRef<
+    C: ClockSource + 'static,
+    L: SessionDatagramLink + 'static,
+    D: BoxedLinkDriver + ?Sized + 'static = dyn BoxedLinkDriver,
+> {
+    cell: &'static PumpCell<C, L, D>,
 }
 
 #[cfg(feature = "session-slot")]
-impl<C: ClockSource, L: SessionDatagramLink + 'static> Deref for PumpRef<C, L> {
-    type Target = SessionPump<C, L>;
+impl<C: ClockSource, L: SessionDatagramLink + 'static, D: BoxedLinkDriver + ?Sized + 'static> Deref
+    for PumpRef<C, L, D>
+{
+    type Target = SessionPump<C, L, D>;
 
-    fn deref(&self) -> &SessionPump<C, L> {
+    fn deref(&self) -> &SessionPump<C, L, D> {
         // SAFETY: a `PumpRef` exists only for a cell whose pump was written by
         // `claim` and not yet dropped, and it is the cell's one reference.
         unsafe { (*self.cell.pump.get()).assume_init_ref() }
@@ -1499,15 +1535,19 @@ impl<C: ClockSource, L: SessionDatagramLink + 'static> Deref for PumpRef<C, L> {
 }
 
 #[cfg(feature = "session-slot")]
-impl<C: ClockSource, L: SessionDatagramLink + 'static> DerefMut for PumpRef<C, L> {
-    fn deref_mut(&mut self) -> &mut SessionPump<C, L> {
+impl<C: ClockSource, L: SessionDatagramLink + 'static, D: BoxedLinkDriver + ?Sized + 'static>
+    DerefMut for PumpRef<C, L, D>
+{
+    fn deref_mut(&mut self) -> &mut SessionPump<C, L, D> {
         // SAFETY: as for `deref`, and `&mut self` is the cell's one reference.
         unsafe { (*self.cell.pump.get()).assume_init_mut() }
     }
 }
 
 #[cfg(feature = "session-slot")]
-impl<C: ClockSource, L: SessionDatagramLink + 'static> Drop for PumpRef<C, L> {
+impl<C: ClockSource, L: SessionDatagramLink + 'static, D: BoxedLinkDriver + ?Sized + 'static> Drop
+    for PumpRef<C, L, D>
+{
     fn drop(&mut self) {
         // SAFETY: the cell holds this handle's pump, written by `claim` and dropped
         // only here; the flag is cleared after, so no claim can write over it first.
@@ -1521,10 +1561,11 @@ impl<C: ClockSource, L: SessionDatagramLink + 'static> Drop for PumpRef<C, L> {
 /// The future is the pump's handle and the observer and a loop's state, a few dozen
 /// bytes, and the pump stays where its table put it.
 #[cfg(feature = "session-slot")]
-pub async fn pump_task<C, L, F>(mut pump: PumpRef<C, L>, mut on_event: F) -> DriverOutcome
+pub async fn pump_task<C, L, D, F>(mut pump: PumpRef<C, L, D>, mut on_event: F) -> DriverOutcome
 where
     C: ClockSource,
     L: SessionDatagramLink + 'static,
+    D: BoxedLinkDriver + ?Sized + 'static,
     F: FnMut(IterationEvent<'_>),
 {
     loop {
@@ -1540,14 +1581,15 @@ where
 /// runtime's task table otherwise) and the pump, which this call owns, is dropped
 /// with its cell and the session it was to run.
 #[cfg(feature = "session-slot")]
-pub fn spawn_pump<C, L, F>(
+pub fn spawn_pump<C, L, D, F>(
     local: &CoopLocalSet<C>,
-    pump: PumpRef<C, L>,
+    pump: PumpRef<C, L, D>,
     on_event: F,
 ) -> Result<CoopLocalJoinHandle<DriverOutcome>, SessionSpawnRefused>
 where
     C: ClockSource + 'static,
     L: SessionDatagramLink + 'static,
+    D: BoxedLinkDriver + ?Sized + 'static,
     F: FnMut(IterationEvent<'_>) + 'static,
 {
     local

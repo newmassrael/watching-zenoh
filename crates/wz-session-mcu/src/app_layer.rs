@@ -39,6 +39,8 @@ use core::ops::Deref;
 use wz_runtime_coop::{ClockSource, CoopRuntime, CoopTime};
 #[cfg(any(feature = "alloc", feature = "session-slot"))]
 use wz_session_core::driver_loop::IterationEvent;
+#[cfg(any(feature = "alloc", feature = "session-slot"))]
+use wz_session_core::link::BoxedLinkDriver;
 #[cfg(feature = "alloc")]
 use wz_session_core::observer::ApplicationLayerObserver;
 #[cfg(feature = "session-slot")]
@@ -72,10 +74,11 @@ use wz_session_core::slot_observer::{
 /// `dispatch_slot` over a process-wide `SlotObserver` and the session's tables in its
 /// slot.
 #[cfg(feature = "alloc")]
-pub fn dispatch_to<C, H, O>(observer: O, actions: H) -> impl FnMut(IterationEvent<'_>) + 'static
+pub fn dispatch_to<C, D, H, O>(observer: O, actions: H) -> impl FnMut(IterationEvent<'_>) + 'static
 where
     C: ClockSource + 'static,
-    H: Deref<Target = SessionLinkActions<CoopRuntime<C>, CoopTime<C>>> + 'static,
+    D: BoxedLinkDriver + ?Sized + 'static,
+    H: Deref<Target = SessionLinkActions<CoopRuntime<C, D>, CoopTime<C>>> + 'static,
     O: Deref<Target = RefCell<ApplicationLayerObserver>> + 'static,
 {
     move |event| observer.borrow_mut().dispatch(event, &*actions)
@@ -195,30 +198,36 @@ pub trait SessionEvents {
 /// the task that holds it) and the session's requesters; its size is what the
 /// runtime's task cell has to hold beside the pump's handle.
 #[cfg(feature = "session-slot")]
-pub struct SlotDispatch<C, R, G, K = DefaultSinks>
-where
+pub struct SlotDispatch<
+    C,
+    R,
+    G,
+    K = DefaultSinks,
+    D: BoxedLinkDriver + ?Sized + 'static = dyn BoxedLinkDriver,
+> where
     C: ClockSource + 'static,
     R: ReplySink,
     G: ReplySink,
     K: ObserverSinks + 'static,
 {
     observer: &'static ObserverCell<K>,
-    handle: SlotRef<CoopRuntime<C>, CoopTime<C>>,
+    handle: SlotRef<CoopRuntime<C, D>, CoopTime<C>>,
     requesters: Requesters<R, G>,
 }
 
 #[cfg(feature = "session-slot")]
-impl<C, R, G, K> SlotDispatch<C, R, G, K>
+impl<C, R, G, K, D> SlotDispatch<C, R, G, K, D>
 where
     C: ClockSource + 'static,
     R: ReplySink,
     G: ReplySink,
     K: ObserverSinks + 'static,
+    D: BoxedLinkDriver + ?Sized + 'static,
 {
     /// The application layer of the session `handle` names, over `observer`.
     pub fn new(
         observer: &'static ObserverCell<K>,
-        handle: SlotRef<CoopRuntime<C>, CoopTime<C>>,
+        handle: SlotRef<CoopRuntime<C, D>, CoopTime<C>>,
         requesters: Requesters<R, G>,
     ) -> Self {
         Self {
@@ -230,12 +239,13 @@ where
 }
 
 #[cfg(feature = "session-slot")]
-impl<C, R, G, K> SessionEvents for SlotDispatch<C, R, G, K>
+impl<C, R, G, K, D> SessionEvents for SlotDispatch<C, R, G, K, D>
 where
     C: ClockSource + 'static,
     R: ReplySink,
     G: ReplySink,
     K: ObserverSinks + 'static,
+    D: BoxedLinkDriver + ?Sized + 'static,
 {
     fn on_event(&mut self, event: IterationEvent<'_>) {
         {
@@ -300,12 +310,13 @@ pub enum GetError {
 }
 
 #[cfg(all(feature = "session-slot", feature = "query-get"))]
-impl<C, R, G, K> SlotDispatch<C, R, G, K>
+impl<C, R, G, K, D> SlotDispatch<C, R, G, K, D>
 where
     C: ClockSource + 'static,
     R: ReplySink,
     G: ReplySink,
     K: ObserverSinks + 'static,
+    D: BoxedLinkDriver + ?Sized + 'static,
 {
     /// Ask a query on this session and deliver what answers it to `sink`.
     ///
@@ -423,9 +434,9 @@ where
 
 /// [`SlotDispatch`] as the `on_event` closure a session driver takes.
 #[cfg(feature = "session-slot")]
-pub fn dispatch_slot<C, R, G, K>(
+pub fn dispatch_slot<C, R, G, K, D>(
     observer: &'static ObserverCell<K>,
-    handle: SlotRef<CoopRuntime<C>, CoopTime<C>>,
+    handle: SlotRef<CoopRuntime<C, D>, CoopTime<C>>,
     requesters: Requesters<R, G>,
 ) -> impl FnMut(IterationEvent<'_>) + 'static
 where
@@ -433,6 +444,7 @@ where
     R: ReplySink + 'static,
     G: ReplySink + 'static,
     K: ObserverSinks + 'static,
+    D: BoxedLinkDriver + ?Sized + 'static,
 {
     let mut dispatch = SlotDispatch::new(observer, handle, requesters);
     move |event| dispatch.on_event(event)

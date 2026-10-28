@@ -32,6 +32,7 @@
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::driver_loop::IterationEvent;
+use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::send_wire_error::SendWireError;
 use wz_session_core::slot_observer::{ObserverCell, Requesters};
 
@@ -61,7 +62,11 @@ type Replies = NoReplies;
 
 /// A put on the session, as an outcome the publishers and the replays settle by: one the session
 /// cannot take now (between transports) is tried again, one the wire cannot carry is refused.
-fn put<C: ClockSource + 'static>(handle: &SessionHandle<C>, key: &str, body: &[u8]) -> Outcome {
+fn put<C: ClockSource + 'static, D: BoxedLinkDriver + ?Sized + 'static>(
+    handle: &SessionHandle<C, D>,
+    key: &str,
+    body: &[u8],
+) -> Outcome {
     match handle.send_push_literal(key, body, true) {
         Ok(()) => Outcome::Sent,
         Err(SendWireError::TransportUnavailable) => Outcome::Retry,
@@ -77,9 +82,10 @@ pub struct ActiveEvents<
     const Q: usize,
     const R: usize,
     const B: usize,
+    D: BoxedLinkDriver + ?Sized + 'static = dyn BoxedLinkDriver,
 > {
-    inner: SlotDispatch<C, Replies, NoReplies, DocumentSinks>,
-    handle: SessionHandle<C>,
+    inner: SlotDispatch<C, Replies, NoReplies, DocumentSinks, D>,
+    handle: SessionHandle<C, D>,
     publications: [Publication; P],
     counts: &'static PublishCounts<P>,
     puts: Publishing<P>,
@@ -95,8 +101,14 @@ pub struct ActiveEvents<
     asks: Schedule<Q>,
 }
 
-impl<C: ClockSource + 'static, const P: usize, const Q: usize, const R: usize, const B: usize>
-    SessionEvents for ActiveEvents<C, P, Q, R, B>
+impl<
+        C: ClockSource + 'static,
+        const P: usize,
+        const Q: usize,
+        const R: usize,
+        const B: usize,
+        D: BoxedLinkDriver + ?Sized + 'static,
+    > SessionEvents for ActiveEvents<C, P, Q, R, B, D>
 {
     fn on_event(&mut self, event: IterationEvent<'_>) {
         self.inner.on_event(event);
@@ -192,15 +204,21 @@ pub struct Active<const P: usize, const Q: usize, const R: usize, const B: usize
     pub state: &'static QueryState<Q>,
 }
 
-impl<C: ClockSource + 'static, const P: usize, const Q: usize, const R: usize, const B: usize>
-    SessionLayer<C> for Active<P, Q, R, B>
+impl<
+        C: ClockSource + 'static,
+        const P: usize,
+        const Q: usize,
+        const R: usize,
+        const B: usize,
+        D: BoxedLinkDriver + ?Sized + 'static,
+    > SessionLayer<C, D> for Active<P, Q, R, B>
 {
-    type Events = ActiveEvents<C, P, Q, R, B>;
+    type Events = ActiveEvents<C, P, Q, R, B, D>;
 
     fn events(
         &mut self,
         observer: &'static ObserverCell<DocumentSinks>,
-        handle: &SessionHandle<C>,
+        handle: &SessionHandle<C, D>,
     ) -> Self::Events {
         ActiveEvents {
             inner: SlotDispatch::new(

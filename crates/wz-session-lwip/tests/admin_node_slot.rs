@@ -109,10 +109,10 @@ const TASKS: usize = 8;
 /// number to the measured size.
 const TASK_BYTES: usize = 12288;
 
-type Rt = CoopRuntime<Frozen>;
+type Rt = CoopRuntime<Frozen, LwipUdpDriver>;
 type LinkRef = &'static LwipLink;
 type Slots<const S: usize> = SessionSlots<Rt, CoopTime<Frozen>, LwipUdpDriver, Counting, S>;
-type Pumps<const P: usize> = PumpSlots<Frozen, LwipSessionLink<LinkRef>, P>;
+type Pumps<const P: usize> = PumpSlots<Frozen, LwipSessionLink<LinkRef>, P, LwipUdpDriver>;
 type Host<const S: usize> = SessionHost<Frozen, LinkRef, Counting, S, S>;
 type Node<const S: usize> = SlotAdminNode<'static, Frozen, LinkRef, Factory<S>, S, S, LANES>;
 
@@ -177,9 +177,9 @@ struct Factory<const S: usize> {
 /// The registrations the node's observer holds: all closed types.
 type Sinks<const S: usize> = AdminSinks<1024, S>;
 
-impl<const S: usize> SessionFactory<Frozen> for Factory<S> {
+impl<const S: usize> SessionFactory<Frozen, LwipUdpDriver> for Factory<S> {
     type Entropy = Counting;
-    type Events = SlotDispatch<Frozen, NoReplies, NoReplies, Sinks<S>>;
+    type Events = SlotDispatch<Frozen, NoReplies, NoReplies, Sinks<S>, LwipUdpDriver>;
 
     fn entropy(&mut self) -> Counting {
         Counting(self.zid)
@@ -189,7 +189,7 @@ impl<const S: usize> SessionFactory<Frozen> for Factory<S> {
         params(self.zid)
     }
 
-    fn events(&mut self, handle: &SessionHandle<Frozen>) -> Self::Events {
+    fn events(&mut self, handle: &SessionHandle<Frozen, LwipUdpDriver>) -> Self::Events {
         SlotDispatch::new(self.observer, handle.clone(), Requesters::new())
     }
 }
@@ -594,7 +594,8 @@ fn a_node_opened_by_its_zid_is_dialled_for_it_declared_on_and_reported() {
 
 #[test]
 fn the_task_cell_holds_the_application_layer_of_a_session() {
-    let events = std::mem::size_of::<SlotDispatch<Frozen, NoReplies, NoReplies, Sinks<N>>>();
+    let events =
+        std::mem::size_of::<SlotDispatch<Frozen, NoReplies, NoReplies, Sinks<N>, LwipUdpDriver>>();
     let requesters = std::mem::size_of::<Requesters<NoReplies, NoReplies>>();
     println!(
         "application layer {events} B, of which requesters {requesters} B; cell {TASK_BYTES} B"
