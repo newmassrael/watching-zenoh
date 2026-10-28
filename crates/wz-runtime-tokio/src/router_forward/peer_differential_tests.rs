@@ -127,6 +127,23 @@ pub(super) enum Seen {
     Graph { nodes: usize, edges: usize },
     /// What a handler the node hosts was given: a sample, or a query.
     Hosted(String),
+    /// The counters a node prints and an e2e barrier reads (see
+    /// [`NodeSession::counters`]), read after each step.
+    Counters(Vec<usize>),
+    /// The graph the admin `linkstate/peers` leg renders.
+    #[cfg(feature = "adminspace-router-linkstate")]
+    Dot(String),
+    /// A row the node reports to its admin space: the leg, the keyexpr, and who the
+    /// body names as routers, peers and clients. A witness read after each step, as
+    /// the graph is.
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    Admin {
+        leg: &'static str,
+        keyexpr: String,
+        routers: Vec<String>,
+        peers: Vec<String>,
+        clients: Vec<String>,
+    },
     /// Anything else, by the name of its kind, so that a kind one node sends
     /// and the other does not is a difference and its contents are not.
     Other(&'static str),
@@ -249,6 +266,35 @@ impl Node {
             hosted: HostedLog::default(),
             self_zid,
         }
+    }
+
+    /// The counters as they stand.
+    fn counters_view(&self) -> Sent {
+        Sent::from([(0, vec![Seen::Counters(self.fwd.counters())])])
+    }
+
+    /// The graph of the `linkstate/peers` leg as it stands.
+    fn dot_view(&self) -> Sent {
+        #[cfg(feature = "adminspace-router-linkstate")]
+        {
+            Sent::from([(0, vec![Seen::Dot(self.fwd.peers_dot())])])
+        }
+        #[cfg(not(feature = "adminspace-router-linkstate"))]
+        {
+            Sent::new()
+        }
+    }
+
+    /// The rows of the admin legs as they stand.
+    fn admin_view(&self) -> Sent {
+        #[cfg(feature = "adminspace-introspection-handlers")]
+        {
+            let rows = self.fwd.admin_declarations();
+            if !rows.is_empty() {
+                return Sent::from([(0, rows)]);
+            }
+        }
+        Sent::new()
     }
 
     /// What the hosted handlers were given since the last call.
@@ -699,8 +745,33 @@ pub(super) enum Plane {
     RegionHat,
 }
 
+/// The keys whose interested nodes the counters count: one each of the scenes' subscribed
+/// keys, so that the count is not zero by construction.
+const PROBE_KEYS: [&str; 3] = ["demo/a", "demo/h/a", "p/a"];
+
 /// What the handlers a node hosts were given, in order.
 pub(super) type HostedLog = Arc<std::sync::Mutex<Vec<String>>>;
+
+/// The rows of the admin legs, one for each keyexpr, in the order of the legs.
+#[cfg(feature = "adminspace-introspection-handlers")]
+fn admin_rows(
+    legs: Vec<(
+        &'static str,
+        Vec<(String, wz_session_core::adminspace::AdminSources)>,
+    )>,
+) -> Vec<Seen> {
+    legs.into_iter()
+        .flat_map(|(leg, rows)| {
+            rows.into_iter().map(move |(keyexpr, sources)| Seen::Admin {
+                leg,
+                keyexpr,
+                routers: sources.routers,
+                peers: sources.peers,
+                clients: sources.clients,
+            })
+        })
+        .collect()
+}
 
 /// A sample as a hosted subscriber was given it.
 fn heard(sample: &dyn wz_session_core::sink::SampleView) -> String {
@@ -733,6 +804,18 @@ pub(super) trait NodeSession: FaceForwarder {
     fn host_queryable(&self, keyexpr: &str, complete: bool, name: &'static str, log: HostedLog);
     /// Take the queryables hosted on `keyexpr` back.
     fn unhost_queryable(&self, keyexpr: &str);
+    /// The declarations the node reports to its admin space, a row for each
+    /// keyexpr of each leg, in a fixed order.
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    fn admin_declarations(&self) -> Vec<Seen>;
+    /// The counters `run_peer` prints and the e2e barriers read, in a fixed order: the
+    /// client subscriptions held, the client queryables held, and how many nodes the
+    /// mesh holds interested in each of the probe keys.
+    fn counters(&self) -> Vec<usize>;
+    /// The graph the admin `linkstate/peers` leg renders, as DOT, with the route
+    /// successors that leg's sibling renders.
+    #[cfg(feature = "adminspace-router-linkstate")]
+    fn peers_dot(&self) -> String;
     /// Nodes in the graph of the peers, self included.
     fn node_count(&self) -> usize;
     /// Mutual links in that graph.
@@ -773,6 +856,38 @@ impl NodeSession for LinkstateForwarder {
     }
     fn unhost_queryable(&self, keyexpr: &str) {
         let _ = self.undeclare_queryable(keyexpr);
+    }
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    fn admin_declarations(&self) -> Vec<Seen> {
+        #[allow(unused_mut)]
+        let mut legs = vec![
+            ("subscriber", self.subscriber_sources()),
+            ("queryable", self.queryable_sources()),
+            ("publisher", self.publisher_sources()),
+            ("querier", self.querier_sources()),
+        ];
+        #[cfg(feature = "routing-token-tables")]
+        legs.push(("token", self.token_sources()));
+        admin_rows(legs)
+    }
+    fn counters(&self) -> Vec<usize> {
+        let mut counters = vec![self.client_subs_seen(), self.client_qabls_seen()];
+        // The nodes interested, the node itself apart: `interested` names the node
+        // among them when it hosts a subscriber, and the region-hat forwarder, which
+        // derives what the node hosts and does not store it as a source, does not.
+        // It is the rule of the admin legs again (`HOSTED_IN_ADMIN_LEGS`).
+        let own = zid(0x01);
+        counters.extend(
+            PROBE_KEYS
+                .iter()
+                .map(|key| self.interested(key).iter().filter(|z| **z != own).count()),
+        );
+        counters
+    }
+    #[cfg(feature = "adminspace-router-linkstate")]
+    fn peers_dot(&self) -> String {
+        let view = self.net_view();
+        format!("{}{:?}", view.dot(), view.route_successors_hex())
     }
     fn node_count(&self) -> usize {
         LinkstateForwarder::node_count(self)
@@ -818,9 +933,38 @@ impl NodeSession for RouterForwarder {
     fn unhost_queryable(&self, keyexpr: &str) {
         self.on_tables_mut().unregister_local_queryable(keyexpr);
     }
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    fn admin_declarations(&self) -> Vec<Seen> {
+        let view = self.on_tables().declarations_view();
+        #[allow(unused_mut)]
+        let mut legs = vec![
+            ("subscriber", view.subscribers()),
+            ("queryable", view.queryables()),
+            ("publisher", view.publishers()),
+            ("querier", view.queriers()),
+        ];
+        #[cfg(feature = "routing-token-tables")]
+        legs.push(("token", view.tokens()));
+        admin_rows(legs)
+    }
     #[cfg(feature = "pubsub-delete")]
     fn publish_delete(&self, keyexpr: &str) {
         let _ = self.on_tables().publish_delete(keyexpr);
+    }
+    fn counters(&self) -> Vec<usize> {
+        let tables = self.on_tables();
+        let mut counters = vec![tables.client_subs_seen(), tables.client_queryables_seen()];
+        counters.extend(
+            PROBE_KEYS
+                .iter()
+                .map(|key| tables.north_interested(key).len()),
+        );
+        counters
+    }
+    #[cfg(feature = "adminspace-router-linkstate")]
+    fn peers_dot(&self) -> String {
+        let view = self.on_tables().peers_net_view();
+        format!("{}{:?}", view.dot(), view.route_successors_hex())
     }
     fn node_count(&self) -> usize {
         self.on_tables().north_net_node_count()
@@ -905,6 +1049,9 @@ fn diverge(scene: &[Step], self_zid: u8, mode: Mode) -> Vec<Divergence> {
             ("topology", old_topology, new_topology),
             ("graph", graph(&old), graph(&new)),
             ("hosted", old.heard_by_hosts(), new.heard_by_hosts()),
+            ("admin", old.admin_view(), new.admin_view()),
+            ("counters", old.counters_view(), new.counters_view()),
+            ("linkview", old.dot_view(), new.dot_view()),
         ] {
             if a != b {
                 out.push(Divergence {
@@ -1377,9 +1524,31 @@ fn a_node_hosts() -> Vec<Step> {
     ]
 }
 
+/// Queriers declare themselves (step 6): a client and a peer each ask, with a future
+/// interest, for the queryables of a key, which is what a publisher and a querier put
+/// on the wire and what the admin legs of the same names report; one asks again for
+/// another key, one ends, and the face that held the other goes down.
+fn queriers_declare_themselves() -> Vec<Step> {
+    vec![
+        Step::Up(0, 0xAA, Wire::Peer),
+        Step::Up(1, 0xCC, Wire::Client),
+        Step::LinkBack(0, 0xAA, 5),
+        Step::Tick,
+        Step::Interest(1, 3, InterestKinds::QUERYABLES, false, true, "q/**"),
+        Step::Interest(0, 4, InterestKinds::QUERYABLES, false, true, "q/**"),
+        Step::Interest(1, 5, InterestKinds::SUBSCRIBERS, false, true, "p/**"),
+        Step::Interest(0, 6, InterestKinds::SUBSCRIBERS, false, true, "p/**"),
+        Step::Queryable(0, "q/a", true),
+        Step::InterestFinal(1, 3),
+        Step::InterestFinal(0, 6),
+        Step::Down(0),
+    ]
+}
+
 fn scenes() -> Vec<(&'static str, Vec<Step>)> {
     #[allow(unused_mut)]
     let mut scenes = vec![
+        ("queriers declare themselves", queriers_declare_themselves()),
         ("a node hosts", a_node_hosts()),
         ("a node publishes", a_node_publishes()),
         (
@@ -1597,6 +1766,57 @@ fn assert_the_hosting_scene_exercises_what_it_claims(mode: Mode) {
     );
 }
 
+/// Every admin leg the region-hat peer reported over all scenes in `mode`, by the tier it
+/// named: a leg no scene reaches is compared over nothing.
+#[cfg(feature = "adminspace-introspection-handlers")]
+fn assert_the_admin_legs_are_exercised(mode: Mode) {
+    let mut named: std::collections::BTreeSet<(&'static str, &'static str)> = Default::default();
+    for (_, scene) in scenes() {
+        let (_, mut node) = both(0x01, mode);
+        for step in &scene {
+            node.apply(step);
+            for row in node.fwd.admin_declarations() {
+                if let Seen::Admin {
+                    leg,
+                    routers,
+                    peers,
+                    clients,
+                    ..
+                } = row
+                {
+                    for (tier, names) in
+                        [("routers", routers), ("peers", peers), ("clients", clients)]
+                    {
+                        if !names.is_empty() {
+                            named.insert((leg, tier));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[allow(unused_mut)]
+    let mut wanted = vec![
+        ("subscriber", "clients"),
+        ("subscriber", "peers"),
+        ("queryable", "clients"),
+        ("publisher", "clients"),
+        ("publisher", "peers"),
+        ("querier", "clients"),
+        ("querier", "peers"),
+    ];
+    #[cfg(feature = "routing-token-tables")]
+    wanted.push(("token", "clients"));
+    for want in wanted {
+        assert!(
+            named.contains(&want),
+            "{mode:?}: no scene reaches the {} leg with {} named: {named:?}",
+            want.0,
+            want.1
+        );
+    }
+}
+
 /// A region-hat peer whose hosted subscriber on `demo/**` writes what it is given to a
 /// log and, while `echoes` allows, publishes into its own pattern from inside itself.
 /// The handler holds the forwarder weakly, as the peer plane's tests do, so that the
@@ -1802,6 +2022,42 @@ fn is_a_node_put(step: &Step) -> bool {
 }
 
 const NODE_PUT_TO_CLIENT: &str = "the node's own Put reaches a client that subscribed";
+#[cfg(feature = "adminspace-introspection-handlers")]
+const HOSTED_IN_ADMIN_LEGS: &str = "the node named among the sources of its own declarations";
+
+/// The admin rows of `sent` with the node taken out of the peers each names, and the
+/// rows that named nobody else dropped.
+#[cfg(feature = "adminspace-introspection-handlers")]
+fn without_the_node(sent: &Sent) -> Vec<Seen> {
+    let own = wz_session_core::zid_hex::zid_to_zenoh_hex(zid(0x01).as_slice());
+    sent.values()
+        .flatten()
+        .filter_map(|seen| match seen {
+            Seen::Admin {
+                leg,
+                keyexpr,
+                routers,
+                peers,
+                clients,
+            } => {
+                let peers: Vec<String> = peers.iter().filter(|p| **p != own).cloned().collect();
+                if routers.is_empty() && peers.is_empty() && clients.is_empty() {
+                    None
+                } else {
+                    Some(Seen::Admin {
+                        leg,
+                        keyexpr: keyexpr.clone(),
+                        routers: routers.clone(),
+                        peers,
+                        clients: clients.clone(),
+                    })
+                }
+            }
+            other => Some(other.clone()),
+        })
+        .collect()
+}
+
 const NODE_PUT_TO_OWN_SUBSCRIBER: &str = "the node's own Put reaches a subscriber it hosts";
 const QABL_DECLARED_AGAIN: &str = "a queryable declared again with what it already was";
 const GOSSIP_GRAPH: &str = "the graph a gossip peer keeps";
@@ -1819,6 +2075,8 @@ fn expected_reasons(mode: Mode) -> std::collections::BTreeSet<&'static str> {
     ]
     .into_iter()
     .collect();
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    reasons.insert(HOSTED_IN_ADMIN_LEGS);
     #[cfg(feature = "routing-token-tables")]
     reasons.insert(TOKEN_TO_INTERESTED_CLIENT);
     #[cfg(all(
@@ -1847,6 +2105,18 @@ fn explained(mode: Mode, d: &Divergence) -> Option<&'static str> {
     // reaches the clients that subscribed; `LinkstateForwarder::publish` reaches
     // its tree children and its gateways and none of its client faces. Every
     // face it does reach is reached with the same message.
+    // The admin legs list the declarations the node itself hosts differently: the
+    // region-hat forwarder keeps the rule the router's host has always had, that a
+    // node is not a source of its own declarations; `LinkstateForwarder` names the
+    // node among the peers. The pin agrees with NEITHER (its broker hat serves the
+    // `Local` region and names the node's own face among the clients,
+    // `zenoh/src/net/routing/hat/broker/pubsub.rs` @ `srcs.clients.push(face.zid);`),
+    // which is an open question of the note and not a reading this gate decides. The
+    // rows must be equal once the node is taken out of the peers they name.
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    if d.plane == "admin" && without_the_node(&d.linkstate) == without_the_node(&d.region_hat) {
+        return Some(HOSTED_IN_ADMIN_LEGS);
+    }
     // A Put of the node's own session reaches the subscribers the same session
     // hosts unless it was sent to remote destinations only
     // (`zenoh/src/api/session.rs` @ `state.subscriber_callbacks(true, SubscriberKind::Subscriber, &wire_expr, false);`);
@@ -1894,7 +2164,8 @@ fn explained(mode: Mode, d: &Divergence) -> Option<&'static str> {
         // by a gossip graph, so this is a count of what each plane keeps and not
         // a routing difference; the link-state extension keeps the same graph
         // in both planes, which the other mode's test holds.
-        ("graph", _) => Some(GOSSIP_GRAPH),
+        // The graph the admin leg renders is the same graph.
+        ("graph", _) | ("linkview", _) => Some(GOSSIP_GRAPH),
         // The pin's gossip `remove_link` forgets the link and sends nothing:
         // the flood to the remaining links is inside the `full_linkstate ||
         // gossip_multihop` branch that follows
@@ -2110,6 +2381,8 @@ fn in_gossip_mode_the_two_peer_planes_differ_only_where_the_pin_says() {
     assert_the_query_scenes_exercise_what_they_claim(Mode::Gossip);
     assert_the_node_publish_scene_exercises_what_it_claims(Mode::Gossip);
     assert_the_hosting_scene_exercises_what_it_claims(Mode::Gossip);
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    assert_the_admin_legs_are_exercised(Mode::Gossip);
 }
 
 /// What the pin's gossip peer tells a new link (`zenoh/src/net/protocol/network.rs`
@@ -2261,4 +2534,6 @@ fn in_link_state_mode_the_two_peer_planes_send_the_same_data_and_topology() {
     assert_the_query_scenes_exercise_what_they_claim(Mode::LinkState);
     assert_the_node_publish_scene_exercises_what_it_claims(Mode::LinkState);
     assert_the_hosting_scene_exercises_what_it_claims(Mode::LinkState);
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    assert_the_admin_legs_are_exercised(Mode::LinkState);
 }

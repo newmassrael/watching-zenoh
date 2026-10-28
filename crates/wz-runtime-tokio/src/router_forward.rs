@@ -1879,6 +1879,66 @@ impl RouterDeclarationsView {
         )
     }
 
+    /// The publishers this node knows (`@/<zid>/<whatami>/publisher/**`, §5.23), item 751
+    /// step 6: the fourth leg of the declarations, and the one the router's host did not have.
+    ///
+    /// A publisher is no table of its own: the pin folds this leg from the FUTURE
+    /// subscriber interests the faces declared, which is what `declare_publisher` puts on the
+    /// wire (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `fn sourced_publishers`). The tier is
+    /// the HAT that owns the face, as it is there: the broker hat of a leaf region reports its
+    /// faces as `clients` and a peer hat its faces as `peers`
+    /// (`zenoh/src/net/routing/hat/broker/pubsub.rs` @ `fn sourced_publishers`), and a router
+    /// hat reports none, so an interest from a face the router hat owns is left out.
+    pub fn publishers(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
+        let tables = self.tables.read();
+        Self::bucket_interests(&tables, &tables.future_subs)
+    }
+
+    /// The [`publishers`](Self::publishers) twin for queriers, reading the queryable interests
+    /// (`zenoh/src/net/routing/hat/peer/queries.rs` @ `fn sourced_queriers`).
+    pub fn queriers(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
+        let tables = self.tables.read();
+        Self::bucket_interests(&tables, &tables.future_qabls)
+    }
+
+    /// Fold one plane's stored future interests into keyexpr -> `Sources`, the tier of each
+    /// being the kind of hat that owns the face it came from.
+    fn bucket_interests<V: Copy + PartialEq>(
+        tables: &Tables,
+        store: &crate::future_interest::FutureInterestStore<V>,
+    ) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
+        use wz_session_core::adminspace::AdminSources;
+        use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+        let mut by_key: HashMap<String, AdminSources> = HashMap::new();
+        for (face, target, _) in store.iter_interests() {
+            let Some(state) = tables.faces.get(&face) else {
+                continue;
+            };
+            // A face with no routing zid names no source, as for the declarations.
+            let Some(zid) = state.peer_zid else {
+                continue;
+            };
+            let hex = zid_to_zenoh_hex(zid.as_slice());
+            let sources = by_key.entry(target.to_owned()).or_default();
+            match hat_kind(&state.tier, tables.node_mode) {
+                HatKind::Broker => sources.clients.push(hex),
+                HatKind::Peer => sources.peers.push(hex),
+                HatKind::Router | HatKind::Client => {}
+            }
+        }
+        let mut out: Vec<(String, AdminSources)> = by_key
+            .into_iter()
+            .filter(|(_, sources)| !sources.clients.is_empty() || !sources.peers.is_empty())
+            .collect();
+        for (_, sources) in out.iter_mut() {
+            sources.peers.sort();
+            sources.clients.sort();
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
     /// Fold three tier tables into one keyexpr -> `Sources` list, sorted by
     /// keyexpr so two GETs of one unchanged state reply identically (a
     /// `HashMap` iteration order would not).
@@ -3739,6 +3799,27 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             .sum()
     }
 
+    /// Total distinct client-hosted queryables this node currently holds (every broker hat's
+    /// `qabls`), the query-plane twin of [`client_subs_seen`](Self::client_subs_seen) and the
+    /// twin of [`LinkstateForwarder::client_qabls_seen`](crate::linkstate_forward::LinkstateForwarder::client_qabls_seen)
+    /// (item 751, step 6). [`queryables_seen`](Self::queryables_seen) adds the mesh's, which a
+    /// readiness barrier for a CLIENT's queryable must not count.
+    #[cfg(test)]
+    pub fn client_queryables_seen(&self) -> usize {
+        self.broker_hats()
+            .map(|h| h.qabls.values().map(|m| m.len()).sum::<usize>())
+            .sum()
+    }
+
+    /// The nodes of the NORTH region interested in `keyexpr`: the peers on a peer node, the
+    /// routers on a router. The twin of
+    /// [`LinkstateForwarder::interested`](crate::linkstate_forward::LinkstateForwarder::interested),
+    /// the subscription filter the data route reads, exposed for the demo's shutdown summary.
+    #[cfg(test)]
+    pub fn north_interested(&self, keyexpr: &str) -> Vec<Zid> {
+        self.tables.mesh(NORTH_REGION).subs.interested(keyexpr)
+    }
+
     /// Total mesh-native subscriptions this router currently holds
     /// (`router_subs` + `linkstatepeer_subs`) — the REVERSE-data READINESS
     /// witness, the mesh twin of [`client_subs_seen`](Self::client_subs_seen). A
@@ -5425,6 +5506,34 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     t.to_owned(),
                     aggregate,
                 );
+            }
+        }
+        // Item 751, step 6 — a MESH face's FUTURE subscriber or queryable interest, kept for
+        // the admin `publisher` and `querier` legs and for nothing else: the face is stamped
+        // with the mesh role, which keeps it off every push path (the mesh plane is served by
+        // the flood, and a push there would be a duplicate declaration). The pin's peer hat
+        // reports such an interest as a peers source
+        // (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `fn sourced_publishers`). The peer
+        // plane's admission is the same, `LinkstateForwarder::respond_to_interest`.
+        #[cfg(feature = "adminspace-introspection-handlers")]
+        if interest.f() && !self.is_client_face(inbound) {
+            if let Some(t) = target.as_deref() {
+                if body.su() {
+                    self.tables.future_subs.store_reporting_only_interest(
+                        inbound,
+                        interest_id,
+                        t.to_owned(),
+                        aggregate,
+                    );
+                }
+                if body.qu() {
+                    self.tables.future_qabls.store_reporting_only_interest(
+                        inbound,
+                        interest_id,
+                        t.to_owned(),
+                        aggregate,
+                    );
+                }
             }
         }
         // §5.21 routing-token-tables (slice-4): STORE a FUTURE liveliness-TOKEN

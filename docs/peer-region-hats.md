@@ -449,9 +449,8 @@ Declared absent, with the reason, so step 7 does not look for them:
   (section 10, `TOKEN_INTEREST_BROKERED`). Step 7 has to move
   `wz_peer_interest_pending_gc_pico_interop`, which asserts the brokered copy.
 
-Still to do in step 6 after this part: the admin sources (`publisher_sources` and
-`querier_sources` have no router twin), the north net view, and the counters
-`run_peer` prints. The next part has them.
+Still to do in step 6 after this part: the admin sources, the north net view and
+the counters `run_peer` prints, which part three has.
 
 ### Part two: the node's declarations and hosted handlers
 
@@ -510,7 +509,74 @@ after the delivery, a handler that always echoes is given the queue's size and t
 delivery ends, and a retracted handler is given nothing of what was left in the
 queue.
 
+### Part three: the admin legs, the net view and the counters
+
+The router's admin host had three legs of the declarations (`subscriber`,
+`queryable`, `token`) and `LinkstateForwarder` had five: the `publisher` and
+`querier` legs are folded from the FUTURE interests the faces declared, which is
+what a publisher and a querier put on the wire. The region-hat forwarder now has
+them too (`RouterDeclarationsView::publishers`, `queriers`), which the router
+host gets as well, since it is the same view. Two things carry them:
+
+- A mesh face's future subscriber or queryable interest is stored for the admin
+  legs and for nothing else, under the mesh role that keeps the face off every
+  push path (`store_reporting_only_interest`, the peer plane's admission). Before,
+  the region-hat forwarder stored a CLIENT's interest only.
+- The tier of a row is the kind of hat that owns the face it came from, as in the
+  pin: a broker hat reports its faces as `clients`, a peer hat as `peers`, and a
+  router hat reports none (`zenoh/src/net/routing/hat/router/pubsub.rs` @
+  `fn sourced_publishers`, which returns nothing). An interest from a face the
+  router hat owns is left out.
+
+The north net view needs no new method: `peers_net_view` reads the first peer-hat
+region, which on a peer node is the north region. The counters `run_peer` prints
+gain `client_queryables_seen` and `north_interested`, test-only until step 7; the
+other counters it reads already exist on both planes.
+
+The gate gained an `admin` plane, a `counters` plane and a `linkview` plane (the
+DOT the `linkstate/peers` leg renders), each compared after every step, a scene of
+queriers and publishers declaring themselves, and a count of which tier each leg
+names over all scenes, because the first run of that count showed that no scene
+had ever reached the `querier` leg. With the scene the two planes agree on every
+row of every leg, the tiers included, except the node itself:
+
+- **The node named among the sources of its own declarations.** `LinkstateForwarder`
+  names the node among the `peers` of a subscription it hosts and counts it among
+  the nodes `interested` in a key; the region-hat forwarder keeps the rule the
+  router's host has always had, that a node is not a source of its own
+  declarations. Both leave the pin, whose broker hat serves the `Local` region and
+  names the node's own face among the `clients`
+  (`zenoh/src/net/routing/hat/broker/pubsub.rs` @ `srcs.clients.push(face.zid);`).
+  This is not decided here: the router's own test asserts the absence, and
+  `wz_peer_adminspace_to_pico_zget` asserts `peers: [<own zid>]` for a peer. See
+  the open question below.
+- **The graph of a gossip peer** reaches the `linkview` plane too, as it does the
+  `graph` plane (`GOSSIP_GRAPH`).
+
+The `linkview` plane compares the DOT and the route successors together
+(`route_successors_hex`), and the `graph` plane the node and edge counts
+(`edge_count`). Declared absent: `interested_queryables` (a test witness the
+shipped node never calls), `with_trees_delay` (the region-hat forwarder takes its
+clock whole), `ingest_inbound_linkstate` and `propagate` (it ingests through
+`forward` and floods through its hats), `tree_children_of` and `recomputes` (each
+moves with the unit test that reads it at step 7). `with_drop_future_timestamp`
+has a twin on the region-hat forwarder already.
+
+With part three the list of section 5 is answered: each surface is moved, already
+there, or declared absent with its reason. What step 6 leaves for step 7 is a
+call-site migration, not a missing surface, and the two decisions below.
+
 ## 12. Open
+
+- **Who a node's own declarations name as their source in the admin legs.** The
+  pin 1.10.1 names the node's own face among the `clients` of the legs the broker
+  hat serves for `Local`. `LinkstateForwarder` names it among the `peers`, and
+  `wz_peer_adminspace_to_pico_zget` pins that. The region-hat forwarder, as the
+  router, names it nowhere, and a router unit test pins that. Moving the
+  region-hat forwarder to the pin changes what an admin GET of a router and of a
+  peer returns for the node's own hosted declarations. It needs a stock zenohd
+  read, which this tree cannot do, and it is the owner's decision because two
+  pinned tests say otherwise.
 
 - The size of step 1's list is unknown until it is made, and the number of
   rounds after it follows from it. The router's own program ran from round 2865
