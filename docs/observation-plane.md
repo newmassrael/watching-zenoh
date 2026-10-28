@@ -227,7 +227,16 @@ many-reader publication. A link-level check that the off build has no symbol.
 
 **SCE.** The ring is not a queue (see above), so it is not declared as one. Once the contract (read
 semantics, loss reporting, single-producer assumption) is fixed by the model test, that text is
-what SCE asked to receive as the ground for reopening the question.
+what SCE asked to receive as the ground for reopening the question. It was sent when step 3 landed,
+and SCE decided: a new kind, `sce:kind="broadcast-log"` (its ADR 0062), one publisher, readers with
+cursors, a read never consumes, a full log forgets its oldest entry, a lapped reader told
+`Lagged{skipped >= 1}`. Its runtimes exist in six languages, its codegen templates do not yet, so a
+document of the kind is still refused at generation. Two differences from this ring, kept: SCE has
+no `drop-newest` or consumer (that stays a queue), and its stamp is a 64-bit sequence number
+(busy `2n+1`, done `2n+2`) where this ring's is 32 bits compared modulo 2^32; SCE plans a
+narrow-stamp row with a wrap bound stated in the deploy. Nothing here waits on it. When its
+templates land, the ring is a candidate to be generated from a document, and the model test's seeds
+and operation traces are what a differential run between the two would be fed.
 
 ## M3 Supervision: a deadline the application feeds
 
