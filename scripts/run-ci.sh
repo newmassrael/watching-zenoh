@@ -8235,12 +8235,15 @@ layer_c1an_cargo_test_adminspace_nodefault() {
 # the an_acl_* test fixtures, not config.rs; the default C1 runs the richer access-*
 # set where the spread is needed.
 layer_c1ao_cargo_test_config_mutate_runtime() {
+    # The three commands below name `routing-router-hat` for the reason the next one does: the
+    # tests live in `router_forward.rs`, which only that feature compiles, and with the feature
+    # missing they selected none.
     _runci_guarded_test "C1AO wzconfig_ 4" 4 \
-        cargo test -p wz-runtime-tokio --features config-mutate-runtime,access-acl --lib wzconfig_ --quiet || return 1
+        cargo test -p wz-runtime-tokio --features config-mutate-runtime,access-acl,routing-router-hat --lib wzconfig_ --quiet || return 1
     _runci_guarded_test "C1AO to_admin_json 3" 3 \
-        cargo test -p wz-runtime-tokio --features config-mutate-runtime,access-acl --lib to_admin_json --quiet || return 1
+        cargo test -p wz-runtime-tokio --features config-mutate-runtime,access-acl,routing-router-hat --lib to_admin_json --quiet || return 1
     _runci_guarded_test "C1AO to_admin_json 4" 4 \
-        cargo test -p wz-runtime-tokio --features config-mutate-runtime,access-acl,access-downsampling,access-quota --lib to_admin_json --quiet || return 1
+        cargo test -p wz-runtime-tokio --features config-mutate-runtime,access-acl,access-downsampling,access-quota,routing-router-hat --lib to_admin_json --quiet || return 1
     # R2702 — `routing-peer` NAMED here, where it used to arrive for free; item 751 step 7c
     # names `routing-router-hat`, the forwarder the test now drives (it lives in
     # `router_forward.rs` since the single-net peer forwarder retired).
@@ -9358,7 +9361,13 @@ layer_c1y_cargo_test_routing_peer() {
     # `a_deny_narrowed_to_quic_denies_the_datagram_face_as_it_denies_the_stream_one`,
     # the ACL bypass asserted at the enforcer rather than at `matches_protocols`.
     # READ off this command with `$access` expanded, which printed 44.
-    _runci_guarded_test "C1y interceptor" 44 \
+    # Item 751 step 7c-2 -- 44 -> 43, READ off this command, which printed 43, every one of them
+    # in `interceptor::`, and 43 again with `routing-router-hat` added, so the difference is not
+    # behind that feature. What changed between the two numbers is the deletion of the single-net
+    # forwarder, whose tests carried names with `interceptor` in them (the cache-invalidation
+    # pair among them); the router's pair of the same property is in `router_forward.rs`, which
+    # this lane does not build.
+    _runci_guarded_test "C1y interceptor" 43 \
         cargo test -p wz-runtime-tokio --features "$access" --lib interceptor --quiet || return 1
     # R311y509 — 211 -> 213: the peer's CURRENT liveliness-TOKEN dump, in its two
     # tiers. Each test is bound by a damage that reds it ALONE: disabling the client

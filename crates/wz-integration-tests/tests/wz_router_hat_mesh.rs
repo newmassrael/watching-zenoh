@@ -93,14 +93,24 @@ use wz_integration_tests::common::{
     wz_ap_demo_binary, ChildGuard,
 };
 
+/// The topology mode every node of this file runs in. These tests assert that a router's peer
+/// tier converges to a node count that includes the peers that dial it, which is the property of
+/// wz's link-state extension of the peer hat. The pin's peer hat is gossip, where a link coming up
+/// forms no edge and a peer never tells a new link about itself (`docs/peer-region-hats.md`), and
+/// that is what an absent `--peer-mode` means since the peer node became the region-hat forwarder
+/// (item 751, step 7b); so the mode is named here, on both kinds of node, and not left to a default
+/// these assertions were never about.
+const LINK_STATE: [&str; 2] = ["--peer-mode", "linkstate"];
+
 /// Spawn the router-hat node (`--router-hat`) — presents wire `WhatAmI::Router`.
 /// Thin wrapper over [`spawn_on_ephemeral_port`](wz_integration_tests::common) that
 /// owns the tempfile the dev-dependency-restricted lib helper cannot allocate.
 fn spawn_router_hat(label: &str, args: &[&str]) -> (ChildGuard, File, u16) {
     let stderr = tempfile::tempfile().expect("tempfile for node stderr");
+    let args: Vec<&str> = args.iter().copied().chain(LINK_STATE).collect();
     spawn_on_ephemeral_port(
         &wz_ap_demo_binary(),
-        args,
+        &args,
         "router-hat: listening on 127.0.0.1:",
         label,
         stderr,
@@ -110,9 +120,10 @@ fn spawn_router_hat(label: &str, args: &[&str]) -> (ChildGuard, File, u16) {
 /// Spawn a `--peer` mesh node — presents wire `WhatAmI::Peer`.
 fn spawn_peer(label: &str, args: &[&str]) -> (ChildGuard, File, u16) {
     let stderr = tempfile::tempfile().expect("tempfile for node stderr");
+    let args: Vec<&str> = args.iter().copied().chain(LINK_STATE).collect();
     spawn_on_ephemeral_port(
         &wz_ap_demo_binary(),
-        args,
+        &args,
         "peer: listening on 127.0.0.1:",
         label,
         stderr,
