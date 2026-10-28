@@ -870,6 +870,49 @@ Each lands whole with its surface lines, tests and faults in one round.
 - **Z8. The graph.** Upstream's tests and examples and `zenoh-ext` built and run against the
   patched graph, on Linux and on Windows. A test that cannot pass is a recorded difference with its
   reason, never a deleted test.
+  - **Z8a. The harness and the first measurement (landed).** `scripts/lib/z8_upstream_suite.py`
+    provisions the tree of the pin on the host (a shallow clone of the tag, its commit asserted),
+    generates a package under `target/z8-suite` that is never committed (upstream's `zenoh/tests`
+    copied byte for byte, the helper crate `zenoh-test` beside it, the third-party crates of
+    upstream's `zenoh` manifest, every family crate in `[patch.crates-io]`, the top crate by path)
+    and compiles and runs each file ON ITS OWN. An exit status grades nothing here (a run that
+    selects no test exits 0), so the table carries the number of tests run, and a file that runs
+    none is `empty`. Four defects of the harness itself came out first, each making all 33 files
+    fail on one line: the helper's `internal` feature wants `zenoh::internal::runtime` (it stays
+    off), `shared-memory` has to reach upstream's `zenoh-transport` as well, the crates the tests
+    name come from the manifest's dependencies and not only its dev-dependencies, and a value of
+    the workspace table can span lines. The first measurement, with `unstable`, `shared-memory`,
+    `transport_tcp` and `transport_udp`, ran 33 files:
+    - **Pass (10 files):** `atexit`, `attachments`, `bytes`, `connectivity`, `formatters`,
+      `handler`, `keyexpr`, `queryable`, `source_info`, `tcp_buffers`.
+    - **A router is refused (Z1b), the half of the gate that was recorded as not applying:**
+      `acl`, `adminspace`, `liveliness`, `matching`, `namespace`, `qos_overwrite`, `scouting`,
+      `timestamp_instrumentation`, `unicity`, and part of `authentication`.
+    - **A key the engine does not act on is refused by name (D6):** `qos` (`qos/publication`),
+      `qos_overwrite` (`qos/network`), `shm` (`transport_optimization`, Z7t).
+    - **Found by the measurement and repaired:** 23 tests of `acl`, `authentication`,
+      `interceptors` and `low_pass` stopped on "this configuration cannot be opened
+      (DocumentUnreadable)". The document an open hands the plan is the configuration rendered, and
+      it states every optional field it does not have as `null` (`id`, `interfaces`,
+      `link_protocols`, `flows` of an entry), which the reader, written for an operator's document,
+      refuses where it expects a string or a list. The rendering now leaves out a member that is
+      `null` and a section that held only such members (`rendered`), and the default it is compared
+      with is rendered the same way. `low_pass` passes (4 tests); the others reach their router.
+    - **Open, with the reason known:** `session` and `unicity` call `tokio::task::block_in_place`
+      and `Handle::current().block_on(..)` from inside a callback, which presumes the callback runs
+      on a worker of a multi-thread runtime, as upstream's do. Here a callback runs on the thread of
+      the face, a current-thread runtime over state that is not `Send`, where `block_in_place` is
+      refused and a blocking call that waits for the face would wait for the thread it is on. The
+      decision is where a callback runs: inline, as now, or on a dispatcher of its own with an
+      ordered queue per entity, which lets a callback block and re-enter the session at the price of
+      a hop per sample and a bound to choose. It is not made here.
+    - **Open, to be read:** `callback_drop_on_undeclare` (the three variants in which the session
+      publishes to itself), `cancellation` (`replies.is_disconnected()`), `connection_retry`
+      (`LinkFailed`), `events`, `namespace` (a timeout), `liveliness` (`sub.try_recv()`), `routing`
+      (no test finishes in 600 s), `interceptors` (it ends without naming a test), and the files
+      that run none (`open_time`, whose four tests are ignored, and `regions`).
+    - **Owed:** a lane that runs the harness (a pinned tree and a network on the host), the arm
+      with `internal` and the files it asks for a `Runtime` of, and Windows.
 - **Owned slices for the configuration-driven features** named in D6 (acl, authentication, low
   pass, downsampling, qos overwrite, namespace, admin space, connection retry, tcp buffers): each is
   a slice or an explicit, recorded refusal; none is implicit in Z1.

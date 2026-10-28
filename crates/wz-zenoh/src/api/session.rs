@@ -1210,12 +1210,41 @@ mod tokio_engine {
         role: EngineWhatAmI,
         zid: &ZenohId,
     ) -> ZResult<serde_json::Value> {
-        let mut document = serde_json::to_value::<&zenoh_config::Config>(config)?;
+        let mut document = rendered(config)?; // `config` derefs to the configuration it expands
         let object = document
             .as_object_mut()
             .ok_or_else(|| zerror!("the configuration is not an object"))?;
         object.insert("mode".to_owned(), role.to_str().into());
         object.insert("id".to_owned(), zid.to_string().into());
+        Ok(document)
+    }
+
+    /// The configuration as the document an operator would have written it.
+    ///
+    /// Serialising the configuration states every optional field, as `null` where it is absent
+    /// (`id`, `interfaces`, `link_protocols` and `flows` of a low pass filter, the same of an
+    /// access rule, a downsampling item). The reader of the plan is written for an operator's
+    /// document, which leaves a field out to mean its default, and refuses a `null` where it
+    /// expects a string or a list, as upstream's own reader would a `null` it has no `Option` for.
+    /// So a member that is `null` is left out, which says the same thing.
+    pub(super) fn rendered(config: &zenoh_config::Config) -> ZResult<serde_json::Value> {
+        fn without_nulls(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(members) => {
+                    members.retain(|_, member| !member.is_null());
+                    for member in members.values_mut() {
+                        without_nulls(member);
+                    }
+                    // A section that held nothing but absent fields is absent itself: the reader
+                    // takes an empty object for a value of its own, and `gateway: {}` is not a key.
+                    members.retain(|_, member| !member.as_object().is_some_and(|m| m.is_empty()));
+                }
+                serde_json::Value::Array(items) => items.iter_mut().for_each(without_nulls),
+                _ => {}
+            }
+        }
+        let mut document = serde_json::to_value(config)?;
+        without_nulls(&mut document);
         Ok(document)
     }
 
@@ -1227,7 +1256,9 @@ mod tokio_engine {
     /// itself does nothing with ([`KeyState::Inert`]) is accepted whatever its value, and a key no
     /// list knows ([`None`]) is refused as the unmapped ones are.
     pub(super) fn refuse_unmapped(ignored: &[String], document: &serde_json::Value) -> ZResult<()> {
-        let default = serde_json::to_value(zenoh_config::Config::default())?;
+        // The default in the shape the document has, nulls left out, or a key whose default is
+        // `null` would differ from the document that states nothing.
+        let default = rendered(&zenoh_config::Config::default())?;
         let unmapped: Vec<String> = ignored
             .iter()
             .filter(|key| key_state(key) != Some(KeyState::Inert))
@@ -7706,6 +7737,44 @@ mod tests {
     #[cfg(feature = "unstable")]
     mod configuration {
         use super::connectivity::on;
+
+        /// The document an open hands the plan is the whole configuration rendered, so every
+        /// section a program sets has to come back out of the reader: a section it cannot read
+        /// makes the open fail as "unreadable" with no key named. Upstream's own tests set the
+        /// low pass filter, the access control, the downsampling and the authentication this way.
+        #[test]
+        fn the_document_of_a_section_a_program_sets_is_one_the_reader_accepts() {
+            use wz_runtime_tokio::zenoh_config::ZenohNodeConfig;
+
+            for (key, value) in [
+                (
+                    "low_pass_filter",
+                    r#"[{ id: "a", flows: ["egress"], messages: ["put"], key_exprs: ["t/**"], size_limit: 10 }]"#,
+                ),
+                (
+                    "downsampling",
+                    r#"[{ id: "a", flows: ["egress"], messages: ["put"], rules: [{ key_expr: "t/**", freq: 1.0 }] }]"#,
+                ),
+                (
+                    "access_control",
+                    r#"{ enabled: false, default_permission: "allow" }"#,
+                ),
+                ("transport/auth/usrpwd", r#"{ user: "u", password: "p" }"#),
+            ] {
+                let mut config = crate::Config::default();
+                config
+                    .insert_json5(key, value)
+                    .unwrap_or_else(|e| panic!("`{key}` is not a key of the configuration: {e}"));
+                let expanded = config.0.clone().expanded();
+                let zid = expanded.id();
+                let role = super::super::tokio_engine::role_of(expanded.mode());
+                let document = super::super::tokio_engine::document_of(&expanded, role, &zid)
+                    .expect("a document");
+                if let Err(error) = ZenohNodeConfig::from_json5(&document.to_string()) {
+                    panic!("the document of `{key}` is refused by the reader: {error:?}");
+                }
+            }
+        }
 
         /// A session reads the configuration it was opened with, by key and as a whole, as the
         /// values of its own and not of the default one.
