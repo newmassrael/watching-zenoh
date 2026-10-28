@@ -2580,7 +2580,6 @@ impl<H> Hosted<H> {
     }
 
     /// The host took this handler back: nothing is delivered to it from now on.
-    #[cfg(test)]
     fn retract(&self) {
         self.1.store(true, std::sync::atomic::Ordering::Release);
     }
@@ -2619,8 +2618,6 @@ impl<H> Hosted<H> {
 /// hat under [`LOCAL_FACE`] and the `id` kept here (item 751, step 6e), so the fold of what the
 /// node advertises and the admin legs read one table for the node and for a client.
 struct HostedQueryable {
-    /// Read by the unregistration, which is test-only until step 7 gives it a caller.
-    #[cfg_attr(not(test), allow(dead_code))]
     id: u64,
     keyexpr: String,
     complete: bool,
@@ -2630,8 +2627,6 @@ struct HostedQueryable {
 /// A subscriber HOSTED BY THIS ROUTER: its keyexpr (a pattern), its handler, and the id its
 /// declaration holds in the `Local` hat (see [`HostedQueryable`]).
 struct HostedSubscriber {
-    /// Read by the unregistration, which is test-only until step 7 gives it a caller.
-    #[cfg_attr(not(test), allow(dead_code))]
     id: u64,
     keyexpr: String,
     handler: Arc<Hosted<HostedSubscriberHandler>>,
@@ -2905,9 +2900,26 @@ router_entry_points! { on_tables_mut:
     fn update_router_link_weights(&self, link_weights: HashMap<Zid, LinkEdgeWeight>) -> bool;
     fn register_local_queryable(&self, keyexpr: &str, complete: bool, handler: HostedQueryHandler);
     fn register_local_subscriber(&self, keyexpr: &str, handler: HostedSubscriberHandler);
+    fn unregister_local_queryable(&self, keyexpr: &str) -> bool;
+    fn unregister_local_subscriber(&self, keyexpr: &str) -> bool;
+    fn set_self_locators(&self, locators: Vec<String>);
 }
 
 router_entry_points! { on_tables:
+    fn publish(&self, keyexpr: &str, payload: &[u8]) -> Result<(), CodecError>;
+    fn publish_qos(
+        &self,
+        keyexpr: &str,
+        payload: &[u8],
+        priority: Priority,
+        express: bool,
+    ) -> Result<(), CodecError>;
+    #[cfg(feature = "pubsub-delete")]
+    fn publish_delete(&self, keyexpr: &str) -> Result<(), CodecError>;
+    fn north_net_node_count(&self) -> usize;
+    fn north_net_edge_count(&self) -> usize;
+    fn client_queryables_seen(&self) -> usize;
+    fn north_interested(&self, keyexpr: &str) -> Vec<Zid>;
     fn enable_autoconnect(&self, policy: AutoConnect) -> DialIntentReceiver;
     fn enable_autoconnect_into(&self, policy: AutoConnect, tx: DialIntentSender);
     fn set_query_timeout(&self, timeout: Duration);
@@ -3144,12 +3156,24 @@ impl RouterForwarder {
     /// (`zenoh/src/net/routing/gateway.rs` @ `GatewaySouthConf::Preset(GatewayPresetConf::Auto) => match mode {`),
     /// with its faces placed by [`region_of`] at node mode Peer.
     ///
-    /// Not public (`docs/peer-region-hats.md`): the publish and subscribe plane
-    /// is held equal to `LinkstateForwarder` by a differential gate (step 3),
-    /// but the query, token and interest planes and the node's own surfaces are
-    /// not (steps 4 to 6), so a host that built one would get a peer that
-    /// answers part of what a peer answers. Step 7 makes this the door
-    /// `run_peer` uses.
+    /// Public since step 7 of `docs/peer-region-hats.md`: the publish and subscribe,
+    /// query, token and interest planes and the node's own surfaces are held to
+    /// `LinkstateForwarder` and to the pin by the differential and the network
+    /// gates (steps 3 to 6). `timestamping` is the `timestamping.enabled` map a
+    /// host read out of its config document, resolved against Peer here, as
+    /// [`with_timestamping`](Self::with_timestamping) does against Router.
+    pub fn peer_with_timestamping(
+        self_zid: Zid,
+        timestamping: crate::node_clock::TimestampingEnabled,
+    ) -> Self {
+        Self::build(
+            WhatAmI::Peer,
+            self_zid,
+            Box::new(Instant::now),
+            timestamping,
+        )
+    }
+
     #[cfg(test)]
     fn peer(self_zid: Zid) -> Self {
         Self::peer_with_clock(self_zid, Box::new(Instant::now))
@@ -3349,7 +3373,6 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// (`zenoh/src/net/protocol/network.rs` @ `get_locators_noloopback()`), and
     /// the runtime has one answer for all of a node's nets. Set once at startup,
     /// before the first face registers, so self's first flood already carries them.
-    #[cfg(test)]
     pub fn set_self_locators(&mut self, locators: Vec<String>)
     where
         T: std::ops::DerefMut,
@@ -3593,7 +3616,6 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// when both of its ends advertise it, so a gossip peer's flood adds nodes
     /// and no edge. The twin of
     /// [`LinkstateForwarder::edge_count`](crate::linkstate_forward::LinkstateForwarder::edge_count).
-    #[cfg(test)]
     pub fn north_net_edge_count(&self) -> usize {
         self.north_net().edge_count()
     }
@@ -3874,7 +3896,6 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// twin of [`LinkstateForwarder::client_qabls_seen`](crate::linkstate_forward::LinkstateForwarder::client_qabls_seen)
     /// (item 751, step 6). [`queryables_seen`](Self::queryables_seen) adds the mesh's, which a
     /// readiness barrier for a CLIENT's queryable must not count.
-    #[cfg(test)]
     pub fn client_queryables_seen(&self) -> usize {
         self.client_hats()
             .map(|h| h.qabls.values().map(|m| m.len()).sum::<usize>())
@@ -3885,7 +3906,6 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// routers on a router. The twin of
     /// [`LinkstateForwarder::interested`](crate::linkstate_forward::LinkstateForwarder::interested),
     /// the subscription filter the data route reads, exposed for the demo's shutdown summary.
-    #[cfg(test)]
     pub fn north_interested(&self, keyexpr: &str) -> Vec<Zid> {
         self.tables.mesh(NORTH_REGION).subs.interested(keyexpr)
     }
@@ -7720,7 +7740,6 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// A retracted subscriber stops receiving at once, including what was queued for it, and the
     /// interest is withdrawn from every mesh unless a client or another hosted subscriber still
     /// holds it (the same fold that decided the registration). Answers whether one was hosted.
-    #[cfg(test)]
     pub fn unregister_local_subscriber(&mut self, keyexpr: &str) -> bool
     where
         T: std::ops::DerefMut,
@@ -7748,7 +7767,6 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// declaration is withdrawn from every mesh, or re-declared with what the remaining holders
     /// make of it (a complete queryable gone leaves an incomplete one). Answers whether one was
     /// hosted.
-    #[cfg(test)]
     pub fn unregister_local_queryable(&mut self, keyexpr: &str) -> bool
     where
         T: std::ops::DerefMut,
@@ -7904,7 +7922,6 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// would fold those answers into one (the reason
     /// [`register_local_subscriber`](Self::register_local_subscriber) returns
     /// none either). The error is the build's.
-    #[cfg(test)]
     pub fn publish(&self, keyexpr: &str, payload: &[u8]) -> Result<(), CodecError> {
         self.publish_qos(keyexpr, payload, Priority::DEFAULT, false)
     }
@@ -7915,7 +7932,6 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// conduit that picks the link of an aggregated multilink session. A DEFAULT
     /// publish carries no extension, so it is byte-identical to `publish`.
     /// Congestion control is Drop, as for the peer twin: no knob is exposed.
-    #[cfg(test)]
     pub fn publish_qos(
         &self,
         keyexpr: &str,
@@ -7947,7 +7963,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// The Del twin of [`publish`](Self::publish): a delete takes the route a
     /// Put to the same key would, and has no payload slot and no qos twin (a
     /// `MsgDel` carries neither, and QoS belongs to the publisher).
-    #[cfg(all(test, feature = "pubsub-delete"))]
+    #[cfg(feature = "pubsub-delete")]
     pub fn publish_delete(&self, keyexpr: &str) -> Result<(), CodecError> {
         let push = wz_session_core::push_build::build_push_del_literal(keyexpr)?;
         self.route_local_push(Priority::DEFAULT, false, &push, keyexpr);
@@ -7960,7 +7976,6 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// once, as every Put is, and then goes to the client faces that subscribed,
     /// to the subscribers this node hosts, into every mesh, and to a multicast
     /// group.
-    #[cfg(test)]
     fn route_local_push(&self, priority: Priority, express: bool, push: &PushOwned, keyexpr: &str) {
         let Some(stamped) = self.node_hlc.stamp_for_every_destination(push) else {
             return;

@@ -645,6 +645,56 @@ The gate's reason `HOSTED_IN_ADMIN_LEGS` is therefore not a standing allowance: 
 against the pin, and the `LinkstateForwarder` side is a departure recorded as the
 others are (the first rule missing for a hosted declaration).
 
+## 12a. Step 7, in parts
+
+Step 7 retires `LinkstateForwarder` and is too large for one round. It goes in four
+parts, each judged by the gates and the tests that exist.
+
+**7a, landed: the door.** The surfaces steps 1, 5 and 6 left test-only are public
+entry points of `RouterForwarder` (`publish`, `publish_qos`, `publish_delete`,
+`unregister_local_subscriber`, `unregister_local_queryable`, `set_self_locators`,
+`north_net_node_count`, `north_net_edge_count`, `client_queryables_seen`,
+`north_interested`), and `RouterForwarder::peer_with_timestamping` builds the peer
+node. Nothing calls them from outside yet, so no door changes its answer.
+
+**7b: `run_peer` takes the region-hat forwarder.** The mapping, measured from the
+call sites in `crates/wz-ap-demo/src/runner.rs`:
+
+- Construction: `peer_with_timestamping` takes the whole `timestamping.enabled` map,
+  where `LinkstateForwarder::with_timestamping` takes the map resolved for the role.
+- `set_full_linkstate` is `set_peer_region_full_linkstate`; `net_view` is
+  `peers_net_view`; `node_count` and `edge_count` are `north_net_node_count` and
+  `north_net_edge_count`; `client_qabls_seen` is `client_queryables_seen`;
+  `interested(key)` is `north_interested(key)`, which does not name the node itself.
+- The five admin source legs are `declarations_view()`'s `subscribers`, `queryables`,
+  `tokens`, `publishers` and `queriers`; a node's own declarations now name it among
+  the clients, so the three e2e files that pin `clients: []` for a hosted declaration
+  change to `{"routers":[],"peers":[<zid>],"clients":[<zid>]}` in the same commit.
+- `declare_subscription` and `undeclare_subscription`, called twice by the demo's
+  unsubscribe-after-data flag, become `register_local_subscriber` with a handler that
+  does nothing and `unregister_local_subscriber`.
+- Everything else `run_peer` calls exists under the same name: autoconnect,
+  `lifecycle_directory`, `admin_sessions`, `register_local_*`, `ingested`,
+  `data_seen`, `client_subs_seen`, the future-push counters, `interceptor_dropped`, and
+  the interceptor install through `InterceptorSink`.
+- Two gaps that are not renames. The region-hat forwarder's hosted handlers are `Send`
+  (a router is shared between threads) where `LinkstateForwarder`'s are not, so the
+  handlers `run_peer` registers cannot capture the `Rc` buffers they capture now, and
+  take `Arc` and a mutex. And the interest collector is absent (section 11):
+  `--interest-timeout` and the two counters of the shutdown summary have nothing to
+  set or read, and `wz_peer_interest_pending_gc_pico_interop` asserts the copy that
+  the pin's peer hat does not make, so it moves with the flag.
+
+**7c: retirement.** `LinkstateForwarder` goes with the tests that only it carries; what
+the router also uses (`NetHandle`, the route cores, `QueryFan`) stays where it is. The
+differential gate has no oracle left then: it is either frozen into expectations that
+the region-hat peer is graded on, which section 3 of this note describes the departures
+for, or dropped for the pin-graded tests. That is decided at 7c, with the gates read
+once more.
+
+**7d: the partition.** `--gateway-south` is accepted on `--peer`, the config key is
+honoured, and the census pins move in the same commit.
+
 ## 13. Open
 
 - **The router's BestMatching was one winner across the meshes and the clients; the
