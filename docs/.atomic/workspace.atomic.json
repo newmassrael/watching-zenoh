@@ -296808,6 +296808,38 @@
         "Owed, from the open list of slice Z8a: the context a callback runs in (session and unicity), events (the open still ends in an Elapsed error), liveliness, routing, the matching status after an undeclare with a namespace, the files that run none, and the router refusals; the words of the listener failure for the protocols not read yet (UDP, TLS, WebSocket, Unix sockets); a lane for the harness; the margin of the main job; the pin bump to 1.10.2."
       ]
     },
+    "Round 3872": {
+      "decision_summary": "The upstream events file of slice Z8 passes as upstream wrote it, by giving a session the part of the admin space that is its own. When it opens, a session declares the two queryables upstream declares under its session key and listens to its transports and links: a transport that comes up or goes down is published on the key of its kind and peer, and a link on the key under it that its own content makes, as a put with the JSON upstream writes or as a delete with none, to the session's own subscribers only; a query for these keys is answered from the faces the engine lists. A link that goes down is told together with its face, which is gone from the listing by then, so the key of the transport is read off the link itself (only a member of a group has a group locator) where upstream looks the transport up. The module belongs to the unstable API with the transports and links it reads.",
+      "changes_bullets": [
+        "crates/wz-zenoh/src/api/admin.rs (new, derived from upstream's admin module): the keys of the session's admin space, the JSON of a transport and of a link, the queryables of the session key and of the advanced publisher's, the publication of transport and link events, the answer to a query; two tests (the key of a transport by kind and peer, the key of a link when it comes up and when it goes down).",
+        "crates/wz-zenoh/src/api/session.rs: the open calls the module's init once the session is built; WeakSession::declare_queryable_inner; the two tests that counted the queryables of a session count those it has beyond its own; the tests of wait_callbacks are compiled only with unstable or internal, where the API is; one needless lifetime elided.",
+        "crates/wz-zenoh/src/api/mod.rs: the module, with unstable."
+      ],
+      "verification_bullets": [
+        "Locally: the library tests of the top crate pass with unstable (165), the two new ones among them; clippy of the crate with warnings denied passes with the default features and with unstable, where the build without unstable had stopped on two things of earlier rounds (tests of wait_callbacks and a lifetime), repaired here; the upstream events file ran and passes (1 of 1), where it ended in an elapsed deadline; the 35 static gates and the format check pass. Not run: the other tests of the family against this change, the legs gate and the hosted run."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed, from the open list of slice Z8a: the context a callback runs in (session and unicity), liveliness, routing, the matching status after an undeclare with a namespace, the files that run none, and the router refusals; a build without unstable serves no admin key of its own, where upstream's answers a query for the transports; the words of the listener failure for the protocols not read yet (UDP, TLS, WebSocket, Unix sockets); a lane for the harness; the margin of the main job; the pin bump to 1.10.2."
+      ],
+      "publishable_decision_summary": "The upstream events file of slice Z8 passes as upstream wrote it, by giving a session the part of the admin space that is its own. When it opens, a session declares the two queryables upstream declares under its session key and listens to its transports and links: a transport that comes up or goes down is published on the key of its kind and peer, and a link on the key under it that its own content makes, as a put with the JSON upstream writes or as a delete with none, to the session's own subscribers only; a query for these keys is answered from the faces the engine lists. A link that goes down is told together with its face, which is gone from the listing by then, so the key of the transport is read off the link itself (only a member of a group has a group locator) where upstream looks the transport up. The module belongs to the unstable API with the transports and links it reads.",
+      "publishable_changes_bullets": [
+        "crates/wz-zenoh/src/api/admin.rs (new, derived from upstream's admin module): the keys of the session's admin space, the JSON of a transport and of a link, the queryables of the session key and of the advanced publisher's, the publication of transport and link events, the answer to a query; two tests (the key of a transport by kind and peer, the key of a link when it comes up and when it goes down).",
+        "crates/wz-zenoh/src/api/session.rs: the open calls the module's init once the session is built; WeakSession::declare_queryable_inner; the two tests that counted the queryables of a session count those it has beyond its own; the tests of wait_callbacks are compiled only with unstable or internal, where the API is; one needless lifetime elided.",
+        "crates/wz-zenoh/src/api/mod.rs: the module, with unstable."
+      ],
+      "publishable_verification_bullets": [
+        "Locally: the library tests of the top crate pass with unstable (165), the two new ones among them; clippy of the crate with warnings denied passes with the default features and with unstable, where the build without unstable had stopped on two things of earlier rounds (tests of wait_callbacks and a lifetime), repaired here; the upstream events file ran and passes (1 of 1), where it ended in an elapsed deadline; the 35 static gates and the format check pass. Not run: the other tests of the family against this change, the legs gate and the hosted run."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed, from the open list of slice Z8a: the context a callback runs in (session and unicity), liveliness, routing, the matching status after an undeclare with a namespace, the files that run none, and the router refusals; a build without unstable serves no admin key of its own, where upstream's answers a query for the transports; the words of the listener failure for the protocols not read yet (UDP, TLS, WebSocket, Unix sockets); a lane for the harness; the margin of the main job; the pin bump to 1.10.2."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
