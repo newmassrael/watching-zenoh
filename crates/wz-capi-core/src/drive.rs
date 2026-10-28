@@ -1500,13 +1500,12 @@ async fn drive_dial(
     // dial, though it dials what it is told of.
     let listeners: Vec<&BoundListener> = listen.iter().map(|leg| &leg.listening.listener).collect();
     // R3089 -- and the listeners that bind later add theirs to this list when they do.
-    let late = if gossiping {
-        let bound_before = Advertised::of_all(&listeners).remote;
+    let bound_before = Advertised::of_all(&listeners).remote;
+    shared.set_listen_locators(bound_before.clone());
+    if gossiping {
         shared.set_gossip_locators(bound_before.clone());
-        late.gossiping(bound_before)
-    } else {
-        late
-    };
+    }
+    let late = late.listening(bound_before, gossiping);
     // R3071 -- bound once its listener is, for either role: a client's bound-and-unserved
     // listener is advertised too (measured: a real client with a listener answers a Scout naming
     // it, and one with none answers with no locators at all). When it STARTS answering is the
@@ -1579,6 +1578,7 @@ async fn drive_dial(
         (responder.map(Responder::start), None)
     };
     // R3089 -- a listener of a client that is bound after the open is held as the others are.
+    let listening_shared = shared.clone();
     tokio::select! {
         _ = drive_client(
             endpoints,
@@ -1593,7 +1593,7 @@ async fn drive_dial(
             stop,
             gate,
         ) => {}
-        _ = late.hold() => {}
+        _ = late.hold(listening_shared) => {}
     }
 }
 
@@ -2932,30 +2932,35 @@ struct LateBinds {
     /// Where each listener that binds late is told to the scouting responder; the responder reads
     /// the same handle ([`bound_responder`]).
     locators: LateLocators,
-    /// The locators gossip tells for the listeners bound before the open returned, when the
-    /// session gossips: a listener bound late adds its own to them.
-    gossiped: Option<Vec<String>>,
+    /// The locators of the listeners bound before the open returned: a listener bound late adds
+    /// its own to them, in what the session reports of where it listens and, when it gossips,
+    /// in what gossip tells.
+    bound_before: Vec<String>,
+    /// Whether the session gossips, so that the locators of a late listener are told to it too.
+    gossiping: bool,
 }
 
 #[cfg(feature = "peer")]
 impl LateBinds {
-    /// Tell the scouting responder, and the gossip plane when the session has one, the locators of
-    /// a listener that has just bound.
+    /// Tell the scouting responder, the session's own record of where it listens, and the gossip
+    /// plane when the session has one, the locators of a listener that has just bound.
     fn advertise(
         locators: &LateLocators,
-        gossiped: &Option<Vec<String>>,
+        bound_before: &[String],
+        gossiping: bool,
         shared: &SharedSession,
         listener: &BoundListener,
     ) {
         let bound = Advertised::of(listener);
         locators.add(&bound.local, &bound.remote);
-        if let Some(base) = gossiped {
-            let mut all = base.clone();
-            for locator in locators.snapshot().1 {
-                if !all.contains(&locator) {
-                    all.push(locator);
-                }
+        let mut all = bound_before.to_vec();
+        for locator in locators.snapshot().1 {
+            if !all.contains(&locator) {
+                all.push(locator);
             }
+        }
+        shared.set_listen_locators(all.clone());
+        if gossiping {
             shared.set_gossip_locators(all);
         }
     }
@@ -2965,10 +2970,11 @@ impl LateBinds {
         self.locators.clone()
     }
 
-    /// Gossip the locators of the listeners bound before the open returned, and those bound later
-    /// after them.
-    fn gossiping(mut self, bound_before: Vec<String>) -> Self {
-        self.gossiped = Some(bound_before);
+    /// Report the locators of the listeners bound before the open returned, and those bound later
+    /// after them, and gossip them when the session gossips.
+    fn listening(mut self, bound_before: Vec<String>, gossiping: bool) -> Self {
+        self.bound_before = bound_before;
+        self.gossiping = gossiping;
         self
     }
 
@@ -2988,14 +2994,15 @@ impl LateBinds {
             offer,
             clock,
             locators,
-            gossiped,
+            bound_before,
+            gossiping,
         } = self;
         pending
             .into_iter()
             .map(|pending| {
                 let (tls, zid) = (tls.clone(), zid.clone());
                 let (shared, gate) = (shared.clone(), gate.clone());
-                let (locators, gossiped) = (locators.clone(), gossiped.clone());
+                let (locators, bound_before) = (locators.clone(), bound_before.clone());
                 let mut closing = closing.clone();
                 tokio::task::spawn_local(async move {
                     let bound = retry_until_bound(pending.schedule, |_| {
@@ -3005,7 +3012,13 @@ impl LateBinds {
                         listening = bound => listening,
                         _ = closing.wait_for(|c| *c) => return,
                     };
-                    LateBinds::advertise(&locators, &gossiped, &shared, &listening.listener);
+                    LateBinds::advertise(
+                        &locators,
+                        &bound_before,
+                        gossiping,
+                        &shared,
+                        &listening.listener,
+                    );
                     accept_faces(
                         listening,
                         offer,
@@ -3026,13 +3039,15 @@ impl LateBinds {
     /// Bind each pending endpoint and HOLD it for as long as this future is polled, serving no
     /// face: a client's listener is bound and serves nobody (see where the client role holds its
     /// own). Never completes.
-    async fn hold(self) {
+    async fn hold(self, shared: Arc<SharedSession>) {
         let LateBinds {
             pending,
             tls,
             zid,
             link_conf,
             locators,
+            bound_before,
+            gossiping,
             ..
         } = self;
         let local = tokio::task::LocalSet::new();
@@ -3043,14 +3058,21 @@ impl LateBinds {
                     .map(|pending| {
                         let (tls, zid) = (tls.clone(), zid.clone());
                         let locators = locators.clone();
+                        let (shared, bound_before) = (shared.clone(), bound_before.clone());
                         tokio::task::spawn_local(async move {
                             let listening = retry_until_bound(pending.schedule, |_| {
                                 bind_one(&pending.endpoint, &tls, &zid, link_conf)
                             })
                             .await;
-                            // A client that answers a Scout names its listener as it binds.
-                            let bound = Advertised::of(&listening.listener);
-                            locators.add(&bound.local, &bound.remote);
+                            // A client that answers a Scout names its listener as it binds, and
+                            // reports it as a place it listens.
+                            LateBinds::advertise(
+                                &locators,
+                                &bound_before,
+                                gossiping,
+                                &shared,
+                                &listening.listener,
+                            );
                             std::future::pending::<()>().await;
                         })
                     })
@@ -3166,7 +3188,8 @@ async fn bind_listeners(
             offer,
             clock,
             locators: LateLocators::default(),
-            gossiped: None,
+            bound_before: Vec::new(),
+            gossiping: false,
         },
     })
 }

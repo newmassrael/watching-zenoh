@@ -114,6 +114,7 @@ fn member_snapshot(
                 locator: group.to_owned(),
                 endpoint: endpoint.to_owned(),
             }),
+            cert_common_name: None,
         }],
     })
 }

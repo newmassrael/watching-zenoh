@@ -1158,6 +1158,10 @@ struct Inner {
     /// the reason `next_entity_id` has one: an id shared with another plane
     /// makes two unrelated undeclares able to collide.
     next_face_watcher_id: u64,
+    /// The locators the session's listeners actually got, without the loopback ones: where a
+    /// neighbour can dial this node. Set as listeners bind, whether or not the session gossips
+    /// ([`SharedSession::set_listen_locators`]).
+    listen_locators: Vec<String>,
     /// The local plane's own handles for the SSOT declarations, keyed by the
     /// same C-level ids the per-face maps use.
     ///
@@ -1803,6 +1807,19 @@ impl SharedSession {
         }
         #[cfg(not(feature = "interceptors"))]
         let _ = (id, outcome);
+    }
+
+    /// Record where this node's listeners can be reached: the locators they actually got, without
+    /// the loopback ones, as upstream's `get_locators_noloopback` lists them. Replaces the list,
+    /// so a caller that adds a listener passes all of them.
+    pub fn set_listen_locators(&self, locators: Vec<String>) {
+        self.lock().listen_locators = locators;
+    }
+
+    /// The locators [`Self::set_listen_locators`] was given: none for a node that listens on
+    /// nothing, or whose listeners have not bound yet.
+    pub fn listen_locators(&self) -> Vec<String> {
+        self.lock().listen_locators.clone()
     }
 
     /// Where this node can be reached, for the entries gossip sends about it: the locators of

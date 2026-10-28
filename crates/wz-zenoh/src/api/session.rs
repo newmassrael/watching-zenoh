@@ -37,15 +37,17 @@ use async_trait::async_trait;
 use zenoh_config::wrappers::EntityGlobalId;
 use zenoh_config::wrappers::ZenohId;
 use zenoh_core::{Resolve, ResolveClosure, Wait};
-#[cfg(feature = "unstable")]
-use zenoh_protocol::core::Reliability;
 use zenoh_protocol::core::{CongestionControl, EntityId, ExprId, Parameters};
+#[cfg(feature = "unstable")]
+use zenoh_protocol::core::{Locator, Reliability};
 use zenoh_protocol::network::request::{self, ext::QueryTarget};
 use zenoh_result::ZResult;
 use zenoh_runtime::ZRuntime;
 
 #[cfg(feature = "unstable")]
 use crate::api::cancellation::CancellationToken;
+#[cfg(feature = "unstable")]
+use crate::api::info::{Face, FaceSink, Link, LinkEvent, Transport, TransportEvent};
 #[cfg(feature = "unstable")]
 use crate::api::sample::SourceInfo;
 #[cfg(feature = "unstable")]
@@ -85,6 +87,15 @@ use crate::api::{
 
 zconfigurable! {
     pub(crate) static ref API_DATA_RECEPTION_CHANNEL_SIZE: usize = 256;
+}
+
+/// The callback of a listener with the notifier that is let go with it: what the sink the engine
+/// holds for the listener keeps, so that the notifier goes when the engine lets go of the sink and
+/// the last call under way has returned.
+#[cfg(feature = "unstable")]
+struct Delivery<T> {
+    callback: Callback<T>,
+    _notifier: Option<SyncGroupNotifier>,
 }
 
 /// What a put or a delete asks of the engine, in the types of this crate: the key as the wire
@@ -392,6 +403,51 @@ impl Engine {
     fn peer_identities(&self) -> Vec<(Vec<u8>, u8)> {
         match self {
             Engine::Tokio(state) => state.shared.as_engine().peer_identities(),
+        }
+    }
+
+    /// The transport of every established peer with the links under it, the unicast ones before
+    /// the members of the groups the session has joined, as upstream lists them.
+    #[cfg(feature = "unstable")]
+    fn faces(&self) -> Vec<Face> {
+        match self {
+            Engine::Tokio(state) => state
+                .shared
+                .as_engine()
+                .face_snapshots()
+                .iter()
+                .filter_map(tokio_engine::face_of)
+                .collect(),
+        }
+    }
+
+    /// The locators the session's listeners got, without the loopback ones, as words.
+    #[cfg(feature = "unstable")]
+    fn listen_locators(&self) -> Vec<String> {
+        match self {
+            Engine::Tokio(state) => state.shared.as_engine().listen_locators(),
+        }
+    }
+
+    /// Tell `sink` each time a face comes up or goes down, from now on, until
+    /// [`Engine::unwatch_faces`] is called with the id returned.
+    #[cfg(feature = "unstable")]
+    fn watch_faces(&self, sink: FaceSink) -> u64 {
+        match self {
+            Engine::Tokio(state) => state
+                .shared
+                .as_engine()
+                .watch_faces(tokio_engine::face_sink(sink)),
+        }
+    }
+
+    /// Stop the watch `id` and let go of its sink.
+    #[cfg(feature = "unstable")]
+    fn unwatch_faces(&self, id: u64) {
+        match self {
+            Engine::Tokio(state) => {
+                state.shared.as_engine().unwatch_faces(id);
+            }
         }
     }
 
@@ -785,6 +841,26 @@ impl Engine {
         match *self {}
     }
 
+    #[cfg(feature = "unstable")]
+    fn faces(&self) -> Vec<Face> {
+        match *self {}
+    }
+
+    #[cfg(feature = "unstable")]
+    fn listen_locators(&self) -> Vec<String> {
+        match *self {}
+    }
+
+    #[cfg(feature = "unstable")]
+    fn watch_faces(&self, _sink: FaceSink) -> u64 {
+        match *self {}
+    }
+
+    #[cfg(feature = "unstable")]
+    fn unwatch_faces(&self, _id: u64) {
+        match *self {}
+    }
+
     fn publish(&self, _publication: &Publication<'_>) -> ZResult<()> {
         match *self {}
     }
@@ -919,6 +995,12 @@ mod tokio_engine {
         zenoh::query::ConsolidationMode,
     };
     use zenoh_result::ZResult;
+    #[cfg(feature = "unstable")]
+    use {
+        crate::api::info::{Face, FaceSink, Link, Transport},
+        wz_capi_core::faces::{FaceEventKind, FaceEventSink, FaceSnapshot, LinkSnapshot},
+        zenoh_protocol::core::{Locator, Priority as WirePriority, Reliability as WireReliability},
+    };
 
     use super::{Arc, LivelinessRequest, Publication, QueryRequest};
     use crate::api::{
@@ -1789,6 +1871,86 @@ mod tokio_engine {
         Arc::new(move |matching| delivery.callback.call(MatchingStatus { matching }))
     }
 
+    /// The face a snapshot of the engine describes, as the Rust API reports it, or `None` for a
+    /// peer whose role the 2-bit wire form of the engine does not name.
+    #[cfg(feature = "unstable")]
+    pub(super) fn face_of(snapshot: &FaceSnapshot) -> Option<Face> {
+        let whatami = match snapshot.whatami {
+            0 => WhatAmI::Router,
+            1 => WhatAmI::Peer,
+            2 => WhatAmI::Client,
+            _ => return None,
+        };
+        let transport = Transport {
+            zid: ZenohId::try_from(snapshot.zid.as_slice()).ok()?,
+            whatami,
+            is_qos: snapshot.is_qos,
+            is_multicast: snapshot.is_multicast,
+            #[cfg(feature = "shared-memory")]
+            is_shm: snapshot.is_shm,
+        };
+        let links = snapshot
+            .links
+            .iter()
+            .filter_map(|link| link_of(&transport, link))
+            .collect();
+        Some(Face { transport, links })
+    }
+
+    /// The link a snapshot describes under `transport`. A locator the Rust API cannot hold leaves
+    /// the link out and says so: it is a link the engine reports in words no zenoh peer reads.
+    #[cfg(feature = "unstable")]
+    fn link_of(transport: &Transport, link: &LinkSnapshot) -> Option<Link> {
+        let locator = |text: &str| match Locator::try_from(text) {
+            Ok(locator) => Some(locator),
+            Err(error) => {
+                tracing::warn!(
+                    "a link of the engine has the locator {text:?}, which is no locator: {error}"
+                );
+                None
+            }
+        };
+        let is_qos = transport.is_qos;
+        Some(Link {
+            zid: transport.zid,
+            src: locator(&link.src)?,
+            dst: locator(&link.dst)?,
+            group: match &link.group {
+                Some(group) => Some(locator(&group.locator)?),
+                None => None,
+            },
+            mtu: link.mtu,
+            is_streamed: link.is_streamed(),
+            // Upstream reads a lookup that failed as no interface at all, and so does this.
+            interfaces: link.interfaces.clone().unwrap_or_default(),
+            auth_identifier: link.auth_identifier().map(str::to_owned),
+            // A transport that negotiated QoS reports the priorities its links carry, all of them
+            // when the endpoint names none, from the highest priority, the lowest number
+            // (`zenoh/src/api/info.rs` @ `lowest numerical value`), and whether the link delivers
+            // reliably.
+            priorities: is_qos.then_some((WirePriority::MAX as u8, WirePriority::MIN as u8)),
+            reliability: is_qos.then(|| match link.is_reliable() {
+                Some(true) => WireReliability::Reliable,
+                Some(false) | None => WireReliability::BestEffort,
+            }),
+        })
+    }
+
+    /// `sink` as the sink of the engine's face watch: a face that comes up is a `Put` and one that
+    /// goes down a `Delete`.
+    #[cfg(feature = "unstable")]
+    pub(super) fn face_sink(sink: FaceSink) -> FaceEventSink {
+        Arc::new(move |event, snapshot| {
+            if let Some(face) = face_of(snapshot) {
+                let kind = match event {
+                    FaceEventKind::Up => SampleKind::Put,
+                    FaceEventKind::Down => SampleKind::Delete,
+                };
+                sink(kind, &face);
+            }
+        })
+    }
+
     /// A publication the engine refused.
     pub(super) fn publish_error(
         refusal: FanoutError,
@@ -1850,6 +2012,13 @@ pub(crate) struct SessionInner {
     matching_listeners: std::sync::Mutex<Vec<Id>>,
     /// The liveliness tokens declared on the session and not undeclared, which a close retracts.
     tokens: std::sync::Mutex<Vec<Id>>,
+    /// The watches of the engine's faces that the transport events listeners declared on the
+    /// session hold, not yet undeclared, which a close lets go of.
+    #[cfg(feature = "unstable")]
+    transport_listeners: std::sync::Mutex<Vec<Id>>,
+    /// The same for the link events listeners.
+    #[cfg(feature = "unstable")]
+    link_listeners: std::sync::Mutex<Vec<Id>>,
 }
 
 impl SessionInner {
@@ -2041,6 +2210,183 @@ impl SessionInner {
         }
         self.engine.undeclare_matching_listener(id);
         Ok(())
+    }
+
+    #[cfg(feature = "unstable")]
+    fn transport_listeners(&self) -> std::sync::MutexGuard<'_, Vec<Id>> {
+        self.transport_listeners
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[cfg(feature = "unstable")]
+    fn link_listeners(&self) -> std::sync::MutexGuard<'_, Vec<Id>> {
+        self.link_listeners
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Let go of every transport and link events listener that is left: those of a session that
+    /// closes. It is run before the engine closes, which tells the faces it drops to the
+    /// listeners it still has.
+    #[cfg(feature = "unstable")]
+    fn release_connectivity_listeners(&self) {
+        let transports = std::mem::take(&mut *self.transport_listeners());
+        let links = std::mem::take(&mut *self.link_listeners());
+        for id in transports.into_iter().chain(links) {
+            self.engine.unwatch_faces(u64::from(id));
+        }
+    }
+
+    /// Watch the faces of the engine for a listener, and record the watch so that a close lets go
+    /// of it. `sink` is told of the faces from now on; the id is of the watch.
+    #[cfg(feature = "unstable")]
+    fn watch_faces_for(
+        &self,
+        listeners: &std::sync::Mutex<Vec<Id>>,
+        sink: FaceSink,
+    ) -> ZResult<Id> {
+        if self.engine.is_closed() {
+            return Err(SessionClosedError.into());
+        }
+        let watch = self.engine.watch_faces(sink);
+        let Ok(id) = Id::try_from(watch) else {
+            self.engine.unwatch_faces(watch);
+            return Err(zerror!(
+                "the engine numbered a face watch {watch}, which is more than an id holds"
+            )
+            .into());
+        };
+        listeners
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(id);
+        // A close that ran between the check and the record has not seen this listener.
+        if self.engine.is_closed() {
+            self.release_connectivity_listeners();
+            return Err(SessionClosedError.into());
+        }
+        Ok(id)
+    }
+
+    /// Declare a transport events listener, whose callback is told each time a transport opens or
+    /// closes, and first of the transports that are open when `history` asks for them, as
+    /// upstream's declaration does.
+    #[cfg(feature = "unstable")]
+    fn declare_transport_events_listener_inner(
+        &self,
+        callback: Callback<TransportEvent>,
+        history: bool,
+        notifier: Option<SyncGroupNotifier>,
+    ) -> ZResult<Id> {
+        let delivery = Arc::new(Delivery {
+            callback,
+            _notifier: notifier,
+        });
+        let told = delivery.clone();
+        let id = self.watch_faces_for(
+            &self.transport_listeners,
+            Arc::new(move |kind, face| {
+                told.callback.call(TransportEvent {
+                    kind,
+                    transport: face.transport.clone(),
+                })
+            }),
+        )?;
+        tracing::trace!("declare_transport_events_listener_inner() => {id}");
+        if history {
+            for face in self.engine.faces() {
+                delivery.callback.call(TransportEvent {
+                    kind: SampleKind::Put,
+                    transport: face.transport,
+                });
+            }
+        }
+        Ok(id)
+    }
+
+    /// Declare a link events listener, whose callback is told each time a link is added or
+    /// removed, those of `transport` only when it is given, and first of the links that exist when
+    /// `history` asks for them.
+    #[cfg(feature = "unstable")]
+    fn declare_link_events_listener_inner(
+        &self,
+        callback: Callback<LinkEvent>,
+        history: bool,
+        transport: Option<Transport>,
+        notifier: Option<SyncGroupNotifier>,
+    ) -> ZResult<Id> {
+        let delivery = Arc::new(Delivery {
+            callback,
+            _notifier: notifier,
+        });
+        let told = delivery.clone();
+        let filter = transport.clone();
+        let id = self.watch_faces_for(
+            &self.link_listeners,
+            Arc::new(move |kind, face| {
+                if filter.as_ref().is_some_and(|t| !face.is_the_face_of(t)) {
+                    return;
+                }
+                for link in &face.links {
+                    told.callback.call(LinkEvent {
+                        kind,
+                        link: link.clone(),
+                    });
+                }
+            }),
+        )?;
+        tracing::trace!("declare_link_events_listener_inner() => {id}");
+        if history {
+            for link in self.links(transport.as_ref()) {
+                delivery.callback.call(LinkEvent {
+                    kind: SampleKind::Put,
+                    link,
+                });
+            }
+        }
+        Ok(id)
+    }
+
+    /// Stop the watch `id` of `listeners`: a closed session has none, and undeclaring on it is no
+    /// error; an id the session does not hold is one, named `what`.
+    #[cfg(feature = "unstable")]
+    fn undeclare_face_watch(
+        &self,
+        listeners: &std::sync::Mutex<Vec<Id>>,
+        id: Id,
+        what: &str,
+    ) -> ZResult<()> {
+        if self.engine.is_closed() {
+            return Ok(());
+        }
+        let known = {
+            let mut listeners = listeners
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let before = listeners.len();
+            listeners.retain(|held| *held != id);
+            before != listeners.len()
+        };
+        if !known {
+            return Err(zerror!("Unable to find {what}").into());
+        }
+        self.engine.unwatch_faces(u64::from(id));
+        Ok(())
+    }
+
+    /// The links of the established transports, those of `transport` only when it is given. A
+    /// closed session has none: its engine has let go of every face.
+    #[cfg(feature = "unstable")]
+    fn links(&self, transport: Option<&Transport>) -> Box<dyn Iterator<Item = Link> + Send + Sync> {
+        let transport = transport.cloned();
+        Box::new(
+            self.engine
+                .faces()
+                .into_iter()
+                .filter(move |face| transport.as_ref().map_or(true, |t| face.is_the_face_of(t)))
+                .flat_map(|face| face.links),
+        )
     }
 
     fn subscriptions(&self) -> std::sync::MutexGuard<'_, Vec<Id>> {
@@ -2462,6 +2808,10 @@ impl Session {
             queriers: std::sync::Mutex::new(vec![]),
             matching_listeners: std::sync::Mutex::new(vec![]),
             tokens: std::sync::Mutex::new(vec![]),
+            #[cfg(feature = "unstable")]
+            transport_listeners: std::sync::Mutex::new(vec![]),
+            #[cfg(feature = "unstable")]
+            link_listeners: std::sync::Mutex::new(vec![]),
         })))
     }
 }
@@ -2589,6 +2939,84 @@ impl WeakSession {
     /// no error; an id the session does not hold is one.
     pub(crate) fn undeclare_matches_listener_inner(&self, id: Id) -> ZResult<()> {
         self.0.undeclare_matches_listener_inner(id)
+    }
+
+    /// The locators on which the session listens, without the loopback ones, as upstream's runtime
+    /// lists them (`get_locators_noloopback`). A locator the Rust API cannot hold is left out and
+    /// said.
+    #[cfg(feature = "unstable")]
+    pub(crate) fn locators(&self) -> Vec<Locator> {
+        self.0
+            .engine
+            .listen_locators()
+            .iter()
+            .filter_map(|text| match Locator::try_from(text.as_str()) {
+                Ok(locator) => Some(locator),
+                Err(error) => {
+                    tracing::warn!("the engine listens on {text:?}, which is no locator: {error}");
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// The established transports, as upstream's runtime lists them: a closed session has none,
+    /// its engine has let go of every face.
+    #[cfg(feature = "unstable")]
+    pub(crate) fn transports(&self) -> Box<dyn Iterator<Item = Transport> + Send + Sync> {
+        Box::new(self.0.engine.faces().into_iter().map(|face| face.transport))
+    }
+
+    /// The links of the established transports, those of `transport` only when it is given.
+    #[cfg(feature = "unstable")]
+    pub(crate) fn links(
+        &self,
+        transport: Option<&Transport>,
+    ) -> Box<dyn Iterator<Item = Link> + Send + Sync> {
+        self.0.links(transport)
+    }
+
+    /// Declare a transport events listener. The id of the engine's watch, released at undeclare or
+    /// at close.
+    #[cfg(feature = "unstable")]
+    pub(crate) fn declare_transport_events_listener_inner(
+        &self,
+        callback: Callback<TransportEvent>,
+        history: bool,
+        notifier: Option<SyncGroupNotifier>,
+    ) -> ZResult<Id> {
+        self.0
+            .declare_transport_events_listener_inner(callback, history, notifier)
+    }
+
+    /// Undeclare the transport events listener `id`. A closed session has none, and undeclaring on
+    /// it is no error; an id the session does not hold is one.
+    #[cfg(feature = "unstable")]
+    pub(crate) fn undeclare_transport_events_listener_inner(&self, id: Id) -> ZResult<()> {
+        self.0
+            .undeclare_face_watch(&self.0.transport_listeners, id, "TransportEventsListener")
+    }
+
+    /// Declare a link events listener. The id of the engine's watch, released at undeclare or at
+    /// close.
+    #[cfg(feature = "unstable")]
+    pub(crate) fn declare_link_events_listener_inner(
+        &self,
+        callback: Callback<LinkEvent>,
+        history: bool,
+        transport: Option<Transport>,
+        notifier: Option<SyncGroupNotifier>,
+    ) -> ZResult<Id> {
+        self.0
+            .declare_link_events_listener_inner(callback, history, transport, notifier)
+    }
+
+    /// Undeclare the link events listener `id`, with the same answers as for a transport events
+    /// listener.
+    #[cfg(feature = "unstable")]
+    pub(crate) fn undeclare_link_events_listener_inner(&self, id: Id) -> ZResult<()> {
+        self.0
+            .undeclare_face_watch(&self.0.link_listeners, id, "LinkEventsListener")
     }
 
     /// Retract the liveliness token `tid`. A closed session has none, and retracting on it is no
@@ -3469,6 +3897,13 @@ impl Closee for WeakSession {
         // executor of the caller, which may be the very thread a callback is about to be run on.
         let _ = ZRuntime::Net
             .spawn_blocking(move || {
+                // Before the engine closes, so that the faces that go down with the session tell
+                // the listeners of their events of nothing.
+                // The listeners of faces are let go of before the engine closes: the faces that
+                // go down with it, those the session dialled at least, would tell them, where
+                // upstream's close lets go of them before its transports are closed.
+                #[cfg(feature = "unstable")]
+                session.release_connectivity_listeners();
                 session.engine.close();
                 // A closed session takes nothing more, and lets go of the callbacks it was to
                 // call: the channel of a subscriber ends with its session, as upstream's does.
@@ -6043,6 +6478,680 @@ mod tests {
             done.recv_timeout(WAIT)
                 .expect("the undeclaration returned once the callback had")
                 .expect("undeclares");
+        }
+    }
+
+    /// The transports and the links a node holds, and the events of their opening and closing.
+    #[cfg(feature = "unstable")]
+    mod connectivity {
+        use std::{sync::mpsc, time::Duration};
+
+        use zenoh_protocol::core::{Reliability, WhatAmI};
+
+        use super::*;
+
+        const WAIT: Duration = Duration::from_secs(5);
+
+        fn on(id: &str, listen: &str, connect: &str) -> Session {
+            open(
+                Config::from_json5(&format!(
+                    r#"{{ id: "{id}", mode: "peer",
+                          listen: {{ endpoints: [{listen}] }},
+                          connect: {{ endpoints: [{connect}] }},
+                          scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                ))
+                .expect("a configuration zenoh reads"),
+            )
+            .wait()
+            .expect("opens")
+        }
+
+        /// The node that listens, and the endpoint it listens on.
+        fn listening(id: &str) -> (Session, String) {
+            let port = unautoselected_port();
+            let endpoint = format!("tcp/127.0.0.1:{port}");
+            (on(id, &format!(r#""{endpoint}""#), ""), endpoint)
+        }
+
+        fn dialling(id: &str, endpoint: &str) -> Session {
+            on(id, "", &format!(r#""{endpoint}""#))
+        }
+
+        fn transports(session: &Session) -> Vec<Transport> {
+            session.info().transports().wait().collect()
+        }
+
+        fn links(session: &Session) -> Vec<Link> {
+            session.info().links().wait().collect()
+        }
+
+        /// Every event of a transport listener as `Put|Delete zid`.
+        fn transport_events() -> (
+            impl Fn(TransportEvent) + Send + Sync + 'static,
+            mpsc::Receiver<String>,
+        ) {
+            let (sender, received) = mpsc::channel();
+            let sender = std::sync::Mutex::new(sender);
+            (
+                move |event: TransportEvent| {
+                    let _ = sender.lock().unwrap().send(format!(
+                        "{:?} {}",
+                        event.kind(),
+                        event.transport().zid()
+                    ));
+                },
+                received,
+            )
+        }
+
+        /// Every event of a link listener as `Put|Delete src dst`.
+        fn link_events() -> (
+            impl Fn(LinkEvent) + Send + Sync + 'static,
+            mpsc::Receiver<String>,
+        ) {
+            let (sender, received) = mpsc::channel();
+            let sender = std::sync::Mutex::new(sender);
+            (
+                move |event: LinkEvent| {
+                    let _ = sender.lock().unwrap().send(format!(
+                        "{:?} {} {}",
+                        event.kind(),
+                        event.link().src(),
+                        event.link().dst()
+                    ));
+                },
+                received,
+            )
+        }
+
+        #[test]
+        fn a_session_lists_the_transport_and_the_link_it_holds_to_a_peer() {
+            let (writer, endpoint) = listening("a1b2d0");
+            let reader = dialling("a1b2d1", &endpoint);
+            assert_eq!(connected(&reader, 1).1.len(), 1, "the nodes are linked");
+            assert_eq!(connected(&writer, 1).1.len(), 1, "the nodes are linked");
+
+            let held = transports(&reader);
+            assert_eq!(held.len(), 1);
+            let transport = &held[0];
+            assert_eq!(transport.zid().to_string(), "a1b2d0");
+            assert_eq!(transport.whatami(), WhatAmI::Peer);
+            assert!(transport.is_qos(), "a session offers QoS");
+            assert!(!transport.is_multicast());
+
+            let held = links(&reader);
+            assert_eq!(held.len(), 1);
+            let link = &held[0];
+            assert_eq!(link.zid().to_string(), "a1b2d0");
+            assert_eq!(link.dst().to_string(), endpoint);
+            assert!(link.src().to_string().starts_with("tcp/127.0.0.1:"));
+            assert_ne!(link.src(), link.dst());
+            assert_eq!(link.group(), None);
+            assert!(link.mtu() > 0);
+            assert!(link.is_streamed(), "tcp carries a stream");
+            assert_eq!(link.auth_identifier(), None);
+            // A transport that negotiated QoS reports all the priorities and the reliability of
+            // its links.
+            assert_eq!(link.priorities(), Some((0, 7)));
+            assert_eq!(link.reliability(), Some(Reliability::Reliable));
+
+            // The listening side holds the same link from the other end.
+            let accepted = links(&writer);
+            assert_eq!(accepted.len(), 1);
+            assert_eq!(accepted[0].zid().to_string(), "a1b2d1");
+            assert_eq!(accepted[0].src(), link.dst());
+            assert_eq!(accepted[0].dst(), link.src());
+        }
+
+        /// A link of the engine's model, from the words of its ends.
+        fn snapshot_link(
+            src: &str,
+            dst: &str,
+            kind: Option<wz_runtime_tokio::session_glue::LinkKind>,
+        ) -> wz_capi_core::faces::LinkSnapshot {
+            wz_capi_core::faces::LinkSnapshot {
+                src: src.to_owned(),
+                dst: dst.to_owned(),
+                kind,
+                interfaces: Some(vec!["eth0".to_owned(), "eth1".to_owned()]),
+                mtu: 1200,
+                group: None,
+                cert_common_name: Some("alice".to_owned()),
+            }
+        }
+
+        fn snapshot_face(
+            whatami: u8,
+            is_qos: bool,
+            links: Vec<wz_capi_core::faces::LinkSnapshot>,
+        ) -> wz_capi_core::faces::FaceSnapshot {
+            let mut zid = [0u8; 16];
+            zid[..3].copy_from_slice(&[0xa1, 0xb2, 0xc3]);
+            wz_capi_core::faces::FaceSnapshot {
+                zid,
+                whatami,
+                is_qos,
+                is_multicast: false,
+                is_shm: false,
+                links,
+            }
+        }
+
+        #[test]
+        fn a_face_of_the_engine_is_the_transport_and_the_links_it_says() {
+            use wz_runtime_tokio::session_glue::LinkKind;
+
+            let face = tokio_engine::face_of(&snapshot_face(
+                2,
+                true,
+                vec![
+                    snapshot_link(
+                        "tls/10.0.0.1:7447",
+                        "tls/10.0.0.2:5000",
+                        Some(LinkKind::Tls),
+                    ),
+                    snapshot_link(
+                        "quic/10.0.0.1:7447",
+                        "quic/10.0.0.2:5000",
+                        Some(LinkKind::QuicDatagram),
+                    ),
+                    snapshot_link("tcp/10.0.0.1:7447", "tcp/10.0.0.2:5000", None),
+                ],
+            ))
+            .expect("a face");
+            let transport = &face.transport;
+            assert_eq!(
+                *transport.zid(),
+                ZenohId::try_from([0xa1, 0xb2, 0xc3].as_slice()).unwrap()
+            );
+            assert_eq!(transport.whatami(), WhatAmI::Client);
+            assert!(transport.is_qos() && !transport.is_multicast());
+
+            let [tls, datagram, unnamed] = face.links.as_slice() else {
+                panic!("three links: {:?}", face.links);
+            };
+            // Every link carries the zid of its transport.
+            assert!(face.links.iter().all(|link| link.zid() == transport.zid()));
+            assert_eq!(tls.src().to_string(), "tls/10.0.0.1:7447");
+            assert_eq!(tls.dst().to_string(), "tls/10.0.0.2:5000");
+            assert_eq!(tls.mtu(), 1200);
+            assert_eq!(tls.interfaces(), ["eth0", "eth1"]);
+            assert!(tls.is_streamed());
+            assert_eq!(tls.auth_identifier(), Some("alice"));
+            assert_eq!(tls.reliability(), Some(Reliability::Reliable));
+            assert_eq!(tls.priorities(), Some((0, 7)));
+            // A datagram link neither streams nor delivers reliably, and a QUIC link is named by
+            // the certificate of its peer as a TLS link is.
+            assert!(!datagram.is_streamed());
+            assert_eq!(datagram.auth_identifier(), Some("alice"));
+            assert_eq!(datagram.reliability(), Some(Reliability::BestEffort));
+            // A link whose driver cannot name its kind is none of that.
+            assert!(!unnamed.is_streamed());
+            assert_eq!(unnamed.auth_identifier(), None);
+            assert_eq!(unnamed.reliability(), Some(Reliability::BestEffort));
+        }
+
+        #[test]
+        fn a_face_without_qos_reports_neither_priorities_nor_reliability() {
+            use wz_runtime_tokio::session_glue::LinkKind;
+
+            let face = tokio_engine::face_of(&snapshot_face(
+                1,
+                false,
+                vec![snapshot_link(
+                    "tcp/10.0.0.1:7447",
+                    "tcp/10.0.0.2:5000",
+                    Some(LinkKind::Tcp),
+                )],
+            ))
+            .expect("a face");
+            assert_eq!(face.transport.whatami(), WhatAmI::Peer);
+            assert!(!face.transport.is_qos());
+            assert_eq!(face.links.len(), 1);
+            assert_eq!(face.links[0].priorities(), None);
+            assert_eq!(face.links[0].reliability(), None);
+            assert_eq!(
+                face.links[0].auth_identifier(),
+                None,
+                "tcp presents no certificate"
+            );
+        }
+
+        #[test]
+        fn the_link_of_a_group_member_names_the_group_and_a_failed_lookup_is_no_interface() {
+            use wz_capi_core::faces::GroupLink;
+            use wz_runtime_tokio::session_glue::LinkKind;
+
+            let mut member = snapshot_link(
+                "udp/10.0.0.1:7447",
+                "udp/10.0.0.2:5000",
+                Some(LinkKind::Udp),
+            );
+            member.group = Some(GroupLink {
+                locator: "udp/224.0.0.224:7446".to_owned(),
+                endpoint: "udp/224.0.0.224:7446#iface=lo".to_owned(),
+            });
+            member.interfaces = None;
+            let mut snapshot = snapshot_face(0, false, vec![member]);
+            snapshot.is_multicast = true;
+            let face = tokio_engine::face_of(&snapshot).expect("a face");
+            assert_eq!(face.transport.whatami(), WhatAmI::Router);
+            assert!(face.transport.is_multicast());
+            let link = &face.links[0];
+            assert_eq!(
+                link.group().map(|group| group.to_string()),
+                Some("udp/224.0.0.224:7446".to_owned())
+            );
+            assert!(
+                link.interfaces().is_empty(),
+                "upstream reads a failed lookup as no interface"
+            );
+        }
+
+        #[test]
+        fn what_the_api_cannot_hold_is_left_out_and_not_made_up() {
+            use wz_runtime_tokio::session_glue::LinkKind;
+
+            // A role the wire form does not name is no transport.
+            assert!(tokio_engine::face_of(&snapshot_face(3, true, vec![])).is_none());
+            // A link whose locator is no locator is left out, the others stay.
+            let face = tokio_engine::face_of(&snapshot_face(
+                1,
+                true,
+                vec![
+                    snapshot_link("not a locator", "tcp/10.0.0.2:5000", Some(LinkKind::Tcp)),
+                    snapshot_link(
+                        "tcp/10.0.0.1:7447",
+                        "tcp/10.0.0.2:5000",
+                        Some(LinkKind::Tcp),
+                    ),
+                ],
+            ))
+            .expect("a face");
+            assert_eq!(face.links.len(), 1);
+            assert_eq!(face.links[0].src().to_string(), "tcp/10.0.0.1:7447");
+        }
+
+        #[test]
+        fn a_session_says_the_locators_it_listens_on() {
+            let (listening, endpoint) = listening("a1b2e7");
+            let said: Vec<String> = listening
+                .info()
+                .locators()
+                .wait()
+                .iter()
+                .map(|locator| locator.to_string())
+                .collect();
+            assert_eq!(said, [endpoint]);
+            // A port of 0 is the port the kernel gave, and a node that listens on nothing says none.
+            let kernel_picked = on("a1b2e8", r#""tcp/127.0.0.1:0""#, "");
+            let said = kernel_picked.info().locators().wait();
+            assert_eq!(said.len(), 1);
+            let text = said[0].to_string();
+            assert!(
+                text.starts_with("tcp/127.0.0.1:") && !text.ends_with(":0"),
+                "{text}"
+            );
+            let alone = on("a1b2e9", "", "");
+            assert!(alone.info().locators().wait().is_empty());
+        }
+
+        /// A listener that binds after the open returned is one the session listens on from then
+        /// on, as the endpoint taken at the open and let go of later.
+        #[test]
+        fn a_listener_that_binds_late_is_listened_on_from_then() {
+            let port = unautoselected_port();
+            let taken = std::net::TcpListener::bind(("127.0.0.1", port)).expect("a free port");
+            let session = open(
+                Config::from_json5(&format!(
+                    r#"{{ id: "a1b2ea", mode: "peer",
+                          listen: {{ endpoints: ["tcp/127.0.0.1:{port}"], exit_on_failure: false,
+                                     timeout_ms: -1,
+                                     retry: {{ period_init_ms: 100, period_max_ms: 200,
+                                              period_increase_factor: 2 }} }},
+                          scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                ))
+                .expect("a configuration zenoh reads"),
+            )
+            .wait()
+            .expect("opens");
+            assert!(
+                session.info().locators().wait().is_empty(),
+                "nothing is bound while the port is taken"
+            );
+            drop(taken);
+            let deadline = std::time::Instant::now() + WAIT;
+            let said = loop {
+                let said: Vec<String> = session
+                    .info()
+                    .locators()
+                    .wait()
+                    .iter()
+                    .map(|locator| locator.to_string())
+                    .collect();
+                if !said.is_empty() || std::time::Instant::now() > deadline {
+                    break said;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            };
+            assert_eq!(said, [format!("tcp/127.0.0.1:{port}")]);
+        }
+
+        #[test]
+        fn a_session_with_no_peer_holds_no_transport_and_no_link() {
+            let session = on("a1b2d2", "", "");
+            assert!(transports(&session).is_empty());
+            assert!(links(&session).is_empty());
+        }
+
+        #[test]
+        fn the_links_of_a_transport_are_those_of_its_peer_and_its_kind() {
+            let (hub, endpoint) = listening("a1b2d3");
+            let first = dialling("a1b2d4", &endpoint);
+            let second = dialling("a1b2d5", &endpoint);
+            assert_eq!(connected(&hub, 2).1.len(), 2, "the nodes are linked");
+            assert_eq!(links(&hub).len(), 2);
+
+            let held = transports(&hub);
+            assert_eq!(held.len(), 2);
+            let of_first = held
+                .iter()
+                .find(|t| t.zid().to_string() == "a1b2d4")
+                .expect("a transport to the first")
+                .clone();
+            let only: Vec<Link> = hub
+                .info()
+                .links()
+                .transport(of_first.clone())
+                .wait()
+                .collect();
+            assert_eq!(only.len(), 1);
+            assert_eq!(only[0].zid().to_string(), "a1b2d4");
+
+            // The same node as a multicast transport is another transport, and has no link here.
+            let mut multicast = of_first;
+            multicast.is_multicast = true;
+            assert_eq!(
+                hub.info().links().transport(multicast).wait().count(),
+                0,
+                "a multicast transport to the node is not the unicast one"
+            );
+            drop((first, second));
+        }
+
+        #[test]
+        fn a_transport_listener_is_told_a_peer_opening_and_closing() {
+            let (writer, endpoint) = listening("a1b2d6");
+            let (callback, told) = transport_events();
+            let _listener = writer
+                .info()
+                .transport_events_listener()
+                .callback(callback)
+                .wait()
+                .expect("declares");
+            let reader = dialling("a1b2d7", &endpoint);
+            assert_eq!(told.recv_timeout(WAIT), Ok("Put a1b2d7".to_owned()));
+            reader.close().wait().expect("closes");
+            assert_eq!(told.recv_timeout(WAIT), Ok("Delete a1b2d7".to_owned()));
+            assert_eq!(
+                told.recv_timeout(Duration::from_millis(200)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            );
+        }
+
+        #[test]
+        fn a_link_listener_is_told_a_link_added_before_the_transport_it_belongs_to_is_gone() {
+            let (writer, endpoint) = listening("a1b2d8");
+            let (link_callback, linked) = link_events();
+            let _links = writer
+                .info()
+                .link_events_listener()
+                .callback(link_callback)
+                .wait()
+                .expect("declares");
+            let (transport_callback, transported) = transport_events();
+            let _transports = writer
+                .info()
+                .transport_events_listener()
+                .callback(transport_callback)
+                .wait()
+                .expect("declares");
+            let reader = dialling("a1b2d9", &endpoint);
+            let added = linked.recv_timeout(WAIT).expect("a link event");
+            assert!(added.starts_with(&format!("Put {endpoint} tcp/127.0.0.1:")));
+            assert_eq!(transported.recv_timeout(WAIT), Ok("Put a1b2d9".to_owned()));
+            reader.close().wait().expect("closes");
+            let removed = linked.recv_timeout(WAIT).expect("a link event");
+            assert!(removed.starts_with(&format!("Delete {endpoint} tcp/127.0.0.1:")));
+            assert_eq!(
+                transported.recv_timeout(WAIT),
+                Ok("Delete a1b2d9".to_owned())
+            );
+        }
+
+        #[test]
+        fn the_history_is_what_is_open_when_the_listener_is_declared() {
+            let (writer, endpoint) = listening("a1b2da");
+            let reader = dialling("a1b2db", &endpoint);
+            assert_eq!(connected(&writer, 1).1.len(), 1, "the nodes are linked");
+            let (transport_callback, transported) = transport_events();
+            let (link_callback, linked) = link_events();
+            let _transports = writer
+                .info()
+                .transport_events_listener()
+                .history(true)
+                .callback(transport_callback)
+                .wait()
+                .expect("declares");
+            let _links = writer
+                .info()
+                .link_events_listener()
+                .history(true)
+                .callback(link_callback)
+                .wait()
+                .expect("declares");
+            // The history is given before the declaration returns.
+            assert_eq!(
+                transported.try_recv(),
+                Ok("Put a1b2db".to_owned()),
+                "the transport that is open"
+            );
+            let link = linked.try_recv().expect("the link that is open");
+            assert!(link.starts_with(&format!("Put {endpoint} tcp/127.0.0.1:")));
+            assert!(transported.try_recv().is_err() && linked.try_recv().is_err());
+
+            // A listener without the history is told of what is open only when it changes.
+            let (quiet_callback, quiet) = transport_events();
+            let _quiet = writer
+                .info()
+                .transport_events_listener()
+                .callback(quiet_callback)
+                .wait()
+                .expect("declares");
+            assert!(quiet.try_recv().is_err());
+            drop(reader);
+        }
+
+        #[test]
+        fn a_link_listener_for_a_transport_is_told_of_the_links_of_that_peer_only() {
+            let (hub, endpoint) = listening("a1b2dc");
+            let first = dialling("a1b2dd", &endpoint);
+            assert_eq!(connected(&hub, 1).1.len(), 1, "the nodes are linked");
+            let of_first = transports(&hub).pop().expect("a transport to the first");
+            let (callback, told) = link_events();
+            let _listener = hub
+                .info()
+                .link_events_listener()
+                .transport(of_first)
+                .callback(callback)
+                .wait()
+                .expect("declares");
+            let second = dialling("a1b2de", &endpoint);
+            assert_eq!(connected(&hub, 2).1.len(), 2, "the nodes are linked");
+            assert_eq!(
+                told.recv_timeout(Duration::from_millis(300)),
+                Err(mpsc::RecvTimeoutError::Timeout),
+                "the link of the second peer is not the first's"
+            );
+            first.close().wait().expect("closes");
+            let removed = told.recv_timeout(WAIT).expect("a link event");
+            assert!(removed.starts_with("Delete "));
+            drop(second);
+        }
+
+        #[test]
+        fn an_undeclared_listener_is_told_nothing_and_cannot_be_undeclared_twice() {
+            let (writer, endpoint) = listening("a1b2df");
+            let (callback, told) = transport_events();
+            let listener = writer
+                .info()
+                .transport_events_listener()
+                .callback(callback)
+                .wait()
+                .expect("declares");
+            let id = listener.inner.id;
+            listener.undeclare().wait().expect("undeclares");
+            let reader = dialling("a1b2e0", &endpoint);
+            assert_eq!(connected(&writer, 1).1.len(), 1, "the nodes are linked");
+            assert!(told.recv_timeout(Duration::from_millis(300)).is_err());
+            let again = writer
+                .downgrade()
+                .undeclare_transport_events_listener_inner(id);
+            assert!(
+                again
+                    .expect_err("a listener that is gone")
+                    .to_string()
+                    .starts_with("Unable to find TransportEventsListener"),
+                "an id the session does not hold is named"
+            );
+            drop(reader);
+        }
+
+        #[test]
+        fn an_undeclaration_that_waits_for_the_callbacks_returns_once_the_engine_has_let_go() {
+            let (writer, _endpoint) = listening("a1b2e6");
+            let (transport_callback, _transported) = transport_events();
+            let (link_callback, _linked) = link_events();
+            let transports = writer
+                .info()
+                .transport_events_listener()
+                .callback(transport_callback)
+                .wait()
+                .expect("declares");
+            let links = writer
+                .info()
+                .link_events_listener()
+                .callback(link_callback)
+                .wait()
+                .expect("declares");
+            // On a thread of its own, so that an undeclaration that never returns fails here and
+            // does not hang the run.
+            let (done, returned) = mpsc::channel();
+            std::thread::spawn(move || {
+                let transports = transports.undeclare().wait_callbacks().wait();
+                let links = links.undeclare().wait_callbacks().wait();
+                let _ = done.send((transports.is_ok(), links.is_ok()));
+            });
+            assert_eq!(returned.recv_timeout(WAIT), Ok((true, true)));
+        }
+
+        /// Two connected nodes, one of which closes with a listener of each kind declared on it in
+        /// the background: what its listeners are told while it closes.
+        fn told_while_closing(
+            closing_the_dialler: bool,
+            ids: (&str, &str),
+        ) -> (Vec<String>, Vec<String>) {
+            let (writer, endpoint) = listening(ids.0);
+            let reader = dialling(ids.1, &endpoint);
+            assert_eq!(connected(&writer, 1).1.len(), 1, "the nodes are linked");
+            assert_eq!(connected(&reader, 1).1.len(), 1, "the nodes are linked");
+            let session = if closing_the_dialler {
+                &reader
+            } else {
+                &writer
+            };
+            let (transport_callback, transported) = transport_events();
+            let (link_callback, linked) = link_events();
+            session
+                .info()
+                .transport_events_listener()
+                .callback(transport_callback)
+                .background()
+                .wait()
+                .expect("declares");
+            session
+                .info()
+                .link_events_listener()
+                .callback(link_callback)
+                .background()
+                .wait()
+                .expect("declares");
+            session.close().wait().expect("closes");
+            std::thread::sleep(Duration::from_millis(500));
+            (
+                transported.try_iter().collect(),
+                linked.try_iter().collect(),
+            )
+        }
+
+        #[test]
+        fn a_listener_of_the_session_that_accepted_a_link_is_told_nothing_of_its_closing() {
+            let told = told_while_closing(false, ("a1b2e1", "a1b2e2"));
+            assert_eq!(told, (vec![], vec![]));
+        }
+
+        /// The engine tells a closing session of the faces it dialled, and the listeners are let
+        /// go of before it does.
+        #[test]
+        fn a_listener_of_the_session_that_dialled_a_link_is_told_nothing_of_its_closing() {
+            let told = told_while_closing(true, ("a1b2f1", "a1b2f2"));
+            assert_eq!(told, (vec![], vec![]));
+        }
+
+        #[test]
+        fn the_channel_of_a_listener_ends_with_its_session() {
+            let (session, _endpoint) = listening("a1b2e5");
+            let transports = session
+                .info()
+                .transport_events_listener()
+                .with(flume::unbounded())
+                .wait()
+                .expect("declares");
+            let links = session
+                .info()
+                .link_events_listener()
+                .with(flume::unbounded())
+                .wait()
+                .expect("declares");
+            session.close().wait().expect("closes");
+            assert_eq!(
+                transports.recv_timeout(WAIT),
+                Err(flume::RecvTimeoutError::Disconnected),
+                "the callback of a transport listener is let go with the session"
+            );
+            assert_eq!(
+                links.recv_timeout(WAIT),
+                Err(flume::RecvTimeoutError::Disconnected),
+                "the callback of a link listener is let go with the session"
+            );
+        }
+
+        #[test]
+        fn a_closed_session_holds_nothing_and_takes_no_listener() {
+            let (writer, endpoint) = listening("a1b2e3");
+            let reader = dialling("a1b2e4", &endpoint);
+            assert_eq!(connected(&reader, 1).1.len(), 1, "the nodes are linked");
+            reader.close().wait().expect("closes");
+            assert!(transports(&reader).is_empty());
+            assert!(links(&reader).is_empty());
+            let (callback, _told) = transport_events();
+            let declared = reader
+                .info()
+                .transport_events_listener()
+                .callback(callback)
+                .wait();
+            assert!(declared.is_err(), "a closed session takes no listener");
+            drop(writer);
         }
     }
 

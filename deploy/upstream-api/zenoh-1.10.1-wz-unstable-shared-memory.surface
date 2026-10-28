@@ -266,6 +266,30 @@ fn zenoh::scouting::ScoutBuilder::callback_mut<F>(Self, F) -> zenoh::scouting::S
 fn zenoh::scouting::ScoutBuilder::with<Handler>(Self, Handler) -> zenoh::scouting::ScoutBuilder<Handler> where Handler: zenoh::handlers::IntoHandler<zenoh::scouting::Hello> ; in impl zenoh::scouting::ScoutBuilder<zenoh::handlers::DefaultHandler>
 fn zenoh::scouting::scout<I: core::convert::Into<zenoh::config::WhatAmIMatcher>, TryIntoConfig>(I, TryIntoConfig) -> zenoh::scouting::ScoutBuilder<zenoh::handlers::DefaultHandler> where <TryIntoConfig as core::convert::TryInto<zenoh::config::Config>>::Error: core::convert::Into<zenoh::Error>, TryIntoConfig: 'static + core::convert::TryInto<zenoh::config::Config> + core::marker::Send
 fn zenoh::session::CloseBuilder::wait_callbacks(Self) -> Self ; in impl zenoh::session::CloseBuilder<zenoh::session::Session>
+fn zenoh::session::Link::auth_identifier(&Self) -> core::option::Option<&str> ; in impl zenoh::session::Link
+fn zenoh::session::Link::dst(&Self) -> &zenoh::config::Locator ; in impl zenoh::session::Link
+fn zenoh::session::Link::group(&Self) -> core::option::Option<&zenoh::config::Locator> ; in impl zenoh::session::Link
+fn zenoh::session::Link::interfaces(&Self) -> &[alloc::string::String] ; in impl zenoh::session::Link
+fn zenoh::session::Link::is_streamed(&Self) -> bool ; in impl zenoh::session::Link
+fn zenoh::session::Link::mtu(&Self) -> u16 ; in impl zenoh::session::Link
+fn zenoh::session::Link::priorities(&Self) -> core::option::Option<(u8, u8)> ; in impl zenoh::session::Link
+fn zenoh::session::Link::reliability(&Self) -> core::option::Option<zenoh::qos::Reliability> ; in impl zenoh::session::Link
+fn zenoh::session::Link::src(&Self) -> &zenoh::config::Locator ; in impl zenoh::session::Link
+fn zenoh::session::Link::zid(&Self) -> &zenoh::session::ZenohId ; in impl zenoh::session::Link
+fn zenoh::session::LinkEvent::kind(&Self) -> zenoh::sample::SampleKind ; in impl zenoh::session::LinkEvent
+fn zenoh::session::LinkEvent::link(&Self) -> &zenoh::session::Link ; in impl zenoh::session::LinkEvent
+fn zenoh::session::LinkEvent::link_mut(&mut Self) -> &mut zenoh::session::Link ; in impl zenoh::session::LinkEvent
+fn zenoh::session::LinkEventsListener::handler(&Self) -> &Handler ; in impl<Handler> zenoh::session::LinkEventsListener<Handler>
+fn zenoh::session::LinkEventsListener::handler_mut(&mut Self) -> &mut Handler ; in impl<Handler> zenoh::session::LinkEventsListener<Handler>
+fn zenoh::session::LinkEventsListener::undeclare(Self) -> zenoh::session::LinkEventsListenerUndeclaration<Handler> where Handler: core::marker::Send ; in impl<Handler> zenoh::session::LinkEventsListener<Handler>
+fn zenoh::session::LinkEventsListenerBuilder::background(Self) -> zenoh::session::LinkEventsListenerBuilder<'0, zenoh::handlers::Callback<zenoh::session::LinkEvent>, true> ; in impl<'0> zenoh::session::LinkEventsListenerBuilder<'0, zenoh::handlers::Callback<zenoh::session::LinkEvent>>
+fn zenoh::session::LinkEventsListenerBuilder::callback<F>(Self, F) -> zenoh::session::LinkEventsListenerBuilder<'0, zenoh::handlers::Callback<zenoh::session::LinkEvent>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::Fn(zenoh::session::LinkEvent) ; in impl<'0, Handler> zenoh::session::LinkEventsListenerBuilder<'0, Handler>
+fn zenoh::session::LinkEventsListenerBuilder::callback_mut<F>(Self, F) -> zenoh::session::LinkEventsListenerBuilder<'0, zenoh::handlers::Callback<zenoh::session::LinkEvent>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::FnMut(zenoh::session::LinkEvent) ; in impl<'0, Handler> zenoh::session::LinkEventsListenerBuilder<'0, Handler>
+fn zenoh::session::LinkEventsListenerBuilder::history(Self, bool) -> Self ; in impl<'0, Handler> zenoh::session::LinkEventsListenerBuilder<'0, Handler>
+fn zenoh::session::LinkEventsListenerBuilder::transport(Self, zenoh::session::Transport) -> Self ; in impl<'0, Handler> zenoh::session::LinkEventsListenerBuilder<'0, Handler>
+fn zenoh::session::LinkEventsListenerBuilder::with<H>(Self, H) -> zenoh::session::LinkEventsListenerBuilder<'0, H> where H: zenoh::handlers::IntoHandler<zenoh::session::LinkEvent> ; in impl<'0, Handler> zenoh::session::LinkEventsListenerBuilder<'0, Handler>
+fn zenoh::session::LinkEventsListenerUndeclaration::wait_callbacks(Self) -> Self ; in impl<Handler> zenoh::session::LinkEventsListenerUndeclaration<Handler>
+fn zenoh::session::LinksBuilder::transport(Self, zenoh::session::Transport) -> Self ; in impl<'0> zenoh::session::LinksBuilder<'0>
 fn zenoh::session::Session::close(&Self) -> zenoh::session::CloseBuilder<Self> ; in impl zenoh::session::Session
 fn zenoh::session::Session::declare_keyexpr<'0, '1: '0, TryIntoKeyExpr>(&'0 Self, TryIntoKeyExpr) -> impl '0 + zenoh::Resolve<zenoh::Result<zenoh::key_expr::KeyExpr<'1>>> where <TryIntoKeyExpr as core::convert::TryInto<zenoh::key_expr::KeyExpr<'1>>>::Error: core::convert::Into<zenoh::Error>, TryIntoKeyExpr: core::convert::TryInto<zenoh::key_expr::KeyExpr<'1>> ; in impl zenoh::session::Session
 fn zenoh::session::Session::declare_publisher<'0, TryIntoKeyExpr>(&Self, TryIntoKeyExpr) -> zenoh::pubsub::PublisherBuilder<'_, '0> where <TryIntoKeyExpr as core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>>>::Error: core::convert::Into<zenoh::Error>, TryIntoKeyExpr: core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>> ; in impl zenoh::session::Session
@@ -298,9 +322,31 @@ fn zenoh::session::SessionGetBuilder::target(Self, zenoh::query::QueryTarget) ->
 fn zenoh::session::SessionGetBuilder::timeout(Self, core::time::Duration) -> Self ; in impl<Handler> zenoh::session::SessionGetBuilder<'_, '_, Handler>
 fn zenoh::session::SessionGetBuilder::timestamp_instrumentation<TS: core::convert::Into<core::option::Option<zenoh::timestamp_stack::TimestampInstrumentation>>>(Self, TS) -> Self ; in impl<Handler> zenoh::session::SessionGetBuilder<'_, '_, Handler>
 fn zenoh::session::SessionGetBuilder::with<Handler>(Self, Handler) -> zenoh::session::SessionGetBuilder<'0, '1, Handler> where Handler: zenoh::handlers::IntoHandler<zenoh::query::Reply> ; in impl<'0, '1> zenoh::session::SessionGetBuilder<'0, '1, zenoh::handlers::DefaultHandler>
+fn zenoh::session::SessionInfo::link_events_listener(&Self) -> zenoh::session::LinkEventsListenerBuilder<'_, zenoh::handlers::DefaultHandler> ; in impl zenoh::session::SessionInfo
+fn zenoh::session::SessionInfo::links(&Self) -> zenoh::session::LinksBuilder<'_> ; in impl zenoh::session::SessionInfo
+fn zenoh::session::SessionInfo::locators(&Self) -> impl '_ + zenoh::Resolve<alloc::vec::Vec<zenoh::config::Locator>> ; in impl zenoh::session::SessionInfo
 fn zenoh::session::SessionInfo::peers_zid(&Self) -> zenoh::session::PeersZenohIdBuilder<'_> ; in impl zenoh::session::SessionInfo
 fn zenoh::session::SessionInfo::routers_zid(&Self) -> zenoh::session::RoutersZenohIdBuilder<'_> ; in impl zenoh::session::SessionInfo
+fn zenoh::session::SessionInfo::transport_events_listener(&Self) -> zenoh::session::TransportEventsListenerBuilder<'_, zenoh::handlers::DefaultHandler> ; in impl zenoh::session::SessionInfo
+fn zenoh::session::SessionInfo::transports(&Self) -> zenoh::session::TransportsBuilder<'_> ; in impl zenoh::session::SessionInfo
 fn zenoh::session::SessionInfo::zid(&Self) -> zenoh::session::ZenohIdBuilder<'_> ; in impl zenoh::session::SessionInfo
+fn zenoh::session::Transport::is_multicast(&Self) -> bool ; in impl zenoh::session::Transport
+fn zenoh::session::Transport::is_qos(&Self) -> bool ; in impl zenoh::session::Transport
+fn zenoh::session::Transport::is_shm(&Self) -> bool ; in impl zenoh::session::Transport
+fn zenoh::session::Transport::whatami(&Self) -> zenoh::config::WhatAmI ; in impl zenoh::session::Transport
+fn zenoh::session::Transport::zid(&Self) -> &zenoh::session::ZenohId ; in impl zenoh::session::Transport
+fn zenoh::session::TransportEvent::kind(&Self) -> zenoh::sample::SampleKind ; in impl zenoh::session::TransportEvent
+fn zenoh::session::TransportEvent::transport(&Self) -> &zenoh::session::Transport ; in impl zenoh::session::TransportEvent
+fn zenoh::session::TransportEvent::transport_mut(&mut Self) -> &mut zenoh::session::Transport ; in impl zenoh::session::TransportEvent
+fn zenoh::session::TransportEventsListener::handler(&Self) -> &Handler ; in impl<Handler> zenoh::session::TransportEventsListener<Handler>
+fn zenoh::session::TransportEventsListener::handler_mut(&mut Self) -> &mut Handler ; in impl<Handler> zenoh::session::TransportEventsListener<Handler>
+fn zenoh::session::TransportEventsListener::undeclare(Self) -> zenoh::session::TransportEventsListenerUndeclaration<Handler> where Handler: core::marker::Send ; in impl<Handler> zenoh::session::TransportEventsListener<Handler>
+fn zenoh::session::TransportEventsListenerBuilder::background(Self) -> zenoh::session::TransportEventsListenerBuilder<'0, zenoh::handlers::Callback<zenoh::session::TransportEvent>, true> ; in impl<'0> zenoh::session::TransportEventsListenerBuilder<'0, zenoh::handlers::Callback<zenoh::session::TransportEvent>>
+fn zenoh::session::TransportEventsListenerBuilder::callback<F>(Self, F) -> zenoh::session::TransportEventsListenerBuilder<'0, zenoh::handlers::Callback<zenoh::session::TransportEvent>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::Fn(zenoh::session::TransportEvent) ; in impl<'0, Handler> zenoh::session::TransportEventsListenerBuilder<'0, Handler>
+fn zenoh::session::TransportEventsListenerBuilder::callback_mut<F>(Self, F) -> zenoh::session::TransportEventsListenerBuilder<'0, zenoh::handlers::Callback<zenoh::session::TransportEvent>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::FnMut(zenoh::session::TransportEvent) ; in impl<'0, Handler> zenoh::session::TransportEventsListenerBuilder<'0, Handler>
+fn zenoh::session::TransportEventsListenerBuilder::history(Self, bool) -> Self ; in impl<'0, Handler> zenoh::session::TransportEventsListenerBuilder<'0, Handler>
+fn zenoh::session::TransportEventsListenerBuilder::with<H>(Self, H) -> zenoh::session::TransportEventsListenerBuilder<'0, H> where H: zenoh::handlers::IntoHandler<zenoh::session::TransportEvent> ; in impl<'0, Handler> zenoh::session::TransportEventsListenerBuilder<'0, Handler>
+fn zenoh::session::TransportEventsListenerUndeclaration::wait_callbacks(Self) -> Self ; in impl<Handler> zenoh::session::TransportEventsListenerUndeclaration<Handler>
 fn zenoh::session::open<TryIntoConfig>(TryIntoConfig) -> zenoh::session::OpenBuilder<TryIntoConfig> where <TryIntoConfig as core::convert::TryInto<zenoh::config::Config>>::Error: core::fmt::Debug, TryIntoConfig: 'static + core::convert::TryInto<zenoh::config::Config> + core::marker::Send
 fn zenoh::timestamp_stack::TimestampInstrumentation::is_instrumented(&Self, zenoh::timestamp_stack::InterceptionPoint) -> bool ; in impl zenoh::timestamp_stack::TimestampInstrumentation
 fn zenoh::timestamp_stack::TimestampInstrumentationBuilder::build(Self) -> zenoh::Result<zenoh::timestamp_stack::TimestampInstrumentation> ; in impl zenoh::timestamp_stack::TimestampInstrumentationBuilder
@@ -350,7 +396,11 @@ impl core::clone::Clone for zenoh::sample::SampleBuilderPut
 impl core::clone::Clone for zenoh::sample::SampleFields
 impl core::clone::Clone for zenoh::sample::SampleKind
 impl core::clone::Clone for zenoh::sample::SourceInfo
+impl core::clone::Clone for zenoh::session::Link
+impl core::clone::Clone for zenoh::session::LinkEvent
 impl core::clone::Clone for zenoh::session::Session
+impl core::clone::Clone for zenoh::session::Transport
+impl core::clone::Clone for zenoh::session::TransportEvent
 impl core::clone::Clone for zenoh::timestamp_stack::InstrumentationTimestamp
 impl core::clone::Clone for zenoh::timestamp_stack::InterceptionPoint
 impl core::clone::Clone for zenoh::timestamp_stack::TimestampInstrumentation
@@ -368,6 +418,10 @@ impl core::cmp::Eq for zenoh::query::ReplyKeyExpr
 impl core::cmp::Eq for zenoh::query::Selector
 impl core::cmp::Eq for zenoh::sample::Locality
 impl core::cmp::Eq for zenoh::sample::SampleKind
+impl core::cmp::Eq for zenoh::session::Link
+impl core::cmp::Eq for zenoh::session::LinkEvent
+impl core::cmp::Eq for zenoh::session::Transport
+impl core::cmp::Eq for zenoh::session::TransportEvent
 impl core::cmp::Eq for zenoh::timestamp_stack::InstrumentationTimestamp
 impl core::cmp::Eq for zenoh::timestamp_stack::InterceptionPoint
 impl core::cmp::Eq for zenoh::timestamp_stack::TimestampInstrumentation
@@ -384,7 +438,11 @@ impl core::cmp::PartialEq for zenoh::query::ReplyKeyExpr
 impl core::cmp::PartialEq for zenoh::query::Selector
 impl core::cmp::PartialEq for zenoh::sample::Locality
 impl core::cmp::PartialEq for zenoh::sample::SampleKind
+impl core::cmp::PartialEq for zenoh::session::Link
+impl core::cmp::PartialEq for zenoh::session::LinkEvent
 impl core::cmp::PartialEq for zenoh::session::Session
+impl core::cmp::PartialEq for zenoh::session::Transport
+impl core::cmp::PartialEq for zenoh::session::TransportEvent
 impl core::cmp::PartialEq for zenoh::timestamp_stack::InstrumentationTimestamp
 impl core::cmp::PartialEq for zenoh::timestamp_stack::InterceptionPoint
 impl core::cmp::PartialEq for zenoh::timestamp_stack::TimestampInstrumentation
@@ -517,6 +575,12 @@ impl core::fmt::Debug for zenoh::sample::SourceInfo
 impl core::fmt::Debug for zenoh::scouting::Scout
 impl core::fmt::Debug for zenoh::scouting::ScoutBuilder
 impl core::fmt::Debug for zenoh::session::CloseBuilder
+impl core::fmt::Debug for zenoh::session::Link
+impl core::fmt::Debug for zenoh::session::LinkEvent
+impl core::fmt::Debug for zenoh::session::LinkEventsListener
+impl core::fmt::Debug for zenoh::session::LinkEventsListenerBuilder
+impl core::fmt::Debug for zenoh::session::LinkEventsListenerUndeclaration
+impl core::fmt::Debug for zenoh::session::LinksBuilder
 impl core::fmt::Debug for zenoh::session::OpenBuilder
 impl core::fmt::Debug for zenoh::session::PeersZenohIdBuilder
 impl core::fmt::Debug for zenoh::session::RoutersZenohIdBuilder
@@ -524,6 +588,12 @@ impl core::fmt::Debug for zenoh::session::Session
 impl core::fmt::Debug for zenoh::session::SessionClosedError
 impl core::fmt::Debug for zenoh::session::SessionGetBuilder
 impl core::fmt::Debug for zenoh::session::SessionInfo
+impl core::fmt::Debug for zenoh::session::Transport
+impl core::fmt::Debug for zenoh::session::TransportEvent
+impl core::fmt::Debug for zenoh::session::TransportEventsListener
+impl core::fmt::Debug for zenoh::session::TransportEventsListenerBuilder
+impl core::fmt::Debug for zenoh::session::TransportEventsListenerUndeclaration
+impl core::fmt::Debug for zenoh::session::TransportsBuilder
 impl core::fmt::Debug for zenoh::session::ZenohIdBuilder
 impl core::fmt::Debug for zenoh::timestamp_stack::InstrumentationTimestamp
 impl core::fmt::Debug for zenoh::timestamp_stack::InterceptionPoint
@@ -561,15 +631,22 @@ impl core::future::into_future::IntoFuture for zenoh::query::ReplyBuilder
 impl core::future::into_future::IntoFuture for zenoh::query::ReplyErrBuilder
 impl core::future::into_future::IntoFuture for zenoh::scouting::ScoutBuilder
 impl core::future::into_future::IntoFuture for zenoh::session::CloseBuilder
+impl core::future::into_future::IntoFuture for zenoh::session::LinkEventsListenerBuilder
+impl core::future::into_future::IntoFuture for zenoh::session::LinkEventsListenerUndeclaration
+impl core::future::into_future::IntoFuture for zenoh::session::LinksBuilder
 impl core::future::into_future::IntoFuture for zenoh::session::OpenBuilder
 impl core::future::into_future::IntoFuture for zenoh::session::PeersZenohIdBuilder
 impl core::future::into_future::IntoFuture for zenoh::session::RoutersZenohIdBuilder
 impl core::future::into_future::IntoFuture for zenoh::session::SessionGetBuilder
+impl core::future::into_future::IntoFuture for zenoh::session::TransportEventsListenerBuilder
+impl core::future::into_future::IntoFuture for zenoh::session::TransportEventsListenerUndeclaration
+impl core::future::into_future::IntoFuture for zenoh::session::TransportsBuilder
 impl core::future::into_future::IntoFuture for zenoh::session::ZenohIdBuilder
 impl core::hash::Hash for zenoh::bytes::Encoding
 impl core::hash::Hash for zenoh::key_expr::KeyExpr
 impl core::hash::Hash for zenoh::qos::Priority
 impl core::hash::Hash for zenoh::query::ReplyKeyExpr
+impl core::hash::Hash for zenoh::session::Link
 impl core::iter::traits::collect::IntoIterator for &zenoh::handlers::fifo::FifoChannelHandler
 impl core::iter::traits::collect::IntoIterator for zenoh::handlers::fifo::FifoChannelHandler
 impl core::iter::traits::exact_size::ExactSizeIterator for zenoh::handlers::fifo::Drain
@@ -597,6 +674,10 @@ impl core::marker::StructuralPartialEq for zenoh::query::ReplyKeyExpr
 impl core::marker::StructuralPartialEq for zenoh::query::Selector
 impl core::marker::StructuralPartialEq for zenoh::sample::Locality
 impl core::marker::StructuralPartialEq for zenoh::sample::SampleKind
+impl core::marker::StructuralPartialEq for zenoh::session::Link
+impl core::marker::StructuralPartialEq for zenoh::session::LinkEvent
+impl core::marker::StructuralPartialEq for zenoh::session::Transport
+impl core::marker::StructuralPartialEq for zenoh::session::TransportEvent
 impl core::marker::StructuralPartialEq for zenoh::timestamp_stack::InstrumentationTimestamp
 impl core::marker::StructuralPartialEq for zenoh::timestamp_stack::InterceptionPoint
 impl core::marker::StructuralPartialEq for zenoh::timestamp_stack::TimestampInstrumentation
@@ -610,10 +691,14 @@ impl core::ops::deref::Deref for zenoh::matching::MatchingListener
 impl core::ops::deref::Deref for zenoh::pubsub::Subscriber
 impl core::ops::deref::Deref for zenoh::query::Queryable
 impl core::ops::deref::Deref for zenoh::scouting::Scout
+impl core::ops::deref::Deref for zenoh::session::LinkEventsListener
+impl core::ops::deref::Deref for zenoh::session::TransportEventsListener
 impl core::ops::deref::DerefMut for zenoh::config::Config
 impl core::ops::deref::DerefMut for zenoh::matching::MatchingListener
 impl core::ops::deref::DerefMut for zenoh::pubsub::Subscriber
 impl core::ops::deref::DerefMut for zenoh::query::Queryable
+impl core::ops::deref::DerefMut for zenoh::session::LinkEventsListener
+impl core::ops::deref::DerefMut for zenoh::session::TransportEventsListener
 impl core::ops::drop::Drop for zenoh::handlers::CallbackDrop
 impl core::ops::drop::Drop for zenoh::liveliness::LivelinessToken
 impl core::ops::drop::Drop for zenoh::matching::MatchingListener
@@ -621,7 +706,9 @@ impl core::ops::drop::Drop for zenoh::pubsub::Publisher
 impl core::ops::drop::Drop for zenoh::pubsub::Subscriber
 impl core::ops::drop::Drop for zenoh::query::Querier
 impl core::ops::drop::Drop for zenoh::query::Queryable
+impl core::ops::drop::Drop for zenoh::session::LinkEventsListener
 impl core::ops::drop::Drop for zenoh::session::Session
+impl core::ops::drop::Drop for zenoh::session::TransportEventsListener
 impl core::panic::unwind_safe::RefUnwindSafe for zenoh::key_expr::KeyExpr
 impl core::panic::unwind_safe::UnwindSafe for zenoh::key_expr::KeyExpr
 impl core::str::traits::FromStr for zenoh::bytes::Encoding
@@ -665,10 +752,16 @@ impl zenoh::Resolvable for zenoh::query::ReplyBuilder
 impl zenoh::Resolvable for zenoh::query::ReplyErrBuilder
 impl zenoh::Resolvable for zenoh::scouting::ScoutBuilder
 impl zenoh::Resolvable for zenoh::session::CloseBuilder
+impl zenoh::Resolvable for zenoh::session::LinkEventsListenerBuilder
+impl zenoh::Resolvable for zenoh::session::LinkEventsListenerUndeclaration
+impl zenoh::Resolvable for zenoh::session::LinksBuilder
 impl zenoh::Resolvable for zenoh::session::OpenBuilder
 impl zenoh::Resolvable for zenoh::session::PeersZenohIdBuilder
 impl zenoh::Resolvable for zenoh::session::RoutersZenohIdBuilder
 impl zenoh::Resolvable for zenoh::session::SessionGetBuilder
+impl zenoh::Resolvable for zenoh::session::TransportEventsListenerBuilder
+impl zenoh::Resolvable for zenoh::session::TransportEventsListenerUndeclaration
+impl zenoh::Resolvable for zenoh::session::TransportsBuilder
 impl zenoh::Resolvable for zenoh::session::ZenohIdBuilder
 impl zenoh::Wait for zenoh::key_expr::KeyExprUndeclaration
 impl zenoh::Wait for zenoh::liveliness::LivelinessGetBuilder
@@ -691,10 +784,16 @@ impl zenoh::Wait for zenoh::query::ReplyBuilder
 impl zenoh::Wait for zenoh::query::ReplyErrBuilder
 impl zenoh::Wait for zenoh::scouting::ScoutBuilder
 impl zenoh::Wait for zenoh::session::CloseBuilder
+impl zenoh::Wait for zenoh::session::LinkEventsListenerBuilder
+impl zenoh::Wait for zenoh::session::LinkEventsListenerUndeclaration
+impl zenoh::Wait for zenoh::session::LinksBuilder
 impl zenoh::Wait for zenoh::session::OpenBuilder
 impl zenoh::Wait for zenoh::session::PeersZenohIdBuilder
 impl zenoh::Wait for zenoh::session::RoutersZenohIdBuilder
 impl zenoh::Wait for zenoh::session::SessionGetBuilder
+impl zenoh::Wait for zenoh::session::TransportEventsListenerBuilder
+impl zenoh::Wait for zenoh::session::TransportEventsListenerUndeclaration
+impl zenoh::Wait for zenoh::session::TransportsBuilder
 impl zenoh::Wait for zenoh::session::ZenohIdBuilder
 impl zenoh::handlers::IntoHandler for zenoh::handlers::Callback
 impl zenoh::handlers::IntoHandler for zenoh::handlers::CallbackDrop
@@ -887,6 +986,12 @@ struct zenoh::sample::SourceInfo
 struct zenoh::scouting::Scout
 struct zenoh::scouting::ScoutBuilder
 struct zenoh::session::CloseBuilder
+struct zenoh::session::Link
+struct zenoh::session::LinkEvent
+struct zenoh::session::LinkEventsListener
+struct zenoh::session::LinkEventsListenerBuilder
+struct zenoh::session::LinkEventsListenerUndeclaration
+struct zenoh::session::LinksBuilder
 struct zenoh::session::OpenBuilder
 struct zenoh::session::PeersZenohIdBuilder
 struct zenoh::session::RoutersZenohIdBuilder
@@ -894,6 +999,12 @@ struct zenoh::session::Session
 struct zenoh::session::SessionClosedError
 struct zenoh::session::SessionGetBuilder
 struct zenoh::session::SessionInfo
+struct zenoh::session::Transport
+struct zenoh::session::TransportEvent
+struct zenoh::session::TransportEventsListener
+struct zenoh::session::TransportEventsListenerBuilder
+struct zenoh::session::TransportEventsListenerUndeclaration
+struct zenoh::session::TransportsBuilder
 struct zenoh::session::ZenohIdBuilder
 struct zenoh::timestamp_stack::TimestampContext
 struct zenoh::timestamp_stack::TimestampInstrumentation

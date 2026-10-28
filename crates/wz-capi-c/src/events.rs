@@ -2619,6 +2619,7 @@ mod tests {
             interfaces: Some(vec!["lo".to_owned()]),
             mtu: 65535,
             group: None,
+            cert_common_name: None,
         };
         let owned = owned_link(LinkState::from_snapshot(&snapshot, [9u8; 16]));
         assert!(unsafe { z_internal_link_check(&owned) });
@@ -2673,6 +2674,7 @@ mod tests {
                 locator: "udp/224.0.0.224:7447".to_owned(),
                 endpoint: "udp/224.0.0.224:7447#iface=lo".to_owned(),
             }),
+            cert_common_name: None,
         };
         let state = LinkState::from_snapshot(&snapshot, [5u8; 16]);
         assert_eq!(state.group.as_deref(), Some("udp/224.0.0.224:7447"));
@@ -2731,6 +2733,7 @@ mod tests {
                 interfaces: None,
                 mtu: 1200,
                 group: None,
+                cert_common_name: None,
             };
             let owned = owned_link(LinkState::from_snapshot(&snapshot, [3u8; 16]));
             let loaned = unsafe { z_link_loan(&owned) };
@@ -2759,6 +2762,7 @@ mod tests {
             interfaces: None,
             mtu: 1024,
             group: None,
+            cert_common_name: None,
         };
         let state = LinkEventState {
             loaned: z_loaned_link_t::from_handle(Box::into_raw(Box::new(LinkState::from_snapshot(

@@ -87,6 +87,13 @@ pub trait SessionEngine: Send + Sync + 'static {
         false
     }
 
+    /// The locators this node's listeners actually got, without the loopback ones: where a
+    /// neighbour can dial it. A node that listens on nothing, and an engine that listens on
+    /// nothing at all, has none, which is the provided answer.
+    fn listen_locators(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Whether any connected peer is a ROUTER — zenoh-pico's `_z_session_has_router_peer`, the
     /// condition under which a peer-mode session sends Interests at all.
     fn has_router_peer(&self) -> bool;

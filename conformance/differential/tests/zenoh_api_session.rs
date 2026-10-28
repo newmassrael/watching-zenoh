@@ -704,6 +704,11 @@ mod observer {
         lines
     }
 
+    /// Close an upstream node, as a peer that goes away.
+    pub fn close(session: &Session) {
+        session.close().wait().expect("closes");
+    }
+
     /// [`seen`] once the session sees `count` transports, or after five seconds.
     pub fn seen_with(session: &Session, count: usize) -> String {
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -1826,6 +1831,324 @@ macro_rules! session_cases {
                 )
             }
 
+            /// The transports and the links of a node of this crate, as it reports them of the
+            /// upstream nodes that dial it and of the one it dials, and the events its listeners
+            /// are told when a peer connects and disconnects: the lists, the lists filtered by a
+            /// transport, the history, the order of the events of a transport and its link, and
+            /// what a node that closes tells its listeners.
+            pub fn connectivities() -> Vec<String> {
+                use std::sync::{Arc, Mutex};
+
+                /// A locator with the port of the listening end named `L` and any other `E`: the
+                /// port of a dialling end is the kernel's pick.
+                fn plain_locator(locator: &str, listen: u16) -> String {
+                    let (address, metadata) = match locator.split_once('?') {
+                        Some((address, metadata)) => (address, format!("?{metadata}")),
+                        None => (locator, String::new()),
+                    };
+                    match address.rsplit_once(':') {
+                        Some((head, port)) if port == listen.to_string() => {
+                            format!("{head}:L{metadata}")
+                        }
+                        Some((head, _)) => format!("{head}:E{metadata}"),
+                        None => locator.to_owned(),
+                    }
+                }
+
+                fn transport_line(transport: &$z::session::Transport) -> String {
+                    format!(
+                        "{} {:?} qos={} multicast={}",
+                        transport.zid(),
+                        transport.whatami(),
+                        transport.is_qos(),
+                        transport.is_multicast()
+                    )
+                }
+
+                /// A link as one line. Its `mtu` is read as present and not as a number: upstream
+                /// derives it from the maximum segment size of the socket of its own end (49152
+                /// on the accepted end of a loopback connection and 65480 on the dialled one, here),
+                /// where this engine reports the batch budget it negotiated, the value the
+                /// advertisement of its INIT carries. The two are numbers of different things, and
+                /// the first depends on the kernel.
+                fn link_line(link: &$z::session::Link, listen: u16) -> String {
+                    format!(
+                        "{} src={} dst={} group={:?} mtu_present={} streamed={} interfaces={:?} \
+                         auth={:?} priorities={:?} reliability={:?}",
+                        link.zid(),
+                        plain_locator(&link.src().to_string(), listen),
+                        plain_locator(&link.dst().to_string(), listen),
+                        link.group().map(|g| g.to_string()),
+                        link.mtu() > 0,
+                        link.is_streamed(),
+                        link.interfaces(),
+                        link.auth_identifier(),
+                        link.priorities(),
+                        link.reliability(),
+                    )
+                }
+
+                fn settle() {
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+
+                fn take(events: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
+                    std::mem::take(&mut *events.lock().unwrap())
+                }
+
+                fn sorted(mut lines: Vec<String>) -> Vec<String> {
+                    lines.sort();
+                    lines
+                }
+
+                fn wait_for_transports(session: &$z::Session, count: usize) {
+                    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                    while session.info().transports().wait().count() != count
+                        && std::time::Instant::now() < deadline
+                    {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                }
+
+                let mut out = vec![];
+                let port = free_port();
+                let subject = $z::open(peer("5a0080", port)).wait().expect("opens");
+                let told_transports = Arc::new(Mutex::new(Vec::<String>::new()));
+                let told_links = Arc::new(Mutex::new(Vec::<String>::new()));
+                let _transports = {
+                    let told = told_transports.clone();
+                    subject
+                        .info()
+                        .transport_events_listener()
+                        .callback(move |event| {
+                            told.lock()
+                                .unwrap()
+                                .push(format!("{:?} {}", event.kind(), transport_line(event.transport())));
+                        })
+                        .wait()
+                        .expect("declares")
+                };
+                let _links = {
+                    let told = told_links.clone();
+                    subject
+                        .info()
+                        .link_events_listener()
+                        .callback(move |event| {
+                            told.lock()
+                                .unwrap()
+                                .push(format!("{:?} {}", event.kind(), link_line(event.link(), port)));
+                        })
+                        .wait()
+                        .expect("declares")
+                };
+                let locators_of = |session: &$z::Session| {
+                    sorted(
+                        session
+                            .info()
+                            .locators()
+                            .wait()
+                            .iter()
+                            .map(|locator| plain_locator(&locator.to_string(), port))
+                            .collect(),
+                    )
+                };
+                out.push(format!("the locators of a node that listens: {:?}", locators_of(&subject)));
+                {
+                    let kernel_picked = $z::open(config(
+                        r#"{ id: "5a0084", mode: "peer",
+                             listen: { endpoints: ["tcp/127.0.0.1:0"] },
+                             scouting: { multicast: { enabled: false } } }"#,
+                    ))
+                    .wait()
+                    .expect("opens");
+                    let alone = $z::open(node("5a0085", "peer", None, None)).wait().expect("opens");
+                    out.push(format!(
+                        "the locators of a node that listens on port 0: {:?}, of one that listens \
+                         on nothing: {:?}",
+                        locators_of(&kernel_picked),
+                        locators_of(&alone)
+                    ));
+                }
+                out.push(format!(
+                    "a node with no peer: transports {:?} links {:?}",
+                    subject.info().transports().wait().count(),
+                    subject.info().links().wait().count()
+                ));
+
+                let first = observer::open("b00080", "peer", None, Some(port)).expect("opens");
+                wait_for_transports(&subject, 1);
+                settle();
+                out.push(format!(
+                    "an upstream peer dials the node: transports {:?} links {:?}",
+                    sorted(subject.info().transports().wait().map(|t| transport_line(&t)).collect()),
+                    sorted(subject.info().links().wait().map(|l| link_line(&l, port)).collect()),
+                ));
+                out.push(format!(
+                    "the events of its opening: transports {:?} links {:?}",
+                    take(&told_transports),
+                    take(&told_links)
+                ));
+
+                let second = observer::open("b00081", "peer", None, Some(port)).expect("opens");
+                wait_for_transports(&subject, 2);
+                settle();
+                let of_first = subject
+                    .info()
+                    .transports()
+                    .wait()
+                    .find(|t| t.zid().to_string() == "b00080")
+                    .expect("a transport to the first peer");
+                out.push(format!(
+                    "two peers: transports {:?} links {:?} links of the first {:?}",
+                    sorted(subject.info().transports().wait().map(|t| transport_line(&t)).collect()),
+                    sorted(subject.info().links().wait().map(|l| link_line(&l, port)).collect()),
+                    sorted(
+                        subject
+                            .info()
+                            .links()
+                            .transport(of_first.clone())
+                            .wait()
+                            .map(|l| link_line(&l, port))
+                            .collect()
+                    ),
+                ));
+                out.push(format!(
+                    "the events of the second: transports {:?} links {:?}",
+                    take(&told_transports),
+                    take(&told_links)
+                ));
+
+                // The listeners declared now: with the history, those that are open; without, none;
+                // and the one of the first peer's links only.
+                let history_transports = Arc::new(Mutex::new(Vec::<String>::new()));
+                let history_links = Arc::new(Mutex::new(Vec::<String>::new()));
+                let filtered_links = Arc::new(Mutex::new(Vec::<String>::new()));
+                let _history_transports = {
+                    let told = history_transports.clone();
+                    subject
+                        .info()
+                        .transport_events_listener()
+                        .history(true)
+                        .callback(move |event| {
+                            told.lock()
+                                .unwrap()
+                                .push(format!("{:?} {}", event.kind(), transport_line(event.transport())));
+                        })
+                        .wait()
+                        .expect("declares")
+                };
+                let _history_links = {
+                    let told = history_links.clone();
+                    subject
+                        .info()
+                        .link_events_listener()
+                        .history(true)
+                        .callback(move |event| {
+                            told.lock()
+                                .unwrap()
+                                .push(format!("{:?} {}", event.kind(), link_line(event.link(), port)));
+                        })
+                        .wait()
+                        .expect("declares")
+                };
+                let _filtered_links = {
+                    let told = filtered_links.clone();
+                    subject
+                        .info()
+                        .link_events_listener()
+                        .history(true)
+                        .transport(of_first)
+                        .callback(move |event| {
+                            told.lock()
+                                .unwrap()
+                                .push(format!("{:?} {}", event.kind(), link_line(event.link(), port)));
+                        })
+                        .wait()
+                        .expect("declares")
+                };
+                out.push(format!(
+                    "listeners with the history: transports {:?} links {:?} links of the first {:?}",
+                    sorted(take(&history_transports)),
+                    sorted(take(&history_links)),
+                    take(&filtered_links)
+                ));
+
+                observer::close(&first);
+                wait_for_transports(&subject, 1);
+                settle();
+                out.push(format!(
+                    "the first peer closes: transports {:?} links {:?}",
+                    sorted(subject.info().transports().wait().map(|t| transport_line(&t)).collect()),
+                    sorted(subject.info().links().wait().map(|l| link_line(&l, port)).collect()),
+                ));
+                out.push(format!(
+                    "the events of its closing: transports {:?} links {:?} | history listeners \
+                     transports {:?} links {:?} | filtered {:?}",
+                    take(&told_transports),
+                    take(&told_links),
+                    take(&history_transports),
+                    take(&history_links),
+                    take(&filtered_links),
+                ));
+
+                // A node that closes tells its listeners nothing of the closing, holds nothing,
+                // and takes no listener.
+                let own_port = free_port();
+                let dialled = observer::open("b00082", "peer", Some(own_port), None).expect("opens");
+                let dialling = $z::open(node("5a0083", "peer", None, Some(own_port))).wait().expect("opens");
+                wait_for_transports(&dialling, 1);
+                settle();
+                out.push(format!(
+                    "a node that dials an upstream peer: transports {:?} links {:?}",
+                    sorted(dialling.info().transports().wait().map(|t| transport_line(&t)).collect()),
+                    sorted(dialling.info().links().wait().map(|l| link_line(&l, own_port)).collect()),
+                ));
+                let on_close = Arc::new(Mutex::new(Vec::<String>::new()));
+                {
+                    let told = on_close.clone();
+                    dialling
+                        .info()
+                        .transport_events_listener()
+                        .callback(move |event| {
+                            told.lock().unwrap().push(format!("{:?}", event.kind()));
+                        })
+                        .background()
+                        .wait()
+                        .expect("declares");
+                    let told = on_close.clone();
+                    dialling
+                        .info()
+                        .link_events_listener()
+                        .callback(move |event| {
+                            told.lock().unwrap().push(format!("{:?}", event.kind()));
+                        })
+                        .background()
+                        .wait()
+                        .expect("declares");
+                }
+                dialling.close().wait().expect("closes");
+                settle();
+                out.push(format!(
+                    "the node closes: told {:?} transports {:?} links {:?}",
+                    take(&on_close),
+                    dialling.info().transports().wait().count(),
+                    dialling.info().links().wait().count()
+                ));
+                out.push(format!(
+                    "a listener after close: {}",
+                    text(
+                        dialling
+                            .info()
+                            .transport_events_listener()
+                            .callback(|_| {})
+                            .wait()
+                            .map(|_| ())
+                    )
+                ));
+                drop((second, dialled, subject));
+                out
+            }
+
             /// Scouting, each way: what a scout of this crate hears of an upstream node that listens
             /// and answers on a group, for the roles it asks for and whether its configuration
             /// enables multicast scouting, how often it hears it and what it hears after it is
@@ -2582,6 +2905,29 @@ fn what_liveliness_tells_is_what_upstream_nodes_tell_each_other() {
         "{u:#?}"
     );
     compare("livelinesses", &u, &w);
+}
+
+#[test]
+fn what_a_node_reports_of_its_transports_and_links_is_what_upstream_reports() {
+    // The log of upstream's nodes, for a run that is asked for it with `RUST_LOG`.
+    up_zenoh::try_init_log_from_env();
+    let (u, w) = (up::connectivities(), wz::connectivities());
+    assert!(
+        u.iter().any(|l| l.starts_with("an upstream peer dials the node: transports [\"b00080 Peer qos=true multicast=false\"]")),
+        "{u:#?}"
+    );
+    assert!(
+        u.iter().any(|l| l == "the locators of a node that listens: [\"tcp/127.0.0.1:L\"]"),
+        "{u:#?}"
+    );
+    assert!(
+        u.iter().any(|l| l.starts_with("the locators of a node that listens on port 0: [\"tcp/127.0.0.1:E\"]")),
+        "{u:#?}"
+    );
+    assert!(u.iter().any(|l| l == "the node closes: told [] transports 0 links 0"), "{u:#?}");
+    assert!(u.iter().any(|l| l.starts_with("the events of its opening: transports [\"Put b00080 Peer")), "{u:#?}");
+    assert!(u.iter().any(|l| l.starts_with("the events of its closing: transports [\"Delete b00080")), "{u:#?}");
+    compare("connectivities", &u, &w);
 }
 
 #[test]

@@ -3783,6 +3783,85 @@ fn a_callback_may_ask_the_queryable_that_answered_it_while_another_thread_drains
     );
 }
 
+/// The guarantee of a caller-drained session is that a call returns once the callbacks it caused
+/// have run, and the drive task drains the same queue: when it takes the batch first, the caller
+/// finds the queue empty while the callback is still running, and a plain drain returns. The
+/// settled drain waits for it, and a drain that a callback makes does not wait for itself.
+#[cfg(all(feature = "codec-push", feature = "pubsub-allow-loop"))]
+#[test]
+fn a_drain_for_the_caller_waits_for_the_callback_another_drainer_is_running() {
+    let (session, _driver) = build_session();
+    // A session that stages and leaves the draining to others, so that the second thread is the
+    // one that takes the fire.
+    let session = session.with_local_delivery_drain(LocalDeliveryDrain::DriveTask);
+    let (started_tx, started) = std::sync::mpsc::channel::<()>();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let (started_tx, released) = (Mutex::new(started_tx), Mutex::new(released));
+    let _sub = session.declare_subscriber("home/settle", SubscribeOptions::default(), move |_| {
+        let _ = started_tx.lock().unwrap().send(());
+        let _ = released.lock().unwrap().recv();
+    });
+    session
+        .publish("home/settle", b"x", PublishOptions::put())
+        .unwrap();
+    let other = {
+        let session = session.clone();
+        std::thread::spawn(move || session.drain_deferred_fires())
+    };
+    started
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the other drainer runs the callback");
+
+    let (done_tx, done) = std::sync::mpsc::channel();
+    let waiter = {
+        let session = session.clone();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(session.drain_deferred_fires_settled());
+        })
+    };
+    assert!(
+        done.recv_timeout(std::time::Duration::from_millis(300))
+            .is_err(),
+        "the drain returned while the callback of the other drainer was running"
+    );
+    release.send(()).unwrap();
+    assert_eq!(
+        done.recv_timeout(std::time::Duration::from_secs(5)),
+        Ok(0),
+        "and it returns once that callback has"
+    );
+    assert_eq!(other.join().unwrap(), 1);
+    waiter.join().unwrap();
+}
+
+/// A callback that makes a call which drains settled is part of the batch the call would wait for,
+/// so the call does not wait: it returns, and the callback with it.
+#[cfg(all(feature = "codec-push", feature = "pubsub-allow-loop"))]
+#[test]
+fn a_callback_that_drains_for_its_own_call_does_not_wait_for_itself() {
+    let (session, _driver) = build_session();
+    let (told_tx, told) = std::sync::mpsc::channel::<usize>();
+    let told_tx = Mutex::new(told_tx);
+    let inside = session.clone();
+    let _sub = session.declare_subscriber("home/nested", SubscribeOptions::default(), move |_| {
+        let _ = told_tx
+            .lock()
+            .unwrap()
+            .send(inside.drain_deferred_fires_settled());
+    });
+    // On a thread of its own, so that a call that waits for itself fails here and does not hang.
+    let publisher = {
+        let session = session.clone();
+        std::thread::spawn(move || {
+            session
+                .publish("home/nested", b"x", PublishOptions::put())
+                .unwrap();
+        })
+    };
+    assert_eq!(told.recv_timeout(std::time::Duration::from_secs(5)), Ok(0));
+    publisher.join().unwrap();
+}
+
 /// R2953 (open-debt item 836) — a query this session asked of ITSELF and a
 /// handler kept is waited for, as upstream's is: the GET's final comes when
 /// the held query is dropped, not when the handler returns, and a reply the

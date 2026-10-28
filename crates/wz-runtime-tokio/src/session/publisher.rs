@@ -450,7 +450,7 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
             // harmless (that is the drive loop's own contract) and keeps the
             // call from having to re-derive a verdict the registry already
             // consumed.
-            self.session.drain_deferred_fires();
+            self.session.drain_registration_fires();
             Ok(listener)
         }
         #[cfg(not(all(feature = "session-matching", feature = "declare-subscriber")))]

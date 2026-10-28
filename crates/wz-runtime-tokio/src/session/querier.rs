@@ -839,7 +839,7 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
             // registering thread; see `Publisher::declare_matching_listener`
             // for the pico contract this mirrors and why the drain is
             // unconditional and placed after the handle exists.
-            self.session.drain_deferred_fires();
+            self.session.drain_registration_fires();
             Ok(listener)
         }
         #[cfg(not(all(feature = "session-matching", feature = "declare-queryable")))]

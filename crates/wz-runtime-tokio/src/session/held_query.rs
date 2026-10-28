@@ -202,7 +202,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     fn drain_or_wake_local(&self) {
         match self.local_delivery {
             LocalDeliveryDrain::Caller => {
-                self.drain_deferred_fires();
+                self.drain_deferred_fires_settled();
             }
             LocalDeliveryDrain::DriveTask => {
                 if let Some(wake) = &self.local_stage_wake {

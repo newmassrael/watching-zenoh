@@ -145,6 +145,10 @@ impl SessionEngine for SharedSession {
         SharedSession::peer_identities(self)
     }
 
+    fn listen_locators(&self) -> Vec<String> {
+        SharedSession::listen_locators(self)
+    }
+
     fn has_router_peer(&self) -> bool {
         SharedSession::has_router_peer(self)
     }

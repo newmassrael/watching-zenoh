@@ -265,3 +265,67 @@ fn self_kill_inside_callback_is_safe_and_final() {
     cell.invoke(|cb| cb());
     assert_eq!(*fired.lock().unwrap(), 1, "killed cell never fires again");
 }
+
+/// A drainer that finds the queue empty because another drainer took the batch has not seen its
+/// fires run: the mark it gets back is not settled while that batch runs, and is once it has.
+#[test]
+fn a_drain_that_finds_the_queue_empty_is_settled_when_the_batch_another_took_has_run() {
+    let queue = Queue::new();
+    let (started_tx, started) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    queue.stage(Box::new(move || {
+        started_tx.send(()).unwrap();
+        released.recv().unwrap();
+    }));
+    let other = {
+        let queue = queue.clone();
+        std::thread::spawn(move || queue.drain(&serializer()))
+    };
+    started.recv().unwrap();
+
+    let (fired, mark) = queue.drain_marked(&serializer());
+    assert_eq!(fired, 0, "the other drainer has the batch");
+    assert!(
+        !queue.is_settled(mark),
+        "the batch the other drainer took is still running"
+    );
+    release.send(()).unwrap();
+    assert_eq!(other.join().unwrap(), 1);
+    assert!(queue.is_settled(mark), "and it has run");
+}
+
+/// Only the batches taken before the mark are waited for: a batch taken after it, however long it
+/// runs, is not one the caller's fires were in.
+#[test]
+fn a_batch_taken_after_the_mark_is_not_waited_for() {
+    let queue = Queue::new();
+    let (_, mark) = queue.drain_marked(&serializer());
+    let (started_tx, started) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    queue.stage(Box::new(move || {
+        started_tx.send(()).unwrap();
+        released.recv().unwrap();
+    }));
+    let other = {
+        let queue = queue.clone();
+        std::thread::spawn(move || queue.drain(&serializer()))
+    };
+    started.recv().unwrap();
+    assert!(queue.is_settled(mark));
+    release.send(()).unwrap();
+    other.join().unwrap();
+}
+
+/// A batch stops being waited for when its job panics, or the waiter would wait for ever.
+#[test]
+fn a_batch_whose_job_panics_is_settled() {
+    let queue = Queue::new();
+    queue.stage(Box::new(|| panic!("a callback that panics")));
+    let panicking = {
+        let queue = queue.clone();
+        std::thread::spawn(move || queue.drain(&serializer()))
+    };
+    assert!(panicking.join().is_err());
+    let (_, mark) = queue.drain_marked(&serializer());
+    assert!(queue.is_settled(mark));
+}

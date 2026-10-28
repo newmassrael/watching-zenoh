@@ -22,7 +22,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use crate::link::LinkKind;
+use crate::link::{LinkKind, LinkSubject};
 #[cfg(feature = "session-unicast")]
 use {
     crate::link::SessionRuntime, crate::session_actions::SessionLinkActions,
@@ -45,6 +45,63 @@ pub struct LinkSnapshot {
     pub mtu: u16,
     /// The group a member of a joined group is reached through, `None` on a unicast link.
     pub group: Option<GroupLink>,
+    /// The common name on the peer's leaf certificate, `None` for a link that presents no
+    /// certificate or whose certificate names none ([`crate::link::LinkSubject::cert_common_name`]
+    /// states the collapse). Read it through [`Self::auth_identifier`], which says for which
+    /// links a name is the identifier of the link.
+    pub cert_common_name: Option<String>,
+}
+
+impl LinkSnapshot {
+    /// A link of a unicast face from `src` to `dst`, as the `subject` of its transport and the
+    /// `mtu` negotiated on it describe it. A link whose driver gives no subject has no kind, no
+    /// interfaces and no certificate.
+    pub fn unicast(src: &str, dst: &str, subject: Option<&LinkSubject>, mtu: u16) -> Self {
+        Self {
+            src: String::from(src),
+            dst: String::from(dst),
+            kind: subject.and_then(|s| s.kind),
+            interfaces: subject.and_then(|s| s.interfaces.clone()),
+            mtu,
+            group: None,
+            cert_common_name: subject.and_then(|s| s.cert_common_name.clone()),
+        }
+    }
+
+    /// Whether the link carries a byte stream rather than framed datagrams, as the Rust API's
+    /// `Link::is_streamed` reports it. A link whose driver cannot name its kind is not streamed:
+    /// nothing is known of it to say otherwise.
+    pub fn is_streamed(&self) -> bool {
+        self.kind.is_some_and(|kind| kind.is_streamed())
+    }
+
+    /// Whether the link delivers reliably, as the Rust API's `Link::reliability` reports it, and
+    /// `None` for a link whose driver cannot name its kind.
+    pub fn is_reliable(&self) -> Option<bool> {
+        self.kind.map(|kind| kind.is_reliable())
+    }
+
+    /// The identifier the link authenticated the peer by, as the Rust API's
+    /// `Link::auth_identifier` reports it: the common name of the leaf certificate of a TLS or a
+    /// QUIC link, and nothing for the others, the reliable UDP link among them, which upstream
+    /// gives the UDP auth id although it runs over QUIC
+    /// (`io/zenoh-links/zenoh-link-udp/src/unicast.rs` @ `&LinkAuthId::Udp`).
+    pub fn auth_identifier(&self) -> Option<&str> {
+        use crate::link::LinkKind;
+        match self.kind? {
+            LinkKind::Tls | LinkKind::Quic | LinkKind::QuicDatagram => {
+                self.cert_common_name.as_deref()
+            }
+            LinkKind::Tcp
+            | LinkKind::Udp
+            | LinkKind::UdpReliable
+            | LinkKind::Serial
+            | LinkKind::Unixpipe
+            | LinkKind::UnixsockStream
+            | LinkKind::Vsock
+            | LinkKind::Ws => None,
+        }
+    }
 }
 
 /// The group under a group member's link, in the two spellings the two upstreams report it
@@ -104,14 +161,7 @@ impl FaceSnapshot {
         let links = actions
             .link_endpoints_all()
             .into_iter()
-            .map(|e| LinkSnapshot {
-                src: String::from(e.src.as_str()),
-                dst: String::from(e.dst.as_str()),
-                kind: subject.as_ref().and_then(|s| s.kind),
-                interfaces: subject.as_ref().and_then(|s| s.interfaces.clone()),
-                mtu,
-                group: None,
-            })
+            .map(|e| LinkSnapshot::unicast(e.src.as_str(), e.dst.as_str(), subject.as_ref(), mtu))
             .collect();
         // A build without `transport-qos` never negotiates the ext, so `false` is the MEASURED
         // answer there rather than a stand-in: there is no conduit split to report. `is_qos`
@@ -151,3 +201,81 @@ pub enum FaceEventKind {
 /// `Arc` rather than `Box` because a registry clones the sink list OUT of its lock before it
 /// invokes any of them: a sink may reach code that re-enters the registry.
 pub type FaceEventSink = Arc<dyn Fn(FaceEventKind, &FaceSnapshot) + Send + Sync>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn named_subject(kind: Option<LinkKind>) -> LinkSubject {
+        LinkSubject {
+            kind,
+            interfaces: Some(alloc::vec![String::from("lo")]),
+            ..LinkSubject::default()
+        }
+        .with_cert_common_name(Some(String::from("alice")))
+    }
+
+    #[test]
+    fn a_unicast_link_reads_what_its_subject_says() {
+        let subject = named_subject(Some(LinkKind::Tls));
+        let link = LinkSnapshot::unicast(
+            "tls/10.0.0.1:7447",
+            "tls/10.0.0.2:5000",
+            Some(&subject),
+            1200,
+        );
+        assert_eq!(link.src, "tls/10.0.0.1:7447");
+        assert_eq!(link.dst, "tls/10.0.0.2:5000");
+        assert_eq!(link.kind, Some(LinkKind::Tls));
+        assert_eq!(link.interfaces, Some(alloc::vec![String::from("lo")]));
+        assert_eq!(link.mtu, 1200);
+        assert!(link.group.is_none());
+        assert_eq!(link.cert_common_name.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn a_link_with_no_subject_says_nothing_of_itself() {
+        let link = LinkSnapshot::unicast("tcp/a", "tcp/b", None, 1);
+        assert_eq!(link.kind, None);
+        assert_eq!(link.interfaces, None);
+        assert_eq!(link.cert_common_name, None);
+        assert!(
+            !link.is_streamed(),
+            "nothing is known of it to say it streams"
+        );
+        assert_eq!(link.is_reliable(), None);
+        assert_eq!(link.auth_identifier(), None);
+    }
+
+    #[test]
+    fn a_link_answers_streamed_and_reliable_as_its_kind_does() {
+        for kind in LinkKind::ALL {
+            let subject = named_subject(Some(*kind));
+            let link = LinkSnapshot::unicast("a", "b", Some(&subject), 1);
+            assert_eq!(link.is_streamed(), kind.is_streamed(), "{kind:?}");
+            assert_eq!(link.is_reliable(), Some(kind.is_reliable()), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn only_a_tls_or_quic_link_names_its_peer_by_the_name_on_its_certificate() {
+        for kind in LinkKind::ALL {
+            let subject = named_subject(Some(*kind));
+            let link = LinkSnapshot::unicast("a", "b", Some(&subject), 1);
+            let names = matches!(
+                kind,
+                LinkKind::Tls | LinkKind::Quic | LinkKind::QuicDatagram
+            );
+            assert_eq!(
+                link.auth_identifier(),
+                names.then_some("alice"),
+                "{kind:?}: the reliable UDP link, which runs over QUIC, has the UDP auth id"
+            );
+        }
+        // A TLS link whose peer presented no certificate has no name to give.
+        let mut subject = named_subject(Some(LinkKind::Tls));
+        subject.cert_common_name = None;
+        let link = LinkSnapshot::unicast("a", "b", Some(&subject), 1);
+        assert_eq!(link.auth_identifier(), None);
+    }
+}

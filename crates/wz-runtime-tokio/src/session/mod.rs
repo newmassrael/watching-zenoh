@@ -358,6 +358,33 @@ use crate::session_glue::SessionLinkActions;
 type ShmValueRef<'a> = &'a crate::shm_provider::ShmBackedPayload;
 #[cfg(all(feature = "transport-unicast", not(feature = "transport-shm")))]
 type ShmValueRef<'a> = &'a core::convert::Infallible;
+thread_local! {
+    /// How many drains of a session's deferred fires this thread is inside of: the jobs of a
+    /// drain run on the thread that drains, so a nonzero depth says a callback may be running.
+    static DRAIN_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// A thread's stay inside a drain of the deferred fires, counted in [`DRAIN_DEPTH`].
+struct Draining;
+
+impl Draining {
+    fn enter() -> Self {
+        DRAIN_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        Draining
+    }
+
+    /// Whether this thread is inside a drain, and so may be running a callback.
+    fn active() -> bool {
+        DRAIN_DEPTH.with(|depth| depth.get() > 0)
+    }
+}
+
+impl Drop for Draining {
+    fn drop(&mut self) {
+        DRAIN_DEPTH.with(|depth| depth.set(depth.get() - 1));
+    }
+}
+
 /// How one query's selector is spelled, on the wire and for the legs that stay in
 /// this process: the `(mapping_id, suffix)` pair the wire carries (`0` and the whole
 /// literal when nothing was declared), and the LITERAL expression the loopback leg and
@@ -2305,7 +2332,53 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     /// drain-after-dispatch contract); calling it while holding the
     /// observer lock self-deadlocks on the first take.
     pub fn drain_deferred_fires(&self) -> usize {
+        let _draining = Draining::enter();
         self.fires.drain(&self.observer)
+    }
+
+    /// Run the fires a registration staged on the registering thread, as the policy of the session
+    /// has the staging calls of a host do: settled under [`LocalDeliveryDrain::Caller`], which
+    /// promises the callback has run when the registration returns, and as before under
+    /// [`LocalDeliveryDrain::DriveTask`], whose host may be holding a lock the drive task's
+    /// callbacks want.
+    #[cfg(all(
+        feature = "session-matching",
+        any(feature = "declare-subscriber", feature = "declare-queryable")
+    ))]
+    fn drain_registration_fires(&self) -> usize {
+        match self.local_delivery {
+            LocalDeliveryDrain::Caller => self.drain_deferred_fires_settled(),
+            LocalDeliveryDrain::DriveTask => self.drain_deferred_fires(),
+        }
+    }
+
+    /// [`Self::drain_deferred_fires`] for a call that must not return before the fires it staged
+    /// have run, the guarantee of [`LocalDeliveryDrain::Caller`]: the drive loop drains the same
+    /// queue, and when it takes the batch first the caller finds the queue empty while its fires
+    /// are still being run, so a plain drain returns early. This waits for the batches taken
+    /// before the caller's own take found nothing.
+    ///
+    /// A call made from a callback that a drain is running does not wait: it is part of one of
+    /// those batches and would wait for itself, and the callbacks of the other batches may be
+    /// parked behind it by their cells.
+    pub fn drain_deferred_fires_settled(&self) -> usize {
+        let nested = Draining::active();
+        let (fired, mark) = {
+            let _draining = Draining::enter();
+            self.fires.drain_marked(&self.observer)
+        };
+        if !nested {
+            let mut waited = 0u32;
+            while !self.fires.is_settled(mark) {
+                waited += 1;
+                if waited < 64 {
+                    std::thread::yield_now();
+                } else {
+                    std::thread::sleep(std::time::Duration::from_micros(100));
+                }
+            }
+        }
+        fired
     }
 
     /// R311y554 — adopt a [`LocalDeliveryDrain`] policy for this session.
@@ -2468,7 +2541,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     #[cfg(feature = "pubsub-allow-loop")]
     fn drain_local_fires_if_inline(&self) -> usize {
         match self.local_delivery {
-            LocalDeliveryDrain::Caller => self.drain_deferred_fires(),
+            LocalDeliveryDrain::Caller => self.drain_deferred_fires_settled(),
             LocalDeliveryDrain::DriveTask => {
                 // R2932 — the wake this policy owes, paid where every loopback
                 // publish passes. A spurious one (nothing matched) costs the
@@ -2511,7 +2584,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     fn finalize_local_query(&self, rid: u64) {
         match self.local_delivery {
             LocalDeliveryDrain::Caller => {
-                self.drain_deferred_fires();
+                self.drain_deferred_fires_settled();
                 #[cfg(feature = "query-queryable")]
                 if defer_final_to_holder(&self.final_holds, FinalKey { rid, local: true }, None) {
                     return;
@@ -2519,7 +2592,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                 R::with_mutex_mut(&self.observer, |observer| {
                     observer.replies.deliver_local_final(rid);
                 });
-                self.drain_deferred_fires();
+                self.drain_deferred_fires_settled();
             }
             LocalDeliveryDrain::DriveTask => {
                 let observer = self.observer.clone();

@@ -101,7 +101,7 @@
 //! the full history.)
 
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
@@ -118,6 +118,40 @@ pub type FireJob = Box<dyn FnOnce() + Send + 'static>;
 /// every deferred sink installed in a registry keeps another.
 pub struct DeferredFireQueue<R: Runtime> {
     jobs: Arc<R::Mutex<Vec<FireJob>>>,
+    batches: Arc<R::Mutex<Batches>>,
+}
+
+/// The batches the drainers have taken: how many, and which are still running.
+///
+/// A drainer that finds the queue empty has not thereby seen its own fires run, because another
+/// drainer may have taken them and be running them still. This is what lets a caller that must
+/// not return before its fires have run ask for that ([`DeferredFireQueue::drain_marked`] and
+/// [`DeferredFireQueue::is_settled`]).
+#[derive(Default)]
+struct Batches {
+    /// How many batches have been taken, which numbers the next.
+    taken: u64,
+    /// The numbers of the batches whose jobs are running.
+    running: BTreeSet<u64>,
+}
+
+/// A point in the order the drainers take batches: every batch taken before it is a batch that
+/// [`DeferredFireQueue::is_settled`] waits for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Mark(u64);
+
+/// A batch that is being run, which stops running when it is dropped, a job that panics included.
+struct RunningBatch<'a, R: Runtime> {
+    queue: &'a DeferredFireQueue<R>,
+    number: u64,
+}
+
+impl<R: Runtime> Drop for RunningBatch<'_, R> {
+    fn drop(&mut self) {
+        R::with_mutex_mut(&self.queue.batches, |batches| {
+            batches.running.remove(&self.number);
+        });
+    }
 }
 
 // Manual Clone: a derive would add the unwanted `R: Clone` bound
@@ -126,6 +160,7 @@ impl<R: Runtime> Clone for DeferredFireQueue<R> {
     fn clone(&self) -> Self {
         Self {
             jobs: Arc::clone(&self.jobs),
+            batches: Arc::clone(&self.batches),
         }
     }
 }
@@ -141,6 +176,7 @@ impl<R: Runtime> DeferredFireQueue<R> {
     pub fn new() -> Self {
         Self {
             jobs: Arc::new(R::new_mutex(Vec::new())),
+            batches: Arc::new(R::new_mutex(Batches::default())),
         }
     }
 
@@ -199,17 +235,57 @@ impl<R: Runtime> DeferredFireQueue<R> {
     where
         G: Send + 'static,
     {
+        self.drain_marked(serializer).0
+    }
+
+    /// [`Self::drain`], and the [`Mark`] of the take that found the queue empty: every batch
+    /// another drainer took before it is one whose jobs may still be running when this returns,
+    /// and [`Self::is_settled`] says when they are not.
+    ///
+    /// The mark is read in the same window of the serializer as the take, so a batch is either
+    /// before it (and was numbered when it was taken) or taken after this call found nothing.
+    pub fn drain_marked<G>(&self, serializer: &<R as Runtime>::Mutex<G>) -> (usize, Mark)
+    where
+        G: Send + 'static,
+    {
         let mut fired = 0;
         loop {
-            let batch = R::with_mutex_mut(serializer, |_serialized| self.take_batch());
-            if batch.is_empty() {
-                return fired;
-            }
+            let (batch, number, mark) = R::with_mutex_mut(serializer, |_serialized| {
+                let batch = self.take_batch();
+                R::with_mutex_mut(&self.batches, |batches| {
+                    let mark = Mark(batches.taken);
+                    if batch.is_empty() {
+                        return (batch, None, mark);
+                    }
+                    let number = batches.taken;
+                    batches.taken += 1;
+                    batches.running.insert(number);
+                    (batch, Some(number), mark)
+                })
+            });
+            let Some(number) = number else {
+                return (fired, mark);
+            };
+            let _running = RunningBatch {
+                queue: self,
+                number,
+            };
             for job in batch {
                 job();
                 fired += 1;
             }
         }
+    }
+
+    /// Whether every batch taken before `mark` has finished running: the fires a caller staged
+    /// are all run once its own [`Self::drain_marked`] has returned and this is true.
+    ///
+    /// A caller that waits on it must not be running a job itself: a job is part of a batch, and
+    /// it would wait for itself.
+    pub fn is_settled(&self, mark: Mark) -> bool {
+        R::with_mutex_mut(&self.batches, |batches| {
+            batches.running.range(..mark.0).next().is_none()
+        })
     }
 
     /// Number of currently staged (not yet drained) jobs.

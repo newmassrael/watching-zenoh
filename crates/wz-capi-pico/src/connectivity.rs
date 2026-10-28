@@ -1931,6 +1931,7 @@ mod tests {
                 interfaces: None,
                 mtu: 2048,
                 group: None,
+                cert_common_name: None,
             }],
         }
     }
@@ -2005,6 +2006,7 @@ mod tests {
                 locator: "udp/224.0.0.224:7447".to_owned(),
                 endpoint: "udp/224.0.0.224:7447#iface=lo".to_owned(),
             }),
+            cert_common_name: None,
         };
         let held = HeldLink(link_of([7; 16], &member));
         assert_eq!(held.0.src.as_bytes(), b"udp/224.0.0.224:7447iface=lo");
@@ -2037,6 +2039,7 @@ mod tests {
                 locator: "reth/aa:bb:cc:dd:ee:ff".to_owned(),
                 endpoint: "reth/30:03:8c:c8:00:a2#iface=lo;whitelist=30:03:8c:c8:00:a1,".to_owned(),
             }),
+            cert_common_name: None,
         };
         let held = HeldLink(link_of([7; 16], &member));
         assert_eq!(
@@ -2272,6 +2275,7 @@ mod tests {
                         interfaces: None,
                         mtu: 1,
                         group: None,
+                        cert_common_name: None,
                     },
                 ),
             };
@@ -2337,6 +2341,7 @@ mod tests {
                     interfaces: Some(vec!["eth0".into()]),
                     mtu: 1,
                     group: None,
+                    cert_common_name: None,
                 },
             );
             let mut group = z_owned_string_t::null_value();

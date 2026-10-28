@@ -701,12 +701,52 @@ Each lands whole with its surface lines, tests and faults in one round.
   upstream scout hear a node of each side, with equal transcripts. The surface falls to 2, 115 and
   119 lines of the three arms; 8 injected faults, none missed (one did not compile at first and
   was redone).
-- **Z6a. The unstable arm: information.** `info().links()`, `transports()`, the link and transport
-  event listeners, `connectivity`.
-- **Z6b. The unstable arm: timestamps.** The timestamp stack (53 surface lines,
-  48 upstream tests, no model in wz's engine: it needs one).
-- **Z6c. The unstable arm: the rest of the session, query, key expression, sample and config
-  lines.**
+- **Z6a (landed). The unstable arm: information.** `info().transports()`, `links()` (also by a
+  transport), `locators()`, and the transport and link event listeners with their builders
+  (`callback`, `callback_mut`, `with`, `history`, `background`, `transport`), their undeclaration
+  (`wait_callbacks`), and the types `Transport`, `Link`, `TransportEvent`, `LinkEvent`.
+  **Decision: the engine already reports what the API lists, so the crate reads it and the port
+  gains one accessor.** `SessionEngine` had `face_snapshots`, `watch_faces` and `unwatch_faces`
+  (the connectivity plane of the C ABI); the crate turns a snapshot into a `Face` (a `Transport`
+  and its `Link`s) at the engine boundary, and a listener is one watch of the engine's faces. A
+  face that comes up is a `Put` of its transport and then of each link, one that goes down a
+  `Delete` of each link and of its transport, as upstream's handlers emit them. `locators()` reads
+  what the port now says, `listen_locators`: the locators the listeners actually got, without the
+  loopback ones, recorded as they bind (late binds included) and not only for a session that
+  gossips. The model of a link gained the common name on the certificate of its peer
+  (`LinkSnapshot::cert_common_name`), from which `auth_identifier` is the name of a TLS or QUIC
+  link and nothing for the others, the reliable UDP link among them, as upstream's auth ids are.
+  A closing session lets go of its listeners before the engine closes: the faces a session
+  dialled go down with it and would tell them, where upstream's close drops them first. One
+  difference is recorded and not mended: `Link::mtu` is the batch budget the engine negotiated,
+  where upstream reports the maximum segment size of the socket of its own end (49152 on the
+  accepted end of a loopback connection and 65480 on the dialled one, here), so the differential
+  compares its presence and not its value; reporting upstream's number means the link drivers
+  compute it, and the budget it would change is the batch size the INIT advertises. The unit tests
+  open two nodes and check the lists, the filter by a transport, the history, the order of the
+  events, the undeclaration and its wait for the callbacks, the end of a listener's channel with
+  its session, a session that closes at either end, a listener that binds late, and the mapping
+  from the engine's snapshot (roles, QoS, reliability, priorities, groups, a certificate) with no
+  socket; the differential has a node of each side connect to, and be dialled by, an upstream node
+  and compares the lists and the events of both. The surface falls to 2, 5 and 8 lines of the
+  three arms; 17 injected faults, none missed in the end (three were missed at first: a guard that
+  was dead code and was removed, a release before the close that no test closed at the dialled end
+  and now one does, and an undeclaration that hung where it should fail).
+  The default-feature unit run of the top crate also failed once on an older test, one that
+  counts a callback right after the `put` that fired it: a caller-drained session promises that a
+  call returns once its callbacks have run, and the drive task drains the same queue, so when it
+  took the batch first the caller found the queue empty while the callback was still running. The
+  queue now numbers the batches it hands out, `DeferredFireQueue::drain_marked` returns the mark
+  of the take that found it empty and `is_settled` says when every batch before the mark has run,
+  and the session's `drain_deferred_fires_settled` waits for that, except from a callback (it is
+  part of one of the batches, and the others may be parked behind it). The staging calls of a
+  `Caller` session use it, and a `DriveTask` session, whose host may hold a lock the drive task's
+  callbacks want, drains as before. 4 injected faults, none missed (one hung where it should fail,
+  and a test of its own now fails it).
+- **Z6b. The unstable arm: timestamps.** `Session::new_timestamp`, `OpenBuilder::with_timestamp_callback`
+  and `Query::timestamp_stack`: the timestamp stack (48 upstream tests, no model in wz's engine: it
+  needs one).
+- **Z6c. The unstable arm: the rest.** `Session::config` and `GIT_VERSION`.
 - **Z7. The shared-memory arm.** `get_shm_provider`, the provider state and the transport.
 - **Z8. The graph.** Upstream's tests and examples and `zenoh-ext` built and run against the
   patched graph, on Linux and on Windows. A test that cannot pass is a recorded difference with its

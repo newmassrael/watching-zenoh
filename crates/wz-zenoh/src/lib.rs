@@ -624,7 +624,9 @@ pub mod session {
     #[zenoh_macros::unstable]
     pub use zenoh_protocol::core::EntityId;
 
-    // Of upstream's module the link and transport events and `WeakSession` arrive with slice Z6a.
+    // Of upstream's module the `init` builder, internal there, is not here.
+    #[zenoh_macros::internal]
+    pub use crate::api::session::WeakSession;
     pub use crate::api::{
         builders::{
             close::CloseBuilder,
@@ -635,6 +637,20 @@ pub mod session {
         },
         info::SessionInfo,
         session::{open, Session, SessionClosedError, Undeclarable},
+    };
+    #[zenoh_macros::unstable]
+    pub use crate::api::{
+        builders::{
+            info_links::{
+                LinkEventsListener, LinkEventsListenerBuilder, LinkEventsListenerUndeclaration,
+                LinksBuilder,
+            },
+            info_transport::{
+                TransportEventsListener, TransportEventsListenerBuilder,
+                TransportEventsListenerUndeclaration, TransportsBuilder,
+            },
+        },
+        info::{Link, LinkEvent, Transport, TransportEvent},
     };
 }
 
