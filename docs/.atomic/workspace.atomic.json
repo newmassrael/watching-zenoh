@@ -296204,6 +296204,50 @@
         "Step 7d-2: honour the gateway/south config key (move it between the surface lists, the reader field, the expansion row, the census pins in one commit). A peer with a partition has no stock zenohd witness yet. Also open: stale LinkstateForwarder comments and the linkstate_forward module name; the router's subscriber and queryable interest dumps return early on an unrestricted interest; a current subscriber Interest from a north peer; a router node's south peer region relays nothing between link-state peers. Read the hosted run for the Layer Z and E6 pending-gc legs."
       ]
     },
+    "Round 3854": {
+      "decision_summary": "Z6c of the seam note, the rest of the unstable arm, is landed: Session::config and GIT_VERSION, and the surface of zenoh falls to 0, 0 and 3 lines of its three arms, so that the default and the unstable arms are whole and what is left is the shared-memory arm of Z7. Decision: the session holds the configuration it was opened with and the crate names its own build. The session keeps a Notifier of the ExpandedConfig made from its Config, as upstream's runtime does, and Session::config hands out a GenericConfig over it, through the IConfig the configuration crate names: the reads, the text, the default timeout of a query, and the write of a key of a plugin that every handle sees. GIT_VERSION is v, the version of the crate, a dash and the commit, as upstream composes it; a build script asks git describe for the commit with the arguments upstream's git_version takes, so that no crate joins the graph. Z6 is complete.",
+      "changes_bullets": [
+        "crates/wz-zenoh/src/api/config.rs and crates/wz-zenoh/src/api/session.rs: the session keeps the notifier of its configuration, Session::config hands out a GenericConfig over it, and IConfig is implemented for the notifier.",
+        "crates/wz-zenoh/build.rs, crates/wz-zenoh/Cargo.toml and crates/wz-zenoh/src/lib.rs: GIT_VERSION, composed from the version of the crate and the commit that git describe names, or release.",
+        "conformance/differential/tests/zenoh_api_session.rs and scripts/run-ci.sh: the configurations case and the E18 count 23 to 24; scripts/lib/rust_api_surface.py: the ratchet 0, 0 and 3; the three wz surface files; docs/zenoh-api-on-the-engine.md."
+      ],
+      "verification_bullets": [
+        "The new unit tests of the top crate pass with all features (4: the configuration a session was opened with, by key and as a whole, the write of a key of a plugin that every handle sees and the refusal of another, the configuration of each session as its own, and the shape of the version), and the default build checks without them. 4 faults were injected one at a time (the version without its prefix, a copy of the notifier for each call, a session that holds the default configuration, a default timeout that reads as zero): each failed a test, none failed to compile, and the sources were diffed against their snapshot after each.",
+        "The differential (Layer E18, 24 tests, conformance/differential/tests/zenoh_api_session.rs) passes with the new case: two sessions opened with the same configuration say the same of each key, of a key that is not there, of the text of the whole, of the typed reads and of what a write of a plugin's key and of another key does, and the version has the same shape; the port a node listens on and the source location an error names are each side's own and are written alike. The surface gate passes with the ratchet at 0, 0 and 3: the default and the unstable arms are whole.",
+        "Clippy with warnings denied is clean for the top crate (defaults and all features), the runtime with ext-pubsub, the session core, the port, the capi core and both ABIs; the tests of the session core (with and without the stack), of the top crate, of the runtime and of the capi core and the ABIs pass; the whole workspace and the facade with api-compat-rust check; rustfmt is clean. The static gates pass, the capability cost gate with them, and no image moved: the build script is of the top crate, which no image links.",
+        "Layer C1bnl: every leg of the non-default table passed except wz-tls-mbedtls, whose build stops because the vendor/mbedtls submodule is empty in this worktree and on the build host; that crate is not touched.",
+        "Not run here: the hosted run."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "The shared-memory arm of the surface keeps 3 lines (with_shm_clients, get_shm_provider and ShmProviderState): Z7.",
+        "The test both_crates_keep_a_confirmed_descriptor_and_invalidate_the_others_alike in conformance/differential/tests/zenoh_shm_metadata.rs waits on the clock for the validator and failed once on a loaded build host; it wants a wait on the validator's own cycle instead of a pause.",
+        "Next in order: Z7, the shared-memory arm, then Z8, the graph."
+      ],
+      "publishable_decision_summary": "Z6c of the seam note, the rest of the unstable arm, is landed: Session::config and GIT_VERSION, and the surface of zenoh falls to 0, 0 and 3 lines of its three arms, so that the default and the unstable arms are whole and what is left is the shared-memory arm of Z7. Decision: the session holds the configuration it was opened with and the crate names its own build. The session keeps a Notifier of the ExpandedConfig made from its Config, as upstream's runtime does, and Session::config hands out a GenericConfig over it, through the IConfig the configuration crate names: the reads, the text, the default timeout of a query, and the write of a key of a plugin that every handle sees. GIT_VERSION is v, the version of the crate, a dash and the commit, as upstream composes it; a build script asks git describe for the commit with the arguments upstream's git_version takes, so that no crate joins the graph. Z6 is complete.",
+      "publishable_changes_bullets": [
+        "crates/wz-zenoh/src/api/config.rs and crates/wz-zenoh/src/api/session.rs: the session keeps the notifier of its configuration, Session::config hands out a GenericConfig over it, and IConfig is implemented for the notifier.",
+        "crates/wz-zenoh/build.rs, crates/wz-zenoh/Cargo.toml and crates/wz-zenoh/src/lib.rs: GIT_VERSION, composed from the version of the crate and the commit that git describe names, or release.",
+        "conformance/differential/tests/zenoh_api_session.rs and scripts/run-ci.sh: the configurations case and the E18 count 23 to 24; scripts/lib/rust_api_surface.py: the ratchet 0, 0 and 3; the three wz surface files; docs/zenoh-api-on-the-engine.md."
+      ],
+      "publishable_verification_bullets": [
+        "The new unit tests of the top crate pass with all features (4: the configuration a session was opened with, by key and as a whole, the write of a key of a plugin that every handle sees and the refusal of another, the configuration of each session as its own, and the shape of the version), and the default build checks without them. 4 faults were injected one at a time (the version without its prefix, a copy of the notifier for each call, a session that holds the default configuration, a default timeout that reads as zero): each failed a test, none failed to compile, and the sources were diffed against their snapshot after each.",
+        "The differential (Layer E18, 24 tests, conformance/differential/tests/zenoh_api_session.rs) passes with the new case: two sessions opened with the same configuration say the same of each key, of a key that is not there, of the text of the whole, of the typed reads and of what a write of a plugin's key and of another key does, and the version has the same shape; the port a node listens on and the source location an error names are each side's own and are written alike. The surface gate passes with the ratchet at 0, 0 and 3: the default and the unstable arms are whole.",
+        "Clippy with warnings denied is clean for the top crate (defaults and all features), the runtime with ext-pubsub, the session core, the port, the capi core and both ABIs; the tests of the session core (with and without the stack), of the top crate, of the runtime and of the capi core and the ABIs pass; the whole workspace and the facade with api-compat-rust check; rustfmt is clean. The static gates pass, the capability cost gate with them, and no image moved: the build script is of the top crate, which no image links.",
+        "Layer C1bnl: every leg of the non-default table passed except wz-tls-mbedtls, whose build stops because the vendor/mbedtls submodule is empty in this worktree and on the build host; that crate is not touched.",
+        "Not run here: the hosted run."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The shared-memory arm of the surface keeps 3 lines (with_shm_clients, get_shm_provider and ShmProviderState): Z7.",
+        "The test both_crates_keep_a_confirmed_descriptor_and_invalidate_the_others_alike in conformance/differential/tests/zenoh_shm_metadata.rs waits on the clock for the validator and failed once on a loaded build host; it wants a wait on the validator's own cycle instead of a pause.",
+        "Next in order: Z7, the shared-memory arm, then Z8, the graph."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
