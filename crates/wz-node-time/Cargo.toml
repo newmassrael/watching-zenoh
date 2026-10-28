@@ -34,7 +34,14 @@ default = []
 # The node clock is a Hybrid Logical Clock (zenoh's `Option<Arc<HLC>>` on the Runtime). Off, a node
 # holds none: `NodeHlc` is zero-sized, nothing stamps, and every consumer falls back to the wall
 # clock, which is zenoh's own `None` arm. The tokio runtime's feature of the same name forwards here.
-time-hlc = []
+#
+# The clock also has a standing (`wz_session_core::clock_standing`): the host reports whether it
+# follows a reference, and the `clock-quality-stamping` policy can refuse to stamp with a clock
+# that does not.
+time-hlc = ["wz-session-core/clock-quality"]
+# A clock the application registered, which can be held over and can run free once the host's bound
+# on holdover has passed (the two states `clock-source` adds to the standing).
+clock-source = ["time-hlc", "wz-session-core/clock-source"]
 # The forward-path stamp (`NodeHlc::treat_timestamp`) works on a Push, so it needs the Push codec.
 codec-push = ["wz-codecs/codec-push", "wz-session-core/codec-push"]
 # The send-side gate `set_push_timestamp` routes through: with it off a forward stamp is a

@@ -154,9 +154,17 @@ timestamp, so the reject path allocates.
   and are documented where they happen: a source with no date stamps nothing (`uhlc`'s clock
   could not say so), and the bound reads `UHLC_MAX_DELTA_MS` itself, since the crate that read it
   is no longer in the path.
-* `clock-quality-stamping = synchronized-only` makes a node with no good clock stamp nothing and
-  say so, instead of stamping with a time it does not trust. The default stamps, as a node does
-  today.
+* `clock-quality-stamping = trusted-only` (landed; the values are `always` and `trusted-only`)
+  makes a node whose clock is not trusted stamp nothing on the data it forwards, take no
+  timestamp into its clock and count the data it passed on as it came (`NodeHlc::unstamped`).
+  Trusted is `Synchronized`, or `Holdover` under `clock-source`. The host reports the standing
+  (`NodeHlc::report_sync_acquired`, `report_sync_lost`, `report_holdover_expired`); a node nobody
+  reports for stays `Unsynchronized`, so `trusted-only` on a host that never reports stamps
+  nothing, which is what it says. A storage that needs a time to order what it keeps still takes
+  one from the system clock. The default stamps, as a node does today. `CLOCK_MAX_FORWARD_STEP_MS`
+  is landed with it and sets the bound `NodeHlc` was given as a constant; `clock-source` as a
+  capability and `CLOCK_SOURCES` wait for the registration door (step 2), because declared before
+  it they would configure nothing.
 * The wire form stays zenoh's (`uhlc` is the reference of the core above) and is not replaced by
   SCE's `hlc_send` and `hlc_receive`. They are the same algorithm in a different shape: SCE keeps wall time in
   milliseconds, a `uint32` counter and a `uint64` node id as three fields, where zenoh packs the
@@ -264,7 +272,7 @@ sampler symbol.
 
 | Step | Builds | Done when |
 |---|---|---|
-| 1 | `HlcCore` over `EpochSource` tested against `uhlc` (done), `NodeHlc` on the core (done), `ClockQuality` machine (done: `clock_standing`, features `clock-quality` and `clock-source`), `clock-source` limits and the `clock-quality-stamping` policy | The stamp and wire tests pass on the tokio host and on the cooperative engine; slot bytes unchanged off; the `algorithm` for the comparison is generated and used by Rust. |
+| 1 | `HlcCore` over `EpochSource` tested against `uhlc` (done), `NodeHlc` on the core (done), `ClockQuality` machine (done: `clock_standing`, features `clock-quality` and `clock-source`), `clock-quality-stamping` and `CLOCK_MAX_FORWARD_STEP_MS` (done); `clock-source` capability and `CLOCK_SOURCES` move to step 2 | The stamp and wire tests pass on the tokio host and on the cooperative engine; slot bytes unchanged off; the `algorithm` for the comparison is generated and used by Rust. |
 | 2 | Clock registration in the C ABIs | `capi-c` ABI revision and the pico export pins updated in the same change; the drop-in leg stays green. |
 | 3 | `EventRing` and the `log` sink | The model test and the concurrency check pass; off build has no symbol; the ring contract is written down and sent to SCE. |
 | 4 | Supervision machine and its checkpoints | Conformance over every event order; the cooperative engine hosts it with no task. |

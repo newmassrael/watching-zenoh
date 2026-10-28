@@ -292,6 +292,18 @@ config WZ_LIMIT_TX_EXPIRY_CLOSE_AFTER
 	  closes the session, which is the policy as it was before this limit. At most
 	  65535: a larger value counts as 65535. It is read only when that policy is on.
 
+config WZ_LIMIT_CLOCK_MAX_FORWARD_STEP_MS
+	int "CLOCK_MAX_FORWARD_STEP_MS"
+	default 500
+	help
+	  How far ahead of the node's clock, in milliseconds, a timestamp from another
+	  node may be before the node's hybrid logical clock refuses it, as zenoh's
+	  UHLC_MAX_DELTA_MS. A refused timestamp is not taken into the clock, and the
+	  data carrying it is stamped afresh or dropped as the timestamping settings say.
+	  A host that sets the environment variable UHLC_MAX_DELTA_MS to a whole number of
+	  milliseconds overrides this at start, as it does zenoh's own bound. 0 refuses
+	  any timestamp ahead of the clock.
+
 config WZ_LIMIT_DECLARATION_SYNC_BURST_MESSAGES
 	int "DECLARATION_SYNC_BURST_MESSAGES"
 	default 8

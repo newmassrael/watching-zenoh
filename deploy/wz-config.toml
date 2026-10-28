@@ -1928,6 +1928,20 @@ closes the session, which is the policy as it was before this limit. At most
 '''
 
 [[limit]]
+id = "CLOCK_MAX_FORWARD_STEP_MS"
+kconfig = "WZ_LIMIT_CLOCK_MAX_FORWARD_STEP_MS"
+default = 500
+help = '''
+How far ahead of the node's clock, in milliseconds, a timestamp from another
+node may be before the node's hybrid logical clock refuses it, as zenoh's
+UHLC_MAX_DELTA_MS. A refused timestamp is not taken into the clock, and the
+data carrying it is stamped afresh or dropped as the timestamping settings say.
+A host that sets the environment variable UHLC_MAX_DELTA_MS to a whole number of
+milliseconds overrides this at start, as it does zenoh's own bound. 0 refuses
+any timestamp ahead of the clock.
+'''
+
+[[limit]]
 id = "DECLARATION_SYNC_BURST_MESSAGES"
 kconfig = "WZ_LIMIT_DECLARATION_SYNC_BURST_MESSAGES"
 default = 8
@@ -2203,6 +2217,26 @@ with a sequence-number width of its own. A session that negotiates a width
 below its peer's runs the narrower ring of the two; a ring of 8 bits wraps
 after 128 frames in flight, so a narrow width asks a deployment to know its
 traffic. The request-id resolution is not part of this policy.
+'''
+
+[[policy]]
+id = "clock-quality-stamping"
+kind = "choice"
+kconfig = "WZ_POLICY_CLOCK_QUALITY_STAMPING"
+choices = ["always", "trusted-only"]
+default = "always"
+upstream = "Stamps with whatever time the system clock reads, and has no notion of whether that clock is set or follows a reference."
+since = 2
+help = '''
+Whether a node stamps data with a time it does not trust. `always` stamps with
+the clock's reading whatever its standing. `trusted-only` stamps only while the
+clock is synchronised to a reference, or held over from one within the bound
+the host keeps: before the host first reports a reference, and once that bound
+has passed, the node stamps no data it forwards, takes no timestamp into its
+clock and counts the data it passed on as it came. A storage that needs a time
+to order what it keeps still takes one from the system clock. The host reports
+the clock's standing, because only the host knows it: a time daemon, a
+satellite receiver, a fieldbus master.
 '''
 
 # The role of a node in a zenoh network: upstream's `mode`. A global axis (it names no image),

@@ -95,7 +95,69 @@ fn frozen_node(zid: &[u8]) -> NodeHlc {
     NodeHlc {
         clock: Some(build_clock(zid, FrozenEpoch)),
         drop_future_timestamp: false,
+        trusted_only: false,
     }
+}
+
+/// A stamping node whose clock is frozen and whose `clock-quality-stamping` policy is the one
+/// named, so a test says which value it is about whatever the build states.
+#[cfg(feature = "time-hlc")]
+fn frozen_node_with_policy(zid: &[u8], trusted_only: bool) -> NodeHlc {
+    frozen_node(zid).with_trusted_only_stamping(trusted_only)
+}
+
+#[cfg(feature = "time-hlc")]
+#[test]
+fn the_policy_always_stamps_with_a_clock_no_reference_was_reported_for() {
+    let node = frozen_node_with_policy(&[0x01], false);
+    assert!(node.stamp().is_some(), "`always` ignores the standing");
+    assert_eq!(node.unstamped(), 0);
+}
+
+#[cfg(feature = "time-hlc")]
+#[test]
+fn the_policy_trusted_only_stamps_nothing_until_a_reference_is_reported_and_after_it_is_lost() {
+    let node = frozen_node_with_policy(&[0x01], true);
+    assert!(node.stamp().is_none(), "no reference yet");
+
+    assert!(node.report_sync_acquired());
+    assert!(node.stamp().is_some(), "a reference is followed");
+
+    assert!(node.report_sync_lost());
+    #[cfg(not(feature = "clock-source"))]
+    assert!(
+        node.stamp().is_none(),
+        "without a registered clock a loss is untrusted"
+    );
+    #[cfg(feature = "clock-source")]
+    {
+        assert!(node.stamp().is_some(), "held over, within the host's bound");
+        assert!(node.report_holdover_expired());
+        assert!(node.stamp().is_none(), "free running is not trusted");
+    }
+
+    assert!(node.report_sync_acquired());
+    assert!(node.stamp().is_some(), "a reference back is followed again");
+}
+
+#[cfg(feature = "time-hlc")]
+#[test]
+fn clones_share_one_standing() {
+    let node = frozen_node_with_policy(&[0x01], true);
+    let other = node.clone();
+    node.report_sync_acquired();
+    assert!(
+        other.stamp().is_some(),
+        "a report through one handle is seen by the other"
+    );
+}
+
+#[test]
+fn a_node_with_no_clock_has_no_standing_to_report() {
+    let node = NodeHlc::disabled();
+    assert!(!node.report_sync_acquired());
+    assert!(!node.report_sync_lost());
+    assert_eq!(node.unstamped(), 0);
 }
 
 #[cfg(feature = "time-hlc")]
@@ -104,6 +166,7 @@ fn a_node_whose_source_cannot_say_the_time_stamps_nothing() {
     let node = NodeHlc {
         clock: Some(build_clock(&[0x01], UnsetEpoch)),
         drop_future_timestamp: false,
+        trusted_only: false,
     };
     assert!(
         node.is_stamping(),
@@ -117,11 +180,11 @@ fn a_node_whose_source_cannot_say_the_time_stamps_nothing() {
 fn the_bound_is_zenohs_unless_the_variable_says_a_whole_number_of_milliseconds() {
     use wz_session_core::ntp64::Ntp64;
     let ms = |n: u64| Ntp64::from_duration(core::time::Duration::from_millis(n));
-    assert_eq!(max_delta_from(None), ms(500));
+    assert_eq!(max_delta_from(None), ms(DEFAULT_MAX_DELTA_MS));
     assert_eq!(max_delta_from(Some("20")), ms(20));
     assert_eq!(max_delta_from(Some(" 3000 ")), ms(3000));
-    assert_eq!(max_delta_from(Some("soon")), ms(500));
-    assert_eq!(max_delta_from(Some("-5")), ms(500));
+    assert_eq!(max_delta_from(Some("soon")), ms(DEFAULT_MAX_DELTA_MS));
+    assert_eq!(max_delta_from(Some("-5")), ms(DEFAULT_MAX_DELTA_MS));
 }
 
 #[cfg(feature = "time-hlc")]
@@ -225,6 +288,44 @@ mod forward_stamp {
         let mut after = before.clone();
         node.treat_timestamp(&mut after);
         assert_eq!(before, after, "a non-stamping node must not touch the Push");
+    }
+
+    #[cfg(feature = "time-hlc")]
+    #[test]
+    fn a_trusted_only_node_relays_a_bare_put_unstamped_until_its_clock_is_followed() {
+        let node = frozen_node_with_policy(&[0xA1], true);
+        let before = bare_put();
+
+        let mut untrusted = before.clone();
+        assert_eq!(
+            node.treat_timestamp(&mut untrusted),
+            TimestampVerdict::Relay
+        );
+        assert_eq!(
+            before, untrusted,
+            "an untrusted clock leaves the Put as it came"
+        );
+        assert_eq!(node.unstamped(), 1, "and the Put is counted");
+
+        node.report_sync_acquired();
+        let mut trusted = before.clone();
+        node.treat_timestamp(&mut trusted);
+        assert!(
+            read_push_timestamp(&trusted).is_some(),
+            "a followed clock stamps"
+        );
+        assert_eq!(node.unstamped(), 1, "a stamped Put is not counted");
+    }
+
+    #[cfg(feature = "time-hlc")]
+    #[test]
+    fn an_untrusted_clock_does_not_judge_a_future_timestamp_nor_drop_it() {
+        // Dropping needs a judgement, and a clock that is not to be trusted has none to give.
+        let node = frozen_node_with_policy(&[0xA1], true).with_drop_future_timestamp(true);
+        let far = stamped_put(u64::MAX - 1, &[0xB2]);
+        let mut push = far.clone();
+        assert_eq!(node.treat_timestamp(&mut push), TimestampVerdict::Relay);
+        assert_eq!(far, push);
     }
 
     #[cfg(feature = "time-hlc")]

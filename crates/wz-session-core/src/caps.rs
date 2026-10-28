@@ -415,6 +415,11 @@ pub const TX_NO_PROGRESS_WINDOW_US: usize = generated::TX_NO_PROGRESS_WINDOW_US;
 /// size: it sizes no memory.
 pub const TX_EXPIRY_CLOSE_AFTER: usize = generated::TX_EXPIRY_CLOSE_AFTER;
 
+/// How far ahead of the node's clock, in milliseconds, a timestamp from another node may be before
+/// the hybrid logical clock ([`crate::hlc::HlcCore`]) refuses it: zenoh's `UHLC_MAX_DELTA_MS`, which
+/// is 500 unless the host states otherwise. A time and not a table size: it sizes no memory.
+pub const CLOCK_MAX_FORWARD_STEP_MS: usize = generated::CLOCK_MAX_FORWARD_STEP_MS;
+
 /// How many declarations one turn of a paced declaration replay sends, when the
 /// `declaration-sync-pacing` policy is on (`docs/declaration-sync-pacing.md`). It is read only
 /// then, by the reconnect supervisor of the heap runtime, and must be at least `1`: a turn that

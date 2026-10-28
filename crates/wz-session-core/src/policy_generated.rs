@@ -198,6 +198,49 @@ impl Default for SnResolution {
     }
 }
 
+/// `clock-quality-stamping`: Whether a node stamps data with a time it does not trust.
+/// `always` stamps with the clock's reading whatever its standing. `trusted-only` stamps
+/// only while the clock is synchronised to a reference, or held over from one within the
+/// bound the host keeps: before the host first reports a reference, and once that bound has
+/// passed, the node stamps no data it forwards, takes no timestamp into its clock and
+/// counts the data it passed on as it came. A storage that needs a time to order what it
+/// keeps still takes one from the system clock. The host reports the clock's standing,
+/// because only the host knows it: a time daemon, a satellite receiver, a fieldbus master.
+/// Upstream: Stamps with whatever time the system clock reads, and has no notion of whether
+/// that clock is set or follows a reference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClockQualityStamping {
+    /// `always`.
+    Always,
+    /// `trusted-only`.
+    TrustedOnly,
+}
+
+impl ClockQualityStamping {
+    /// The value as the declaration, the Kconfig and the environment spell it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Always => "always",
+            Self::TrustedOnly => "trusted-only",
+        }
+    }
+
+    const CHOICES: [&str; 2] = ["always", "trusted-only"];
+    const ALL: [Self; 2] = [Self::Always, Self::TrustedOnly];
+
+    const fn stated() -> Self {
+        let stated = option_env!("WZ_POLICY_CLOCK_QUALITY_STAMPING");
+        let index = policy_choice(stated, &Self::CHOICES, 0);
+        Self::ALL[index]
+    }
+}
+
+impl Default for ClockQualityStamping {
+    fn default() -> Self {
+        Self::stated()
+    }
+}
+
 /// What this build decided beyond upstream's behaviour.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -231,6 +274,9 @@ pub struct SessionPolicy {
     /// InitSyn and in the Join of a group, and has no setting for another: zenoh's
     /// `Resolution` default and zenoh-pico's `Z_SN_RESOLUTION 0x02`.
     pub sn_resolution: SnResolution,
+    /// `clock-quality-stamping`. Upstream: Stamps with whatever time the system clock
+    /// reads, and has no notion of whether that clock is set or follows a reference.
+    pub clock_quality_stamping: ClockQualityStamping,
 }
 
 impl SessionPolicy {
@@ -244,6 +290,7 @@ impl SessionPolicy {
         let subscriber_overload = SubscriberOverload::stated();
         let key_set = KeySet::stated();
         let sn_resolution = SnResolution::stated();
+        let clock_quality_stamping = ClockQualityStamping::stated();
         Self {
             multicast_loopback,
             tx_no_progress_deadline,
@@ -253,6 +300,7 @@ impl SessionPolicy {
             subscriber_overload,
             key_set,
             sn_resolution,
+            clock_quality_stamping,
         }
     }
 }

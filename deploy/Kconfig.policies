@@ -177,4 +177,28 @@ config WZ_POLICY_SN_RESOLUTION_BITS_64
 
 endchoice
 
+choice WZ_POLICY_CLOCK_QUALITY_STAMPING
+	prompt "clock-quality-stamping"
+	default WZ_POLICY_CLOCK_QUALITY_STAMPING_ALWAYS
+	help
+	  Whether a node stamps data with a time it does not trust. `always` stamps with
+	  the clock's reading whatever its standing. `trusted-only` stamps only while the
+	  clock is synchronised to a reference, or held over from one within the bound
+	  the host keeps: before the host first reports a reference, and once that bound
+	  has passed, the node stamps no data it forwards, takes no timestamp into its
+	  clock and counts the data it passed on as it came. A storage that needs a time
+	  to order what it keeps still takes one from the system clock. The host reports
+	  the clock's standing, because only the host knows it: a time daemon, a
+	  satellite receiver, a fieldbus master.
+	  Upstream: Stamps with whatever time the system clock reads, and has no notion
+	  of whether that clock is set or follows a reference.
+
+config WZ_POLICY_CLOCK_QUALITY_STAMPING_ALWAYS
+	bool "always"
+
+config WZ_POLICY_CLOCK_QUALITY_STAMPING_TRUSTED_ONLY
+	bool "trusted-only"
+
+endchoice
+
 endmenu
