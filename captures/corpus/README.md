@@ -45,6 +45,10 @@ The original captures are not kept anywhere.
 | `zenoh15-tcp-full.pcap` | zenoh | TCP | an upstream zenohd 1.5.0 router |
 | `zenoh15-tcp-midsession.pcap` | zenoh | TCP | the same, joined six seconds in |
 | `zenoh15-udp-full.pcap` | zenoh | UDP unicast | the same, from before the first Init |
+| `zenoh-v1-10-0-tcp-full.pcap`, `zenoh-v1-10-0-udp-full.pcap` | zenoh | TCP, UDP unicast | an upstream zenohd 1.10.0 router (the eclipse/zenoh image), from before the first Init |
+| `zenoh-v1-9-0-tcp-full.pcap`, `zenoh-v1-9-0-udp-full.pcap` | zenoh | TCP, UDP unicast | the same with 1.9.0 |
+| `zenoh-v1-8-0-tcp-full.pcap`, `zenoh-v1-8-0-udp-full.pcap` | zenoh | TCP, UDP unicast | the same with 1.8.0 |
+| `zenoh-v1-7-2-tcp-full.pcap`, `zenoh-v1-7-2-udp-full.pcap` | zenoh | TCP, UDP unicast | the same with 1.7.2 |
 | `zenoh-pico-tcp.pcap` | zenoh | TCP | zenoh-pico 1.10.1 clients |
 | `zenoh-pico-udp.pcap` | zenoh | UDP unicast | zenoh-pico 1.10.1 clients |
 | `zenoh-handshakes.pcap` | zenoh | TCP and UDP | 240 short sessions, the handshake checks' population |
@@ -72,8 +76,8 @@ The original captures are not kept anywhere.
 ## What it does not hold yet
 
 On the zenoh side versions other than
-1.10.1 and 1.5.0 and links other than loopback, an emulated lossy one and one
-office Wi-Fi link.
+1.10.1, 1.10.0, 1.9.0, 1.8.0, 1.7.2 and 1.5.0 (all with 1.10.1 clients) and
+links other than loopback, an emulated lossy one and one office Wi-Fi link.
 Each is added the same way: captured from the real
 implementation, a parser in the anonymiser where a payload of other devices can
 carry an identity, and the measured tally pinned beside the others. QUIC needed

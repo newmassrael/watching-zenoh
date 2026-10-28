@@ -250,10 +250,11 @@ the weights by `model_weights_are_their_stated_probabilities`):
 
 - zenoh's chance of each failure is the one-sided 95% Clopper-Pearson upper
   bound on its count, and the confirming outcome takes the rest: 0 residual
-  and 0 undecoded in 3062 units; 0 framings lost in 268 directions held from
-  their start; 0 differing cookies in 264 echoes; 0 Init pairs of one kind in
-  264; 0 other versions in 528 version headers. The zenoh files are 1.10.1
-  routers and clients, an upstream 1.5.0 router, zenoh-pico 1.10.1 clients,
+  and 0 undecoded in 3594 units; 0 framings lost in 284 directions held from
+  their start; 0 differing cookies in 280 echoes; 0 Init pairs of one kind in
+  280; 0 other versions in 560 version headers. The zenoh files are 1.10.1
+  routers and clients, upstream 1.5.0, 1.7.2, 1.8.0, 1.9.0 and 1.10.0 routers
+  with 1.10.1 clients (the eclipse/zenoh images), zenoh-pico 1.10.1 clients,
   240 short sessions captured for their handshakes, a lossy link, and a real
   link between two machines (an office Wi-Fi: TCP with small and 3000-byte
   samples, joined mid-session, UDP, and zenoh-pico);
@@ -267,22 +268,22 @@ the weights by `model_weights_are_their_stated_probabilities`):
 | outcome | `yes` sum | `no` sum | model 1 |
 |---|---|---|---|
 | unit read whole | +964 | +3858 | +2603 |
-| unit residual | -9998 | -8406 | -6745 |
-| unit undecoded | -9998 | -9260 | -7000 |
-| stream framing held | +4088 | +6978 | (none) |
-| stream framing lost | -6491 | -6480 | (none) |
-| cookie matched (8 bytes) | +63984 | +63984 | +63999 |
-| cookie differing | -6470 | -6470 | -10000 |
-| Inits of opposite kinds | +984 | +984 | +999 |
-| Inits of one kind | -5470 | -5470 | -9000 |
+| unit residual | -10229 | -8637 | -6745 |
+| unit undecoded | -10229 | -9491 | -7000 |
+| stream framing held | +4089 | +6979 | (none) |
+| stream framing lost | -6574 | -6563 | (none) |
+| cookie matched (8 bytes) | +63985 | +63985 | +63999 |
+| cookie differing | -6554 | -6554 | -10000 |
+| Inits of opposite kinds | +985 | +985 | +999 |
+| Inits of one kind | -5554 | -5554 | -9000 |
 | version of this reader | +7992 | +7992 | +8000 |
-| another version | -7460 | -7460 | (none) |
+| another version | -7545 | -7545 | (none) |
 
 The unit weight fell because the corpus's real mDNS reads a unit whole 36% of
 the time where the generated mDNS model 1 was priced on did 16%: model 1's
 weight claimed more than the bytes give, against a protocol the corpus holds.
 The handshake violations weigh less than model 1's assumed `2^-10` gave them:
-264 clean handshakes bound a failure only to about 1.1%, and a weight may not
+280 clean handshakes bound a failure only to about 1.1%, and a weight may not
 claim more than the corpus shows.
 
 **The SN steps stay assumed, as a tolerance.** How often a step breaks is a
@@ -299,7 +300,7 @@ first: a unit framed (held) or a desynchronisation this reader inferred
 capture holds from its SYN: a tap that joins a zenoh stream later lands inside
 a unit nearly always and loses the framing too, so there the observation says
 how the capture began and not what the bytes are. Held from the start, zenoh
-never lost it (0 in 268). The forty short MQTT connections lose it in both
+never lost it (0 in 284). The forty short MQTT connections lose it in both
 directions and read `undecided` still: twenty-odd bytes a direction are too
 few to say `no` at 2^-20, and that is the honest word.
 
@@ -309,7 +310,7 @@ raweth capture moved from `yes` to `undecided`: a version header, seven units
 read whole and one SN break come to about ten and a half bits, and model 1's
 crossing rested on the unit weight the real mDNS beats.
 
-Still open after model 2: zenoh versions other than 1.10.1 and 1.5.0, links
+Still open after model 2: zenoh versions other than 1.10.1, 1.10.0, 1.9.0,
+1.8.0, 1.7.2 and 1.5.0 (and routers only: the clients are all 1.10.1), links
 other than loopback, one emulated lossy link and one Wi-Fi link, and the
-null side only on the protocols the corpus holds (a busier LAN's DHCP, NTP,
-LLMNR and WS-Discovery from real implementations are still to add).
+null side only on the protocols the corpus holds.

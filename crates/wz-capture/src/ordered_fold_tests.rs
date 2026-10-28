@@ -592,7 +592,7 @@ fn the_walk_from_nothing_is_the_whole_walk_and_from_a_mark_is_its_tail() {
 /// sum: a broken step, -3994 millibits, beside a unit read whole, +3858), and
 /// with a hundred and forty of them the sum is about -15 bits and the word
 /// still `undecided`. An Init of another protocol version then arrives: its
-/// version header (-7460) or its unit, which does not decode (-9260), is more
+/// version header (-7545) or its unit, which does not decode (-9491), is more
 /// than the 5 bits left, the `no` sum crosses its threshold, and the word
 /// becomes `no`. That Init names no node, so nothing else a fold is
 /// judged by moves, which is what isolates the word. A selector that reads

@@ -294,20 +294,20 @@ pub mod model {
 
     /// `log2(1 - e)`, the zenoh side of a cookie match: a zenoh OpenSyn fails
     /// to echo its InitAck's cookie with chance `e`, the bound of 0 failures
-    /// in the corpus's 264 echoes ([`measured::ZENOH_COOKIE`]).
-    pub const COOKIE_ECHO_FIDELITY: i64 = -16;
+    /// in the corpus's 280 echoes ([`measured::ZENOH_COOKIE`]).
+    pub const COOKIE_ECHO_FIDELITY: i64 = -15;
 
     /// `log2(e / 1)`: a cookie that differs. An arbitrary pair of byte strings
     /// differs with chance close to one.
-    pub const COOKIE_ECHO_VIOLATED: Weight = Weight::both(-6_470);
+    pub const COOKIE_ECHO_VIOLATED: Weight = Weight::both(-6_554);
 
     /// `log2((1 - e) / (1/2))`: two Inits of opposite kinds, which two
     /// arbitrary Inits are with chance one half; `e` the bound of 0 pairs of
-    /// one kind in 264 ([`measured::ZENOH_ROLES`]).
-    pub const INIT_ROLES_CONFIRMED: Weight = Weight::both(984);
+    /// one kind in 280 ([`measured::ZENOH_ROLES`]).
+    pub const INIT_ROLES_CONFIRMED: Weight = Weight::both(985);
 
     /// `log2(e / (1/2))`: two Inits of the same kind.
-    pub const INIT_ROLES_VIOLATED: Weight = Weight::both(-5_470);
+    pub const INIT_ROLES_VIOLATED: Weight = Weight::both(-5_554);
 
     /// `log2((1 - 2^-4) / 2^-8)`: a frame one step after the last. A varint
     /// equals a given value with chance at most `2^-8`, and a zenoh frame
@@ -321,13 +321,13 @@ pub mod model {
     /// `log2((1 - e) / 2^-8)`: the version byte of a message that names one
     /// is this reader's. A byte equals it by chance `2^-8`, and a zenoh flow
     /// of this version names another with chance `e`, the bound of 0 in the
-    /// corpus's 528 version headers ([`measured::ZENOH_VERSIONS`]).
+    /// corpus's 560 version headers ([`measured::ZENOH_VERSIONS`]).
     pub const VERSION_HEADER: Weight = Weight::both(7_992);
 
     /// `log2(e / (1 - 2^-8))`: it names another version. Model 1 weighed
     /// only the match, which bounds neither sum: an observation that can only
     /// confirm raises the `yes` sum's expectation under the null.
-    pub const VERSION_FOREIGN: Weight = Weight::both(-7_460);
+    pub const VERSION_FOREIGN: Weight = Weight::both(-7_545);
 
     /// A unit read whole. Zenoh: one less the two failures' bounds. `yes`:
     /// mDNS's bound, 13 of 36 units; `no`: the members' average.
@@ -336,34 +336,34 @@ pub mod model {
         no: 3_858,
     };
 
-    /// A unit with bytes left over. Zenoh: the bound of 0 in 3062 units;
+    /// A unit with bytes left over. Zenoh: the bound of 0 in 3594 units;
     /// `yes`: QUIC's 22 of 22; `no`: the members' average.
     pub const UNIT_RESIDUAL: Weight = Weight {
-        yes: -9_998,
-        no: -8_406,
+        yes: -10_229,
+        no: -8_637,
     };
 
     /// A unit that did not decode. Zenoh: as residual; `yes`: SSDP's 26 of
     /// 26; `no`: the members' average.
     pub const UNIT_UNDECODED: Weight = Weight {
-        yes: -9_998,
-        no: -9_260,
+        yes: -10_229,
+        no: -9_491,
     };
 
     /// A stream direction, captured from its start, that framed a unit before
-    /// it lost its framing. Zenoh: one less the bound of 0 lost in 268; `yes`:
+    /// it lost its framing. Zenoh: one less the bound of 0 lost in 284; `yes`:
     /// the bound of 0 held in 50, the HTTP connections that open with another
     /// method than GET; `no`: the smoothed shares of that and MQTT, averaged.
     pub const FRAMING_HELD: Weight = Weight {
-        yes: 4_088,
-        no: 6_978,
+        yes: 4_089,
+        no: 6_979,
     };
 
     /// A stream direction, captured from its start, that lost its framing
     /// before it framed a unit: bytes that are not zenoh's framing.
     pub const FRAMING_LOST: Weight = Weight {
-        yes: -6_491,
-        no: -6_480,
+        yes: -6_574,
+        no: -6_563,
     };
 
     /// The counts of `captures/corpus/` the measured weights are computed
@@ -472,20 +472,20 @@ pub mod model {
         ];
 
         /// The zenoh files' framing units: read whole, residual, undecoded.
-        pub const ZENOH_UNITS: [u64; 3] = [3_062, 0, 0];
+        pub const ZENOH_UNITS: [u64; 3] = [3_594, 0, 0];
 
         /// The zenoh files' stream directions captured from their start:
         /// framing held, framing lost.
-        pub const ZENOH_FRAMING: [u64; 2] = [268, 0];
+        pub const ZENOH_FRAMING: [u64; 2] = [284, 0];
 
         /// The zenoh files' cookie echoes: matched, differing.
-        pub const ZENOH_COOKIE: [u64; 2] = [264, 0];
+        pub const ZENOH_COOKIE: [u64; 2] = [280, 0];
 
         /// The zenoh files' Init pairs: of opposite kinds, of one kind.
-        pub const ZENOH_ROLES: [u64; 2] = [264, 0];
+        pub const ZENOH_ROLES: [u64; 2] = [280, 0];
 
         /// The zenoh files' version headers: this reader's, another.
-        pub const ZENOH_VERSIONS: [u64; 2] = [528, 0];
+        pub const ZENOH_VERSIONS: [u64; 2] = [560, 0];
     }
 }
 
@@ -782,9 +782,9 @@ mod tests {
     /// fidelity, the same in both sums.
     #[test]
     fn a_cookie_match_weighs_its_bytes_up_to_the_cap() {
-        assert_eq!(cookie_echo_weight(1), Weight::both(7_984));
-        assert_eq!(cookie_echo_weight(8), Weight::both(63_984));
-        assert_eq!(cookie_echo_weight(40), Weight::both(63_984));
+        assert_eq!(cookie_echo_weight(1), Weight::both(7_985));
+        assert_eq!(cookie_echo_weight(8), Weight::both(63_985));
+        assert_eq!(cookie_echo_weight(40), Weight::both(63_985));
     }
 
     /// Evidence sums per check and over checks, in each sum, and two bodies of

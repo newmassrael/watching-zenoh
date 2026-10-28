@@ -266,6 +266,16 @@ const EXPECTED: &[(&str, Tally, Tally)] = &[
     ("zenoh15-tcp-full.pcap", (2, 0, 0), (2, 0, 0)),
     ("zenoh15-tcp-midsession.pcap", (2, 0, 0), (2, 0, 0)),
     ("zenoh15-udp-full.pcap", (2, 0, 0), (2, 0, 0)),
+    // The eclipse/zenoh images of four more releases (2026-10-28), over TCP
+    // and UDP unicast: every flow `yes`.
+    ("zenoh-v1-10-0-tcp-full.pcap", (2, 0, 0), (2, 0, 0)),
+    ("zenoh-v1-10-0-udp-full.pcap", (2, 0, 0), (2, 0, 0)),
+    ("zenoh-v1-9-0-tcp-full.pcap", (2, 0, 0), (2, 0, 0)),
+    ("zenoh-v1-9-0-udp-full.pcap", (2, 0, 0), (2, 0, 0)),
+    ("zenoh-v1-8-0-tcp-full.pcap", (2, 0, 0), (2, 0, 0)),
+    ("zenoh-v1-8-0-udp-full.pcap", (2, 0, 0), (2, 0, 0)),
+    ("zenoh-v1-7-2-tcp-full.pcap", (2, 0, 0), (2, 0, 0)),
+    ("zenoh-v1-7-2-udp-full.pcap", (2, 0, 0), (2, 0, 0)),
     ("zenoh-pico-tcp.pcap", (2, 0, 0), (2, 0, 0)),
     ("zenoh-pico-udp.pcap", (2, 0, 0), (2, 0, 0)),
     ("zenoh-handshakes.pcap", (240, 0, 0), (240, 0, 0)),
