@@ -296082,6 +296082,42 @@
         "A change that adds a parameter to a type the other crates name must be built in the isolated feature sets of Layer C3 and C4 before it lands, not only in the workspace's default set: the pre-push hook defers those lanes, so the check is the author's. The reds left by the retirement of the single-net peer forwarder remain for that work's owner to repair or for the next round to take: the doc links to router_forward and linkstate_forward in wz-runtime-tokio, the dead-code lints for resolve_governed_keyexpr and its siblings, and the failing wz_peer_liveliness_token_pico_interop."
       ]
     },
+    "Round 3851": {
+      "decision_summary": "Item 751 step 7c, residual. Steps 7b/7c read the pin's south-bound filter of the peer hat as selecting nobody; the interest broker was found wrong earlier (rounds 3840/3841) and the same reading had dropped the default send to a gateway: a Put or Query whose source lies south of a peer node goes to every gateway face unless that face finalized its interest on the key (R2901 data, R2902 queries, R2904 finalized key). A probe test found a client's Put reaching no gateway (0 against 1). The send is now one seam, gateways_owed, taken by the data plane (self_publish_into_tier) and the query plane (forward_request_to_gateways: All, AllComplete, BestMatching when the peer hat's region has no complete queryable). routing-interest-pending-gc is COMPLETE; the census pin returns to 2.",
+      "changes_bullets": [
+        "router_forward.rs: gateway_faces moved out of the broker module; gateways_owed; self_publish_into_tier takes the gateways; forward_request_to_gateways on the route_request, best-matching and All paths; four tests.",
+        "router_forward/brokered_interest.rs: BrokeredCopy keeps target and planes; the broker keeps what each gateway finalized (mark_brokered_finalized, gateway_withholds), dropped with the face.",
+        "docs/peer-region-hats.md section 13: the default send, the probe, the fix.",
+        "atom routing-interest-pending-gc PARTIAL -> COMPLETE; depth_axis_census PIN_REACHED 3 -> 2; run-ci.sh broker arm 253 -> 257."
+      ],
+      "verification_bullets": [
+        "Probes first: a client's Put and Query against a gateway that declared nothing both failed, 0 frames against 1. After the fix the runtime lib passes 1008 with the broker feature and the frozen-scene feature set (unchanged scenes); the broker arm measures 257. Clippy -D warnings clean with the broker and frozen features. Passing locally: upstream citation anchor, store reason citation, depth census (2 reached), audit-catalog-status, reason review pins, gate reason claims. Not run locally: the pico and stock zenohd legs (Layer E6 pending-gc, Layer Z), which need foreign binaries."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Rounds 3840 and 3841 describe the same landing (the first attempt filed before its push was refused). Read the hosted run for the Layer Z and E6 pending-gc legs and the router admin and query legs. Still open: stale LinkstateForwarder mentions in about 100 comments and the module name linkstate_forward; step 7d (--gateway-south on --peer); the router's subscriber and queryable interest dumps return early on an unrestricted interest; a current subscriber Interest from a north peer; a router node's south peer region relays nothing between link-state peers."
+      ],
+      "publishable_decision_summary": "Item 751 step 7c, residual. Steps 7b/7c read the pin's south-bound filter of the peer hat as selecting nobody; the interest broker was found wrong earlier (rounds 3840/3841) and the same reading had dropped the default send to a gateway: a Put or Query whose source lies south of a peer node goes to every gateway face unless that face finalized its interest on the key (R2901 data, R2902 queries, R2904 finalized key). A probe test found a client's Put reaching no gateway (0 against 1). The send is now one seam, gateways_owed, taken by the data plane (self_publish_into_tier) and the query plane (forward_request_to_gateways: All, AllComplete, BestMatching when the peer hat's region has no complete queryable). routing-interest-pending-gc is COMPLETE; the census pin returns to 2.",
+      "publishable_changes_bullets": [
+        "router_forward.rs: gateway_faces moved out of the broker module; gateways_owed; self_publish_into_tier takes the gateways; forward_request_to_gateways on the route_request, best-matching and All paths; four tests.",
+        "router_forward/brokered_interest.rs: BrokeredCopy keeps target and planes; the broker keeps what each gateway finalized (mark_brokered_finalized, gateway_withholds), dropped with the face.",
+        "docs/peer-region-hats.md section 13: the default send, the probe, the fix.",
+        "atom routing-interest-pending-gc PARTIAL -> COMPLETE; depth_axis_census PIN_REACHED 3 -> 2; run-ci.sh broker arm 253 -> 257."
+      ],
+      "publishable_verification_bullets": [
+        "Probes first: a client's Put and Query against a gateway that declared nothing both failed, 0 frames against 1. After the fix the runtime lib passes 1008 with the broker feature and the frozen-scene feature set (unchanged scenes); the broker arm measures 257. Clippy -D warnings clean with the broker and frozen features. Passing locally: upstream citation anchor, store reason citation, depth census (2 reached), audit-catalog-status, reason review pins, gate reason claims. Not run locally: the pico and stock zenohd legs (Layer E6 pending-gc, Layer Z), which need foreign binaries."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Rounds 3840 and 3841 describe the same landing (the first attempt filed before its push was refused). Read the hosted run for the Layer Z and E6 pending-gc legs and the router admin and query legs. Still open: stale LinkstateForwarder mentions in about 100 comments and the module name linkstate_forward; step 7d (--gateway-south on --peer); the router's subscriber and queryable interest dumps return early on an unrestricted interest; a current subscriber Interest from a north peer; a router node's south peer region relays nothing between link-state peers."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
