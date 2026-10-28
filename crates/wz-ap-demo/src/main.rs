@@ -445,16 +445,19 @@ fn demo_main() -> ExitCode {
         return ExitCode::from(2);
     }
 
-    // Item 751 — a south partition is a ROUTER's here: the router hat builds a
-    // hat for every region a partition can place a remote in, and no other run
-    // mode does yet (a peer's partition holds router hats of its own in the pin,
-    // `zenoh/src/net/routing/gateway.rs` @ `GatewaySouthConf::Custom(subregions) => {`).
-    // Refused rather than ignored on every other mode, so a node never runs on
-    // the `auto` preset while its operator asked for a partition.
-    if parse_pair(rest, "--gateway-south").is_some() && parse_pair(rest, "--router-hat").is_none() {
+    // Item 751 — a south partition is held by the two modes that run the region-hat
+    // forwarder: the router hat and the peer (step 7d). The forwarder builds a hat for every
+    // region a partition can place a remote in, whatever its node mode
+    // (`zenoh/src/net/routing/gateway.rs` @ `GatewaySouthConf::Custom(subregions) => {`).
+    // Refused rather than ignored on every other mode, so a node never runs on the `auto`
+    // preset while its operator asked for a partition.
+    if parse_pair(rest, "--gateway-south").is_some()
+        && parse_pair(rest, "--router-hat").is_none()
+        && parse_pair(rest, "--peer").is_none()
+    {
         eprintln!(
-            "wz-ap-demo: --gateway-south requires --router-hat (only the router \
-             hat serves a partitioned south)"
+            "wz-ap-demo: --gateway-south requires --router-hat or --peer (only the \
+             region-hat forwarder serves a partitioned south)"
         );
         return ExitCode::from(2);
     }
@@ -606,6 +609,17 @@ fn demo_main() -> ExitCode {
                 );
                 return ExitCode::from(2);
             }
+            // Item 751, step 7d — `--gateway-south <partition>`, read by the config reader's
+            // own `gateway/south` reader and REFUSED loudly rather than degraded, as the router
+            // hat's is: a partition the operator asked for and did not get places remotes in
+            // regions nobody chose.
+            let south_partition = match crate::args::parse_gateway_south(rest) {
+                Ok(v) => v,
+                Err(msg) => {
+                    eprintln!("wz-ap-demo: {msg}");
+                    return ExitCode::from(2);
+                }
+            };
             // R311tt (§5.16 access control) — `--acl-deny <keyexpr>` opts this
             // peer into ACL enforcement: an allow-default policy with one ingress
             // Put deny rule on the keyexpr (every peer subject). A Put a neighbour
@@ -976,6 +990,7 @@ fn demo_main() -> ExitCode {
                     // `timestamping.enabled`, resolved by the forwarder against
                     // the `WhatAmI::Peer` this run-mode announces.
                     timestamping,
+                    south_partition,
                 },
                 InterceptorOpts {
                     acl_deny,

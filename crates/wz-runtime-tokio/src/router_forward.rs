@@ -6557,6 +6557,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             if target_tier == inbound_tier {
                 continue;
             }
+            // R2901 — a mesh source takes the default send to a gateway only when its region
+            // lies south (`src_region.bound().is_south()`): a subregion's peers, on a node with a
+            // partition. A transit message from the north is not owed to a gateway.
+            let gateways = if inbound_tier.bound().is_south() {
+                self.gateways_owed(target_tier, keyexpr, false)
+            } else {
+                Vec::new()
+            };
             self.self_publish_into_tier(
                 target_tier,
                 Egress {
@@ -6566,8 +6574,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 },
                 push,
                 keyexpr,
-                // A mesh source is not south of a gateway (R2901 takes only a south source).
-                &[],
+                &gateways,
                 |dst| self.crosses(inbound_tier, target_tier, src_zid, fwd_zid, Some(dst)),
             );
         }
@@ -8495,7 +8502,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // no info passes its completeness filter), and BestMatching when its region has no
         // complete queryable. A query from a peer is transit and does not take the arm; R2904
         // leaves out the gateways that finalized a QUERYABLES interest on this resource.
-        let mut gateways = if is_leaf(tier, self.tables.node_mode) {
+        let mut gateways = if tier.bound().is_south() {
             self.gateways_owed(NORTH_REGION, &keyexpr, true)
         } else {
             Vec::new()
@@ -13129,6 +13136,57 @@ mod tests {
         fwd.deregister(FaceId(1));
         assert_eq!(fwd.pending_interests_len(), 0, "the client's entries go");
         assert_eq!(sink_client.frame_count(), 0, "with nobody left to tell");
+    }
+
+    /// Item 751, step 7d — a peer node with a `gateway/south` subregion naming the zid 0xCC, a
+    /// stock router attached as face 0 and a peer `publisher` as face 1, every sink empty. The
+    /// publisher is in the subregion (a region lying south) when it is 0xCC and in the north
+    /// region otherwise.
+    fn partitioned_peer_with_gateway_and(
+        publisher: u8,
+    ) -> (RouterForwarder, Arc<RecordingLinkDriver>) {
+        use wz_session_core::region_partition::{RegionFilter, SouthSubregion};
+        let partition = SouthPartition::Custom(vec![SouthSubregion {
+            filters: Some(vec![RegionFilter {
+                zids: Some(vec![zid(0xCC).as_slice().to_vec()]),
+                ..RegionFilter::default()
+            }]),
+        }]);
+        let fwd = RouterForwarder::peer(zid(0x05)).with_south_partition(partition);
+        let (gateway, sink_gateway) = face(zid(0xAA), WIRE_ROUTER);
+        let (peer, _sink_peer) = face(zid(publisher), WIRE_PEER);
+        fwd.register(FaceId(0), &gateway);
+        fwd.register(FaceId(1), &peer);
+        sink_gateway.reset();
+        (fwd, sink_gateway)
+    }
+
+    /// R2901 on a peer node with a partition: the default send to a gateway takes data whose
+    /// source region lies south (`src_region.bound().is_south()`), and a subregion's peers are
+    /// south. A Put relayed by a peer of the north region is transit and is not owed.
+    #[test]
+    fn a_put_from_a_subregions_peer_reaches_a_gateway_and_one_from_the_north_does_not() {
+        let put = |publisher: u8| -> usize {
+            let (fwd, sink_gateway) = partitioned_peer_with_gateway_and(publisher);
+            let push = wz_session_core::push_build::build_push_literal("demo/a", b"x")
+                .expect("build push");
+            forward_one(&fwd, FaceId(1), NetworkMessage::Push(Box::new(push)));
+            sink_gateway.frame_count()
+        };
+        assert_eq!(put(0xCC), 1, "a subregion's peer is south of the node");
+        assert_eq!(put(0xBB), 0, "a north peer's Put is transit");
+    }
+
+    /// The query twin of the Put above (R2902).
+    #[test]
+    fn a_query_from_a_subregions_peer_reaches_a_gateway_and_one_from_the_north_does_not() {
+        let query = |publisher: u8| -> usize {
+            let (fwd, sink_gateway) = partitioned_peer_with_gateway_and(publisher);
+            forward_one(&fwd, FaceId(1), request_best(3, "demo/q"));
+            sink_gateway.frame_count()
+        };
+        assert_eq!(query(0xCC), 1, "a subregion's peer is south of the node");
+        assert_eq!(query(0xBB), 0, "a north peer's Query is transit");
     }
 
     /// One Put on `keyexpr` from the client on face 1.

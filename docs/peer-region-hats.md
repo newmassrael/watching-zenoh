@@ -721,6 +721,23 @@ once more.
 **7d: the partition.** `--gateway-south` is accepted on `--peer`, the config key is
 honoured, and the census pins move in the same commit.
 
+- **7d-1, the flag (landed).** `--peer` takes `--gateway-south` and hands the partition to
+  the forwarder before anything else is set on its hats (the call rebuilds them, so
+  `--peer-mode`, applied after, is not lost); every session the face loop opens announces
+  its bound from it, as the router's do. The mode rule in `main` now names both modes
+  (`--router-hat` or `--peer`) and still refuses every other. Found on the way: the default
+  send to a gateway (R2901, R2902) asked `is_leaf` where the pin asks
+  `src_region.bound().is_south()`, which differ only on a node with a partition, where a
+  subregion's peers are south and not leaves. Both call sites ask the pin's predicate now
+  (`a_put_from_a_subregions_peer_reaches_a_gateway_and_one_from_the_north_does_not` and its
+  query twin), and the binary test `peer_gateway_south_binary` holds the flag at argv.
+  Not witnessed here: a peer with a partition against a stock zenohd, which needs the
+  foreign binary (the router's twin is `wz_south_partition_region_zenohd_interop`).
+- **7d-2, the config key (open).** `gateway/south` stays in `UNHONOURED_BEYOND_WZ` and the
+  expansion emits no flag for it. Honouring it moves the key between the surface lists,
+  adds the row of the expansion table and the reader field, and moves the census pins that
+  count the honoured fraction in the same commit.
+
 ## 13. Open
 
 - **The interest broker is the region-hat peer's, and it asks gateways (step 7c).** Steps 5

@@ -471,7 +471,7 @@ pub(crate) fn parse_peer_mode(args: &[String]) -> Result<bool, String> {
 ///
 /// The reader lives in the config reader, so a build without `zenoh-config`
 /// has none, and the flag is then refused rather than ignored.
-#[cfg(feature = "router-hat-router")]
+#[cfg(any(feature = "router-hat-router", feature = "routing-peer"))]
 pub(crate) fn parse_gateway_south(
     args: &[String],
 ) -> Result<wz::runtime_tokio::region_partition::SouthPartition, String> {
@@ -490,7 +490,7 @@ pub(crate) fn parse_gateway_south(
         Err(format!(
             "--gateway-south {text:?} requires the `zenoh-config` feature, whose \
              reader parses it (build: cargo build -p wz-ap-demo --features \
-             router-hat-router,zenoh-config)"
+             router-hat-router,zenoh-config, or routing-peer,zenoh-config)"
         ))
     }
 }

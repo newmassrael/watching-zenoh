@@ -4405,6 +4405,11 @@ pub(crate) struct PeerOpts {
     /// and `timestamping: { enabled: { peer: true } }` — a document a real zenoh
     /// peer answers by stamping — reached no behaviour here.
     pub timestamping: crate::args::NodeTimestamping,
+    /// Item 751, step 7d — `--gateway-south <partition>`: how this peer's south is partitioned
+    /// into subregions. The forwarder's hats are built from it and every session the face loop
+    /// opens announces its bound from it, so the one value is handed to the forwarder alone.
+    /// `Auto` (no flag) is the pin's preset and every node's default.
+    pub south_partition: wz::runtime_tokio::region_partition::SouthPartition,
 }
 
 #[cfg(feature = "routing-peer")]
@@ -4597,7 +4602,11 @@ async fn run_peer_until(
         Zid::from_slice(&params.zid),
         opts.timestamping.map_for(WhatAmI::Peer),
     )
-    .with_drop_future_timestamp(opts.timestamping.drop_future_timestamp());
+    .with_drop_future_timestamp(opts.timestamping.drop_future_timestamp())
+    // Item 751, step 7d — the south partition, before ANYTHING else is set on the hats: it
+    // rebuilds them, so a mode chosen first would be lost, and the hats a face joins are the
+    // ones it keeps. The face loop reads it back off the forwarder for every session it opens.
+    .with_south_partition(opts.south_partition.clone());
     // `--peer-mode` (zenoh `routing.peer.mode`). Set BEFORE any face registers,
     // because the mode governs how the very first inbound flood is ingested; a
     // node that learned one flood in the wrong mode has already mis-shaped its
@@ -10110,6 +10119,7 @@ mod peer_quic_cert_tests {
             // `--timestamping` and what these BIND witnesses mean: they never
             // relay a Put, so no stamping policy is under test here.
             timestamping: crate::args::NodeTimestamping::default(),
+            south_partition: wz::runtime_tokio::region_partition::SouthPartition::Auto,
         };
         let interceptors = InterceptorOpts {
             acl_deny: None,
@@ -10247,6 +10257,7 @@ mod peer_failfast_tests {
             // `--timestamping` and what these BIND witnesses mean: they never
             // relay a Put, so no stamping policy is under test here.
             timestamping: crate::args::NodeTimestamping::default(),
+            south_partition: wz::runtime_tokio::region_partition::SouthPartition::Auto,
         };
         let interceptors = InterceptorOpts {
             acl_deny: None,
