@@ -496,8 +496,10 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "axis probes, and its features that gate a public item are forwarded from the session "
         "core or the tokio runtime and run by this crate's own tests: `codec-push` (the "
         "forward-path stamp over a Push), `time-hlc` (the node clock) and `clock-source` (the "
-        "clock registry an application registers sources in, which the node clock then reads)",
-        frozenset({"clock-source", "codec-push", "time-hlc"}),
+        "clock registry an application registers sources in, which the node clock then reads) "
+        "and `pubsub-ts-stack` (the clock the interceptions of a timestamp stack are recorded "
+        "with, which a forwarder takes a stamp from)",
+        frozenset({"clock-source", "codec-push", "pubsub-ts-stack", "time-hlc"}),
     ),
     "wz-rest": (
         "the REST bridge: the facade re-exports the whole crate as `wz::rest` "
