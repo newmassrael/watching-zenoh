@@ -627,6 +627,14 @@ routing-peer = [
     # that hosts it compiles that module in. The facade's `routing-peer` stays what it was:
     # the accept loop and the peer-mode foundation.
     "wz/routing-router-hat",
+    # The token plane of that forwarder. The peer node carries liveliness whatever else it
+    # is built with (a client's token is held, replayed to a client that asks with history,
+    # and flooded to the mesh), and the forwarder compiles that plane only under this
+    # feature: the single-net forwarder this node ran before step 7b held it ungated, so
+    # the move left a `--features routing-peer` peer that silently answered no token
+    # interest. It pulls the runtime feature and not the demo's own `routing-token-tables`,
+    # which is the run-mode witness of `run_router_hat`.
+    "wz/routing-token-tables",
     "wz/access-acl",
     "wz/access-downsampling",
     "wz/access-quota",
