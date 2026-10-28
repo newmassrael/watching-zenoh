@@ -296748,6 +296748,34 @@
         "Owed: why the matching status of a publisher or a querier does not fall when its remote subscriber or queryable is undeclared, with a namespace on either end, where the same scenario without one does (narrowed to the decorator and the undeclare, not read); the namespace in the C ABI builds, which now refuse a document naming it and do not carry it; the rest of the open list of slice Z8a (the context a callback runs in, callback drop in three local variants, cancellation, connection retry, events, liveliness, interceptors with a repeated id, routing); a lane for the harness; the margin of the main job; the pin bump to 1.10.2."
       ]
     },
+    "Round 3870": {
+      "decision_summary": "Two more upstream test files of slice Z8 stop on what a program reads in the open, and both pass by doing what upstream does. The lists of the interceptors (downsampling, the low pass filter, the QoS overwrite of the network, and the rules, subjects and policies of an access control that is enabled) are checked for a repeated id when the session opens, in the words of upstream's check of each list; before, a repeated id was accepted. A listener that cannot be bound is named when it is the only thing the open was to do, in the words of upstream's link for TCP and QUIC, whose words were read off the pinned source; an unknown protocol keeps the generic words. When the bind phase had a deadline, which upstream arms around the whole phase, the open fails with the deadline's own error, shown and debugged as tokio's is. Seven tests of the interceptors file and six of the connection retry file now pass as upstream wrote them.",
+      "changes_bullets": [
+        "crates/wz-zenoh/src/api/session.rs: refuse_repeated_ids over the rendered document, called before the plan resolves; OpenScope and open_error, which carry what the open was to do and fail a bind phase that had a deadline with an error that shows as tokio's Elapsed; listener_failure, the words of upstream's link for TCP and QUIC; three tests (the words of each list's refusal and the access control judged only when enabled, the listener words, and the deadline error)."
+      ],
+      "verification_bullets": [
+        "Locally: the library tests of the top crate pass (160), the three new ones among them; the upstream interceptors file ran again and passes (7 of 7), where one failed, and the upstream connection retry file passes (6 of 6), where two failed; the 35 static gates pass. Not run: the other tests of the family against this change, the legs gate and the hosted run."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed, from the open list of slice Z8a: the context a callback runs in, callback drop in three local variants, cancellation, events, liveliness, routing, the matching status after an undeclare with a namespace, the files that run none, and the router refusals; the words of the listener failure for the protocols not read yet (UDP, TLS, WebSocket, Unix sockets); a lane for the harness; the margin of the main job; the pin bump to 1.10.2."
+      ],
+      "publishable_decision_summary": "Two more upstream test files of slice Z8 stop on what a program reads in the open, and both pass by doing what upstream does. The lists of the interceptors (downsampling, the low pass filter, the QoS overwrite of the network, and the rules, subjects and policies of an access control that is enabled) are checked for a repeated id when the session opens, in the words of upstream's check of each list; before, a repeated id was accepted. A listener that cannot be bound is named when it is the only thing the open was to do, in the words of upstream's link for TCP and QUIC, whose words were read off the pinned source; an unknown protocol keeps the generic words. When the bind phase had a deadline, which upstream arms around the whole phase, the open fails with the deadline's own error, shown and debugged as tokio's is. Seven tests of the interceptors file and six of the connection retry file now pass as upstream wrote them.",
+      "publishable_changes_bullets": [
+        "crates/wz-zenoh/src/api/session.rs: refuse_repeated_ids over the rendered document, called before the plan resolves; OpenScope and open_error, which carry what the open was to do and fail a bind phase that had a deadline with an error that shows as tokio's Elapsed; listener_failure, the words of upstream's link for TCP and QUIC; three tests (the words of each list's refusal and the access control judged only when enabled, the listener words, and the deadline error)."
+      ],
+      "publishable_verification_bullets": [
+        "Locally: the library tests of the top crate pass (160), the three new ones among them; the upstream interceptors file ran again and passes (7 of 7), where one failed, and the upstream connection retry file passes (6 of 6), where two failed; the 35 static gates pass. Not run: the other tests of the family against this change, the legs gate and the hosted run."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed, from the open list of slice Z8a: the context a callback runs in, callback drop in three local variants, cancellation, events, liveliness, routing, the matching status after an undeclare with a namespace, the files that run none, and the router refusals; the words of the listener failure for the protocols not read yet (UDP, TLS, WebSocket, Unix sockets); a lane for the harness; the margin of the main job; the pin bump to 1.10.2."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
