@@ -354,6 +354,9 @@ admin-space = []
 # no upstream library has). The registry is the node clock's own, in `wz-node-time`, so the model
 # reads it under both ABIs once the runtime's clock does.
 clock-source = ["timestamping", "unstable-api", "wz-runtime-tokio/clock-source"]
+# The node's event log (`deploy/wz-config.toml`, off by default: wz's own doors). The ring is in
+# `wz-node-time`, so the model has it under both ABIs once the runtime does.
+event-ring = ["unstable-api", "wz-runtime-tokio/event-ring"]
 local-subscriber = []
 local-queryable = []
 

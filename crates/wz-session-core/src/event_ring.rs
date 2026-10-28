@@ -457,6 +457,20 @@ impl<const SLOTS: usize, const ARGS: usize> Consumer<'_, SLOTS, ARGS> {
     }
 }
 
+impl<const SLOTS: usize, const ARGS: usize> Consumer<'_, SLOTS, ARGS> {
+    /// Free everything before sequence number `upto`, for a caller that read the records through a
+    /// reader of its own and says when it is done with them. Only forward, and never past what the
+    /// producer has stored: a number past the end frees what there is.
+    pub fn release(&mut self, upto: u64) {
+        let ring = self.reader.ring;
+        let stored = pair(&ring.next_lo, &ring.next_hi);
+        let cursor = self.reader.cursor.unwrap_or(0);
+        let to = upto.min(stored).max(cursor);
+        self.reader.cursor = Some(to);
+        store_pair(&ring.tail_lo, &ring.tail_hi, to);
+    }
+}
+
 /// A handle that makes readers and counts. `Copy`: any number of threads hold one.
 #[derive(Clone, Copy)]
 pub struct Observer<'a, const SLOTS: usize, const ARGS: usize> {
@@ -469,6 +483,17 @@ impl<'a, const SLOTS: usize, const ARGS: usize> Observer<'a, SLOTS, ARGS> {
         Reader {
             ring: self.ring,
             cursor: None,
+        }
+    }
+
+    /// A reader that starts at sequence number `cursor`, for a caller that keeps its own cursor
+    /// between calls (a C program holds a number, not a Rust value). A cursor that names a record
+    /// already overwritten is not an error: the first read reports the gap and moves on. A cursor
+    /// ahead of the ring reads nothing until the producer gets there.
+    pub fn reader_at(&self, cursor: u64) -> Reader<'a, SLOTS, ARGS> {
+        Reader {
+            ring: self.ring,
+            cursor: Some(cursor),
         }
     }
 
@@ -604,6 +629,36 @@ mod tests {
     }
 
     #[test]
+    fn release_frees_up_to_a_number_only_forward_and_never_past_what_was_stored() {
+        let mut ring = Ring::new(FullPolicy::DropNewest);
+        let (mut producer, mut consumer, _observer) = ring.split();
+        for _ in 0..4 {
+            producer.push(0, 0, 0, &[]);
+        }
+        assert_eq!(producer.push(0, 0, 0, &[]), Pushed::Dropped);
+        consumer.release(2);
+        assert_eq!(producer.push(0, 0, 0, &[]), Pushed::Stored(4));
+        assert_eq!(producer.push(0, 0, 0, &[]), Pushed::Stored(5));
+        assert_eq!(
+            producer.push(0, 0, 0, &[]),
+            Pushed::Dropped,
+            "two were freed, two taken"
+        );
+        consumer.release(1);
+        assert_eq!(
+            producer.push(0, 0, 0, &[]),
+            Pushed::Dropped,
+            "a release only goes forward"
+        );
+        consumer.release(u64::MAX);
+        assert_eq!(
+            producer.push(0, 0, 0, &[]),
+            Pushed::Stored(6),
+            "a number past the end frees what there is, no more"
+        );
+    }
+
+    #[test]
     fn readers_are_independent_and_none_of_them_frees_anything() {
         let mut ring = Ring::new(FullPolicy::DropNewest);
         let (mut producer, _consumer, observer) = ring.split();
@@ -635,6 +690,28 @@ mod tests {
             sequences(&read_all(&mut ring.observer().reader())),
             [0, 1, 2]
         );
+    }
+
+    #[test]
+    fn a_reader_started_at_a_number_reads_from_there_and_is_told_of_a_gap_before_it() {
+        let ring = Ring::new(FullPolicy::OverwriteOldest);
+        for _ in 0..10 {
+            // SAFETY: one producer at a time, in turn.
+            unsafe { ring.producer() }.push(0, 0, 0, &[]);
+        }
+        let observer = ring.observer();
+        // Alive: 6..=9 of the ten; a reader at 8 has lost nothing.
+        assert_eq!(sequences(&read_all(&mut observer.reader_at(8))), [8, 9]);
+        // A reader at 2 is told that 2..=5 are gone, then reads the rest.
+        assert_eq!(
+            sequences(&read_all(&mut observer.reader_at(2))),
+            [-4, 6, 7, 8, 9]
+        );
+        // A reader ahead of the ring reads nothing, and is not behind when the ring gets there.
+        let mut ahead = observer.reader_at(10);
+        assert_eq!(ahead.poll(), Read::Empty);
+        unsafe { ring.producer() }.push(0, 0, 0, &[]);
+        assert!(matches!(ahead.poll(), Read::Record(record) if record.sequence == 10));
     }
 
     #[test]

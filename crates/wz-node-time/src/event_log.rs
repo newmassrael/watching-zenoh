@@ -79,6 +79,16 @@ impl EventLog {
         self.emit_at(level, source, timestamp, args)
     }
 
+    /// Record an event stamped with the time now, for a caller that has no node clock to hand
+    /// (a C program): the clocks the application registered when `clock-source` is on, the system
+    /// clock otherwise. A clock that does not know the date records time `0`.
+    ///
+    /// This is a plain reading and not a stamp of the hybrid logical clock: events are ordered by
+    /// their sequence number within a ring, and the time is for the reader's eye.
+    pub fn emit_now(&self, level: u8, source: u16, args: &[u64]) -> Pushed {
+        self.emit_at(level, source, now_ntp64(), args)
+    }
+
     /// A handle to read the log through and to count with.
     pub fn observer(&self) -> Observer<'_, EVENT_RING_SLOTS, EVENT_RECORD_ARGS> {
         self.ring.observer()
@@ -101,10 +111,31 @@ impl EventLog {
         }
     }
 
+    /// Free every event before sequence number `upto`, for a reader that read them through an
+    /// [`Observer`] of its own and says when it is done. Only forward.
+    pub fn release_to(&self, upto: u64) {
+        let _one_at_a_time = self
+            .consumers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // SAFETY: the lock is held for the whole life of the consumer.
+        unsafe { self.ring.consumer() }.release(upto);
+    }
+
     /// How many events a full ring refused under `drop-newest`.
     pub fn dropped(&self) -> u32 {
         self.observer().dropped()
     }
+}
+
+/// The time now as an NTP64 word, `0` when the clock does not know the date.
+fn now_ntp64() -> u64 {
+    use wz_session_core::epoch::EpochSource;
+    #[cfg(feature = "clock-source")]
+    let source = crate::clock_registry::RegisteredOrSystem(&crate::clock_registry::GLOBAL);
+    #[cfg(not(feature = "clock-source"))]
+    let source = crate::timestamp_source::SystemEpoch;
+    source.try_now_ntp64().map_or(0, |ntp| ntp.as_word())
 }
 
 /// The log of this process, built with the build's policy.
@@ -178,6 +209,20 @@ mod tests {
         assert!(first.timestamp > 0, "a router has a clock");
         let _ = first;
         assert_eq!(second.timestamp, 0, "a node with no clock records no time");
+    }
+
+    #[test]
+    fn an_event_recorded_with_the_time_now_carries_a_real_time() {
+        let log = log(FullPolicy::OverwriteOldest);
+        log.emit_now(1, 5, &[3]);
+        let Read::Record(record) = log.observer().reader().poll() else {
+            panic!("an event was recorded");
+        };
+        assert!(
+            record.timestamp >> 32 > 1_700_000_000,
+            "{}",
+            record.timestamp >> 32
+        );
     }
 
     #[test]

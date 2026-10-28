@@ -895,6 +895,21 @@ abis = ["core", "pico"]
 implies = ["timestamping", "unstable-api"]
 help = "Register a clock source the node reads instead of the system clock, and report whether it is synchronised."
 
+# The node's event log (docs/observation-plane.md M2): a ring of fixed-size records that the node
+# and the program write events into and that a program reads back, with no text stored. wz's own
+# doors, with no counterpart in an upstream library, so off in every original and part of the
+# unstable surface. The ring's size is `EVENT_RING_SLOTS` and `EVENT_RECORD_ARGS`, and what a full
+# ring gives up is the `event-ring-full` policy.
+[[capability]]
+id = "event-ring"
+kconfig = "WZ_CAP_EVENT_RING"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+default = "off"
+abis = ["core", "pico"]
+implies = ["unstable-api"]
+help = "Write events into the node's event ring and read them back, with no text stored."
+
 [[capability]]
 id = "group"
 kconfig = "WZ_CAP_GROUP"

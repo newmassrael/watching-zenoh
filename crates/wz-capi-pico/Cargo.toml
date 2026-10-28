@@ -203,6 +203,16 @@ clock-source = [
     "wz-node-time/clock-source",
     "wz-capi-core?/clock-source",
 ]
+# `event-ring`: the node's event log and the doors that write and read it (`wz_ext_event_emit`,
+# `wz_ext_event_read`, `wz_ext_event_dropped`). wz's own, which zenoh-pico has not, so off as the
+# reference build is, and part of the unstable surface: it implies `unstable-api`. The ring is
+# `wz-node-time`'s.
+event-ring = [
+    "unstable-api",
+    "dep:wz-node-time",
+    "wz-node-time/event-ring",
+    "wz-capi-core?/event-ring",
+]
 # `admin-space` (`Z_FEATURE_ADMIN_SPACE`, off as upstream's is): `zp_start_admin_space` /
 # `zp_stop_admin_space`, the queryable that answers pico's `@/<zid>/pico/**` documents, and the
 # `auto_start_admin_space` flag of the open options. Upstream refuses the switch without
@@ -316,6 +326,10 @@ name = "advanced_subscriber_faces"
 required-features = ["engine-tokio", "peer", "advanced"]
 
 # It drives the advanced publisher, the liveliness subscriber and a get together.
+[[test]]
+name = "event_log_doors"
+required-features = ["event-ring"]
+
 [[test]]
 name = "clock_source_stamps"
 required-features = ["engine-tokio", "peer", "clock-source"]

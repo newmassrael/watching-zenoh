@@ -415,7 +415,10 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # doors `wz_ext_clock_source_register`, `wz_ext_clock_source_unregister` and
         # `wz_ext_clock_report`, each `#[no_mangle] extern "C"` and declared in `wz_ext.h`. Like
         # `admin-space` it is off by default; unlike it, upstream has no name for them.
-        frozenset({"admin-space", "clock-source"}),
+        # `event-ring` gates `pub mod event_log`, whose public items are wz's own doors
+        # `wz_ext_event_emit`, `wz_ext_event_read`, `wz_ext_event_release` and
+        # `wz_ext_event_dropped`, declared in `wz_ext.h`, off by default as `clock-source` is.
+        frozenset({"admin-space", "clock-source", "event-ring"}),
     ),
     "wz-codecs-test-support": (
         "a test-support crate: `publish = false`, and NO workspace library "

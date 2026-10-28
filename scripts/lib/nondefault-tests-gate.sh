@@ -312,6 +312,10 @@ transport-link-unixpipe,transport-link-ws|"
     # session over a registered clock (`clock_source_stamps`, which `Cargo.toml` requires the feature
     # for). Off by default, as the pico oracle's build has no such door.
     "wz-capi-pico|hook|clock-source|"
+    # The node's event log written and read from C (`wz_ext_event_emit` and its three siblings):
+    # the unit tests of the module's types and the target that writes, reads, wraps and releases
+    # through the doors (`event_log_doors`, which `Cargo.toml` requires the feature for).
+    "wz-capi-pico|hook|event-ring|"
     # The two node-config features the zenoh-c ABI turns on: the usrpwd
     # credential machinery and the interceptor chain (`access_control`,
     # `low_pass_filter`, `downsampling`). Both are off here by default, so the

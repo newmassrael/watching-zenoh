@@ -104,8 +104,12 @@ pub mod connectivity;
 pub mod clock_source;
 #[cfg(feature = "unstable-api")]
 pub mod device_requires;
+// The node's event log, written and read from C: wz doors (`wz_ext.h`) of the unstable surface
+// (docs/observation-plane.md M2).
 pub mod encoding;
 pub mod entity;
+#[cfg(feature = "event-ring")]
+pub mod event_log;
 mod ffi;
 #[cfg(feature = "query")]
 pub mod get;

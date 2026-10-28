@@ -314,6 +314,9 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             # and gates nothing in this package: the registry is `wz-node-time`'s, which this
             # package re-exports module by module at the paths it has always had.
             "clock-source",
+            # `event-ring` is forwarded to `wz-node-time`, whose event log it turns on, and
+            # gates nothing in this package.
+            "event-ring",
             # R2684 — `adminspace-router-linkstate` LEAVES this list, by the same
             # route R2571 records above and R2454 before it: the claim was true
             # when written and THIS round falsified it. Serving `linkstate/peers`
