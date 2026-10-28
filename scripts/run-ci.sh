@@ -12496,13 +12496,18 @@ layer_c1r_mcu_multicast_e2e() {
 # prints is what `format!` gives, and a line past the buffer is cut at a character.
 # The stack watch's line-less form (`StackWatch::observe_peak`) has one in
 # `stack::tests`: it reports the readings the lined form does.
+#
+# 29 -> 31: the tick-to-microsecond conversion that no longer takes a 64-bit divide
+# (`refactor(zephyr)`, 503b3eb5f) brought two tests of its own in the crate root and
+# the guard was not moved with them (hosted C1ns: `expected exactly 29 passed`, the
+# run printed `31 passed`).
 layer_c1ns_nostd_members_isolated() {
     local nostd
     nostd="$(python3 scripts/lib/nostd_workspace_members.py)" || return 1
     for member in $nostd; do
         (cd crates && cargo test -p "$member" --quiet) || return 1
     done
-    _runci_guarded_test "C1ns zephyr lib" 29 \
+    _runci_guarded_test "C1ns zephyr lib" 31 \
         cargo test -p wz-runtime-zephyr --lib --quiet || return 1
 }
 
