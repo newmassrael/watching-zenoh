@@ -296166,6 +296166,44 @@
         "Next in order: Z6c (Session::config and GIT_VERSION)."
       ]
     },
+    "Round 3853": {
+      "decision_summary": "Item 751 step 7d-1. --gateway-south is accepted on --peer: the partition is handed to the region-hat forwarder before any other setting of its hats (the call rebuilds them), and every session the face loop opens announces its bound from it, as a router's do. The mode rule names the router hat and the peer and refuses every other run mode. A node with a partition made the default send to a gateway (R2901 data, R2902 queries) wrong: it asked is_leaf where the pin asks src_region.bound().is_south(), and a subregion's peers are south and not leaves. Both call sites ask the pin's predicate now. The config key gateway/south stays unhonoured (7d-2).",
+      "changes_bullets": [
+        "wz-ap-demo: PeerOpts.south_partition; run_peer applies it first; main accepts the flag on --peer; parse_gateway_south gated on either mode's feature; usage text.",
+        "router_forward.rs: the Put bridge and the query route take the gateways when the source region is south by the pin's predicate; two tests on a partitioned peer.",
+        "tests/peer_gateway_south_binary.rs: the flag at argv (a mode without a partition refuses it by name; a peer reaches the value's own parse).",
+        "run-ci.sh: every C1AY router_forward arm +2 (measured 249 251 274 255 258 297 249 251, broker 259) and a new arm for the binary test.",
+        "docs/peer-region-hats.md: 7d-1 and the open 7d-2."
+      ],
+      "verification_bullets": [
+        "The two forwarder tests pass on a partitioned peer; every router_forward arm measured +2 as predicted; the binary test passes (2); clippy -D warnings clean for the demo under all features and for the runtime under the broker and frozen features. Citation anchor gate unchanged at its budgets. Not run: a peer with a partition against a stock zenohd, which needs the foreign binary."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Step 7d-2: honour the gateway/south config key (move it between the surface lists, the reader field, the expansion row, the census pins in one commit). A peer with a partition has no stock zenohd witness yet. Also open: stale LinkstateForwarder comments and the linkstate_forward module name; the router's subscriber and queryable interest dumps return early on an unrestricted interest; a current subscriber Interest from a north peer; a router node's south peer region relays nothing between link-state peers. Read the hosted run for the Layer Z and E6 pending-gc legs."
+      ],
+      "publishable_decision_summary": "Item 751 step 7d-1. --gateway-south is accepted on --peer: the partition is handed to the region-hat forwarder before any other setting of its hats (the call rebuilds them), and every session the face loop opens announces its bound from it, as a router's do. The mode rule names the router hat and the peer and refuses every other run mode. A node with a partition made the default send to a gateway (R2901 data, R2902 queries) wrong: it asked is_leaf where the pin asks src_region.bound().is_south(), and a subregion's peers are south and not leaves. Both call sites ask the pin's predicate now. The config key gateway/south stays unhonoured (7d-2).",
+      "publishable_changes_bullets": [
+        "wz-ap-demo: PeerOpts.south_partition; run_peer applies it first; main accepts the flag on --peer; parse_gateway_south gated on either mode's feature; usage text.",
+        "router_forward.rs: the Put bridge and the query route take the gateways when the source region is south by the pin's predicate; two tests on a partitioned peer.",
+        "tests/peer_gateway_south_binary.rs: the flag at argv (a mode without a partition refuses it by name; a peer reaches the value's own parse).",
+        "run-ci.sh: every C1AY router_forward arm +2 (measured 249 251 274 255 258 297 249 251, broker 259) and a new arm for the binary test.",
+        "docs/peer-region-hats.md: 7d-1 and the open 7d-2."
+      ],
+      "publishable_verification_bullets": [
+        "The two forwarder tests pass on a partitioned peer; every router_forward arm measured +2 as predicted; the binary test passes (2); clippy -D warnings clean for the demo under all features and for the runtime under the broker and frozen features. Citation anchor gate unchanged at its budgets. Not run: a peer with a partition against a stock zenohd, which needs the foreign binary."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 7d-2: honour the gateway/south config key (move it between the surface lists, the reader field, the expansion row, the census pins in one commit). A peer with a partition has no stock zenohd witness yet. Also open: stale LinkstateForwarder comments and the linkstate_forward module name; the router's subscriber and queryable interest dumps return early on an unrestricted interest; a current subscriber Interest from a north peer; a router node's south peer region relays nothing between link-state peers. Read the hosted run for the Layer Z and E6 pending-gc legs."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
