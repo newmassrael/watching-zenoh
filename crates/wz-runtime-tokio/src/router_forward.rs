@@ -213,12 +213,12 @@
 //! query route reads its `complete` / `distance`.
 //!
 //! The one query-specific twist over the data plane is the `QueryTarget` dispatch,
-//! whose **BestMatching is GLOBAL** (zenoh `compute_final_route` picks the FIRST
-//! complete queryable in the union route sorted by SELF-relative distance,
-//! `queries.rs:1520`): the C5a per-net `compute_query_directions` does NOT compose
-//! for it, so the router picks the min over each net's per-net nearest complete
-//! (`select_best_matching`, min-of-mins == global-min) and the client candidates at
-//! distance 1 (`best_query_winner`). `All` /
+//! whose **BestMatching is PER REGION** (zenoh runs `compute_final_route` once for each
+//! hat over that hat's own distance-sorted route and merges the picks, item 751): the
+//! router takes each mesh region's nearest complete queryable (`select_best_matching`)
+//! and each client region's lowest complete face, or all of a region's matching ones
+//! when it has none complete (`forward_request_best_matching`). Until item 751 step 6e it
+//! took ONE winner across the meshes and the clients. `All` /
 //! `AllComplete` DO compose per tier (union of per-tier `all_query_directions` /
 //! `complete_query_directions` + client faces). Each forwarded Request ALLOCATES a
 //! [`PendingQueries`] return entry (the
@@ -1426,17 +1426,6 @@ impl GroupMember {
             zid: from.and_then(|id| Zid::try_from(id.as_slice()).ok()),
         }
     }
-}
-
-/// The GLOBAL-BestMatching winner — the single globally-nearest COMPLETE queryable
-/// across BOTH meshes + clients (zenoh `compute_final_route`'s first complete in
-/// the distance-sorted union route, `dispatcher/queries.rs:243`).
-enum BestQueryWinner {
-    /// A mesh queryable: the index into the router's live `MeshQueryBlock`s + the
-    /// tree hop toward it.
-    Mesh(usize, Zid),
-    /// A client-hosted queryable: the client face to forward the Query to.
-    Client(FaceId),
 }
 
 /// Per-face state the router keeps for each held face: the send seam to flood
@@ -7479,7 +7468,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// `Option`-seeded from the first contributor (NEVER `DEFAULT` — its distance 0
     /// would collapse the `min`). Self is never a source (derive-not-store), so no
     /// self-exclusion is needed. The advertised `distance` is DISTINCT from the
-    /// query-ROUTE distance (`net.distances`, `best_query_winner`) — this rides the
+    /// query-ROUTE distance (`net.distances`, `select_best_matching`) — this rides the
     /// DeclareQueryable ext for UPSTREAM propagation only. (The client-qabl fold is
     /// already wired so ACTIVATION-3 adds only the client-declare TRIGGER, not a
     /// derive change.)
@@ -8173,7 +8162,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// route (C5b), the query-plane twin of [`route_push`](Self::route_push).
     ///
     /// Structure (mirroring the data plane's `route_push` legs, but the Query flows
-    /// TOWARD queryables and the three blocks are UNIFIED by a GLOBAL BestMatching):
+    /// TOWARD queryables and BestMatching is picked region by region):
     /// - Blocks 1 & 2 — the two meshes' qabls: a WITHIN-tier leg (the inbound
     ///   tier's own net, unfiltered, stamped with the querier's psid) and a
     ///   CROSS-mesh leg (self-originated, node_id 0) whose egresses pass the
@@ -8190,8 +8179,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     ///
     /// The `QueryTarget` dispatch (the wire DEFAULT — an absent ext_target — is
     /// BestMatching): `All` fans to every matching queryable, `AllComplete` to every
-    /// COMPLETE one, BestMatching to the SINGLE globally-nearest complete one
-    /// ([`best_query_winner`](Self::best_query_winner)) with an All fallback. Each
+    /// COMPLETE one, BestMatching to each region's nearest complete one, or all of a region's
+    /// when it has none ([`forward_request_best_matching`](Self::forward_request_best_matching)). Each
     /// forwarded Request ALLOCATES a pending-return entry so the reverse Response
     /// route (C5c) finds its way back. An EMPTY route prompts a `ResponseFinal` to
     /// the querier so its `get()` terminates at once (a pure router hosts no local
@@ -8335,35 +8324,19 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             clients: self.client_query_legs(&keyexpr, wire),
         };
         let forwarded = match read_request_target(request) {
-            // BestMatching (wire default): the SINGLE globally-nearest COMPLETE
-            // queryable; fall back to All (every matching one) when none is
-            // complete.
-            None => match self.best_query_winner(&blocks, &route, client_gate, inbound) {
-                Some(BestQueryWinner::Mesh(bi, hop)) => self.forward_request_to_tier(
-                    &blocks[bi],
-                    reliable,
-                    inbound,
-                    &[hop],
-                    request,
-                    &keyexpr,
-                    &fan,
-                    deadline,
-                ),
-                Some(BestQueryWinner::Client(face)) => self
-                    .forward_request_to_face(face, 0, reliable, request, &keyexpr, &fan, deadline),
-                None => self.forward_request_all(
-                    &blocks,
-                    &route,
-                    client_gate,
-                    false,
-                    reliable,
-                    inbound,
-                    request,
-                    &keyexpr,
-                    &fan,
-                    deadline,
-                ),
-            },
+            // BestMatching (wire default): one pick for each region, the nearest COMPLETE
+            // queryable of that region or all of its matching ones when none is complete.
+            None => self.forward_request_best_matching(
+                &blocks,
+                &route,
+                client_gate,
+                reliable,
+                inbound,
+                request,
+                &keyexpr,
+                &fan,
+                deadline,
+            ),
             Some(QueryTarget::All) => self.forward_request_all(
                 &blocks,
                 &route,
@@ -8541,73 +8514,71 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         })
     }
 
-    /// The GLOBAL BestMatching winner (zenoh `compute_final_route`'s BestMatching,
-    /// `dispatcher/queries.rs:243`): the globally-nearest COMPLETE queryable across
-    /// both meshes + clients, or `None` when none is complete (the caller then
-    /// falls back to All). zenoh sorts the union route by SELF-relative distance and
-    /// takes the first complete; wz picks the min over each net's per-net nearest
-    /// complete ([`select_best_matching`], min-of-mins == global-min) and the client
-    /// candidates at distance 1. A distance TIE keeps the EARLIER block (routers
-    /// before peers before clients), matching zenoh's stable-sorted B1/B2/B3 order.
-    fn best_query_winner(
+    /// BestMatching, hat by hat (zenoh `compute_final_route`'s BestMatching): in each region
+    /// the nearest COMPLETE queryable of THAT region's route, or every queryable of it when
+    /// none is complete. Item 751, step 6e / the router finding.
+    ///
+    /// This used to pick ONE winner across the meshes and the clients. The pin picks one for
+    /// each region and merges the picks: its dispatcher runs `compute_final_route` once per
+    /// hat (`zenoh/src/net/routing/dispatcher/queries.rs` @ `for dst in rtables.hats.regions() {`)
+    /// over that hat's own distance-sorted route, so a complete queryable in the router
+    /// region and another in a client region are BOTH asked. The node's own face is the
+    /// `Local` hat's pick, made by
+    /// [`dispatch_router_local_queryables`](Self::dispatch_router_local_queryables) beside
+    /// these.
+    ///
+    /// A mesh hat's pick is [`select_best_matching`]: the nearest by graph distance, the
+    /// inbound direction and a hop the inter-region filter refuses left out, so a refused
+    /// nearest falls through to the next as the pin's route does. A client hat's pick is its
+    /// lowest-numbered complete face, every client being a leaf at the same distance
+    /// ([`first_complete_client`](Self::first_complete_client)).
+    #[allow(clippy::too_many_arguments)]
+    fn forward_request_best_matching(
         &self,
         blocks: &[MeshQueryBlock],
         route: &QueryRoute,
         client_gate: bool,
+        reliable: bool,
         inbound: FaceId,
-    ) -> Option<BestQueryWinner> {
-        let mut best: Option<(u16, BestQueryWinner)> = None;
-        for (bi, (block, candidates)) in blocks.iter().zip(&route.mesh).enumerate() {
-            if let Some((dist, hop)) =
-                select_best_matching(candidates, block.inbound_for_net, |hop| {
-                    self.query_block_admits(block, hop)
-                })
-            {
-                // Truncate the jittered graph distance to u16, exactly as zenoh
-                // stamps `distance: net.distances[qabl_idx] as u16`
-                // (`zenoh/src/net/routing/hat/router/queries.rs` @ `distance`):
-                // the per-net best-matching pick
-                // picks the truly-nearest by the full f64 (jitter breaks a same-cost
-                // tie deterministically WITHIN a net), but the CROSS-block compare
-                // must be on the same integer scale zenoh sorts by. With the DEFAULT
-                // link weight (100, matching zenoh's `DEFAULT_LINK_WEIGHT`) a 1-hop
-                // mesh queryable is ~100 and a client is 1, so a client wins by
-                // distance; an advertised weight-1 link CAN tie a client at u16 1,
-                // and the mesh block (fed first) then wins — zenoh's insertion
-                // order (B1/B2 before B3) breaks the same tie the same way. The
-                // truncation's other load-bearing role is cross-net MESH-vs-MESH
-                // ties: a router-net 100.6 and a peer-net 100.3 both → u16 100, and
-                // the strict `<` + routers-first order then breaks that tie exactly
-                // as zenoh's stable B1/B2/B3 sort does.
-                Self::consider_best(&mut best, dist as u16, BestQueryWinner::Mesh(bi, hop));
-            }
+        request: &RequestOwned,
+        keyexpr: &str,
+        fan: &Arc<QueryFan>,
+        deadline: Instant,
+    ) -> usize {
+        let mut forwarded = 0;
+        for (block, candidates) in blocks.iter().zip(&route.mesh) {
+            let hops = match select_best_matching(candidates, block.inbound_for_net, |hop| {
+                self.query_block_admits(block, hop)
+            }) {
+                Some((_, hop)) => vec![hop],
+                None => all_query_directions(candidates),
+            };
+            forwarded += self.forward_request_to_tier(
+                block, reliable, inbound, &hops, request, keyexpr, fan, deadline,
+            );
         }
         if client_gate {
-            if let Some(face) = Self::first_complete_client(inbound, &route.clients) {
-                // A client-hosted queryable is a directly-attached leaf: distance 1
-                // (zenoh `compute_query_route` block 3's `distance: 1`).
-                Self::consider_best(&mut best, 1, BestQueryWinner::Client(face));
+            let mut template = request.clone();
+            set_request_source(&mut template, 0);
+            if set_request_keyexpr_literal(&mut template, keyexpr).is_ok() {
+                for ((region, _hat), leg) in self.client_regions().zip(&route.clients) {
+                    forwarded +=
+                        match Self::first_complete_client(inbound, std::slice::from_ref(leg)) {
+                            Some(face) => self.forward_request_to_face(
+                                face, 0, reliable, request, keyexpr, fan, deadline,
+                            ),
+                            None => self.forward_request_to_client_leg(
+                                region, leg, false, reliable, inbound, &template, fan, deadline,
+                            ),
+                        };
+                }
             }
         }
-        best.map(|(_, winner)| winner)
-    }
-
-    /// Keep `winner` as the running best IFF it is strictly NEARER (fewer hops) than
-    /// the current best — strict `<` so an equal-distance later candidate does NOT
-    /// displace the earlier one (the router/peer/client block order is the zenoh
-    /// stable-sort tie break, so the caller must feed candidates in that order).
-    fn consider_best(
-        best: &mut Option<(u16, BestQueryWinner)>,
-        dist: u16,
-        winner: BestQueryWinner,
-    ) {
-        if best.as_ref().map_or(true, |(bd, _)| dist < *bd) {
-            *best = Some((dist, winner));
-        }
+        forwarded
     }
 
     /// The first client face (other than `inbound`) hosting a queryable COMPLETE
-    /// for `keyexpr` — the client candidate for the GLOBAL BestMatching (distance 1,
+    /// for `keyexpr` — a client region's BestMatching pick (every client a leaf at distance 1,
     /// zenoh `compute_query_route` block 3's `distance: 1`,
     /// `zenoh/src/net/routing/hat/router/queries.rs` @ `qabl_info`).
     /// "Complete for the query" is the declared
@@ -8774,30 +8745,60 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         if set_request_keyexpr_literal(&mut template, keyexpr).is_err() {
             return 0;
         }
-        let mut forwarded = 0;
         // R2873 (step 3d) — one fan-out per broker hat, scoped to its region.
         // R2911 — each hat's matching faces are its leg of this query's route.
-        for ((region, _hat), leg) in self.client_regions().zip(clients) {
-            if leg.is_empty() {
-                continue;
-            }
-            let _ = self.fan_out_tier(region, reliable, |id, _zid| {
-                if id == inbound {
-                    return Ok(None);
-                }
-                let qualifies = leg
-                    .binary_search_by_key(&id, |c| c.face)
-                    .is_ok_and(|i| !complete_only || leg[i].complete);
-                if !qualifies {
-                    return Ok(None);
-                }
-                let qid = self.pending.guard().allocate(id, fan, deadline);
-                let mut carrier = template.clone();
-                carrier.rid = qid;
-                forwarded += 1;
-                Ok(Some(NetworkMessage::Request(Box::new(carrier))))
-            });
+        self.client_regions()
+            .zip(clients)
+            .map(|((region, _hat), leg)| {
+                self.forward_request_to_client_leg(
+                    region,
+                    leg,
+                    complete_only,
+                    reliable,
+                    inbound,
+                    &template,
+                    fan,
+                    deadline,
+                )
+            })
+            .sum()
+    }
+
+    /// The Query to every face of ONE client region's leg that qualifies: all of them, or
+    /// the complete ones under `complete_only`. `template` is the Request already stamped
+    /// for a client leaf (source 0, a literal keyexpr). Returns the faces forwarded to.
+    #[allow(clippy::too_many_arguments)]
+    fn forward_request_to_client_leg(
+        &self,
+        region: Region,
+        leg: &[ClientQueryable],
+        complete_only: bool,
+        reliable: bool,
+        inbound: FaceId,
+        template: &RequestOwned,
+        fan: &Arc<QueryFan>,
+        deadline: Instant,
+    ) -> usize {
+        if leg.is_empty() {
+            return 0;
         }
+        let mut forwarded = 0;
+        let _ = self.fan_out_tier(region, reliable, |id, _zid| {
+            if id == inbound {
+                return Ok(None);
+            }
+            let qualifies = leg
+                .binary_search_by_key(&id, |c| c.face)
+                .is_ok_and(|i| !complete_only || leg[i].complete);
+            if !qualifies {
+                return Ok(None);
+            }
+            let qid = self.pending.guard().allocate(id, fan, deadline);
+            let mut carrier = template.clone();
+            carrier.rid = qid;
+            forwarded += 1;
+            Ok(Some(NetworkMessage::Request(Box::new(carrier))))
+        });
         forwarded
     }
 
@@ -9920,7 +9921,7 @@ impl RouterForwarder {
                     // A Query Request: count the reception (the query-plane witness),
                     // then route it through [`route_request`](Self::route_request) — the
                     // router's full zenoh compute_query_route (3-block master-gated +
-                    // GLOBAL BestMatching over both meshes + clients, C5b).
+                    // BestMatching region by region, C5b).
                     NetworkMessage::Request(request) => {
                         self.queries_seen.bump();
                         on.route_request(id, tier, *reliable, request, None);
@@ -20164,49 +20165,97 @@ mod tests {
     }
 
     #[test]
-    fn best_matching_prefers_a_local_client_over_a_mesh_queryable() {
-        // GLOBAL BestMatching (the query-specific twist): with a COMPLETE peer
-        // queryable AND a COMPLETE client queryable BOTH matching demo/q,
-        // BestMatching routes to EXACTLY ONE — the LOCAL CLIENT, whose distance is
-        // 1 versus the mesh queryable's per-hop link weight (~100, zenoh's default),
-        // exactly as zenoh prefers a directly-attached session queryable
-        // (`compute_query_route` block 3 stamps `distance: 1`, mesh qabls stamp
-        // `net.distances[..] as u16`). This proves the cross-block global min (a
-        // client can beat a mesh candidate) AND single-winner (not the All fan-out).
-        // R2889 — the mesh candidate sits in the ROUTER mesh: since open-debt
-        // item 751 rule 8b a peer queryable is no candidate for a peer querier
-        // at all, so with peers this test passed without the comparison it names.
+    fn best_matching_asks_each_region_for_its_nearest_complete_queryable() {
+        // BestMatching, region by region (item 751, the router finding). With a COMPLETE router
+        // queryable AND a COMPLETE client queryable both matching demo/q, the pin asks BOTH: its
+        // dispatcher runs `compute_final_route` once for each hat and merges the picks
+        // (`zenoh/src/net/routing/dispatcher/queries.rs` @ `for dst in rtables.hats.regions() {`),
+        // so the client's nearness (distance 1 against the router's ~100) decides nothing
+        // between regions, as it did when this router took ONE winner across all of them. Within
+        // a region it still takes ONE: two complete clients are asked once, the lower face.
+        // R2889 — the mesh candidate sits in the ROUTER mesh: since open-debt item 751 rule 8b
+        // a peer queryable is no candidate for a peer querier at all.
         let fwd = RouterForwarder::new(zid(0x01));
         let (a, sink_a) = face(zid(0xAA), WIRE_ROUTER); // querier
         let (c, sink_c) = face(zid(0xCC), WIRE_ROUTER); // complete router queryable (~100)
-        let (client, sink_client) = face(zid(0xEE), WIRE_CLIENT); // complete client (distance 1)
+        let (client, sink_client) = face(zid(0xEE), WIRE_CLIENT); // complete client
+        let (other, sink_other) = face(zid(0xEF), WIRE_CLIENT); // a second complete client
         fwd.register(FaceId(0), &a);
         fwd.register(FaceId(1), &c);
         fwd.register(FaceId(2), &client);
+        fwd.register(FaceId(3), &other);
         advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
         advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
         fwd.tick();
-        forward_one(&fwd, FaceId(1), declare_qabl("demo/q", true)); // peer C complete
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/q", true)); // router C complete
         forward_one(&fwd, FaceId(2), declare_qabl("demo/q", true)); // client complete
+        forward_one(&fwd, FaceId(3), declare_qabl("demo/q", true)); // client complete
         sink_a.reset();
         sink_c.reset();
         sink_client.reset();
+        sink_other.reset();
         forward_one(&fwd, FaceId(0), request_best(11, "demo/q"));
+        assert_eq!(
+            sink_c.frame_count(),
+            1,
+            "the router region's pick is asked, whatever the client region has"
+        );
         assert_eq!(
             sink_client.frame_count(),
             1,
-            "the nearer LOCAL client queryable (distance 1) wins over the mesh (~100)"
+            "and the client region's pick, the lower of its two complete faces"
         );
         assert_eq!(
-            sink_c.frame_count(),
+            sink_other.frame_count(),
             0,
-            "BestMatching routes to ONE, not the mesh queryable too"
+            "within a region BestMatching still takes ONE"
         );
         assert_eq!(
             fwd.pending.guard().len(),
-            1,
-            "one pending entry for the single winner"
+            2,
+            "one pending entry for each region's pick"
         );
+    }
+
+    #[test]
+    fn a_region_with_no_complete_queryable_is_asked_whole_beside_another_regions_pick() {
+        // The fallback to All is the region's own (item 751, the router finding): the router
+        // region holds two INCOMPLETE queryables and the client region one COMPLETE one, and the
+        // pin, computing each hat's route alone, asks both incomplete ones AND the complete
+        // client. A single global pick would have found the complete client and asked no one else.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, sink_a) = face(zid(0xAA), WIRE_ROUTER); // querier
+        let (b, sink_b) = face(zid(0xBB), WIRE_ROUTER); // incomplete
+        let (c, sink_c) = face(zid(0xCC), WIRE_ROUTER); // incomplete
+        let (client, sink_client) = face(zid(0xEE), WIRE_CLIENT); // complete
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &b);
+        fwd.register(FaceId(2), &c);
+        fwd.register(FaceId(3), &client);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+        advertise_link_back(&fwd, FaceId(2), 0x01, 0xCC, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/q", false));
+        forward_one(&fwd, FaceId(2), declare_qabl("demo/q", false));
+        forward_one(&fwd, FaceId(3), declare_qabl("demo/q", true));
+        sink_a.reset();
+        sink_b.reset();
+        sink_c.reset();
+        sink_client.reset();
+        forward_one(&fwd, FaceId(0), request_best(12, "demo/q"));
+        assert_eq!(
+            sink_b.frame_count(),
+            1,
+            "the router region fell back to All: B"
+        );
+        assert_eq!(sink_c.frame_count(), 1, "and C");
+        assert_eq!(
+            sink_client.frame_count(),
+            1,
+            "beside the client region's complete pick"
+        );
+        assert_eq!(sink_a.frame_count(), 0, "never the inbound querier");
     }
 
     #[test]

@@ -647,16 +647,22 @@ others are (the first rule missing for a hosted declaration).
 
 ## 13. Open
 
-- **The router's BestMatching is one winner across the meshes and the clients; the
-  pin's is one for each region.** Step 6e read `compute_final_route` for the `Local`
-  hat and found that the pin 1.10.1 runs it once for every hat and merges the
-  routes, where `best_query_winner` takes the globally nearest complete queryable
-  and forwards to that one (its comment cites a union route sorted by distance, which
-  is the shape of an earlier layout). A router with a complete queryable in the
-  router region and another in the client region forwards the query to one of them
-  and the pin forwards it to both. It is the router's, was not introduced here, and
-  changes what every router with several regions sends; it needs its own step with its
-  own gate, and is recorded and not fixed here.
+- **The router's BestMatching was one winner across the meshes and the clients; the
+  pin's is one for each region. Fixed (owner, 2026-10-28).** Step 6e read
+  `compute_final_route` for the `Local` hat and found that the pin 1.10.1 runs it once
+  for every hat and merges the routes, where `best_query_winner` took the globally
+  nearest complete queryable and forwarded to that one (its comment cited a union route
+  sorted by distance, the shape of an earlier layout). A router with a complete
+  queryable in the router region and another in the client region forwarded the query to
+  one of them and the pin forwards it to both. `forward_request_best_matching` now picks
+  per region: each mesh region's nearest complete queryable (the inbound direction and a
+  refused hop left out), each client region's lowest complete face, and all of a region's
+  matching queryables where it has none complete; the node's own face is the `Local`
+  hat's pick. It changes what every router with several regions sends. The old test that
+  pinned the global rule, `best_matching_prefers_a_local_client_over_a_mesh_queryable`,
+  is now `best_matching_asks_each_region_for_its_nearest_complete_queryable`, and
+  `a_region_with_no_complete_queryable_is_asked_whole_beside_another_regions_pick` holds
+  the per-region fallback. Read the first hosted run for the router query legs.
 
 - The size of step 1's list is unknown until it is made, and the number of
   rounds after it follows from it. The router's own program ran from round 2865

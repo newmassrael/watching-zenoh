@@ -6423,9 +6423,11 @@ layer_c1ay_cargo_test_router_hat() {
     # test that a node's locators ride its first flood carries no feature gate.
     # Step (b), step 6, part two (hosted handlers) -- EVERY arm moves by +3 again: the three
     # tests of the self-echo queue carry no feature gate either.
-    _runci_guarded_test "C1AY router_forward 246" 246 \
+    # The router finding (BestMatching region by region) -- EVERY arm moves by +1: the test of
+    # a region with no complete queryable carries no feature gate.
+    _runci_guarded_test "C1AY router_forward 247" 247 \
         cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward --quiet || return 1
-    _runci_guarded_test "C1AY router_forward 248" 248 \
+    _runci_guarded_test "C1AY router_forward 249" 249 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-qos --lib router_forward --quiet || return 1
     # The router's counts (`counter`): four UNGATED witnesses of the atomic count (it rises by one,
     # by n and to a peak; many threads lose none; a peak taken from many threads is the greatest
@@ -6458,7 +6460,7 @@ layer_c1ay_cargo_test_router_hat() {
     # Step (b), step 2: 258 -> 261 (+3, the peer placement tests); step 3: 264.
     # The network gate: 264 -> 266.
     # Step (b), step 5: 266 -> 267.
-    _runci_guarded_test "C1AY router_forward mcast-faces 271" 271 \
+    _runci_guarded_test "C1AY router_forward mcast-faces 272" 272 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,router-multicast-faces --lib router_forward --quiet || return 1
     # R2346 — 140 -> 141, and ONLY this arm moves: the added test is
     # `#[cfg(feature = "access-acl")]`, so the five sibling resolutions that do
@@ -6479,7 +6481,7 @@ layer_c1ay_cargo_test_router_hat() {
     # unattributable message, which would strand a face that has merely not
     # finished its handshake. Still `#[cfg(feature = "access-acl")]`, so the
     # five sibling resolutions are unchanged for R2346's reason.
-    _runci_guarded_test "C1AY router_forward 251" 251 \
+    _runci_guarded_test "C1AY router_forward 252" 252 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,access-acl --lib router_forward --quiet || return 1
     # R2348 — a NEW arm, and it exists because without it this round's central
     # tests would have been compiled out while the lane stayed green. The router
@@ -6497,7 +6499,7 @@ layer_c1ay_cargo_test_router_hat() {
     # before the cache is consulted (the same vacuity that made R311y508's first
     # cross-impl leg prove nothing), so a cache test with no policy installed
     # tests nothing.
-    _runci_guarded_test "C1AY router_forward hotreload 254" 254 \
+    _runci_guarded_test "C1AY router_forward hotreload 255" 255 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-interceptor-hotreload,access-acl --lib router_forward --quiet || return 1
     # R311y464 — 171 -> 173: y463 added token_current_future_interest_replies_with_a
     # _client_token and token_current_future_interest_matches_a_wildcard_target, both
@@ -6509,13 +6511,13 @@ layer_c1ay_cargo_test_router_hat() {
     # this arm red and the other twenty-seven it reached OK.
     # R3334 — 246 -> 247, and ONLY this arm: the token-arm witness of a token
     # older than a FUTURE-only interest is cfg(routing-token-tables).
-    _runci_guarded_test "C1AY router_forward 293" 293 \
+    _runci_guarded_test "C1AY router_forward 294" 294 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --lib router_forward --quiet || return 1
     # R2415 — 146 -> 140. NOT this round's tests: `d7cd078f` re-gated the mcast
     # egress plane from `transport-multicast` onto `router-multicast-faces`, so six
     # tests that ran in this broad-feature lane now need the atom and no longer
     # appear here. The number moves because the plane correctly is not there.
-    _runci_guarded_test "C1AY router_forward 246" 246 \
+    _runci_guarded_test "C1AY router_forward 247" 247 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-multicast --lib router_forward --quiet || return 1
     # R2636 — 143 -> 144, and ONLY this arm of the seven moves. The added test
     # renders the router's `sessions[]` table and is `#[cfg(feature =
@@ -6528,7 +6530,7 @@ layer_c1ay_cargo_test_router_hat() {
     # command itself, after that round's full sweep STALLED with an empty log on a
     # machine at load 37 — so the one guard predicted to move and the one predicted
     # NOT to (`C1AM adminspace`, still 33) were each run directly instead.
-    _runci_guarded_test "C1AY router_forward 248" 248 \
+    _runci_guarded_test "C1AY router_forward 249" 249 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-router-linkstate --lib router_forward --quiet || return 1
     # R311y786 (§5.21 router-connect-reconcile) — the re-dial BACKOFF. Until y786
     # the loop slept a `const RECONNECT_BACKOFF_MS = 1000`, so an unreachable
