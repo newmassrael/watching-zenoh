@@ -421,7 +421,7 @@ pub const TX_EXPIRY_CLOSE_AFTER: usize = generated::TX_EXPIRY_CLOSE_AFTER;
 pub const CLOCK_SOURCES: usize = generated::CLOCK_SOURCES;
 
 /// How far ahead of the node's clock, in milliseconds, a timestamp from another node may be before
-/// the hybrid logical clock ([`crate::hlc::HlcCore`]) refuses it: zenoh's `UHLC_MAX_DELTA_MS`, which
+/// the hybrid logical clock (`hlc::HlcCore`) refuses it: zenoh's `UHLC_MAX_DELTA_MS`, which
 /// is 500 unless the host states otherwise. A time and not a table size: it sizes no memory.
 pub const CLOCK_MAX_FORWARD_STEP_MS: usize = generated::CLOCK_MAX_FORWARD_STEP_MS;
 

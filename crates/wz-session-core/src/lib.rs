@@ -364,12 +364,17 @@ pub mod epoch;
 /// A ring of fixed-size event records with one producer and any number of readers
 /// (`docs/observation-plane.md` M2): a per-slot sequence lock over 32-bit atomic words, no lock,
 /// no read-modify-write on the write side, loss reported as a gap in the sequence. Generic and
-/// unconditional like [`hlc`]: a build that instantiates no ring carries no code of it.
+/// unconditional: a build that instantiates no ring carries no code of it. It uses 32-bit atomics
+/// only, so a Cortex-M0 builds it.
 pub mod event_ring;
 
 /// The Hybrid Logical Clock arithmetic over the [`epoch`] port: `uhlc`'s stamp and absorb rules
 /// in one atomic word, with no allocation and no lock, so a profile with no operating system has
-/// a node clock too. Pure no_std + no_alloc; unconditional.
+/// a node clock too. Pure no_std + no_alloc. The word is 64 bits, so the module exists where the
+/// target has a 64-bit atomic or the `no_std` feature brings `portable-atomic` to provide one
+/// (the same split `session_actions` makes); a bare cross-compile of the crate for a core with
+/// neither (`thumbv7em`, `thumbv6m`) does not carry it.
+#[cfg(any(target_has_atomic = "64", feature = "no_std"))]
 pub mod hlc;
 
 /// A1a — modular sequence-number arithmetic (zenoh-pico

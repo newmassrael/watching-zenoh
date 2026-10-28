@@ -757,6 +757,13 @@ mod tests {
                         let mut reader = observer.reader();
                         let (mut previous, mut seen, mut lost) = (None::<u64>, 0u64, 0u64);
                         loop {
+                            // `done` is read BEFORE the poll. A reader that polled, found
+                            // nothing, and only then looked at `done` could be told the producer
+                            // had finished by a producer that had written a hundred thousand more
+                            // records since the poll, and stop with them unread. Read first, an
+                            // `Empty` after a `done` is the end: every write happened before the
+                            // flag, and the poll that follows sees them all.
+                            let finished = done.load(Ordering::Acquire);
                             match reader.poll() {
                                 Read::Record(record) => {
                                     check(&record);
@@ -775,7 +782,7 @@ mod tests {
                                     previous = None;
                                 }
                                 Read::Empty => {
-                                    if done.load(Ordering::Acquire) {
+                                    if finished {
                                         break;
                                     }
                                     std::hint::spin_loop();
