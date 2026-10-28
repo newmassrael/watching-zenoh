@@ -282,6 +282,16 @@ config WZ_LIMIT_TX_NO_PROGRESS_WINDOW_US
 	  It is read only when that policy is on, and must be at least 1 and no more
 	  than the total wait before the session is closed, which is set as before.
 
+config WZ_LIMIT_TX_EXPIRY_CLOSE_AFTER
+	int "TX_EXPIRY_CLOSE_AFTER"
+	default 0
+	help
+	  How many blocking messages in a row may find no room within their deadline
+	  before the session is closed as unresponsive, when the tx-expiry-keeps-session
+	  policy is on. A blocking message that does find room ends the run. 0 never
+	  closes the session, which is the policy as it was before this limit. At most
+	  65535: a larger value counts as 65535. It is read only when that policy is on.
+
 config WZ_LIMIT_DECLARATION_SYNC_BURST_MESSAGES
 	int "DECLARATION_SYNC_BURST_MESSAGES"
 	default 8

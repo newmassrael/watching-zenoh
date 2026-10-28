@@ -408,6 +408,13 @@ pub const QUERIER_MAX_PENDING_QUERIES: usize = generated::QUERIER_MAX_PENDING_QU
 /// table size: it sizes no memory.
 pub const TX_NO_PROGRESS_WINDOW_US: usize = generated::TX_NO_PROGRESS_WINDOW_US;
 
+/// How many blocking messages in a row may find no room within their deadline before the
+/// session is closed as unresponsive, when the `tx-expiry-keeps-session` policy is on
+/// ([`crate::tx_deadline::ExpiryRun`]). `0`, the default, never closes it: the policy as it was
+/// before this limit. It is read only when that policy is on. A count of messages and not a table
+/// size: it sizes no memory.
+pub const TX_EXPIRY_CLOSE_AFTER: usize = generated::TX_EXPIRY_CLOSE_AFTER;
+
 /// How many declarations one turn of a paced declaration replay sends, when the
 /// `declaration-sync-pacing` policy is on (`docs/declaration-sync-pacing.md`). It is read only
 /// then, by the reconnect supervisor of the heap runtime, and must be at least `1`: a turn that

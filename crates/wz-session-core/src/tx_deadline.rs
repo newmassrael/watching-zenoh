@@ -48,6 +48,39 @@ impl TxExpiry {
     }
 }
 
+/// The run of blocking messages that found no room, one after another, on one session: what a
+/// circuit breaker counts. `tx-expiry-keeps-session` keeps the session open for each expiry,
+/// and `TX_EXPIRY_CLOSE_AFTER` is how long a link may stay blocked before it is not kept any
+/// more. A message that finds room is proof the link moves, so it ends the run.
+///
+/// It counts messages in a row and not messages in a period, so it needs no clock: a session
+/// has none fine enough, and a run of expiries is already spread over `wait_before_close` each.
+///
+/// A plain count, not an atomic: it lives in the session's out-of-band state, under the lock
+/// that state already has, where it takes the room of a field's padding and no new bytes.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ExpiryRun {
+    run: u16,
+}
+
+impl ExpiryRun {
+    /// A message was pushed, so the link has room: the run ends.
+    pub fn pushed(&mut self) {
+        self.run = 0;
+    }
+
+    /// A blocking message expired. Whether this is the `close_after`-th in the run, which is
+    /// the one that closes the session; every expiry after it is too, so a close asked for twice
+    /// is the same close. `0` never closes.
+    pub fn expired(&mut self, close_after: u16) -> bool {
+        if close_after == 0 {
+            return false;
+        }
+        self.run = self.run.saturating_add(1);
+        self.run >= close_after
+    }
+}
+
 /// R2926 — one message's congestion deadline, held across every ask for room
 /// its frame or fragment chain makes: upstream's `Deadline` over a
 /// `LazyDeadline` over a `WaitTime`
@@ -189,6 +222,56 @@ impl PushDeadline {
 mod tests {
     use super::*;
     use crate::session_init_params::WAIT_BEFORE_CLOSE_US;
+
+    /// With no count stated, a blocked link is kept however long it stays blocked: the
+    /// policy as it was before the limit.
+    #[test]
+    fn a_run_of_expiries_never_closes_when_no_count_is_stated() {
+        let mut run = ExpiryRun::default();
+        for _ in 0..10_000 {
+            assert!(!run.expired(0));
+        }
+    }
+
+    /// The count-th expiry in a row is the one that closes the session, and the ones before
+    /// it are kept.
+    #[test]
+    fn the_expiry_that_completes_the_run_closes_the_session() {
+        let mut run = ExpiryRun::default();
+        assert!(!run.expired(3));
+        assert!(!run.expired(3));
+        assert!(run.expired(3));
+        // A close asked for again is the same close.
+        assert!(run.expired(3));
+    }
+
+    /// A count of one is upstream's own answer, the first expiry closes it.
+    #[test]
+    fn a_count_of_one_closes_at_the_first_expiry() {
+        assert!(ExpiryRun::default().expired(1));
+    }
+
+    /// A message that finds room ends the run: the expiries on either side of it are two runs
+    /// of two, not one of four, so a link that blocks now and then is never closed.
+    #[test]
+    fn a_push_between_expiries_starts_the_count_again() {
+        let mut run = ExpiryRun::default();
+        assert!(!run.expired(3));
+        assert!(!run.expired(3));
+        run.pushed();
+        assert!(!run.expired(3));
+        assert!(!run.expired(3));
+        assert!(run.expired(3));
+    }
+
+    /// A push with no run open changes nothing.
+    #[test]
+    fn a_push_with_no_run_open_leaves_the_count_at_zero() {
+        let mut run = ExpiryRun::default();
+        run.pushed();
+        assert!(!run.expired(2));
+        assert!(run.expired(2));
+    }
 
     /// Under pico's transmit model a droppable message asks for room as long
     /// as a blocking one does, and its fragments add nothing past that: pico

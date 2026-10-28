@@ -1916,6 +1916,18 @@ than the total wait before the session is closed, which is set as before.
 '''
 
 [[limit]]
+id = "TX_EXPIRY_CLOSE_AFTER"
+kconfig = "WZ_LIMIT_TX_EXPIRY_CLOSE_AFTER"
+default = 0
+help = '''
+How many blocking messages in a row may find no room within their deadline
+before the session is closed as unresponsive, when the tx-expiry-keeps-session
+policy is on. A blocking message that does find room ends the run. 0 never
+closes the session, which is the policy as it was before this limit. At most
+65535: a larger value counts as 65535. It is read only when that policy is on.
+'''
+
+[[limit]]
 id = "DECLARATION_SYNC_BURST_MESSAGES"
 kconfig = "WZ_LIMIT_DECLARATION_SYNC_BURST_MESSAGES"
 default = 8
@@ -2087,7 +2099,9 @@ What happens when a blocking message finds no room within its deadline. Off,
 the session is closed as unresponsive and the send reports success. On, the
 message is dropped, the send reports that the transport was not available,
 and the session stays open: a slow link costs the message and not the
-session. A multicast group never closes either way.
+session. A link that stays blocked is closed after TX_EXPIRY_CLOSE_AFTER such
+messages in a row, when that limit is not 0. A multicast group never closes
+either way.
 '''
 
 [[policy]]

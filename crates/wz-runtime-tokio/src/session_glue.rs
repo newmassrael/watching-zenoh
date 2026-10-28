@@ -5318,6 +5318,85 @@ mod link_congestion_tests {
         );
     }
 
+    /// `TX_EXPIRY_CLOSE_AFTER`: a link that stays blocked is kept for the first expiries and
+    /// closed at the count-th, and the message that completes the run is still refused to its
+    /// sender, since it was dropped.
+    #[test]
+    fn a_link_that_stays_blocked_is_closed_at_the_count_the_limit_states() {
+        use wz_session_core::send_wire_error::SendWireError;
+        let link = CongestibleLink::new();
+        let actions = session_with_queue(
+            link.clone(),
+            super::TxQueueConf {
+                expiry_keeps_session: true,
+                expiry_close_after: 3,
+                ..super::TxQueueConf::default()
+            },
+        );
+        link.set_room(LinkRoom::Congested);
+        for _ in 0..2 {
+            assert_eq!(
+                blocking_push(&actions),
+                Ok(SendWireError::TransportUnavailable)
+            );
+            assert!(!actions.take_congestion_close(), "kept, the run is short");
+        }
+        assert_eq!(
+            blocking_push(&actions),
+            Ok(SendWireError::TransportUnavailable),
+            "the message that completes the run was dropped, and its sender is told"
+        );
+        assert!(
+            actions.take_congestion_close(),
+            "the third in a row closes the session"
+        );
+    }
+
+    /// A link that blocks now and then is never closed: a push that finds room ends the run.
+    #[test]
+    fn a_push_that_finds_room_ends_the_run_of_expiries() {
+        let link = CongestibleLink::new();
+        let actions = session_with_queue(
+            link.clone(),
+            super::TxQueueConf {
+                expiry_keeps_session: true,
+                expiry_close_after: 2,
+                ..super::TxQueueConf::default()
+            },
+        );
+        for _ in 0..4 {
+            link.set_room(LinkRoom::Congested);
+            assert!(blocking_push(&actions).is_ok(), "refused, not sent");
+            link.set_room(LinkRoom::Free);
+            actions
+                .send_push_literal_qos("home/a", b"A", true, Priority::DEFAULT)
+                .expect("room again");
+        }
+        assert!(
+            !actions.take_congestion_close(),
+            "four single expiries, each ended by a push, are four runs of one"
+        );
+    }
+
+    /// With the limit at its default the policy is as it was: no count of expiries closes it.
+    #[test]
+    fn with_no_count_stated_no_run_of_expiries_closes_the_session() {
+        let link = CongestibleLink::new();
+        let actions = session_with_queue(
+            link.clone(),
+            super::TxQueueConf {
+                expiry_keeps_session: true,
+                expiry_close_after: 0,
+                ..super::TxQueueConf::default()
+            },
+        );
+        link.set_room(LinkRoom::Congested);
+        for _ in 0..50 {
+            assert!(blocking_push(&actions).is_ok());
+        }
+        assert!(!actions.take_congestion_close());
+    }
+
     /// The control: upstream's behaviour, the policy off. The put succeeds from the caller's
     /// side and the close is staged for the loop.
     #[test]

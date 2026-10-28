@@ -519,6 +519,10 @@ pub struct OutOfBandState {
     /// (`tx.congestion.exhaust`), as zenoh's `handle_push_result` closes its
     /// transport with `UNRESPONSIVE`.
     pub tx_congested: bool,
+    /// The run of blocking messages that found no room, one after another: what the
+    /// `TX_EXPIRY_CLOSE_AFTER` limit of `tx-expiry-keeps-session` counts. It is state of this
+    /// lock and not a request, so it wakes no one and [`Self::any`] does not read it.
+    pub expiry_run: crate::tx_deadline::ExpiryRun,
     waker: Option<core::task::Waker>,
 }
 
@@ -8965,8 +8969,22 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// drop to the sender. The one place both senders ask, so the two cannot disagree.
     pub fn settle_blocking_expiry(&self) -> TxExpiry {
         let outcome = TxExpiry::of(&self.params.tx_queue);
-        if outcome == TxExpiry::Closing {
-            self.request_congestion_close();
+        match outcome {
+            TxExpiry::Closing => self.request_congestion_close(),
+            // The link has stayed blocked for `TX_EXPIRY_CLOSE_AFTER` messages in a row: the
+            // session is not kept any more. The message that completes the run is still
+            // dropped and still reported, because it was: the sender is told the transport was
+            // not available, and the close is the drive loop's, as upstream's is.
+            TxExpiry::Kept => {
+                let close_after = self.params.tx_queue.expiry_close_after;
+                if self
+                    .core
+                    .out_of_band
+                    .take(|s| s.expiry_run.expired(close_after))
+                {
+                    self.request_congestion_close();
+                }
+            }
         }
         outcome
     }
@@ -9372,6 +9390,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // never both.
         let wire_reliability = Reliability::from_reliable_bool(reliable);
         let count_pushed = || {
+            // A message with room ends a run of expiries (`TX_EXPIRY_CLOSE_AFTER`); with no
+            // count stated there is no run to end.
+            if self.params.tx_queue.expiry_close_after != 0 {
+                self.core.out_of_band.take(|s| s.expiry_run.pushed());
+            }
             #[cfg(feature = "transport-stats")]
             self.stats.inc_tx_network(&_stats_class);
             #[cfg(feature = "transport-stats")]

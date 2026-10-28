@@ -52,7 +52,9 @@ config WZ_POLICY_TX_EXPIRY_KEEPS_SESSION
 	  the session is closed as unresponsive and the send reports success. On, the
 	  message is dropped, the send reports that the transport was not available,
 	  and the session stays open: a slow link costs the message and not the
-	  session. A multicast group never closes either way.
+	  session. A link that stays blocked is closed after TX_EXPIRY_CLOSE_AFTER such
+	  messages in a row, when that limit is not 0. A multicast group never closes
+	  either way.
 	  Upstream: Closes the session as unresponsive when a blocking message found no
 	  room in its deadline, and tells the sender nothing.
 

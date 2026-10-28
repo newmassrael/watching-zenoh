@@ -335,6 +335,11 @@ pub struct TxQueueConf {
     /// and tells the sender nothing. `true` drops the message, reports the transport as not
     /// available, and keeps the session open.
     pub expiry_keeps_session: bool,
+    /// The `TX_EXPIRY_CLOSE_AFTER` limit of `tx-expiry-keeps-session`: how many blocking
+    /// messages in a row may find no room before the session is closed after all
+    /// ([`crate::tx_deadline::ExpiryRun`]). `0` never closes it. Read only when
+    /// [`Self::expiry_keeps_session`] is `true`.
+    pub expiry_close_after: u16,
 }
 
 /// R2926 — upstream's default
@@ -353,6 +358,18 @@ const fn build_no_progress_us() -> Option<u64> {
     }
 }
 
+/// `TX_EXPIRY_CLOSE_AFTER` as [`TxQueueConf::expiry_close_after`] carries it: a count of 16 bits,
+/// which is as long a run of expiries as a session is asked to count, so a larger limit is that
+/// count. 16 bits and not 32 so that the count and the run it is compared with sit in the
+/// padding the session already has.
+const fn build_expiry_close_after() -> u16 {
+    if crate::caps::TX_EXPIRY_CLOSE_AFTER > u16::MAX as usize {
+        u16::MAX
+    } else {
+        crate::caps::TX_EXPIRY_CLOSE_AFTER as u16
+    }
+}
+
 impl Default for TxQueueConf {
     fn default() -> Self {
         Self {
@@ -363,6 +380,7 @@ impl Default for TxQueueConf {
             no_progress_us: build_no_progress_us(),
             expiry_keeps_session: crate::policy::SessionPolicy::from_build()
                 .tx_expiry_keeps_session,
+            expiry_close_after: build_expiry_close_after(),
         }
     }
 }
@@ -421,6 +439,7 @@ impl TxQueueConf {
             no_progress_us: build_no_progress_us(),
             expiry_keeps_session: crate::policy::SessionPolicy::from_build()
                 .tx_expiry_keeps_session,
+            expiry_close_after: build_expiry_close_after(),
         }
     }
 
@@ -573,6 +592,8 @@ mod no_progress_tests {
         assert!(!TxQueueConf::default().expiry_keeps_session);
         assert_eq!(TxQueueConf::pico().no_progress_us, None);
         assert!(!TxQueueConf::pico().expiry_keeps_session);
+        assert_eq!(TxQueueConf::default().expiry_close_after, 0);
+        assert_eq!(TxQueueConf::pico().expiry_close_after, 0);
     }
 
     /// The window is held against the total wait: none, zero and past-the-total are refused,
