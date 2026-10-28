@@ -23,7 +23,12 @@ What it asserts of an image, in this order:
 5. the bound stays inside 75 percent of the image's stack (the rule `resource_budget_gate.py` applies
    to the measured peak, applied here to the bound, which is what a margin is for);
 6. the stack peak the kit measured is not above the bound. A measurement above a bound is a hole in the
-   model, never a bound that holds.
+   model, never a bound that holds;
+7. the stack of the image is what its bound needs, in units of 64 bytes, and not more than 512 bytes above
+   it: the reservation is a function of the bound, so a bound that falls gives the RAM back;
+8. a rule with no line (a whole file, a whole C function) pins, for each image, how many calls through a
+   register it claims, so that a call added to such a file is read against the rule's callees and is not
+   claimed in silence.
 
 What the bound still rests on, stated: the rules are written by a person and read against the code; other
 threads and interrupts are taken to run on their own stacks; the recursion the contract declares has the
@@ -235,6 +240,7 @@ def _locate(elf: str, addrs: list[int]) -> dict[int, tuple[str, int | None]]:
 
 @dataclass
 class Result:
+    claims: dict[str, int] = field(default_factory=dict)  # rule id -> its sites in the functions reached
     unclaimed: list[tuple[str, str]] = field(default_factory=list)  # (function, where)
     empty_rules: list[str] = field(default_factory=list)  # rules that name nobody but are used
     premises: list[str] = field(default_factory=list)  # a NONE rule whose premise has failed
@@ -323,6 +329,8 @@ def analyse(model: Model, contract: dict) -> Result:
     for s in sorted(reach):
         for w in unclaimed.get(s, []):
             res.unclaimed.append((model.funcs[s].norm, w))
+        for r in claimed_by.get(s, []):
+            res.claims[r["id"]] = res.claims.get(r["id"], 0) + 1
     for rule_id in sorted(empty):
         users = [s for s in reach for r in claimed_by.get(s, []) if r["id"] == rule_id]
         if users:
@@ -374,9 +382,38 @@ def analyse(model: Model, contract: dict) -> Result:
 # ── the gate ────────────────────────────────────────────────────────────────────────────────────────
 
 
-def verdicts(res: Result, key: str, bound_row: int | None, peak: int | None, stack: int) -> list[str]:
+#: A stack is sized from the bound it must hold: the bound over three quarters, in units of this.
+STACK_UNIT = 64
+#: How much above that a stack may be before the bytes it holds idle are a finding.
+STACK_SLACK = 512
+
+
+def derived_stack(bound: int) -> int:
+    """The smallest stack, in units of STACK_UNIT, that keeps the bound within three quarters of it."""
+    need = -(-bound * MARGIN_DEN // MARGIN_NUM)
+    return -(-need // STACK_UNIT) * STACK_UNIT
+
+
+def verdicts(
+    res: Result, key: str, bound_row: int | None, peak: int | None, stack: int, contract: dict | None = None
+) -> list[str]:
     """What is wrong with an image's bound, one sentence each; empty when nothing is."""
     bad: list[str] = []
+    # A rule with no line claims every call by register of a file or of a C function, so a call added
+    # there is claimed without anyone reading it. Its number of sites is committed for each image, and
+    # a change of it is the moment the rule is read again.
+    pins = (contract or {}).get("site_pins", {})
+    for rule in (contract or {}).get("rules", []):
+        if "line" in rule["where"]:
+            continue
+        n, pinned = res.claims.get(rule["id"], 0), pins.get(rule["id"], {}).get(key)
+        if n and pinned is None:
+            bad.append(f"rule `{rule['id']}` has no line and claims {n} call(s) in {key}; pin them in `site_pins`")
+        elif pinned is not None and pinned != n:
+            bad.append(
+                f"rule `{rule['id']}` claims {n} call(s) through a register in {key} and pins {pinned}: "
+                f"read the new ones against its callees, then move the pin"
+            )
     for fn, where in res.unclaimed[:12]:
         bad.append(
             f"`{fn}` calls through a register at {where} and no rule of {CONTRACTS.name} claims the site"
@@ -399,6 +436,12 @@ def verdicts(res: Result, key: str, bound_row: int | None, peak: int | None, sta
         bad.append(
             f"the bound {res.bound} is over {MARGIN_NUM}/{MARGIN_DEN} of the {stack}-byte stack "
             f"({stack * MARGIN_NUM // MARGIN_DEN})"
+        )
+    want = derived_stack(res.bound)
+    if stack > want + STACK_SLACK:
+        bad.append(
+            f"the stack of {key} is {stack} bytes and its bound needs {want}: the overlay holds "
+            f"{stack - want} bytes more than the {STACK_SLACK} of slack allowed; set it to {want}"
         )
     if peak is not None and peak > res.bound:
         bad.append(
@@ -452,15 +495,22 @@ def main() -> int:
     image = _image(key)
     model = load(args.elf, image.entry)
     res = analyse(model, _contract())
+    contract = _contract()
     if args.emit:
         print(report(res))
         for fn, where in res.unclaimed:
             print(f"   UNCLAIMED {fn} at {where}")
         for a, b in res.cycles:
             print(f"   CYCLE {a} -> {b}")
+        for rule in contract["rules"]:
+            if "line" not in rule["where"] and res.claims.get(rule["id"]):
+                print(f"   SITES {rule['id']} {res.claims[rule['id']]}")
+        print(f"   STACK declared {g.declared_stack(image, ROOT)}, derived {derived_stack(res.bound)}")
         return 0
     row = _row(key)
-    bad = verdicts(res, key, row.get("static_bound_bytes"), row.get("peak_stack_bytes"), g.declared_stack(image, ROOT))
+    bad = verdicts(
+        res, key, row.get("static_bound_bytes"), row.get("peak_stack_bytes"), g.declared_stack(image, ROOT), contract
+    )
     if bad:
         print(f"stack-bound: FAIL {key}")
         for b in bad:
@@ -542,6 +592,15 @@ def selftest() -> int:
     eq("a bound over three quarters of the stack", len(verdicts(ok, "k", 390, 300, 400)), 1)
     eq("a measurement above the bound is a hole", len(verdicts(ok, "k", 390, 391, 1000)), 1)
     eq("no row is a refusal", len(verdicts(ok, "k", None, None, 1000)), 1)
+    eq("the stack a bound needs", derived_stack(390), 576)
+    eq("a stack far above what the bound needs", len(verdicts(ok, "k", 390, 300, 2000)), 1)
+    broad = {"rules": [{"id": "b", "where": {"file": "lib.rs"}, "callees": "^leaf_", "why": "t"}]}
+    res_b = analyse(_model(), broad)
+    eq("a rule with no line has to pin its sites", len(verdicts(res_b, "k", 390, 300, 1000, broad)), 1)
+    pinned = {**broad, "site_pins": {"b": {"k": 1}}}
+    eq("a pinned rule holds", verdicts(res_b, "k", 390, 300, 1000, pinned), [])
+    moved = {**broad, "site_pins": {"b": {"k": 2}}}
+    eq("a pin that moved is a rule to read again", len(verdicts(res_b, "k", 390, 300, 1000, moved)), 1)
     # norm drops generic arguments and keeps a qualified path
     eq("norm: generics", norm("a::b::<T>::c"), "a::b::c")
     eq("norm: qualified path", norm("<X<Y> as T>::m"), "<X as T>::m")

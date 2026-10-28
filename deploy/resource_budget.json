@@ -2,7 +2,7 @@
   "schema": 1,
   "images": {
     "zephyr-client-fixed": {
-      "built_as": "the fixed-memory client of overlays/t2g_client_fixed.conf with the idle wait and batching off (main stack 9216 bytes), its node wz_session_mcu::slot_node",
+      "built_as": "the fixed-memory client of overlays/t2g_client_fixed.conf with the idle wait and batching off (main stack 8320 bytes), its node wz_session_mcu::slot_node",
       "static_chain_bytes": 5480,
       "static_bound_bytes": 6216,
       "peak_stack_bytes": 5904,
@@ -14,7 +14,7 @@
       "evidence": "docs/storage-policy-and-link-layer.md section 5.5"
     },
     "zephyr-client-fixed-batching": {
-      "built_as": "the fixed-memory client of overlays/t2g_client_batching.conf with one send window sent as one datagram, the idle wait off (main stack 10240 bytes), its node wz_session_mcu::slot_node",
+      "built_as": "the fixed-memory client of overlays/t2g_client_batching.conf with one send window sent as one datagram, the idle wait off (main stack 8320 bytes), its node wz_session_mcu::slot_node",
       "static_chain_bytes": 5480,
       "static_bound_bytes": 6216,
       "peak_stack_bytes": 5908,
@@ -26,7 +26,7 @@
       "evidence": "docs/storage-policy-and-link-layer.md section 5.5"
     },
     "zephyr-client-fixed-get": {
-      "built_as": "the fixed-memory client of overlays/t2g_client_get.conf, which also asks one query at a time (two pending rows), the idle wait and batching off (main stack 12288 bytes); its node is wz_session_mcu::slot_node and its getter wz_session_mcu::slot_getter",
+      "built_as": "the fixed-memory client of overlays/t2g_client_get.conf, which also asks one query at a time (two pending rows), the idle wait and batching off (main stack 9024 bytes); its node is wz_session_mcu::slot_node and its getter wz_session_mcu::slot_getter",
       "static_chain_bytes": 5768,
       "static_bound_bytes": 6768,
       "peak_stack_bytes": 6020,

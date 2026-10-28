@@ -4,6 +4,37 @@
   "cold": [
     "^core::str::slice_error_fail"
   ],
+  "site_pins": {
+    "exec-drop": {"zephyr-client-fixed": 3, "zephyr-client-fixed-batching": 3, "zephyr-client-fixed-get": 3},
+    "waker": {"zephyr-client-fixed": 8, "zephyr-client-fixed-batching": 8, "zephyr-client-fixed-get": 8},
+    "planner-call": {"zephyr-client-fixed": 1, "zephyr-client-fixed-batching": 1, "zephyr-client-fixed-get": 1},
+    "planner-emit": {"zephyr-client-fixed": 3, "zephyr-client-fixed-batching": 3, "zephyr-client-fixed-get": 3},
+    "record": {"zephyr-client-fixed": 6, "zephyr-client-fixed-batching": 6, "zephyr-client-fixed-get": 6},
+    "own-mapping": {"zephyr-client-fixed": 2, "zephyr-client-fixed-batching": 2, "zephyr-client-fixed-get": 2},
+    "answer-reply": {"zephyr-client-fixed": 6, "zephyr-client-fixed-batching": 6, "zephyr-client-fixed-get": 6},
+    "byte-cells": {"zephyr-client-fixed": 2, "zephyr-client-fixed-batching": 2, "zephyr-client-fixed-get": 2},
+    "fmt-builders": {"zephyr-client-fixed": 0, "zephyr-client-fixed-batching": 0, "zephyr-client-fixed-get": 5},
+    "app-main": {"zephyr-client-fixed": 2, "zephyr-client-fixed-batching": 2, "zephyr-client-fixed-get": 2},
+    "zsock-sendto": {"zephyr-client-fixed": 1, "zephyr-client-fixed-batching": 1, "zephyr-client-fixed-get": 1},
+    "zsock-recvfrom": {"zephyr-client-fixed": 1, "zephyr-client-fixed-batching": 1, "zephyr-client-fixed-get": 1},
+    "zsock-bind": {"zephyr-client-fixed": 1, "zephyr-client-fixed-batching": 1, "zephyr-client-fixed-get": 1},
+    "zsock-getsockname": {"zephyr-client-fixed": 1, "zephyr-client-fixed-batching": 1, "zephyr-client-fixed-get": 1},
+    "zsock-setsockopt": {"zephyr-client-fixed": 1, "zephyr-client-fixed-batching": 1, "zephyr-client-fixed-get": 1},
+    "zsock-socket": {"zephyr-client-fixed": 1, "zephyr-client-fixed-batching": 1, "zephyr-client-fixed-get": 1},
+    "zvfs-close": {"zephyr-client-fixed": 2, "zephyr-client-fixed-batching": 2, "zephyr-client-fixed-get": 2},
+    "zvfs-ioctl": {"zephyr-client-fixed": 2, "zephyr-client-fixed-batching": 2, "zephyr-client-fixed-get": 2},
+    "stdio-put": {"zephyr-client-fixed": 14, "zephyr-client-fixed-batching": 14, "zephyr-client-fixed-get": 14},
+    "stdio-hook": {"zephyr-client-fixed": 1, "zephyr-client-fixed-batching": 1, "zephyr-client-fixed-get": 1},
+    "stdout-console": {"zephyr-client-fixed": 2, "zephyr-client-fixed-batching": 2, "zephyr-client-fixed-get": 2},
+    "console-uart": {"zephyr-client-fixed": 2, "zephyr-client-fixed-batching": 2, "zephyr-client-fixed-get": 2},
+    "csrand": {"zephyr-client-fixed": 2, "zephyr-client-fixed-batching": 2, "zephyr-client-fixed-get": 2},
+    "net-if-send": {"zephyr-client-fixed": 3, "zephyr-client-fixed-batching": 3, "zephyr-client-fixed-get": 3},
+    "eth-driver-send": {"zephyr-client-fixed": 2, "zephyr-client-fixed-batching": 2, "zephyr-client-fixed-get": 2},
+    "link-callbacks": {"zephyr-client-fixed": 2, "zephyr-client-fixed-batching": 2, "zephyr-client-fixed-get": 2},
+    "buf-alloc": {"zephyr-client-fixed": 1, "zephyr-client-fixed-batching": 1, "zephyr-client-fixed-get": 1},
+    "buf-unref": {"zephyr-client-fixed": 4, "zephyr-client-fixed-batching": 4, "zephyr-client-fixed-get": 4},
+    "pkt-alloc-hook": {"zephyr-client-fixed": 1, "zephyr-client-fixed-batching": 1, "zephyr-client-fixed-get": 1}
+  },
   "recursion": [
     {
       "function": "session_slot::release_cell$",

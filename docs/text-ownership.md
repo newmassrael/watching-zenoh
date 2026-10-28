@@ -103,6 +103,12 @@ carries about 6 KB of C library code wz does not, which is why the difference is
   the get image's 12,288) every one of the three readings was inside its own before and after, so
   the fall is margin and not a repair: Rounds 3845 and 3846 said the get image's 7,640 was over the
   rule, which read the fixed image's limit against the get image.
+- TAKEN: the main stack as a function of the bound. The three fixed images held 9,216, 10,240 and
+  12,288 bytes of main stack, sized from the kit's reading and a quarter free; `stack_bound_gate.py`
+  now holds each to what its bound needs, in units of 64 and at most 512 above: 8,320, 8,320 and 9,024.
+  RAM (bss) fell by exactly that, 896, 1,920 and 3,264 bytes (109,714 to 108,818, 110,786 to 108,866,
+  121,482 to 118,218); text is unchanged, and the three images boot, answer and read the same stack
+  peaks on the kit (5,904, 5,908 and 6,020), inside 75 percent of the smaller stacks.
 - NOT TAKEN, measured: taking `judge_ext_chain`'s two helpers out of line (7 instances) moved the
   text by +16 bytes; the link-time optimizer already shares them.
 - `wz_session_core` is a long tail (525 symbols in a build without LTO, none over 1.6 KB) and the
