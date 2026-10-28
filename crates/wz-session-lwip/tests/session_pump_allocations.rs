@@ -277,8 +277,15 @@ impl wz_session_core::entropy::EntropySource for Counting {
     }
 }
 
-type Rt = CoopRuntime<Clk, LwipUdpDriver>;
-type Handle = SessionHandle<Clk, LwipUdpDriver>;
+/// The driver the runtime names: the slot profile holds the concrete one, in its slot, and the
+/// others take whichever driver at run time, through the trait object their seam is written for.
+#[cfg(feature = "session-slot")]
+type Driver = LwipUdpDriver;
+#[cfg(not(feature = "session-slot"))]
+type Driver = dyn wz_session_core::link::BoxedLinkDriver;
+
+type Rt = CoopRuntime<Clk, Driver>;
+type Handle = SessionHandle<Clk, Driver>;
 
 /// The init parameters of a session whose zid is four bytes of `zid`, written the
 /// same way on every profile.
@@ -467,7 +474,7 @@ mod placing_on_the_heap {
     use wz_session_core::session_actions::SessionLinkActions;
 
     pub type LinkHandle = Rc<LwipLink>;
-    pub type Pump = SessionPump<Clk, LwipSessionLink<LinkHandle>, LwipUdpDriver>;
+    pub type Pump = SessionPump<Clk, LwipSessionLink<LinkHandle>, Driver>;
 
     pub fn link_handle(link: LwipLink) -> LinkHandle {
         Rc::new(link)

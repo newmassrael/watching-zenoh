@@ -4169,10 +4169,9 @@ mod tests {
     ))]
     #[test]
     fn to_admin_json_renders_downsampling_and_low_pass_rules() {
+        use crate::interceptor::downsampling::{DownsamplingMessage, DownsamplingRule};
+        use crate::interceptor::low_pass::{LowPassMessage, LowPassRule};
         use crate::interceptor::InterceptorFlow;
-        use crate::linkstate_forward::{
-            DownsamplingMessage, DownsamplingRule, LowPassMessage, LowPassRule,
-        };
         use std::time::Duration;
         let mut c = router_config();
         c.interceptors.downsampling = vec![DownsamplingRule {

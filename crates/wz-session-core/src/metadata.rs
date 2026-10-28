@@ -328,9 +328,16 @@ mod tests {
         let same = QueryOptions::get().with_ts_stack(Some(local.clone()), None);
         assert_eq!(same.query_metadata().ts_stack, Some(local));
 
-        // A query that is not instrumented has none, and is empty.
+        // A query that is not instrumented has none. Whether the rest of its metadata is empty
+        // depends on the fields the build carries (a default timeout is one), so this says only
+        // that the stack adds nothing: dropping it from an instrumented query's metadata leaves
+        // what a plain query has.
         let plain = QueryOptions::get();
         assert_eq!(plain.query_metadata().ts_stack, None);
-        assert!(plain.query_metadata().is_empty());
+        let mut without = QueryOptions::get()
+            .with_ts_stack(Some(TsStack::new(point::SEND)), None)
+            .query_metadata();
+        without.ts_stack = None;
+        assert_eq!(without.is_empty(), plain.query_metadata().is_empty());
     }
 }
