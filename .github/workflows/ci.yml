@@ -206,10 +206,20 @@ jobs:
           df -h /
 
       - name: Checkout (with submodules)
+        # MEASURED on the runs that tripped `Budget margin` below: this checkout took 239s, 259s,
+        # 384s and 411s on four of them, against 42-77s for every other job's, and it is the only
+        # one with the whole history. The history is wanted for its SHAPE (the commit graph and
+        # the names of the files each commit added, deleted or renamed, which the citation gates
+        # and the commit↔ledger drift check read); no lane reads the CONTENT of an old blob. A
+        # partial clone keeps every commit and every tree and fetches a blob only when something
+        # asks for it, so the history those checks read is the same history and the clone no
+        # longer carries the bytes of every version of every file. To be read off the first hosted
+        # run: this step's duration, and `Budget margin`'s percentage.
         uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0  # full history for git-log-based commit↔ledger drift check
+          filter: blob:none
 
       - name: Restore apt archives (R311y882 — keep the mirror off the path)
         # R311y881 MEASURED azure.archive.ubuntu.com at ~27 kB/s sustained on
