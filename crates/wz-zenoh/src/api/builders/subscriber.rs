@@ -24,7 +24,6 @@ use zenoh_result::ZResult;
 
 use crate::{
     api::{
-        cancellation::SyncGroup,
         handlers::{locked, Callback, DefaultHandler, IntoHandler},
         key_expr::KeyExpr,
         sample::{Locality, Sample},
@@ -220,7 +219,7 @@ where
         key_expr = self.session.declare_nonwild_prefix(key_expr)?;
         let session = self.session;
         let (callback, receiver) = self.handler.into_handler();
-        let callback_sync_group = SyncGroup::default();
+        let callback_sync_group = session.callback_group();
         session
             .declare_subscriber_inner(
                 &key_expr,
@@ -263,8 +262,11 @@ impl Wait for SubscriberBuilder<'_, '_, Callback<Sample>, true> {
     fn wait(self) -> <Self as Resolvable>::To {
         let mut key_expr = self.key_expr?;
         key_expr = self.session.declare_nonwild_prefix(key_expr)?;
+        // A subscriber that runs in the background has no group of its own to be waited on, but its
+        // callback counts in the session's: the session's close waits for it.
+        let notifier = self.session.callback_group().notifier();
         self.session
-            .declare_subscriber_inner(&key_expr, self.origin, self.handler, None)?;
+            .declare_subscriber_inner(&key_expr, self.origin, self.handler, notifier)?;
         Ok(())
     }
 }

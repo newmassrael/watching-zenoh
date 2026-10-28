@@ -41,7 +41,6 @@ use crate::api::{
         TimestampInstrumentationBuilderTrait,
     },
     bytes::{OptionZBytes, ZBytes},
-    cancellation::SyncGroup,
     encoding::Encoding,
     handlers::{locked, Callback, DefaultHandler, IntoHandler},
     key_expr::KeyExpr,
@@ -199,7 +198,7 @@ impl Wait for QuerierBuilder<'_, '_> {
             timeout: self.timeout,
             accept_replies: self.accept_replies,
             matching_listeners: Default::default(),
-            callback_sync_group: SyncGroup::default(),
+            callback_sync_group: self.session.callback_group(),
         })
     }
 }

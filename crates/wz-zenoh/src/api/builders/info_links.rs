@@ -476,7 +476,7 @@ where
     Handler::Handler: Send,
 {
     fn wait(self) -> Self::To {
-        let callback_sync_group = SyncGroup::default();
+        let callback_sync_group = self.session.callback_group();
         let (callback, handler) = self.handler.into_handler();
         let id = self.session.declare_link_events_listener_inner(
             callback,

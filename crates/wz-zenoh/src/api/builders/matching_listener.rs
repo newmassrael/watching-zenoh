@@ -28,7 +28,7 @@ use zenoh_core::{Resolvable, Wait};
 use zenoh_result::ZResult;
 
 use crate::api::{
-    cancellation::{SyncGroup, SyncGroupNotifier},
+    cancellation::SyncGroupNotifier,
     handlers::{Callback, DefaultHandler, IntoHandler},
     key_expr::KeyExpr,
     matching::{MatchingListener, MatchingListenerInner, MatchingStatus, MatchingStatusType},
@@ -205,7 +205,7 @@ where
     Handler::Handler: Send,
 {
     fn wait(self) -> <Self as Resolvable>::To {
-        let callback_sync_group = SyncGroup::default();
+        let callback_sync_group = self.session.callback_group();
         let (callback, handler) = self.handler.into_handler();
         let id = self.session.declare_matches_listener_inner(
             self.key_expr,
@@ -252,7 +252,10 @@ impl Wait for MatchingListenerBuilder<'_, Callback<MatchingStatus>, true> {
             self.destination,
             self.matching_status_type,
             self.handler,
-            self.parent_callback_sync_group_notifier,
+            // A listener of a querier counts in the querier's group, which is the session's child;
+            // one of an entity that has none, in the session's.
+            self.parent_callback_sync_group_notifier
+                .or_else(|| self.session.callback_group().notifier()),
         )?;
         zlock!(self.matching_listeners).insert(id);
         Ok(())

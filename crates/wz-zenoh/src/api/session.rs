@@ -72,7 +72,7 @@ use crate::api::{
         subscriber::SubscriberBuilder,
     },
     bytes::ZBytes,
-    cancellation::SyncGroupNotifier,
+    cancellation::{SyncGroup, SyncGroupNotifier},
     config::Config,
     encoding::Encoding,
     handlers::{Callback, DefaultHandler},
@@ -2400,6 +2400,32 @@ mod tokio_engine {
     }
 }
 
+/// The fans of the queries a session has asked, held weakly: a query that has ended leaves an
+/// entry that holds nothing. The ended ones are dropped from the list each time it has doubled
+/// since it was last pruned, which keeps a push constant in time on average and the list within a
+/// small multiple of the queries that are under way.
+#[derive(Default)]
+struct PendingQueries {
+    fans: Vec<std::sync::Weak<QueryFan>>,
+    prune_at: usize,
+}
+
+impl PendingQueries {
+    const FIRST_PRUNE: usize = 16;
+
+    fn push(&mut self, fan: std::sync::Weak<QueryFan>) {
+        if self.fans.len() >= self.prune_at.max(Self::FIRST_PRUNE) {
+            self.fans.retain(|fan| fan.strong_count() > 0);
+            self.prune_at = self.fans.len() * 2;
+        }
+        self.fans.push(fan);
+    }
+
+    fn into_live(self) -> impl Iterator<Item = Arc<QueryFan>> {
+        self.fans.into_iter().filter_map(|fan| fan.upgrade())
+    }
+}
+
 /// A querier of a session: its id, which is the engine's for its interest, and the queries it has
 /// asked, each by the fan that stops it while it is under way. A query that has ended is a fan
 /// nobody holds any more.
@@ -2417,6 +2443,10 @@ pub(crate) struct SessionInner {
     engine: Engine,
     id: EntityId,
     zid: ZenohId,
+    /// The group every entity of the session counts its callback in, until the callback is dropped:
+    /// a close that is to wait for the callbacks waits for it ([`Closee::close_inner`]). The groups
+    /// of the entities are its children ([`WeakSession::callback_group`]).
+    callbacks_drop_sync_group: SyncGroup,
     /// How long a query waits for its replies when it does not say, from the configuration.
     queries_default_timeout: Duration,
     /// The configuration the session was opened with, as the application reads it
@@ -2448,6 +2478,11 @@ pub(crate) struct SessionInner {
     /// The queriers declared on the session and not undeclared, which a close lets go of, each
     /// with the queries it has asked that may still be under way.
     queriers: std::sync::Mutex<Vec<QuerierEntry>>,
+    /// The queries the session has asked that may still be under way, by the fan that stops each:
+    /// the queries of the session itself and of its queriers alike. A close stops them all, as
+    /// upstream's drops the state of every query it holds, so that the channel of a `get` that
+    /// has not been answered ends with its session and does not wait for its timeout.
+    pending_queries: std::sync::Mutex<PendingQueries>,
     /// The matching listeners declared on the session and not undeclared, which a close lets go
     /// of.
     matching_listeners: std::sync::Mutex<Vec<Id>>,
@@ -2862,6 +2897,27 @@ impl SessionInner {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// Remember the fan of a query that may be under way, for a close to stop.
+    fn track_query(&self, fan: &Arc<QueryFan>) {
+        self.pending_queries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(Arc::downgrade(fan));
+    }
+
+    /// Stop every query that is under way: the callback of each is dropped and its channel ends.
+    fn release_queries(&self) {
+        let fans = std::mem::take(
+            &mut *self
+                .pending_queries
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+        for fan in fans.into_live() {
+            fan.cancel();
+        }
+    }
+
     /// Undeclare every querier that is left: those of a session that has closed.
     fn release_queriers(&self) {
         let left = std::mem::take(&mut *self.queriers());
@@ -3110,6 +3166,11 @@ impl SessionInner {
         if self.engine.is_closed() {
             return Err(SessionClosedError.into());
         }
+        // A query of a querier counts in the querier's group, which is the session's child. A
+        // query of the session's own counts in the session's: a close that waits for callbacks
+        // waits for the reply callback of a get as well.
+        let querier_notifier =
+            querier_notifier.or_else(|| self.callbacks_drop_sync_group.notifier());
         // A query that asks for its instrumentation starts the stack the nodes it crosses record
         // on, with what this node records at the send, and the one that leaves the node has what
         // it records on routing the message out as well (as for a publication, `resolve_put`).
@@ -3132,14 +3193,14 @@ impl SessionInner {
             ConsolidationMode::Auto => ConsolidationMode::Latest,
             mode => mode,
         };
-        // A query that something may stop before it ends by itself is given a fan: a cancellation
-        // token, and the undeclaration of the querier that asks it, which keeps the fans of the
-        // queries it has under way.
-        #[cfg(feature = "unstable")]
-        let stoppable = querier_id.is_some() || cancellation_token.is_some();
-        #[cfg(not(feature = "unstable"))]
-        let stoppable = querier_id.is_some();
-        let fan = stoppable.then(|| self.engine.new_query_fan());
+        // Every query is given a fan, because something may stop any of them before it ends by
+        // itself: a cancellation token, the undeclaration of the querier that asks it (which keeps
+        // the fans of the queries it has under way), and the close of the session, which keeps
+        // the fans of all of them.
+        let fan = Some(self.engine.new_query_fan());
+        if let Some(fan) = &fan {
+            self.track_query(fan);
+        }
         if let (Some(id), Some(fan)) = (querier_id, &fan) {
             let mut queriers = self.queriers();
             let Some(entry) = queriers.iter_mut().find(|entry| entry.id == id) else {
@@ -3243,6 +3304,11 @@ impl Session {
         WeakSession(self.0.clone())
     }
 
+    /// A group for the callback of one entity of the session ([`WeakSession::callback_group`]).
+    pub(crate) fn callback_group(&self) -> SyncGroup {
+        SyncGroup::child_of(&self.0.callbacks_drop_sync_group)
+    }
+
     /// The handle by which a key expression is declared on this session.
     pub(crate) fn anchor(&self) -> SessionAnchor {
         self.0.clone()
@@ -3277,6 +3343,7 @@ impl Session {
             engine,
             id,
             zid,
+            callbacks_drop_sync_group: SyncGroup::default(),
             queries_default_timeout,
             #[cfg(feature = "unstable")]
             config: crate::api::config::Notifier::new(config.0.clone().expanded()),
@@ -3295,6 +3362,7 @@ impl Session {
             publishers: std::sync::Mutex::new(vec![]),
             queryables: std::sync::Mutex::new(vec![]),
             queriers: std::sync::Mutex::new(vec![]),
+            pending_queries: std::sync::Mutex::new(PendingQueries::default()),
             matching_listeners: std::sync::Mutex::new(vec![]),
             tokens: std::sync::Mutex::new(vec![]),
             #[cfg(feature = "unstable")]
@@ -3335,6 +3403,12 @@ impl WeakSession {
     /// The id the session stands on.
     pub(crate) fn zid(&self) -> ZenohId {
         self.0.zid
+    }
+
+    /// A group for the callback of one entity of the session, which the session's close can wait
+    /// for as it waits for the callbacks of all of them.
+    pub(crate) fn callback_group(&self) -> SyncGroup {
+        SyncGroup::child_of(&self.0.callbacks_drop_sync_group)
     }
 
     /// Stop the delivery to the subscriber `sid`. A closed session has none to stop, and
@@ -4465,8 +4539,11 @@ pub(crate) struct SessionCloseArgs {
 #[async_trait]
 impl Closee for WeakSession {
     type CloseArgs = SessionCloseArgs;
-    // This engine's close waits for every callback to return, whether or not the caller asked it to
-    // (`wait_callbacks`): it joins the thread that runs them.
+    // This engine's close joins the threads of its faces, so a callback that runs on one has
+    // returned when it is done. A callback that runs on the thread of the caller of a put or a
+    // query (a delivery the session makes to itself) is no thread of the engine's, and neither is
+    // the drop of a callback that was being called when the session let go of it: those are what
+    // `wait_callbacks` waits for, in the group every entity's callback is counted in.
     #[allow(unused_variables)]
     async fn close_inner(&self, close_args: SessionCloseArgs) {
         let session = self.0.clone();
@@ -4488,8 +4565,14 @@ impl Closee for WeakSession {
                 session.release_publishers();
                 session.release_queryables();
                 session.release_queriers();
+                session.release_queries();
                 session.release_matching_listeners();
                 session.release_tokens();
+                // After the callbacks were let go of, so that none is called afresh: the wait ends
+                // when the last one that was being called has returned and been dropped.
+                if close_args.wait_callbacks {
+                    session.callbacks_drop_sync_group.wait();
+                }
             })
             .await;
     }
@@ -7161,6 +7244,129 @@ mod tests {
             done.recv_timeout(WAIT)
                 .expect("the undeclaration returned once the callback had")
                 .expect("undeclares");
+        }
+    }
+
+    /// What a subscriber's undeclaration waits for. Upstream's test of it (`callback_drop_on_undeclare`)
+    /// gives the callback a call that takes a while and a drop that takes a while and then states
+    /// that it ran, and asks that `wait_callbacks` return after both, whichever thread the sample
+    /// was delivered on.
+    mod subscriber_undeclaration {
+        use std::{
+            sync::{
+                atomic::{AtomicBool, Ordering},
+                Arc,
+            },
+            time::Duration,
+        };
+
+        use super::*;
+
+        const WORK: Duration = Duration::from_millis(400);
+
+        struct Slow {
+            dropped: Arc<AtomicBool>,
+        }
+
+        impl Drop for Slow {
+            fn drop(&mut self) {
+                std::thread::sleep(WORK);
+                self.dropped.store(true, Ordering::SeqCst);
+            }
+        }
+
+        fn slow_callback() -> (impl Fn(Sample) + Send + Sync + 'static, Arc<AtomicBool>) {
+            let dropped = Arc::new(AtomicBool::new(false));
+            let slow = Slow {
+                dropped: dropped.clone(),
+            };
+            (
+                move |_sample: Sample| {
+                    let _ = &slow;
+                    std::thread::sleep(WORK);
+                },
+                dropped,
+            )
+        }
+
+        /// A sample the session sends to itself from another thread is being delivered while
+        /// the subscriber is undeclared: the wait returns after the call and the drop.
+        #[test]
+        fn the_wait_holds_for_the_call_and_the_drop_of_a_sample_the_session_sent_itself() {
+            let session = open(peer("a1b2fa")).wait().expect("opens");
+            let (callback, dropped) = slow_callback();
+            let subscriber = session
+                .declare_subscriber("demo/u/local")
+                .callback(callback)
+                .wait()
+                .expect("declares");
+            let putting = session.clone();
+            std::thread::spawn(move || {
+                putting.put("demo/u/local", "x").wait().expect("puts");
+            });
+            std::thread::sleep(Duration::from_millis(100));
+            subscriber
+                .undeclare()
+                .wait_callbacks()
+                .wait()
+                .expect("undeclares");
+            assert!(
+                dropped.load(Ordering::SeqCst),
+                "the undeclaration returned before the callback had been dropped"
+            );
+        }
+
+        /// The same for the close of the session, which waits for the callbacks of every entity it
+        /// has, a subscriber that runs in the background among them.
+        #[test]
+        fn the_wait_of_a_close_holds_for_the_callback_of_a_background_subscriber() {
+            let session = open(peer("a1b2fb")).wait().expect("opens");
+            let (callback, dropped) = slow_callback();
+            session
+                .declare_subscriber("demo/u/background")
+                .callback(callback)
+                .background()
+                .wait()
+                .expect("declares");
+            let putting = session.clone();
+            std::thread::spawn(move || {
+                putting.put("demo/u/background", "x").wait().expect("puts");
+            });
+            std::thread::sleep(Duration::from_millis(100));
+            session.close().wait_callbacks().wait().expect("closes");
+            assert!(
+                dropped.load(Ordering::SeqCst),
+                "the close returned before the callback had been dropped"
+            );
+        }
+    }
+
+    /// A query nobody has answered ends with the session that asked it: the channel of its replies
+    /// is disconnected when the session closes, and does not wait for the timeout of the query.
+    mod unanswered_queries {
+        use std::time::Duration;
+
+        use super::*;
+
+        #[test]
+        fn the_channel_of_a_get_that_is_not_answered_ends_with_the_session() {
+            let session = open(peer("a1b2fc")).wait().expect("opens");
+            // Declared and never replied to, on the same session: the get stays under way.
+            let _queryable = session
+                .declare_queryable("demo/q/open")
+                .wait()
+                .expect("declares");
+            let replies = session
+                .get("demo/q/open")
+                .timeout(Duration::from_secs(30))
+                .wait()
+                .expect("asks");
+            assert!(!replies.is_disconnected(), "the query is under way");
+            session.close().wait().expect("closes");
+            assert!(
+                replies.is_disconnected(),
+                "the channel of a query that was not answered outlived its session"
+            );
         }
     }
 

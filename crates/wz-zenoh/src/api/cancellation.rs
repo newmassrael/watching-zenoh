@@ -33,21 +33,27 @@ use zenoh_core::{Resolvable, Wait};
 use zenoh_result::ZResult;
 use zenoh_runtime::ZRuntime;
 
+/// A permit of a group, held by something whose end the group's wait is for. A group made as the
+/// child of another ([`SyncGroup::child_of`]) has its notifiers hold a permit of the parent as
+/// well, so that waiting for the parent waits for every notifier of its children.
 #[zenoh_macros::pub_visibility_if_internal]
 #[derive(Debug)]
 #[allow(dead_code)]
-pub(crate) struct SyncGroupNotifier(OwnedSemaphorePermit);
+pub(crate) struct SyncGroupNotifier(OwnedSemaphorePermit, Option<OwnedSemaphorePermit>);
 
 #[zenoh_macros::pub_visibility_if_internal]
 #[derive(Clone)]
 pub(crate) struct SyncGroup {
     semaphore: Arc<Semaphore>,
+    /// The group whose wait this one's notifiers also hold up, when it has one.
+    parent: Option<Arc<Semaphore>>,
 }
 
 impl Default for SyncGroup {
     fn default() -> Self {
         Self {
             semaphore: Arc::new(Semaphore::new(SyncGroup::max_permits() as usize)),
+            parent: None,
         }
     }
 }
@@ -56,13 +62,26 @@ impl SyncGroup {
         Semaphore::MAX_PERMITS.try_into().unwrap_or(u32::MAX)
     }
 
+    /// A group of its own whose notifiers also belong to `parent`. Upstream's session keeps one
+    /// group that every entity's callback is counted in (`callbacks_drop_sync_group`), which
+    /// `Session::close().wait_callbacks()` waits for; the entity keeps the group it waits on
+    /// itself, and the notifiers of that group are the session's as well.
+    #[zenoh_macros::pub_visibility_if_internal]
+    pub(crate) fn child_of(parent: &SyncGroup) -> Self {
+        Self {
+            parent: Some(parent.semaphore.clone()),
+            ..Self::default()
+        }
+    }
+
     #[zenoh_macros::pub_visibility_if_internal]
     pub(crate) fn notifier(&self) -> Option<SyncGroupNotifier> {
-        self.semaphore
-            .clone()
-            .try_acquire_owned()
-            .ok()
-            .map(SyncGroupNotifier)
+        let own = self.semaphore.clone().try_acquire_owned().ok()?;
+        let parent = match &self.parent {
+            Some(parent) => Some(parent.clone().try_acquire_owned().ok()?),
+            None => None,
+        };
+        Some(SyncGroupNotifier(own, parent))
     }
 
     pub(crate) fn close(&self) {

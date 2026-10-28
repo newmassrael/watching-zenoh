@@ -25,7 +25,6 @@ use zenoh_result::ZResult;
 
 use crate::{
     api::{
-        cancellation::SyncGroup,
         handlers::{locked, Callback, DefaultHandler, IntoHandler},
         key_expr::KeyExpr,
         queryable::{Query, Queryable, QueryableInner},
@@ -208,7 +207,7 @@ where
     Handler::Handler: Send,
 {
     fn wait(self) -> <Self as Resolvable>::To {
-        let callback_sync_group = SyncGroup::default();
+        let callback_sync_group = self.session.callback_group();
         let session = self.session;
         let (callback, receiver) = self.handler.into_handler();
         let mut ke = self.key_expr?;
@@ -255,12 +254,14 @@ impl Wait for QueryableBuilder<'_, '_, Callback<Query>, true> {
     fn wait(self) -> <Self as Resolvable>::To {
         let mut ke = self.key_expr?;
         ke = self.session.declare_nonwild_prefix(ke)?;
+        // See the subscriber that runs in the background: its callback counts in the session's group.
+        let notifier = self.session.callback_group().notifier();
         self.session.declare_queryable_inner(
             &ke,
             self.complete,
             self.origin,
             self.handler,
-            None,
+            notifier,
         )?;
         Ok(())
     }

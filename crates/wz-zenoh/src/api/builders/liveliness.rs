@@ -18,7 +18,6 @@ use zenoh_core::{Resolvable, Result as ZResult, Wait};
 #[cfg(feature = "unstable")]
 use crate::api::cancellation::CancellationTokenBuilderTrait;
 use crate::api::{
-    cancellation::SyncGroup,
     handlers::{locked, Callback, DefaultHandler, IntoHandler},
     key_expr::KeyExpr,
     liveliness::LivelinessToken,
@@ -277,7 +276,7 @@ where
         let key_expr = self.key_expr?;
         let session = self.session;
         let (callback, handler) = self.handler.into_handler();
-        let callback_sync_group = SyncGroup::default();
+        let callback_sync_group = session.callback_group();
         let id = session.declare_liveliness_subscriber_inner(
             &key_expr,
             Locality::default(),
@@ -318,12 +317,14 @@ impl Resolvable for LivelinessSubscriberBuilder<'_, '_, Callback<Sample>, true> 
 
 impl Wait for LivelinessSubscriberBuilder<'_, '_, Callback<Sample>, true> {
     fn wait(self) -> <Self as Resolvable>::To {
+        // See the subscriber that runs in the background: its callback counts in the session's group.
+        let notifier = self.session.callback_group().notifier();
         self.session.declare_liveliness_subscriber_inner(
             &self.key_expr?,
             Locality::default(),
             self.history,
             self.handler,
-            None,
+            notifier,
         )?;
         Ok(())
     }
