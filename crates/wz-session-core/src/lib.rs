@@ -1072,6 +1072,12 @@ pub mod wireexpr_build;
 #[cfg(feature = "storage-profile")]
 pub mod ext_nodeid;
 
+/// The timestamp stack a Push, a Request or a Response may carry (extension `0x7`): the bytes of
+/// its body, and its place in a chain of extensions. What a node records in it, and with what
+/// clock, is the host's.
+#[cfg(feature = "pubsub-ts-stack")]
+pub mod ts_stack;
+
 /// QueryableInfo (`complete` / `distance`) extension on a DeclareQueryable
 /// (P4 routing, QueryTarget::BestMatching) — `read_queryable_info` /
 /// `set_queryable_info` over the body's ext chain, a thin projection of the

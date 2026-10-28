@@ -16079,6 +16079,8 @@ async fn the_offloaded_callback_sees_what_the_inline_one_sees() {
         source_info: Some(SourceInfo::new(&[9, 8, 7], 11, 12)),
         attachment: Some(b"attached".to_vec()),
         qos: Some(QosLevel::from_raw(0x05)),
+        #[cfg(feature = "pubsub-ts-stack")]
+        ts_stack: None,
     };
     type Seen = (
         String,

@@ -638,6 +638,16 @@ pub struct Sample {
     /// extension was present or the ZBuf payload failed source-info
     /// parsing (truncated header / VLE overflow).
     pub source_info: Option<SourceInfo>,
+    /// The timestamp stack the message carried (Push extension `0x7`): which points were
+    /// instrumented and what the nodes it crossed recorded. `None` for a message that was not
+    /// instrumented, and for one whose extension does not decode.
+    #[cfg(feature = "pubsub-ts-stack")]
+    pub ts_stack: Option<crate::ts_stack::TsStack>,
+    /// Whether the message came in over a link, and so was routed to this node, as against one this
+    /// session published itself: the node that delivers a routed message records its own routing
+    /// on the timestamp stack, one that did not route it does not.
+    #[cfg(feature = "pubsub-ts-stack")]
+    pub routed: bool,
     /// Reliability classification from the link/transport layer.
     /// Defaults to [`Reliability::Reliable`] (zenoh-pico
     /// `Z_RELIABILITY_DEFAULT`); transport-context wire-up is an
@@ -684,6 +694,14 @@ impl crate::sink::SampleView for Sample {
     }
     fn source_info(&self) -> Option<&SourceInfo> {
         self.source_info.as_ref()
+    }
+    #[cfg(feature = "pubsub-ts-stack")]
+    fn ts_stack(&self) -> Option<&crate::ts_stack::TsStack> {
+        self.ts_stack.as_ref()
+    }
+    #[cfg(feature = "pubsub-ts-stack")]
+    fn routed(&self) -> bool {
+        self.routed
     }
     fn payload_shared(&self) -> Option<&RxBytes> {
         Some(&self.payload)
@@ -735,6 +753,11 @@ impl Sample {
             .cloned()
             .or_else(|| view.attachment().map(|bytes| RxBytes::from(bytes.to_vec())));
         sample.source_info = view.source_info().cloned();
+        #[cfg(feature = "pubsub-ts-stack")]
+        {
+            sample.ts_stack = view.ts_stack().cloned();
+            sample.routed = view.routed();
+        }
         sample
     }
 
@@ -758,6 +781,10 @@ impl Sample {
             qos: None,
             attachment: None,
             source_info: None,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
+            #[cfg(feature = "pubsub-ts-stack")]
+            routed: false,
             reliability: Reliability::default(),
         }
     }
@@ -775,6 +802,10 @@ impl Sample {
             qos: None,
             attachment: None,
             source_info: None,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
+            #[cfg(feature = "pubsub-ts-stack")]
+            routed: false,
             reliability: Reliability::default(),
         }
     }
@@ -798,6 +829,20 @@ impl Sample {
     /// Attach an outer-level QoS value.
     pub fn with_qos(mut self, qos: QosLevel) -> Self {
         self.qos = Some(qos);
+        self
+    }
+
+    /// Attach the timestamp stack the message carried.
+    #[cfg(feature = "pubsub-ts-stack")]
+    pub fn with_ts_stack(mut self, ts_stack: crate::ts_stack::TsStack) -> Self {
+        self.ts_stack = Some(ts_stack);
+        self
+    }
+
+    /// Say whether the message came in over a link.
+    #[cfg(feature = "pubsub-ts-stack")]
+    pub fn with_routed(mut self, routed: bool) -> Self {
+        self.routed = routed;
         self
     }
 

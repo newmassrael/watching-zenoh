@@ -550,6 +550,14 @@ pub use wz_session_core::extqos;
 // verbatim across the wz-runtime-tokio surface.
 pub use wz_session_core::sample;
 
+/// The timestamp stack a message may carry (extension `0x7`): the bytes of its body, which the
+/// nodes it crosses add their interceptions to. Re-exported for the top crate, which records on it
+/// at the node that sends and the node that receives a message. The module and its types are the
+/// session core's with `pubsub-ts-stack`, which is also what has the engine read and write a stack
+/// on the wire.
+#[cfg(feature = "pubsub-ts-stack")]
+pub use wz_session_core::ts_stack;
+
 /// R311y481 — attachment wire helpers: the `ze_serializer` kv-sequence
 /// SERIALIZER / parser pair (`serialize_kv_attachment` /
 /// `parse_kv_attachment`) plus the ext encode/decode.

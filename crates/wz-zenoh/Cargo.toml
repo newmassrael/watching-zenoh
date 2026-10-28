@@ -70,7 +70,14 @@ shared-memory = [
     "zenoh-codec/shared-memory",
     "zenoh-protocol/shared-memory",
 ]
-unstable = ["zenoh-config/unstable", "zenoh-keyexpr/unstable", "zenoh-protocol/unstable"]
+# `unstable` carries the timestamp instrumentation of a message, which records on the timestamp
+# stack the engine reads and writes only with `pubsub-ts-stack`.
+unstable = [
+    "zenoh-config/unstable",
+    "zenoh-keyexpr/unstable",
+    "zenoh-protocol/unstable",
+    "wz-runtime-tokio?/pubsub-ts-stack",
+]
 
 [dependencies]
 async-trait = "0.1.89"
@@ -83,7 +90,7 @@ serde = { version = "1.0.225", features = ["default"] }
 serde_json = "1.0.145"
 tokio = { version = "1.47.1", default-features = false, features = ["macros", "rt", "sync", "time"] }
 tracing = "0.1.41"
-uhlc = { version = "0.8.0", default-features = false }
+uhlc = { version = "0.8.0", default-features = false, features = ["std"] }
 # The tokio engine: what opens a session from the plan of a configuration (`open_plan`) and runs it.
 #
 # The unicast capabilities a session OFFERS are chosen by the crate that takes the engine, and an

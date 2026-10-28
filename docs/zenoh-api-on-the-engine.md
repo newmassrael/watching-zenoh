@@ -743,9 +743,30 @@ Each lands whole with its surface lines, tests and faults in one round.
   `Caller` session use it, and a `DriveTask` session, whose host may hold a lock the drive task's
   callbacks want, drains as before. 4 injected faults, none missed (one hung where it should fail,
   and a test of its own now fails it).
-- **Z6b. The unstable arm: timestamps.** `Session::new_timestamp`, `OpenBuilder::with_timestamp_callback`
-  and `Query::timestamp_stack`: the timestamp stack (48 upstream tests, no model in wz's engine: it
-  needs one).
+- **Z6b (in part landed). The unstable arm: timestamps.** Landed: `Session::new_timestamp`,
+  `OpenBuilder::with_timestamp_callback`, and the instrumentation of puts and deletes.
+  **Decision: the engine carries the stack and the session records on it.** The timestamp stack is
+  Push extension `0x7`, a ZBuf a node may skip, and wz's engine had no model for it:
+  `wz_session_core::ts_stack` now holds its bytes (the format of `zenoh-codec`) and its place in a
+  chain, the options of a publication carry the stack it starts with
+  (`PublishOptions::with_ts_stack`, one for the loopback leg and one for the Push that leaves,
+  because upstream's node records one more interception on a message it routes out), and a
+  delivered `Sample` carries the stack it came with and whether it came over a link
+  (`Sample::routed`), the fact that makes the node record its routing before it delivers. Who
+  records what, and with what clock, is the session's (`TimestampSource`): the bytes of the user's
+  callback when the session was opened with one, otherwise a UHLC timestamp off the clock of the
+  node, or off one of the session's own. A message read in place is delivered through the owned
+  path when it carries a stack, which the lent form has none to add to. All of it is behind the
+  session core's feature `pubsub-ts-stack`, which this crate's `unstable` selects: a build without
+  it (the C and pico client images) neither compiles the module nor holds the fields, and the
+  capability cost gate holds it to that. The differential has a
+  node of each side publish, with every combination of the three points and with a callback, to a
+  subscriber of the other and to its own, and compares the stacks record by record. Carried: the
+  query side (`Query::timestamp_stack` and the stacks of requests and responses, which this engine
+  still refuses by name), a wz node that forwards a message in its mesh does not record its own
+  route, and a subscriber offloaded to a lane is handed no stack. The surface falls to 1, 3 and 6
+  lines of the three arms; 15 injected faults, none missed in the end (the first test of a plain
+  Put could not tell, and one assertion was changed so that it can).
 - **Z6c. The unstable arm: the rest.** `Session::config` and `GIT_VERSION`.
 - **Z7. The shared-memory arm.** `get_shm_provider`, the provider state and the transport.
 - **Z8. The graph.** Upstream's tests and examples and `zenoh-ext` built and run against the

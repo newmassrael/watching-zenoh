@@ -1809,6 +1809,13 @@ impl SharedSession {
         let _ = (id, outcome);
     }
 
+    /// The next timestamp off this node's clock, or `None` when the node holds none (its role does
+    /// not stamp, or the build has no clock): upstream's `runtime.hlc()` followed by
+    /// `new_timestamp`. Strictly increasing from one call to the next.
+    pub fn node_timestamp(&self) -> Option<wz_session_core::sample::TimestampHint> {
+        self.node_hlc.stamp()
+    }
+
     /// Record where this node's listeners can be reached: the locators they actually got, without
     /// the loopback ones, as upstream's `get_locators_noloopback` lists them. Replaces the list,
     /// so a caller that adds a listener passes all of them.

@@ -704,6 +704,120 @@ mod observer {
         lines
     }
 
+    /// A timestamp stack as one line: the points instrumented, and each record as
+    /// `Point:uhlc:<id>` (the id of the node whose clock made it) or `Point:custom:<text>`.
+    pub fn stack_line(stack: Option<&up_zenoh::timestamp_stack::TimestampStack>) -> String {
+        use up_zenoh::timestamp_stack::{InstrumentationTimestamp, InterceptionPoint};
+
+        let Some(stack) = stack else {
+            return "no stack".to_owned();
+        };
+        let point = |p: InterceptionPoint| stack.instrumentation().is_instrumented(p);
+        let flags = format!(
+            "{}{}{}",
+            if point(InterceptionPoint::Send) { "S" } else { "-" },
+            if point(InterceptionPoint::Route) { "R" } else { "-" },
+            if point(InterceptionPoint::Receive) { "E" } else { "-" },
+        );
+        let records: Vec<String> = stack
+            .records()
+            .iter()
+            .map(|record| match record.timestamp() {
+                InstrumentationTimestamp::UHLC(ts) => {
+                    format!("{:?}:uhlc:{}", record.point(), ts.get_id())
+                }
+                InstrumentationTimestamp::Custom(bytes) => {
+                    format!("{:?}:custom:{}", record.point(), String::from_utf8_lossy(bytes))
+                }
+            })
+            .collect();
+        format!("{flags} {records:?}")
+    }
+
+    /// An upstream node that dials `port`, subscribes to `demo/**` keeping the timestamp stack of
+    /// what it receives, and publishes instrumented messages. `custom` is the text its timestamp
+    /// callback gives, when it has one.
+    pub struct Stacker {
+        session: Session,
+        _subscriber: up_zenoh::pubsub::Subscriber<()>,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    pub fn stacker(id: &str, port: u16, custom: Option<&'static str>) -> Result<Stacker, String> {
+        let config = Config::from_json5(&format!(
+            r#"{{ id: "{id}", mode: "peer", connect: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                  scouting: {{ multicast: {{ enabled: false }} }} }}"#
+        ))
+        .expect("a configuration zenoh reads");
+        let mut builder = up_zenoh::open(config);
+        if let Some(text) = custom {
+            builder = builder.with_timestamp_callback(move |_| text.as_bytes().to_vec());
+        }
+        let session = builder.wait().map_err(|error| error.to_string())?;
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let subscriber = session
+            .declare_subscriber("demo/**")
+            .callback(move |sample| {
+                sink.lock().unwrap().push(format!(
+                    "{} {:?} {}",
+                    sample.key_expr(),
+                    sample.kind(),
+                    stack_line(sample.timestamp_stack())
+                ));
+            })
+            .wait()
+            .map_err(|error| error.to_string())?;
+        Ok(Stacker {
+            session,
+            _subscriber: subscriber,
+            seen,
+        })
+    }
+
+    impl Stacker {
+        /// What the subscriber received since it was last asked.
+        pub fn take(&self) -> Vec<String> {
+            std::mem::take(&mut *self.seen.lock().unwrap())
+        }
+
+        fn instrumentation(
+            points: &str,
+        ) -> Option<up_zenoh::timestamp_stack::TimestampInstrumentation> {
+            if points.is_empty() {
+                return None;
+            }
+            Some(
+                up_zenoh::timestamp_stack::TimestampInstrumentationBuilder::new()
+                    .set_send(points.contains('S'))
+                    .set_route(points.contains('R'))
+                    .set_receive(points.contains('E'))
+                    .build()
+                    .expect("a point to instrument"),
+            )
+        }
+
+        /// A put on `key` whose messages are instrumented at `points` (`S`, `R`, `E`).
+        pub fn put(&self, key: &str, points: &str) {
+            use up_zenoh::internal::traits::TimestampInstrumentationBuilderTrait;
+            self.session
+                .put(key, "v")
+                .timestamp_instrumentation(Self::instrumentation(points))
+                .wait()
+                .expect("puts");
+        }
+
+        /// A delete of `key` whose messages are instrumented at `points`.
+        pub fn delete(&self, key: &str, points: &str) {
+            use up_zenoh::internal::traits::TimestampInstrumentationBuilderTrait;
+            self.session
+                .delete(key)
+                .timestamp_instrumentation(Self::instrumentation(points))
+                .wait()
+                .expect("deletes");
+        }
+    }
+
     /// Close an upstream node, as a peer that goes away.
     pub fn close(session: &Session) {
         session.close().wait().expect("closes");
@@ -1831,6 +1945,151 @@ macro_rules! session_cases {
                 )
             }
 
+            /// The timestamp stack of a message, as each side reads it: what a node of this crate
+            /// publishes with its instrumentation reaches an upstream subscriber with, what an
+            /// upstream node publishes reaches a subscriber of this crate with, and the session's
+            /// own subscriber is told of the session's own puts and deletes, with the clock of
+            /// the node and with the callback of a session opened with one.
+            pub fn instrumentations() -> Vec<String> {
+                use std::sync::{Arc, Mutex};
+
+                use $z::internal::traits::TimestampInstrumentationBuilderTrait;
+                use $z::timestamp_stack::{
+                    InstrumentationTimestamp, InterceptionPoint, TimestampInstrumentation,
+                    TimestampInstrumentationBuilder, TimestampStack,
+                };
+
+                fn line(stack: Option<&TimestampStack>) -> String {
+                    let Some(stack) = stack else {
+                        return "no stack".to_owned();
+                    };
+                    let point = |p: InterceptionPoint| stack.instrumentation().is_instrumented(p);
+                    let flags = format!(
+                        "{}{}{}",
+                        if point(InterceptionPoint::Send) { "S" } else { "-" },
+                        if point(InterceptionPoint::Route) { "R" } else { "-" },
+                        if point(InterceptionPoint::Receive) { "E" } else { "-" },
+                    );
+                    let records: Vec<String> = stack
+                        .records()
+                        .iter()
+                        .map(|record| match record.timestamp() {
+                            InstrumentationTimestamp::UHLC(ts) => {
+                                format!("{:?}:uhlc:{}", record.point(), ts.get_id())
+                            }
+                            InstrumentationTimestamp::Custom(bytes) => format!(
+                                "{:?}:custom:{}",
+                                record.point(),
+                                String::from_utf8_lossy(bytes)
+                            ),
+                        })
+                        .collect();
+                    format!("{flags} {records:?}")
+                }
+
+                fn instrumentation(points: &str) -> Option<TimestampInstrumentation> {
+                    if points.is_empty() {
+                        return None;
+                    }
+                    Some(
+                        TimestampInstrumentationBuilder::new()
+                            .set_send(points.contains('S'))
+                            .set_route(points.contains('R'))
+                            .set_receive(points.contains('E'))
+                            .build()
+                            .expect("a point to instrument"),
+                    )
+                }
+
+                let mut out = vec![];
+                for (label, subject_text, upstream_text) in
+                    [("clock", None, None), ("callback", Some("subject"), Some("upstream"))]
+                {
+                    let port = free_port();
+                    let mut builder = $z::open(peer("5a00a0", port));
+                    if let Some(text) = subject_text {
+                        builder = builder.with_timestamp_callback(move |_| text.as_bytes().to_vec());
+                    }
+                    let subject = builder.wait().expect("opens");
+                    let other = observer::stacker("b000a0", port, upstream_text).expect("opens");
+                    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+                    let sink = seen.clone();
+                    let _subscriber = subject
+                        .declare_subscriber("demo/**")
+                        .callback(move |sample| {
+                            sink.lock().unwrap().push(format!(
+                                "{} {:?} {}",
+                                sample.key_expr(),
+                                sample.kind(),
+                                line(sample.timestamp_stack())
+                            ));
+                        })
+                        .wait()
+                        .expect("declares");
+                    std::thread::sleep(Duration::from_millis(800));
+                    for points in ["SE", "S", "E", "SRE", ""] {
+                        subject
+                            .put("demo/s", "v")
+                            .timestamp_instrumentation(instrumentation(points))
+                            .wait()
+                            .expect("puts");
+                        std::thread::sleep(Duration::from_millis(300));
+                        out.push(format!(
+                            "{label}: the subject puts at '{points}': the other node is given {:?}, the subject {:?}",
+                            other.take(),
+                            std::mem::take(&mut *seen.lock().unwrap())
+                        ));
+                        other.put("demo/o", points);
+                        std::thread::sleep(Duration::from_millis(300));
+                        out.push(format!(
+                            "{label}: the other node puts at '{points}': the subject is given {:?}, the other node {:?}",
+                            std::mem::take(&mut *seen.lock().unwrap()),
+                            other.take()
+                        ));
+                    }
+                    subject
+                        .delete("demo/d")
+                        .timestamp_instrumentation(instrumentation("SE"))
+                        .wait()
+                        .expect("deletes");
+                    other.delete("demo/e", "SE");
+                    std::thread::sleep(Duration::from_millis(500));
+                    out.push(format!(
+                        "{label}: the deletes at 'SE': the other node is given {:?}, the subject {:?}",
+                        other.take(),
+                        std::mem::take(&mut *seen.lock().unwrap())
+                    ));
+                }
+                out
+            }
+
+            /// The timestamps a session gives: with the id of the session, of the time of now, and
+            /// strictly one after the other when the node holds a clock, for a node that does and
+            /// one that does not.
+            pub fn new_timestamps() -> Vec<String> {
+                let mut out = vec![];
+                for (id, timestamping) in [("5a0090", false), ("5a0091", true)] {
+                    let session = $z::open(config(&format!(
+                        r#"{{ id: "{id}", mode: "peer", timestamping: {{ enabled: {timestamping} }},
+                              scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                    )))
+                    .wait()
+                    .expect("opens");
+                    let before = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap();
+                    let stamps: Vec<_> = (0..200).map(|_| session.new_timestamp()).collect();
+                    let first = stamps[0].get_time().to_duration();
+                    out.push(format!(
+                        "timestamping {timestamping}: id {} time of now {} strictly increasing {}",
+                        stamps.iter().all(|s| s.get_id().to_string() == id),
+                        first >= before && first < before + Duration::from_secs(5),
+                        stamps.windows(2).all(|pair| pair[0] < pair[1]),
+                    ));
+                }
+                out
+            }
+
             /// The transports and the links of a node of this crate, as it reports them of the
             /// upstream nodes that dial it and of the one it dials, and the events its listeners
             /// are told when a peer connects and disconnects: the lists, the lists filtered by a
@@ -2905,6 +3164,25 @@ fn what_liveliness_tells_is_what_upstream_nodes_tell_each_other() {
         "{u:#?}"
     );
     compare("livelinesses", &u, &w);
+}
+
+#[test]
+fn what_a_message_carries_in_its_timestamp_stack_is_what_upstream_carries() {
+    // The log of upstream's nodes, for a run that is asked for it with `RUST_LOG`.
+    up_zenoh::try_init_log_from_env();
+    let (u, w) = (up::instrumentations(), wz::instrumentations());
+    assert!(u.iter().any(|l| l.contains("Send:uhlc:")), "{u:#?}");
+    compare("instrumentations", &u, &w);
+}
+
+#[test]
+fn what_a_session_gives_as_a_new_timestamp_is_what_upstream_gives() {
+    let (u, w) = (up::new_timestamps(), wz::new_timestamps());
+    assert!(
+        u.iter().any(|l| l == "timestamping true: id true time of now true strictly increasing true"),
+        "{u:#?}"
+    );
+    compare("new_timestamps", &u, &w);
 }
 
 #[test]

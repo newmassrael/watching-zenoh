@@ -14,10 +14,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 // Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
 // src/api/builders/session.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). Without the
-// two options that belong to later slices (`with_shm_clients`, slice Z7, and
-// `with_timestamp_callback`, slice Z6b) and without `init`, the plugins' door to a runtime that
-// another session already holds, which is `internal` and names a runtime this crate does not have
-// (docs/zenoh-api-on-the-engine.md, slice Z1).
+// option that belongs to a later slice (`with_shm_clients`, slice Z7) and without `init`, the
+// plugins' door to a runtime that another session already holds, which is `internal` and names a
+// runtime this crate does not have (docs/zenoh-api-on-the-engine.md, slice Z1).
 
 use std::{
     fmt,
@@ -28,6 +27,8 @@ use zenoh_core::{Resolvable, Wait};
 use zenoh_result::ZResult;
 
 use crate::api::session::Session;
+#[cfg(feature = "unstable")]
+use crate::api::timestamp_stack::{GetTimestampCallback, TimestampContext};
 
 /// A builder returned by [`crate::open`] used to open a zenoh [`Session`].
 ///
@@ -46,6 +47,8 @@ where
     <TryIntoConfig as std::convert::TryInto<crate::config::Config>>::Error: std::fmt::Debug,
 {
     config: TryIntoConfig,
+    #[cfg(feature = "unstable")]
+    timestamp_callback: Option<GetTimestampCallback>,
 }
 
 impl<TryIntoConfig> fmt::Debug for OpenBuilder<TryIntoConfig>
@@ -66,7 +69,33 @@ where
     <TryIntoConfig as std::convert::TryInto<crate::config::Config>>::Error: std::fmt::Debug,
 {
     pub(crate) fn new(config: TryIntoConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            #[cfg(feature = "unstable")]
+            timestamp_callback: None,
+        }
+    }
+}
+
+#[cfg(feature = "unstable")]
+impl<TryIntoConfig> OpenBuilder<TryIntoConfig>
+where
+    TryIntoConfig: std::convert::TryInto<crate::config::Config> + Send + 'static,
+    <TryIntoConfig as std::convert::TryInto<crate::config::Config>>::Error: std::fmt::Debug,
+{
+    /// Set a custom timestamp callback for timestamp stack instrumentation.
+    ///
+    /// The callback will be called at each interception point (Send, Route, Receive)
+    /// when the timestamp stack feature is activated.
+    ///
+    /// If no callback is provided, the default UHLC timestamp generation will be used.
+    #[zenoh_macros::unstable]
+    pub fn with_timestamp_callback<F: Fn(TimestampContext) -> Vec<u8> + Send + Sync + 'static>(
+        mut self,
+        cb: F,
+    ) -> Self {
+        self.timestamp_callback = Some(Box::new(cb));
+        self
     }
 }
 
@@ -88,7 +117,11 @@ where
             .config
             .try_into()
             .map_err(|e| zerror!("Invalid Zenoh configuration {:?}", &e))?;
-        Session::open(config)
+        Session::open(
+            config,
+            #[cfg(feature = "unstable")]
+            self.timestamp_callback,
+        )
     }
 }
 

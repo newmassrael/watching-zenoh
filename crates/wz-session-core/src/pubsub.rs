@@ -501,6 +501,10 @@ pub struct InPlaceFallbacks {
     /// fixed bounded backing refuses one; the owned path resolves it into a
     /// `String`.
     pub keyexpr_past_bound: u32,
+    /// A message that carries a timestamp stack (extension `0x7`): the nodes that deliver it add
+    /// to the stack, which is an owned value the lent form has none of, so the owned path takes it.
+    #[cfg(feature = "pubsub-ts-stack")]
+    pub instrumented: u32,
 }
 
 /// The counted refusals of the session-local subscriber-interest staging, by
@@ -1996,6 +2000,11 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         if let Some(q) = qos {
             sample = sample.with_qos(q);
         }
+        // The timestamp stack of an instrumented message: the nodes it crossed recorded on it.
+        #[cfg(feature = "pubsub-ts-stack")]
+        if let Some(stack) = crate::ts_stack::read_ts_stack(outer_exts.iter()) {
+            sample = sample.with_ts_stack(stack);
+        }
         if let Some(att) = body_attachment {
             sample = sample.with_attachment_shared(att);
         }
@@ -2003,6 +2012,10 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
             sample = sample.with_source_info(si);
         }
         sample = sample.with_reliability(reliability);
+        #[cfg(feature = "pubsub-ts-stack")]
+        {
+            sample = sample.with_routed(is_remote);
+        }
 
         // R231 — self-echo dedup. When this dispatch is on the
         // wire-arrival path (is_remote=true) AND the decoded sample

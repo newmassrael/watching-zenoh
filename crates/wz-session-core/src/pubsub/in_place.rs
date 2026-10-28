@@ -117,6 +117,11 @@ impl SampleView for LentSample<'_> {
     fn source_info(&self) -> Option<&SourceInfo> {
         self.source_info.as_ref()
     }
+    // A message is read in place only off a link, so it was routed to this node.
+    #[cfg(feature = "pubsub-ts-stack")]
+    fn routed(&self) -> bool {
+        true
+    }
     // `attachment_shared` and `payload_shared` keep their `None` defaults: the
     // bytes are the link's, lent for the call, and a subscriber that keeps them
     // copies them, as it does a `BorrowedSample`.
@@ -140,6 +145,9 @@ enum Fallback {
     Sliced,
     /// Its keyexpr does not fit the bounded buffer.
     KeyexprPastBound,
+    /// It carries a timestamp stack, which the delivering node adds to.
+    #[cfg(feature = "pubsub-ts-stack")]
+    Instrumented,
 }
 
 /// The body of `push` as a lent sample delivers it, `Ok(None)` for a body the
@@ -249,6 +257,12 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
                 #[cfg(feature = "alloc")]
                 self.dispatch_owned_projection(peer, push, reliability);
             }
+            #[cfg(feature = "pubsub-ts-stack")]
+            Err(Fallback::Instrumented) => {
+                self.in_place_fallbacks.instrumented =
+                    self.in_place_fallbacks.instrumented.saturating_add(1);
+                self.dispatch_owned_projection(peer, push, reliability);
+            }
         }
     }
 
@@ -263,6 +277,17 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
         let Some(body) = lent_body(push)? else {
             return Ok(());
         };
+        // A message the nodes record on is delivered with a stack of its own to add to.
+        #[cfg(feature = "pubsub-ts-stack")]
+        if push.extensions.as_deref().is_some_and(|outer| {
+            crate::ext_view::find_by_eid(
+                outer,
+                crate::ext_header::ext_eid(crate::ts_stack::TS_STACK_EXT_HEADER),
+            )
+            .is_some()
+        }) {
+            return Err(Fallback::Instrumented);
+        }
         // The keyexpr may be the peer table's own literal, so the table stays
         // borrowed through the delivery; the subscribers are a field of their
         // own (`fire_lent`). A composed keyexpr lies in `composed`, in this
@@ -457,6 +482,10 @@ mod tests {
         timestamp: Option<TimestampHint>,
         encoding: Option<EncodingHint>,
         source_info: Option<SourceInfo>,
+        #[cfg(feature = "pubsub-ts-stack")]
+        ts_stack: Option<crate::ts_stack::TsStack>,
+        #[cfg(feature = "pubsub-ts-stack")]
+        routed: bool,
     }
 
     fn recording(pattern: &str) -> (SubscriberRegistry, Arc<Mutex<Vec<Seen>>>) {
@@ -478,6 +507,10 @@ mod tests {
                         timestamp: s.timestamp().cloned(),
                         encoding: s.encoding().cloned(),
                         source_info: s.source_info().cloned(),
+                        #[cfg(feature = "pubsub-ts-stack")]
+                        ts_stack: s.ts_stack().cloned(),
+                        #[cfg(feature = "pubsub-ts-stack")]
+                        routed: s.routed(),
                     });
                 }),
             )
@@ -530,6 +563,8 @@ mod tests {
             source_info: Some(SourceInfo::new(&[0x51, 0x52, 0x53, 0x54], 9, 41)),
             attachment: Some(alloc::vec![1, 2, 3, 4, 5]),
             qos: Some(QosLevel::from_raw(0x05)),
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
         }
     }
 
@@ -547,6 +582,42 @@ mod tests {
         );
         assert_eq!(lent[0].reliability, Reliability::BestEffort);
         assert_eq!(fallbacks, InPlaceFallbacks::default(), "nothing fell back");
+    }
+
+    /// A message that carries a timestamp stack is delivered with it, as a message routed to this
+    /// node: the lent form has no stack of its own to hand over, so it takes the owned path, and
+    /// says so.
+    #[cfg(all(feature = "pubsub-qos", feature = "pubsub-ts-stack"))]
+    #[test]
+    fn an_instrumented_put_takes_the_owned_path_and_arrives_with_its_stack() {
+        use crate::ts_stack::{point, TsStack};
+
+        let mut stack = TsStack::new(point::SEND | point::RECEIVE);
+        stack.record(point::SEND, alloc::vec![9, 8, 7], false);
+        let instrumented = crate::metadata::PushMetadata {
+            ts_stack: Some(stack.clone()),
+            ..meta()
+        };
+        let built =
+            crate::push_build::build_push_literal_with_meta("demo/a", b"payload", &instrumented)
+                .expect("build");
+        let wire = wire_of(&built);
+        let push = Push::decode(&mut SceCursor::new(&wire)).expect("decode");
+        let (lent, owned, fallbacks) = both_ways(&push, "demo/*", |_| {});
+        assert_eq!(lent, owned, "the lent delivery is the owned one");
+        assert_eq!(lent.len(), 1);
+        assert_eq!(lent[0].ts_stack.as_ref(), Some(&stack));
+        assert!(lent[0].routed, "it came in over a link");
+        assert_eq!(fallbacks.instrumented, 1);
+
+        // One that carries none is delivered lent, and nothing falls back.
+        let built = crate::push_build::build_push_literal_with_meta("demo/a", b"payload", &meta())
+            .expect("build");
+        let wire = wire_of(&built);
+        let push = Push::decode(&mut SceCursor::new(&wire)).expect("decode");
+        let (lent, _, fallbacks) = both_ways(&push, "demo/*", |_| {});
+        assert_eq!(lent[0].ts_stack, None);
+        assert_eq!(fallbacks.instrumented, 0);
     }
 
     /// A literal Put on `key`, decoded from the wire bytes a peer would send, as both paths read it.

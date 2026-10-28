@@ -550,6 +550,12 @@ pubsub-attachment = ["attachment-bytes"]
 pubsub-timestamp = []
 pubsub-encoding = []
 pubsub-source-info = []
+# The timestamp stack of a Push (extension 0x7): the read at the dispatch of a delivered Push, the
+# write into the outer chain of one built, and the fall-back of a Push read in place that carries
+# one. Only the top crate's timestamp instrumentation (`zenoh` with `unstable`) records on a stack,
+# so a build without it links none of that. The `ts_stack` module's types stay with `alloc`:
+# `PushMetadata`, `Sample` and `PublishOptions` hold a stack as a value that is `None` here.
+pubsub-ts-stack = ["alloc"]
 
 # R311y307 — the Push QoS extension (network ext id 0x01, ENC_ZINT) is ONE
 # compile unit. `pubsub-qos` gates its encode (`build_push_outer_extensions`)

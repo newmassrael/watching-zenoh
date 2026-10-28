@@ -149,6 +149,10 @@ impl SessionEngine for SharedSession {
         SharedSession::listen_locators(self)
     }
 
+    fn node_timestamp(&self) -> Option<wz_session_core::sample::TimestampHint> {
+        SharedSession::node_timestamp(self)
+    }
+
     fn has_router_peer(&self) -> bool {
         SharedSession::has_router_peer(self)
     }

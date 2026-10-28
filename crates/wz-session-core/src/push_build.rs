@@ -427,7 +427,12 @@ fn build_body_extensions(
 /// bit. zenoh-pico mirror: `_z_n_msg_encode_push` outer-ext switch
 /// at network.c — qos lands on the outer chain, source_info /
 /// attachment on the body chain (`_z_push_body_encode_extensions`).
-fn build_push_outer_extensions(qos: Option<crate::sample::QosLevel>) -> Option<Vec<ExtEntryOwned>> {
+fn build_push_outer_extensions(
+    qos: Option<crate::sample::QosLevel>,
+    #[cfg(feature = "pubsub-ts-stack")] ts_stack: Option<&crate::ts_stack::TsStack>,
+) -> Option<Vec<ExtEntryOwned>> {
+    // Only the QoS ext is pushed here, and it is gated: with `pubsub-qos` off the chain is empty.
+    #[cfg_attr(not(feature = "pubsub-qos"), allow(unused_mut))]
     let mut exts: Vec<ExtEntryOwned> = Vec::new();
     // Push outer QoS ext (id 0x01) — gated on `pubsub-qos`, the ONE compile
     // unit for the ext (its single byte packs priority / congestion-control /
@@ -458,11 +463,27 @@ fn build_push_outer_extensions(qos: Option<crate::sample::QosLevel>) -> Option<V
     }
     #[cfg(not(feature = "pubsub-qos"))]
     let _ = qos;
-    if exts.is_empty() {
-        return None;
+    // The timestamp stack (id 0x07), after the QoS by id; `set_ts_stack` makes the chain's `Z`
+    // bits right, and the chain stays absent when there is nothing in it.
+    let mut chain = if exts.is_empty() { None } else { Some(exts) };
+    #[cfg(feature = "pubsub-ts-stack")]
+    if ts_stack.is_some() {
+        crate::ts_stack::set_ts_stack(&mut chain, ts_stack);
     }
-    crate::ext_nodeid::apply_chain_z_bits(&mut exts);
-    Some(exts)
+    if let Some(exts) = chain.as_mut() {
+        crate::ext_nodeid::apply_chain_z_bits(exts);
+    }
+    chain
+}
+
+/// The outer extension chain of a Push built from `meta`: its QoS, and with `pubsub-ts-stack` the
+/// timestamp stack it starts.
+fn outer_extensions_of(meta: &PushMetadata) -> Option<Vec<ExtEntryOwned>> {
+    build_push_outer_extensions(
+        meta.qos,
+        #[cfg(feature = "pubsub-ts-stack")]
+        meta.ts_stack.as_ref(),
+    )
 }
 
 /// R311fx — SSOT for the `pubsub-timestamp` send-side gate. The inline
@@ -665,7 +686,7 @@ pub fn build_push_literal_with_meta(
     value: &[u8],
     meta: &PushMetadata,
 ) -> Result<PushOwned, CodecError> {
-    let outer_exts = build_push_outer_extensions(meta.qos);
+    let outer_exts = outer_extensions_of(meta);
     let z_flag = if outer_exts.is_some() { 0x80u8 } else { 0x00u8 };
     Ok(PushOwned {
         header: wire_const::N_MID_PUSH | 0x20 | z_flag,
@@ -738,7 +759,7 @@ pub fn build_push_shm_literal(
     descriptor: &crate::extshm::ShmDescriptor,
     meta: &PushMetadata,
 ) -> Result<PushOwned, CodecError> {
-    let outer_exts = build_push_outer_extensions(meta.qos);
+    let outer_exts = outer_extensions_of(meta);
     let z_flag = if outer_exts.is_some() { 0x80u8 } else { 0x00u8 };
     Ok(PushOwned {
         header: wire_const::N_MID_PUSH | 0x20 | z_flag,
@@ -783,7 +804,7 @@ pub fn build_push_shm_aliased(
         "build_push_shm_aliased requires a non-zero mapping id; \
          use build_push_shm_literal for id=0",
     );
-    let outer_exts = build_push_outer_extensions(meta.qos);
+    let outer_exts = outer_extensions_of(meta);
     let z_flag = if outer_exts.is_some() { 0x80u8 } else { 0x00u8 };
     let suffix_len = suffix.map(|s| s.len() as u64);
     let suffix_string = suffix.map(crate::wire::wire_string).transpose()?;
@@ -821,7 +842,7 @@ pub fn build_push_aliased_with_meta(
         "build_push_aliased_with_meta requires a non-zero mapping id; \
          use build_push_literal_with_meta for id=0",
     );
-    let outer_exts = build_push_outer_extensions(meta.qos);
+    let outer_exts = outer_extensions_of(meta);
     let z_flag = if outer_exts.is_some() { 0x80u8 } else { 0x00u8 };
     let suffix_len = suffix.map(|s| s.len() as u64);
     let suffix_string = suffix.map(crate::wire::wire_string).transpose()?;
@@ -854,7 +875,7 @@ pub fn build_push_del_literal_with_meta(
     keyexpr_suffix: &str,
     meta: &PushMetadata,
 ) -> Result<PushOwned, CodecError> {
-    let outer_exts = build_push_outer_extensions(meta.qos);
+    let outer_exts = outer_extensions_of(meta);
     let z_flag = if outer_exts.is_some() { 0x80u8 } else { 0x00u8 };
     Ok(PushOwned {
         header: wire_const::N_MID_PUSH | 0x20 | z_flag,
@@ -885,7 +906,7 @@ pub fn build_push_del_aliased_with_meta(
         "build_push_del_aliased_with_meta requires a non-zero mapping id; \
          use build_push_del_literal_with_meta for id=0",
     );
-    let outer_exts = build_push_outer_extensions(meta.qos);
+    let outer_exts = outer_extensions_of(meta);
     let z_flag = if outer_exts.is_some() { 0x80u8 } else { 0x00u8 };
     let suffix_len = suffix.map(|s| s.len() as u64);
     let suffix_string = suffix.map(crate::wire::wire_string).transpose()?;
@@ -1327,10 +1348,19 @@ mod tests {
         }
     }
 
+    /// The chain of a Push that starts no timestamp stack.
+    fn outer_chain_of(qos: Option<QosLevel>) -> Option<Vec<ExtEntryOwned>> {
+        build_push_outer_extensions(
+            qos,
+            #[cfg(feature = "pubsub-ts-stack")]
+            None,
+        )
+    }
+
     #[cfg(all(feature = "codec-push", feature = "pubsub-qos"))]
     #[test]
     fn build_push_outer_extensions_emits_qos_with_zint_body() {
-        let exts = build_push_outer_extensions(Some(QosLevel::from_raw(0b0001_1010)))
+        let exts = outer_chain_of(Some(QosLevel::from_raw(0b0001_1010)))
             .expect("qos populates outer chain");
         assert_eq!(exts.len(), 1);
         // ENC_ZINT(0x20) | id_qos(0x01); no M, no Z (single ext).
@@ -1344,7 +1374,7 @@ mod tests {
 
     #[test]
     fn build_push_outer_extensions_returns_none_without_qos() {
-        assert!(build_push_outer_extensions(None).is_none());
+        assert!(outer_chain_of(None).is_none());
     }
 
     #[cfg(all(feature = "codec-push", feature = "pubsub-qos"))]
@@ -1355,13 +1385,38 @@ mod tests {
         // has_qos_ext gate, network.c:44); a non-default byte still emits.
         assert_eq!(crate::sample::QosLevel::DEFAULT.raw, 0x05);
         assert!(
-            build_push_outer_extensions(Some(crate::sample::QosLevel::DEFAULT)).is_none(),
+            outer_chain_of(Some(crate::sample::QosLevel::DEFAULT)).is_none(),
             "DEFAULT qos byte must not emit an outer ext"
         );
         assert!(
-            build_push_outer_extensions(Some(QosLevel::from_raw(0x11))).is_some(),
+            outer_chain_of(Some(QosLevel::from_raw(0x11))).is_some(),
             "a non-default qos byte must emit"
         );
+    }
+
+    #[cfg(feature = "pubsub-ts-stack")]
+    #[test]
+    fn build_push_outer_extensions_carries_the_timestamp_stack_after_the_qos() {
+        use crate::ts_stack::{point, read_ts_stack, TsStack};
+
+        let mut stack = TsStack::new(point::SEND | point::RECEIVE);
+        stack.record(point::SEND, alloc::vec![1, 2], false);
+        // Alone, it is the one extension of the chain, and nothing follows it.
+        let alone = build_push_outer_extensions(None, Some(&stack)).expect("a chain");
+        assert_eq!(alone.len(), 1);
+        assert_eq!(alone[0].header & 0x7f, crate::ts_stack::TS_STACK_EXT_HEADER);
+        assert_eq!(read_ts_stack(alone.iter()), Some(stack.clone()));
+        // With a non-default QoS, the QoS comes first and the chain continues to the stack.
+        #[cfg(feature = "pubsub-qos")]
+        {
+            let both = build_push_outer_extensions(Some(QosLevel::from_raw(0x11)), Some(&stack))
+                .expect("a chain");
+            assert_eq!(both.len(), 2);
+            assert_eq!(both[0].header & 0x0f, 0x01, "the QoS first");
+            assert_ne!(both[0].header & 0x80, 0, "and the chain goes on");
+            assert_eq!(both[1].header & 0x80, 0, "the stack ends it");
+            assert_eq!(read_ts_stack(both.iter()), Some(stack));
+        }
     }
 
     /// `build_push_literal` populates the Push struct with the
@@ -1699,6 +1754,8 @@ mod tests {
             source_info: Some(SourceInfo::new(&[0x01, 0x02, 0x03, 0x04], 7, 42)),
             attachment: Some(b"attach".to_vec()),
             qos: Some(QosLevel::from_raw(0b0001_1010)),
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
         };
         let push = build_push_literal_with_meta("home/temp", b"payload", &meta).unwrap();
         let encoded = push.wire();
@@ -1781,6 +1838,8 @@ mod tests {
             source_info: Some(SourceInfo::new(&[0xDE, 0xAD], 1, 2)),
             attachment: Some(b"del-att".to_vec()),
             qos: Some(QosLevel::from_raw(0x10)),
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
         };
         let push = build_push_del_literal_with_meta("home/temp", &meta).unwrap();
         let encoded = push.wire();

@@ -37,10 +37,12 @@ use async_trait::async_trait;
 use zenoh_config::wrappers::EntityGlobalId;
 use zenoh_config::wrappers::ZenohId;
 use zenoh_core::{Resolve, ResolveClosure, Wait};
-use zenoh_protocol::core::{CongestionControl, EntityId, ExprId, Parameters};
+use zenoh_protocol::core::{CongestionControl, EntityId, ExprId, Parameters, Timestamp};
 #[cfg(feature = "unstable")]
 use zenoh_protocol::core::{Locator, Reliability};
 use zenoh_protocol::network::request::{self, ext::QueryTarget};
+#[cfg(feature = "unstable")]
+use zenoh_protocol::network::timestamp_stack::interception_point;
 use zenoh_result::ZResult;
 use zenoh_runtime::ZRuntime;
 
@@ -53,7 +55,9 @@ use crate::api::sample::SourceInfo;
 #[cfg(feature = "unstable")]
 use crate::api::selector::ZenohParameters;
 #[cfg(feature = "unstable")]
-use crate::api::timestamp_stack::TimestampInstrumentation;
+use crate::api::timestamp_stack::{
+    GetTimestampCallback, TimestampInstrumentation, TimestampSource,
+};
 use crate::api::{
     builders::{
         close::{CloseBuilder, Closeable, Closee},
@@ -123,6 +127,15 @@ pub(crate) struct Publication<'a> {
     #[cfg(feature = "unstable")]
     pub(crate) source_info: Option<SourceInfo>,
     pub(crate) attachment: Option<ZBytes>,
+    /// The timestamp stack of the message for the session's own subscribers, when the publication
+    /// asks for its instrumentation: the points to record at, and what this node recorded at the
+    /// send.
+    #[cfg(feature = "unstable")]
+    pub(crate) ts_stack: Option<zenoh_protocol::network::timestamp_stack::TimestampStack>,
+    /// The stack of the message as it leaves the node: the one above with what the node records
+    /// on a message it routes out.
+    #[cfg(feature = "unstable")]
+    pub(crate) wire_ts_stack: Option<zenoh_protocol::network::timestamp_stack::TimestampStack>,
 }
 
 /// What a subscription asks of the engine, in the types of this crate: the key as the wire names
@@ -143,6 +156,9 @@ pub(crate) struct Subscription<'a> {
     /// What the engine keeps for as long as it records the subscription: the declaration of the
     /// prefix the wire names the key by.
     pub(crate) keeps: Arc<dyn Send + Sync>,
+    /// What the node records on an instrumented sample it delivers to the callback.
+    #[cfg(feature = "unstable")]
+    pub(crate) timestamps: Arc<TimestampSource>,
 }
 
 /// What the declaration of a publisher asks of the engine, in the types of this crate: the key as
@@ -421,6 +437,36 @@ impl Engine {
         }
     }
 
+    /// The clock of the node as a function: the next timestamp, or `None` for a node that holds
+    /// none. The function lets go of the engine's session with the last of its holders.
+    #[cfg(feature = "unstable")]
+    fn node_clock(&self) -> Box<dyn Fn() -> Option<uhlc::Timestamp> + Send + Sync> {
+        match self {
+            Engine::Tokio(state) => {
+                let shared = state.shared.clone();
+                Box::new(move || {
+                    shared
+                        .as_engine()
+                        .node_timestamp()
+                        .as_ref()
+                        .and_then(tokio_engine::timestamp_from)
+                })
+            }
+        }
+    }
+
+    /// The next timestamp off the node's clock, or `None` for a node that holds none.
+    fn node_timestamp(&self) -> Option<uhlc::Timestamp> {
+        match self {
+            Engine::Tokio(state) => state
+                .shared
+                .as_engine()
+                .node_timestamp()
+                .as_ref()
+                .and_then(tokio_engine::timestamp_from),
+        }
+    }
+
     /// The locators the session's listeners got, without the loopback ones, as words.
     #[cfg(feature = "unstable")]
     fn listen_locators(&self) -> Vec<String> {
@@ -491,6 +537,8 @@ impl Engine {
                     callback,
                     notifier,
                     keeps,
+                    #[cfg(feature = "unstable")]
+                    timestamps,
                 } = subscription;
                 let wire = tokio_engine::wire_key_of(scope, suffix).keeping(keeps);
                 let id = state.shared.as_engine().declare_subscriber_on_wire(
@@ -498,7 +546,12 @@ impl Engine {
                     wire,
                     tokio_engine::engine_locality(origin),
                     None,
-                    tokio_engine::subscriber_sink(callback, notifier),
+                    tokio_engine::subscriber_sink(
+                        callback,
+                        notifier,
+                        #[cfg(feature = "unstable")]
+                        timestamps,
+                    ),
                 );
                 Id::try_from(id).map_err(|_| {
                     zerror!("the engine numbered a subscriber {id}, which is more than an id holds")
@@ -846,6 +899,15 @@ impl Engine {
         match *self {}
     }
 
+    fn node_timestamp(&self) -> Option<uhlc::Timestamp> {
+        match *self {}
+    }
+
+    #[cfg(feature = "unstable")]
+    fn node_clock(&self) -> Box<dyn Fn() -> Option<uhlc::Timestamp> + Send + Sync> {
+        match *self {}
+    }
+
     #[cfg(feature = "unstable")]
     fn listen_locators(&self) -> Vec<String> {
         match *self {}
@@ -998,8 +1060,11 @@ mod tokio_engine {
     #[cfg(feature = "unstable")]
     use {
         crate::api::info::{Face, FaceSink, Link, Transport},
+        crate::api::timestamp_stack::TimestampSource,
         wz_capi_core::faces::{FaceEventKind, FaceEventSink, FaceSnapshot, LinkSnapshot},
+        wz_capi_core::runtime::ts_stack::{Interception as EngineInterception, TsStack},
         zenoh_protocol::core::{Locator, Priority as WirePriority, Reliability as WireReliability},
+        zenoh_protocol::network::timestamp_stack::interception_point,
     };
 
     use super::{Arc, LivelinessRequest, Publication, QueryRequest};
@@ -1239,6 +1304,13 @@ mod tokio_engine {
         if let Some(attachment) = &publication.attachment {
             options = options.with_attachment(attachment.to_bytes().into_owned());
         }
+        #[cfg(feature = "unstable")]
+        if publication.ts_stack.is_some() {
+            options = options.with_ts_stack(
+                publication.ts_stack.as_ref().map(engine_stack_of),
+                publication.wire_ts_stack.as_ref().map(engine_stack_of),
+            );
+        }
         options
     }
 
@@ -1289,7 +1361,7 @@ mod tokio_engine {
     }
 
     /// The timestamp a hint says, when its id is one.
-    fn timestamp_from(hint: &TimestampHint) -> Option<uhlc::Timestamp> {
+    pub(super) fn timestamp_from(hint: &TimestampHint) -> Option<uhlc::Timestamp> {
         let id = uhlc::ID::try_from(hint.zid.as_slice()).ok()?;
         Some(uhlc::Timestamp::new(uhlc::NTP64(hint.time), id))
     }
@@ -1396,20 +1468,31 @@ mod tokio_engine {
     pub(super) fn subscriber_sink(
         callback: Callback<Sample>,
         notifier: Option<SyncGroupNotifier>,
+        #[cfg(feature = "unstable")] timestamps: Arc<TimestampSource>,
     ) -> SubscriberSink {
         struct Delivery {
             callback: Callback<Sample>,
             _notifier: Option<SyncGroupNotifier>,
+            #[cfg(feature = "unstable")]
+            timestamps: Arc<TimestampSource>,
         }
         let delivery = Arc::new(Delivery {
             callback,
             _notifier: notifier,
+            #[cfg(feature = "unstable")]
+            timestamps,
         });
         Arc::new(move || {
             let delivery = Arc::clone(&delivery);
-            Box::new(move |view: &dyn SampleView| match sample_of(view) {
-                Ok(sample) => delivery.callback.call(sample),
-                Err(error) => tracing::error!("a sample could not be delivered: {error}"),
+            Box::new(move |view: &dyn SampleView| {
+                match sample_of(
+                    view,
+                    #[cfg(feature = "unstable")]
+                    Some(&delivery.timestamps),
+                ) {
+                    Ok(sample) => delivery.callback.call(sample),
+                    Err(error) => tracing::error!("a sample could not be delivered: {error}"),
+                }
             })
         })
     }
@@ -1418,7 +1501,10 @@ mod tokio_engine {
     ///
     /// The payload is copied out of the frame: handing it over as the frame's own bytes is the
     /// zero-copy payload of slice Z2 that no engine offers yet.
-    fn sample_of(view: &dyn SampleView) -> ZResult<Sample> {
+    fn sample_of(
+        view: &dyn SampleView,
+        #[cfg(feature = "unstable")] receive: Option<&TimestampSource>,
+    ) -> ZResult<Sample> {
         let key_expr = KeyExpr::try_from(view.keyexpr().to_owned())?;
         let kind = match view.kind() {
             EngineSampleKind::Put => SampleKind::Put,
@@ -1443,8 +1529,69 @@ mod tokio_engine {
             source_info: view.source_info().and_then(source_info_from),
             attachment: view.attachment().map(|bytes| ZBytes::from(bytes.to_vec())),
             #[cfg(feature = "unstable")]
-            timestamp_stack: None,
+            timestamp_stack: view
+                .ts_stack()
+                .and_then(|stack| received_stack(stack, view.routed(), receive)),
         })
+    }
+
+    /// The timestamp stack of a message as the application is given it: what the nodes it crossed
+    /// recorded, and what this node records on delivering it when it is the point asked for.
+    /// `None` for a stack that cannot be read.
+    #[cfg(feature = "unstable")]
+    fn received_stack(
+        stack: &TsStack,
+        routed: bool,
+        receive: Option<&TimestampSource>,
+    ) -> Option<crate::api::timestamp_stack::TimestampStack> {
+        let mut stack = protocol_stack_of(stack);
+        if let Some(source) = receive {
+            // A message that came in over a link was routed by this node on its way, and one the
+            // session published itself was not.
+            if routed {
+                source.record(&mut stack, interception_point::ROUTE);
+            }
+            source.record(&mut stack, interception_point::RECEIVE);
+        }
+        crate::api::timestamp_stack::TimestampStack::try_from(&stack).ok()
+    }
+
+    /// The stack of this crate's protocol types that the engine's stack says.
+    #[cfg(feature = "unstable")]
+    fn protocol_stack_of(
+        stack: &TsStack,
+    ) -> zenoh_protocol::network::timestamp_stack::TimestampStack {
+        zenoh_protocol::network::timestamp_stack::TimestampStack {
+            conf_flags: stack.conf_flags,
+            stack: stack
+                .stack
+                .iter()
+                .map(
+                    |record| zenoh_protocol::network::timestamp_stack::Interception {
+                        flags: record.flags,
+                        timestamp: record.timestamp.clone(),
+                    },
+                )
+                .collect(),
+        }
+    }
+
+    /// The engine's stack that a stack of this crate's protocol types says.
+    #[cfg(feature = "unstable")]
+    pub(super) fn engine_stack_of(
+        stack: &zenoh_protocol::network::timestamp_stack::TimestampStack,
+    ) -> TsStack {
+        TsStack {
+            conf_flags: stack.conf_flags,
+            stack: stack
+                .stack
+                .iter()
+                .map(|record| EngineInterception {
+                    flags: record.flags,
+                    timestamp: record.timestamp.clone(),
+                })
+                .collect(),
+        }
     }
 
     /// What the engine hands the queries of a queryable to: the callback, called once for each
@@ -1997,6 +2144,10 @@ pub(crate) struct SessionInner {
     zid: ZenohId,
     /// How long a query waits for its replies when it does not say, from the configuration.
     queries_default_timeout: Duration,
+    /// What a node records on a message it intercepts: its role, the callback of the user if the
+    /// session was opened with one, and the clock of a node that holds none.
+    #[cfg(feature = "unstable")]
+    timestamps: Arc<TimestampSource>,
     /// The subscriptions declared on the session and not undeclared, which a close lets go of.
     subscriptions: std::sync::Mutex<Vec<Id>>,
     /// The publishers declared on the session and not undeclared, which a close lets go of.
@@ -2597,16 +2748,20 @@ impl SessionInner {
         if self.engine.is_closed() {
             return Err(SessionClosedError.into());
         }
-        // The instrumentation of a message at each node it crosses is the model of slice Z6b: an
-        // engine without it would send the message without the stamps asked for, which is the
-        // silent fallback this crate refuses everywhere else.
+        // A publication that asks for its instrumentation starts the stack the nodes it crosses
+        // record on, with what this node records at the send, and the one that leaves the node
+        // has what it records on routing the message out as well.
         #[cfg(feature = "unstable")]
-        if timestamp_instrumentation.is_some() {
-            bail!(
-                "the timestamp instrumentation of a publication is not carried by this engine yet \
-                 (slice Z6b of docs/zenoh-api-on-the-engine.md)"
-            );
-        }
+        let ts_stack = timestamp_instrumentation.map(|instrumentation| {
+            self.timestamps
+                .start(instrumentation, interception_point::SEND)
+        });
+        #[cfg(feature = "unstable")]
+        let wire_ts_stack = ts_stack.clone().map(|mut stack| {
+            self.timestamps
+                .record(&mut stack, interception_point::ROUTE);
+            stack
+        });
         let anchor: SessionAnchor = self.clone();
         let wire = key_expr.to_wire(&anchor);
         let suffix = (!wire.suffix.is_empty()).then(|| wire.suffix.to_string());
@@ -2627,6 +2782,10 @@ impl SessionInner {
             #[cfg(feature = "unstable")]
             source_info,
             attachment,
+            #[cfg(feature = "unstable")]
+            ts_stack,
+            #[cfg(feature = "unstable")]
+            wire_ts_stack,
         })
     }
 
@@ -2787,8 +2946,15 @@ impl Session {
     }
 
     /// Open a session on the selected engine, from `config`.
-    pub(crate) fn open(config: Config) -> ZResult<Session> {
+    pub(crate) fn open(
+        config: Config,
+        #[cfg(feature = "unstable")] timestamp_callback: Option<GetTimestampCallback>,
+    ) -> ZResult<Session> {
         let (engine, zid) = Engine::open(&config)?;
+        #[cfg(feature = "unstable")]
+        let whatami = config.0.clone().expanded().mode();
+        #[cfg(feature = "unstable")]
+        let node_clock = engine.node_clock();
         let id = u32::try_from(engine.next_entity_id()).unwrap_or(u32::MAX);
         let queries_default_timeout = Duration::from_millis(
             config
@@ -2802,6 +2968,13 @@ impl Session {
             id,
             zid,
             queries_default_timeout,
+            #[cfg(feature = "unstable")]
+            timestamps: Arc::new(TimestampSource::new(
+                zid,
+                whatami,
+                timestamp_callback,
+                node_clock,
+            )),
             subscriptions: std::sync::Mutex::new(vec![]),
             publishers: std::sync::Mutex::new(vec![]),
             queryables: std::sync::Mutex::new(vec![]),
@@ -3204,6 +3377,34 @@ impl Session {
         self.0.zid
     }
 
+    /// Get a new Timestamp from a Zenoh [`Session`].
+    ///
+    /// The returned timestamp has the current time, with the Session's runtime [`ZenohId`].
+    ///
+    /// # Examples
+    /// ### Get a new timestamp
+    /// ```
+    /// # #[tokio::main]
+    /// # async fn main() {
+    ///
+    /// let session = zenoh::open(zenoh::Config::default()).await.unwrap();
+    /// let timestamp = session.new_timestamp();
+    /// # }
+    /// ```
+    pub fn new_timestamp(&self) -> Timestamp {
+        match self.0.engine.node_timestamp() {
+            Some(timestamp) => timestamp,
+            None => {
+                // The node holds no clock: the time of the system, with the id of the session.
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .into();
+                Timestamp::new(now, self.zid().into())
+            }
+        }
+    }
+
     /// Returns the [`EntityGlobalId`] of this Session.
     #[zenoh_macros::unstable]
     pub fn id(&self) -> EntityGlobalId {
@@ -3384,6 +3585,8 @@ impl Session {
             // The declaration of the prefix is held by the subscription for as long as the engine
             // records it, whoever else holds the key.
             keeps: Arc::new(key_expr.clone().into_owned()),
+            #[cfg(feature = "unstable")]
+            timestamps: self.0.timestamps.clone(),
         })?;
         self.0.subscriptions().push(id);
         // A close that ran between the check and the record has not seen this subscription.
@@ -4219,6 +4422,39 @@ mod tests {
             .expect("a free port below the ephemeral range")
     }
 
+    /// A node with no clock still gives a timestamp: the time of the system with the id of the
+    /// session. A node that holds one gives the next of its clock, and no two are the same.
+    #[test]
+    fn a_new_timestamp_carries_the_id_of_the_session_and_is_not_repeated_by_a_clock() {
+        let open_with = |id: &str, timestamping: bool| {
+            open(
+                Config::from_json5(&format!(
+                    r#"{{ id: "{id}", mode: "peer", timestamping: {{ enabled: {timestamping} }},
+                          scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                ))
+                .expect("a configuration zenoh reads"),
+            )
+            .wait()
+            .expect("opens")
+        };
+        let plain = open_with("a1b2f5", false);
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        let stamp = plain.new_timestamp();
+        assert_eq!(*stamp.get_id(), plain.zid().into());
+        let taken = stamp.get_time().to_duration();
+        assert!(
+            taken >= before && taken < before + Duration::from_secs(5),
+            "the time of the system: {taken:?} after {before:?}"
+        );
+
+        let clocked = open_with("a1b2f6", true);
+        let stamps: Vec<_> = (0..1000).map(|_| clocked.new_timestamp()).collect();
+        assert!(stamps.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(stamps.iter().all(|s| *s.get_id() == clocked.zid().into()));
+    }
+
     #[test]
     fn the_info_of_a_session_says_its_id_and_the_peers_it_is_connected_to() {
         let port = unautoselected_port();
@@ -4410,6 +4646,10 @@ mod tests {
             #[cfg(feature = "unstable")]
             source_info: None,
             attachment: Some(ZBytes::from("attached")),
+            #[cfg(feature = "unstable")]
+            ts_stack: None,
+            #[cfg(feature = "unstable")]
+            wire_ts_stack: None,
         }
     }
 
@@ -6492,7 +6732,7 @@ mod tests {
 
         const WAIT: Duration = Duration::from_secs(5);
 
-        fn on(id: &str, listen: &str, connect: &str) -> Session {
+        pub(super) fn on(id: &str, listen: &str, connect: &str) -> Session {
             open(
                 Config::from_json5(&format!(
                     r#"{{ id: "{id}", mode: "peer",
@@ -6507,13 +6747,13 @@ mod tests {
         }
 
         /// The node that listens, and the endpoint it listens on.
-        fn listening(id: &str) -> (Session, String) {
+        pub(super) fn listening(id: &str) -> (Session, String) {
             let port = unautoselected_port();
             let endpoint = format!("tcp/127.0.0.1:{port}");
             (on(id, &format!(r#""{endpoint}""#), ""), endpoint)
         }
 
-        fn dialling(id: &str, endpoint: &str) -> Session {
+        pub(super) fn dialling(id: &str, endpoint: &str) -> Session {
             on(id, "", &format!(r#""{endpoint}""#))
         }
 
@@ -7152,6 +7392,280 @@ mod tests {
                 .wait();
             assert!(declared.is_err(), "a closed session takes no listener");
             drop(writer);
+        }
+    }
+
+    /// The timestamp stack of a message: what the nodes record on it as it is published, routed and
+    /// delivered.
+    #[cfg(feature = "unstable")]
+    mod instrumentation {
+        use std::{sync::mpsc, time::Duration};
+
+        use zenoh_protocol::core::WhatAmI;
+
+        use super::{
+            connectivity::{dialling, listening, on},
+            *,
+        };
+        use crate::api::timestamp_stack::{
+            InstrumentationTimestamp, InterceptionPoint, TimestampInstrumentation,
+            TimestampInstrumentationBuilder, TimestampStack,
+        };
+
+        const WAIT: Duration = Duration::from_secs(5);
+
+        fn at(points: &str) -> TimestampInstrumentation {
+            TimestampInstrumentationBuilder::new()
+                .set_send(points.contains('S'))
+                .set_route(points.contains('R'))
+                .set_receive(points.contains('E'))
+                .build()
+                .expect("a point to instrument")
+        }
+
+        /// A stack as the points it was recorded at and by whom: the id of the node for a UHLC
+        /// timestamp and the text for a custom one.
+        fn records(stack: &TimestampStack) -> Vec<String> {
+            stack
+                .records()
+                .iter()
+                .map(|record| match record.timestamp() {
+                    InstrumentationTimestamp::UHLC(ts) => {
+                        format!("{:?}:uhlc:{}", record.point(), ts.get_id())
+                    }
+                    InstrumentationTimestamp::Custom(bytes) => {
+                        format!(
+                            "{:?}:custom:{}",
+                            record.point(),
+                            String::from_utf8_lossy(bytes)
+                        )
+                    }
+                })
+                .collect()
+        }
+
+        /// The sender of a stack records on the samples a subscriber of the other node takes.
+        fn taking(session: &Session) -> mpsc::Receiver<Sample> {
+            let (sender, received) = mpsc::channel();
+            let sender = std::sync::Mutex::new(sender);
+            let subscriber = session
+                .declare_subscriber("demo/**")
+                .callback(move |sample| {
+                    let _ = sender.lock().unwrap().send(sample);
+                })
+                .wait()
+                .expect("declares");
+            std::mem::forget(subscriber);
+            received
+        }
+
+        fn stack_of(received: &mpsc::Receiver<Sample>) -> Option<Vec<String>> {
+            let sample = received.recv_timeout(WAIT).expect("a sample");
+            sample.timestamp_stack().map(records)
+        }
+
+        /// Two connected nodes, the second of which takes samples.
+        fn pair(ids: (&str, &str)) -> (Session, Session, mpsc::Receiver<Sample>) {
+            let (first, endpoint) = listening(ids.0);
+            let second = dialling(ids.1, &endpoint);
+            assert_eq!(connected(&first, 1).1.len(), 1, "the nodes are linked");
+            let received = taking(&second);
+            // The subscription of the second node reaches the first.
+            std::thread::sleep(Duration::from_millis(500));
+            (first, second, received)
+        }
+
+        #[test]
+        fn a_message_that_is_not_instrumented_carries_no_stack() {
+            let (first, _second, received) = pair(("a1b2c0", "a1b2c1"));
+            first.put("demo/x", "v").wait().expect("puts");
+            assert_eq!(stack_of(&received), None);
+        }
+
+        #[test]
+        fn what_the_nodes_record_on_a_message_is_the_send_and_the_receive() {
+            let (first, _second, received) = pair(("a1b2c2", "a1b2c3"));
+            first
+                .put("demo/x", "v")
+                .timestamp_instrumentation(at("SE"))
+                .wait()
+                .expect("puts");
+            assert_eq!(
+                stack_of(&received),
+                Some(vec![
+                    "Send:uhlc:a1b2c2".to_owned(),
+                    "Receive:uhlc:a1b2c3".to_owned()
+                ])
+            );
+            // A point that is not asked for is not recorded.
+            first
+                .put("demo/x", "v")
+                .timestamp_instrumentation(at("S"))
+                .wait()
+                .expect("puts");
+            assert_eq!(
+                stack_of(&received),
+                Some(vec!["Send:uhlc:a1b2c2".to_owned()])
+            );
+            first
+                .put("demo/x", "v")
+                .timestamp_instrumentation(at("E"))
+                .wait()
+                .expect("puts");
+            assert_eq!(
+                stack_of(&received),
+                Some(vec!["Receive:uhlc:a1b2c3".to_owned()])
+            );
+        }
+
+        #[test]
+        fn each_node_that_routes_a_message_records_it() {
+            let (first, _second, received) = pair(("a1b2c4", "a1b2c5"));
+            first
+                .put("demo/x", "v")
+                .timestamp_instrumentation(at("SRE"))
+                .wait()
+                .expect("puts");
+            assert_eq!(
+                stack_of(&received),
+                Some(vec![
+                    "Send:uhlc:a1b2c4".to_owned(),
+                    "Route:uhlc:a1b2c4".to_owned(),
+                    "Route:uhlc:a1b2c5".to_owned(),
+                    "Receive:uhlc:a1b2c5".to_owned(),
+                ])
+            );
+        }
+
+        #[test]
+        fn a_delete_carries_its_stack_as_a_put_does() {
+            let (first, _second, received) = pair(("a1b2c6", "a1b2c7"));
+            first
+                .delete("demo/x")
+                .timestamp_instrumentation(at("SE"))
+                .wait()
+                .expect("deletes");
+            let sample = received.recv_timeout(WAIT).expect("a sample");
+            assert_eq!(sample.kind(), SampleKind::Delete);
+            assert_eq!(
+                sample.timestamp_stack().map(records),
+                Some(vec![
+                    "Send:uhlc:a1b2c6".to_owned(),
+                    "Receive:uhlc:a1b2c7".to_owned()
+                ])
+            );
+        }
+
+        /// The session's own subscribers are not reached through its routing: no route is recorded
+        /// for them, where the message that leaves the node has one.
+        #[test]
+        fn the_session_own_subscriber_is_given_a_stack_with_no_route() {
+            let session = on("a1b2c8", "", "");
+            let received = taking(&session);
+            session
+                .put("demo/x", "v")
+                .timestamp_instrumentation(at("SRE"))
+                .wait()
+                .expect("puts");
+            assert_eq!(
+                stack_of(&received),
+                Some(vec![
+                    "Send:uhlc:a1b2c8".to_owned(),
+                    "Receive:uhlc:a1b2c8".to_owned()
+                ])
+            );
+        }
+
+        #[test]
+        fn a_callback_gives_the_timestamps_the_nodes_record() {
+            let open_with = |id: &str, text: &'static str, connect: &str| {
+                let config = Config::from_json5(&format!(
+                    r#"{{ id: "{id}", mode: "peer",
+                          listen: {{ endpoints: [{}] }},
+                          connect: {{ endpoints: [{connect}] }},
+                          scouting: {{ multicast: {{ enabled: false }} }} }}"#,
+                    if connect.is_empty() {
+                        r#""tcp/127.0.0.1:0""#
+                    } else {
+                        ""
+                    }
+                ))
+                .expect("a configuration zenoh reads");
+                open(config)
+                    .with_timestamp_callback(move |context| {
+                        assert_eq!(context.whatami, WhatAmI::Peer);
+                        format!("{text}@{}", context.zid).into_bytes()
+                    })
+                    .wait()
+                    .expect("opens")
+            };
+            let (first, endpoint) = {
+                let port = unautoselected_port();
+                let endpoint = format!("tcp/127.0.0.1:{port}");
+                let config = Config::from_json5(&format!(
+                    r#"{{ id: "a1b2c9", mode: "peer", listen: {{ endpoints: ["{endpoint}"] }},
+                          scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                ))
+                .expect("a configuration zenoh reads");
+                let session = open(config)
+                    .with_timestamp_callback(|context| {
+                        format!("first@{}", context.zid).into_bytes()
+                    })
+                    .wait()
+                    .expect("opens");
+                (session, endpoint)
+            };
+            let second = open_with("a1b2ca", "second", &format!(r#""{endpoint}""#));
+            assert_eq!(connected(&second, 1).1.len(), 1, "the nodes are linked");
+            let received = taking(&second);
+            std::thread::sleep(Duration::from_millis(500));
+            first
+                .put("demo/x", "v")
+                .timestamp_instrumentation(at("SE"))
+                .wait()
+                .expect("puts");
+            assert_eq!(
+                stack_of(&received),
+                Some(vec![
+                    "Send:custom:first@a1b2c9".to_owned(),
+                    "Receive:custom:second@a1b2ca".to_owned()
+                ])
+            );
+        }
+
+        #[test]
+        fn a_callback_that_gives_nothing_records_nothing() {
+            let config = Config::from_json5(
+                r#"{ id: "a1b2cb", mode: "peer", scouting: { multicast: { enabled: false } } }"#,
+            )
+            .expect("a configuration zenoh reads");
+            let session = open(config)
+                .with_timestamp_callback(|_| Vec::new())
+                .wait()
+                .expect("opens");
+            let received = taking(&session);
+            session
+                .put("demo/x", "v")
+                .timestamp_instrumentation(at("SE"))
+                .wait()
+                .expect("puts");
+            assert_eq!(stack_of(&received), Some(Vec::<String>::new()));
+        }
+
+        #[test]
+        fn the_points_asked_for_are_those_of_the_stack() {
+            let session = on("a1b2cc", "", "");
+            let received = taking(&session);
+            session
+                .put("demo/x", "v")
+                .timestamp_instrumentation(at("SE"))
+                .wait()
+                .expect("puts");
+            let sample = received.recv_timeout(WAIT).expect("a sample");
+            let instrumentation = sample.timestamp_stack().expect("a stack").instrumentation();
+            assert!(instrumentation.is_instrumented(InterceptionPoint::Send));
+            assert!(!instrumentation.is_instrumented(InterceptionPoint::Route));
+            assert!(instrumentation.is_instrumented(InterceptionPoint::Receive));
         }
     }
 

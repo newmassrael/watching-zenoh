@@ -1740,6 +1740,8 @@ mod tests {
             }),
             attachment: Some(vec![7; 300]),
             qos: Some(QosLevel::DEFAULT.with_congestion(CongestionControl::Block)),
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
         };
         let shapes: Vec<(&str, crate::wire::PushOwned)> = vec![
             ("literal", build_push_literal("demo/x", b"payload").unwrap()),

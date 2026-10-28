@@ -42,9 +42,26 @@ pub struct PushMetadata {
     pub attachment: Option<Vec<u8>>,
     /// Outer-level QoS metadata (Push extension ext_id=0x01 ENC_ZINT).
     pub qos: Option<QosLevel>,
+    /// Outer-level timestamp stack (Push extension ext_id=0x07 ENC_ZBUF), which the node that
+    /// publishes starts and the nodes that route and receive add to.
+    #[cfg(feature = "pubsub-ts-stack")]
+    pub ts_stack: Option<crate::ts_stack::TsStack>,
 }
 
 impl PushMetadata {
+    /// `true` when the metadata starts no timestamp stack, which a build without
+    /// `pubsub-ts-stack` has no slot for.
+    fn carries_no_ts_stack(&self) -> bool {
+        #[cfg(feature = "pubsub-ts-stack")]
+        {
+            self.ts_stack.is_none()
+        }
+        #[cfg(not(feature = "pubsub-ts-stack"))]
+        {
+            true
+        }
+    }
+
     /// `true` when every metadata slot is `None` — callers can use
     /// this to short-circuit to the no-metadata `build_push_*` fast
     /// paths without paying the with-meta builder cost.
@@ -54,6 +71,7 @@ impl PushMetadata {
             && self.source_info.is_none()
             && self.attachment.is_none()
             && self.qos.is_none()
+            && self.carries_no_ts_stack()
     }
 
     /// `true` when no slot but the QoS byte is set: a Put of this metadata is the bare Put
@@ -66,6 +84,7 @@ impl PushMetadata {
             && self.encoding.is_none()
             && self.source_info.is_none()
             && self.attachment.is_none()
+            && self.carries_no_ts_stack()
     }
 
     /// `true` when the QoS layer requests express delivery (the

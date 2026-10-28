@@ -106,6 +106,16 @@ pub struct PublishOptions {
     /// (`wz_qos_congestion_express_to_pico_zsub`, pico `z_sample_congestion_control` /
     /// `z_sample_express`). Loopback honours all three from R232.
     pub qos: Option<QosLevel>,
+    /// The timestamp stack the publication has for the session's own subscribers, on the loopback
+    /// leg: the interceptions of the node that sends it, which the node that delivers it adds to.
+    /// `None` (default) is a message that is not instrumented.
+    #[cfg(feature = "pubsub-ts-stack")]
+    pub ts_stack: Option<crate::ts_stack::TsStack>,
+    /// The timestamp stack the publication leaves with, as extension `0x7` of the Push, when it
+    /// is not the one of the loopback leg: the node records one more interception on a message
+    /// it routes out. `None` is the same stack as [`Self::ts_stack`].
+    #[cfg(feature = "pubsub-ts-stack")]
+    pub wire_ts_stack: Option<crate::ts_stack::TsStack>,
     /// Whether a publisher declared with these options stamps the messages it is given a time for:
     /// see [`Self::with_stamp_timestamp`].
     stamp_timestamp: crate::timestamp_visibility::StampTimestamp,
@@ -231,6 +241,20 @@ impl PublishOptions {
     #[cfg(feature = "pubsub-qos")]
     pub fn with_qos(mut self, qos: QosLevel) -> Self {
         self.qos = Some(qos);
+        self
+    }
+
+    /// Give the publication the timestamp stack `local` for the session's own subscribers and
+    /// `wire` for the Push that leaves (`None` for the same stack as `local`), so that the nodes it
+    /// crosses record on it. `None` for both is a message that is not instrumented.
+    #[cfg(feature = "pubsub-ts-stack")]
+    pub fn with_ts_stack(
+        mut self,
+        local: Option<crate::ts_stack::TsStack>,
+        wire: Option<crate::ts_stack::TsStack>,
+    ) -> Self {
+        self.ts_stack = local;
+        self.wire_ts_stack = wire;
         self
     }
 
@@ -370,6 +394,8 @@ impl PublishOptions {
             source_info: gated_source_info(self.source_info.clone()),
             attachment: gated_attachment(self.attachment.clone()),
             qos: gated_qos(self.qos),
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: self.wire_ts_stack.clone().or_else(|| self.ts_stack.clone()),
         }
     }
 
@@ -408,6 +434,12 @@ impl PublishOptions {
         }
         if let Some(qos) = meta.qos {
             sample = sample.with_qos(qos);
+        }
+        // The stack of the loopback leg, not the wire's: the session's own subscribers are not
+        // reached through the routing of the node.
+        #[cfg(feature = "pubsub-ts-stack")]
+        if let Some(ts_stack) = self.ts_stack.clone() {
+            sample = sample.with_ts_stack(ts_stack);
         }
         sample
     }
@@ -646,6 +678,44 @@ mod plain_put_tests {
 
     /// The constant the engine's tests read the build from is the answer of the function it
     /// stands for, and a Put that is not plain is no plain Put in any build.
+    #[cfg(feature = "pubsub-ts-stack")]
+    #[test]
+    fn the_wire_and_the_loopback_leg_each_have_their_own_timestamp_stack() {
+        use crate::ts_stack::{point, TsStack};
+
+        let mut local = TsStack::new(point::SEND | point::ROUTE);
+        local.record(point::SEND, alloc::vec![1], false);
+        let mut wire = local.clone();
+        wire.record(point::ROUTE, alloc::vec![2], false);
+        let options = PublishOptions::put().with_ts_stack(Some(local.clone()), Some(wire.clone()));
+        // The Push that leaves has the stack with the route; the session's own subscribers the one
+        // without.
+        assert_eq!(options.push_metadata().ts_stack, Some(wire.clone()));
+        let sample = options.loopback_sample("demo/k", b"v");
+        assert_eq!(sample.ts_stack, Some(local.clone()));
+        // With no stack of its own for the wire, the Push leaves with the loopback leg's.
+        let same = PublishOptions::put().with_ts_stack(Some(local.clone()), None);
+        assert_eq!(same.push_metadata().ts_stack, Some(local));
+        // A message with no stack carries none, and is a plain Put apart from its QoS.
+        assert_eq!(PublishOptions::put().push_metadata().ts_stack, None);
+        assert!(PublishOptions::put()
+            .loopback_sample("demo/k", b"v")
+            .ts_stack
+            .is_none());
+        // The plain lane has no room for the extension: an instrumented Put takes the general one.
+        // (`plain_put_params` is `None` in a build with no plain lane, which would not tell.)
+        assert!(PublishOptions::put()
+            .push_metadata()
+            .is_plain_apart_from_qos());
+        assert!(
+            !PublishOptions::put()
+                .with_ts_stack(Some(wire), None)
+                .push_metadata()
+                .is_plain_apart_from_qos(),
+            "an instrumented Put is not a plain one"
+        );
+    }
+
     #[test]
     fn the_build_says_what_a_plain_put_gets() {
         assert_eq!(

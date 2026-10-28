@@ -77,6 +77,7 @@
   <sce:feature name="pubsub-qos"/>
   <sce:feature name="pubsub-source-info"/>
   <sce:feature name="pubsub-timestamp"/>
+  <sce:feature name="pubsub-ts-stack" requires="alloc"/>
   <sce:feature name="query-attachment" requires="attachment-bytes"/>
   <sce:feature name="query-consolidation" requires="query-get"/>
   <sce:feature name="query-get"/>

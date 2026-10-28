@@ -105,6 +105,18 @@ pub trait SampleView {
     fn timestamp(&self) -> Option<&crate::sample::TimestampHint> {
         None
     }
+    /// The timestamp stack the message carried (Push extension `0x7`), if it was instrumented.
+    /// Defaults to `None`.
+    #[cfg(feature = "pubsub-ts-stack")]
+    fn ts_stack(&self) -> Option<&crate::ts_stack::TsStack> {
+        None
+    }
+    /// Whether the message came in over a link, and so was routed to this node, as against one
+    /// this session published itself. Defaults to `false`.
+    #[cfg(feature = "pubsub-ts-stack")]
+    fn routed(&self) -> bool {
+        false
+    }
     /// Body-level encoding hint (Put-only on the wire), if present.
     /// Defaults to `None`.
     #[cfg(feature = "alloc")]
@@ -371,6 +383,11 @@ impl SampleView for PlainSample<'_> {
     }
     fn is_plain_put(&self) -> bool {
         // A plain `Put` of a frame has nothing else: its accessors are the defaults.
+        true
+    }
+    // A frame's Put is read off a link, so it was routed to this node.
+    #[cfg(feature = "pubsub-ts-stack")]
+    fn routed(&self) -> bool {
         true
     }
     fn plain_facts(&self) -> Option<PlainFacts> {

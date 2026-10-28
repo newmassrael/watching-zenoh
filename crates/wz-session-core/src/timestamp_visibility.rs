@@ -105,6 +105,14 @@ impl SampleView for HiddenTimestamp<'_> {
     fn encoding(&self) -> Option<&crate::sample::EncodingHint> {
         self.0.encoding()
     }
+    #[cfg(feature = "pubsub-ts-stack")]
+    fn ts_stack(&self) -> Option<&crate::ts_stack::TsStack> {
+        self.0.ts_stack()
+    }
+    #[cfg(feature = "pubsub-ts-stack")]
+    fn routed(&self) -> bool {
+        self.0.routed()
+    }
     #[cfg(feature = "storage-profile")]
     fn source_info(&self) -> Option<&crate::sample::SourceInfo> {
         self.0.source_info()
@@ -229,5 +237,24 @@ mod tests {
             !hidden.is_plain_put(),
             "a stamped sample is not a plain put"
         );
+    }
+
+    /// The stack a message carries is not a timestamp of the sample, so hiding the timestamp
+    /// leaves it, and the fact that the message was routed, as the inner view has them.
+    #[cfg(feature = "pubsub-ts-stack")]
+    #[test]
+    fn a_hidden_view_shows_the_timestamp_stack_and_the_routing_of_the_inner_view() {
+        use crate::{
+            sample::Sample,
+            ts_stack::{point, TsStack},
+        };
+        let mut stack = TsStack::new(point::SEND);
+        stack.record(point::SEND, alloc::vec![1, 2], false);
+        let sample = Sample::new_put("home/a", b"payload".as_slice())
+            .with_ts_stack(stack.clone())
+            .with_routed(true);
+        let hidden = HiddenTimestamp(&sample);
+        assert_eq!(hidden.ts_stack(), Some(&stack));
+        assert!(hidden.routed());
     }
 }

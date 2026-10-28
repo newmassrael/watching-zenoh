@@ -14,9 +14,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 // Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
 // src/api/timestamp_stack.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). The function
-// that pushes an interception record onto the stack of a frame (`push_ts_interception`) is not
-// here: it asks a runtime for the node's identity and clock, so it is behaviour and joins the
-// runtime in slice Z6b of docs/zenoh-api-on-the-engine.md. The identifier type is read from the
+// that pushes an interception record onto the stack of a frame (`push_ts_interception`) asks a
+// runtime for the node's identity and clock; here the session holds them, as `TimestampSource`,
+// and the stack is the engine's bytes (`wz_session_core::ts_stack`), so the record is made by the
+// session (docs/zenoh-api-on-the-engine.md, slice Z6b). The identifier type is read from the
 // configuration crate, where upstream's session module re-exports it from.
 use zenoh_config::wrappers::ZenohId;
 use zenoh_protocol::{
@@ -484,5 +485,113 @@ impl From<&TimestampStack> for zenoh_protocol::network::timestamp_stack::Timesta
                 })
                 .collect(),
         }
+    }
+}
+
+/// What a node records on a message it intercepts, and the clock it records it with: the bytes of
+/// the user's callback when the session was opened with one, and otherwise a UHLC timestamp off
+/// the clock of the node, or off one of the session's own when the node holds none (upstream's
+/// `get_ts_stack_timestamp`).
+#[cfg(feature = "unstable")]
+pub(crate) struct TimestampSource {
+    zid: ZenohId,
+    whatami: WhatAmI,
+    callback: Option<GetTimestampCallback>,
+    /// The next stamp of the clock of the node, when it holds one.
+    node_clock: Box<dyn Fn() -> Option<uhlc::Timestamp> + Send + Sync>,
+    /// The clock of a node that holds none, made when it is first asked.
+    lazy_hlc: std::sync::OnceLock<uhlc::HLC>,
+}
+
+#[cfg(feature = "unstable")]
+impl TimestampSource {
+    pub(crate) fn new(
+        zid: ZenohId,
+        whatami: WhatAmI,
+        callback: Option<GetTimestampCallback>,
+        node_clock: Box<dyn Fn() -> Option<uhlc::Timestamp> + Send + Sync>,
+    ) -> Self {
+        Self {
+            zid,
+            whatami,
+            callback,
+            node_clock,
+            lazy_hlc: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// The stack a message starts with when `instrumentation` is asked for it, with what this node
+    /// records at `at`: the send of a publication or a query.
+    pub(crate) fn start(
+        &self,
+        instrumentation: TimestampInstrumentation,
+        at: u8,
+    ) -> zenoh_protocol::network::timestamp_stack::TimestampStack {
+        let mut stack = zenoh_protocol::network::timestamp_stack::TimestampStack {
+            conf_flags: instrumentation.conf_flags(),
+            stack: Vec::new(),
+        };
+        self.record(&mut stack, at);
+        stack
+    }
+
+    /// Record `at` on `stack` if it is instrumented there: the timestamp this node gives, and
+    /// whether it is the user's. A callback that gives nothing, and a UHLC timestamp that cannot
+    /// be written, record nothing.
+    pub(crate) fn record(
+        &self,
+        stack: &mut zenoh_protocol::network::timestamp_stack::TimestampStack,
+        at: u8,
+    ) {
+        if stack.conf_flags & at == 0 {
+            return;
+        }
+        let (timestamp, is_custom) = self.stamp();
+        // An empty timestamp is skipped, and a stack at its limit is left as it is, because the
+        // codec would refuse the frame it made (upstream's `push_ts_interception`).
+        if timestamp.is_empty()
+            || stack.stack.len() >= zenoh_protocol::network::timestamp_stack::MAX_STACK_SIZE
+        {
+            return;
+        }
+        stack.stack.push(Interception {
+            flags: at
+                | if is_custom {
+                    interception_point::IS_CUSTOM_TS
+                } else {
+                    0
+                },
+            timestamp,
+        });
+    }
+
+    /// The timestamp to record and whether it is the user's. A UHLC timestamp that cannot be
+    /// written is empty, and a record of an empty timestamp is no record.
+    fn stamp(&self) -> (Vec<u8>, bool) {
+        if let Some(callback) = &self.callback {
+            return (
+                callback(TimestampContext {
+                    zid: self.zid,
+                    whatami: self.whatami,
+                }),
+                true,
+            );
+        }
+        let timestamp = (self.node_clock)().unwrap_or_else(|| {
+            self.lazy_hlc
+                .get_or_init(|| {
+                    uhlc::HLCBuilder::new()
+                        .with_id(uhlc::ID::from(self.zid))
+                        .build()
+                })
+                .new_timestamp()
+        });
+        use zenoh_codec::{WCodec, Zenoh080};
+
+        let mut buf = Vec::new();
+        if Zenoh080.write(&mut buf, &timestamp).is_err() {
+            return (Vec::new(), false);
+        }
+        (buf, false)
     }
 }

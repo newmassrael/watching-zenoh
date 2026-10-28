@@ -510,6 +510,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         pubsub-qos,\
         pubsub-source-info,\
         pubsub-timestamp,\
+        pubsub-ts-stack,\
         query-attachment,\
         query-queryable,\
         query-reply,\

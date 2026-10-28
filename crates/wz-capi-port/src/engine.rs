@@ -26,6 +26,7 @@ use wz_session_core::face::{FaceEventSink, FaceSnapshot};
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
 use wz_session_core::query_options::QueryOptions;
+use wz_session_core::sample::TimestampHint;
 
 use crate::cancellation::CancellableFan;
 use crate::{
@@ -92,6 +93,12 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// nothing at all, has none, which is the provided answer.
     fn listen_locators(&self) -> Vec<String> {
         Vec::new()
+    }
+
+    /// The next timestamp off this node's clock, strictly after the one before, or `None` for a
+    /// node that holds no clock, which is the provided answer.
+    fn node_timestamp(&self) -> Option<TimestampHint> {
+        None
     }
 
     /// Whether any connected peer is a ROUTER — zenoh-pico's `_z_session_has_router_peer`, the
