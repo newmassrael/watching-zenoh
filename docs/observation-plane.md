@@ -96,7 +96,6 @@ policy, `A` axis (existing).
 | Events | `event-ring` | C | off | A bounded record of events, readable after the fact. |
 | Events | `EVENT_RING_BYTES` | L | | Size of the ring. |
 | Events | `EVENT_RECORD_ARGS` | L | | Arguments one record carries. |
-| Events | `EVENT_RING_READERS` | L | 1 | Cursors that read without consuming. |
 | Events | `event-ring-full` | P (`overwrite-oldest`, `drop-newest`) | `overwrite-oldest` | What a full ring does. |
 | Supervision | `supervision` | C | off | A deadline the application feeds. |
 | Supervision | `SUPERVISION_CHECKPOINTS` | L | 1 | Points one supervisor watches. |
@@ -196,19 +195,29 @@ encode to the same bytes for the same time. The C ABI pins for the registration 
   the reader holds (deferred formatting, as `defmt` does), so a record costs a few words and no
   formatting happens on the node.
 * Each producer context owns a single-producer ring: no lock, no atomic read-modify-write on the
-  write side, and no producer ever waits for another. A reader merges the rings by sequence
-  number. A gap in the sequence is a loss, so overwritten records need no separate count; a node
-  also keeps one counter per ring for the reader that wants the number without the walk.
-* Reads do not have to consume. `EVENT_RING_READERS` cursors each remember how far they have
-  read and see a loss as a gap in their own sequence. A consuming read is one cursor that also
-  frees what it has passed.
+  write side, and no producer ever waits for another. Sequence numbers are per ring (a global one
+  would be a read-modify-write on every write), so a reader puts the records of several rings in
+  order by their timestamp, which is a hybrid logical clock's and never goes back on one node. A
+  gap in a ring's sequence is a loss, so overwritten records need no separate count; the ring
+  keeps one counter, for what `drop-newest` refused, for the reader that wants the number without
+  the walk.
+* Reads do not have to consume. A `Reader` is a value that holds its own cursor, so there is no
+  table of cursors and no `EVENT_RING_READERS` limit to size (the limit this plan listed is not
+  declared: it would configure nothing); a reader sees a loss as a gap in its own sequence. The
+  one `Consumer` is the reader that also frees what it has passed, which `drop-newest` needs.
+  Built as `EventRing::split(&mut self)`: the borrow checker makes the producer the only one.
+  Landed (step 3a), with a model test of random interleavings of one producer's micro-steps and
+  three readers over 300 seeds, and a stress run of 300000 records against three reader threads.
 * `event-ring-full` decides a full ring: `overwrite-oldest` keeps the latest, which is what a
   post-mortem wants, and `drop-newest` keeps the beginning, which is what a boot trace wants.
 * A `log` sink writes into the ring, so existing `log` calls become events with no new call. The
   ring may be placed in a region that survives a reset; where it is, a start-up that finds a valid
   header reads what the last run wrote.
-* Pure type `EventRing<const BYTES>` in `wz-session-core`, in the shape of `delivery_lane.rs`:
-  bookkeeping only, the bytes are the host's.
+* Pure type `EventRing<const SLOTS, const ARGS>` in `wz-session-core`. Not bookkeeping over the
+  host's bytes, as `delivery_lane.rs` is: a reader that runs while the producer writes must read
+  atomic words, or the read is a data race, so the ring owns its slots as 32-bit atomics (a
+  Cortex-M0 has no 64-bit and no compare-and-swap) under a per-slot sequence lock, and the host
+  places the whole ring, in a `static` in a region a reset leaves alone if it wants.
 
 **Tests.** The model test of `delivery_lane.rs` extended to this type: random interleavings of
 producers and readers, whatever the order, a reader sees records in sequence order, a gap exactly
@@ -274,7 +283,7 @@ sampler symbol.
 |---|---|---|
 | 1 | `HlcCore` over `EpochSource` tested against `uhlc` (done), `NodeHlc` on the core (done), `ClockQuality` machine (done: `clock_standing`, features `clock-quality` and `clock-source`), `clock-quality-stamping` and `CLOCK_MAX_FORWARD_STEP_MS` (done); `clock-source` capability and `CLOCK_SOURCES` move to step 2 | The stamp and wire tests pass on the tokio host and on the cooperative engine; slot bytes unchanged off; the `algorithm` for the comparison is generated and used by Rust. |
 | 2 | Clock registration in the C ABIs (2a done: `wz_node_time::clock_registry` and the `CLOCK_SOURCES` limit, first registered source that can answer wins, none able means no date and no fallback to the system clock; 2b done for the pico ABI: `wz_ext_clock_source_register`, `wz_ext_clock_source_unregister` and `wz_ext_clock_report` in `wz_ext.h`, the `clock-source` capability (off by default, `core` and `pico`, implies `timestamping` and `unstable-api`), `z_timestamp_new` stamping from the registered clock through the session's node clock, one standing shared by every node over the registry; open: the same doors in the `capi-c` ABI, and a wire test that a registered clock and the system clock encode the same bytes) | `capi-c` ABI revision and the pico export pins updated in the same change; the drop-in leg stays green. |
-| 3 | `EventRing` and the `log` sink | The model test and the concurrency check pass; off build has no symbol; the ring contract is written down and sent to SCE. |
+| 3 | `EventRing` (3a done: the type, the model test and the stress run) and the `log` sink, with `event-ring` as a capability, `EVENT_RING_SLOTS` and `EVENT_RECORD_ARGS` as limits and `event-ring-full` as a policy (3b) | The model test and the concurrency check pass; off build has no symbol; the ring contract is written down and sent to SCE. |
 | 4 | Supervision machine and its checkpoints | Conformance over every event order; the cooperative engine hosts it with no task. |
 | 5 | Snapshot and its generated timer | Histogram test against the reference; admin-space and dissector read it. |
 | 6 | Cross-instrument: events carry M1 time, supervision expiry writes an event, the snapshot reads the ring's loss count | One integration test per link. |

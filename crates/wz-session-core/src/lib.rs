@@ -361,6 +361,12 @@ pub mod entropy;
 /// no_std + no_alloc; unconditional.
 pub mod epoch;
 
+/// A ring of fixed-size event records with one producer and any number of readers
+/// (`docs/observation-plane.md` M2): a per-slot sequence lock over 32-bit atomic words, no lock,
+/// no read-modify-write on the write side, loss reported as a gap in the sequence. Generic and
+/// unconditional like [`hlc`]: a build that instantiates no ring carries no code of it.
+pub mod event_ring;
+
 /// The Hybrid Logical Clock arithmetic over the [`epoch`] port: `uhlc`'s stamp and absorb rules
 /// in one atomic word, with no allocation and no lock, so a profile with no operating system has
 /// a node clock too. Pure no_std + no_alloc; unconditional.
