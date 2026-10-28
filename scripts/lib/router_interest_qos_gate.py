@@ -188,6 +188,44 @@ def test_lines(path: pathlib.Path, lines: list[str]) -> set[int]:
     return inside
 
 
+def declared_as_test_module(repo: pathlib.Path, rel: pathlib.Path) -> bool:
+    """Whether the file that declares this one gates it behind `test`.
+
+    An out-of-line module (`#[cfg(test)] mod peer_network_tests;` in
+    `router_forward.rs`) is test code throughout, yet nothing in its own text
+    says so: `test_lines` sees a file with no `mod tests {` and reads all of it
+    as production. The declaration lives in the parent, either `<dir>.rs` or
+    `<dir>/mod.rs`; a `mod <stem>;` whose attributes name `test` makes the
+    file a test module, whatever it is called.
+    """
+    if rel.stem in ("mod", "lib", "main"):
+        return False
+    decl = re.compile(
+        r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+" + re.escape(rel.stem) + r"\s*;"
+    )
+    for parent in (rel.parent.with_suffix(".rs"), rel.parent / "mod.rs"):
+        try:
+            lines = (repo / parent).read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError):
+            continue
+        attr_buf = ""
+        pending = ""
+        for line in lines:
+            if attr_buf or ATTR_OPEN.match(line):
+                attr_buf += line
+                if attr_buf.count("[") <= attr_buf.count("]"):
+                    pending += attr_buf
+                    attr_buf = ""
+                continue
+            stripped = line.strip()
+            if not stripped or stripped.startswith("//"):
+                continue
+            if decl.match(line):
+                return "test" in pending
+            pending = ""
+    return False
+
+
 def is_comment(line: str) -> bool:
     stripped = line.lstrip()
     return stripped.startswith("//") or stripped.startswith("*")
@@ -264,6 +302,8 @@ def call_sites(
         except (OSError, UnicodeDecodeError):
             continue
         if "build_interest_" not in text and "InterestOwned" not in text:
+            continue
+        if declared_as_test_module(repo, rel):
             continue
         lines = text.splitlines()
         in_test = test_lines(rel, lines)
@@ -589,6 +629,37 @@ def selftest() -> int:
     ):
         failures.append("the direct-construction ratchet did not fire on its own fixture")
 
+    # An out-of-line `#[cfg(test)] mod x_tests;` is test code even though its
+    # own text has no `mod tests {`; a plain `mod x;` beside it is production.
+    # The same bare call is judged by where the PARENT declares the file.
+    with tempfile.TemporaryDirectory() as td:
+        d = pathlib.Path(td)
+        subprocess.run(["git", "-C", str(d), "init", "-q"], check=True)
+        bare_call = "fn p(&self, f: FaceId) {\n    let _ = build_interest_bare();\n}\n"
+        for rel_name, body in (
+            (BUILDER_FILE, _STAMPING_BUILDER + "\n" + _BARE_BUILDER),
+            (
+                "crates/x/src/fwd.rs",
+                "#[cfg(test)]\nmod fwd_tests;\n\n"
+                "#[cfg(all(\n    test,\n    feature = \"q\",\n))]\nmod fwd_split_tests;\n\n"
+                "mod fwd_prod;\n",
+            ),
+            ("crates/x/src/fwd/fwd_tests.rs", bare_call),
+            ("crates/x/src/fwd/fwd_split_tests.rs", bare_call),
+            ("crates/x/src/fwd/fwd_prod.rs", bare_call),
+        ):
+            p = d / rel_name
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(body, encoding="utf-8")
+            subprocess.run(["git", "-C", str(d), "add", rel_name], check=True)
+        sites, _direct = call_sites(d)
+        flagged = sorted({s[0] for s in sites if s[2] == "build_interest_bare"})
+        if flagged != ["crates/x/src/fwd/fwd_prod.rs"]:
+            failures.append(
+                f"out-of-line test modules: bare sites in {flagged}, want only "
+                "the undecorated `mod fwd_prod;`"
+            )
+
     reported, branch_total = _findings_branches(failures)
 
     if failures:
@@ -596,7 +667,7 @@ def selftest() -> int:
             print(f"  router-interest-qos SELFTEST FAIL: {line}", file=sys.stderr)
         return 1
     print(
-        f"  router-interest-qos: selftest {len(CASES) + 3} predicate case(s) OK, "
+        f"  router-interest-qos: selftest {len(CASES) + 4} predicate case(s) OK, "
         f"plus every one of {branch_total} `findings()` failure branch(es) fired "
         f"from a fixture ({reported} message(s) collected). The branch population "
         "is DERIVED from this file's own syntax tree, not counted by hand"
