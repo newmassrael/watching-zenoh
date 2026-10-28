@@ -657,6 +657,16 @@ session-unicast = ["dep:sce-rust-runtime"]
 session-unicast-open = []
 session-unicast-accept = []
 
+# clock-quality (docs/observation-plane.md M1) — the clock-quality statechart
+# (`sources/session/clock_quality.scxml`): how far a node may trust the time it stamps with
+# (Unsynchronized / Synchronized), moved by the events the host raises. Engine-free and
+# allocation-free like the other generated machines, so it pulls the SCE runtime and nothing else.
+clock-quality = ["dep:sce-rust-runtime"]
+# clock-source — a clock the application registers, which can report the two states between a
+# lost reference and an untrusted reading (Holdover, FreeRunning). The states are gated in the
+# machine itself (`sce:requires`), so a build without this feature holds the two-state machine.
+clock-source = ["clock-quality"]
+
 # session-close-ingress — a rail message can close a RUNNING session. The
 # ingress (a keyexpr matcher) and the session FSM engine live in two different
 # ownership domains and never meet: the matcher runs under the observer lock on

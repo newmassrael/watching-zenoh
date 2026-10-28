@@ -26,6 +26,8 @@
   <sce:feature name="alloc" requires="storage-profile"/>
   <sce:feature name="attachment-bytes"/>
   <sce:feature name="bounded-heapless"/>
+  <sce:feature name="clock-quality"/>
+  <sce:feature name="clock-source" requires="clock-quality"/>
   <sce:feature name="codec-close"/>
   <sce:feature name="codec-declare" requires="codec-frame"/>
   <sce:feature name="codec-fragment"/>

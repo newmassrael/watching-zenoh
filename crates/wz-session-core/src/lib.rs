@@ -246,7 +246,8 @@ pub mod registry_error;
     feature = "reassembly",
     feature = "scouting-active",
     feature = "session-unicast",
-    feature = "session-multicast"
+    feature = "session-multicast",
+    feature = "clock-quality"
 ))]
 pub mod constant_session_id;
 
@@ -2118,8 +2119,44 @@ pub mod peer_connection {
 /// The duties a generated machine's action bodies record for its host to
 /// perform after the event (the multicast machines and the peer connection
 /// machine). Gated on the features whose modules build such a machine.
-#[cfg(any(feature = "session-unicast", feature = "session-multicast"))]
+#[cfg(any(
+    feature = "session-unicast",
+    feature = "session-multicast",
+    feature = "clock-quality"
+))]
 pub mod duty_outbox;
+
+/// SCE-generated clock-quality statechart (`docs/observation-plane.md` M1), from
+/// `sources/session/clock_quality.scxml`, COMMITTED at
+/// `out/wz-session-core/clock_quality_sm.rs` and `include!`-ed from there.
+/// Exposes `ClockQualityState` / `ClockQualityEvent`, the `ClockQualityActions` host
+/// trait and the `ClockQualityPolicy<A>` policy, driven by [`clock_standing`]. Its
+/// `Holdover` and `FreeRunning` states exist only under `clock-source`
+/// (`sce:requires`). Engine-free and allocation-free; gated on `clock-quality`, which
+/// brings the SCE runtime in. The lint allows are restored as outer attributes, as
+/// for the other generated machines.
+#[cfg(feature = "clock-quality")]
+#[allow(non_snake_case)]
+#[allow(unused_imports)]
+#[allow(dead_code)]
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+#[allow(unused_labels)]
+#[allow(unreachable_patterns)]
+#[allow(unreachable_code)]
+#[allow(clippy::all)]
+pub mod clock_quality {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-session-core",
+        "/clock_quality_sm.rs"
+    ));
+}
+
+/// How far the node may trust its clock: the [`clock_quality`] machine and the host
+/// that drives it. Gated as the machine is.
+#[cfg(feature = "clock-quality")]
+pub mod clock_standing;
 
 /// The peers a node is told to hold, each with its [`peer_connection`]
 /// machine, in a table of fixed capacity (decision D5). Gated as the machine

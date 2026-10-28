@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Clock quality - how far the node may trust the time it stamps with.
+
+  A node stamps data with a time read from a clock (`wz_session_core::epoch::EpochSource`). The
+  reading says WHAT time it is; this machine says HOW MUCH that reading is worth, so a node that
+  must not stamp with a time it does not trust can say so (`clock-quality-stamping`), and a
+  consumer of the node's observations can tell a synchronised clock from a drifting one. The
+  design is `docs/observation-plane.md` M1.
+
+  Division of labour with the host (the machine owns the states, the host owns the clock):
+    - Whether the clock is synchronised, and when it stopped being, is the host's knowledge:
+      NTP/PTP daemon state, a GNSS lock, a fieldbus time master. The host raises
+      `sync.acquired` and `sync.lost`; this machine never reads a clock.
+    - How long a lost reference may be bridged by the local oscillator (the holdover bound) is
+      host arithmetic over the host's clock. The host raises `holdover.expired`, as the host
+      raises every deadline of the library (a machine holds no timer of its own).
+    - The uncertainty of one reading, in microseconds, is DATA OF THE READING and not a state: it
+      grows continuously while a clock is held over, and a state per value is not a machine.
+
+  The states:
+    Unsynchronized - no reference has been acquired since the node started. A clock that is set
+                     by hand, or that nothing disciplines, is here, and stamping from it is the
+                     node's default behaviour.
+    Synchronized   - a reference is acquired and the clock follows it.
+    Holdover       - the reference was lost recently; the clock runs on its own oscillator and
+                     is still good within the host's bound. Present only with `clock-source`.
+    FreeRunning    - the holdover bound has passed with no reference back; the reading is a
+                     time but not a trusted one. Present only with `clock-source`.
+
+  Without `clock-source` the clock is the system clock, which the operating system disciplines
+  and which has no holdover the node could bound, so losing the reference returns to
+  Unsynchronized. With it, a clock the application registered can report the two states between.
+
+  Engine-free: every effect is a no-arg `<sce:action>` host-trait call, so the generated
+  `ClockQualityPolicy<A>` carries no `IScriptEngine` and compiles `no_std`.
+
+  Host action (the generated `ClockQualityActions` trait):
+    quality_changed - entered a state: the host re-reads the quality, moves its stamping gate and
+                      counts the change.
+
+  Events fed by the host:
+    sync.acquired    - a reference is acquired (first time, or back after a loss).
+    sync.lost        - the reference is gone.
+    holdover.expired - the holdover bound passed with no reference back.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="statechart"
+       name="clock_quality"
+       version="1.0"
+       initial="Unsynchronized">
+
+  <sce:import kind="feature-model" src="../features/wz-session-core.scxml" as="features"/>
+
+  <state id="Unsynchronized">
+    <onentry>
+      <sce:action name="quality_changed" effect="duty"/>
+    </onentry>
+    <transition event="sync.acquired" target="Synchronized"/>
+  </state>
+
+  <state id="Synchronized">
+    <onentry>
+      <sce:action name="quality_changed" effect="duty"/>
+    </onentry>
+    <!-- A gated transition placed before the ungated one on the same event wins where it holds. -->
+    <transition event="sync.lost" target="Holdover" sce:requires="clock-source"/>
+    <transition event="sync.lost" target="Unsynchronized"/>
+  </state>
+
+  <state id="Holdover" sce:requires="clock-source">
+    <onentry>
+      <sce:action name="quality_changed" effect="duty"/>
+    </onentry>
+    <transition event="sync.acquired" target="Synchronized"/>
+    <transition event="holdover.expired" target="FreeRunning"/>
+  </state>
+
+  <state id="FreeRunning" sce:requires="clock-source">
+    <onentry>
+      <sce:action name="quality_changed" effect="duty"/>
+    </onentry>
+    <transition event="sync.acquired" target="Synchronized"/>
+  </state>
+
+</scxml>
