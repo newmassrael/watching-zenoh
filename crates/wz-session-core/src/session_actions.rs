@@ -521,7 +521,7 @@ pub struct OutOfBandState {
     pub tx_congested: bool,
     /// The run of blocking messages that found no room, one after another: what the
     /// `TX_EXPIRY_CLOSE_AFTER` limit of `tx-expiry-keeps-session` counts. It is state of this
-    /// lock and not a request, so it wakes no one and [`Self::any`] does not read it.
+    /// lock and not a request, so it wakes no one and `Self::any` does not read it.
     pub expiry_run: crate::tx_deadline::ExpiryRun,
     waker: Option<core::task::Waker>,
 }
