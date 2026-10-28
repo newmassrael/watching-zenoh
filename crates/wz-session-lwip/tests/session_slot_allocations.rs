@@ -286,11 +286,18 @@ impl wz_session_core::entropy::EntropySource for Counting {
     }
 }
 
-type Rt = CoopRuntime<Frozen, LwipUdpDriver>;
-type Pump = SessionPump<Frozen, LwipSessionLink<Rc<LwipLink>>, LwipUdpDriver>;
+/// The driver the runtime names: the slot profile holds the concrete one, in its slot, and the
+/// others take whichever driver at run time, through the trait object their seam is written for.
+#[cfg(feature = "session-slot")]
+type Driver = LwipUdpDriver;
+#[cfg(not(feature = "session-slot"))]
+type Driver = dyn wz_session_core::link::BoxedLinkDriver;
+
+type Rt = CoopRuntime<Frozen, Driver>;
+type Pump = SessionPump<Frozen, LwipSessionLink<Rc<LwipLink>>, Driver>;
 /// The handle to a session: an `Rc` of the bundle, or under `session-slot` a
 /// counted reference to the slot that holds it.
-type Handle = SessionHandle<Frozen, LwipUdpDriver>;
+type Handle = SessionHandle<Frozen, Driver>;
 
 /// The init parameters of a session whose zid is four bytes of `zid`, written
 /// the same way on every profile: the arrays of the slot profile, the vectors of
