@@ -192,17 +192,28 @@ struct PeerEntry<K> {
 }
 
 impl<K> PeerEntry<K> {
+    /// The entry of `key`, its machine built and not yet started: [`Self::start`] enters the
+    /// initial state once the entry is where the table keeps it.
+    ///
+    /// The machine is the call's own result, written into the entry as it is returned. Started
+    /// here it would be a local that is then moved into the entry, a second kilobyte in this
+    /// frame beside the one the caller holds the entry in.
     fn new(key: K) -> Self {
-        let mut engine = Engine::new(built_under_constant_id(
-            PeerConnectionPolicy::new_with_session_id(
-                PEER_CONNECTION_SESSION_ID,
-                PeerBinding::default(),
-            ),
-            "the peer connection session id",
-        ));
-        // W3C SCXML 3.3: enter the initial `Idle` leaf.
-        engine.initialize();
-        Self { key, engine }
+        Self {
+            key,
+            engine: Engine::new(built_under_constant_id(
+                PeerConnectionPolicy::new_with_session_id(
+                    PEER_CONNECTION_SESSION_ID,
+                    PeerBinding::default(),
+                ),
+                "the peer connection session id",
+            )),
+        }
+    }
+
+    /// W3C SCXML 3.3: enter the initial `Idle` leaf.
+    fn start(&mut self) {
+        self.engine.initialize();
     }
 
     fn drive(&mut self, event: PeerConnectionEvent) -> PeerDuties {
@@ -311,7 +322,9 @@ impl<K: PartialEq, const N: usize> PeerTable<K, N> {
         if !self.entries.is_full() {
             // Not full, so the push cannot fail.
             let _ = self.entries.push(PeerEntry::new(key));
-            return Ok(self.entries.len() - 1);
+            let at = self.entries.len() - 1;
+            self.entries[at].start();
+            return Ok(at);
         }
         match self
             .entries
@@ -320,6 +333,7 @@ impl<K: PartialEq, const N: usize> PeerTable<K, N> {
         {
             Some(at) => {
                 self.entries[at] = PeerEntry::new(key);
+                self.entries[at].start();
                 Ok(at)
             }
             None => {

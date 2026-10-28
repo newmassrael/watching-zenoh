@@ -74,7 +74,7 @@
     },
     {
       "id": "queryable",
-      "where": {"file": "query_sink.rs", "line": 883},
+      "where": {"file": "query_sink.rs", "line": 903},
       "callees": "slot_client::answer",
       "why": "the function a queryable was registered with"
     },

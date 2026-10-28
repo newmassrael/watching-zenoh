@@ -117,15 +117,28 @@ carries about 6 KB of C library code wz does not, which is why the difference is
   5,224 (get), and the bound of the fixed and batching images 6,216 to 6,084; the get image stays at
   6,768, its worst path being the lend of a declaration. The main stack follows the bound, 8,320 to
   8,128 bytes (192 of RAM each); the text moved by 176 bytes or less and the kit's peaks did not move.
+  They did not move because the kit's reading was on another path, the connect manager's planner
+  (see the next entry), which the direct chain does not follow: the reading is the worst of the paths
+  the kit takes, and the dial was not it.
 - NOT TAKEN, measured: the connect manager's peer entry built in place (`PeerEntry::new` written
   through a pointer into the table's next row). The entry is about a kilobyte; the compiler kept
   its copy in the planner's frame, and the bound read 6,116 (function never inlined, 32 more) and
   6,036 (inlined, the machine built in the planner's frame beside a second copy: 48 less, which is
   64 bytes of stack by the derivation). The 48 was not taken: it came from an inlining choice the
   next change to the function moves, and it cost an `unsafe` write and a different row order when
-  the table is full. The planner's `open` and `PeerEntry::new` (1,000 and 1,080 bytes) are now the
-  worst path of the bound; building the machine in the table's own row (a table of cells written
-  once, as the session slots are) is the change that would remove the copy.
+  the table is full.
+- TAKEN: the peer entry as the call's own result. `PeerEntry::new` started its machine in a local
+  (`engine.initialize()`) and moved the local into the entry, so the planner's `open` held the entry
+  (1,000 bytes) and `new` held the local (1,080) on the kit's own path. `new` now returns the machine
+  as the call's result, written into the entry as it is returned, and the table starts it once the
+  entry is in its row (`PeerEntry::start`): no unsafe code and no change of row order. The kit's
+  reading fell 5,904 to 5,248 bytes (fixed and batching) and 6,020 to 5,360 (get), the bound 6,084
+  to 5,972 (get stays 6,768), the main stacks to 8,000, 8,000 and 9,024; text +72 bytes. The worst
+  path of the bound is now the receive's lend of a declaration (`lend_declare`, 2,064 bytes) under a
+  query's answer, 5,972 bytes: the next 700 bytes of the bound are there, not in the planner. The
+  entry is still copied from the call's result into the table, which the kit's reading falling 656
+  bytes and not the 1,080 of the local suggests; a table of cells written once, as the session slots
+  are, would remove that copy (the frame was not measured after this change).
 - NOT TAKEN, measured: taking `judge_ext_chain`'s two helpers out of line (7 instances) moved the
   text by +16 bytes; the link-time optimizer already shares them.
 - `wz_session_core` is a long tail (525 symbols in a build without LTO, none over 1.6 KB) and the
