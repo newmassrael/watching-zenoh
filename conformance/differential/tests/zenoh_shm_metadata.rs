@@ -34,8 +34,11 @@
 
 use std::{
     panic::{catch_unwind, AssertUnwindSafe},
-    sync::{Mutex, MutexGuard},
-    time::Duration,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex, MutexGuard,
+    },
+    time::{Duration, Instant},
 };
 
 static LOCK: Mutex<()> = Mutex::new(());
@@ -52,6 +55,78 @@ fn plain(e: &impl std::fmt::Display) -> String {
 
 fn pause(ms: u64) {
     std::thread::sleep(Duration::from_millis(ms));
+}
+
+/// How late the timers of the host are allowed to be while a run that depends on the periods of the
+/// watchdog threads goes on. The confirmator wakes every 50 ms and the validator every 100 ms, so a
+/// thread that is kept from running for much longer than the difference between them is a
+/// confirmation the validator does not see, which is the host's doing and not the crate's.
+const TIMER_LATENESS_LIMIT: Duration = Duration::from_millis(30);
+
+/// How many times a run is made again when the host did not keep time during it.
+const TIMED_RUNS: usize = 8;
+
+/// A thread that sleeps in short steps and keeps the worst lateness of its wake-ups: what the
+/// scheduler of the host did to a timer while it ran.
+struct Lateness {
+    running: Arc<AtomicBool>,
+    worst_micros: Arc<AtomicU64>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl Lateness {
+    const STEP: Duration = Duration::from_millis(5);
+
+    fn start() -> Self {
+        let running = Arc::new(AtomicBool::new(true));
+        let worst_micros = Arc::new(AtomicU64::new(0));
+        let (flag, worst) = (running.clone(), worst_micros.clone());
+        let thread = std::thread::spawn(move || {
+            while flag.load(Ordering::Relaxed) {
+                let began = Instant::now();
+                std::thread::sleep(Self::STEP);
+                let late = began.elapsed().saturating_sub(Self::STEP);
+                worst.fetch_max(late.as_micros() as u64, Ordering::Relaxed);
+            }
+        });
+        Self {
+            running,
+            worst_micros,
+            thread,
+        }
+    }
+
+    fn stop(self) -> Duration {
+        self.running.store(false, Ordering::Relaxed);
+        let _ = self.thread.join();
+        Duration::from_micros(self.worst_micros.load(Ordering::Relaxed))
+    }
+}
+
+/// `run`, made again until the host kept time while it ran. A run that depends on how often two
+/// threads wake says nothing of the crates when the host kept one of them from running: it is
+/// made again then, and a crate that is wrong is wrong in every run, so that it still fails.
+fn on_a_host_that_keeps_time<T>(run: impl FnMut() -> T) -> T {
+    timed(TIMER_LATENESS_LIMIT, TIMED_RUNS, run)
+}
+
+/// [`on_a_host_that_keeps_time`] with the lateness it allows and the runs it makes as arguments, so
+/// that what it does with a late host can be held by a test of its own.
+fn timed<T>(limit: Duration, runs: usize, mut run: impl FnMut() -> T) -> T {
+    let mut worst = Duration::ZERO;
+    for _ in 0..runs {
+        let lateness = Lateness::start();
+        let out = run();
+        worst = lateness.stop();
+        if worst < limit {
+            return out;
+        }
+    }
+    panic!(
+        "the timers of the host were late by up to {worst:?} in each of {runs} runs, so the 50 and \
+         100 ms periods of the watchdog threads were not kept and what they did says nothing of the \
+         crates"
+    );
 }
 
 macro_rules! shm_cases {
@@ -480,7 +555,8 @@ fn both_crates_link_a_descriptor_back_by_its_id_and_index() {
 #[test]
 fn both_crates_keep_a_confirmed_descriptor_and_invalidate_the_others_alike() {
     let _g = serial();
-    let (a, b) = (up::watchdog_timeline(), wz::watchdog_timeline());
+    let a = on_a_host_that_keeps_time(up::watchdog_timeline);
+    let b = on_a_host_that_keeps_time(wz::watchdog_timeline);
     assert_eq!(a, b);
     assert_eq!(
         a,
@@ -490,6 +566,28 @@ fn both_crates_keep_a_confirmed_descriptor_and_invalidate_the_others_alike() {
             "never confirmed: invalidated=true"
         ]
     );
+}
+
+/// A run is made once on a host that keeps time, and again, up to the runs it is allowed, on one
+/// that does not; and it is refused when the host never did, and not answered with the last of its
+/// runs.
+#[test]
+fn a_run_is_made_again_on_a_host_that_does_not_keep_time() {
+    let mut calls = 0;
+    let out = timed(Duration::from_secs(3600), 5, || {
+        calls += 1;
+        calls
+    });
+    assert_eq!((out, calls), (1, 1), "a host that keeps time is asked once");
+
+    let mut calls = 0;
+    let refused = catch_unwind(AssertUnwindSafe(|| {
+        timed(Duration::ZERO, 3, || {
+            calls += 1;
+        })
+    }));
+    assert!(refused.is_err(), "a host that never kept time is refused");
+    assert_eq!(calls, 3, "and asked every time it was allowed");
 }
 
 #[test]
@@ -507,26 +605,36 @@ fn a_descriptor_of_one_crate_is_linked_and_kept_alive_by_the_other() {
     // upstream allocates, wz links; and the other way round.
     macro_rules! across {
         ($alloc:ident, $link:ident) => {{
-            // A descriptor past the first words of watchdog bits, so that the word its bit is in
-            // is part of what the two crates must agree on.
-            let _pad: Vec<_> = (0..70).map(|_| $alloc::alloc()).collect();
-            let a = $alloc::alloc();
-            a.set_protocol(5);
-            let l = $link::link_confirm(a.id, a.index).unwrap();
-            assert_eq!(l.refcount(), a.refcount());
-            assert_eq!(l.generation(), a.generation());
-            assert_eq!(l.protocol(), 5);
-            l.set_refcount(3);
-            assert_eq!(a.refcount(), 3);
-            a.watch();
-            pause(450);
+            // The two claims that depend on the periods of the watchdog threads are returned, and
+            // not asserted where a host that did not keep time would fail them: the run is made
+            // again then.
+            let held_then_dropped = on_a_host_that_keeps_time(|| {
+                // A descriptor past the first words of watchdog bits, so that the word its bit is
+                // in is part of what the two crates must agree on.
+                let _pad: Vec<_> = (0..70).map(|_| $alloc::alloc()).collect();
+                let a = $alloc::alloc();
+                a.set_protocol(5);
+                let l = $link::link_confirm(a.id, a.index).unwrap();
+                assert_eq!(l.refcount(), a.refcount());
+                assert_eq!(l.generation(), a.generation());
+                assert_eq!(l.protocol(), 5);
+                l.set_refcount(3);
+                assert_eq!(a.refcount(), 3);
+                a.watch();
+                pause(450);
+                let held = !a.invalidated();
+                drop(l);
+                pause(450);
+                (held, a.invalidated())
+            });
             assert!(
-                !a.invalidated(),
+                held_then_dropped.0,
                 "invalidated while the other crate confirms"
             );
-            drop(l);
-            pause(450);
-            assert!(a.invalidated(), "kept alive after the confirmation stopped");
+            assert!(
+                held_then_dropped.1,
+                "kept alive after the confirmation stopped"
+            );
         }};
     }
     across!(up, wz);
