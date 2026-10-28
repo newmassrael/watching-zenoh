@@ -449,7 +449,7 @@ _ANY_TOKEN = re.compile(r"(?<![\w/.-])(\w[\w-]*)/[\w/.-]+\.rs")
 #: justified the negotiation check went with it: it cited the transport's receive
 #: callback and its `is_shm` predicate by line. The comment now says the same thing
 #: with the callback as a needle. (Described, not spelled: see the warning above.)
-LINE_BUDGET = 284
+LINE_BUDGET = 282
 #: 58 -> 57 (R2862). The SHM payload provider's module doc named the upstream
 #: POSIX shm implementation file with no anchor; the rewrite that mirrors the
 #: metadata segment cites the files it follows by needle instead.
@@ -459,7 +459,7 @@ LINE_BUDGET = 284
 #: as the source of an identity mask constant, with no anchor, and upstream declares
 #: no such constant there; the rewrite cites the `eid` function it really follows as
 #: a needle.
-BARE_BUDGET = 55
+BARE_BUDGET = 54
 #: The root-less axis, after R2317 repaired the 49 citations that named a file
 #: gone at the pin. Same two-directional ratchet as LINE and BARE.
 #:
@@ -530,12 +530,12 @@ BARE_BUDGET = 55
 # the doc of the deleted election function cited the router hat's election by
 # line number with no root, twice, and the text that replaced it cites nothing
 # upstream. Read off the gate at the red tip, not chosen.
-ROOTLESS_LINE_BUDGET = 78
+ROOTLESS_LINE_BUDGET = 76
 # R2862 — 36 -> 35. The auth segment's helpers moved into the shared POSIX
 # segment module, and the retry-count note that named the upstream segment file
 # with no root went with them; its replacement is anchored.
 # R2934 — 35 -> 27, the same `c867f7b8` module deletion as ROOTLESS_LINE_BUDGET.
-ROOTLESS_BARE_BUDGET = 27
+ROOTLESS_BARE_BUDGET = 26
 #: Root-less LINE citations whose file EXISTS at the pin but whose line number
 #: is past its end -- 1.5.0 line numbers on files that shrank. Measured, not
 #: chosen, and graded only by the RESOLUTION arm (it takes a checkout to know).
@@ -669,12 +669,12 @@ ROOTLESS_STALE_LINE_BUDGET = 1
 ROOTLESS_RESIDUE_BY_SEGMENT: dict[str, int] = {
     "auth": 5,
     "codec": 4,
-    "dispatcher": 57,
+    "dispatcher": 48,
     "establishment": 34,
     "ext": 15,
     "lowlatency": 4,
     "memory_backend": 11,
-    "protocol": 8,
+    "protocol": 7,
     "replication": 4,
     "routing": 2,
     "runtime": 1,
@@ -792,7 +792,7 @@ def rootless_undeclared_budget() -> int:
 # R3706 — 504 -> 502, the two `builders` occurrences (`builders/...` paths a reason cites) that now
 # resolve to a tracked file, the top crate's own `api/builders` directory; its row left the table.
 # Item 751 -- 502 -> 500, the same two line-form removals as ROOTLESS_LINE_BUDGET.
-ROOTLESS_TOTAL_BUDGET = 498
+ROOTLESS_TOTAL_BUDGET = 485
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete
