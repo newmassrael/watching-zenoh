@@ -198,6 +198,46 @@ impl Default for SnResolution {
     }
 }
 
+/// `event-ring-full`: Which event a full event ring gives up. `overwrite-oldest` writes the
+/// new event over the oldest, so the ring always holds the latest: it is what a post-mortem
+/// wants, and needs no reader at all. `drop-newest` refuses the new event and counts the
+/// refusals, so the ring holds the beginning until a reader frees it: it is what a boot
+/// trace wants, and the events are lost whenever no reader is reading.
+/// Upstream: Keeps no record of the events a node has: a log call with no logger installed
+/// is dropped, so neither the oldest nor the newest of them survives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EventRingFull {
+    /// `overwrite-oldest`.
+    OverwriteOldest,
+    /// `drop-newest`.
+    DropNewest,
+}
+
+impl EventRingFull {
+    /// The value as the declaration, the Kconfig and the environment spell it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::OverwriteOldest => "overwrite-oldest",
+            Self::DropNewest => "drop-newest",
+        }
+    }
+
+    const CHOICES: [&str; 2] = ["overwrite-oldest", "drop-newest"];
+    const ALL: [Self; 2] = [Self::OverwriteOldest, Self::DropNewest];
+
+    const fn stated() -> Self {
+        let stated = option_env!("WZ_POLICY_EVENT_RING_FULL");
+        let index = policy_choice(stated, &Self::CHOICES, 0);
+        Self::ALL[index]
+    }
+}
+
+impl Default for EventRingFull {
+    fn default() -> Self {
+        Self::stated()
+    }
+}
+
 /// `clock-quality-stamping`: Whether a node stamps data with a time it does not trust.
 /// `always` stamps with the clock's reading whatever its standing. `trusted-only` stamps
 /// only while the clock is synchronised to a reference, or held over from one within the
@@ -274,6 +314,10 @@ pub struct SessionPolicy {
     /// InitSyn and in the Join of a group, and has no setting for another: zenoh's
     /// `Resolution` default and zenoh-pico's `Z_SN_RESOLUTION 0x02`.
     pub sn_resolution: SnResolution,
+    /// `event-ring-full`. Upstream: Keeps no record of the events a node has: a log call
+    /// with no logger installed is dropped, so neither the oldest nor the newest of them
+    /// survives.
+    pub event_ring_full: EventRingFull,
     /// `clock-quality-stamping`. Upstream: Stamps with whatever time the system clock
     /// reads, and has no notion of whether that clock is set or follows a reference.
     pub clock_quality_stamping: ClockQualityStamping,
@@ -290,6 +334,7 @@ impl SessionPolicy {
         let subscriber_overload = SubscriberOverload::stated();
         let key_set = KeySet::stated();
         let sn_resolution = SnResolution::stated();
+        let event_ring_full = EventRingFull::stated();
         let clock_quality_stamping = ClockQualityStamping::stated();
         Self {
             multicast_loopback,
@@ -300,6 +345,7 @@ impl SessionPolicy {
             subscriber_overload,
             key_set,
             sn_resolution,
+            event_ring_full,
             clock_quality_stamping,
         }
     }

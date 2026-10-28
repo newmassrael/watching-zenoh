@@ -200,6 +200,43 @@ impl<const SLOTS: usize, const ARGS: usize> EventRing<SLOTS, ARGS> {
         self.policy
     }
 
+    /// A handle that makes readers and counts, for a ring kept in a `static`, which cannot be
+    /// split. Reading changes nothing, so no one can misuse it.
+    pub const fn observer(&self) -> Observer<'_, SLOTS, ARGS> {
+        Observer { ring: self }
+    }
+
+    /// The producer of a ring kept in a `static`, which `&mut self` cannot reach.
+    ///
+    /// # Safety
+    ///
+    /// At most one [`Producer`] of this ring may be alive at any time, and a new one must be made
+    /// after the last was dropped, with whatever orders the two (a lock, a single thread). Two at
+    /// once write the same slot, and a reader can then take half of one record and half of the
+    /// other for a whole record.
+    pub unsafe fn producer(&self) -> Producer<'_, SLOTS, ARGS> {
+        Producer {
+            ring: self,
+            head: pair(&self.next_lo, &self.next_hi),
+        }
+    }
+
+    /// The consumer of a ring kept in a `static`.
+    ///
+    /// # Safety
+    ///
+    /// At most one [`Consumer`] of this ring may be alive at any time, ordered as for
+    /// [`Self::producer`]. Two at once both free what they pass, and the producer may then write
+    /// over a record the slower of them has not read.
+    pub unsafe fn consumer(&self) -> Consumer<'_, SLOTS, ARGS> {
+        Consumer {
+            reader: Reader {
+                ring: self,
+                cursor: Some(pair(&self.tail_lo, &self.tail_hi)),
+            },
+        }
+    }
+
     /// The three parts of the ring. Taking `&mut self` is what makes the producer the only one:
     /// until all three are dropped the ring cannot be split again.
     pub fn split(
@@ -581,6 +618,22 @@ mod tests {
             producer.push(0, 0, 0, &[]),
             Pushed::Dropped,
             "readers do not consume; only the consumer frees"
+        );
+    }
+
+    #[test]
+    fn a_ring_in_a_static_is_written_one_producer_after_another_and_read_through_its_observer() {
+        let ring = Ring::new(FullPolicy::OverwriteOldest);
+        // One producer at a time, as a lock would order them.
+        for round in 0..3u64 {
+            // SAFETY: the previous producer is dropped at the end of the previous iteration.
+            let mut producer = unsafe { ring.producer() };
+            assert_eq!(producer.push(0, 0, 0, &[]), Pushed::Stored(round));
+        }
+        assert_eq!(ring.observer().stored(), 3);
+        assert_eq!(
+            sequences(&read_all(&mut ring.observer().reader())),
+            [0, 1, 2]
         );
     }
 

@@ -498,8 +498,9 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "forward-path stamp over a Push), `time-hlc` (the node clock) and `clock-source` (the "
         "clock registry an application registers sources in, which the node clock then reads) "
         "and `pubsub-ts-stack` (the clock the interceptions of a timestamp stack are recorded "
-        "with, which a forwarder takes a stamp from)",
-        frozenset({"clock-source", "codec-push", "pubsub-ts-stack", "time-hlc"}),
+        "with, which a forwarder takes a stamp from), and `event-ring` (the node's event log, "
+        "one ring the node writes events into, stamped with the node clock)",
+        frozenset({"clock-source", "codec-push", "event-ring", "pubsub-ts-stack", "time-hlc"}),
     ),
     "wz-rest": (
         "the REST bridge: the facade re-exports the whole crate as `wz::rest` "

@@ -292,6 +292,24 @@ config WZ_LIMIT_TX_EXPIRY_CLOSE_AFTER
 	  closes the session, which is the policy as it was before this limit. At most
 	  65535: a larger value counts as 65535. It is read only when that policy is on.
 
+config WZ_LIMIT_EVENT_RING_SLOTS
+	int "EVENT_RING_SLOTS"
+	default 64
+	help
+	  How many event records the node's event ring holds. When the ring is full,
+	  the event-ring-full policy decides which record is lost: the oldest or the
+	  newest. Each record is a few words, a fixed size, so the ring's memory is this
+	  number times that size. At least 1.
+
+config WZ_LIMIT_EVENT_RECORD_ARGS
+	int "EVENT_RECORD_ARGS"
+	default 4
+	help
+	  How many integer arguments one event record carries, each 8 bytes. A record
+	  has no text: the format an event is read with is a constant the reader holds,
+	  and the arguments fill it. An event with more arguments than this keeps the
+	  first of them. At most 255.
+
 config WZ_LIMIT_CLOCK_SOURCES
 	int "CLOCK_SOURCES"
 	default 1

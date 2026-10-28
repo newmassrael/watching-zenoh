@@ -1942,6 +1942,28 @@ closes the session, which is the policy as it was before this limit. At most
 '''
 
 [[limit]]
+id = "EVENT_RING_SLOTS"
+kconfig = "WZ_LIMIT_EVENT_RING_SLOTS"
+default = 64
+help = '''
+How many event records the node's event ring holds. When the ring is full,
+the event-ring-full policy decides which record is lost: the oldest or the
+newest. Each record is a few words, a fixed size, so the ring's memory is this
+number times that size. At least 1.
+'''
+
+[[limit]]
+id = "EVENT_RECORD_ARGS"
+kconfig = "WZ_LIMIT_EVENT_RECORD_ARGS"
+default = 4
+help = '''
+How many integer arguments one event record carries, each 8 bytes. A record
+has no text: the format an event is read with is a constant the reader holds,
+and the arguments fill it. An event with more arguments than this keeps the
+first of them. At most 255.
+'''
+
+[[limit]]
 id = "CLOCK_SOURCES"
 kconfig = "WZ_LIMIT_CLOCK_SOURCES"
 default = 1
@@ -2243,6 +2265,23 @@ with a sequence-number width of its own. A session that negotiates a width
 below its peer's runs the narrower ring of the two; a ring of 8 bits wraps
 after 128 frames in flight, so a narrow width asks a deployment to know its
 traffic. The request-id resolution is not part of this policy.
+'''
+
+[[policy]]
+id = "event-ring-full"
+kind = "choice"
+kconfig = "WZ_POLICY_EVENT_RING_FULL"
+choices = ["overwrite-oldest", "drop-newest"]
+default = "overwrite-oldest"
+upstream = "Keeps no record of the events a node has: a log call with no logger installed is dropped, so neither the oldest nor the newest of them survives."
+since = 2
+help = '''
+Which event a full event ring gives up. `overwrite-oldest` writes the new event
+over the oldest, so the ring always holds the latest: it is what a post-mortem
+wants, and needs no reader at all. `drop-newest` refuses the new event and
+counts the refusals, so the ring holds the beginning until a reader frees it:
+it is what a boot trace wants, and the events are lost whenever no reader is
+reading.
 '''
 
 [[policy]]

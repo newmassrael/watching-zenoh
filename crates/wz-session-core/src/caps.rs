@@ -415,6 +415,14 @@ pub const TX_NO_PROGRESS_WINDOW_US: usize = generated::TX_NO_PROGRESS_WINDOW_US;
 /// size: it sizes no memory.
 pub const TX_EXPIRY_CLOSE_AFTER: usize = generated::TX_EXPIRY_CLOSE_AFTER;
 
+/// How many event records the node's event ring holds (`event_ring::EventRing`). A count of
+/// records of a fixed size, so it sizes the ring's memory. At least `1`.
+pub const EVENT_RING_SLOTS: usize = generated::EVENT_RING_SLOTS;
+
+/// How many integer arguments one event record carries (`event_ring::Record`). At most `255`:
+/// the count is one byte of a record's meta word.
+pub const EVENT_RECORD_ARGS: usize = generated::EVENT_RECORD_ARGS;
+
 /// How many clock sources an application can register with the node at once, when `clock-source` is
 /// on (`wz_node_time::clock_registry`). `0` registers none and leaves the system clock the only
 /// source. A count of entries in a table whose rows are allocated when they are registered.

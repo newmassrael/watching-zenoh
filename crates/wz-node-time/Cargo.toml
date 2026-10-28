@@ -39,6 +39,9 @@ default = []
 # follows a reference, and the `clock-quality-stamping` policy can refuse to stamp with a clock
 # that does not.
 time-hlc = ["wz-session-core/clock-quality"]
+# The node's event log (`docs/observation-plane.md` M2): one event ring the node writes events
+# into, stamped with the node clock, sized by `EVENT_RING_SLOTS` and `EVENT_RECORD_ARGS`.
+event-ring = []
 # A clock the application registered, which can be held over and can run free once the host's bound
 # on holdover has passed (the two states `clock-source` adds to the standing).
 clock-source = ["time-hlc", "wz-session-core/clock-source"]

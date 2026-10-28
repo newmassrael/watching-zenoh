@@ -367,7 +367,9 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # features, 20 with the three, under 1 s. `pubsub-ts-stack` joins: the clock a node records the
     # interceptions of a timestamp stack with, and its four tests (the identity of the stamp, a peer
     # that stamps no data, the `trusted-only` policy not refusing one, a node with no identity).
-    "wz-node-time|hook|clock-source,codec-push,pubsub-timestamp,pubsub-ts-stack,time-hlc|"
+    # `event-ring` joins: the node's event log and its seven tests (a record's fields, a clock that
+    # stamps and one that does not, the two full-ring policies, producers on four threads).
+    "wz-node-time|hook|clock-source,codec-push,event-ring,pubsub-timestamp,pubsub-ts-stack,time-hlc|"
     # Open-debt item 913 -- the in-memory group every group test of the workspace runs over
     # (`multicast_bus`) holds a member's place while a send half of its link lives, as a socket
     # does, which the departure test of the group face depends on. The module exists only with

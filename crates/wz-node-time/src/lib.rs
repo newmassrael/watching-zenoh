@@ -16,6 +16,8 @@
 
 #[cfg(feature = "clock-source")]
 pub mod clock_registry;
+#[cfg(feature = "event-ring")]
+pub mod event_log;
 pub mod node_clock;
 #[cfg(feature = "time-hlc")]
 pub mod standing_cell;

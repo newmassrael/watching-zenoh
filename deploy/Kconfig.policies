@@ -177,6 +177,27 @@ config WZ_POLICY_SN_RESOLUTION_BITS_64
 
 endchoice
 
+choice WZ_POLICY_EVENT_RING_FULL
+	prompt "event-ring-full"
+	default WZ_POLICY_EVENT_RING_FULL_OVERWRITE_OLDEST
+	help
+	  Which event a full event ring gives up. `overwrite-oldest` writes the new event
+	  over the oldest, so the ring always holds the latest: it is what a post-mortem
+	  wants, and needs no reader at all. `drop-newest` refuses the new event and
+	  counts the refusals, so the ring holds the beginning until a reader frees it:
+	  it is what a boot trace wants, and the events are lost whenever no reader is
+	  reading.
+	  Upstream: Keeps no record of the events a node has: a log call with no logger
+	  installed is dropped, so neither the oldest nor the newest of them survives.
+
+config WZ_POLICY_EVENT_RING_FULL_OVERWRITE_OLDEST
+	bool "overwrite-oldest"
+
+config WZ_POLICY_EVENT_RING_FULL_DROP_NEWEST
+	bool "drop-newest"
+
+endchoice
+
 choice WZ_POLICY_CLOCK_QUALITY_STAMPING
 	prompt "clock-quality-stamping"
 	default WZ_POLICY_CLOCK_QUALITY_STAMPING_ALWAYS
