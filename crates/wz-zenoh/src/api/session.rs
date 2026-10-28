@@ -2837,7 +2837,7 @@ impl Drop for Session {
 ///
 /// It is not a `Weak` of the `Arc`: the entities of a session hold it, so a session that closed
 /// itself when its handles were counted by the `Arc` would never close while one of them lived.
-/// The handles count themselves ([`SessionInner::strong_counter`]) and the last one to be dropped
+/// The handles count themselves (`SessionInner::strong_counter`, private) and the last one to be dropped
 /// closes the session, whatever references remain.
 #[derive(Debug, Clone)]
 pub struct WeakSession(Arc<SessionInner>);
