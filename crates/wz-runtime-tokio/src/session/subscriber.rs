@@ -103,12 +103,14 @@ impl SubscribeOptions {
 
     /// What the delivery lane of an OFFLOADED subscriber does when it is full: `block` makes the
     /// session wait for room, so no sample is lost and a slow callback slows the session; `reject`
-    /// refuses the sample, so the session is never held and the sample is lost and counted. Only
+    /// refuses the sample, so the session is never held and the sample is lost and counted;
+    /// `keep-latest` admits it and takes out the newest samples already queued until it fits, so
+    /// the session is never held and the newest sample is the one that is kept. Only
     /// [`Session::declare_subscriber_offloaded`] reads it: a plain subscriber's callback runs inline
     /// and has no lane.
     ///
     /// What a declaration that does not say gets is the build's `subscriber-overload` policy, which
-    /// is `block`, upstream's behaviour, unless the build states `reject`.
+    /// is `block`, upstream's behaviour, unless the build states `reject` or `keep-latest`.
     pub fn with_overload(mut self, overload: wz_session_core::policy::SubscriberOverload) -> Self {
         self.overload = overload;
         self

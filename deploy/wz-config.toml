@@ -2144,7 +2144,7 @@ own node identity, so a caller cannot sign a sample as another node.
 id = "subscriber-overload"
 kind = "choice"
 kconfig = "WZ_POLICY_SUBSCRIBER_OVERLOAD"
-choices = ["block", "reject"]
+choices = ["block", "reject", "keep-latest"]
 default = "block"
 upstream = "Hands a sample to a channel handler that blocks its sender when the handler is full, so a slow consumer applies backpressure into the session and no sample is lost."
 since = 2
@@ -2154,10 +2154,14 @@ delivery lane is full and its declaration says nothing. `block` makes the
 session wait for room, outside the lock the receive path holds, so the
 transport's own backpressure is the flow control and no sample is lost.
 `reject` refuses the sample at once: the receive path is never held, the sample
-is lost, and it is counted by reason and by whether it was sent reliably. A
-sample longer than the whole lane can never wait for room, so it is refused
-either way. Each declaration can still state its own choice; this sets the
-default for the ones that do not.
+is lost, and it is counted by reason and by whether it was sent reliably.
+`keep-latest` admits the new sample and takes out the newest ones already
+queued behind the one being delivered until it fits: the receive path is never
+held, the newest sample is never the one lost, and each one taken out is
+counted by how it was sent. It is for a stream whose last value is the one
+that matters. A sample longer than the whole lane can never wait for room, so
+it is refused under every choice. Each declaration can still state its own
+choice; this sets the default for the ones that do not.
 '''
 
 [[policy]]

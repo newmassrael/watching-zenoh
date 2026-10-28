@@ -173,6 +173,9 @@ pub struct Stats {
     pub byte_capacity: usize,
     /// Refusals by reason.
     pub refused: Refused,
+    /// Samples admitted and then taken out again to make room for a newer one
+    /// ([`DeliveryLane::evict_latest`]). Not a refusal: each was admitted, and each was lost.
+    pub evicted: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,6 +234,7 @@ pub struct DeliveryLane<const EVENTS: usize> {
     reserved: usize,
     stopping: bool,
     refused: Refused,
+    evicted: usize,
 }
 
 impl<const EVENTS: usize> DeliveryLane<EVENTS> {
@@ -264,6 +268,7 @@ impl<const EVENTS: usize> DeliveryLane<EVENTS> {
                 stopping: 0,
                 no_consumer: 0,
             },
+            evicted: 0,
         }
     }
 
@@ -408,6 +413,47 @@ impl<const EVENTS: usize> DeliveryLane<EVENTS> {
         self.entries[reservation.index].phase = Phase::Void;
     }
 
+    /// Take the newest admitted sample out of the lane and give its charges back at once, so that
+    /// a newer one can be admitted in its place: what `keep-latest` does where `block` waits and
+    /// `reject` refuses. Answers the event slot it held, so the host can drop the record it keeps
+    /// beside the sample and count it; `None` when there is nothing it may take.
+    ///
+    /// It takes from the NEWEST end, never the oldest, for two reasons the ring forces. The head is
+    /// the sample the consumer may be running its callbacks for ([`Self::front`] does not say
+    /// whether it has begun), so it is never touched. And bytes come back to a ring from its
+    /// tail: a sample taken from the middle would keep its charge until the head reached it,
+    /// and free no room now, which is the only thing this is for. So the lane keeps what it has
+    /// begun delivering and the older samples queued behind it, and the newest of them is what
+    /// is lost; the sample that follows is then admitted, so the newest sample is always the
+    /// last one in the lane.
+    ///
+    /// A slot that is reserved and not yet published is not taken: its producer holds it. Nothing
+    /// is counted as a refusal; [`Stats::evicted`] counts it.
+    pub fn evict_latest(&mut self) -> Option<usize> {
+        if self.len < 2 {
+            return None;
+        }
+        let at = advance(self.head, self.len - 1, EVENTS);
+        let entry = self.entries[at];
+        if entry.phase == Phase::Reserved {
+            return None;
+        }
+        // Where the byte area ended before this sample was placed: a sample that wrapped skipped
+        // `pad` bytes at the end of the area, and the tail was there.
+        let pad = entry.charge - entry.bytes;
+        self.byte_tail = if pad > 0 {
+            self.byte_capacity - pad
+        } else {
+            entry.offset
+        };
+        self.byte_used -= entry.charge;
+        self.pending_callbacks -= entry.callbacks;
+        self.entries[at] = Entry::FREE;
+        self.len -= 1;
+        self.evicted = self.evicted.saturating_add(1);
+        Some(at)
+    }
+
     /// Give the head's charges back and move on.
     fn pop(&mut self) {
         let entry = self.entries[self.head];
@@ -491,6 +537,7 @@ impl<const EVENTS: usize> DeliveryLane<EVENTS> {
             pending_bytes: self.byte_used,
             byte_capacity: self.byte_capacity,
             refused: self.refused,
+            evicted: self.evicted,
         }
     }
 }
@@ -773,6 +820,93 @@ mod tests {
         );
     }
 
+    /// An empty lane, and a lane of one, have nothing to take: the one sample is the head, which
+    /// the consumer may be running its callbacks for.
+    #[test]
+    fn evict_latest_never_takes_the_head() {
+        let mut lane = lane::<3>(16, 4);
+        assert_eq!(lane.evict_latest(), None);
+        admit(&mut lane, 4, 1).unwrap();
+        assert_eq!(lane.evict_latest(), None);
+        assert_eq!(lane.stats().evicted, 0);
+        assert!(matches!(lane.front(), Next::Ready(_)));
+    }
+
+    /// With every event slot taken, taking the newest sample makes room for the next at once, the
+    /// head and the older sample stay in their order, and the newest ends up last.
+    #[test]
+    fn evict_latest_makes_room_in_the_event_slots_and_keeps_the_older_samples() {
+        let mut lane = lane::<3>(64, 8);
+        let first = admit(&mut lane, 4, 1).unwrap();
+        let second = admit(&mut lane, 4, 1).unwrap();
+        let third = admit(&mut lane, 4, 1).unwrap();
+        assert_eq!(lane.fits(4), Err(Refusal::EventsFull));
+
+        assert_eq!(lane.evict_latest(), Some(third.index));
+        assert_eq!(lane.fits(4), Ok(()));
+        let fourth = admit(&mut lane, 4, 1).unwrap();
+
+        let mut seen = std::vec::Vec::new();
+        while let Next::Ready(delivery) = lane.front() {
+            seen.push(delivery.offset);
+            assert!(lane.complete());
+        }
+        assert_eq!(seen, [first.offset, second.offset, fourth.offset]);
+        assert_eq!(lane.stats().evicted, 1);
+        assert_eq!(
+            lane.stats().refused.total,
+            0,
+            "a sample taken out is not a refusal"
+        );
+    }
+
+    /// The byte area is a ring that gives bytes back at its tail: taking a sample that wrapped
+    /// returns its padding too, and the sample that follows is placed where it would have been.
+    #[test]
+    fn evict_latest_gives_back_the_bytes_of_a_sample_that_wrapped() {
+        let mut lane = lane::<4>(10, 8);
+        admit(&mut lane, 4, 1).unwrap();
+        admit(&mut lane, 4, 1).unwrap();
+        assert!(matches!(lane.front(), Next::Ready(_)));
+        assert!(lane.complete());
+        // Four bytes do not fit before the end of the area (two are left), so the sample goes
+        // to the start and is charged the two bytes it skipped.
+        let wrapped = admit(&mut lane, 4, 1).unwrap();
+        assert_eq!(wrapped.offset, 0);
+        assert_eq!(lane.stats().pending_bytes, 4 + 6);
+
+        assert_eq!(lane.evict_latest(), Some(wrapped.index));
+        assert_eq!(lane.stats().pending_bytes, 4);
+        let again = admit(&mut lane, 4, 1).unwrap();
+        assert_eq!(again.offset, 0, "placed as the sample taken out was");
+        assert_eq!(lane.stats().pending_bytes, 4 + 6);
+    }
+
+    /// A sample taken out gives its callbacks back to the budget, so the budget does not fill with
+    /// samples that will never be delivered.
+    #[test]
+    fn evict_latest_gives_back_the_callbacks_the_sample_owed() {
+        let mut lane = lane::<3>(64, 4);
+        admit(&mut lane, 4, 1).unwrap();
+        admit(&mut lane, 4, 3).unwrap();
+        assert_eq!(lane.stats().pending_callbacks, 4);
+        assert!(lane.evict_latest().is_some());
+        assert_eq!(lane.stats().pending_callbacks, 1);
+    }
+
+    /// A slot a producer has reserved and not published is the producer's: the newest sample that
+    /// can be taken is not behind it.
+    #[test]
+    fn evict_latest_leaves_a_reserved_slot_alone() {
+        let mut lane = lane::<3>(64, 4);
+        admit(&mut lane, 4, 1).unwrap();
+        admit(&mut lane, 4, 1).unwrap();
+        let reservation = lane.reserve(4).unwrap();
+        assert_eq!(lane.evict_latest(), None);
+        lane.cancel(reservation);
+        assert!(lane.evict_latest().is_some(), "a skipped slot can be taken");
+    }
+
     /// The lane against a model, over many interleavings of the producer's and the consumer's
     /// steps: whatever the order, the bytes of two live samples never overlap, the charges add up
     /// to what the counters say, and the samples that are delivered are the published ones, in the
@@ -805,7 +939,7 @@ mod tests {
             let mut stopped_asked = false;
 
             for _ in 0..200 {
-                match rng() % 6 {
+                match rng() % 7 {
                     0 | 1 => {
                         let bytes = (rng() % 9) as usize;
                         if let Ok(r) = lane.reserve(bytes) {
@@ -855,6 +989,15 @@ mod tests {
                             );
                             assert!(lane.complete());
                         }
+                    }
+                    // The newest sample is taken out: it is the last the model admitted, and it
+                    // is not one a producer still holds.
+                    6 if lane.evict_latest().is_some() => {
+                        let newest = order.pop_back().expect("the model has it");
+                        assert!(
+                            !held.iter().any(|(_, held_id)| *held_id == newest.0),
+                            "seed {seed}: a reserved sample was taken"
+                        );
                     }
                     _ => {}
                 }

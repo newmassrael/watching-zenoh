@@ -48,7 +48,7 @@ byte and callback bounds, a refusal policy other than "wait", counters, and a no
 | Name | Kind | Default | Meaning |
 |---|---|---|---|
 | `rx-callback-offload` | capability | on in host builds, off on the fixed-memory profile | The lane and its consumer are built in. Off, no lane code is linked and a subscriber's callback runs inline, as today. |
-| `subscriber-overload` | policy, choice | `block` | `block`: a full lane makes the receive path wait, as the buffered subscriber does today (upstream's blocking channel handler). `reject`: a full lane refuses the sample, counts it by reason, and answers by reliability as above. |
+| `subscriber-overload` | policy, choice | `block` | `block`: a full lane makes the receive path wait, as the buffered subscriber does today (upstream's blocking channel handler). `reject`: a full lane refuses the sample, counts it by reason, and answers by reliability as above. `keep-latest`: a full lane takes out the newest queued samples until the new one fits (below), so the receive path is never held and the sample that arrived last is the one kept. |
 | `DELIVERY_LANE_EVENTS` | limit | 64 | Samples that wait at once. Zero is refused. |
 | `DELIVERY_LANE_BYTES` | limit | 65536 | Bytes of copied samples that wait at once. Zero is refused. |
 | `DELIVERY_LANE_CALLBACKS` | limit | 256 | Callback invocations owed at once. Zero is refused. Larger than the event limit on a host that admits per subscription, where it never binds (see Design). |
@@ -221,6 +221,33 @@ callbacks are slow and leaves the rest inline.
    between the receive lock and a second thread publishing; and zenoh-c or zenoh-pico, which are not
    in this process, so no comparison with them is claimed. A single machine, and the times of a
    shared one: the figures are a reading, not a gate.
+
+## `keep-latest`: the newest sample wins
+
+A stream whose last value is the one that matters (a sensor reading, a state) is badly served by
+both other answers: `block` slows the session for a value that is stale by the time it is delivered,
+and `reject` keeps the OLDEST samples and loses the newest. `keep-latest` admits the new sample and
+takes out queued ones until it fits. It does that with `DeliveryLane::evict_latest`, one sample at a
+time, and the host calls it while `fits` says the lane has no room.
+
+It takes from the newest end and never the head, for two reasons the ring forces. The head is the
+sample the consumer may be running its callbacks for, and the lane cannot tell whether it has begun.
+And a byte ring gives bytes back at its tail: a sample taken from the middle would keep its charge
+until the head reached it and free no room now. So the lane keeps the sample being delivered and
+the older ones queued behind it, and loses the newest of those; the last sample to arrive is always
+the last one in the lane and is therefore delivered.
+
+What it does not do is conflate by key. A subscriber of a wildcard whose keys interleave can have
+the newest sample of one key taken out for a newer sample of another. A lane that keeps the last
+value of each key is a different structure, with a table of keys the lane does not have; it is the
+right answer for a stream of states and is not built here.
+
+Each sample taken out is counted twice: by how it was sent, in the host's `dropped_reliable` and
+`dropped_best_effort`, as a refusal is; and in the lane's `evicted`, which tells a lane that
+keeps the latest from one that refuses. A refusal is still counted for a sample that can never fit
+(longer than the whole byte area), which takes nothing out. A sample lost this way that was sent
+reliably is a loss of what the sender was promised: a stream that cannot lose reliable samples
+does not use this choice.
 
 ## Open for the owner
 

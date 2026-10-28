@@ -169,6 +169,7 @@ impl Delivery {
             Delivery::Buffered => "buffered",
             Delivery::Offloaded(SubscriberOverload::Reject) => "offloaded/reject",
             Delivery::Offloaded(SubscriberOverload::Block) => "offloaded/block",
+            Delivery::Offloaded(SubscriberOverload::KeepLatest) => "offloaded/keep-latest",
         }
     }
 }

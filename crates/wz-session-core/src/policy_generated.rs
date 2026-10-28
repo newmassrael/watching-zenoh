@@ -58,9 +58,13 @@ impl Default for MulticastLoopback {
 /// session wait for room, outside the lock the receive path holds, so the transport's own
 /// backpressure is the flow control and no sample is lost. `reject` refuses the sample at
 /// once: the receive path is never held, the sample is lost, and it is counted by reason
-/// and by whether it was sent reliably. A sample longer than the whole lane can never wait
-/// for room, so it is refused either way. Each declaration can still state its own choice;
-/// this sets the default for the ones that do not.
+/// and by whether it was sent reliably. `keep-latest` admits the new sample and takes out
+/// the newest ones already queued behind the one being delivered until it fits: the receive
+/// path is never held, the newest sample is never the one lost, and each one taken out is
+/// counted by how it was sent. It is for a stream whose last value is the one that matters.
+/// A sample longer than the whole lane can never wait for room, so it is refused under
+/// every choice. Each declaration can still state its own choice; this sets the default for
+/// the ones that do not.
 /// Upstream: Hands a sample to a channel handler that blocks its sender when the handler is
 /// full, so a slow consumer applies backpressure into the session and no sample is lost.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,6 +73,8 @@ pub enum SubscriberOverload {
     Block,
     /// `reject`.
     Reject,
+    /// `keep-latest`.
+    KeepLatest,
 }
 
 impl SubscriberOverload {
@@ -77,11 +83,12 @@ impl SubscriberOverload {
         match self {
             Self::Block => "block",
             Self::Reject => "reject",
+            Self::KeepLatest => "keep-latest",
         }
     }
 
-    const CHOICES: [&str; 2] = ["block", "reject"];
-    const ALL: [Self; 2] = [Self::Block, Self::Reject];
+    const CHOICES: [&str; 3] = ["block", "reject", "keep-latest"];
+    const ALL: [Self; 3] = [Self::Block, Self::Reject, Self::KeepLatest];
 
     const fn stated() -> Self {
         let stated = option_env!("WZ_POLICY_SUBSCRIBER_OVERLOAD");

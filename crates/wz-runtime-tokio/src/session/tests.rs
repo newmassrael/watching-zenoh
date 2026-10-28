@@ -15746,6 +15746,74 @@ async fn a_full_lane_refuses_counts_by_reason_and_by_how_the_sample_was_sent() {
     assert!(!delivered.iter().any(|payload| payload == b"late"));
 }
 
+/// The claim: under `keep-latest` a full lane never refuses and never holds the session, the
+/// newest queued samples are taken out for the one that arrives, each is counted by how it was
+/// sent, and the sample that arrived last is delivered. The consumer is held by a gate, so the lane
+/// is provably full; the head is never touched, whether or not the consumer has begun on it.
+#[cfg(all(
+    feature = "declare-subscriber",
+    feature = "pubsub-put",
+    feature = "codec-push"
+))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn under_keep_latest_a_full_lane_loses_the_newest_queued_and_delivers_the_last() {
+    let events = wz_session_core::caps::DELIVERY_LANE_EVENTS;
+    let (session, _driver) = build_session();
+    let gate = OffloadGate::new();
+    let _release = gate.release_on_exit();
+    let delivered = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+    let (gate_cb, delivered_cb) = (gate.clone(), delivered.clone());
+    let offloaded = session
+        .declare_subscriber_offloaded(
+            "demo/**",
+            SubscribeOptions::default()
+                .with_overload(wz_session_core::policy::SubscriberOverload::KeepLatest),
+            move |sample| {
+                gate_cb.wait();
+                delivered_cb.lock().unwrap().push(sample.payload().to_vec());
+            },
+        )
+        .expect("offloaded subscriber declares");
+
+    for i in 0..events {
+        let outcome = offload_inbound(&[(i % 250) as u8], true, None);
+        session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
+    }
+    assert_eq!(offloaded.stats().lane.queued_events, events);
+
+    // Past the bound: one sent reliably, two best-effort. Each takes out the newest queued sample
+    // and is admitted in its place, so the lane stays full and the last to arrive is the last queued.
+    for (payload, reliable) in [(b"L1", true), (b"L2", false), (b"L3", false)] {
+        let outcome = offload_inbound(payload, reliable, None);
+        session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
+    }
+    let stats = offloaded.stats();
+    assert_eq!(stats.lane.refused.total, 0, "nothing is refused");
+    assert_eq!(stats.held, 0, "nothing is held: the session is not slowed");
+    assert_eq!(stats.lane.evicted, 3);
+    assert_eq!(
+        stats.dropped_reliable, 2,
+        "the last of the first fill, and L1, both sent reliably"
+    );
+    assert_eq!(stats.dropped_best_effort, 1, "L2");
+    assert_eq!(stats.lane.queued_events, events, "the lane is still full");
+
+    gate.release();
+    for _ in 0..300 {
+        if delivered.lock().unwrap().len() == events {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let delivered = delivered.lock().unwrap();
+    let mut expected: Vec<Vec<u8>> = (0..events - 1).map(|i| vec![(i % 250) as u8]).collect();
+    expected.push(b"L3".to_vec());
+    assert_eq!(
+        *delivered, expected,
+        "the older samples in order, then the last to arrive"
+    );
+}
+
 /// The claim: the byte bound refuses a sample that does not fit, by its own reason, and takes
 /// nothing for it. Under BOTH answers: a sample longer than the whole area would wait for room
 /// that can never come, so `block` refuses it too instead of holding the session for ever.
@@ -15757,7 +15825,11 @@ async fn a_full_lane_refuses_counts_by_reason_and_by_how_the_sample_was_sent() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_sample_larger_than_the_byte_area_is_refused_by_the_byte_bound_under_either_answer() {
     use wz_session_core::policy::SubscriberOverload;
-    for overload in [SubscriberOverload::Block, SubscriberOverload::Reject] {
+    for overload in [
+        SubscriberOverload::Block,
+        SubscriberOverload::Reject,
+        SubscriberOverload::KeepLatest,
+    ] {
         let (session, _driver) = build_session();
         let offloaded = session
             .declare_subscriber_offloaded(
@@ -15889,7 +15961,11 @@ fn a_subscription_takes_the_overload_answer_of_the_build_unless_it_says_its_own(
         SubscribeOptions::default().overload(),
         SessionPolicy::from_build().subscriber_overload
     );
-    for own in [SubscriberOverload::Block, SubscriberOverload::Reject] {
+    for own in [
+        SubscriberOverload::Block,
+        SubscriberOverload::Reject,
+        SubscriberOverload::KeepLatest,
+    ] {
         assert_eq!(
             SubscribeOptions::default().with_overload(own).overload(),
             own

@@ -222,6 +222,28 @@ impl State {
         self.write([Some(key), Some(payload), attachment, schema], total, meta)
     }
 
+    /// Make room for a sample of `bytes` bytes by taking out the newest samples already queued,
+    /// as `keep-latest` does where `block` waits and `reject` refuses. Each one taken is lost to
+    /// the lane and counted by how it was sent, as a refusal is. It stops when the sample fits, or
+    /// when what is left is the head, which the consumer may be running. A sample that could never
+    /// fit takes nothing out: it is refused whatever the lane holds.
+    fn make_room(&mut self, bytes: usize) {
+        if !self.lane.can_ever_fit(bytes) {
+            return;
+        }
+        while matches!(
+            self.lane.fits(bytes),
+            Err(Refusal::EventsFull | Refusal::BytesFull)
+        ) {
+            let Some(index) = self.lane.evict_latest() else {
+                return;
+            };
+            if let Some(taken) = self.meta[index].take() {
+                self.lose(taken.reliability);
+            }
+        }
+    }
+
     /// A sample was lost to the lane: count it by how it was sent.
     fn lose(&mut self, reliability: Reliability) {
         match Overload::of(reliability) {
@@ -266,6 +288,9 @@ impl OffloadLane {
                     state.held.push_back(captured.held());
                     return Admission::Held;
                 }
+            }
+            if overload == SubscriberOverload::KeepLatest {
+                state.make_room(captured.total);
             }
             // `write` reserves, and a reservation that is refused counts the reason.
             match state.write(captured.slices, captured.total, captured.meta) {
