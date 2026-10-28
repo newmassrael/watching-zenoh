@@ -8,9 +8,13 @@
 //!   auto-stamping consumer borrows the node clock through.
 //! * `node_clock`: the node-scoped Hybrid Logical Clock, the per-role switch that decides whether
 //!   a node has one, and the forward-path stamp.
+//! * `clock_registry` (with `clock-source`): the clock sources an application registers, which the
+//!   node clock reads instead of the system clock.
 //!
 //! The tokio runtime re-exports both modules at the paths it has always had, and the cooperative
 //! engine hosts the same ones (`docs/advanced-pubsub-on-a-neutral-core.md`).
 
+#[cfg(feature = "clock-source")]
+pub mod clock_registry;
 pub mod node_clock;
 pub mod timestamp_source;

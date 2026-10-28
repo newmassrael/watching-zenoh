@@ -1928,6 +1928,18 @@ closes the session, which is the policy as it was before this limit. At most
 '''
 
 [[limit]]
+id = "CLOCK_SOURCES"
+kconfig = "WZ_LIMIT_CLOCK_SOURCES"
+default = 1
+help = '''
+How many clock sources an application can register with the node at once, when
+the clock-source capability is on. A node reads its time from the registered
+sources in the order they were registered, and the first that can say what time
+it is answers; with none registered it reads the system clock. 0 registers
+none, which leaves the system clock as the only source.
+'''
+
+[[limit]]
 id = "CLOCK_MAX_FORWARD_STEP_MS"
 kconfig = "WZ_LIMIT_CLOCK_MAX_FORWARD_STEP_MS"
 default = 500

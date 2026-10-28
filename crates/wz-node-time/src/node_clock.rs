@@ -301,25 +301,61 @@ impl NodeHlc {
     /// role rather than anything a per-consumer call site would have handy.
     #[cfg_attr(not(feature = "time-hlc"), allow(unused_variables))]
     pub fn for_node(zid: &[u8], whatami: WhatAmI, enabled: TimestampingEnabled) -> Self {
-        #[cfg(feature = "time-hlc")]
+        #[cfg(all(feature = "time-hlc", feature = "clock-source"))]
         {
-            let clock = enabled
-                .get(whatami)
-                .then(|| build_clock(zid, crate::timestamp_source::SystemEpoch));
-            // Upstream's shipped default; `with_drop_future_timestamp` is how a
-            // host that read the key states otherwise.
-            Self {
-                clock,
-                drop_future_timestamp: false,
-                trusted_only: matches!(
-                    wz_session_core::policy::SessionPolicy::default().clock_quality_stamping,
-                    wz_session_core::policy::ClockQualityStamping::TrustedOnly
-                ),
-            }
+            Self::over_source(
+                zid,
+                whatami,
+                enabled,
+                crate::clock_registry::RegisteredOrSystem(&crate::clock_registry::GLOBAL),
+            )
+        }
+        #[cfg(all(feature = "time-hlc", not(feature = "clock-source")))]
+        {
+            Self::over_source(zid, whatami, enabled, crate::timestamp_source::SystemEpoch)
         }
         #[cfg(not(feature = "time-hlc"))]
         {
             Self {}
+        }
+    }
+
+    /// [`for_node`](Self::for_node) reading the time from `registry` instead of the process's own:
+    /// the registered sources when there are any, the system clock when there are none. For a host
+    /// that keeps its registry elsewhere, and for a test that must not share one.
+    #[cfg(feature = "clock-source")]
+    pub fn for_node_with_registry(
+        zid: &[u8],
+        whatami: WhatAmI,
+        enabled: TimestampingEnabled,
+        registry: &'static crate::clock_registry::ClockRegistry,
+    ) -> Self {
+        Self::over_source(
+            zid,
+            whatami,
+            enabled,
+            crate::clock_registry::RegisteredOrSystem(registry),
+        )
+    }
+
+    /// The node over `source`, for the role gate `enabled` says.
+    #[cfg(feature = "time-hlc")]
+    fn over_source(
+        zid: &[u8],
+        whatami: WhatAmI,
+        enabled: TimestampingEnabled,
+        source: impl wz_session_core::epoch::EpochSource + Send + Sync + 'static,
+    ) -> Self {
+        let clock = enabled.get(whatami).then(|| build_clock(zid, source));
+        // Upstream's shipped default; `with_drop_future_timestamp` is how a
+        // host that read the key states otherwise.
+        Self {
+            clock,
+            drop_future_timestamp: false,
+            trusted_only: matches!(
+                wz_session_core::policy::SessionPolicy::default().clock_quality_stamping,
+                wz_session_core::policy::ClockQualityStamping::TrustedOnly
+            ),
         }
     }
 

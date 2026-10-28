@@ -292,6 +292,16 @@ config WZ_LIMIT_TX_EXPIRY_CLOSE_AFTER
 	  closes the session, which is the policy as it was before this limit. At most
 	  65535: a larger value counts as 65535. It is read only when that policy is on.
 
+config WZ_LIMIT_CLOCK_SOURCES
+	int "CLOCK_SOURCES"
+	default 1
+	help
+	  How many clock sources an application can register with the node at once, when
+	  the clock-source capability is on. A node reads its time from the registered
+	  sources in the order they were registered, and the first that can say what time
+	  it is answers; with none registered it reads the system clock. 0 registers
+	  none, which leaves the system clock as the only source.
+
 config WZ_LIMIT_CLOCK_MAX_FORWARD_STEP_MS
 	int "CLOCK_MAX_FORWARD_STEP_MS"
 	default 500

@@ -415,6 +415,11 @@ pub const TX_NO_PROGRESS_WINDOW_US: usize = generated::TX_NO_PROGRESS_WINDOW_US;
 /// size: it sizes no memory.
 pub const TX_EXPIRY_CLOSE_AFTER: usize = generated::TX_EXPIRY_CLOSE_AFTER;
 
+/// How many clock sources an application can register with the node at once, when `clock-source` is
+/// on (`wz_node_time::clock_registry`). `0` registers none and leaves the system clock the only
+/// source. A count of entries in a table whose rows are allocated when they are registered.
+pub const CLOCK_SOURCES: usize = generated::CLOCK_SOURCES;
+
 /// How far ahead of the node's clock, in milliseconds, a timestamp from another node may be before
 /// the hybrid logical clock ([`crate::hlc::HlcCore`]) refuses it: zenoh's `UHLC_MAX_DELTA_MS`, which
 /// is 500 unless the host states otherwise. A time and not a table size: it sizes no memory.

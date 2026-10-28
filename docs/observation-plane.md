@@ -273,7 +273,7 @@ sampler symbol.
 | Step | Builds | Done when |
 |---|---|---|
 | 1 | `HlcCore` over `EpochSource` tested against `uhlc` (done), `NodeHlc` on the core (done), `ClockQuality` machine (done: `clock_standing`, features `clock-quality` and `clock-source`), `clock-quality-stamping` and `CLOCK_MAX_FORWARD_STEP_MS` (done); `clock-source` capability and `CLOCK_SOURCES` move to step 2 | The stamp and wire tests pass on the tokio host and on the cooperative engine; slot bytes unchanged off; the `algorithm` for the comparison is generated and used by Rust. |
-| 2 | Clock registration in the C ABIs | `capi-c` ABI revision and the pico export pins updated in the same change; the drop-in leg stays green. |
+| 2 | Clock registration in the C ABIs (2a done: `wz_node_time::clock_registry` and the `CLOCK_SOURCES` limit, first registered source that can answer wins, none able means no date and no fallback to the system clock; 2b: the `wz_ext_*` doors, the `clock-source` capability in the three manifests, the wire test) | `capi-c` ABI revision and the pico export pins updated in the same change; the drop-in leg stays green. |
 | 3 | `EventRing` and the `log` sink | The model test and the concurrency check pass; off build has no symbol; the ring contract is written down and sent to SCE. |
 | 4 | Supervision machine and its checkpoints | Conformance over every event order; the cooperative engine hosts it with no task. |
 | 5 | Snapshot and its generated timer | Histogram test against the reference; admin-space and dissector read it. |

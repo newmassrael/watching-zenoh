@@ -140,6 +140,56 @@ fn the_policy_trusted_only_stamps_nothing_until_a_reference_is_reported_and_afte
     assert!(node.stamp().is_some(), "a reference back is followed again");
 }
 
+#[cfg(feature = "clock-source")]
+#[test]
+fn a_node_reads_a_source_registered_after_it_was_built_and_none_it_stamps_nothing() {
+    use crate::clock_registry::ClockRegistry;
+    let registry: &'static ClockRegistry = Box::leak(Box::new(ClockRegistry::new(2)));
+    let node = NodeHlc::for_node_with_registry(
+        &[0x05],
+        WhatAmI::Router,
+        TimestampingEnabled::default(),
+        registry,
+    );
+    assert!(
+        node.stamp().is_some(),
+        "nothing registered: the system clock"
+    );
+
+    // The application's own clock, registered after the node exists: its date is the node's. It
+    // is set ahead of the system clock because a hybrid logical clock never goes back: a source
+    // that read earlier than the stamp already made would be stamped over, not followed.
+    struct AheadEpoch;
+    impl wz_session_core::epoch::EpochSource for AheadEpoch {
+        fn try_since_epoch(
+            &self,
+        ) -> Result<wz_session_core::epoch::SinceEpoch, wz_session_core::epoch::EpochUnavailable>
+        {
+            Ok(wz_session_core::epoch::SinceEpoch {
+                secs: 4_000_000_000,
+                nanos: 0,
+            })
+        }
+    }
+    let id = registry
+        .register(Box::new(AheadEpoch))
+        .expect("room for one source");
+    let stamp = node.stamp().expect("the registered source answers");
+    assert_eq!(
+        stamp.time >> 32,
+        4_000_000_000,
+        "the stamp carries the registered clock's seconds, not the system's"
+    );
+
+    // A registered clock that does not know the date leaves the node without one.
+    registry.unregister(id);
+    registry.register(Box::new(UnsetEpoch)).expect("room");
+    assert!(
+        node.stamp().is_none(),
+        "the system clock is not the fallback of a clock the application chose"
+    );
+}
+
 #[cfg(feature = "time-hlc")]
 #[test]
 fn clones_share_one_standing() {
