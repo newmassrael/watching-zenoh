@@ -589,9 +589,11 @@ fn the_walk_from_nothing_is_the_whole_walk_and_from_a_mark_is_its_tail() {
 /// The flow carries records and no handshake, and every Frame of it repeats
 /// SN 0, which a zenoh sender never does: each Frame after the first weighs
 /// against the flow a little more than its unit weighs for it (model 2's `no`
-/// sum: a broken step, -3994 millibits, beside a unit read whole, +3858), and
-/// with a hundred and forty of them the sum is about -15 bits and the word
-/// still `undecided`. An Init of another protocol version then arrives: its
+/// sum: a broken step, -3994 millibits, beside a unit read whole, +3982), and
+/// with enough of them for the sum to be about -15 bits (the count follows
+/// from the two weights: the margin is 12 millibits a Frame, so it is more
+/// than fifteen hundred) the word is still `undecided`. An Init of another
+/// protocol version then arrives: its
 /// version header (-7545) or its unit, which does not decode (-9491), is more
 /// than the 5 bits left, the `no` sum crosses its threshold, and the word
 /// becomes `no`. That Init names no node, so nothing else a fold is
@@ -601,10 +603,21 @@ fn the_walk_from_nothing_is_the_whole_walk_and_from_a_mark_is_its_tail() {
 /// continues, and folds exactly the one message that arrived.
 #[test]
 fn a_flow_word_that_moves_begins_a_fold_that_reads_it_and_no_other() {
+    // What each Frame after the first adds to the `no` sum, and the Frames
+    // that bring it to about -15 bits from the first one's unit.
+    let unit = crate::zenoh_evidence::model::UNIT_EXPLAINED.no;
+    let step = -(unit + crate::zenoh_evidence::model::SN_BREAKS.no);
+    assert!(
+        step > 0,
+        "a Frame repeating SN 0 no longer weighs against the flow more than \
+         its unit weighs for it ({unit} against {}): this test has no flow to build",
+        crate::zenoh_evidence::model::SN_BREAKS.no
+    );
+    let frames = (15_000 + unit) / step;
     for (selector, begins) in [("zenoh == undecided", true), ("kind == put", false)] {
         let mut g = Growing::new(Dissection::new(), selector);
         g.udp(true, 40000, 7447, &declare_kexpr(7, "demo/temp"));
-        for _ in 0..138 {
+        for _ in 0..frames {
             g.udp(true, 40000, 7447, &push(sender_space(7, None), &[1u8; 12]));
         }
         g.ask("settled");

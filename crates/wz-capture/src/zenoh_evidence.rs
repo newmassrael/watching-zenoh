@@ -333,37 +333,38 @@ pub mod model {
     /// mDNS's bound, 13 of 36 units; `no`: the members' average.
     pub const UNIT_EXPLAINED: Weight = Weight {
         yes: 964,
-        no: 3_858,
+        no: 3_982,
     };
 
     /// A unit with bytes left over. Zenoh: the bound of 0 in 3594 units;
     /// `yes`: QUIC's 22 of 22; `no`: the members' average.
     pub const UNIT_RESIDUAL: Weight = Weight {
         yes: -10_229,
-        no: -8_637,
+        no: -8_860,
     };
 
     /// A unit that did not decode. Zenoh: as residual; `yes`: SSDP's 26 of
     /// 26; `no`: the members' average.
     pub const UNIT_UNDECODED: Weight = Weight {
         yes: -10_229,
-        no: -9_491,
+        no: -9_365,
     };
 
     /// A stream direction, captured from its start, that framed a unit before
     /// it lost its framing. Zenoh: one less the bound of 0 lost in 284; `yes`:
-    /// the bound of 0 held in 50, the HTTP connections that open with another
-    /// method than GET; `no`: the smoothed shares of that and MQTT, averaged.
+    /// the bound of 0 held in 48, PostgreSQL's; `no`: the smoothed shares of
+    /// the four members that lose it (MQTT, HTTP opening with another method,
+    /// Redis, PostgreSQL), averaged.
     pub const FRAMING_HELD: Weight = Weight {
-        yes: 4_089,
-        no: 6_979,
+        yes: 4_032,
+        no: 7_043,
     };
 
     /// A stream direction, captured from its start, that lost its framing
     /// before it framed a unit: bytes that are not zenoh's framing.
     pub const FRAMING_LOST: Weight = Weight {
         yes: -6_574,
-        no: -6_563,
+        no: -6_564,
     };
 
     /// The counts of `captures/corpus/` the measured weights are computed
@@ -389,7 +390,7 @@ pub mod model {
         }
 
         /// The null protocols.
-        pub const NULL: [Member; 14] = [
+        pub const NULL: [Member; 16] = [
             Member {
                 file: "lan-dns.pcap",
                 units: [26, 32, 320],
@@ -468,6 +469,19 @@ pub mod model {
                 file: "stack-http-post.pcap",
                 units: [0, 0, 0],
                 framing: [0, 50],
+            },
+            // Redis frames no unit and loses the framing of all 120 stream
+            // directions; PostgreSQL frames 531 units, every one with bytes
+            // left over, and loses 48 directions.
+            Member {
+                file: "stack-redis.pcap",
+                units: [0, 0, 0],
+                framing: [0, 120],
+            },
+            Member {
+                file: "stack-postgres.pcap",
+                units: [0, 531, 0],
+                framing: [0, 48],
             },
         ];
 

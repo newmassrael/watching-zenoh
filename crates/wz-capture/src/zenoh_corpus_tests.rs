@@ -323,6 +323,12 @@ const EXPECTED: &[(&str, Tally, Tally)] = &[
     ("stack-http.pcap", (0, 0, 34), (0, 0, 34)),
     ("stack-tls.pcap", (0, 0, 34), (0, 0, 34)),
     ("stack-http-post.pcap", (0, 0, 28), (0, 0, 28)),
+    // Stream protocols of databases (2026-10-28): neither opens with GET,
+    // HTTP or a TLS ClientHello, so the stream reader takes their first two
+    // bytes for a length prefix. No flow reads `yes`; PostgreSQL's three `no`
+    // flows carry enough residual units to say so.
+    ("stack-redis.pcap", (0, 0, 60), (0, 0, 60)),
+    ("stack-postgres.pcap", (0, 3, 21), (0, 3, 21)),
 ];
 
 #[test]

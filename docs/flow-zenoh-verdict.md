@@ -229,6 +229,20 @@ such connections (POST, PUT and HEAD, bodies up to 30000 bytes) stay
 framing before it frames a unit. That is the first framing the null side
 observed beside MQTT's, and it moves the weights of a held framing.
 
+Two database protocols reach the stream reader too, since neither opens with
+`GET `, `HTTP` or a ClientHello: Redis (RESP; 60 connections, a one-shot
+client, a pipelining one and a small benchmark) and PostgreSQL (24
+connections). Neither flow reads `yes`. Redis frames no
+unit and loses the framing of all 120 directions. PostgreSQL frames 531 units
+and every one of them has bytes left over (a residual unit), loses 48
+directions, and three of its connections carry enough of them to read `no`.
+The 531 residual units put the null side's unit share of a unit read whole
+lower, which raises that unit's `no` weight to +3982, within 12 millibits of
+a broken SN step's -3994: a flow of units that read whole and repeat an SN
+now weighs almost nothing either way, and the ordered-fold test that builds
+such a flow takes its length from the two weights and fails with a sentence
+when the margin turns positive.
+
 Still to come for step 2: further zenoh versions and links on the zenoh side.
 
 ### 6.2 Model 2: measured weights, two sums (step 3, 2026-10-26)
@@ -260,18 +274,17 @@ the weights by `model_weights_are_their_stated_probabilities`):
   samples, joined mid-session, UDP, and zenoh-pico);
 - the `yes` sum's null chance of an outcome is the largest such upper bound
   over the null protocols (a unit read whole: mDNS, 13 of 36 units, bound
-  0.51; a framing held: HTTP opening with POST, PUT or HEAD, 0 of 50
-  directions, bound 0.058);
+  0.51; a framing held: PostgreSQL, 0 of 48 directions, bound 0.060);
 - the `no` sum's is the average over the null protocols of each one's
   Jeffreys estimate, `(k + 1/2) / (n + K/2)`, a proper distribution.
 
 | outcome | `yes` sum | `no` sum | model 1 |
 |---|---|---|---|
-| unit read whole | +964 | +3858 | +2603 |
-| unit residual | -10229 | -8637 | -6745 |
-| unit undecoded | -10229 | -9491 | -7000 |
-| stream framing held | +4089 | +6979 | (none) |
-| stream framing lost | -6574 | -6563 | (none) |
+| unit read whole | +964 | +3982 | +2603 |
+| unit residual | -10229 | -8860 | -6745 |
+| unit undecoded | -10229 | -9365 | -7000 |
+| stream framing held | +4032 | +7043 | (none) |
+| stream framing lost | -6574 | -6564 | (none) |
 | cookie matched (8 bytes) | +63985 | +63985 | +63999 |
 | cookie differing | -6554 | -6554 | -10000 |
 | Inits of opposite kinds | +985 | +985 | +999 |

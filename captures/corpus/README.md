@@ -72,6 +72,8 @@ The original captures are not kept anywhere.
 | `stack-http.pcap` | other | HTTP/1.1 | python 3.12 http.server, keep-alive and short connections, containers |
 | `stack-tls.pcap` | other | TLS 1.2 and 1.3 | the same behind OpenSSL 3, containers |
 | `stack-http-post.pcap` | other | HTTP/1.1 opening with POST, PUT or HEAD | the same server, bodies up to 30000 bytes, containers |
+| `stack-redis.pcap` | other | Redis (RESP) | redis 7 server, one-shot and pipelining redis-cli and a small redis-benchmark, containers |
+| `stack-postgres.pcap` | other | PostgreSQL | postgres 16 server, psql one-shot queries, a statement script and queries returning thousands of rows, containers |
 
 ## What it does not hold yet
 
