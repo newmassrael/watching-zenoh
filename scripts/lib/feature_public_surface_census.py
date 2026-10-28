@@ -407,7 +407,11 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "links against, not a Rust path a consumer names, and that set is "
         "measured against upstream's own library. Held to `ABI_CONTRACT` "
         "below rather than to this sentence",
-        frozenset({"admin-space"}),
+        # `clock-source` gates `pub mod clock_source`, whose three public items are wz's own
+        # doors `wz_ext_clock_source_register`, `wz_ext_clock_source_unregister` and
+        # `wz_ext_clock_report`, each `#[no_mangle] extern "C"` and declared in `wz_ext.h`. Like
+        # `admin-space` it is off by default; unlike it, upstream has no name for them.
+        frozenset({"admin-space", "clock-source"}),
     ),
     "wz-codecs-test-support": (
         "a test-support crate: `publish = false`, and NO workspace library "

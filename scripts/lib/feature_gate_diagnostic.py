@@ -307,6 +307,10 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             # which imports these tables.
             "adminspace-metrics",
             "adminspace-read",
+            # `clock-source` is forwarded to `wz-node-time` (`time-hlc` and the clock registry)
+            # and gates nothing in this package: the registry is `wz-node-time`'s, which this
+            # package re-exports module by module at the paths it has always had.
+            "clock-source",
             # R2684 — `adminspace-router-linkstate` LEAVES this list, by the same
             # route R2571 records above and R2454 before it: the claim was true
             # when written and THIS round falsified it. Serving `linkstate/peers`
