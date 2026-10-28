@@ -1007,12 +1007,42 @@ impl IterationEvent<'_> {
     }
 }
 
+/// Where a receive path reports what it reads: every [`IterationEvent`], and, apart from
+/// them, the records of a frame it LENDS.
+///
+/// The two are different callees on purpose. A record is lent while the frame it lies in
+/// is still on the stack under the walk, so what answers it is on top of the receive; an
+/// event that is not a lent record (the application layer's wake, a handshake's outcome, a
+/// timer) is raised with no frame lent. A layer that sends work of its own (a query it was
+/// asked to make, a put that came due) does it in [`Self::event`] and not in
+/// [`Self::record`], and the call graph of the image says so: the walk calls `record`
+/// through this trait's own slot, so what `record` reaches is what a stack bound adds to
+/// the frame of the receive, and what only `event` reaches is not.
+///
+/// Every `FnMut(IterationEvent)` is a sink whose `record` is the in-place event, which is
+/// what the heap profile and the tests pass.
+pub trait EventSink {
+    /// One event of the session's drive loop.
+    fn event(&mut self, event: IterationEvent<'_>);
+
+    /// One record of an inbound frame, lent for the call. Defaults to the event that
+    /// carries it ([`IterationEvent::InPlace`]).
+    fn record(&mut self, record: InPlaceRecord<'_>) {
+        self.event(IterationEvent::InPlace(record));
+    }
+}
+
+impl<F: FnMut(IterationEvent<'_>) + ?Sized> EventSink for F {
+    fn event(&mut self, event: IterationEvent<'_>) {
+        self(event)
+    }
+}
+
 /// Hand one record a walk LENT ([`crate::network_message::try_for_each_record`]) to
-/// `on_event` as the in-place event that carries it
-/// ([`IterationEvent::InPlace`]), with the carrying frame's own reliability, SN and
-/// priority. The one place a lent record becomes an event, shared by the unicast
-/// receive path and the multicast one, so a Push is delivered the same whichever
-/// transport it arrived on.
+/// `sink` as the record it carries ([`EventSink::record`]), with the carrying frame's
+/// own reliability, SN and priority. The one place a lent record is handed on, shared by
+/// the unicast receive path and the multicast one, so a Push is delivered the same
+/// whichever transport it arrived on.
 ///
 /// A record the walk read and judged and no consumer reads further
 /// ([`WalkedRecord::Skipped`](crate::network_message::WalkedRecord::Skipped)) raises
@@ -1040,7 +1070,7 @@ pub(crate) fn report_lent_record(
     reliable: bool,
     sn: u64,
     priority: crate::qos::Priority,
-    on_event: &mut dyn FnMut(IterationEvent<'_>),
+    sink: &mut dyn EventSink,
 ) {
     use crate::network_message::WalkedRecord;
     match one {
@@ -1048,29 +1078,29 @@ pub(crate) fn report_lent_record(
         #[cfg(feature = "alloc")]
         WalkedRecord::Owned(_) => {}
         #[cfg(feature = "codec-push")]
-        WalkedRecord::Push(push) => on_event(IterationEvent::InPlace(
-            InPlaceRecord::push_of_frame(push, reliable, sn, priority),
-        )),
+        WalkedRecord::Push(push) => {
+            sink.record(InPlaceRecord::push_of_frame(push, reliable, sn, priority))
+        }
         #[cfg(feature = "codec-request")]
-        WalkedRecord::Request(request) => on_event(IterationEvent::InPlace(
-            InPlaceRecord::request_of_frame(request, reliable, sn, priority),
+        WalkedRecord::Request(request) => sink.record(InPlaceRecord::request_of_frame(
+            request, reliable, sn, priority,
         )),
         #[cfg(feature = "codec-response")]
-        WalkedRecord::Response(response) => on_event(IterationEvent::InPlace(
-            InPlaceRecord::response_of_frame(response, reliable, sn, priority),
+        WalkedRecord::Response(response) => sink.record(InPlaceRecord::response_of_frame(
+            response, reliable, sn, priority,
         )),
         // The slot profile's control records, lent as the data records are.
         #[cfg(all(feature = "session-slot", feature = "codec-declare"))]
-        WalkedRecord::Declare(declare) => on_event(IterationEvent::InPlace(
-            InPlaceRecord::declare_of_frame(declare, reliable, sn, priority),
+        WalkedRecord::Declare(declare) => sink.record(InPlaceRecord::declare_of_frame(
+            declare, reliable, sn, priority,
         )),
         #[cfg(all(feature = "session-slot", feature = "codec-response-final"))]
-        WalkedRecord::ResponseFinal(response_final) => on_event(IterationEvent::InPlace(
+        WalkedRecord::ResponseFinal(response_final) => sink.record(
             InPlaceRecord::response_final_of_frame(response_final, reliable, sn, priority),
-        )),
+        ),
         #[cfg(feature = "session-slot")]
-        WalkedRecord::Interest(interest) => on_event(IterationEvent::InPlace(
-            InPlaceRecord::interest_of_frame(interest, reliable, sn, priority),
+        WalkedRecord::Interest(interest) => sink.record(InPlaceRecord::interest_of_frame(
+            interest, reliable, sn, priority,
         )),
         // Read and judged, and nothing reads it further: no event, and the walk
         // counts it as a record dispatched.
@@ -1103,7 +1133,7 @@ pub(crate) fn walk_lent_payload(
     reliable: bool,
     sn: u64,
     priority: crate::qos::Priority,
-    on_event: &mut dyn FnMut(IterationEvent<'_>),
+    on_event: &mut dyn EventSink,
 ) -> Result<(), crate::parse_error::InboundParseError> {
     use crate::network_message::{new_record_buf, try_for_each_record, RecordForm};
     let mut record = new_record_buf();
@@ -1115,7 +1145,7 @@ pub(crate) fn walk_lent_payload(
     })?;
     if !dispatched {
         #[cfg(feature = "alloc")]
-        on_event(IterationEvent::Poll(&DriverLoopOutcome::FramePayload {
+        on_event.event(IterationEvent::Poll(&DriverLoopOutcome::FramePayload {
             reliable,
             sn,
             messages: alloc::vec::Vec::new(),
@@ -1124,7 +1154,7 @@ pub(crate) fn walk_lent_payload(
             priority,
         }));
         #[cfg(not(feature = "alloc"))]
-        on_event(IterationEvent::Poll(&DriverLoopOutcome::EmptyFrame {
+        on_event.event(IterationEvent::Poll(&DriverLoopOutcome::EmptyFrame {
             reliable,
             sn,
             priority,

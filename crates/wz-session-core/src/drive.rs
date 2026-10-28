@@ -1405,7 +1405,7 @@ pub fn dispatch_datagram<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
     engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
     record: &mut crate::network_message::RecordBuf,
-    on_event: &mut dyn FnMut(crate::driver_loop::IterationEvent<'_>),
+    on_event: &mut dyn crate::driver_loop::EventSink,
 ) -> DatagramPath {
     let (path, used) = dispatch_datagram_unit(unit, actions, engine, record, on_event);
     // A datagram that holds more than one message: the heap profile parks what
@@ -1436,7 +1436,7 @@ fn dispatch_datagram_unit<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
     engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
     record: &mut crate::network_message::RecordBuf,
-    on_event: &mut dyn FnMut(crate::driver_loop::IterationEvent<'_>),
+    on_event: &mut dyn crate::driver_loop::EventSink,
 ) -> (DatagramPath, usize) {
     match in_place_unit(unit, actions, false) {
         Ok(InPlaceUnit::Frame(head, payload_at)) => (
@@ -1499,7 +1499,7 @@ pub fn dispatch_datagram_reassembling<R, T, const SLOTS: usize, const CAP: usize
     record: &mut crate::network_message::RecordBuf,
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
     now_ms: u64,
-    on_event: &mut dyn FnMut(IterationEvent<'_>),
+    on_event: &mut dyn crate::driver_loop::EventSink,
 ) -> DatagramPath
 where
     R: SessionRuntime,
@@ -1541,7 +1541,7 @@ fn dispatch_datagram_reassembling_unit<R, T, const SLOTS: usize, const CAP: usiz
     record: &mut crate::network_message::RecordBuf,
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
     now_ms: u64,
-    on_event: &mut dyn FnMut(IterationEvent<'_>),
+    on_event: &mut dyn crate::driver_loop::EventSink,
 ) -> (DatagramPath, usize)
 where
     R: SessionRuntime,
@@ -1589,24 +1589,67 @@ where
 }
 
 /// `on_event` with every `Poll` passed through [`report_outcome_reassembling`]
-/// on its way, as the copying loop reports its outcomes.
+/// on its way, as the copying loop reports its outcomes. A lent record is not an outcome
+/// and goes to `on_event`'s `record` as it is.
 #[cfg(feature = "reassembly")]
-fn through_hand_off<'a, R, T, const SLOTS: usize, const CAP: usize, S>(
-    reasm: &'a mut ReassemblyDispatcher<SLOTS, CAP, S>,
-    actions: &'a SessionLinkActions<R, T>,
-    now_ms: u64,
-    on_event: &'a mut dyn FnMut(IterationEvent<'_>),
-) -> impl FnMut(IterationEvent<'_>) + 'a
+struct HandOff<'a, R, T, const SLOTS: usize, const CAP: usize, S>
 where
     R: SessionRuntime,
     T: TimeSource,
     S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
 {
-    move |event: IterationEvent<'_>| match event {
-        IterationEvent::Poll(outcome) => {
-            report_outcome_reassembling(outcome, reasm, actions, now_ms, &mut *on_event)
+    reasm: &'a mut ReassemblyDispatcher<SLOTS, CAP, S>,
+    actions: &'a SessionLinkActions<R, T>,
+    now_ms: u64,
+    on_event: &'a mut dyn crate::driver_loop::EventSink,
+}
+
+#[cfg(feature = "reassembly")]
+impl<R, T, const SLOTS: usize, const CAP: usize, S> crate::driver_loop::EventSink
+    for HandOff<'_, R, T, SLOTS, CAP, S>
+where
+    R: SessionRuntime,
+    T: TimeSource,
+    S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
+{
+    fn event(&mut self, event: IterationEvent<'_>) {
+        match event {
+            IterationEvent::Poll(outcome) => {
+                let on_event = &mut *self.on_event;
+                report_outcome_reassembling(
+                    outcome,
+                    self.reasm,
+                    self.actions,
+                    self.now_ms,
+                    &mut |event: IterationEvent<'_>| on_event.event(event),
+                )
+            }
+            other => self.on_event.event(other),
         }
-        other => on_event(other),
+    }
+
+    fn record(&mut self, record: crate::driver_loop::InPlaceRecord<'_>) {
+        self.on_event.record(record);
+    }
+}
+
+#[cfg(feature = "reassembly")]
+fn through_hand_off<'a, R, T, const SLOTS: usize, const CAP: usize, S>(
+    reasm: &'a mut ReassemblyDispatcher<SLOTS, CAP, S>,
+    actions: &'a SessionLinkActions<R, T>,
+    now_ms: u64,
+    on_event: &'a mut dyn crate::driver_loop::EventSink,
+) -> HandOff<'a, R, T, SLOTS, CAP, S>
+where
+    R: SessionRuntime,
+    T: TimeSource,
+    S: crate::chain_staging::ChainStaging<SLOTS, CAP>,
+{
+    HandOff {
+        reasm,
+        actions,
+        now_ms,
+        on_event,
     }
 }
 
@@ -1623,7 +1666,7 @@ fn dispatch_copied<R: SessionRuntime, T: TimeSource>(
     reason: CopyReason,
     actions: &SessionLinkActions<R, T>,
     engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
-    on_event: &mut dyn FnMut(crate::driver_loop::IterationEvent<'_>),
+    on_event: &mut dyn crate::driver_loop::EventSink,
 ) -> (DatagramPath, usize) {
     // Fixed-memory step S5 — under `session-slot` a handshake, a KeepAlive or a
     // Close is dispatched where the link holds it, by the copying path's own
@@ -1637,7 +1680,7 @@ fn dispatch_copied<R: SessionRuntime, T: TimeSource>(
     if matches!(reason, CopyReason::NotAFrame) {
         account_bytes_in_place(unit, actions);
         let outcome = dispatch_unit_borrowed(unit, actions, engine);
-        on_event(crate::driver_loop::IterationEvent::Poll(&outcome));
+        on_event.event(crate::driver_loop::IterationEvent::Poll(&outcome));
         return (DatagramPath::Copied(reason), unit.len());
     }
     // A build with no allocator has no copying path: whatever the reason the unit
@@ -1652,13 +1695,13 @@ fn dispatch_copied<R: SessionRuntime, T: TimeSource>(
         account_bytes_in_place(unit, actions);
         let mut consumed = unit.len();
         let outcome = dispatch_unit_borrowed(unit, &mut consumed, actions, engine);
-        on_event(crate::driver_loop::IterationEvent::Poll(&outcome));
+        on_event.event(crate::driver_loop::IterationEvent::Poll(&outcome));
         (DatagramPath::Copied(reason), consumed)
     }
     #[cfg(feature = "alloc")]
     {
         let frame = crate::link::RxFrame::new(alloc::vec::Vec::from(unit));
-        on_event(crate::driver_loop::IterationEvent::Poll(
+        on_event.event(crate::driver_loop::IterationEvent::Poll(
             &dispatch_link_event(LinkEvent::Rx(frame), actions, engine),
         ));
         (DatagramPath::Copied(reason), unit.len())
@@ -1713,7 +1756,7 @@ fn lean_in_place<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
     engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
     record: &mut crate::network_message::RecordBuf,
-    on_event: &mut dyn FnMut(crate::driver_loop::IterationEvent<'_>),
+    on_event: &mut dyn crate::driver_loop::EventSink,
 ) -> DatagramPath {
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
     account_bytes_in_place(unit, actions);
@@ -1744,7 +1787,7 @@ fn lean_in_place<R: SessionRuntime, T: TimeSource>(
         Ok(()) => {}
         Err(parse_err) => {
             engine.process_event(E::FramingError);
-            on_event(crate::driver_loop::IterationEvent::Poll(
+            on_event.event(crate::driver_loop::IterationEvent::Poll(
                 &DriverLoopOutcome::ParseError(parse_err),
             ));
         }
@@ -1761,7 +1804,7 @@ fn frame_in_place<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
     engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
     record: &mut crate::network_message::RecordBuf,
-    on_event: &mut dyn FnMut(crate::driver_loop::IterationEvent<'_>),
+    on_event: &mut dyn crate::driver_loop::EventSink,
 ) -> DatagramPath {
     use crate::driver_loop::IterationEvent;
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
@@ -1780,7 +1823,7 @@ fn frame_in_place<R: SessionRuntime, T: TimeSource>(
     #[cfg(not(feature = "alloc"))]
     let _ = chain;
     if let Some(refused) = refuse_frame(actions, engine, priority, reliable, sn) {
-        on_event(IterationEvent::Poll(&refused));
+        on_event.event(IterationEvent::Poll(&refused));
         return DatagramPath::InPlace;
     }
     let carrier = RecordCarrier {
@@ -1805,7 +1848,7 @@ fn frame_in_place<R: SessionRuntime, T: TimeSource>(
     );
     if let Err(parse_err) = walked {
         engine.process_event(E::FramingError);
-        on_event(IterationEvent::Poll(&DriverLoopOutcome::ParseError(
+        on_event.event(IterationEvent::Poll(&DriverLoopOutcome::ParseError(
             parse_err,
         )));
     }
@@ -1922,7 +1965,7 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
     source: RecordSource,
     actions: &SessionLinkActions<R, T>,
     record: &mut crate::network_message::RecordBuf,
-    on_event: &mut dyn FnMut(crate::driver_loop::IterationEvent<'_>),
+    on_event: &mut dyn crate::driver_loop::EventSink,
 ) -> Result<(), crate::parse_error::InboundParseError> {
     use crate::driver_loop::IterationEvent;
     #[cfg(feature = "alloc")]
@@ -1999,7 +2042,7 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
                 if source == RecordSource::Reassembled {
                     actions.apply_namespace_ingress(outcome);
                 }
-                on_event(IterationEvent::Poll(outcome));
+                on_event.event(IterationEvent::Poll(outcome));
                 if let DriverLoopOutcome::FramePayload { messages, .. } = outcome {
                     take_record_back(messages, one);
                 }
@@ -2019,11 +2062,11 @@ fn walk_records_in_place<R: SessionRuntime, T: TimeSource>(
     })?;
     if !dispatched {
         #[cfg(feature = "alloc")]
-        on_event(IterationEvent::Poll(&empty(extensions()?)));
+        on_event.event(IterationEvent::Poll(&empty(extensions()?)));
         // A frame with no record to deliver is a frame the session read and has
         // nothing to hand on; the heap profile's empty batch, without the batch.
         #[cfg(not(feature = "alloc"))]
-        on_event(IterationEvent::Poll(&DriverLoopOutcome::EmptyFrame {
+        on_event.event(IterationEvent::Poll(&DriverLoopOutcome::EmptyFrame {
             reliable,
             sn,
             priority,
@@ -2045,7 +2088,7 @@ fn fragment_in_place<R, T, const SLOTS: usize, const CAP: usize, S>(
     record: &mut crate::network_message::RecordBuf,
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S>,
     now_ms: u64,
-    on_event: &mut dyn FnMut(IterationEvent<'_>),
+    on_event: &mut dyn crate::driver_loop::EventSink,
 ) -> DatagramPath
 where
     R: SessionRuntime,
@@ -2066,10 +2109,12 @@ where
     // The copying `Fragment` arm's two gates, in its order; an SN rejection
     // reaches the hand-off, which clears the channel's chain.
     if let Some(refused) = refuse_frame(actions, engine, priority, reliable, sn) {
-        report_outcome_reassembling(&refused, reasm, actions, now_ms, &mut *on_event);
+        report_outcome_reassembling(&refused, reasm, actions, now_ms, &mut |event| {
+            on_event.event(event)
+        });
         return DatagramPath::FragmentInPlace;
     }
-    on_event(IterationEvent::InPlaceFragment(
+    on_event.event(IterationEvent::InPlaceFragment(
         crate::driver_loop::InPlaceFragment::new(
             unit, payload_at, reliable, sn, more, has_ext, priority, markers,
         ),
@@ -2130,12 +2175,12 @@ where
     // A reassembled message that does not decode is reported and dropped; the
     // session goes on, as on the copying path.
     if let Some(parse_err) = dropped_by_decode {
-        on_event(IterationEvent::Poll(&DriverLoopOutcome::ParseError(
+        on_event.event(IterationEvent::Poll(&DriverLoopOutcome::ParseError(
             parse_err,
         )));
     }
     if let Some(reason) = ReassemblyDropReason::from_ingest(ingest_outcome) {
-        on_event(IterationEvent::ReassemblyDropped(reason));
+        on_event.event(IterationEvent::ReassemblyDropped(reason));
     }
     DatagramPath::FragmentInPlace
 }

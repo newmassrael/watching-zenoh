@@ -37,6 +37,8 @@ use core::ops::Deref;
 
 #[cfg(any(feature = "alloc", feature = "session-slot"))]
 use wz_runtime_coop::{ClockSource, CoopRuntime, CoopTime};
+#[cfg(feature = "session-slot")]
+use wz_session_core::driver_loop::InPlaceRecord;
 #[cfg(any(feature = "alloc", feature = "session-slot"))]
 use wz_session_core::driver_loop::IterationEvent;
 #[cfg(any(feature = "alloc", feature = "session-slot"))]
@@ -185,6 +187,19 @@ impl<K: ObserverSinks> Default for SlotApp<K> {
 pub trait SessionEvents {
     /// One iteration of the session's drive loop.
     fn on_event(&mut self, event: IterationEvent<'_>);
+
+    /// One record of an inbound frame, lent for the call: what the receive hands over while the
+    /// frame still lies on the stack under it.
+    ///
+    /// A layer answers a record beside it, in place, and does nothing else here. What it sends
+    /// of its own (a query it was asked to make, a put that came due) it sends in
+    /// [`Self::on_event`], on the turn's own events, so that the frame of the receive and the
+    /// frame of that send are never on the stack together. Defaults to [`Self::on_event`] with
+    /// the event that carries the record, which is right for a layer that sends nothing of its
+    /// own.
+    fn on_record(&mut self, record: InPlaceRecord<'_>) {
+        self.on_event(IterationEvent::InPlace(record));
+    }
 }
 
 /// The application layer of one session on the slot profile: each iteration's event
@@ -235,6 +250,16 @@ where
             handle,
             requesters,
         }
+    }
+
+    /// Ask the drive loop to raise [`IterationEvent::AppWake`] at the top of its next step.
+    ///
+    /// For a layer that has something to send and was called on a record the receive lent: it
+    /// leaves the work to the turn's own event, before the next datagram is read and with no
+    /// frame lent. Replaces the layer's stated deadline, which the layer states again on that
+    /// event.
+    pub fn wake_now(&self) {
+        self.handle.set_app_wake_deadline_ms(Some(0));
     }
 }
 

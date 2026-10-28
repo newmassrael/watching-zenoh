@@ -40,7 +40,7 @@ use wz_runtime_coop::session_drive::{
 use wz_runtime_coop::session_runtime::{new_session_in_slot, SessionHandle};
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
 use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
-use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
+use wz_session_core::driver_loop::{DriverOutcome, EventSink};
 use wz_session_core::entropy::EntropySource;
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::session_init_params::SessionInitParams;
@@ -157,7 +157,7 @@ where
         on_event: impl FnOnce(&SessionHandle<C, T::Driver>) -> F,
     ) -> Result<OpenedSession<C, T::Driver>, OpenRefused>
     where
-        F: FnMut(IterationEvent<'_>) + 'static,
+        F: EventSink + 'static,
     {
         let runtime = self.local.runtime();
         let Ok(claim) = self.sessions.claim(driver, entropy) else {
@@ -204,7 +204,7 @@ where
         on_event: impl FnOnce(&SessionHandle<C, T::Driver>) -> F,
     ) -> Result<OpenedSession<C, T::Driver>, DialRefused>
     where
-        F: FnMut(IterationEvent<'_>) + 'static,
+        F: EventSink + 'static,
     {
         let driver = bind().map_err(DialRefused::Link)?;
         let opened = self

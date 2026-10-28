@@ -128,7 +128,7 @@ fn next_datagram_after_the_init_ack(
                 role: SessionRole::Initiator,
                 max_iters: None,
             },
-            |_| |_| {},
+            |_| |_: wz_session_core::driver_loop::IterationEvent<'_>| {},
         )
         .expect("the host has a socket, a slot, a pump cell and a task cell");
 

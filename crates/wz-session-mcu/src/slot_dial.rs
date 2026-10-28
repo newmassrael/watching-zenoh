@@ -22,7 +22,7 @@ use wz_runtime_coop::session_drive::{SessionDriveConfig, SessionRole, SlotStack}
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle};
 use wz_session_core::close_reason::CloseReason;
-use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
+use wz_session_core::driver_loop::{DriverOutcome, EventSink, InPlaceRecord, IterationEvent};
 use wz_session_core::entropy::EntropySource;
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::replay_cursor::ReplayCursor;
@@ -72,19 +72,33 @@ pub trait SessionFactory<
     fn events(&mut self, handle: &SessionHandle<C, D>) -> Self::Events;
 }
 
-/// The `on_event` closure a session driver takes, over the factory's application layer for the
-/// session `handle` names.
-pub fn events_of<C, D, F>(
-    factory: &RefCell<F>,
-    handle: &SessionHandle<C, D>,
-) -> impl FnMut(IterationEvent<'_>) + 'static
+/// What a session driver reports to, over an application layer: the layer's `on_event` for
+/// every event, and its `on_record` for a record the receive lends.
+///
+/// A struct and not a closure, so that the driver's two callees stay two: a closure has one
+/// body, and the call graph of an image could not tell what a lent record reaches from what
+/// the turn's own events do (`wz_session_core::driver_loop::EventSink`).
+pub struct EventsOf<E>(E);
+
+impl<E: SessionEvents> EventSink for EventsOf<E> {
+    fn event(&mut self, event: IterationEvent<'_>) {
+        self.0.on_event(event);
+    }
+
+    fn record(&mut self, record: InPlaceRecord<'_>) {
+        self.0.on_record(record);
+    }
+}
+
+/// The sink a session driver takes, over the factory's application layer for the session
+/// `handle` names.
+pub fn events_of<C, D, F>(factory: &RefCell<F>, handle: &SessionHandle<C, D>) -> EventsOf<F::Events>
 where
     C: ClockSource + 'static,
     D: BoxedLinkDriver + ?Sized + 'static,
     F: SessionFactory<C, D>,
 {
-    let mut events = factory.borrow_mut().events(handle);
-    move |event| events.on_event(event)
+    EventsOf(factory.borrow_mut().events(handle))
 }
 
 /// A session a node holds, with what the node remembers about it.

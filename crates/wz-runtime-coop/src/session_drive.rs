@@ -63,7 +63,7 @@ use wz_session_core::drive::{check_keepalive_deadline, keepalive_wake_deadline};
 use wz_session_core::drive::{check_lease_deadline, lease_wake_deadline, new_session_engine_in};
 #[cfg(feature = "rx-in-place")]
 use wz_session_core::drive::{CopyReason, DatagramPath};
-use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
+use wz_session_core::driver_loop::{DriverOutcome, EventSink, IterationEvent};
 use wz_session_core::link::BoxedLinkDriver;
 #[cfg(all(not(feature = "rx-in-place"), feature = "alloc"))]
 use wz_session_core::link::LinkEvent;
@@ -945,7 +945,7 @@ impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'stat
     /// is precisely the inversion [`CoopLocalSet`] exists to remove.
     pub fn step<F>(&mut self, on_event: &mut F) -> Option<DriverOutcome>
     where
-        F: FnMut(IterationEvent<'_>),
+        F: EventSink,
     {
         // The role's activation, deferred from the pump's making (`session-slot`).
         #[cfg(feature = "session-slot")]
@@ -984,14 +984,14 @@ impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'stat
         // so. Raised before the inbound datagram is read and without ending the step, so a stream
         // of datagrams cannot hold it off and it does not cost one.
         if self.actions.take_app_wake_due(now_ms) {
-            on_event(IterationEvent::AppWake);
+            on_event.event(IterationEvent::AppWake);
         }
         // Sweep expired reassembly chains and surface the eviction count as
         // an `IterationEvent::ReassemblyTimeout` (the shared SSOT — the AP
         // loop calls the same primitive). A stalled chain whose continuation
         // never arrives is reclaimed here once `now_ms` crosses its deadline.
         #[cfg(feature = "reassembly")]
-        sweep_reporting(&mut self.reasm, now_ms, &mut *on_event);
+        sweep_reporting(&mut self.reasm, now_ms, &mut |event| on_event.event(event));
 
         // R311y632 (§17) — the parked remainder of the LAST unit first. A unit
         // is a batch, and `try_recv` below would otherwise hold the second
@@ -1006,10 +1006,10 @@ impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'stat
                 &mut self.reasm,
                 &self.actions,
                 now_ms,
-                &mut *on_event,
+                &mut |event| on_event.event(event),
             );
             #[cfg(not(feature = "reassembly"))]
-            on_event(IterationEvent::Poll(&outcome));
+            on_event.event(IterationEvent::Poll(&outcome));
             return None;
         }
 
@@ -1067,10 +1067,10 @@ impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'stat
                 &mut self.reasm,
                 &self.actions,
                 now_ms,
-                &mut *on_event,
+                &mut |event| on_event.event(event),
             );
             #[cfg(not(feature = "reassembly"))]
-            on_event(IterationEvent::Poll(&outcome));
+            on_event.event(IterationEvent::Poll(&outcome));
             return None;
         }
 
@@ -1079,7 +1079,7 @@ impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'stat
         // been read. The next step finds the engine final.
         if let Some(cause) = self.link.lost() {
             let outcome = wz_session_core::drive::dispatch_link_lost(&mut self.engine, cause);
-            on_event(IterationEvent::Poll(&outcome));
+            on_event.event(IterationEvent::Poll(&outcome));
             return None;
         }
 
@@ -1105,7 +1105,7 @@ impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'stat
                     None => {
                         let lease_outcome =
                             check_lease_deadline(&self.actions, &mut self.engine, now_ms);
-                        on_event(IterationEvent::Lease(lease_outcome));
+                        on_event.event(IterationEvent::Lease(lease_outcome));
                     }
                     Some(event) => {
                         self.engine.process_event(event);
@@ -1125,7 +1125,7 @@ impl<C: ClockSource, L: SessionDatagramLink, D: BoxedLinkDriver + ?Sized + 'stat
         if let Some(ka_deadline_ms) = keepalive_wake_deadline(&self.actions) {
             if now_ms >= ka_deadline_ms {
                 let ka_outcome = check_keepalive_deadline(&self.actions, now_ms);
-                on_event(IterationEvent::KeepAlive(ka_outcome));
+                on_event.event(IterationEvent::KeepAlive(ka_outcome));
             }
         }
 
@@ -1566,7 +1566,7 @@ where
     C: ClockSource,
     L: SessionDatagramLink + 'static,
     D: BoxedLinkDriver + ?Sized + 'static,
-    F: FnMut(IterationEvent<'_>),
+    F: EventSink,
 {
     loop {
         if let Some(outcome) = pump.step(&mut on_event) {
@@ -1590,7 +1590,7 @@ where
     C: ClockSource + 'static,
     L: SessionDatagramLink + 'static,
     D: BoxedLinkDriver + ?Sized + 'static,
-    F: FnMut(IterationEvent<'_>) + 'static,
+    F: EventSink + 'static,
 {
     local
         .spawn_local(pump_task(pump, on_event))
@@ -1614,6 +1614,7 @@ mod wake_budget_tests {
     use wz_session_core::session_timeouts::SessionTimeouts;
     use wz_session_core::signing_key::SigningKey;
 
+    #[cfg(feature = "session-unicast-accept")]
     use wz_session_core::driver_loop::DriverLoopOutcome;
 
     use crate::session_runtime::new_session_actions;
@@ -1709,7 +1710,7 @@ mod wake_budget_tests {
             max_iters: None,
         };
         let mut pump = SessionPump::new(runtime, link.clone(), actions, clock, config);
-        let _ = pump.step(&mut |_event| {});
+        let _ = pump.step(&mut |_event: IterationEvent<'_>| {});
         let waited = *link.budgets.borrow().last().expect("the link was serviced");
         waited
     }
@@ -1731,7 +1732,7 @@ mod wake_budget_tests {
         };
         let mut pump = SessionPump::new(runtime, link, actions.clone(), clock, config);
         let mut wakes = 0;
-        let _ = pump.step(&mut |event| {
+        let _ = pump.step(&mut |event: IterationEvent<'_>| {
             if matches!(event, IterationEvent::AppWake) {
                 wakes += 1;
             }
@@ -1752,6 +1753,10 @@ mod wake_budget_tests {
 
     /// A stream whose peer closed it: the loop tells the session, which ends, and the pump stops
     /// on the next step. A link that is not gone raises nothing of the kind.
+    ///
+    /// The session is an acceptor's, whose machine is compiled only with the accept path: without
+    /// it the role has no activation and a lost link ends nothing.
+    #[cfg(feature = "session-unicast-accept")]
     #[test]
     fn a_link_that_is_gone_ends_its_session() {
         let runtime = CoopRuntime::new(Stopped);

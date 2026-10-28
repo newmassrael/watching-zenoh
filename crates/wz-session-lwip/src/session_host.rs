@@ -22,7 +22,7 @@ use wz_runtime_coop::session_drive::{IpEndpoint, PumpSlots, SessionDriveConfig};
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime};
 use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
-use wz_session_core::driver_loop::IterationEvent;
+use wz_session_core::driver_loop::EventSink;
 use wz_session_core::entropy::EntropySource;
 use wz_session_core::session_init_params::SessionInitParams;
 use wz_session_core::session_slot::SessionSlots;
@@ -150,7 +150,7 @@ where
         on_event: impl FnOnce(&SessionHandle<C, LwipUdpDriver>) -> F,
     ) -> Result<OpenedSession<C, LwipUdpDriver>, OpenRefused>
     where
-        F: FnMut(IterationEvent<'_>) + 'static,
+        F: EventSink + 'static,
     {
         let Admission { driver, lane } = admission;
         self.host
@@ -171,7 +171,7 @@ where
         on_event: impl FnOnce(&SessionHandle<C, LwipUdpDriver>) -> F,
     ) -> Result<OpenedSession<C, LwipUdpDriver>, DialRefused>
     where
-        F: FnMut(IterationEvent<'_>) + 'static,
+        F: EventSink + 'static,
     {
         let DialTarget { peer, expected_zid } = target;
         self.host.dial(

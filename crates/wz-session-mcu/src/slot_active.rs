@@ -31,7 +31,7 @@
 
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::ClockSource;
-use wz_session_core::driver_loop::IterationEvent;
+use wz_session_core::driver_loop::{InPlaceRecord, IterationEvent};
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::send_wire_error::SendWireError;
 use wz_session_core::slot_observer::{ObserverCell, Requesters};
@@ -180,6 +180,17 @@ impl<
                 .flatten()
                 .min(),
         );
+    }
+
+    /// Answers the record beside it and sends nothing: the record lies on the receive, and a
+    /// put or a query written now would be on top of it. What is due is left to the next
+    /// `AppWake`, raised at the top of the drive loop's next step, which polls and states the
+    /// layer's deadlines again.
+    fn on_record(&mut self, record: InPlaceRecord<'_>) {
+        self.inner.on_record(record);
+        if P != 0 || Q != 0 || R != 0 {
+            self.inner.wake_now();
+        }
     }
 }
 

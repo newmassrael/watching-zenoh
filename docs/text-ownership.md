@@ -90,6 +90,16 @@ carries about 6 KB of C library code wz does not, which is why the difference is
   fell 48 bytes. The worst chain read by `stack_frame_gate.py` fell 5,512 to 5,480 (fixed) and
   5,520 to 5,480 (batching); it is a reading, not a bound: it follows direct calls only, so a callee
   behind a register call is not on it (the connect manager's trait object above hid one in `ask`).
+- TAKEN: the receive's records handed to their own callee. The receive path reported everything to one
+  `FnMut(IterationEvent)`, the record a frame lends included, so a layer that sent a query or a put of
+  its own did it on top of the frame it was handed. `EventSink` has two methods now: `event` for the
+  turn's own events and `record` for a lent record. The layers answer a record beside it and send what
+  they own on `event` only, after asking the loop to wake (`AppWake`, raised before the next datagram
+  is read). A call graph tells the two apart because they are two slots of one trait object. The
+  fixed image fell 568 bytes of text (wz_runtime_coop 796 of them), the batching image's total did
+  not move, the get image's grew 72. The get image's worst chain by the register-call reading fell
+  7,640 to 6,768 bytes, inside the 6,912 of the 75 percent rule; the fixed and batching images stay at
+  6,216.
 - NOT TAKEN, measured: taking `judge_ext_chain`'s two helpers out of line (7 instances) moved the
   text by +16 bytes; the link-time optimizer already shares them.
 - `wz_session_core` is a long tail (525 symbols in a build without LTO, none over 1.6 KB) and the

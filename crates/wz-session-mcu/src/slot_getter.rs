@@ -497,6 +497,41 @@ where
 {
     fn on_event(&mut self, event: wz_session_core::driver_loop::IterationEvent<'_>) {
         self.inner.on_event(event);
+        self.ask_due();
+    }
+
+    /// Answers the record beside it and asks nothing: the record lies on the receive, and the
+    /// request would be written on top of it. A query that is due is left to the next
+    /// `AppWake`, which the drive loop raises at the top of its next step.
+    fn on_record(&mut self, record: wz_session_core::driver_loop::InPlaceRecord<'_>) {
+        self.inner.on_record(record);
+        if self.ask_pending() {
+            self.inner.wake_now();
+        }
+    }
+}
+
+impl<C, K, D, const SAMPLES: usize, const INFLIGHT: usize, const ROWS: usize>
+    GetterEvents<C, K, SAMPLES, INFLIGHT, ROWS, D>
+where
+    C: ClockSource + Default + 'static,
+    K: ObserverSinks + 'static,
+    D: BoxedLinkDriver + ?Sized + 'static,
+{
+    /// Whether a query waits for a turn that can send it: one left in the mailbox, or a place
+    /// free on a session that can send.
+    fn ask_pending(&self) -> bool {
+        let plan = self.plan;
+        if plan.uses_mailbox() {
+            plan.mailbox.waiting() > 0
+        } else {
+            self.inner.is_established() && plan.free_slot().is_some()
+        }
+    }
+
+    /// Ask what is due: what the main loop left in the mailbox, or, with none, a query for every
+    /// free place while the session can send.
+    fn ask_due(&mut self) {
         let plan = self.plan;
         if plan.uses_mailbox() {
             // What the main loop left; it also wakes the loop when it leaves something.
