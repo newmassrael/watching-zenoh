@@ -3,11 +3,11 @@
   "schema": 1,
   "images": {
     "zephyr-client-fixed": {
-      "text_bytes": 174100,
+      "text_bytes": 171692,
       "text_tolerance_bytes": 1024,
       "owner_tolerance_bytes": 1024,
       "owners": {
-        "wz_session_core": 41602,
+        "wz_session_core": 41548,
         "c:net_": 20590,
         "c:wz_": 10536,
         "c:z_": 10028,
@@ -18,12 +18,11 @@
         "c:__": 7074,
         "wz_runtime_coop": 6068,
         "c:zsock": 5532,
-        "(no symbol)": 4659,
         "c:Cy": 4486,
+        "(no symbol)": 4469,
         "c:": 3568,
         "c:other": 2975,
         "c:sys_": 2360,
-        "keccak": 2164,
         "c:cyhal": 1862,
         "core": 1784,
         "compiler_builtins": 1642,
@@ -43,15 +42,15 @@
         "c:update": 544,
         "c:route": 514
       },
-      "measured": "2026-10-28, scripts/kit-lane.sh build on the parity tree at origin's round 3818 (the answer path, the Declare dispatch). The first reading of the owners, from the compare build of run 20261028T005644 (text 176,352), put the single-threaded zenoh-pico image's own code at about 55 KB against about 92 KB of wz's own (wz_session_core, c:wz_, wz_session_mcu, wz_codecs, sce_rust_runtime, wz_runtime_coop, keccak, core, compiler_builtins, wz_runtime_zephyr); the platform (the Zephyr network stack, the board's drivers, the toolchain) is the same size in both. `keccak` is the SHAKE128 permutation of the initial sequence number's derivation (src/initial_sn.rs), which zenoh-pico does not carry.",
+      "measured": "2026-10-28, scripts/kit-lane.sh build on the parity tree at origin's round 3820. The first reading of the owners, from the compare build of run 20261028T005644 (text 176,352), put the single-threaded zenoh-pico image's own code at about 55 KB against about 92 KB of wz's own (wz_session_core, c:wz_, wz_session_mcu, wz_codecs, sce_rust_runtime, wz_runtime_coop, keccak, core, compiler_builtins, wz_runtime_zephyr); the platform (the Zephyr network stack, the board's drivers, the toolchain) is the same size in both. The row first read 174,100 bytes with `keccak` at 2,164, the SHAKE128 permutation of the initial sequence number's derivation (src/initial_sn.rs), which zenoh-pico does not carry; with CONFIG_WZ_INITIAL_SN_COMPACT (this image's overlay turns it on) the permutation is not linked and the text is 171,692, 2,408 bytes less.",
       "evidence": "docs/text-ownership.md"
     },
     "zephyr-client-fixed-batching": {
-      "text_bytes": 178652,
+      "text_bytes": 176236,
       "text_tolerance_bytes": 1024,
       "owner_tolerance_bytes": 1024,
       "owners": {
-        "wz_session_core": 44894,
+        "wz_session_core": 44840,
         "c:net_": 20590,
         "c:wz_": 10540,
         "c:z_": 10028,
@@ -62,12 +61,11 @@
         "c:__": 7074,
         "wz_runtime_coop": 5790,
         "c:zsock": 5532,
-        "(no symbol)": 4661,
         "c:Cy": 4486,
+        "(no symbol)": 4463,
         "c:": 3568,
         "c:other": 2975,
         "c:sys_": 2360,
-        "keccak": 2164,
         "c:cyhal": 1862,
         "core": 1784,
         "compiler_builtins": 1642,
@@ -88,15 +86,15 @@
         "c:update": 544,
         "c:route": 514
       },
-      "measured": "2026-10-28, scripts/kit-lane.sh build on the parity tree at origin's round 3818.",
+      "measured": "2026-10-28, scripts/kit-lane.sh build on the parity tree at origin's round 3820. The row first read 178,652 bytes; with CONFIG_WZ_INITIAL_SN_COMPACT (the fixed overlay turns it on) the SHAKE128 permutation is not linked: 176,236, 2,416 bytes less.",
       "evidence": "docs/text-ownership.md"
     },
     "zephyr-client-fixed-get": {
-      "text_bytes": 185600,
+      "text_bytes": 183192,
       "text_tolerance_bytes": 1024,
       "owner_tolerance_bytes": 1024,
       "owners": {
-        "wz_session_core": 43290,
+        "wz_session_core": 43236,
         "c:net_": 20590,
         "c:wz_": 11684,
         "wz_session_mcu": 11362,
@@ -106,14 +104,13 @@
         "sce_rust_runtime": 7908,
         "c:__": 7074,
         "core": 6162,
-        "(no symbol)": 5893,
         "wz_runtime_coop": 5810,
+        "(no symbol)": 5703,
         "c:zsock": 5532,
         "c:Cy": 4486,
         "c:": 3568,
         "c:other": 2975,
         "c:sys_": 2360,
-        "keccak": 2164,
         "c:cyhal": 1862,
         "compiler_builtins": 1642,
         "c:zvfs": 1384,
@@ -133,7 +130,7 @@
         "rust:other": 538,
         "c:route": 514
       },
-      "measured": "2026-10-28, scripts/kit-lane.sh build on the parity tree at origin's round 3818. The getter's `core` is 6,162 bytes against 1,784 for the queryable image; what it holds was not looked at.",
+      "measured": "2026-10-28, scripts/kit-lane.sh build on the parity tree at origin's round 3820. The row first read 185,600 bytes; with CONFIG_WZ_INITIAL_SN_COMPACT the SHAKE128 permutation is not linked: 183,192, 2,408 bytes less. The getter's `core` is 6,162 bytes against 1,784 for the queryable image; what it holds was not looked at.",
       "evidence": "docs/text-ownership.md"
     }
   }

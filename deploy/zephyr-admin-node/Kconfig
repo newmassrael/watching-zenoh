@@ -171,6 +171,22 @@ config WZ_RX_IN_PLACE
 	  new path. Off by default until a lab records a run of it: the board's row is
 	  graded on the image without it.
 
+config WZ_INITIAL_SN_COMPACT
+	bool "Derive the Open body's initial sequence number with a compact function"
+	help
+	  The initial sequence number of a session is announced in the Open body and never
+	  recomputed by the far side. zenoh derives it from the two zids with SHAKE128, so that
+	  a re-attempt of one pair lands on the same origin with nothing stored; zenoh-pico draws
+	  it from entropy. This keeps what the derivation is for (the same origin for the same
+	  pair, a different origin at each end of a session, a different one for another peer)
+	  with a pure function of the two zids that is not SHAKE128, and leaves the Keccak
+	  permutation, 2.2 KB of text, out of the image.
+
+	  It is not zenoh's value. A peer cannot tell (it reads the origin from the Open body);
+	  a passive dissector that checks a foreign session's origin against zenoh's own
+	  derivation can. Off by default: the image that matches zenoh's behaviour is the one
+	  without it.
+
 endif # WZ_NET_BACKEND_ZEPHYR_SOCKETS
 
 if WZ_NET_BACKEND_LWIP_MAC

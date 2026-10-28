@@ -73,16 +73,19 @@
 
 /// SHAKE128's rate in bytes: 1600 state bits minus twice the 128-bit
 /// capacity, FIPS 202 §6.2.
+#[cfg(not(feature = "initial-sn-compact"))]
 const SHAKE128_RATE: usize = 168;
 
 /// SHAKE128 as a bare sponge over `keccak::f1600`, reading the first eight
 /// output bytes — all this module squeezes.
+#[cfg(not(feature = "initial-sn-compact"))]
 struct Shake128 {
     state: [u64; 25],
     /// Bytes absorbed into the current block.
     pos: usize,
 }
 
+#[cfg(not(feature = "initial-sn-compact"))]
 impl Shake128 {
     fn new() -> Self {
         Self {
@@ -148,11 +151,50 @@ impl Shake128 {
 /// positions, so for every resolution zenoh can express the masked value is
 /// bit-identical to what zenoh computes. `the_low_half_is_what_zenoh_reads`
 /// pins that.
+#[cfg(not(feature = "initial-sn-compact"))]
 pub fn derive_initial_sn(own_zid: &[u8], peer_zid: &[u8], sn_mask: u64) -> u64 {
     let mut hasher = Shake128::new();
     hasher.absorb(own_zid);
     hasher.absorb(peer_zid);
     u64::from_le_bytes(hasher.squeeze_u64()) & sn_mask
+}
+
+/// The compact derivation (`initial-sn-compact`): the same contract as the
+/// SHAKE128 one, a PURE function of `(own_zid, peer_zid)` projected onto the
+/// ring of `sn_mask`, with the permutation left out of the image.
+///
+/// What the contract is, and what it is not. It is what the module opens with:
+/// a re-attempt of one `(own, peer)` pair lands on the same origin with
+/// nothing stored, the two ends of a session derive different origins, and a
+/// different peer moves the origin. It is NOT zenoh's value: the origin is
+/// announced and never recomputed by the far side, so a peer cannot tell the
+/// two derivations apart, but a passive dissector that checks a foreign
+/// session's announced origin against `compute_sn` can, and a build that has
+/// one has no use for this feature.
+///
+/// FNV-1a over each zid with its length in front (so `(AB, C)` and `(A, BC)`
+/// differ, which the unseparated SHAKE absorb does not guarantee), the own zid
+/// first and the peer's second (the order is the same correctness term), then
+/// the finalizer of SplitMix64 so that the low bits a narrow ring keeps depend
+/// on every input byte.
+#[cfg(feature = "initial-sn-compact")]
+pub fn derive_initial_sn(own_zid: &[u8], peer_zid: &[u8], sn_mask: u64) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    fn absorb(mut hash: u64, bytes: &[u8]) -> u64 {
+        hash = (hash ^ bytes.len() as u64).wrapping_mul(FNV_PRIME);
+        for &byte in bytes {
+            hash = (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
+        }
+        hash
+    }
+    let mut hash = absorb(absorb(FNV_OFFSET, own_zid), peer_zid);
+    hash ^= hash >> 30;
+    hash = hash.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    hash ^= hash >> 27;
+    hash = hash.wrapping_mul(0x94d0_49bb_1331_11eb);
+    hash ^= hash >> 31;
+    hash & sn_mask
 }
 
 #[cfg(test)]
@@ -213,10 +255,39 @@ mod tests {
     /// not authenticated), and DIVERGING to a length-prefixed absorb would
     /// break the byte-identity this module exists for.
     #[test]
+    #[cfg(not(feature = "initial-sn-compact"))]
     fn the_absorb_is_unseparated_concatenation_like_upstream() {
         let split_left = derive_initial_sn(&[0x01, 0x02], &[0x03], mask_from_res(3));
         let split_right = derive_initial_sn(&[0x01], &[0x02, 0x03], mask_from_res(3));
         assert_eq!(split_left, split_right);
+    }
+
+    /// The compact derivation puts each zid's length in front of it, so the
+    /// split between the two zids is part of what is hashed: the aliasing the
+    /// unseparated SHAKE absorb has (above) does not exist here.
+    #[test]
+    #[cfg(feature = "initial-sn-compact")]
+    fn the_compact_absorb_keeps_the_split_between_the_zids() {
+        let split_left = derive_initial_sn(&[0x01, 0x02], &[0x03], mask_from_res(3));
+        let split_right = derive_initial_sn(&[0x01], &[0x02, 0x03], mask_from_res(3));
+        assert_ne!(split_left, split_right);
+    }
+
+    /// The low bits a narrow ring keeps are not a function of the last byte
+    /// alone: over a grid of sixteen zids differing in one byte the 4-bit ring
+    /// takes more than a few values.
+    #[test]
+    #[cfg(feature = "initial-sn-compact")]
+    fn the_compact_derivation_spreads_over_a_narrow_ring() {
+        let mut seen = [false; 16];
+        for i in 0u8..64 {
+            let sn = derive_initial_sn(&[0x01, 0x02, 0x03, i], &[0x0a, 0x0b, 0x0c], 0xf);
+            seen[sn as usize] = true;
+        }
+        assert!(
+            seen.iter().filter(|hit| **hit).count() >= 12,
+            "64 zids reached fewer than 12 of the 16 values of a 4-bit ring"
+        );
     }
 
     /// Every resolution projects onto its own ring — `mask_from_res` is the
@@ -258,6 +329,7 @@ mod tests {
     /// wz value equals `u32::from_le_bytes` over the first four squeezed
     /// bytes — the same number zenoh's `compute_sn` returns.
     #[test]
+    #[cfg(not(feature = "initial-sn-compact"))]
     fn the_low_half_is_what_zenoh_reads() {
         let mut four = [0u8; 4];
         reference_shake128(A, B, &mut four);
@@ -269,6 +341,7 @@ mod tests {
     }
 
     /// The XOF zenoh's `compute_sn` calls, from the crate it calls it from.
+    #[cfg(not(feature = "initial-sn-compact"))]
     fn reference_shake128(first: &[u8], second: &[u8], out: &mut [u8]) {
         use sha3::digest::{ExtendableOutput, Update, XofReader};
         let mut hasher = sha3::Shake128::default();
@@ -293,6 +366,7 @@ mod tests {
     /// module is compiled by the no-alloc Open-body build too, and its tests
     /// run there (a Layer C count guard selects them with `alloc` off).
     #[test]
+    #[cfg(not(feature = "initial-sn-compact"))]
     fn shake128_is_the_reference_shake128() {
         /// The longest input any arm below feeds.
         const LONGEST: usize = 336;

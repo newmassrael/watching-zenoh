@@ -92,6 +92,10 @@ net-zephyr-sockets = []
 # record, so the only thing missing was this selection (`CONFIG_WZ_RX_IN_PLACE`). The crate is
 # named directly only to turn the selector on; the facade's `runtime-coop` links the same one.
 rx-in-place = ["dep:wz-runtime-coop", "wz-runtime-coop/rx-in-place"]
+# The Open body's `initial_sn` as a compact pure function of the two zids in place of zenoh's
+# SHAKE128 (`wz-session-core`'s `initial-sn-compact`, `CONFIG_WZ_INITIAL_SN_COMPACT`): the Keccak
+# permutation, 2.2 KB, is not in the image.
+initial-sn-compact = ["wz-session-core/initial-sn-compact"]
 # lwIP polled from the node's loop, over a wz Ethernet MAC crate. The facade's
 # `session-lwip-fixed` brings lwIP's links and the real lwIP build, which needs
 # WZ_LWIP_PORT in the build's environment (the CMake sets it); the heap profile adds

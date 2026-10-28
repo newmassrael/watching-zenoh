@@ -466,6 +466,15 @@ codec-init-body = ["wz-codecs/codec-init-body"]
 # acceptor's deepest path. The construction is unchanged and is checked
 # against `sha3::Shake128` (a dev-dependency below) in that module's tests.
 codec-open-body = ["wz-codecs/codec-open-body", "dep:keccak"]
+# The Open body's `initial_sn` is a compact pure function of the two zids in place of zenoh's
+# SHAKE128 (`src/initial_sn.rs`). It keeps what the derivation is for (a re-attempt of one
+# `(own, peer)` pair lands on the same origin with nothing stored, and the two ends of a session
+# derive different origins) and drops the Keccak permutation from the image, 2.2 KB. It is not
+# zenoh's value, which a peer cannot tell (the origin is announced and never recomputed by the far
+# side) and a passive dissector that checks a foreign session against `compute_sn` can; a build
+# that has one does not select this. It selects an implementation and adds no code, so enabling it
+# beside the default is safe: the compact one is used.
+initial-sn-compact = []
 codec-keep-alive = ["wz-codecs/codec-keep-alive"]
 codec-close = ["wz-codecs/codec-close"]
 # R311kt — codec-join forwards the wz-codecs JOIN body codec. Gates the

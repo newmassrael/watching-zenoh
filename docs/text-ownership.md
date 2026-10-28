@@ -43,13 +43,16 @@ wz's 92 KB is `wz_session_core` 41.6 KB, the inlined `wz_app_main` 10.5 KB, `wz_
 1.8 KB, `compiler_builtins` 1.6 KB (0.9 KB in the pico image) and `wz_runtime_zephyr` 0.7 KB. Zenoh-pico
 carries about 6 KB of C library code wz does not, which is why the difference is 31 and not 37 KB.
 
-## Levers this ranks (none taken here)
+## Levers this ranks
 
-- `keccak` (2.2 KB, one symbol) is the SHAKE128 permutation of the initial sequence number
+- TAKEN: `keccak` (2.2 KB, one symbol) was the SHAKE128 permutation of the initial sequence number
   (`src/initial_sn.rs`): zenoh derives it from the two zids so that a re-attempt of a multilink
-  session lands on the same origin, and zenoh-pico draws it from entropy. A single-link MCU client
-  does not need the derivation; a build switch between the zenoh derivation and a compact pure
-  function of the two zids keeps the idempotence and drops the permutation.
+  session lands on the same origin, and zenoh-pico draws it from entropy. `initial-sn-compact`
+  (`CONFIG_WZ_INITIAL_SN_COMPACT`, which the fixed overlay turns on) is a compact pure function of
+  the two zids: the same properties (the same origin for a pair, a different one at each end and for
+  another peer), not zenoh's value, no permutation. The three fixed images fell 2.4 KB of text and
+  their worst chain 428 to 500 bytes (the permutation's frame was on it); the kit's readings did not
+  move.
 - `wz_session_core` is the owner to split further, by function, before any flag is tried on it.
 - The machine outliner and `opt-level=z` are weighed per tier (the answer path against the connect
   and declare paths), not on the whole image.

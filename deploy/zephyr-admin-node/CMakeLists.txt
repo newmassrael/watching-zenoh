@@ -45,6 +45,12 @@ if(CONFIG_WZ_NET_BACKEND_ZEPHYR_SOCKETS)
     list(APPEND backend_feature rx-in-place)
   endif()
 
+  # The Open body's initial sequence number as a compact function of the two zids
+  # (CONFIG_WZ_INITIAL_SN_COMPACT), without the Keccak permutation of zenoh's own derivation.
+  if(CONFIG_WZ_INITIAL_SN_COMPACT)
+    list(APPEND backend_feature initial-sn-compact)
+  endif()
+
   # The client node (its features come with the axes): the router it dials is stated here, once,
   # as a constant the Rust side checks when it compiles.
   if(CONFIG_WZ_ROLE_CLIENT)
