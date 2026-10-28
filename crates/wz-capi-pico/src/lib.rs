@@ -98,6 +98,10 @@ pub mod config;
 // unstable surface (docs/target-build-contract.md T9).
 #[cfg(feature = "connectivity")]
 pub mod connectivity;
+// The clock a program registers and the standing it reports: wz doors (`wz_ext.h`) of the unstable
+// surface (docs/observation-plane.md M1).
+#[cfg(feature = "clock-source")]
+pub mod clock_source;
 #[cfg(feature = "unstable-api")]
 pub mod device_requires;
 pub mod encoding;

@@ -1628,6 +1628,10 @@ pubsub-express = ["pubsub-qos", "wz-session-core/pubsub-express"]
 # (byte-identical to the prior behavior). NOT default — an opt-in
 # alternative timestamp source, like the other advanced composition knobs.
 time-hlc = ["storage-backend", "wz-node-time/time-hlc"]
+# A clock the application registers (`docs/observation-plane.md` M1): the node clock reads the
+# registered sources in place of the system clock, and the host reports their standing. The
+# registry is `wz-node-time`'s; this forwards it where the node clock is built.
+clock-source = ["time-hlc", "wz-node-time/clock-source"]
 # The wall-clock NTP64 source alone (`timestamp_source::wall_clock_ntp64`), with none of the
 # stamper seams or the storage module the other features of that module bring: what a C ABI's
 # `z_timestamp_new` reads, in a build that holds no node clock and answers no query.

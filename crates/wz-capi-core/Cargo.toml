@@ -344,6 +344,10 @@ connectivity = ["unstable-api"]
 # filter or matching listener told whether to count the session's own entities. Features here
 # because every capability is one of the core's.
 admin-space = []
+# A clock the application registers (`deploy/wz-config.toml`, off by default: wz's own door, which
+# no upstream library has). The registry is the node clock's own, in `wz-node-time`, so the model
+# reads it under both ABIs once the runtime's clock does.
+clock-source = ["timestamping", "unstable-api", "wz-runtime-tokio/clock-source"]
 local-subscriber = []
 local-queryable = []
 

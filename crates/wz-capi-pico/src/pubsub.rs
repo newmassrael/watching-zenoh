@@ -682,6 +682,27 @@ pub unsafe extern "C" fn z_timestamp_new(
             Some(s) => s,
             None => return Z_ERR_NULL,
         };
+        // A program that registered a clock (`wz_ext_clock_source_register`) is stamped from it,
+        // through the session's node clock, so successive stamps strictly increase whatever the
+        // clock does. A registered clock that cannot say what time it is leaves no stamp to give:
+        // pico's own answer to a stamp with no clock, and the system clock is not the fallback of
+        // a clock the program chose. With nothing registered the stamp is the wall clock, below.
+        #[cfg(feature = "clock-source")]
+        if !wz_node_time::clock_registry::GLOBAL.is_empty() {
+            return match state.ext.hlc.stamp() {
+                Some(stamp) => {
+                    *ts = z_timestamp_t {
+                        valid: true,
+                        id: crate::zid::z_id_t {
+                            id: state.drive.zid(),
+                        },
+                        time: stamp.time,
+                    };
+                    Z_OK
+                }
+                None => Z_ERR_GENERIC,
+            };
+        }
         *ts = z_timestamp_t {
             valid: true,
             id: crate::zid::z_id_t {

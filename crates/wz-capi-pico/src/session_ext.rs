@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 #[cfg(feature = "connectivity")]
 use wz_capi_port::SessionEngine;
-#[cfg(feature = "advanced")]
+#[cfg(any(feature = "advanced", feature = "clock-source"))]
 use wz_node_time::node_clock::{NodeHlc, TimestampingEnabled};
 use wz_session_core::WhatAmI;
 
@@ -35,8 +35,9 @@ use crate::connectivity::Connectivity;
 pub(crate) struct PicoSessionExt {
     /// The session's own role — pico's `zn->_mode`.
     pub(crate) mode: WhatAmI,
-    /// The session's clock, which the advanced plane's publisher stamps with.
-    #[cfg(feature = "advanced")]
+    /// The session's clock, which the advanced plane's publisher stamps with, and which
+    /// `z_timestamp_new` stamps with once a clock source is registered.
+    #[cfg(any(feature = "advanced", feature = "clock-source"))]
     pub(crate) hlc: NodeHlc,
     /// The transport and link listeners a C program declared on this session.
     #[cfg(feature = "connectivity")]
@@ -80,12 +81,13 @@ impl PicoSessionExt {
                 sink.on_face_event(kind, snapshot);
             }))
         };
-        // Without the advanced plane nothing stamps, so there is no clock to build.
-        #[cfg(not(feature = "advanced"))]
+        // Without the advanced plane or a registrable clock nothing stamps, so there is no clock to
+        // build.
+        #[cfg(not(any(feature = "advanced", feature = "clock-source")))]
         let _ = zid;
         Self {
             mode,
-            #[cfg(feature = "advanced")]
+            #[cfg(any(feature = "advanced", feature = "clock-source"))]
             hlc: NodeHlc::for_node(zid, mode, TimestampingEnabled::all(true)),
             #[cfg(feature = "connectivity")]
             connectivity,

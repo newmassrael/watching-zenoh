@@ -881,6 +881,20 @@ abis = ["core", "pico", "c"]
 implies = ["liveliness", "queryable", "timestamping", "unstable-api"]
 help = "The advanced publisher and subscriber (cache, history, miss detection)."
 
+# A clock the application registers (docs/observation-plane.md M1): a hardware clock or a time
+# master the device has, which the node reads in place of the system clock. wz's own door, with no
+# counterpart in an upstream library, so it is off in every original and part of the unstable
+# surface, as `wz_ext_config_device_requires` is.
+[[capability]]
+id = "clock-source"
+kconfig = "WZ_CAP_CLOCK_SOURCE"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+default = "off"
+abis = ["core", "pico"]
+implies = ["timestamping", "unstable-api"]
+help = "Register a clock source the node reads instead of the system clock, and report whether it is synchronised."
+
 [[capability]]
 id = "group"
 kconfig = "WZ_CAP_GROUP"

@@ -33,6 +33,19 @@ use crate::timestamp_source::SystemEpoch;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceId(u32);
 
+impl SourceId {
+    /// The handle as a number, for a caller that cannot hold the type (a C program).
+    pub const fn into_raw(self) -> u32 {
+        self.0
+    }
+
+    /// The source a handle named. A number that was never handed out names no source, and
+    /// removing it removes nothing.
+    pub const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+}
+
 /// The registry holds as many sources as it was built for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegistryFull;

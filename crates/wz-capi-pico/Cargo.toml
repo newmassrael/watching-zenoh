@@ -192,6 +192,17 @@ advanced = [
     "wz-capi-core?/advanced",
     "wz-capi-coop?/ticker",
 ]
+# `clock-source`: the clock a program registers (`wz_ext_clock_source_register`), which
+# `z_timestamp_new` reads in place of the system clock, and the report of its standing
+# (`wz_ext_clock_report`). wz's own door, which zenoh-pico has not, so it is off as the reference
+# build is, and part of the unstable surface as the other `wz_ext_*` doors are: it implies
+# `unstable-api`. The registry and the clock are `wz-node-time`'s.
+clock-source = [
+    "unstable-api",
+    "dep:wz-node-time",
+    "wz-node-time/clock-source",
+    "wz-capi-core?/clock-source",
+]
 # `admin-space` (`Z_FEATURE_ADMIN_SPACE`, off as upstream's is): `zp_start_admin_space` /
 # `zp_stop_admin_space`, the queryable that answers pico's `@/<zid>/pico/**` documents, and the
 # `auto_start_admin_space` flag of the open options. Upstream refuses the switch without
@@ -305,6 +316,10 @@ name = "advanced_subscriber_faces"
 required-features = ["engine-tokio", "peer", "advanced"]
 
 # It drives the advanced publisher, the liveliness subscriber and a get together.
+[[test]]
+name = "clock_source_stamps"
+required-features = ["engine-tokio", "peer", "clock-source"]
+
 [[test]]
 name = "pubsub_roundtrip"
 required-features = ["peer", "advanced", "query"]

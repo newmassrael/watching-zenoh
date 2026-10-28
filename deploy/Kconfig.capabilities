@@ -113,6 +113,15 @@ config WZ_CAP_ADVANCED
 	  zenoh-pico's switches for it, either of which asks for it: Z_FEATURE_ADVANCED_PUBLICATION, Z_FEATURE_ADVANCED_SUBSCRIPTION.
 	  Exported by: pico, c.
 
+config WZ_CAP_CLOCK_SOURCE
+	bool "clock-source"
+	default n
+	select WZ_CAP_TIMESTAMPING
+	select WZ_CAP_UNSTABLE_API
+	help
+	  Register a clock source the node reads instead of the system clock, and report whether it is synchronised.
+	  Exported by: pico.
+
 config WZ_CAP_GROUP
 	bool "group"
 	default y
