@@ -296506,6 +296506,34 @@
         "Next in order: the lane subscriber of the C ABI; Z7, the shared-memory arm of the surface (3 lines); Z8, the graph. Open for the owner of the gateway/south config reader: whether to shrink it, which grew the capic-client-small image by 13.6 KB."
       ]
     },
+    "Round 3862": {
+      "decision_summary": "The carried item of the lane subscriber of the C ABI is closed by a measurement and not by code: it owes no timestamp stack. The stack is a Rust API of upstream's zenoh, its module zenoh::timestamp_stack, and the C library that wraps it does not bind it. Decision: nothing is added to a lane, and the carry leaves the stored reason and the roadmap, replaced by what was measured, so that a later reader finds the ground and not an unexplained absence. On the oracle, zenoh-c 1.10.1 built with its unstable API, none of the dynamic symbols of libzenohc.so is about a stack, an instrumentation or an interception, the headers hold no such name, and its timestamp surface is z_sample_timestamp, z_timestamp_new, z_timestamp_id and z_timestamp_ntp64_time. Should a later zenoh-c bind the stack, the surface census of the C ABI names the symbol and this item reopens.",
+      "changes_bullets": [
+        "docs/zenoh-api-on-the-engine.md and the stored reason of api-compat-rust: the carry of the lane subscriber is replaced by the measurement that closes it."
+      ],
+      "verification_bullets": [
+        "Measured on the installed oracle: no dynamic symbol of its libzenohc.so (zenoh-c 1.10.1, Z_FEATURE_UNSTABLE_API defined in its zenoh_configure.h) matches stack, instrument or intercept, and its timestamp symbols are the four named; the headers hold none of the names. The 33 static gates and the reason pin gate pass. No code moved, so no test was run. Not run here: the hosted run."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Next in order: Z7, the shared-memory arm of the surface (3 lines: Session::get_shm_provider, ShmProviderState, OpenBuilder::with_shm_clients); Z8, the graph. Open for the owner of the gateway/south config reader: whether to shrink it, which grew the capic-client-small image by 13.6 KB."
+      ],
+      "publishable_decision_summary": "The carried item of the lane subscriber of the C ABI is closed by a measurement and not by code: it owes no timestamp stack. The stack is a Rust API of upstream's zenoh, its module zenoh::timestamp_stack, and the C library that wraps it does not bind it. Decision: nothing is added to a lane, and the carry leaves the stored reason and the roadmap, replaced by what was measured, so that a later reader finds the ground and not an unexplained absence. On the oracle, zenoh-c 1.10.1 built with its unstable API, none of the dynamic symbols of libzenohc.so is about a stack, an instrumentation or an interception, the headers hold no such name, and its timestamp surface is z_sample_timestamp, z_timestamp_new, z_timestamp_id and z_timestamp_ntp64_time. Should a later zenoh-c bind the stack, the surface census of the C ABI names the symbol and this item reopens.",
+      "publishable_changes_bullets": [
+        "docs/zenoh-api-on-the-engine.md and the stored reason of api-compat-rust: the carry of the lane subscriber is replaced by the measurement that closes it."
+      ],
+      "publishable_verification_bullets": [
+        "Measured on the installed oracle: no dynamic symbol of its libzenohc.so (zenoh-c 1.10.1, Z_FEATURE_UNSTABLE_API defined in its zenoh_configure.h) matches stack, instrument or intercept, and its timestamp symbols are the four named; the headers hold none of the names. The 33 static gates and the reason pin gate pass. No code moved, so no test was run. Not run here: the hosted run."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next in order: Z7, the shared-memory arm of the surface (3 lines: Session::get_shm_provider, ShmProviderState, OpenBuilder::with_shm_clients); Z8, the graph. Open for the owner of the gateway/south config reader: whether to shrink it, which grew the capic-client-small image by 13.6 KB."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
