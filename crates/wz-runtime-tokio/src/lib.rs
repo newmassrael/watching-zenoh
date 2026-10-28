@@ -2330,8 +2330,10 @@ pub mod session_lifecycle_open;
 /// UNION of its two consumers rather than on either, because that is what it is:
 /// routing keys its graph on the zid and the §5.16 enforcer reads both as ACL
 /// subject axes, and while the readers lived inside the routing module the
-/// enforcer could not exist without one.
-#[cfg(any(feature = "routing-peer", feature = "access-acl"))]
+/// enforcer could not exist without one. The routing consumer is the region-hat forwarder, which a
+/// peer node is as well since the single-net forwarder retired (open-debt item 751 step 7), so the
+/// gate names it and not `routing-peer`, which a build can have with no forwarder to read them.
+#[cfg(any(feature = "routing-router-hat", feature = "access-acl"))]
 pub(crate) mod peer_identity;
 
 // R311y108 — §5.21 router-hat slice 1a: the DUAL-mesh router forwarder. A 4th
@@ -2400,8 +2402,8 @@ pub mod linkstate_interest;
 
 /// The client faces' subscriptions, indexed by key and changed only through methods that record the
 /// key they moved, so [`route_cache::RouteCache::refresh`] can retire a route and not the whole cache.
-/// Gated on `routing-peer`, with the forwarders that hold it.
-#[cfg(feature = "routing-peer")]
+/// Gated on `routing-router-hat`, with the forwarder that holds it.
+#[cfg(feature = "routing-router-hat")]
 pub(crate) mod client_sub_store;
 /// R2908 — [`route_cache::RouteCache`]: the per-(source, keyexpr) route both
 /// mesh forwarders compute once and reuse until a table it was read from

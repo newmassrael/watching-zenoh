@@ -23,7 +23,7 @@
 //! importing the seam's resolver adds no edge, while the seam importing the
 //! forwarder's was an edge from a thing to one of its own consumers.
 
-#[cfg(any(feature = "routing-peer", test))]
+#[cfg(any(feature = "routing-router-hat", test))]
 use hashbrown::HashMap;
 
 use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
@@ -51,7 +51,7 @@ use wz_session_core::wireexpr_resolve::{resolve_wireexpr_in, MappingSpaces};
 ///
 /// The peer-only form: what the routing forwarders call, each holding one face's table. A
 /// session that holds both spaces calls [`resolve_governed_keyexpr_in`].
-#[cfg(any(feature = "routing-peer", test))]
+#[cfg(any(feature = "routing-router-hat", test))]
 pub(crate) fn resolve_governed_keyexpr(
     msg: &NetworkMessage,
     keyexpr_table: &HashMap<u64, String>,

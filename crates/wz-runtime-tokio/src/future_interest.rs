@@ -55,7 +55,7 @@
 //!   on (`filtering.c:202`) consistent for the deferred undeclare-push.
 //!
 //! zenoh warns against two parallel `FaceId`-keyed maps drifting
-//! ([`crate::linkstate_forward`] `FaceState` doc); the two live in ONE per-face
+//! (`crate::linkstate_forward` `FaceState` doc); the two live in ONE per-face
 //! struct so a single [`FutureInterestStore::purge_face`] on `deregister` covers
 //! both — and the sub and qabl stores are ONE generic type, so the invariant is
 //! enforced once for both planes (mirroring the y144 `emit_current_interest_replies`

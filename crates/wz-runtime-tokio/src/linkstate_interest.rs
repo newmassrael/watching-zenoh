@@ -233,6 +233,9 @@ impl<V> LinkstatepeerInterest<V> {
     /// matched resource carries its own `QueryableInfoType` and its own
     /// includes-the-query verdict. Borrowed (`&str` / `&V`) — the BestMatching
     /// select consumes them under the same table borrow.
+    ///
+    /// Read by the region-hat forwarder only, so it exists with `routing-router-hat`.
+    #[cfg(feature = "routing-router-hat")]
     pub(crate) fn matching_entries(
         &self,
         target: &str,
@@ -266,6 +269,7 @@ impl<V> LinkstatepeerInterest<V> {
     /// MATCHES-EVERYTHING, not a matches-nothing, and keeping the two arms in one
     /// function is what stops the unrestricted case drifting into a second,
     /// disagreeing definition of what a match is.
+    #[cfg(feature = "routing-router-hat")]
     fn entries_matching(
         &self,
         target: Option<&str>,
@@ -451,6 +455,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "routing-router-hat")]
     #[test]
     fn matching_entries_yields_the_per_peer_value_for_best_matching() {
         // The value-bearing accessor BestMatching reads (atom 3): each matching

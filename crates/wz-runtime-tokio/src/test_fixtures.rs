@@ -107,10 +107,10 @@ impl RecordingLinkDriver {
 
     /// Discard all recorded frames — lets a test ignore set-up emits (e.g. a
     /// register-time bootstrap flood) so a later `frame_count()` counts only
-    /// the frames the operation under test produced. Gated like its sole
-    /// consumer (`linkstate_forward`'s tests) so the no-`routing-peer`
-    /// deny-warnings lane does not see it as dead code.
-    #[cfg(feature = "routing-peer")]
+    /// the frames the operation under test produced. Gated like its consumers
+    /// (the tests of the region-hat forwarder) so a deny-warnings lane without
+    /// `routing-router-hat` does not see it as dead code.
+    #[cfg(feature = "routing-router-hat")]
     pub(crate) fn reset(&self) {
         self.frames
             .lock()
@@ -343,7 +343,7 @@ pub(crate) fn refusing_actions(
 ///
 /// GATED AS THE UNION OF ITS CONSUMERS, exactly like `recording_driver`'s
 /// `session-reconnect` sibling and `RecordingLinkDriver::reset`'s
-/// `routing-peer` one: the two tests that use it are
+/// `routing-router-hat` one: the two tests that use it are
 /// `all(declare-subscriber, declare-undeclare)` and `liveliness-token`, and a
 /// `--no-default-features` subset that compiles neither must not see this as
 /// dead code. Measured: gate 4b refused a push because nine such legs died at
@@ -492,7 +492,7 @@ pub(crate) fn recording_actions_with_driver(
 /// single plane and shrugged at the rest. The caller pins the SET, which is this
 /// workspace's standing rule for coverage claims — a count would keep passing
 /// while a plane quietly stopped emitting.
-#[cfg(feature = "routing-peer")]
+#[cfg(feature = "routing-router-hat")]
 pub(crate) fn assert_emits_no_alias_of_its_own(
     sink: &RecordingLinkDriver,
     source_aliases: &hashbrown::HashMap<u64, String>,
@@ -514,9 +514,9 @@ pub(crate) fn assert_emits_no_alias_of_its_own(
         };
         let records = parse_frame_payload(&payload).expect("the forwarder's own batch parses");
         for record in records {
-            let as_literal = crate::linkstate_forward::resolve_governed_keyexpr(&record, &empty);
+            let as_literal = crate::interceptor::keyexpr::resolve_governed_keyexpr(&record, &empty);
             let via_source =
-                crate::linkstate_forward::resolve_governed_keyexpr(&record, source_aliases);
+                crate::interceptor::keyexpr::resolve_governed_keyexpr(&record, source_aliases);
             match (as_literal, via_source) {
                 (Some(k), _) => literals.push(k),
                 (None, Some(k)) => passed_through.push(k),

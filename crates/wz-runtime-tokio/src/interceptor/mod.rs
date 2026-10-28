@@ -55,11 +55,13 @@ pub mod document;
 #[cfg(feature = "access-downsampling")]
 pub mod downsampling;
 // Gated on its CONSUMERS, which are the `InterceptorContext` implementations
-// rather than the enforcers: the two forwarders' face contexts (`routing-peer`)
-// and the session's egress context (`access-acl`). A downsampling- or
-// quota-only build compiles an enforcer but no context to run it against, so it
-// resolves no governed keyexpr and this module would be dead code there.
-#[cfg(any(feature = "routing-peer", feature = "access-acl"))]
+// rather than the enforcers: the region-hat forwarder's face contexts
+// (`routing-router-hat`, which a peer node is as well since the single-net forwarder retired)
+// and the session's egress context (`access-acl`). A downsampling- or quota-only build
+// compiles an enforcer but no context to run it against, so it resolves no governed keyexpr and
+// this module would be dead code there; so would it with `routing-peer` alone, which has the
+// config types of the chain and no forwarder to run it.
+#[cfg(any(feature = "routing-router-hat", feature = "access-acl"))]
 pub(crate) mod keyexpr;
 #[cfg(feature = "access-quota")]
 pub mod low_pass;
@@ -784,8 +786,9 @@ impl InterceptorConfig {
 /// forwarder type. `WzConfig::install_interceptors` / `reconfigure_interceptors`
 /// take `&dyn InterceptorSink`, so the §5.23 combined node composes the
 /// config-drive surface against this abstraction rather than the concrete
-/// [`RouterForwarder`](crate::router_forward::RouterForwarder) (which is the production
-/// impl). One method — re-install both flow chains from the given config — so a
+/// `RouterForwarder` of `crate::router_forward` (which is the production
+/// impl; the module exists with `routing-router-hat`, so a link to it would not resolve in a
+/// build without). One method — re-install both flow chains from the given config — so a
 /// reconfigure re-drives the live verdict through the same path setup uses.
 pub trait InterceptorSink {
     /// Re-install the ingress + egress interceptor chains built from `config`
