@@ -657,8 +657,15 @@ entry points of `RouterForwarder` (`publish`, `publish_qos`, `publish_delete`,
 `north_interested`), and `RouterForwarder::peer_with_timestamping` builds the peer
 node. Nothing calls them from outside yet, so no door changes its answer.
 
-**7b: `run_peer` takes the region-hat forwarder.** The mapping, measured from the
-call sites in `crates/wz-ap-demo/src/runner.rs`:
+**7b, landed: `run_peer` takes the region-hat forwarder.** The `--peer` node is now the
+region-hat forwarder at node mode Peer; `--interest-timeout` is refused on `--peer` and
+the config key `routing/interests/timeout` is reported read-and-not-applied. The demo's
+`routing-peer` feature pulls `wz/routing-router-hat`, which compiles `router_forward`.
+One defect the move introduced and the multilink e2e found: the loop's sources read
+`max_links` and `max_sessions` through two `wz_config.guard()` temporaries in one call
+expression, and a `PlainMutex` is not reentrant, so the second waited on the first and
+the peer never dialed. Both are read into locals before the call. The mapping, measured
+from the call sites in `crates/wz-ap-demo/src/runner.rs`:
 
 - Construction: `peer_with_timestamping` takes the whole `timestamping.enabled` map,
   where `LinkstateForwarder::with_timestamping` takes the map resolved for the role.

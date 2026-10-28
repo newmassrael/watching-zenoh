@@ -4115,68 +4115,6 @@ struct LoopLifecycle<I, M, P> {
     opener: P,
 }
 
-/// Host the session lifecycle queries -- the close, reset, status, open and
-/// capability queries (`wz_session_core::lifecycle_query`) -- on a forwarder.
-///
-/// `register` is the forwarder's `register_local_queryable`, passed in because the
-/// peer and the router are two types with one method of that shape. One answerer
-/// serves every pattern, so the queries cannot disagree about who this node is or
-/// what it permits. `intent` is what a close withdraws the peer from (decision D6):
-/// the face loop's reconcile channel on a host that has one, `NoIntent` on one
-/// that dials nobody again. `machines` is what the status query reads them from:
-/// the board the face loop publishes its machines to, or `NoMachines`. `opener`
-/// is what an open asks to hold a peer: the link-state opener of a host whose loop
-/// holds its peers by machines, or `NoOpener`, which serves no open query.
-#[cfg(feature = "session-close-ingress")]
-fn host_session_lifecycle<D, I, M, P, E>(
-    zid_hex: &str,
-    whatami: &str,
-    permit: bool,
-    directory: D,
-    loop_side: LoopLifecycle<I, M, P>,
-    mut register: impl FnMut(
-        &str,
-        Box<
-            dyn FnMut(
-                &dyn wz::runtime_tokio::query_sink::QueryView,
-                &mut dyn wz::runtime_tokio::query_sink::ReplyOut,
-            ),
-        >,
-    ) -> Result<usize, E>,
-) where
-    D: wz::runtime_tokio::lifecycle_query::SessionDirectory + 'static,
-    I: wz::runtime_tokio::lifecycle_query::PeerIntent + 'static,
-    M: wz::runtime_tokio::lifecycle_query::PeerMachines + 'static,
-    P: wz::runtime_tokio::lifecycle_query::PeerOpener + 'static,
-    E: std::fmt::Debug,
-{
-    use wz::runtime_tokio::lifecycle_query::LifecycleQueries;
-    use wz::runtime_tokio::query_sink::{QueryView, ReplyOut};
-    let queries = std::rc::Rc::new(
-        LifecycleQueries::new(zid_hex, whatami, ClosePermit(permit), directory)
-            .with_intent(loop_side.intent)
-            .with_machines(loop_side.machines)
-            .with_opener(loop_side.opener),
-    );
-    for pattern in queries.patterns() {
-        let answerer = std::rc::Rc::clone(&queries);
-        let handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
-            let answered = answerer.answer(view, out);
-            log::info!(
-                "wz-ap-demo: session lifecycle query {} -> {answered:?}",
-                view.keyexpr()
-            );
-        };
-        match register(&pattern, Box::new(handler)) {
-            Ok(_) => log::info!("wz-ap-demo {whatami}: session lifecycle query at {pattern}"),
-            Err(e) => log::warn!(
-                "wz-ap-demo {whatami}: session lifecycle registration of {pattern} failed: {e:?}"
-            ),
-        }
-    }
-    log_lifecycle_verbs(whatami, permit);
-}
-
 /// Say once what the session lifecycle verbs this host serves are permitted to do.
 #[cfg(feature = "session-close-ingress")]
 fn log_lifecycle_verbs(whatami: &str, permit: bool) {
@@ -4190,11 +4128,20 @@ fn log_lifecycle_verbs(whatami: &str, permit: bool) {
     );
 }
 
-/// [`host_session_lifecycle`] for a host whose forwarder runs a handler from any thread (the
-/// router's): the answerer is shared behind a lock and the handler is `Send`, where the peer's is
-/// one task's and an `Rc`. What the queries are and what they answer is the same.
-#[cfg(all(feature = "session-close-ingress", feature = "router-hat-router"))]
-fn host_session_lifecycle_shared<D, I, M, P, E>(
+/// Host the session lifecycle queries -- the close, reset, status, open and
+/// capability queries (`wz_session_core::lifecycle_query`) -- on a forwarder.
+///
+/// The forwarder runs a handler from any thread (the region-hat forwarder, the peer's since item
+/// 751 step 7b and the router's), so the answerer is shared behind a lock and the handler is
+/// `Send`. `register` is the forwarder's `register_local_queryable`. One answerer serves every
+/// pattern, so the queries cannot disagree about who this node is or what it permits. `intent`
+/// is what a close withdraws the peer from (decision D6): the face loop's reconcile channel on a
+/// host that has one, `NoIntent` on one that dials nobody again. `machines` is what the status
+/// query reads them from: the board the face loop publishes its machines to, or `NoMachines`.
+/// `opener` is what an open asks to hold a peer: the link-state opener of a host whose loop
+/// holds its peers by machines, or `NoOpener`, which serves no open query.
+#[cfg(feature = "session-close-ingress")]
+fn host_session_lifecycle<D, I, M, P, E>(
     zid_hex: &str,
     whatami: &str,
     permit: bool,
@@ -4553,11 +4500,13 @@ async fn run_peer_until(
     use wz::runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources};
     use wz::runtime_tokio::linkstate_forward::{
         default_autoconnect_matcher, interval_from_freq, AutoConnect, DownsamplingMessage,
-        DownsamplingRule, InterceptorConfig, InterceptorFlow, InterceptorLink, LinkstateForwarder,
-        LowPassMessage, LowPassRule, WhatAmI, Zid,
+        DownsamplingRule, InterceptorConfig, InterceptorFlow, InterceptorLink, LowPassMessage,
+        LowPassRule, WhatAmI, Zid,
     };
+    use wz::runtime_tokio::router_forward::RouterForwarder;
+    use wz::runtime_tokio::sync::PlainMutex;
     // Per-peer routing zid: see `crate::args::resolve_node_zid`. (The periodic self-flood
-    // cadence lives in the LinkstateForwarder itself — R311rf, on the
+    // cadence lives in the forwarder itself — R311rf, on the
     // FaceForwarder seam — so this demo owns no flood timer.)
     //
     // Cadence of the DEMO APPLICATION driver (not the protocol flood): a
@@ -4641,9 +4590,12 @@ async fn run_peer_until(
     // R2626 — `--drop-future-timestamp` rides the same section. Applied as a
     // builder because it is not role-resolved: upstream reads it once as a plain
     // bool, unlike the map above.
-    let forwarder = LinkstateForwarder::with_timestamping(
+    //
+    // Item 751, step 7b — the peer node is the region-hat forwarder at node mode
+    // Peer (`docs/peer-region-hats.md`), the forwarder the router host runs, with
+    // the peer hat in `North` and a broker hat for the clients south of it.
+    let forwarder = RouterForwarder::peer_with_timestamping(
         Zid::from_slice(&params.zid),
-        WhatAmI::Peer,
         opts.timestamping.map_for(WhatAmI::Peer),
     )
     .with_drop_future_timestamp(opts.timestamping.drop_future_timestamp());
@@ -4651,15 +4603,25 @@ async fn run_peer_until(
     // because the mode governs how the very first inbound flood is ingested; a
     // node that learned one flood in the wrong mode has already mis-shaped its
     // graph. Default `linkstate` — see the flag's doc for why wz does not adopt
-    // zenoh's `peer_to_peer` default here.
-    forwarder.set_full_linkstate(opts.full_linkstate);
-    // R311y512 — `--interest-timeout <ms>` (zenoh `routing.interests.timeout`).
-    // Set BEFORE any face registers for the same reason as the mode above: it
-    // stamps the deadline of every brokered interest, and one propagated under a
-    // stale window keeps that window. Absent, the forwarder default (10s) stands.
+    // zenoh's `peer_to_peer` default here. On the region-hat forwarder it is the
+    // mode of the north peer hat (`set_peer_region_full_linkstate`), which is
+    // wz's link-state peer extension as a flag of that hat.
+    forwarder.set_peer_region_full_linkstate(opts.full_linkstate);
+    // R311y512 — `--interest-timeout <ms>` (zenoh `routing.interests.timeout`)
+    // bounded how long an interest this node BROKERED to a peer waited for that
+    // peer's final. The region-hat peer brokers none: the pin's peer hat sends an
+    // interest on only to the faces whose remote bound is south
+    // (`zenoh/src/net/routing/hat/peer/interests.rs` @ `.filter(|f| f.remote_bound.is_south())`)
+    // and answers a client from its own table, which holds the mesh tier. A
+    // deadline for nothing is refused, not accepted and ignored (`docs/peer-region-hats.md`,
+    // sections 10 and 12a).
     #[cfg(feature = "routing-interest-pending-gc")]
-    if let Some(ms) = opts.interest_timeout_ms {
-        forwarder.set_interest_timeout(Duration::from_millis(ms));
+    if opts.interest_timeout_ms.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--interest-timeout: this peer brokers no interest to its peers, so no pending \
+             interest exists to time out; remove the flag",
+        ));
     }
     // Advertise this peer's listen address as its dial locator BEFORE the first
     // face registers, so self's first FULL flood already carries it. A neighbour
@@ -4921,9 +4883,12 @@ async fn run_peer_until(
     // §5.23 `adminspace-core` — the initial `metadata`, into the SAME live config
     // the admin host reads per GET, so a runtime write replaces it there.
     let cfg = with_metadata_flag(cfg, opts.metadata.as_ref());
-    let wz_config = std::rc::Rc::new(std::cell::RefCell::new(cfg));
+    // Step 7b — `Arc<PlainMutex<_>>` and not `Rc<RefCell<_>>`: the region-hat forwarder is
+    // shared between threads, so the handlers it hosts are `Send`, and the config the
+    // admin handler reads is one they hold.
+    let wz_config = Arc::new(PlainMutex::new(cfg));
     {
-        let cfg = wz_config.borrow();
+        let cfg = wz_config.guard();
         log::info!(
             "wz-ap-demo peer config (read-at-open): {}",
             cfg.to_admin_json()
@@ -4955,8 +4920,7 @@ async fn run_peer_until(
     // point of the R311y43 `InterceptorSink` seam — and the subscriber handler
     // signature unchanged (`FnMut(&dyn SampleView)`, no interceptor-sink param a
     // plain data subscriber would never use).
-    let pending_acl_deny: std::rc::Rc<std::cell::RefCell<Option<String>>> =
-        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let pending_acl_deny: Arc<PlainMutex<Option<String>>> = Arc::new(PlainMutex::new(None));
 
     // §5.23 adminspace-introspection-handlers — the per-query materialization of the
     // subs/queryables this node knows that the admin GET on
@@ -4969,9 +4933,8 @@ async fn run_peer_until(
     // side-table), and the handler reads it. Always allocated (`AdminDeclaration` is
     // always-compiled, like `AdminSession`); refreshed ONLY under the feature, so a
     // feature-off build leaves it empty and the introspection reply legs compile out.
-    let introspection: std::rc::Rc<
-        std::cell::RefCell<Vec<wz::runtime_tokio::adminspace::AdminDeclaration>>,
-    > = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let introspection: Arc<PlainMutex<Vec<wz::runtime_tokio::adminspace::AdminDeclaration>>> =
+        Arc::new(PlainMutex::new(Vec::new()));
 
     // R311y473 (§5.23) — the admin `local_data` `sessions[]` buffer. Shares the
     // shape and the REASON of `introspection` directly above: the
@@ -4982,9 +4945,8 @@ async fn run_peer_until(
     // Freshness is therefore one app-tick, exactly as for the introspection buffer.
     // That is why a caller waits for a node-side event (the face-up / aggregation
     // log line) before asserting on an admin GET, rather than racing the tick.
-    let admin_sessions: std::rc::Rc<
-        std::cell::RefCell<Vec<wz::runtime_tokio::adminspace::AdminSession>>,
-    > = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let admin_sessions: Arc<PlainMutex<Vec<wz::runtime_tokio::adminspace::AdminSession>>> =
+        Arc::new(PlainMutex::new(Vec::new()));
 
     // `--config-queryable`: §5.23 Phase 2b — host this peer's adminspace on the
     // forwarder. A querier's GET for `@/<zid>/peer/config` routes to A's
@@ -5042,7 +5004,7 @@ async fn run_peer_until(
         // runtime permission change could not reach it.
         log::info!(
             "wz-ap-demo peer: adminspace read permit = {}",
-            wz::runtime_tokio::admin_read_permit(&shared.borrow().admin_permissions())
+            wz::runtime_tokio::admin_read_permit(&shared.guard().admin_permissions())
         );
         // R2684 (§5.23 `adminspace-router-linkstate`) — this peer's OWN link-state
         // graph, as the read-only render seam its `linkstate/peers` leg needs.
@@ -5056,15 +5018,15 @@ async fn run_peer_until(
         // (`zenoh/src/net/runtime/adminspace.rs` @ `hat.mode().is_peer()`), which
         // is what wz did not do: the leg existed only on the router host.
         #[cfg(feature = "adminspace-router-linkstate")]
-        let peers_view = forwarder.net_view();
+        let peers_view = forwarder.peers_net_view();
         let node_stats_h = node_stats.clone();
         let handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
             let admin_read =
-                wz::runtime_tokio::admin_read_permit(&shared.borrow().admin_permissions());
-            let config_json = shared.borrow().to_admin_json();
+                wz::runtime_tokio::admin_read_permit(&shared.guard().admin_permissions());
+            let config_json = shared.guard().to_admin_json();
             // §5.23 `adminspace-core` — per GET off the same live config, as
             // upstream reads it inside its handler.
-            let metadata_json = String::from(shared.borrow().admin_metadata_json());
+            let metadata_json = String::from(shared.guard().admin_metadata_json());
             // R2844 — the NODE's registry, which the face loop fills with every
             // face this peer holds. This was `None` since R311y810: wz's counters
             // are per-session and this node holds N faces, and there was no
@@ -5095,13 +5057,13 @@ async fn run_peer_until(
             // R311y473 — the LIVE held-face enumeration, replacing the empty slice
             // the §5.23 host shipped as a documented deferral. Resolved per query
             // (never a retained side-table), like `introspection` above.
-            let sessions = sessions_h.borrow();
+            let sessions = sessions_h.guard();
             if answer_admin_query(
                 view,
                 out,
                 &ctx,
                 &sessions,
-                &introspection_h.borrow(),
+                &introspection_h.guard(),
                 &plugins,
                 &config_json,
             ) == AdminAnswerOutcome::DeniedRead
@@ -5137,14 +5099,8 @@ async fn run_peer_until(
                 let _ = answer_router_admin_query(view, out, &rctx);
             }
         };
-        match forwarder.register_local_queryable(&queryable_key, true, Box::new(handler)) {
-            Ok(_) => {
-                log::info!("wz-ap-demo peer: adminspace config GET at {config_key}");
-            }
-            Err(e) => {
-                log::warn!("wz-ap-demo peer: adminspace registration failed: {e:?}");
-            }
-        }
+        forwarder.register_local_queryable(&queryable_key, true, Box::new(handler));
+        log::info!("wz-ap-demo peer: adminspace config GET at {config_key}");
     }
 
     // `--session-lifecycle`: host the session lifecycle queries -- close a session
@@ -5170,7 +5126,10 @@ async fn run_peer_until(
                 machines: wz::runtime_tokio::lifecycle_query::NoMachines,
                 opener: wz::runtime_tokio::lifecycle_query::NoOpener,
             },
-            |pattern, handler| forwarder.register_local_queryable(pattern, true, handler),
+            |pattern, handler| {
+                forwarder.register_local_queryable(pattern, true, handler);
+                Ok::<usize, std::convert::Infallible>(0)
+            },
         );
     }
     #[cfg(not(feature = "session-close-ingress"))]
@@ -5238,13 +5197,13 @@ async fn run_peer_until(
         let write_cfg = wz_config.clone();
         log::info!(
             "wz-ap-demo peer: adminspace write permit = {}",
-            admin_write_permit(&write_cfg.borrow().admin_permissions())
+            admin_write_permit(&write_cfg.guard().admin_permissions())
         );
         let pending = pending_acl_deny.clone();
         let handler = move |sample: &dyn SampleView| {
             // Gate (permissions.write) + decode via the wz-session-core SSOT, the
             // write-side counterpart of answer_admin_query.
-            let write_permitted = admin_write_permit(&write_cfg.borrow().admin_permissions());
+            let write_permitted = admin_write_permit(&write_cfg.guard().admin_permissions());
             match parse_admin_config_write(
                 &write_space,
                 sample.keyexpr(),
@@ -5263,7 +5222,7 @@ async fn run_peer_until(
             ) {
                 AdminConfigWriteOutcome::Apply(AdminConfigWrite::AclDeny(deny_kx)) => {
                     log::info!("wz-ap-demo peer: config-write received acl-deny {deny_kx}");
-                    *pending.borrow_mut() = Some(deny_kx);
+                    *pending.guard() = Some(deny_kx);
                 }
                 // R311y239 — the storage config-hotreload intents (AddStorage / RemoveStorage,
                 // decoded only under adminspace-config-hotreload) are recognized but this demo
@@ -5335,14 +5294,8 @@ async fn run_peer_until(
                 AdminConfigWriteOutcome::NotAWrite => {}
             }
         };
-        match forwarder.register_local_subscriber(&write_key, Box::new(handler)) {
-            Ok(_) => {
-                log::info!("wz-ap-demo peer: adminspace config WRITE at {write_key}");
-            }
-            Err(e) => {
-                log::warn!("wz-ap-demo peer: adminspace config-write registration failed: {e:?}");
-            }
-        }
+        forwarder.register_local_subscriber(&write_key, Box::new(handler));
+        log::info!("wz-ap-demo peer: adminspace config WRITE at {write_key}");
     }
 
     // `--autoconnect`: opt this peer into gossip-autoconnect. The role matcher is
@@ -5412,6 +5365,12 @@ async fn run_peer_until(
     // gone; each producer holds its own clone.
     drop(dial_tx);
 
+    // Read under ONE guard, before the literal below: a `PlainMutex` is not reentrant, and
+    // a guard taken per field would live to the end of the call expression, so the second
+    // `.guard()` would wait on the first for ever.
+    #[cfg(feature = "transport-multilink")]
+    let loop_max_links = wz_config.guard().max_links;
+    let loop_max_sessions = wz_config.guard().effective_max_sessions().limit;
     let loop_fut = peer_loop(
         FaceSources {
             // R2099 (item 512) — EVERY bound `listen/endpoints` member, so an
@@ -5437,11 +5396,11 @@ async fn run_peer_until(
             // `1` = single-link (byte-identical to pre-multilink); `> 1` aggregates
             // that many physical links to a peer zid into ONE logical session.
             #[cfg(feature = "transport-multilink")]
-            max_links: wz_config.borrow().max_links,
+            max_links: loop_max_links,
             // R2758 — the session bound, off the SAME shared WzConfig the admin
             // GET renders, so the loop and the config surface cannot disagree
             // about how many peers this node will hold.
-            max_sessions: wz_config.borrow().effective_max_sessions().limit,
+            max_sessions: loop_max_sessions,
             accept: opts.accept,
             ceiling: None,
             peer_board: None,
@@ -5505,7 +5464,7 @@ async fn run_peer_until(
             let faces_up_ev = connect_faces_up;
             move |event: &AcceptEvent| {
                 {
-                    let mut buf = admin_sessions_ev.borrow_mut();
+                    let mut buf = admin_sessions_ev.guard();
                     buf.clear();
                     buf.extend(forwarder_ev.admin_sessions());
                 }
@@ -5624,8 +5583,8 @@ async fn run_peer_until(
                         if all_up { "met (every dialled peer up)" } else { "passed" }
                     );
                 }
-                peak_nodes = peak_nodes.max(forwarder.node_count());
-                peak_edges = peak_edges.max(forwarder.edge_count());
+                peak_nodes = peak_nodes.max(forwarder.north_net_node_count());
+                peak_edges = peak_edges.max(forwarder.north_net_edge_count());
                 // Ingest witness: this peer decoded a neighbour's link-state flood
                 // (the wire control-plane arrived). Logged once, on the positive
                 // edge — the post-ingest settle a topology e2e waits on regardless
@@ -5644,11 +5603,11 @@ async fn run_peer_until(
                 // once, on the positive edge — the deterministic post-ingest signal
                 // a full-linkstate federation e2e settles on (and the discriminator
                 // a gossip-mode peer never trips: its self-flood carries no links).
-                if !announced_reciprocal && forwarder.edge_count() > 0 {
+                if !announced_reciprocal && forwarder.north_net_edge_count() > 0 {
                     announced_reciprocal = true;
                     log::info!(
                         "wz-ap-demo peer: reciprocal mesh link confirmed ({} edge(s))",
-                        forwarder.edge_count()
+                        forwarder.north_net_edge_count()
                     );
                 }
                 // Client-queryable HOSTING witness: this peer ingested a co-attached
@@ -5659,11 +5618,11 @@ async fn run_peer_until(
                 // hosts the client queryable. In-tick, not shutdown-latched:
                 // `client_qabls_seen()` is a live count the client's teardown
                 // face-down zeroes (mirror of the reciprocal/ingest positive edges).
-                if !announced_client_qabl && forwarder.client_qabls_seen() > 0 {
+                if !announced_client_qabl && forwarder.client_queryables_seen() > 0 {
                     announced_client_qabl = true;
                     log::info!(
                         "wz-ap-demo peer: learned a client queryable ({} queryable(s))",
-                        forwarder.client_qabls_seen()
+                        forwarder.client_queryables_seen()
                     );
                 }
                 // c3c-3 debt A2 — a `--subscribe` peer declares its interest ONCE.
@@ -5680,11 +5639,14 @@ async fn run_peer_until(
                     if unsubscribe_after_data && forwarder.data_seen() > 0 {
                         if !undeclared {
                             undeclared = true;
-                            let _ = forwarder.undeclare_subscription(key);
+                            forwarder.unregister_local_subscriber(key);
                         }
                     } else if !declared {
                         declared = true;
-                        let _ = forwarder.declare_subscription(key);
+                        // A declaration is its callback, as the pin's session has it
+                        // (`docs/peer-region-hats.md`, section 12): the demo counts what
+                        // arrives through `data_seen`, so the callback does nothing.
+                        forwarder.register_local_subscriber(key, Box::new(|_| {}));
                         // A deterministic barrier for an admin-introspection querier:
                         // the sub is now in `forwarder.subs`, and the introspection
                         // buffer is re-snapshotted at the end of THIS tick (below), so a
@@ -5737,29 +5699,41 @@ async fn run_peer_until(
                     // which the old accessor never read. The hardcoding was the
                     // symptom; the accessor shape that made it the only option was
                     // the cause.
-                    let mut buf = introspection.borrow_mut();
+                    // Step 7b — the declarations are the region-hat forwarder's view, the
+                    // one the router host reads, so the node's own face is named among
+                    // the clients and the node among the peers of what a south region
+                    // sourced (`docs/peer-region-hats.md`, section 12).
+                    let declarations = forwarder.declarations_view();
+                    let mut buf = introspection.guard();
                     buf.clear();
-                    buf.extend(forwarder.subscriber_sources().into_iter().map(
-                        |(keyexpr, sources)| AdminDeclaration {
-                            kind: AdminEntityKind::Subscriber,
-                            keyexpr,
-                            sources,
-                        },
-                    ));
-                    buf.extend(forwarder.queryable_sources().into_iter().map(
-                        |(keyexpr, sources)| AdminDeclaration {
-                            kind: AdminEntityKind::Queryable,
-                            keyexpr,
-                            sources,
-                        },
-                    ));
+                    buf.extend(
+                        declarations
+                            .subscribers()
+                            .into_iter()
+                            .map(|(keyexpr, sources)| AdminDeclaration {
+                                kind: AdminEntityKind::Subscriber,
+                                keyexpr,
+                                sources,
+                            }),
+                    );
+                    buf.extend(
+                        declarations
+                            .queryables()
+                            .into_iter()
+                            .map(|(keyexpr, sources)| AdminDeclaration {
+                                kind: AdminEntityKind::Queryable,
+                                keyexpr,
+                                sources,
+                            }),
+                    );
                     // R2693 — the THIRD leg. Upstream serves five per-entity
                     // handlers and this entry's reason named four; the token one
                     // was claimed by no atom at all until R2691 registered it.
                     // Every upstream hat enumerates tokens, unlike publishers and
                     // queriers where the client and router hats return an empty
                     // map, so no host is excused from this leg by its role.
-                    buf.extend(forwarder.token_sources().into_iter().map(
+                    #[cfg(feature = "routing-token-tables")]
+                    buf.extend(declarations.tokens().into_iter().map(
                         |(keyexpr, sources)| AdminDeclaration {
                             kind: AdminEntityKind::Token,
                             keyexpr,
@@ -5780,14 +5754,14 @@ async fn run_peer_until(
                     // `fn sourced_publishers`), so the pure-Session host and the
                     // router forwarder emitting nothing here is faithful, not a
                     // second gap.
-                    buf.extend(forwarder.publisher_sources().into_iter().map(
+                    buf.extend(declarations.publishers().into_iter().map(
                         |(keyexpr, sources)| AdminDeclaration {
                             kind: AdminEntityKind::Publisher,
                             keyexpr,
                             sources,
                         },
                     ));
-                    buf.extend(forwarder.querier_sources().into_iter().map(
+                    buf.extend(declarations.queriers().into_iter().map(
                         |(keyexpr, sources)| AdminDeclaration {
                             kind: AdminEntityKind::Querier,
                             keyexpr,
@@ -5807,7 +5781,7 @@ async fn run_peer_until(
                 // which is why the `--config-queryable` block above needs no cfg of
                 // its own.
                 {
-                    let mut buf = admin_sessions.borrow_mut();
+                    let mut buf = admin_sessions.guard();
                     buf.clear();
                     buf.extend(forwarder.admin_sessions());
                 }
@@ -5844,12 +5818,12 @@ async fn run_peer_until(
                     // forwards once it has LEARNED an interested subscriber (the
                     // declaration flooded back to it). Logged once, when interest
                     // first arrives — proof the propagation reached the publisher.
-                    let interested_now = !forwarder.interested(key).is_empty();
+                    let interested_now = !forwarder.north_interested(key).is_empty();
                     if !announced_interest && interested_now {
                         announced_interest = true;
                         log::info!(
                             "wz-ap-demo peer: publisher learned subscriber interest ({} peer(s))",
-                            forwarder.interested(key).len()
+                            forwarder.north_interested(key).len()
                         );
                     } else if announced_interest && !announced_withdrawal && !interested_now {
                         // c3c-3 debt A1 — the retraction reached the publisher: a
@@ -5886,13 +5860,13 @@ async fn run_peer_until(
                 // per-tick PUT of the same value is a no-op and the witness logs once.
                 // Drain on its own line so the `RefCell` borrow is released BEFORE the
                 // apply body (which re-borrows wz_config) — no nested-borrow fragility.
-                let drained = pending_acl_deny.borrow_mut().take();
+                let drained = pending_acl_deny.guard().take();
                 if let Some(deny_kx) = drained {
                     if last_applied_deny.as_deref() != Some(deny_kx.as_str()) {
-                        let mut merged = wz_config.borrow().interceptors().clone();
+                        let mut merged = wz_config.guard().interceptors().clone();
                         merged.acl = Some(acl_deny_policy(&deny_kx));
                         wz_config
-                            .borrow_mut()
+                            .guard()
                             .reconfigure_interceptors(merged, &forwarder);
                         log::info!(
                             "wz-ap-demo peer: config reconfigured — now denying {deny_kx}"
@@ -5928,24 +5902,13 @@ async fn run_peer_until(
         summary.established,
         summary.peak_concurrent,
         forwarder.ingested(),
-        peak_nodes.max(forwarder.node_count()),
-        peak_edges.max(forwarder.edge_count()),
+        peak_nodes.max(forwarder.north_net_node_count()),
+        peak_edges.max(forwarder.north_net_edge_count()),
         forwarder.data_seen()
     );
-    // R311y512 — the INTEREST-BROKER witness, on its own line rather than
-    // appended to the summary above so the OFF build simply does not print it
-    // (the whole block is compiled out) and a test can tell the two builds apart
-    // by presence, not by parsing a number out of a shared line. `reaped` is the
-    // GC's own counter: it rises only when the tick sweep abandoned a propagated
-    // interest whose upstream never answered, which is the event a foreign client
-    // observes as its `z_liveliness_get` terminating anyway.
-    #[cfg(feature = "routing-interest-pending-gc")]
-    log::info!(
-        "wz-ap-demo peer: interest broker; {} propagated interest(s) still \
-         pending, {} reaped by the GC",
-        forwarder.pending_interests_len(),
-        forwarder.interests_timed_out()
-    );
+    // There is no interest-broker line any more (R311y512 printed one): this peer brokers no
+    // interest, so it has no pending interest to count or collect
+    // (`docs/peer-region-hats.md`, section 12a).
     // Convergence witness the e2e asserts on: emitted ONLY when this peer
     // actually INGESTED a neighbour's link-state flood — proof topology
     // converged over the wire, not just that a face was held. The register-time
@@ -5955,7 +5918,7 @@ async fn run_peer_until(
         log::info!(
             "wz-ap-demo peer: learned mesh topology (ingested {} link-state(s), peak {} node(s) in graph)",
             forwarder.ingested(),
-            peak_nodes.max(forwarder.node_count())
+            peak_nodes.max(forwarder.north_net_node_count())
         );
     }
     // R311y423 — the GOSSIP-AUTOCONNECT witness (`scouting-autoconnect`), and it
@@ -5981,10 +5944,10 @@ async fn run_peer_until(
     // gossip peer emits ONLY the former — the load-bearing distinction between
     // `routing/peer/mode=linkstate` and the default `peer_to_peer`. Deterministic
     // at shutdown (peak-sampled), mirroring the `learned mesh topology` gate.
-    if peak_edges.max(forwarder.edge_count()) > 0 {
+    if peak_edges.max(forwarder.north_net_edge_count()) > 0 {
         log::info!(
             "wz-ap-demo peer: confirmed reciprocal mesh link ({} edge(s) in graph)",
-            peak_edges.max(forwarder.edge_count())
+            peak_edges.max(forwarder.north_net_edge_count())
         );
     }
     // Data-reception witness — a DETERMINISTIC shutdown counterpart to the
@@ -6036,10 +5999,10 @@ async fn run_peer_until(
     // latch hardens the 2-router federation e2e, whose subscription half propagates
     // across a router hop (R311y128 design-panel A robustness note).
     if let Some(key) = publish_key {
-        if !forwarder.interested(key).is_empty() {
+        if !forwarder.north_interested(key).is_empty() {
             log::info!(
                 "wz-ap-demo peer: publisher learned subscriber interest ({} peer(s))",
-                forwarder.interested(key).len()
+                forwarder.north_interested(key).len()
             );
         } else if announced_interest {
             log::info!("wz-ap-demo peer: publisher subscriber interest withdrawn");
@@ -7200,7 +7163,7 @@ async fn run_router_hat_until(
         );
         #[cfg(not(feature = "router-connect-reconcile"))]
         let opener = wz::runtime_tokio::lifecycle_query::NoOpener;
-        host_session_lifecycle_shared(
+        host_session_lifecycle(
             &wz::runtime_tokio::zid_hex::zid_to_zenoh_hex(&params.zid),
             params.whatami.to_str(),
             session_close_permit,

@@ -499,12 +499,15 @@ fn apfull_adminspace_plane_decoded_by_a_real_pico_z_get() {
         .unwrap_or_else(|| {
             panic!("pico decoded no per-entity subscriber leg at `{sub_key}`\n--- z_get ---\n{out}")
         });
+    // Item 751 step 7b: this host's own session is a client of its `Local` region, so it is
+    // named among the clients as well as in the north bucket (`peers`) of what that south
+    // region sourced (`zenoh/src/net/routing/dispatcher/tables.rs` @ `fn add_north_source(`).
     assert!(
         sub.contains(&format!(
-            r#"{{"routers":[],"peers":["{zid}"],"clients":[]}}"#
+            r#"{{"routers":[],"peers":["{zid}"],"clients":["{zid}"]}}"#
         )),
         "the subscriber leg carries the zenoh Sources body naming this host as the \
-         source peer\n  got: {sub}"
+         source peer and as its own client face\n  got: {sub}"
     );
 
     // ── adminspace-metrics — THE COMPOSITION DELTA ──────────────────

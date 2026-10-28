@@ -622,6 +622,11 @@ routing-routes = ["routing-router", "wz/routing-routes"]
 # (--acl-deny / --downsample / --max-payload); each implies routing-peer.
 routing-peer = [
     "wz/routing-peer",
+    # Item 751, step 7b (`docs/peer-region-hats.md`) — the peer node IS the region-hat
+    # forwarder at node mode Peer, the forwarder the router host runs, so the run-mode
+    # that hosts it compiles that module in. The facade's `routing-peer` stays what it was:
+    # the accept loop and the peer-mode foundation.
+    "wz/routing-router-hat",
     "wz/access-acl",
     "wz/access-downsampling",
     "wz/access-quota",

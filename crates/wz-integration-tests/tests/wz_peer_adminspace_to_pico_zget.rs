@@ -36,8 +36,9 @@
 //! - `adminspace-introspection-handlers` — the per-entity subscriber leg, keyed
 //!   `@/<zid>/peer/subscriber/demo/data` (the LIVE declared keyexpr, not a
 //!   template) with the zenoh `Sources` body `{"routers":[],"peers":["<A_zid>"],
-//!   "clients":[]}`. Same discriminator as the wz<->wz E6b test, now read by
-//!   pico's C decoder.
+//!   "clients":["<A_zid>"]}` (A's own session is a client of its `Local` region and
+//!   the merge names A in the north bucket; item 751 step 7b). Same discriminator as
+//!   the wz<->wz E6b test, now read by pico's C decoder.
 //!
 //! ## Why the gate is real — and the two atoms are NOT equally bound
 //!
@@ -235,11 +236,16 @@ fn wz_peer_adminspace_decoded_by_pico_z_get() {
         .unwrap_or_else(|| {
             panic!("pico decoded no per-entity subscriber leg at `{sub_key}`\n--- z_get ---\n{out}")
         });
+    // Item 751 step 7b: A's own session is a client of A's `Local` region, so A is named among
+    // the clients as well, and the dispatcher's merge names A in the north bucket of what a
+    // south region sourced (`zenoh/src/net/routing/dispatcher/tables.rs` @ `fn add_north_source(`).
+    // The body used to read `clients:[]`.
     assert!(
         sub_line.contains(&format!(
-            r#"{{"routers":[],"peers":["{zid}"],"clients":[]}}"#
+            r#"{{"routers":[],"peers":["{zid}"],"clients":["{zid}"]}}"#
         )),
-        "subscriber leg carries the zenoh Sources body naming A as the source peer\n  got: {sub_line}"
+        "subscriber leg carries the zenoh Sources body naming A as the source peer and as \
+         the node's own client face\n  got: {sub_line}"
     );
 
     // ── R2413 (item 676): the surface document, decoded by the FOREIGN client ─

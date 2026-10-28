@@ -179,16 +179,21 @@ fn wz_peer_admin_subscriber_introspection_over_the_wire() {
         .expect("root has a zid chunk")
         .to_string();
     // zenoh serializes the SAME `Sources` struct for the admin body of BOTH kinds — for
-    // A's own subscriber it is `{"routers":[],"peers":["<A_zid>"],"clients":[]}` (the
-    // reply log debug-escapes the quotes, so they appear backslash-escaped). This pins
-    // the exact body shape + content (A as the declaring peer), not just a bare `null`.
+    // A's own subscriber it is `{"routers":[],"peers":["<A_zid>"],"clients":["<A_zid>"]}`
+    // (the reply log debug-escapes the quotes, so they appear backslash-escaped). Item 751
+    // step 7b: A's own session is a face of the `Local` region, a client of A, so A is named
+    // among the clients (`zenoh/src/net/routing/hat/broker/pubsub.rs` @ `srcs.clients.push(face.zid);`),
+    // and the dispatcher's merge names A in the north bucket of what a south region sourced
+    // (`zenoh/src/net/routing/dispatcher/tables.rs` @ `fn add_north_source(`): `peers` on a
+    // peer node. Before, the body read `clients:[]`. This pins the exact body shape and
+    // content, not just a bare `null`.
     assert!(
         reply.contains(r#"body=Put"#)
             && reply.contains(&format!(r#"\"peers\":[\"{a_zid}\"]"#))
             && reply.contains(r#"\"routers\":[]"#)
-            && reply.contains(r#"\"clients\":[]"#),
+            && reply.contains(&format!(r#"\"clients\":[\"{a_zid}\"]"#)),
         "the subscriber introspection reply body must be the zenoh Sources struct \
-         {{routers:[],peers:[{a_zid}],clients:[]}}, not `null`.\n--- B ---\n{reply}"
+         {{routers:[],peers:[{a_zid}],clients:[{a_zid}]}}, not `null`.\n--- B ---\n{reply}"
     );
 }
 
@@ -390,23 +395,25 @@ fn wz_peer_admin_client_declared_subscriber_lands_in_the_clients_bucket() {
     // THE BUCKETING ASSERTION, pinning the WHOLE body rather than one bucket.
     //
     // ⚠ AN EARLIER DRAFT ASSERTED ONLY `clients`, AND THAT PASSED IN BOTH STATES.
-    // Two repairs stand behind this body and only the SECOND is visible here.
-    // R2687 gave the fold its tiers, which is what put B in `clients` at all —
-    // and left `{"routers":[],"peers":["<A>"],"clients":["<B>"]}`, B correctly
-    // named AND A wrongly named, because the peer advertises a client's
-    // declaration into the mesh under its own zid and the fold read that row
-    // back as a peer-tier source. R2689 (open-debt 779) removed A by recording
-    // what BACKS a keyexpr. A `clients`-only assertion cannot tell those two
-    // states apart, so the second repair would have landed unasserted. Pinning
-    // all three buckets is what makes this test the contract: ONE declaration,
-    // ONE source, in the tier that declared it.
+    // R2687 gave the fold its tiers, which is what put B in `clients` at all, and
+    // R2689 (open-debt 779) removed A from the body by recording what BACKS a keyexpr,
+    // on the reasoning "ONE declaration, ONE source, in the tier that declared it".
+    //
+    // ⛔ ITEM 751 STEP 7b REPLACED THAT EXPECTATION, and the reasoning with it. The pin's
+    // dispatcher does not name one source: it adds the NODE's own zid to the north bucket
+    // of everything a south region sourced, "so they are visible to north-facing peers"
+    // (`zenoh/src/net/routing/dispatcher/tables.rs` @ `fn add_north_source(`). A client's
+    // subscription at a peer node is therefore `{"routers":[],"peers":["<A>"],
+    // "clients":["<B>"]}`: B is the source, in the tier that declared it, and A is named
+    // as the gateway the declaration reaches the north through. A `clients`-only assertion
+    // still cannot tell A's absence from its presence, so the whole body is pinned.
     assert!(
         reply.contains(&format!(
-            r#"{{\"routers\":[],\"peers\":[],\"clients\":[\"{CLIENT_B_ZID_RENDERED}\"]}}"#
+            r#"{{\"routers\":[],\"peers\":[\"{a_zid}\"],\"clients\":[\"{CLIENT_B_ZID_RENDERED}\"]}}"#
         )),
         "the `demo/client` body must be exactly \
-         {{routers:[],peers:[],clients:[{CLIENT_B_ZID_RENDERED}]}} — B declared it \
-         and A ({a_zid}) did not, so A must not appear as a peer-tier source for \
-         someone else's subscription.\n--- C ---\n{reply}"
+         {{routers:[],peers:[{a_zid}],clients:[{CLIENT_B_ZID_RENDERED}]}} — B declared it, \
+         and A ({a_zid}) is named as the north source of what its client region \
+         sourced.\n--- C ---\n{reply}"
     );
 }

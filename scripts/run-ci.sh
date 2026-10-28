@@ -21551,21 +21551,19 @@ layer_e6_peer_mesh() {
     else
         _pico_cli_unavailable "E6 leg wz_peer_liveliness_token_pico_interop" || return 1
     fi
-    # R311y512 — §5.21 routing-interest-pending-gc, on the SAME E6 binary. A real
-    # pico `z_get_liveliness` against a wz peer whose upstream is SIGSTOPped: pico
-    # carries NO timeout for a CURRENT interest (`net/liveliness.c:348`), so its
-    # return IS the GC's DeclareFinal arriving. Three arms — frozen upstream (the
-    # atom), live upstream (0 reaped, so the atom arm is not "the broker always
-    # reaps"), and no upstream (inline, so the delay is the pending table). One
-    # arm holds a 2.5s GC window inside an 8s budget, so --test-threads=1 keeps
-    # the three fixtures' ports and frozen processes from overlapping.
+    # Item 751 step 7b — a real pico `z_get_liveliness` against a wz peer whose
+    # upstream is SIGSTOPped. Pico carries NO timeout for a CURRENT interest
+    # (`net/liveliness.c:348`), so its return IS the peer's answer arriving. The
+    # peer is the region-hat forwarder, which brokers no interest to its peers, so
+    # the answer is prompt: frozen upstream, live upstream, and no upstream. The
+    # fixtures freeze processes, so --test-threads=1 keeps them from overlapping.
     if [[ -x target/zenoh-pico-cli/z_get_liveliness ]]; then
         (cd crates && cargo test -p wz-integration-tests \
             --test wz_peer_interest_pending_gc_pico_interop -- --ignored --quiet --test-threads=1) \
             || return 1
-        # R3362 — `routing/interests/timeout` from a CONFIG FILE, on the same binary: a
-        # document stating 2500 ms ends the frozen-upstream get at that deadline, and a
-        # document that omits the key leaves the default 10 s window pending.
+        # `routing/interests/timeout` from a CONFIG FILE, on the same binary: a document
+        # naming the key is reported read-and-not-applied and the get is still answered
+        # promptly; a document that omits the key is not reported for it.
         _runci_guarded_test "E6 interest timeout from a config file" 2 \
             cargo test -p wz-integration-tests \
             --test wz_peer_interest_pending_gc_pico_interop_from_a_config_file -- --ignored --quiet --test-threads=1 || return 1
