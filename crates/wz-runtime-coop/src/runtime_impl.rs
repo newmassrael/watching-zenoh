@@ -109,7 +109,6 @@ use core::task::{Context, Poll};
 
 use critical_section::Mutex;
 use wz_runtime_core::Runtime;
-use wz_session_core::link::BoxedLinkDriver;
 
 #[cfg(not(feature = "session-slot"))]
 use crate::executor::make_waker;
@@ -163,6 +162,16 @@ pub(crate) struct RuntimeInner<C: ClockSource> {
     pub(crate) clock: C,
 }
 
+/// The link driver a [`CoopRuntime`] is made over when it is not told one: the trait object, where
+/// the session tier (`wz-session-core`) is built.
+#[cfg(feature = "session-unicast")]
+pub type DefaultDriver = dyn wz_session_core::link::BoxedLinkDriver;
+
+/// The link driver a [`CoopRuntime`] is made over when it is not told one: none, where no session
+/// tier is built.
+#[cfg(not(feature = "session-unicast"))]
+pub type DefaultDriver = ();
+
 /// `impl Runtime` for the MCU profile. Cheap to clone — the entire
 /// state lives in `Arc<RuntimeInner<C>>`. Multiple clones share the
 /// same task pool, timer queue, and clock; task closures may capture
@@ -170,11 +179,12 @@ pub(crate) struct RuntimeInner<C: ClockSource> {
 /// Decision 5).
 ///
 /// `D` is the link driver the sessions over this runtime send through. The runtime owns none: it
-/// is the type the session tier reads back as [`SessionRuntime::Driver`], so a profile that
+/// is the type the session tier reads back as `SessionRuntime::Driver`, so a profile that
 /// names its driver at build time (the fixed-memory profile, over the driver the image's
 /// Kconfig chose) gets direct calls through the link, and the default, the trait object, is the
-/// profile that picks its driver at run time.
-pub struct CoopRuntime<C: ClockSource, D: ?Sized = dyn BoxedLinkDriver> {
+/// profile that picks its driver at run time. A build with no session tier has no driver trait
+/// to name and its default is `()`, which nothing reads.
+pub struct CoopRuntime<C: ClockSource, D: ?Sized = DefaultDriver> {
     pub(crate) inner: InnerRef<C>,
     driver: PhantomData<fn() -> *const D>,
 }
