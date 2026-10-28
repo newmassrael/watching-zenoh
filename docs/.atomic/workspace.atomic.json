@@ -295994,6 +295994,34 @@
         "The next steps of the structure: derive the callee sets from the compiler's call graph and not from names, so that the 57 rules are a check and no longer the source; a record per kind in the sink, which would put the smaller frame of lend_request under a query's answer where lend_declare's 2,064 bytes are now (the get image reads 6,768 against a limit of 9,216); the reservation of each image derived from its bound (the fixed image holds 9,216 bytes for a bound of 6,216); the application callback typed so that it cannot send from inside a record; a test that a record lent to the getter's layer sends nothing and the next AppWake does."
       ]
     },
+    "Round 3848": {
+      "decision_summary": "The non-default legs gate, run on three crates and one leg row, failed since the session's link driver became a type of the runtime (the commit that named it left four places still using the old one-parameter forms). The runtime cell's start takes the driver as a parameter that nothing can infer, and the acceptor image, the lwIP slot tests and the cell's own tests did not name it. Each now names the driver its session uses. The leg row that filtered on the retired linkstate forwarder's lifecycle test matched no test; it is removed and the router forwarder's row stays.",
+      "changes_bullets": [
+        "crates/wz-runtime-coop/src/static_tests.rs, crates/wz-session-lwip/tests/session_peer_tables.rs, crates/wz-session-lwip/tests/slot_control_records.rs: RuntimeCell::start is called with the driver type its sessions use. crates/wz-mcu-session-acceptor/src/fixed.rs: the session tables, the pump slots, the started runtime and the held session carry LwipUdpDriver. scripts/lib/nondefault-tests-gate.sh: the row naming linkstate_forward::tests::a_lifecycle_close_orders_every_link_to_the_peer_and_no_other is dropped, and the comment above it follows."
+      ],
+      "verification_bullets": [
+        "On pc2: wz-runtime-coop under alloc,reassembly,session-slot,session-unicast passes 57 tests (the lib did not compile before); wz-session-lwip slot_control_records and session_peer_tables pass 3 and 3 under the slot row's features; wz-mcu-session-acceptor passes its leg (1 test); the router forwarder's lifecycle-close test runs 1 test under its row. cargo fmt --check is clean on the three crates. Not run: the census over the whole table and the other wz-session-lwip rows."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "carry_forward_bullets": [
+        "The census (--census) and the remaining wz-session-lwip rows were not run after this change; the hosted run of the push reads them."
+      ],
+      "publishable_decision_summary": "The non-default legs gate, run on three crates and one leg row, failed since the session's link driver became a type of the runtime (the commit that named it left four places still using the old one-parameter forms). The runtime cell's start takes the driver as a parameter that nothing can infer, and the acceptor image, the lwIP slot tests and the cell's own tests did not name it. Each now names the driver its session uses. The leg row that filtered on the retired linkstate forwarder's lifecycle test matched no test; it is removed and the router forwarder's row stays.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-coop/src/static_tests.rs, crates/wz-session-lwip/tests/session_peer_tables.rs, crates/wz-session-lwip/tests/slot_control_records.rs: RuntimeCell::start is called with the driver type its sessions use. crates/wz-mcu-session-acceptor/src/fixed.rs: the session tables, the pump slots, the started runtime and the held session carry LwipUdpDriver. scripts/lib/nondefault-tests-gate.sh: the row naming linkstate_forward::tests::a_lifecycle_close_orders_every_link_to_the_peer_and_no_other is dropped, and the comment above it follows."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2: wz-runtime-coop under alloc,reassembly,session-slot,session-unicast passes 57 tests (the lib did not compile before); wz-session-lwip slot_control_records and session_peer_tables pass 3 and 3 under the slot row's features; wz-mcu-session-acceptor passes its leg (1 test); the router forwarder's lifecycle-close test runs 1 test under its row. cargo fmt --check is clean on the three crates. Not run: the census over the whole table and the other wz-session-lwip rows."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The census (--census) and the remaining wz-session-lwip rows were not run after this change; the hosted run of the push reads them."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
