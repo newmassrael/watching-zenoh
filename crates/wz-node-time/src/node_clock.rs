@@ -220,7 +220,7 @@ pub struct NodeHlc {
     interception_clock: Option<std::sync::Arc<NodeClock>>,
 }
 
-/// R2626 — what [`NodeHlc::treat_timestamp`] tells its caller to do with the
+/// R2626 — what `NodeHlc::treat_timestamp` (with `codec-push`) tells its caller to do with the
 /// message it was just handed.
 ///
 /// wz needs this and zenoh does not, and the reason is structural rather than a

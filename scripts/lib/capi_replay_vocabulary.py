@@ -157,6 +157,38 @@ def plan_half_sources() -> list[pathlib.Path]:
     return files
 
 
+# `pub use wz_workload::pacing::{Timing, TimingSource};` and the one-name form: the names the plan
+# half re-exports from a module of another crate of this workspace.
+REEXPORT = re.compile(
+    r"^pub use\s+(wz_[a-z0-9_]+)::([a-z_][a-z0-9_]*)::(?:\{([^}]*)\}|([A-Za-z_][A-Za-z0-9_]*))\s*;",
+    re.M,
+)
+
+
+def reexported_enums(path: pathlib.Path) -> dict[str, list[str]]:
+    """The enums a file of the plan half re-exports from a module of another crate.
+
+    The plan half is what the crate PUBLISHES, not only what it defines: the pacing and the
+    mutation moved to `wz-workload` (the traffic driver plays them too) and are re-exported here
+    at the paths they have always had, which is the path the ABI names. A gate that read only the
+    definitions found none of them and, by its own rule, called that a failure. So a re-export is
+    followed to the module that defines the name and kept when that is an enum; a struct that is
+    re-exported beside them (`Pacing`, `Schedule`) is not one and drops out of the population on
+    its own."""
+    found: dict[str, list[str]] = {}
+    for match in REEXPORT.finditer(path.read_text(encoding="utf-8")):
+        crate, module, group, single = match.groups()
+        names = [n.strip() for n in (group or single).split(",") if n.strip()]
+        defining = ROOT / "crates" / crate.replace("_", "-") / "src" / f"{module}.rs"
+        if not defining.exists():
+            continue
+        defined = enums_of(defining)
+        for name in names:
+            if name in defined:
+                found[name] = defined[name]
+    return found
+
+
 def enums_of(path: pathlib.Path) -> dict[str, list[str]]:
     """Every `pub enum` in one file, with its variants in declaration order."""
     text = path.read_text(encoding="utf-8")
@@ -183,6 +215,8 @@ def main() -> int:
     upstream: dict[str, list[str]] = {}
     for path in sources:
         for name, variants in enums_of(path).items():
+            upstream[name] = variants
+        for name, variants in reexported_enums(path).items():
             upstream[name] = variants
 
     # P1 -- the population, and an empty one is a FAILURE. A gate whose subject
