@@ -60,7 +60,7 @@ what that means for each instrument:
 | `queue` | Bounded FIFO hand-off between contexts, with `producers`, `consumers` and `progress` declared. Documents no policy for a full queue. | Not the event ring (M2): the ring is a broadcast with overwrite, which a queue is not (see the limit below). |
 | `buffer-pool`, `bounded-collection` | Sized pools and tables; SCE emits the numbers (`SLOT_COUNT`, `SLOT_SIZE`). | The numbers of the plane (sizes of the ring and of the snapshot), as the session-slot pool states its own. |
 | `algorithm` | Pure functions generated for several backends, under an integer contract: an overflow or an out-of-range read is a named failure and never a value. | The deadline comparison, once, for the Rust and C11 backends. |
-| `stdlib` (`sce:std/...`) | Algorithms SCE ships and tests against reference implementations. Read, not assumed: `merge/hlc_send`, `hlc_receive`, `hlc_compare`, `hlc_within_drift` (Kulkarni et al. 2014; wall time in milliseconds as `int64`, a `uint32` counter, a `uint64` node id) and `rate/gcra_admit` (a generic cell rate limiter). | `hlc_within_drift` is the drift bound of M1, as it is written. The HLC itself stays `uhlc` on the wire (below). `gcra_admit` is the candidate for a querier quota that is a rate and not a count. |
+| `stdlib` (`sce:std/...`) | Algorithms SCE ships and tests against reference implementations. Read, not assumed: `merge/hlc_send`, `hlc_receive`, `hlc_compare`, `hlc_within_drift` (Kulkarni et al. 2014; wall time in milliseconds as `int64`, a `uint32` counter, a `uint64` node id) and `rate/gcra_admit` (a generic cell rate limiter). | `hlc_within_drift` is the drift bound of M1, as it is written. The HLC keeps zenoh's NTP64 form, with `uhlc` as its reference (below). `gcra_admit` is the candidate for a querier quota that is a rate and not a count. |
 
 Two honest limits, so that nothing is built on a feature SCE does not have:
 
@@ -108,32 +108,53 @@ policy, `A` axis (existing).
 
 ## M1 Time: a clock with a quality
 
-**Today.** `wz-node-time` reads `SystemTime` (so it needs `std`), turns it into NTP64, and feeds
-an `uhlc::HLC` when `time-hlc` is on. The fixed-memory hosts have no node clock, and the session
-stamps from whatever the host hands it.
+**Today (read from the sources, 2026-10-28).** The clock port already exists:
+`wz_session_core::epoch::EpochSource` (`no_std`) answers `try_since_epoch()` as seconds and
+nanoseconds since the Unix epoch, or `EpochUnavailable` when the board has no set clock, and
+derives `try_now_ntp64()`. It is implemented for the system clock (`SystemEpoch` in
+`wz-node-time`), POSIX, FreeRTOS and Zephyr, and the pico C ABI stamps through it. What is
+missing is above the port: the node clock `NodeHlc` calls `wall_clock_ntp64()` directly and so
+cannot take any other source, and it holds a `uhlc::HLC` that only exists under `std` hosts'
+`time-hlc`. `uhlc` 0.8.2 shows why it cannot simply be handed a source: `HLCBuilder::with_clock`
+takes a plain `fn() -> NTP64`, with no state and no closure, so a source with state can only reach
+it through a process-wide static; the counter is in the low `CSIZE` = 4 bits of the NTP64 word
+(`lib.rs` `CMASK`); the drift bound is `with_max_delta(Duration)`, 500 ms by default (a fixed 500
+ms without `std`); and `update_with_timestamp` builds a `String` with `format!` when it rejects a
+timestamp, so the reject path allocates.
 
 **Design.**
 
-* `ClockSource` beside `TimeSource` in `wz-runtime-core` (no `std`, no allocation): `read()`
-  returns a reading and `quality()` returns a `ClockQuality`. A reading is an integer count of
-  nanoseconds since the Unix epoch in 64 bits, which is where an NTP64 word is made from; the
-  wire stays the Timestamp extension (NTP64 and the node's id), unchanged. `TimeSource` stays
-  monotonic and wall-clock-free, as its documentation says it must; the two are different
-  questions and different traits.
+* No new `ClockSource` trait. The port is `EpochSource`, and the plan builds on it (an earlier
+  draft of this plan named a new trait and missed that the port exists). `EpochUnavailable` is
+  already the "no clock" state. What is added is a quality (below) and, for a clock the
+  application owns, a registered `EpochSource` that wraps the application's callback (step 2).
+  A reading stays seconds and nanoseconds since the Unix epoch, from which an NTP64 word is made;
+  the wire stays the Timestamp extension (NTP64 and the node's id), unchanged. `TimeSource` stays
+  monotonic and wall-clock-free, as its documentation says it must.
 * `ClockQuality` is a statechart, `sources/session/clock_quality.scxml`: `Unsynchronized`,
   `Synchronized`, `Holdover` and `FreeRunning`, moved by `sync.acquired`, `sync.lost` and
   `holdover.expired` (the host raises the last, as it raises every deadline). `Holdover` and
   `FreeRunning` exist only with `clock-source`, through `sce:requires`. A quality carries an
   uncertainty bound in microseconds, which is data of the reading and not a state.
-* The node clock becomes `NodeHlc<C: ClockSource>`. Physical time is the registered source's
-  reading; the logical counter is `uhlc`'s, which is `no_std`. A reading that moves more than
-  `CLOCK_MAX_FORWARD_STEP_MS` past the last stamp is refused and counted, which is zenoh's own
-  drift check (`uhlc`'s `max_delta`) and is the answer to an external clock that steps.
+* The node clock's arithmetic moves into a core of our own, `HlcCore`, over an `EpochSource`
+  (`no_std`, no allocation), and `NodeHlc` holds it. The algorithm is the one `uhlc` 0.8.2 shows:
+  take the reading's NTP64 word with the low `CSIZE` bits cleared; if it is above the last stamp's
+  time part, the stamp is that word, otherwise the last stamp plus one; and absorbing a remote
+  stamp takes the larger of the reading, the remote time and the last stamp, refusing a remote
+  time more than the bound ahead of the reading. The state is one `AtomicU64` advanced by
+  compare-and-swap, so no lock is held and a refusal allocates nothing. `uhlc` is not removed
+  from the build: it becomes the REFERENCE the core is tested against, over random clock traces
+  that step back, freeze and jump, and the two must agree on every stamp and every refusal. A
+  reading that moves more than `CLOCK_MAX_FORWARD_STEP_MS` past the last stamp is refused and
+  counted, which is zenoh's own drift check (`uhlc`'s `max_delta`) and is the answer to an
+  external clock that steps. Superior only where measured: the allocation-free reject path and
+  the lock-free state are read from the code, and the cost of a stamp is compared with `uhlc`'s
+  in a test before the core replaces it.
 * `clock-quality-stamping = synchronized-only` makes a node with no good clock stamp nothing and
   say so, instead of stamping with a time it does not trust. The default stamps, as a node does
   today.
-* The wire clock stays `uhlc`, zenoh's own crate, and is not replaced by SCE's `hlc_send` and
-  `hlc_receive`. They are the same algorithm in a different shape: SCE keeps wall time in
+* The wire form stays zenoh's (`uhlc` is the reference of the core above) and is not replaced by
+  SCE's `hlc_send` and `hlc_receive`. They are the same algorithm in a different shape: SCE keeps wall time in
   milliseconds, a `uint32` counter and a `uint64` node id as three fields, where zenoh packs the
   counter into the low bits of an NTP64 word and carries a node id of up to 16 bytes. A node that
   stamped with SCE's record would need a conversion into the wire form that `uhlc` does not make,
@@ -239,7 +260,7 @@ sampler symbol.
 
 | Step | Builds | Done when |
 |---|---|---|
-| 1 | `ClockSource`, `ClockQuality` machine, `NodeHlc<C>` over a source, `clock-source` and its limits | The stamp and wire tests pass on the tokio host and on the cooperative engine; slot bytes unchanged off; the `algorithm` for the comparison is generated and used by Rust. |
+| 1 | `HlcCore` over `EpochSource` tested against `uhlc`, `ClockQuality` machine, `NodeHlc` on the core, `clock-source` and its limits | The stamp and wire tests pass on the tokio host and on the cooperative engine; slot bytes unchanged off; the `algorithm` for the comparison is generated and used by Rust. |
 | 2 | Clock registration in the C ABIs | `capi-c` ABI revision and the pico export pins updated in the same change; the drop-in leg stays green. |
 | 3 | `EventRing` and the `log` sink | The model test and the concurrency check pass; off build has no symbol; the ring contract is written down and sent to SCE. |
 | 4 | Supervision machine and its checkpoints | Conformance over every event order; the cooperative engine hosts it with no task. |
