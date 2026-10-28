@@ -360,6 +360,11 @@ pub mod entropy;
 /// no_std + no_alloc; unconditional.
 pub mod epoch;
 
+/// The Hybrid Logical Clock arithmetic over the [`epoch`] port: `uhlc`'s stamp and absorb rules
+/// in one atomic word, with no allocation and no lock, so a profile with no operating system has
+/// a node clock too. Pure no_std + no_alloc; unconditional.
+pub mod hlc;
+
 /// A1a — modular sequence-number arithmetic (zenoh-pico
 /// `transport/utils.c` mirror): the `seq_num_res` ring masks + the
 /// half-window `precedes` ordering every RX SN gate shares. First
