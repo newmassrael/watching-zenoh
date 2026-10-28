@@ -295460,6 +295460,38 @@
         "Next in order: Z6b, the timestamp stack (Session::new_timestamp, OpenBuilder::with_timestamp_callback, Query::timestamp_stack), then Z6c (Session::config and GIT_VERSION)."
       ]
     },
+    "Round 3833": {
+      "decision_summary": "Read the hosted run of 91f7a8311 (40593418426, eight red jobs) job by job and checked each against the head it ran on and the head now on main. Four were already repaid by other sessions' commits (the stamp pin at revision 7, the interest gate's out-of-line test modules, the zephyr lib count, the C consumer's no weight) and the dialer bound of the reliable-quic leg; I measured the same causes on pc2 first and dropped my duplicates. The one left is the router's uncongested-path budget: with time-hlc and without it a forward now costs one allocation and 16 bytes less in all four cases, and the test records the new figures.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/tests/router_hot_path_cost.rs: both BUDGET tables follow the measured cost: without time-hlc 8/553, 10/692, 68/7438, 85/8702; with it 14/629, 17/832, 89/8114, 107/9442. The six-allocation, 76-byte step of time-hlc over the plain build still holds."
+      ],
+      "verification_bullets": [
+        "On pc2: router_hot_path_cost passes with routing-router-hat alone and with the 83 features of the crate's wide leg. The wz-runtime-tokio lib under the wide leg ran 2278 tests with none failing, so the four peer-gate liveliness tests of the earlier red pass at this head. Not run here: Layer Z's quic-datagram leg (read from its log only), Layer C0 as a whole, and the lwip legs of C1bnl, which cannot build on pc2 without the submodule."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "carry_forward_bullets": [
+        "Which commit took the allocation out of the forward is not found; the figure is a measurement, not an attribution.",
+        "network_message.rs gates judge_chain on a union that omits session-slot with codec-response and without session-unicast, while judge_response_chains is gated on codec-response alone: a build with session-slot and codec-response and no session-unicast does not compile. Whether an image builds that is not read.",
+        "Layer Z was read only to the failures of one run; the legs behind a first error may carry their own red."
+      ],
+      "publishable_decision_summary": "Read the hosted run of 91f7a8311 (40593418426, eight red jobs) job by job and checked each against the head it ran on and the head now on main. Four were already repaid by other sessions' commits (the stamp pin at revision 7, the interest gate's out-of-line test modules, the zephyr lib count, the C consumer's no weight) and the dialer bound of the reliable-quic leg; I measured the same causes on pc2 first and dropped my duplicates. The one left is the router's uncongested-path budget: with time-hlc and without it a forward now costs one allocation and 16 bytes less in all four cases, and the test records the new figures.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/tests/router_hot_path_cost.rs: both BUDGET tables follow the measured cost: without time-hlc 8/553, 10/692, 68/7438, 85/8702; with it 14/629, 17/832, 89/8114, 107/9442. The six-allocation, 76-byte step of time-hlc over the plain build still holds."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2: router_hot_path_cost passes with routing-router-hat alone and with the 83 features of the crate's wide leg. The wz-runtime-tokio lib under the wide leg ran 2278 tests with none failing, so the four peer-gate liveliness tests of the earlier red pass at this head. Not run here: Layer Z's quic-datagram leg (read from its log only), Layer C0 as a whole, and the lwip legs of C1bnl, which cannot build on pc2 without the submodule."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Which commit took the allocation out of the forward is not found; the figure is a measurement, not an attribution.",
+        "network_message.rs gates judge_chain on a union that omits session-slot with codec-response and without session-unicast, while judge_response_chains is gated on codec-response alone: a build with session-slot and codec-response and no session-unicast does not compile. Whether an image builds that is not read.",
+        "Layer Z was read only to the failures of one run; the legs behind a first error may carry their own red."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
