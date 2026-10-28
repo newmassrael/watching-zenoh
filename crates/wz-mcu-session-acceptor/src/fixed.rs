@@ -95,8 +95,8 @@ const MAX_TURNS: usize = MAX_ITERS * 4;
 /// task on one core drives it), not by anything a compiler can check.
 pub struct AcceptorStatics<C: ClockSource + 'static, E: EntropySource + Send + 'static> {
     runtime: RuntimeCell<C, TASKS, TASK_BYTES, TIMERS>,
-    sessions: SessionSlots<CoopRuntime<C>, CoopTime<C>, LwipUdpDriver, E, 1>,
-    pumps: PumpSlots<C, LwipSessionLink<&'static LwipLink>, 1>,
+    sessions: SessionSlots<CoopRuntime<C, LwipUdpDriver>, CoopTime<C>, LwipUdpDriver, E, 1>,
+    pumps: PumpSlots<C, LwipSessionLink<&'static LwipLink>, 1, LwipUdpDriver>,
     listener: SessionListener<1>,
     /// The listener's socket.
     sockets: SessionRxPool<1>,
@@ -176,7 +176,7 @@ where
 
     // ── The stack, the runtime and the host the session is opened by.
     let link = LwipLink::init_static();
-    let Some(runtime) = statics.runtime.start(clock_source) else {
+    let Some(runtime) = statics.runtime.start::<LwipUdpDriver>(clock_source) else {
         return never_established(statics);
     };
     let local = CoopLocalSet::new(&runtime);
@@ -212,7 +212,7 @@ where
     let mut params = Some(acceptor_params(&mut entropy));
     let mut entropy = Some(entropy);
     let mut on_fragment = Some(on_fragment);
-    let mut session: Option<OpenedSession<C>> = None;
+    let mut session: Option<OpenedSession<C, LwipUdpDriver>> = None;
 
     // Open the handshake: the initiator's first move. The reactive peer drives OpenSyn
     // and the application data off the acceptor's real replies.

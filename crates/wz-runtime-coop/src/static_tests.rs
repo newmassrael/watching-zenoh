@@ -16,6 +16,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use wz_runtime_core::{Runtime, RuntimeError, TimeSource};
+use wz_session_core::link::BoxedLinkDriver;
 
 use crate::executor::{yield_now, SpawnRefusal};
 use crate::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeCell};
@@ -66,9 +67,9 @@ async fn forever() {
 fn a_runtime_cell_starts_one_runtime() {
     static NOW: AtomicU64 = AtomicU64::new(0);
     static CELL: RuntimeCell<Hand, 1, 64, 1> = RuntimeCell::new();
-    assert!(CELL.start(Hand(&NOW)).is_some());
+    assert!(CELL.start::<dyn BoxedLinkDriver>(Hand(&NOW)).is_some());
     assert!(
-        CELL.start(Hand(&NOW)).is_none(),
+        CELL.start::<dyn BoxedLinkDriver>(Hand(&NOW)).is_none(),
         "a second start would share the tables"
     );
 }
@@ -87,7 +88,9 @@ fn the_runtime_may_cross_threads_as_the_trait_demands() {
 fn a_spawned_task_is_polled_to_its_output_and_its_cell_is_reused() {
     static NOW: AtomicU64 = AtomicU64::new(0);
     static CELL: RuntimeCell<Hand, 1, 64, 1> = RuntimeCell::new();
-    let runtime = CELL.start(Hand(&NOW)).expect("start");
+    let runtime = CELL
+        .start::<dyn BoxedLinkDriver>(Hand(&NOW))
+        .expect("start");
     let local = CoopLocalSet::new(&runtime);
     for round in 0..3u32 {
         let handle = local
@@ -108,7 +111,9 @@ fn a_full_task_table_refuses_counts_and_hands_the_future_back() {
     static NOW: AtomicU64 = AtomicU64::new(0);
     static DROPS: AtomicU32 = AtomicU32::new(0);
     static CELL: RuntimeCell<Hand, 2, 64, 1> = RuntimeCell::new();
-    let runtime = CELL.start(Hand(&NOW)).expect("start");
+    let runtime = CELL
+        .start::<dyn BoxedLinkDriver>(Hand(&NOW))
+        .expect("start");
     let local = CoopLocalSet::new(&runtime);
     let first = local.spawn_local(forever()).expect("a cell");
     let second = local.spawn_local(forever()).expect("a cell");
@@ -155,7 +160,9 @@ fn a_task_table_fills_to_its_capacity_and_every_spawn_past_it_is_refused_and_cou
     static NOW: AtomicU64 = AtomicU64::new(0);
     static DROPS: AtomicU32 = AtomicU32::new(0);
     static CELL: RuntimeCell<Hand, TASKS, 64, 1> = RuntimeCell::new();
-    let runtime = CELL.start(Hand(&NOW)).expect("start");
+    let runtime = CELL
+        .start::<dyn BoxedLinkDriver>(Hand(&NOW))
+        .expect("start");
     let local = CoopLocalSet::new(&runtime);
 
     // Fill to N: every one of the N cells is a task, and nothing is refused yet.
@@ -217,7 +224,9 @@ fn a_task_table_fills_to_its_capacity_and_every_spawn_past_it_is_refused_and_cou
 fn the_task_refusal_counters_are_split_by_cause_and_only_rise() {
     static NOW: AtomicU64 = AtomicU64::new(0);
     static CELL: RuntimeCell<Hand, 1, 64, 1> = RuntimeCell::new();
-    let runtime = CELL.start(Hand(&NOW)).expect("start");
+    let runtime = CELL
+        .start::<dyn BoxedLinkDriver>(Hand(&NOW))
+        .expect("start");
     let local = CoopLocalSet::new(&runtime);
     let big = [1u8; 512];
     let too_big = |big: [u8; 512]| async move {
@@ -264,7 +273,9 @@ fn the_task_refusal_counters_are_split_by_cause_and_only_rise() {
 fn a_task_too_large_for_a_cell_is_refused_and_counted() {
     static NOW: AtomicU64 = AtomicU64::new(0);
     static CELL: RuntimeCell<Hand, 2, 64, 1> = RuntimeCell::new();
-    let runtime = CELL.start(Hand(&NOW)).expect("start");
+    let runtime = CELL
+        .start::<dyn BoxedLinkDriver>(Hand(&NOW))
+        .expect("start");
     let local = CoopLocalSet::new(&runtime);
     let big = [7u8; 512];
     let Err(refused) = local.spawn_local(async move {
@@ -284,7 +295,9 @@ fn an_output_nobody_reads_is_dropped_once_with_the_handle() {
     static NOW: AtomicU64 = AtomicU64::new(0);
     static DROPS: AtomicU32 = AtomicU32::new(0);
     static CELL: RuntimeCell<Hand, 1, 64, 1> = RuntimeCell::new();
-    let runtime = CELL.start(Hand(&NOW)).expect("start");
+    let runtime = CELL
+        .start::<dyn BoxedLinkDriver>(Hand(&NOW))
+        .expect("start");
     let local = CoopLocalSet::new(&runtime);
 
     // The task ends first; the handle goes without reading its output.
@@ -321,7 +334,9 @@ fn an_aborted_task_is_swept_its_state_dropped_and_its_handle_cancelled() {
     static NOW: AtomicU64 = AtomicU64::new(0);
     static DROPS: AtomicU32 = AtomicU32::new(0);
     static CELL: RuntimeCell<Hand, 1, 64, 1> = RuntimeCell::new();
-    let runtime = CELL.start(Hand(&NOW)).expect("start");
+    let runtime = CELL
+        .start::<dyn BoxedLinkDriver>(Hand(&NOW))
+        .expect("start");
     let local = CoopLocalSet::new(&runtime);
     let guard = Counted(&DROPS);
     let mut handle = local
@@ -356,7 +371,9 @@ fn an_aborted_task_is_swept_its_state_dropped_and_its_handle_cancelled() {
 fn an_abort_after_the_task_ended_keeps_its_result() {
     static NOW: AtomicU64 = AtomicU64::new(0);
     static CELL: RuntimeCell<Hand, 1, 64, 1> = RuntimeCell::new();
-    let runtime = CELL.start(Hand(&NOW)).expect("start");
+    let runtime = CELL
+        .start::<dyn BoxedLinkDriver>(Hand(&NOW))
+        .expect("start");
     let local = CoopLocalSet::new(&runtime);
     let handle = local.spawn_local(async { 17u32 }).expect("a cell");
     local.run_until_idle();
@@ -368,7 +385,9 @@ fn an_abort_after_the_task_ended_keeps_its_result() {
 fn a_spawn_through_the_runtime_contract_runs_and_a_refused_one_answers_shutdown() {
     static NOW: AtomicU64 = AtomicU64::new(0);
     static CELL: RuntimeCell<Hand, 1, 64, 1> = RuntimeCell::new();
-    let runtime = CELL.start(Hand(&NOW)).expect("start");
+    let runtime = CELL
+        .start::<dyn BoxedLinkDriver>(Hand(&NOW))
+        .expect("start");
     let mut ran = runtime.spawn(async { 9u32 });
     let mut refused = runtime.spawn(async { 10u32 });
     assert_eq!(runtime.task_refusals().no_task_cell, 1);
@@ -384,7 +403,9 @@ fn a_spawn_through_the_runtime_contract_runs_and_a_refused_one_answers_shutdown(
 fn a_sleep_registers_in_the_table_and_wakes_at_its_deadline() {
     static NOW: AtomicU64 = AtomicU64::new(0);
     static CELL: RuntimeCell<Hand, 2, 64, 2> = RuntimeCell::new();
-    let runtime = CELL.start(Hand(&NOW)).expect("start");
+    let runtime = CELL
+        .start::<dyn BoxedLinkDriver>(Hand(&NOW))
+        .expect("start");
     let local = CoopLocalSet::new(&runtime);
     let time = CoopTime::new(&runtime);
     let handle = local
@@ -406,7 +427,9 @@ fn a_sleep_registers_in_the_table_and_wakes_at_its_deadline() {
 fn a_full_timer_table_refuses_counts_and_the_sleep_still_ends_by_polling() {
     static NOW: AtomicU64 = AtomicU64::new(0);
     static CELL: RuntimeCell<Hand, 3, 64, 1> = RuntimeCell::new();
-    let runtime = CELL.start(Hand(&NOW)).expect("start");
+    let runtime = CELL
+        .start::<dyn BoxedLinkDriver>(Hand(&NOW))
+        .expect("start");
     let local = CoopLocalSet::new(&runtime);
     let sleeper = |ms: u64, answer: u32| {
         let time = CoopTime::new(&runtime);
@@ -445,7 +468,9 @@ fn a_timer_table_fills_to_its_capacity_and_a_sleep_past_it_takes_an_entry_once_o
     const TIMERS: usize = 3;
     static NOW: AtomicU64 = AtomicU64::new(0);
     static CELL: RuntimeCell<Hand, 6, 64, TIMERS> = RuntimeCell::new();
-    let runtime = CELL.start(Hand(&NOW)).expect("start");
+    let runtime = CELL
+        .start::<dyn BoxedLinkDriver>(Hand(&NOW))
+        .expect("start");
     let local = CoopLocalSet::new(&runtime);
     assert_eq!(runtime.timers().capacity(), TIMERS);
     let sleeper = |ms: u64, answer: u32| {
@@ -524,7 +549,9 @@ fn a_timer_table_fills_to_its_capacity_and_a_sleep_past_it_takes_an_entry_once_o
 fn a_timeout_holds_its_future_inline_and_elapses_at_its_deadline() {
     static NOW: AtomicU64 = AtomicU64::new(0);
     static CELL: RuntimeCell<Hand, 1, 128, 1> = RuntimeCell::new();
-    let runtime = CELL.start(Hand(&NOW)).expect("start");
+    let runtime = CELL
+        .start::<dyn BoxedLinkDriver>(Hand(&NOW))
+        .expect("start");
     let local = CoopLocalSet::new(&runtime);
     let time = CoopTime::new(&runtime);
     let handle = local
@@ -539,7 +566,9 @@ fn a_timeout_holds_its_future_inline_and_elapses_at_its_deadline() {
 fn the_time_source_still_reads_milliseconds_from_the_cells_clock() {
     static NOW: AtomicU64 = AtomicU64::new(0);
     static CELL: RuntimeCell<Hand, 1, 64, 1> = RuntimeCell::new();
-    let runtime = CELL.start(Hand(&NOW)).expect("start");
+    let runtime = CELL
+        .start::<dyn BoxedLinkDriver>(Hand(&NOW))
+        .expect("start");
     let time = CoopTime::new(&runtime);
     assert_eq!(time.now_monotonic_ms(), 0);
     NOW.store(2_500, Ordering::SeqCst);

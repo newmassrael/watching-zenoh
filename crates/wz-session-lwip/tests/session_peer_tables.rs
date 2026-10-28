@@ -117,7 +117,9 @@ fn each_session_has_peer_tables_of_its_own_and_a_flood_stays_with_the_flooded() 
         wz_runtime_coop::RuntimeCell::new();
     let (_serial, link) = wz_link_lwip::lwip_test_link();
     let link = Rc::new(link);
-    let runtime = RUNTIME.start(Frozen).expect("the runtime is started once");
+    let runtime = RUNTIME
+        .start::<LwipUdpDriver>(Frozen)
+        .expect("the runtime is started once");
 
     let claim_a = TABLE
         .claim(driver_on(&link, 7741), Fill)
@@ -189,7 +191,9 @@ fn a_slot_comes_back_with_empty_peer_tables() {
         wz_runtime_coop::RuntimeCell::new();
     let (_serial, link) = wz_link_lwip::lwip_test_link();
     let link = Rc::new(link);
-    let runtime = RUNTIME.start(Frozen).expect("the runtime is started once");
+    let runtime = RUNTIME
+        .start::<LwipUdpDriver>(Frozen)
+        .expect("the runtime is started once");
     let mut subscribers: SubscriberTable<BoxedSink> = SubscriberTable::new();
 
     let claim = TABLE

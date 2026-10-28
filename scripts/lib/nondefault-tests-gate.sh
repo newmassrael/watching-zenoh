@@ -228,15 +228,14 @@ router-connect-reconcile,transport-link-tcp,transport-link-tls,transport-unicast
     # whole: the forwarders are `routing-peer` and `routing-router-hat`
     # (`lib.rs`), and a leg naming fewer builds a file that is not there and
     # reports a population of zero as green. `--test=session_close_query` covers
-    # every test of that target by construction. The two unit tests, one in each
-    # forwarder, are named by their full module path: the gate admits a bare test
-    # name as neither (a name prefix covers whatever the next test is called,
-    # R2714b), and a leg on a whole forwarder module would run the hundreds of
-    # tests of the router and linkstate forwarders in front of every push. A
-    # lifecycle test added to either module is then reported `unclaimed` by the
-    # census, which is the reminder to add its path here.
+    # every test of that target by construction. The unit test in the router
+    # forwarder (the linkstate forwarder it once sat beside is retired) is named
+    # by its full module path: the gate admits a bare test name as neither (a
+    # name prefix covers whatever the next test is called, R2714b), and a leg on
+    # the whole forwarder module would run its hundreds of tests in front of
+    # every push. A lifecycle test added to the module is then reported
+    # `unclaimed` by the census, which is the reminder to add its path here.
     "wz-runtime-tokio|hook|session-close-ingress,routing-peer,routing-router-hat,transport-link-tls|--test=session_close_query"
-    "wz-runtime-tokio|hook|session-close-ingress,routing-peer,routing-router-hat,transport-link-tls|linkstate_forward::tests::a_lifecycle_close_orders_every_link_to_the_peer_and_no_other"
     "wz-runtime-tokio|hook|session-close-ingress,routing-peer,routing-router-hat,transport-link-tls|router_forward::tests::a_lifecycle_close_orders_every_link_to_the_peer_and_no_other"
     # R2743 — the storage MANAGER's lib unit tests, and this row exists for a
     # reason none of the rows above had: the census DID NOT ASK FOR IT.

@@ -112,7 +112,7 @@ impl wz_session_core::entropy::EntropySource for Counting {
 }
 
 type Rt = CoopRuntime<Frozen, LwipUdpDriver>;
-type Pump = SessionPump<Frozen, LwipSessionLink<Rc<LwipLink>>>;
+type Pump = SessionPump<Frozen, LwipSessionLink<Rc<LwipLink>>, LwipUdpDriver>;
 type Handle = SessionHandle<Frozen, LwipUdpDriver>;
 type Slots = SessionSlots<Rt, CoopTime<Frozen>, LwipUdpDriver, Counting, 2>;
 static SESSIONS: Slots = SessionSlots::new();
@@ -480,7 +480,9 @@ fn a_control_record_lent_in_place_costs_the_heap_nothing_and_does_its_work() {
     let link = Rc::new(link);
     static RUNTIME: wz_runtime_coop::RuntimeCell<Frozen, 1, 64, 1> =
         wz_runtime_coop::RuntimeCell::new();
-    let runtime = RUNTIME.start(Frozen).expect("the runtime is started once");
+    let runtime = RUNTIME
+        .start::<LwipUdpDriver>(Frozen)
+        .expect("the runtime is started once");
     let (mut acceptor, initiator) = establish(&link, &runtime, 7731);
 
     let measure = Measurement::new();
@@ -721,7 +723,9 @@ fn a_frame_chain_is_owned_by_no_record_of_the_slot_profile() {
     let link = Rc::new(link);
     static RUNTIME: wz_runtime_coop::RuntimeCell<Frozen, 1, 64, 1> =
         wz_runtime_coop::RuntimeCell::new();
-    let runtime = RUNTIME.start(Frozen).expect("the runtime is started once");
+    let runtime = RUNTIME
+        .start::<LwipUdpDriver>(Frozen)
+        .expect("the runtime is started once");
     let (mut acceptor, initiator) = establish(&link, &runtime, 7733);
     let measure = Measurement::new();
     // Ids 5 and 6, unit encoded, M clear; the first carries the chain flag.
@@ -773,7 +777,9 @@ fn what_the_owned_builders_of_the_control_sends_cost_is_bounded() {
     let link = Rc::new(link);
     static RUNTIME: wz_runtime_coop::RuntimeCell<Frozen, 1, 64, 1> =
         wz_runtime_coop::RuntimeCell::new();
-    let runtime = RUNTIME.start(Frozen).expect("the runtime is started once");
+    let runtime = RUNTIME
+        .start::<LwipUdpDriver>(Frozen)
+        .expect("the runtime is started once");
     let (mut acceptor, mut initiator) = establish(&link, &runtime, 7732);
 
     let measure = Measurement::new();
