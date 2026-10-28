@@ -489,10 +489,11 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "the node's time (the wall clock in NTP64, the node HLC with its per-role switch, the "
         "fallback stamper), reached through the tokio runtime's re-exports at the paths it has "
         "always had and by the cooperative engine; it is not a surface the analyzer's diagnostic "
-        "axis probes, and its one feature that gates a public item, `codec-push` (the forward-path "
-        "stamp over a Push), is the tokio runtime's feature of that name forwarded, run by this "
-        "crate's own tests",
-        frozenset({"codec-push"}),
+        "axis probes, and its features that gate a public item are forwarded from the session "
+        "core or the tokio runtime and run by this crate's own tests: `codec-push` (the "
+        "forward-path stamp over a Push), `time-hlc` (the node clock) and `clock-source` (the "
+        "clock registry an application registers sources in, which the node clock then reads)",
+        frozenset({"clock-source", "codec-push", "time-hlc"}),
     ),
     "wz-rest": (
         "the REST bridge: the facade re-exports the whole crate as `wz::rest` "

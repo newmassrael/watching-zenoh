@@ -661,6 +661,10 @@ DEFERRED: dict[str, dict[str, str]] = {
                 # which are methods (`LinkEndpoint::into_strings`, `admin_links`,
                 # `admin_session`), so no `module::name` path is left for it to gate.
                 "adminspace-core",
+                # `clock-source` gates `ClockStanding::holdover_expired`, the event of the
+                # host's holdover bound passing, a METHOD under a simple cfg; the rest of what
+                # it changes in this package is a match arm and the body of a method.
+                "clock-source",
                 "declare-interest",
                 "declare-undeclare",
                 "multicast-declarations",
