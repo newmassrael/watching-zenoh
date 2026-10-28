@@ -296294,6 +296294,36 @@
         "The worst path of the bound is now the connect manager's `ask` into the planner's `open` and `PeerEntry::new` (1,000 and 1,080 bytes): the entry holds a machine of about a kilobyte, built in one frame and copied into the table in another. Building it in the table's own row needs a table of cells written once, as the session slots are, and not a vector that is pushed to; an unsafe write into the vector's next row did not do it, because the compiler kept the copy. The dial path under the main loop is 4,980 bytes, so the bound's next 130 bytes are in the planner and the main frame (1,256) and `reconcile` (1,056), not in the dial. The kit's peak, 5,904, did not move with the bound: the path that sets it is not the one these rounds have shortened and has not been identified, so the bytes of stack the firmware uses (the matrix's stack_used) are as before and only what it reserves fell. The matrix has not been run on this tree; that main stack falls 192 bytes is arithmetic until it is."
       ]
     },
+    "Round 3856": {
+      "decision_summary": "The shared-memory watchdog test that failed once on a loaded build host is repaired at its cause, and with it the carry of the last two rounds. conformance/differential/tests/zenoh_shm_metadata.rs had two tests that wait for the periods of the watchdog threads (the confirmator wakes every 50 ms, the validator every 100 ms) with a fixed pause, which a host that keeps a thread from running turns into a failure that is not the crate's. Decision: the run says whether the host kept time, and is made again when it did not. A thread sleeps in steps of 5 ms during the run and keeps its worst lateness; a run on a host whose timers were late by 30 ms or more is made again, up to 8 times, and refused if the host never kept time. A crate that is wrong is wrong in every run: a validator that never invalidates fails both tests in the first one. The repeat is held by a test of its own.",
+      "changes_bullets": [
+        "conformance/differential/tests/zenoh_shm_metadata.rs: the helper on_a_host_that_keeps_time (and timed, which takes the lateness and the runs as arguments), the probe Lateness, the two timing tests that now run under it, and the test a_run_is_made_again_on_a_host_that_does_not_keep_time; docs/reason-review-pins.md: the pin of that file."
+      ],
+      "verification_bullets": [
+        "The 14 tests of conformance/differential/tests/zenoh_shm_metadata.rs pass on the build host (13, and the new one that holds the repeat: a host that keeps time is asked once, a host that never did is asked every time it was allowed and refused). One fault was injected into crates/wz-zenoh-shm/src/watchdog/validator.rs, the store that marks a descriptor invalidated written as false: both timing tests failed, so the repeat does not hide a crate that is wrong; it was restored and diffed.",
+        "The wz-tls-mbedtls leg failed only because vendor/mbedtls and vendor/tf-psa-crypto were not checked out in this worktree; they are, and its 5 tests pass. Not run here: the hosted run."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Next in order: the receive of a reply recorded when it arrives and not at the callback; a wz node that forwards a message in its mesh recording its own route; the lane subscriber of the C ABI; Z7, the shared-memory arm of the surface (3 lines); Z8, the graph."
+      ],
+      "publishable_decision_summary": "The shared-memory watchdog test that failed once on a loaded build host is repaired at its cause, and with it the carry of the last two rounds. conformance/differential/tests/zenoh_shm_metadata.rs had two tests that wait for the periods of the watchdog threads (the confirmator wakes every 50 ms, the validator every 100 ms) with a fixed pause, which a host that keeps a thread from running turns into a failure that is not the crate's. Decision: the run says whether the host kept time, and is made again when it did not. A thread sleeps in steps of 5 ms during the run and keeps its worst lateness; a run on a host whose timers were late by 30 ms or more is made again, up to 8 times, and refused if the host never kept time. A crate that is wrong is wrong in every run: a validator that never invalidates fails both tests in the first one. The repeat is held by a test of its own.",
+      "publishable_changes_bullets": [
+        "conformance/differential/tests/zenoh_shm_metadata.rs: the helper on_a_host_that_keeps_time (and timed, which takes the lateness and the runs as arguments), the probe Lateness, the two timing tests that now run under it, and the test a_run_is_made_again_on_a_host_that_does_not_keep_time; docs/reason-review-pins.md: the pin of that file."
+      ],
+      "publishable_verification_bullets": [
+        "The 14 tests of conformance/differential/tests/zenoh_shm_metadata.rs pass on the build host (13, and the new one that holds the repeat: a host that keeps time is asked once, a host that never did is asked every time it was allowed and refused). One fault was injected into crates/wz-zenoh-shm/src/watchdog/validator.rs, the store that marks a descriptor invalidated written as false: both timing tests failed, so the repeat does not hide a crate that is wrong; it was restored and diffed.",
+        "The wz-tls-mbedtls leg failed only because vendor/mbedtls and vendor/tf-psa-crypto were not checked out in this worktree; they are, and its 5 tests pass. Not run here: the hosted run."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next in order: the receive of a reply recorded when it arrives and not at the callback; a wz node that forwards a message in its mesh recording its own route; the lane subscriber of the C ABI; Z7, the shared-memory arm of the surface (3 lines); Z8, the graph."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
