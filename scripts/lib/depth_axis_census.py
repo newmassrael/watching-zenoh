@@ -1233,7 +1233,16 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # (`conformance/differential/tests/zenoh_keyexpr.rs`). REACHED, UNREACHED and NO_SYMBOL hold at
 # 2, 0 and 0, and AMBIGUOUS does not move. READ off the census's own FAIL line, `wz citations:
 # 22 against a pin of 21`.
-PIN_REACHED = 2
+# R3840 -- REACHED 2 -> 3, an ARRIVAL. `routing-interest-pending-gc` is regraded COMPLETE ->
+# PARTIAL when the single-net peer forwarder is retired and its interest broker moves to the
+# region-hat forwarder (item 751 step 7): the grade follows the residual its reason now names,
+# the finalized-key rule the new forwarder's data route has not been given. It arrives already
+# reached (the Layer E6 test `wz_peer_interest_pending_gc_pico_interop` names its symbols), so
+# UNREACHED and NO_SYMBOL hold at 0 and 0. The retiring commit did not move this pin, and this
+# census is deferred to hosted CI. READ off the census's own FAIL line, `reached: 3 against a
+# pin of 2`, and attributed by `routing-interest-pending-gc` being the one PARTIAL atom outside
+# the two (`api-compat-rust`, `session-close-ingress`) the pin already counted.
+PIN_REACHED = 3
 PIN_UNREACHED = 0
 PIN_NO_SYMBOL = 0
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
