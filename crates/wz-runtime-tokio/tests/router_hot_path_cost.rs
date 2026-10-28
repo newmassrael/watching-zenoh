@@ -259,19 +259,19 @@ fn measure(case: &str, congestion: CongestionControl, subscribers: usize, n: usi
 /// of the crate's wide leg beside it in groups: only `time-hlc` moves the figure.
 #[cfg(not(feature = "time-hlc"))]
 const BUDGET: [(&str, CongestionControl, usize, usize, usize); 4] = [
-    ("drop_k1", CongestionControl::Drop, 1, 9, 569),
-    ("block_k1", CongestionControl::Block, 1, 11, 708),
-    ("drop_k16", CongestionControl::Drop, 16, 69, 7_454),
-    ("block_k16", CongestionControl::Block, 16, 86, 8_718),
+    ("drop_k1", CongestionControl::Drop, 1, 8, 553),
+    ("block_k1", CongestionControl::Block, 1, 10, 692),
+    ("drop_k16", CongestionControl::Drop, 16, 68, 7_438),
+    ("block_k16", CongestionControl::Block, 16, 85, 8_702),
 ];
 
 /// The same cases in a build with `time-hlc`.
 #[cfg(feature = "time-hlc")]
 const BUDGET: [(&str, CongestionControl, usize, usize, usize); 4] = [
-    ("drop_k1", CongestionControl::Drop, 1, 15, 645),
-    ("block_k1", CongestionControl::Block, 1, 18, 848),
-    ("drop_k16", CongestionControl::Drop, 16, 90, 8_130),
-    ("block_k16", CongestionControl::Block, 16, 108, 9_458),
+    ("drop_k1", CongestionControl::Drop, 1, 14, 629),
+    ("block_k1", CongestionControl::Block, 1, 17, 832),
+    ("drop_k16", CongestionControl::Drop, 16, 89, 8_114),
+    ("block_k16", CongestionControl::Block, 16, 107, 9_442),
 ];
 
 /// Frames per case. Few, because the figure is exact and not a mean: it is the same at 100 as at
