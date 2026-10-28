@@ -188,7 +188,7 @@ impl<const SLOTS: usize, const PUMPS: usize, const POOL: usize, const TASKS: usi
                 port: self.sink_port,
             }),
             Counting(zid),
-            params(zid),
+            || params(zid),
             config(),
             |_| |_: wz_session_core::driver_loop::IterationEvent<'_>| {},
         )

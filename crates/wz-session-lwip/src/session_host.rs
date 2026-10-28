@@ -145,7 +145,7 @@ where
         &self,
         admission: Admission,
         entropy: E,
-        params: SessionInitParams,
+        params: impl FnOnce() -> SessionInitParams,
         config: SessionDriveConfig,
         on_event: impl FnOnce(&SessionHandle<C, LwipUdpDriver>) -> F,
     ) -> Result<OpenedSession<C, LwipUdpDriver>, OpenRefused>
@@ -166,7 +166,7 @@ where
         links: &LwipLinks<L>,
         target: DialTarget,
         entropy: E,
-        params: SessionInitParams,
+        params: impl FnOnce() -> SessionInitParams,
         config: SessionDriveConfig,
         on_event: impl FnOnce(&SessionHandle<C, LwipUdpDriver>) -> F,
     ) -> Result<OpenedSession<C, LwipUdpDriver>, DialRefused>

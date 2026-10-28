@@ -129,8 +129,8 @@ fn each_session_has_peer_tables_of_its_own_and_a_flood_stays_with_the_flooded() 
         .claim(driver_on(&link, 7742), Fill)
         .ok()
         .expect("slot");
-    let a = new_session_in_slot(claim_a, params(0xa1), CoopTime::new(&runtime));
-    let b = new_session_in_slot(claim_b, params(0xb1), CoopTime::new(&runtime));
+    let a = new_session_in_slot(claim_a, || params(0xa1), CoopTime::new(&runtime));
+    let b = new_session_in_slot(claim_b, || params(0xb1), CoopTime::new(&runtime));
     assert!(
         !core::ptr::eq(a.peers(), b.peers()),
         "two sessions, two sets of peer tables"
@@ -200,7 +200,7 @@ fn a_slot_comes_back_with_empty_peer_tables() {
         .claim(driver_on(&link, 7743), Fill)
         .ok()
         .expect("slot");
-    let first = new_session_in_slot(claim, params(0xc1), CoopTime::new(&runtime));
+    let first = new_session_in_slot(claim, || params(0xc1), CoopTime::new(&runtime));
     {
         let mut peers = first.peers().borrow_mut();
         for id in 1..=4u64 {
@@ -217,7 +217,7 @@ fn a_slot_comes_back_with_empty_peer_tables() {
         .claim(driver_on(&link, 7744), Fill)
         .ok()
         .expect("slot");
-    let second = new_session_in_slot(claim, params(0xc2), CoopTime::new(&runtime));
+    let second = new_session_in_slot(claim, || params(0xc2), CoopTime::new(&runtime));
     let peers = second.peers().borrow();
     assert_eq!(
         (

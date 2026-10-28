@@ -310,11 +310,10 @@ where
             self.links.link(),
             &mut |admission: Admission| -> Result<(), OpenRefused> {
                 let entropy = factory.borrow_mut().entropy();
-                let params = factory.borrow_mut().params();
                 let opened = host.admit(
                     admission,
                     entropy,
-                    params,
+                    || factory.borrow_mut().params(),
                     SessionDriveConfig {
                         timeouts,
                         role: SessionRole::Acceptor,

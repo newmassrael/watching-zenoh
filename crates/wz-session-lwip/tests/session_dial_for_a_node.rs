@@ -122,7 +122,7 @@ fn next_datagram_after_the_init_ack(
                 expected,
             ),
             Counting(0xb0),
-            params(),
+            params,
             SessionDriveConfig {
                 timeouts: SessionTimeouts::spec_defaults(),
                 role: SessionRole::Initiator,

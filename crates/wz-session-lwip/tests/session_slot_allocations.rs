@@ -351,7 +351,7 @@ mod placing_in_slot {
             panic!("a slot is free");
         };
         let pump_link = LwipSessionLink::new(link.clone(), claim.driver_handle());
-        let actions = new_session_in_slot(claim, params(zid), CoopTime::new(runtime));
+        let actions = new_session_in_slot(claim, || params(zid), CoopTime::new(runtime));
         (actions, pump_link)
     }
 
@@ -801,7 +801,7 @@ mod table {
             .ok()
             .expect("a slot");
         let driver_handle = claim.driver_handle();
-        let actions = new_session_in_slot(claim, params(0xc1), CoopTime::new(&runtime));
+        let actions = new_session_in_slot(claim, || params(0xc1), CoopTime::new(&runtime));
         let clone = actions.clone();
         let sink = actions.link.driver.clone();
         assert_eq!(TABLE.in_use(), 1);

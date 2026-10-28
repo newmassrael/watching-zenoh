@@ -109,6 +109,23 @@ carries about 6 KB of C library code wz does not, which is why the difference is
   RAM (bss) fell by exactly that, 896, 1,920 and 3,264 bytes (109,714 to 108,818, 110,786 to 108,866,
   121,482 to 118,218); text is unchanged, and the three images boot, answer and read the same stack
   peaks on the kit (5,904, 5,908 and 6,020), inside 75 percent of the smaller stacks.
+- TAKEN: the session's parameters as a function. The dial built the 328 bytes of `SessionInitParams`
+  and passed them by value through the host's `dial`, `open`, `new_session_in_slot` and the slot's
+  `open`, each keeping a copy in its frame. The slot now takes `impl FnOnce() -> SessionInitParams`
+  and calls it in its own frame (`SlotClaim::open`, never inlined), so `dial_expecting` fell from
+  1,224 to 688 bytes, the worst chain of direct calls 5,480 to 4,980 (fixed), 5,004 (batching) and
+  5,224 (get), and the bound of the fixed and batching images 6,216 to 6,084; the get image stays at
+  6,768, its worst path being the lend of a declaration. The main stack follows the bound, 8,320 to
+  8,128 bytes (192 of RAM each); the text moved by 176 bytes or less and the kit's peaks did not move.
+- NOT TAKEN, measured: the connect manager's peer entry built in place (`PeerEntry::new` written
+  through a pointer into the table's next row). The entry is about a kilobyte; the compiler kept
+  its copy in the planner's frame, and the bound read 6,116 (function never inlined, 32 more) and
+  6,036 (inlined, the machine built in the planner's frame beside a second copy: 48 less, which is
+  64 bytes of stack by the derivation). The 48 was not taken: it came from an inlining choice the
+  next change to the function moves, and it cost an `unsafe` write and a different row order when
+  the table is full. The planner's `open` and `PeerEntry::new` (1,000 and 1,080 bytes) are now the
+  worst path of the bound; building the machine in the table's own row (a table of cells written
+  once, as the session slots are) is the change that would remove the copy.
 - NOT TAKEN, measured: taking `judge_ext_chain`'s two helpers out of line (7 instances) moved the
   text by +16 bytes; the link-time optimizer already shares them.
 - `wz_session_core` is a long tail (525 symbols in a build without LTO, none over 1.6 KB) and the

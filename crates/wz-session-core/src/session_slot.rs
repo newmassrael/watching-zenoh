@@ -367,11 +367,17 @@ where
     /// the stack once while it is built: the in-place build the Q lane's stack
     /// verdict is there to catch on a board.
     ///
+    /// The parameters are taken as the function that makes them and are made here. A value
+    /// handed down by the dial would be copied into the frame of each caller on the way
+    /// (the host's `dial`, its `open`, `new_session_in_slot`), 328 bytes each; made here it
+    /// is one temporary of this function, gone when it returns.
+    ///
     /// Never inlined, for the stack: the bundle (2 KB on the fixed client) is a temporary of
     /// this function and is gone when it returns. Inlined into the dial, it stayed in the
     /// dial's frame while the pump and the engine were built beneath it.
     #[inline(never)]
-    pub fn open(self, params: SessionInitParams, clock: T) -> SlotRef<R, T> {
+    pub fn open(self, params: impl FnOnce() -> SessionInitParams, clock: T) -> SlotRef<R, T> {
+        let params = params();
         let cell = self.cell;
         // SAFETY: the claim holds the slot `Claimed`, so the driver and the
         // entropy source are written. The references made here are `'static`

@@ -299,13 +299,12 @@ where
     #[inline(never)]
     fn open_accepted(&mut self, driver: T::Driver) {
         let entropy = self.factory.borrow_mut().entropy();
-        let params = self.factory.borrow_mut().accepted_params();
         let factory = self.factory;
         let Ok(opened) = self.host.open(
             driver,
             None,
             entropy,
-            params,
+            || factory.borrow_mut().accepted_params(),
             SessionDriveConfig {
                 timeouts: self.timeouts,
                 role: SessionRole::Acceptor,

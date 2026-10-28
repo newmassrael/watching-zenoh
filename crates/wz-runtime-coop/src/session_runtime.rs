@@ -347,7 +347,7 @@ where
 #[cfg(feature = "session-slot")]
 pub fn new_session_in_slot<C, D, E>(
     claim: SlotClaim<CoopRuntime<C, D>, CoopTime<C>, D, E>,
-    params: wz_session_core::session_init_params::SessionInitParams,
+    params: impl FnOnce() -> wz_session_core::session_init_params::SessionInitParams,
     clock: CoopTime<C>,
 ) -> SlotRef<CoopRuntime<C, D>, CoopTime<C>>
 where

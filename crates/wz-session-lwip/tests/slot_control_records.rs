@@ -199,7 +199,7 @@ fn create(
     };
     let sender = claim.driver_handle();
     let pump_link = LwipSessionLink::new(link.clone(), claim.driver_handle());
-    let actions = new_session_in_slot(claim, params(zid), CoopTime::new(runtime));
+    let actions = new_session_in_slot(claim, || params(zid), CoopTime::new(runtime));
     (actions, pump_link, sender)
 }
 

@@ -152,7 +152,7 @@ where
         driver: T::Driver,
         lane: Option<T::Lane>,
         entropy: E,
-        params: SessionInitParams,
+        params: impl FnOnce() -> SessionInitParams,
         config: SessionDriveConfig,
         on_event: impl FnOnce(&SessionHandle<C, T::Driver>) -> F,
     ) -> Result<OpenedSession<C, T::Driver>, OpenRefused>
@@ -199,7 +199,7 @@ where
         bind: impl FnOnce() -> Result<T::Driver, LinkOpenError>,
         expected_zid: Option<[u8; CREDENTIAL_ZID_BYTES]>,
         entropy: E,
-        params: SessionInitParams,
+        params: impl FnOnce() -> SessionInitParams,
         config: SessionDriveConfig,
         on_event: impl FnOnce(&SessionHandle<C, T::Driver>) -> F,
     ) -> Result<OpenedSession<C, T::Driver>, DialRefused>

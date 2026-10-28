@@ -398,7 +398,7 @@ mod placing_in_slot {
             panic!("a session slot is free");
         };
         let pump_link = LwipSessionLink::new(link, claim.driver_handle());
-        let actions = new_session_in_slot(claim, params(zid), CoopTime::new(runtime));
+        let actions = new_session_in_slot(claim, || params(zid), CoopTime::new(runtime));
         (actions, pump_link)
     }
 

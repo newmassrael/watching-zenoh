@@ -236,7 +236,7 @@ where
                 let opened = host.admit(
                     admission,
                     entropy,
-                    params,
+                    move || params,
                     SessionDriveConfig {
                         timeouts: SessionTimeouts::spec_defaults(),
                         role: SessionRole::Acceptor,

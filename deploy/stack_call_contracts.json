@@ -11,7 +11,7 @@
     "planner-emit": {"zephyr-client-fixed": 3, "zephyr-client-fixed-batching": 3, "zephyr-client-fixed-get": 3},
     "record": {"zephyr-client-fixed": 6, "zephyr-client-fixed-batching": 6, "zephyr-client-fixed-get": 6},
     "own-mapping": {"zephyr-client-fixed": 2, "zephyr-client-fixed-batching": 2, "zephyr-client-fixed-get": 2},
-    "answer-reply": {"zephyr-client-fixed": 6, "zephyr-client-fixed-batching": 6, "zephyr-client-fixed-get": 6},
+    "answer-reply": {"zephyr-client-fixed": 7, "zephyr-client-fixed-batching": 7, "zephyr-client-fixed-get": 7},
     "byte-cells": {"zephyr-client-fixed": 2, "zephyr-client-fixed-batching": 2, "zephyr-client-fixed-get": 2},
     "fmt-builders": {"zephyr-client-fixed": 0, "zephyr-client-fixed-batching": 0, "zephyr-client-fixed-get": 5},
     "app-main": {"zephyr-client-fixed": 2, "zephyr-client-fixed-batching": 2, "zephyr-client-fixed-get": 2},

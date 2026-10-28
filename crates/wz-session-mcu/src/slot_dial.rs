@@ -249,7 +249,6 @@ where
     ) -> Result<SlotSession<C, T::Driver>, DialFailed> {
         let to = parse_locator(endpoint).map_err(DialFailed::Refused)?;
         let entropy = self.factory.borrow_mut().entropy();
-        let params = self.factory.borrow_mut().params();
         let factory = self.factory;
         let bind = &mut self.bind;
         let opened = self
@@ -261,7 +260,9 @@ where
                 // the session closes at the InitAck if another node answers (decision D4).
                 expected_zid,
                 entropy,
-                params,
+                // Handed as the function that makes it, which the slot calls in its own frame: a
+                // value built here is copied into the frame of each call it passes through.
+                || factory.borrow_mut().params(),
                 SessionDriveConfig {
                     timeouts: self.timeouts,
                     role: SessionRole::Initiator,

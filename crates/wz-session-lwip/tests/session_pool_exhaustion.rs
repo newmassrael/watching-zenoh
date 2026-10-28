@@ -248,7 +248,7 @@ impl<
             host.admit(
                 admission,
                 Counting(0xa0 + k as u8),
-                params(0xa0 + k as u8),
+                || params(0xa0 + k as u8),
                 config(SessionRole::Acceptor),
                 |_| counting(base + k),
             )
@@ -273,7 +273,7 @@ impl<
             driver,
             None,
             Counting(0xb0 + k as u8),
-            params(0xb0 + k as u8),
+            || params(0xb0 + k as u8),
             config(SessionRole::Initiator),
             |_| counting(self.base + DIALLED + k),
         );
