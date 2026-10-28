@@ -349,6 +349,7 @@ impl Engine {
             listen: Vec::new(),
         };
         let document = tokio_engine::document_of(&expanded, role, &zid)?;
+        tokio_engine::refuse_repeated_ids(&document)?;
         let plan = OpenPlan::resolve(role, stated, Some(&document.to_string()))
             .map_err(tokio_engine::refusal_error)?;
         // A router is refused by the key that makes the session one (decision D6 of the seam note).
@@ -373,6 +374,15 @@ impl Engine {
         let dialled =
             (!plan.connect.is_empty() && plan.listen.is_empty() && plan.groups.is_empty())
                 .then(|| tokio_engine::peers_text(&expanded, expanded.mode()));
+        // And when it was only to listen, on one endpoint, that is the one that could not be bound.
+        let listened =
+            (plan.connect.is_empty() && plan.groups.is_empty() && plan.listen.len() == 1)
+                .then(|| plan.listen[0].clone());
+        let scope = tokio_engine::OpenScope {
+            dialled,
+            listened,
+            listen_deadline: plan.listen_phase.policy.budget.deadline().is_some(),
+        };
         let state = plan
             .into_arguments(AbiChoices {
                 tx_queue: Default::default(),
@@ -392,7 +402,7 @@ impl Engine {
                 groups_report_shm: false,
             })
             .run()
-            .map_err(|error| tokio_engine::open_error(error, dialled))?;
+            .map_err(|error| tokio_engine::open_error(error, scope))?;
         Ok((Engine::Tokio(state), zid))
     }
 
@@ -1246,6 +1256,49 @@ mod tokio_engine {
         let mut document = serde_json::to_value(config)?;
         without_nulls(&mut document);
         Ok(document)
+    }
+
+    /// The refusal of a configuration whose entries of one list share an `id`, in the words
+    /// upstream refuses it in when it builds the interceptors of a session
+    /// (`zenoh/src/net/routing/interceptor/`: one check per list, each with its own opening).
+    ///
+    /// Upstream makes the check when the session opens, over the list it was given, and the open
+    /// fails with it; so does this one. The lists are the interceptors' (downsampling, the low
+    /// pass filter, the QoS overwrite of the network) and, when the access control is enabled,
+    /// its rules, subjects and policies, which upstream builds only then.
+    pub(super) fn refuse_repeated_ids(document: &serde_json::Value) -> ZResult<()> {
+        fn repeated<'a>(entries: Option<&'a serde_json::Value>) -> Option<&'a str> {
+            let mut seen = std::collections::HashSet::new();
+            entries?
+                .as_array()?
+                .iter()
+                .filter_map(|entry| entry.get("id")?.as_str())
+                .find(|id| !seen.insert(*id))
+        }
+        if let Some(id) = repeated(document.get("downsampling")) {
+            bail!("Invalid Downsampling config: id '{id}' is repeated");
+        }
+        if let Some(id) = repeated(document.get("low_pass_filter")) {
+            bail!("Invalid low-pass filter config: id '{id}' is repeated");
+        }
+        if let Some(id) = repeated(document.pointer("/qos/network")) {
+            bail!("Invalid Qos Overwrite config: id '{id}' is repeated");
+        }
+        if let Some(acl) = document
+            .get("access_control")
+            .filter(|acl| acl.get("enabled").and_then(serde_json::Value::as_bool) == Some(true))
+        {
+            if let Some(id) = repeated(acl.get("rules")) {
+                bail!("Rule id must be unique: id '{id}' is repeated");
+            }
+            if let Some(id) = repeated(acl.get("subjects")) {
+                bail!("Subject id must be unique: id '{id}' is repeated");
+            }
+            if let Some(id) = repeated(acl.get("policies")) {
+                bail!("Policy id must be unique: id '{id}' is repeated");
+            }
+        }
+        Ok(())
     }
 
     /// Decision D6: refuse, by name, the keys of `document` that `ignored` says the engine does not
@@ -2283,14 +2336,66 @@ mod tokio_engine {
         }
     }
 
-    /// An open that was carried out and failed. `dialled` is what the session was to dial, when
-    /// that was all it was to do.
-    pub(super) fn open_error(error: OpenError, dialled: Option<String>) -> zenoh_result::Error {
-        match (error, dialled) {
-            (OpenError::LinkFailed, Some(peers)) => {
+    /// What an open was to do, as far as it says which link failed: the engine says that a link
+    /// did not open and not which one, so only an open with one thing to do can name it.
+    pub(super) struct OpenScope {
+        /// What the session was to dial, when that was all it was to do.
+        pub(super) dialled: Option<String>,
+        /// The one endpoint the session was to listen on, when that was all it was to do.
+        pub(super) listened: Option<String>,
+        /// Whether the bind phase had a deadline (`listen/timeout_ms` above zero), which
+        /// upstream arms as a `tokio::time::timeout` around the whole phase: a phase that spends
+        /// it fails with the timeout's own error and not with the listener's.
+        pub(super) listen_deadline: bool,
+    }
+
+    /// The error of a deadline that passed, which is what upstream's `tokio::time::timeout`
+    /// answers: the same words when it is shown (`deadline has elapsed`) and the same shape when
+    /// it is debugged (`Elapsed(())`), which is how a program that unwraps an open reads it.
+    #[derive(Debug)]
+    struct Elapsed(());
+
+    impl std::fmt::Display for Elapsed {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("deadline has elapsed")
+        }
+    }
+
+    impl std::error::Error for Elapsed {}
+
+    /// An open that was carried out and failed.
+    pub(super) fn open_error(error: OpenError, scope: OpenScope) -> zenoh_result::Error {
+        match (
+            error,
+            scope.dialled,
+            scope.listened.as_deref().and_then(listener_failure),
+        ) {
+            (OpenError::LinkFailed, Some(peers), _) => {
                 zerror!("Unable to connect to any of {}! ", peers).into()
             }
-            (error, _) => zerror!("the session could not be opened: {:?}", error).into(),
+            (OpenError::LinkFailed, None, Some(_)) if scope.listen_deadline => {
+                Box::new(Elapsed(())) as zenoh_result::Error
+            }
+            (OpenError::LinkFailed, None, Some(words)) => zerror!("{words}").into(),
+            (error, _, _) => zerror!("the session could not be opened: {:?}", error).into(),
+        }
+    }
+
+    /// The words upstream's link says when it cannot bind the listener of `endpoint`, for the
+    /// links whose words were read off the pinned source (`io/zenoh-links/`): they differ per
+    /// protocol in what they call the protocol and in saying `bound to` or `on`. `None` for a
+    /// protocol this does not know, which keeps the generic words and does not guess.
+    pub(super) fn listener_failure(endpoint: &str) -> Option<String> {
+        let (scheme, rest) = endpoint.split_once('/')?;
+        let address = rest.split('#').next().unwrap_or(rest);
+        match scheme {
+            "tcp" => Some(format!(
+                "Can not create a new TCP listener bound to {address}: the address cannot be bound"
+            )),
+            "quic" => Some(format!(
+                "Can not create a new QUIC listener on {address}: the address cannot be bound"
+            )),
+            _ => None,
         }
     }
 }
@@ -7737,6 +7842,109 @@ mod tests {
     #[cfg(feature = "unstable")]
     mod configuration {
         use super::connectivity::on;
+
+        /// A listener that cannot be bound is named in the words of upstream's link for the
+        /// protocols whose words were read, without the metadata of the endpoint, and an unknown
+        /// protocol keeps the generic words and does not borrow another's.
+        #[test]
+        fn a_listener_that_cannot_be_bound_is_named_in_the_words_of_its_link() {
+            use super::super::tokio_engine::listener_failure;
+            assert!(listener_failure("tcp/8.8.8.8:8")
+                .expect("tcp")
+                .starts_with("Can not create a new TCP listener bound to 8.8.8.8:8"));
+            assert!(listener_failure("quic/127.0.0.1:7447#iface=lo")
+                .expect("quic")
+                .starts_with("Can not create a new QUIC listener on 127.0.0.1:7447:"));
+            assert_eq!(listener_failure("udp/127.0.0.1:7447"), None);
+            assert_eq!(listener_failure("no-scheme"), None);
+        }
+
+        /// A bind phase that had a deadline and spent it fails with the deadline's own error, as
+        /// upstream's does, and shows as upstream's does when a program unwraps the open; one
+        /// that had none names the listener.
+        #[test]
+        fn a_bind_phase_that_spends_its_deadline_fails_with_the_deadlines_error() {
+            use super::super::tokio_engine::{open_error, OpenScope};
+            use wz_capi_core::drive::OpenError;
+            let scope = |listen_deadline| OpenScope {
+                dialled: None,
+                listened: Some("tcp/8.8.8.8:8".to_owned()),
+                listen_deadline,
+            };
+            let timed = open_error(OpenError::LinkFailed, scope(true));
+            assert_eq!(format!("{timed:?}"), "Elapsed(())");
+            assert_eq!(timed.to_string(), "deadline has elapsed");
+            let untimed = open_error(OpenError::LinkFailed, scope(false));
+            assert!(untimed
+                .to_string()
+                .starts_with("Can not create a new TCP listener bound to 8.8.8.8:8"));
+        }
+
+        /// A list of an interceptor whose entries share an `id` fails the open with the words of
+        /// upstream's check of that list, and a list whose ids differ, or whose entries state none,
+        /// does not; the access control is judged only when it is enabled.
+        #[test]
+        fn a_repeated_id_in_an_interceptor_list_is_refused_in_upstreams_words() {
+            fn refusal(key: &str, value: &str, extra: Option<(&str, &str)>) -> Option<String> {
+                let mut config = crate::Config::default();
+                config.insert_json5(key, value).expect("a key");
+                if let Some((key, value)) = extra {
+                    config.insert_json5(key, value).expect("a key");
+                }
+                let expanded = config.0.clone().expanded();
+                let zid = expanded.id();
+                let role = super::super::tokio_engine::role_of(expanded.mode());
+                let document = super::super::tokio_engine::document_of(&expanded, role, &zid)
+                    .expect("a document");
+                // The error says where it was raised after its words (`... at file:line.`);
+                // upstream's tests look for the words as a part of the message, so the words are
+                // what is compared here.
+                super::super::tokio_engine::refuse_repeated_ids(&document)
+                    .err()
+                    .map(|error| {
+                        let text = error.to_string();
+                        text.split(" at ").next().unwrap_or(&text).to_owned()
+                    })
+            }
+            let entry = |id: &str| {
+                format!(
+                    r#"{{ id: "{id}", flows: ["egress"], messages: ["put"], key_exprs: ["t/**"], size_limit: 10 }}"#
+                )
+            };
+            let low_pass = |a: &str, b: &str| format!("[{}, {}]", entry(a), entry(b));
+            assert_eq!(
+                refusal("low_pass_filter", &low_pass("same", "same"), None).as_deref(),
+                Some("Invalid low-pass filter config: id 'same' is repeated")
+            );
+            assert_eq!(refusal("low_pass_filter", &low_pass("a", "b"), None), None);
+            let downsampling = |a: &str, b: &str| {
+                format!(
+                    r#"[{{ id: "{a}", flows: ["egress"], messages: ["put"], rules: [{{ key_expr: "t/**", freq: 1.0 }}] }},
+                        {{ id: "{b}", flows: ["egress"], messages: ["put"], rules: [{{ key_expr: "t/**", freq: 1.0 }}] }}]"#
+                )
+            };
+            assert_eq!(
+                refusal("downsampling", &downsampling("same", "same"), None).as_deref(),
+                Some("Invalid Downsampling config: id 'same' is repeated")
+            );
+            assert_eq!(refusal("downsampling", &downsampling("a", "b"), None), None);
+            let rules = r#"[{ id: "r", key_exprs: ["t/**"], messages: ["put"], permission: "allow" },
+                            { id: "r", key_exprs: ["u/**"], messages: ["put"], permission: "allow" }]"#;
+            assert_eq!(
+                refusal(
+                    "access_control/rules",
+                    rules,
+                    Some(("access_control/enabled", "true"))
+                )
+                .as_deref(),
+                Some("Rule id must be unique: id 'r' is repeated")
+            );
+            assert_eq!(
+                refusal("access_control/rules", rules, None),
+                None,
+                "an access control that is not enabled is not built, and is not judged"
+            );
+        }
 
         /// The document an open hands the plan is the whole configuration rendered, so every
         /// section a program sets has to come back out of the reader: a section it cannot read
