@@ -264,12 +264,13 @@ the weights by `model_weights_are_their_stated_probabilities`):
 
 - zenoh's chance of each failure is the one-sided 95% Clopper-Pearson upper
   bound on its count, and the confirming outcome takes the rest: 0 residual
-  and 0 undecoded in 3594 units; 0 framings lost in 284 directions held from
-  their start; 0 differing cookies in 280 echoes; 0 Init pairs of one kind in
-  280; 0 other versions in 560 version headers. The zenoh files are 1.10.1
+  and 0 undecoded in 4246 units; 0 framings lost in 284 directions held from
+  their start; 0 differing cookies in 292 echoes; 0 Init pairs of one kind in
+  294; 0 other versions in 588 version headers. The zenoh files are 1.10.1
   routers and clients, upstream 1.5.0, 1.7.2, 1.8.0, 1.9.0 and 1.10.0 routers
   with 1.10.1 clients (the eclipse/zenoh images), zenoh-pico 1.10.1 clients,
-  240 short sessions captured for their handshakes, a lossy link, and a real
+  240 short sessions captured for their handshakes, links that drop 1%, 5%,
+  10% and 20% of the packets each way, and a real
   link between two machines (an office Wi-Fi: TCP with small and 3000-byte
   samples, joined mid-session, UDP, and zenoh-pico);
 - the `yes` sum's null chance of an outcome is the largest such upper bound
@@ -280,31 +281,56 @@ the weights by `model_weights_are_their_stated_probabilities`):
 
 | outcome | `yes` sum | `no` sum | model 1 |
 |---|---|---|---|
-| unit read whole | +964 | +3982 | +2603 |
-| unit residual | -10229 | -8860 | -6745 |
-| unit undecoded | -10229 | -9365 | -7000 |
+| unit read whole | +965 | +3982 | +2603 |
+| unit residual | -10469 | -9101 | -6745 |
+| unit undecoded | -10469 | -9606 | -7000 |
 | stream framing held | +4032 | +7043 | (none) |
 | stream framing lost | -6574 | -6564 | (none) |
 | cookie matched (8 bytes) | +63985 | +63985 | +63999 |
-| cookie differing | -6554 | -6554 | -10000 |
+| cookie differing | -6614 | -6614 | -10000 |
 | Inits of opposite kinds | +985 | +985 | +999 |
-| Inits of one kind | -5554 | -5554 | -9000 |
-| version of this reader | +7992 | +7992 | +8000 |
-| another version | -7545 | -7545 | (none) |
+| Inits of one kind | -5624 | -5624 | -9000 |
+| version of this reader | +7993 | +7993 | +8000 |
+| another version | -7615 | -7615 | (none) |
 
 The unit weight fell because the corpus's real mDNS reads a unit whole 36% of
 the time where the generated mDNS model 1 was priced on did 16%: model 1's
 weight claimed more than the bytes give, against a protocol the corpus holds.
 The handshake violations weigh less than model 1's assumed `2^-10` gave them:
-280 clean handshakes bound a failure only to about 1.1%, and a weight may not
+290 clean handshakes bound a failure only to about 1.0%, and a weight may not
 claim more than the corpus shows.
 
 **The SN steps stay assumed, as a tolerance.** How often a step breaks is a
 property of the link, what it loses and reorders, and not of zenoh: the
-loopback captures break nothing and `zenoh-udp-lossy.pcap`, a link dropping 5%
-each way, breaks 6 steps of 110 (5.5%). A rate measured on either would
-describe that capture's link. The assumed `2^-4` is the loss the test is built to tolerate,
-and the lossy capture holds it there: both its flows read `yes`.
+loopback and Wi-Fi captures break nothing in 940 steps, and a UDP link that
+drops a share of the packets each way breaks about that share of its steps:
+
+| link drops, each way | steps broken | flows (yes / no / undecided) |
+|---|---|---|
+| 1% | 4 of 230 (1.7%) | 2 / 0 / 0 |
+| 5% | 6 of 110 (5.5%) | 2 / 0 / 0 |
+| 10% | 0 of 2 | 2 / 0 / 0 |
+| 20% | 17 of 94 (18%) | 8 / 0 / 2 |
+
+A rate measured on any of them would describe that capture's link. The assumed
+`2^-4` is the loss the test is built to tolerate, and it is not where the
+verdict gives out. The SN steps alone push the `yes` sum up while the steps
+that follow are more than a third of all, `f * 7907 > (1 - f) * 3994`, so a
+link breaking up to two steps in three still reads `yes`; the 20% link, which
+breaks 18%, does. What gives out first on a lossy link is the session, not
+the verdict: the 10% capture holds two sessions that carried 2 steps between
+them in two minutes, the 20% capture ten flows of which two read `undecided`,
+and at 40% the handshake never got past the first Init and InitAck in two
+minutes (11 packets, no session, not kept in the corpus). The causes were not
+traced packet by packet.
+
+A frame that repeats its SN never counts toward `yes`: a unit read whole
+(+965) and a broken step (-3994) sum to -3029. On the `no` sum the two nearly
+cancel (+3982 and -3994, 12 millibits apart), which is the model saying what
+it should: under the null a unit reads whole one time in sixteen and a step
+breaks nearly always, and a zenoh flow breaks it one time in sixteen, so a
+frame that does both is as likely under one as under the other. A flow of such
+frames therefore stays `undecided` and is never read `yes`.
 
 **`stream_framing`.** A stream direction is judged once, by what happened
 first: a unit framed (held) or a desynchronisation this reader inferred

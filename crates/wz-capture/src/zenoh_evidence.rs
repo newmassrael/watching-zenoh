@@ -142,8 +142,8 @@ impl Check {
     /// The SN steps stay assumed though the corpus counts them: how often a
     /// step breaks is a property of the LINK (what it loses and reorders), not
     /// of zenoh, so the assumed rate is the loss the test is built to tolerate,
-    /// and `zenoh-udp-lossy.pcap`, a link dropping 5% each way, holds it to
-    /// reading `yes` there.
+    /// and the `zenoh-udp-loss*` captures, links dropping 1% to 20% each way,
+    /// hold it to reading `yes` there.
     pub const fn eps_basis(self) -> Basis {
         match self {
             Check::SnFollows => Basis::Assumed,
@@ -294,20 +294,20 @@ pub mod model {
 
     /// `log2(1 - e)`, the zenoh side of a cookie match: a zenoh OpenSyn fails
     /// to echo its InitAck's cookie with chance `e`, the bound of 0 failures
-    /// in the corpus's 280 echoes ([`measured::ZENOH_COOKIE`]).
+    /// in the corpus's 292 echoes ([`measured::ZENOH_COOKIE`]).
     pub const COOKIE_ECHO_FIDELITY: i64 = -15;
 
     /// `log2(e / 1)`: a cookie that differs. An arbitrary pair of byte strings
     /// differs with chance close to one.
-    pub const COOKIE_ECHO_VIOLATED: Weight = Weight::both(-6_554);
+    pub const COOKIE_ECHO_VIOLATED: Weight = Weight::both(-6_614);
 
     /// `log2((1 - e) / (1/2))`: two Inits of opposite kinds, which two
     /// arbitrary Inits are with chance one half; `e` the bound of 0 pairs of
-    /// one kind in 280 ([`measured::ZENOH_ROLES`]).
+    /// one kind in 294 ([`measured::ZENOH_ROLES`]).
     pub const INIT_ROLES_CONFIRMED: Weight = Weight::both(985);
 
     /// `log2(e / (1/2))`: two Inits of the same kind.
-    pub const INIT_ROLES_VIOLATED: Weight = Weight::both(-5_554);
+    pub const INIT_ROLES_VIOLATED: Weight = Weight::both(-5_624);
 
     /// `log2((1 - 2^-4) / 2^-8)`: a frame one step after the last. A varint
     /// equals a given value with chance at most `2^-8`, and a zenoh frame
@@ -321,33 +321,33 @@ pub mod model {
     /// `log2((1 - e) / 2^-8)`: the version byte of a message that names one
     /// is this reader's. A byte equals it by chance `2^-8`, and a zenoh flow
     /// of this version names another with chance `e`, the bound of 0 in the
-    /// corpus's 560 version headers ([`measured::ZENOH_VERSIONS`]).
-    pub const VERSION_HEADER: Weight = Weight::both(7_992);
+    /// corpus's 588 version headers ([`measured::ZENOH_VERSIONS`]).
+    pub const VERSION_HEADER: Weight = Weight::both(7_993);
 
     /// `log2(e / (1 - 2^-8))`: it names another version. Model 1 weighed
     /// only the match, which bounds neither sum: an observation that can only
     /// confirm raises the `yes` sum's expectation under the null.
-    pub const VERSION_FOREIGN: Weight = Weight::both(-7_545);
+    pub const VERSION_FOREIGN: Weight = Weight::both(-7_615);
 
     /// A unit read whole. Zenoh: one less the two failures' bounds. `yes`:
     /// mDNS's bound, 13 of 36 units; `no`: the members' average.
     pub const UNIT_EXPLAINED: Weight = Weight {
-        yes: 964,
+        yes: 965,
         no: 3_982,
     };
 
-    /// A unit with bytes left over. Zenoh: the bound of 0 in 3594 units;
+    /// A unit with bytes left over. Zenoh: the bound of 0 in 4246 units;
     /// `yes`: QUIC's 22 of 22; `no`: the members' average.
     pub const UNIT_RESIDUAL: Weight = Weight {
-        yes: -10_229,
-        no: -8_860,
+        yes: -10_469,
+        no: -9_101,
     };
 
     /// A unit that did not decode. Zenoh: as residual; `yes`: SSDP's 26 of
     /// 26; `no`: the members' average.
     pub const UNIT_UNDECODED: Weight = Weight {
-        yes: -10_229,
-        no: -9_365,
+        yes: -10_469,
+        no: -9_606,
     };
 
     /// A stream direction, captured from its start, that framed a unit before
@@ -486,20 +486,20 @@ pub mod model {
         ];
 
         /// The zenoh files' framing units: read whole, residual, undecoded.
-        pub const ZENOH_UNITS: [u64; 3] = [3_594, 0, 0];
+        pub const ZENOH_UNITS: [u64; 3] = [4_246, 0, 0];
 
         /// The zenoh files' stream directions captured from their start:
         /// framing held, framing lost.
         pub const ZENOH_FRAMING: [u64; 2] = [284, 0];
 
         /// The zenoh files' cookie echoes: matched, differing.
-        pub const ZENOH_COOKIE: [u64; 2] = [280, 0];
+        pub const ZENOH_COOKIE: [u64; 2] = [292, 0];
 
         /// The zenoh files' Init pairs: of opposite kinds, of one kind.
-        pub const ZENOH_ROLES: [u64; 2] = [280, 0];
+        pub const ZENOH_ROLES: [u64; 2] = [294, 0];
 
         /// The zenoh files' version headers: this reader's, another.
-        pub const ZENOH_VERSIONS: [u64; 2] = [560, 0];
+        pub const ZENOH_VERSIONS: [u64; 2] = [588, 0];
     }
 }
 
@@ -790,6 +790,17 @@ mod tests {
         let closed = 1.0 - 0.05f64.powf(1.0 / n as f64);
         assert!((upper_bound(0, n) - closed).abs() < 1e-12);
         assert_eq!(upper_bound(5, 5), 1.0);
+    }
+
+    /// A frame that repeats its SN while its unit reads whole moves the `yes`
+    /// sum down, however many of them a flow holds: the `no` sum's unit weight
+    /// is an average over the null protocols and can come to match the break's
+    /// (it is within 12 millibits now), but the `yes` sum's is a bound and
+    /// cannot, so a flow of such frames stays short of `yes`.
+    #[test]
+    fn a_unit_read_whole_on_a_broken_step_never_counts_toward_yes() {
+        let sum = model::UNIT_EXPLAINED.yes + model::SN_BREAKS.yes;
+        assert!(sum < 0, "{sum}");
     }
 
     /// A cookie match counts its bytes up to the cap, less the zenoh side's
