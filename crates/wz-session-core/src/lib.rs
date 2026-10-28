@@ -361,19 +361,19 @@ pub mod entropy;
 /// no_std + no_alloc; unconditional.
 pub mod epoch;
 
-/// A ring of fixed-size event records with one producer and any number of readers
-/// (`docs/observation-plane.md` M2): a per-slot sequence lock over 32-bit atomic words, no lock,
-/// no read-modify-write on the write side, loss reported as a gap in the sequence. Generic and
-/// unconditional: a build that instantiates no ring carries no code of it. It uses 32-bit atomics
-/// only, so a Cortex-M0 builds it.
+// A ring of fixed-size event records with one producer and any number of readers
+// (`docs/observation-plane.md` M2). Unconditional: a build that instantiates no ring carries no
+// code of it, and it uses 32-bit atomics only, so a Cortex-M0 builds it.
+//
+// These three modules carry their documentation in their own `//!` and none here: rustdoc
+// resolves the links of a module's inner documentation in the module's PARENT when the
+// declaration also carries outer documentation, and every link in them is written for the module.
 pub mod event_ring;
 
-/// The Hybrid Logical Clock arithmetic over the [`epoch`] port: `uhlc`'s stamp and absorb rules
-/// in one atomic word, with no allocation and no lock, so a profile with no operating system has
-/// a node clock too. Pure no_std + no_alloc. The word is 64 bits, so the module exists where the
-/// target has a 64-bit atomic or the `no_std` feature brings `portable-atomic` to provide one
-/// (the same split `session_actions` makes); a bare cross-compile of the crate for a core with
-/// neither (`thumbv7em`, `thumbv6m`) does not carry it.
+// The Hybrid Logical Clock arithmetic over the `epoch` port. The word is 64 bits, so the module
+// exists where the target has a 64-bit atomic or the `no_std` feature brings `portable-atomic` to
+// provide one (the same split `session_actions` makes); a bare cross-compile of the crate for a
+// core with neither (`thumbv7em`, `thumbv6m`) does not carry it.
 #[cfg(any(target_has_atomic = "64", feature = "no_std"))]
 pub mod hlc;
 
@@ -2164,8 +2164,8 @@ pub mod clock_quality {
     ));
 }
 
-/// How far the node may trust its clock: the [`clock_quality`] machine and the host
-/// that drives it. Gated as the machine is.
+// How far the node may trust its clock: the `clock_quality` machine and the host that drives it.
+// Gated as the machine is. Documented in its own `//!`; see the note at `event_ring`.
 #[cfg(feature = "clock-quality")]
 pub mod clock_standing;
 

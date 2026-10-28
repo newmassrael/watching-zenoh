@@ -8,7 +8,7 @@
 //! much that is worth, and it is told by the host, which is the only party that knows: a time
 //! daemon's state, a satellite lock, a fieldbus master. The host raises
 //! [`sync_acquired`](ClockStanding::sync_acquired) and [`sync_lost`](ClockStanding::sync_lost),
-//! and, for a clock it registered, [`holdover_expired`](ClockStanding::holdover_expired) when its
+//! and, for a clock it registered (`clock-source`), `holdover_expired` when its
 //! own bound on running without a reference has passed. This machine holds no timer and reads no
 //! clock, so what it does is a function of the events it was given.
 //!
