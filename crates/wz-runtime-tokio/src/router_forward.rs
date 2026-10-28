@@ -348,8 +348,8 @@
 //!   plane yet); these two egress helpers are the router↔single-net data-path
 //!   parity obligation for the interceptor slice.
 
-use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -427,6 +427,7 @@ use wz_session_core::region_partition::{region_of, RemoteFacts, SouthPartition};
 use wz_session_core::sink::SampleView;
 // R2393 — the host-subscriber dispatch's sample types, the same ones the peer
 // plane's `dispatch_local_subscribers` builds from.
+use wz_session_core::sample::Sample;
 use wz_session_core::sample_kind::SampleKind;
 use wz_session_core::sink::BorrowedSample;
 
@@ -2414,16 +2415,77 @@ thread_local! {
     /// again from its own body (it publishes into its own pattern) from one that another thread is
     /// running, which is waited for.
     static HOSTED_RUNNING: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+
+    /// The samples a hosted subscriber was refused because this thread was inside it already (it
+    /// published into its own pattern), with the handler to give each to once it is out (item 751,
+    /// step 6). Per thread because the refusal is: only a call from inside the handler is refused,
+    /// and that call is on the handler's own thread.
+    static HOSTED_ECHO: RefCell<VecDeque<(Arc<Hosted<HostedSubscriberHandler>>, Sample)>> =
+        const { RefCell::new(VecDeque::new()) };
+
+    /// How many deliveries to hosted subscribers this thread is inside of, so that the queue above
+    /// is drained by the outermost one and not by one nested in a handler.
+    static HOSTED_DISPATCH_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+/// How many refused samples the queue of one thread keeps, and how many it redelivers each time
+/// it is drained: zenoh's default reception channel size
+/// (`zenoh/src/api/session.rs` @ `API_DATA_RECEPTION_CHANNEL_SIZE`). Past it the OLDEST is
+/// dropped, as zenoh's ring channel does, so a subscriber that republishes into itself without
+/// end spins with bounded memory and bounded work for each delivery.
+const SELF_ECHO_QUEUE_CAP: usize = 256;
+
+/// A delivery to hosted subscribers this thread is inside of: counted, so that the queue of
+/// refused samples is drained by the outermost one, and counted back however the delivery ends.
+struct HostedDispatch {
+    outermost: bool,
+}
+
+impl HostedDispatch {
+    fn enter() -> Self {
+        let depth = HOSTED_DISPATCH_DEPTH.with(|depth| {
+            let before = depth.get();
+            depth.set(before + 1);
+            before
+        });
+        Self {
+            outermost: depth == 0,
+        }
+    }
+
+    fn is_outermost(&self) -> bool {
+        self.outermost
+    }
+}
+
+impl Drop for HostedDispatch {
+    fn drop(&mut self) {
+        HOSTED_DISPATCH_DEPTH.with(|depth| depth.set(depth.get() - 1));
+    }
 }
 
 /// A handler a host registered on the router, callable from any thread: calls of one handler are
 /// serialized, as an `FnMut` needs, and a call that comes from inside the handler itself is refused
-/// and not waited for, which would never end.
-pub(crate) struct Hosted<H>(PlainMutex<H>);
+/// and not waited for, which would never end. The second field says the host took it back, which a
+/// sample queued for it before then must not outlive.
+pub(crate) struct Hosted<H>(PlainMutex<H>, std::sync::atomic::AtomicBool);
 
 impl<H> Hosted<H> {
     fn new(handler: H) -> Arc<Self> {
-        Arc::new(Self(PlainMutex::new(handler)))
+        Arc::new(Self(
+            PlainMutex::new(handler),
+            std::sync::atomic::AtomicBool::new(false),
+        ))
+    }
+
+    /// The host took this handler back: nothing is delivered to it from now on.
+    #[cfg(test)]
+    fn retract(&self) {
+        self.1.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    fn is_retracted(&self) -> bool {
+        self.1.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Run `f` over the handler, waiting for a call on another thread to finish; `None`, without
@@ -7483,6 +7545,51 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         self.repropagate(snapshot);
     }
 
+    /// Item 751, step 6 — take back the subscribers this node hosts on `keyexpr`: the inverse of
+    /// [`register_local_subscriber`](Self::register_local_subscriber), and the twin of
+    /// [`LinkstateForwarder::undeclare_subscription`](crate::linkstate_forward::LinkstateForwarder::undeclare_subscription).
+    /// A retracted subscriber stops receiving at once, including what was queued for it, and the
+    /// interest is withdrawn from every mesh unless a client or another hosted subscriber still
+    /// holds it (the same fold that decided the registration). Answers whether one was hosted.
+    #[cfg(test)]
+    pub fn unregister_local_subscriber(&mut self, keyexpr: &str) -> bool
+    where
+        T: std::ops::DerefMut,
+    {
+        let snapshot = self.snapshot::<SubPlane>(keyexpr);
+        let mut hosted = false;
+        self.tables.local_subscribers.retain(|sub| {
+            if sub.keyexpr != keyexpr {
+                return true;
+            }
+            sub.handler.retract();
+            hosted = true;
+            false
+        });
+        self.repropagate(snapshot);
+        hosted
+    }
+
+    /// Item 751, step 6 — take back the queryables this node hosts on `keyexpr`, the inverse of
+    /// [`register_local_queryable`](Self::register_local_queryable). It stops answering, and the
+    /// declaration is withdrawn from every mesh, or re-declared with what the remaining holders
+    /// make of it (a complete queryable gone leaves an incomplete one). Answers whether one was
+    /// hosted.
+    #[cfg(test)]
+    pub fn unregister_local_queryable(&mut self, keyexpr: &str) -> bool
+    where
+        T: std::ops::DerefMut,
+    {
+        let snapshot = self.snapshot::<QablPlane>(keyexpr);
+        let before = self.tables.local_queryables.len();
+        self.tables
+            .local_queryables
+            .retain(|qabl| qabl.keyexpr != keyexpr);
+        let hosted = self.tables.local_queryables.len() != before;
+        self.repropagate(snapshot);
+        hosted
+    }
+
     /// R2393 — deliver a routed Put to any subscriber HOSTED BY THIS ROUTER whose
     /// declared pattern matches the concrete key: the Push-plane twin of
     /// [`dispatch_local_queryables`](Self::dispatch_local_queryables) and the router
@@ -7495,16 +7602,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// views do), and it must not call a method that writes the tables (a registration, a
     /// declaration), which would wait for the guard it runs under.
     ///
-    /// ⚠ ONE DIVERGENCE FROM THE PEER TWIN, named rather than left to be discovered:
-    /// on a BUSY handler ([`Hosted::call`] answers `None` — a handler that re-entered this
-    /// dispatch for its own pattern) the peer plane QUEUES the sample and redelivers
-    /// it off-stack, faithful to zenoh's FIFO requeue. This plane drops it and says
-    /// so. The requeue needs the outermost-`forward`-exit drain the peer plane owns,
-    /// and no router-hosted subscriber can currently reach the busy arm: the shipped
-    /// host is an admin config-write handler that sends on a channel and publishes
-    /// nothing, so it cannot echo to its own pattern. Building the queue now would be
-    /// a mechanism with no reachable caller; it becomes real the first time a
-    /// router-hosted subscriber publishes.
+    /// A BUSY handler ([`Hosted::call`] answers `None` — a handler that re-entered this
+    /// dispatch for its own pattern) is not dropped, as it was until item 751 step 6: the
+    /// sample is QUEUED on this thread and redelivered off-stack once the outermost delivery
+    /// of the thread is done, as the peer plane does and as zenoh's FIFO requeue does
+    /// ([`enqueue_self_echo`](Self::enqueue_self_echo), [`drain_self_echo`](Self::drain_self_echo)).
+    /// It became reachable when a node could publish ([`publish`](Self::publish)): a hosted
+    /// subscriber that publishes echoes into its own pattern.
     fn dispatch_local_subscribers(&self, reliable: bool, push: &PushOwned, keyexpr: &str) {
         // Cheap exit before any payload work: the overwhelmingly common case is a
         // router hosting no subscribers at all.
@@ -7551,13 +7655,52 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 .map(|sub| Arc::clone(&sub.handler))
                 .collect()
         };
+        let inside = HostedDispatch::enter();
         for handler in &matched {
             if handler.call(|h| h(&sample)).is_none() {
-                log::warn!(
-                    "router-forward: host subscriber for {keyexpr} is BUSY (self-echo); \
-                     the sample is dropped — this plane has no redelivery queue yet"
-                );
+                Self::enqueue_self_echo(handler, &sample);
             }
+        }
+        if inside.is_outermost() {
+            drop(inside);
+            Self::drain_self_echo();
+        }
+    }
+
+    /// Item 751, step 6 — keep a sample a hosted subscriber was refused, because this thread is
+    /// inside it already (it published into its own pattern), for redelivery once it is out. The
+    /// peer plane's `enqueue_self_echo`, with the cap and the drop-oldest rule of zenoh's ring
+    /// channel; the sample is copied, as the borrowed view ends with this delivery.
+    fn enqueue_self_echo(handler: &Arc<Hosted<HostedSubscriberHandler>>, view: &dyn SampleView) {
+        HOSTED_ECHO.with(|queue| {
+            let mut queue = queue.borrow_mut();
+            if queue.len() >= SELF_ECHO_QUEUE_CAP {
+                queue.pop_front();
+            }
+            queue.push_back((Arc::clone(handler), Sample::from_view(view)));
+        });
+    }
+
+    /// Item 751, step 6 — give the queued samples to their handlers, off the stack of the one that
+    /// caused them: run once by the outermost delivery of a thread, as the peer plane's drain runs
+    /// at the outermost `forward` exit, and as zenoh's reception channel is read on its own task
+    /// and not inside the publish. At most [`SELF_ECHO_QUEUE_CAP`] deliveries each time: a handler
+    /// that publishes into itself again queues again, and what is left waits for the next delivery
+    /// on this thread. A retracted handler is skipped, so a subscriber that stopped receiving
+    /// does not receive what was already queued for it.
+    fn drain_self_echo() {
+        let _inside = HostedDispatch::enter();
+        let mut budget = SELF_ECHO_QUEUE_CAP;
+        while budget > 0 {
+            let Some((handler, sample)) = HOSTED_ECHO.with(|queue| queue.borrow_mut().pop_front())
+            else {
+                break;
+            };
+            budget -= 1;
+            if handler.is_retracted() {
+                continue;
+            }
+            let _ = handler.call(|h| h(&sample as &dyn SampleView));
         }
     }
 

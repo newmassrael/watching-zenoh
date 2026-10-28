@@ -449,11 +449,66 @@ Declared absent, with the reason, so step 7 does not look for them:
   (section 10, `TOKEN_INTEREST_BROKERED`). Step 7 has to move
   `wz_peer_interest_pending_gc_pico_interop`, which asserts the brokered copy.
 
-Still to do in step 6: the node's own declarations (`declare_subscription`,
-`undeclare_subscription`, `declare_queryable`, `undeclare_queryable`) and the
-unregistration and redelivery queue of a hosted handler, the admin sources
-(`publisher_sources` and `querier_sources` have no router twin), the north net
-view, and the counters `run_peer` prints.
+Still to do in step 6 after this part: the admin sources (`publisher_sources` and
+`querier_sources` have no router twin), the north net view, and the counters
+`run_peer` prints. The next part has them.
+
+### Part two: the node's declarations and hosted handlers
+
+The node's own declarations are the pin's: a session declares a subscriber or a
+queryable WITH its callback, and a declaration without one does not exist. So
+the four bare entries are not moved but replaced. `register_local_subscriber`
+and `register_local_queryable` are the declaration, and what was missing was
+their inverse: `unregister_local_subscriber` and `unregister_local_queryable`,
+test-only until step 7. A retraction goes through the fold that decided the
+registration (`repropagate`), so a client holding the same key keeps the interest
+alive, and a complete queryable leaving a key that a client's incomplete one
+still holds lowers the advertisement to incomplete instead of withdrawing it, as
+the peer plane's union refcount does (the hosting scene holds the two planes
+equal at both).
+`LinkstateForwarder`'s bare `declare_subscription` and `declare_queryable` are
+declared absent. Two calls in `run_peer` use the bare form, the demo's
+unsubscribe-after-data flag, and step 7 moves them to a registration with a
+no-op handler.
+
+The refused call is no longer dropped. A hosted subscriber that publishes into
+its own pattern was refused when it was called from inside itself, and the
+router's twin dropped the sample with a warning because nothing could reach
+that arm. A node that can publish reaches it. The sample is now queued on the
+thread, bounded at the pin's reception channel size with the oldest dropped, and
+given to the handler by the outermost delivery of the thread once the handler
+is out. The queue is per thread because the refusal is: only a call from inside
+the handler is refused, and that is on the handler's own thread. A handler taken
+back is marked, and what was queued for it is skipped.
+
+Not moved, and the reason: a hosted handler cannot unregister ITSELF from inside
+its own body, which the peer plane allows (`undeclare_purges_a_pending_self_echo`).
+The router's handler runs under the tables' read guard and a retraction writes
+the tables, so it would wait for the guard it runs under. This is the rule the
+router's hosted handlers have always had, and it is stated rather than removed.
+A hosted queryable's redelivery is not built either: a query originates from a
+face, the node has no querier entry on this plane, and a handler that queries
+its own key has no path to do it.
+
+The gate gained `host_subscriber`, `unhost_subscriber`, `host_queryable` and
+`unhost_queryable` on `NodeSession`, a `hosted` plane compared after every step
+(what each hosted handler was given), and a scene of a node hosting. Two more
+`LinkstateForwarder` departures surfaced, both in both modes:
+
+- **The node's own Put reaches the subscribers it hosts.** The pin delivers to
+  the session's own callbacks unless the Put was sent to remote destinations only
+  (`zenoh/src/api/session.rs` @ `state.subscriber_callbacks(true, SubscriberKind::Subscriber, &wire_expr, false);`);
+  `LinkstateForwarder::publish` reaches none.
+- **A queryable declared again with what it already was.** A second, incomplete
+  queryable on a key whose first is complete changes nothing the other regions
+  fold out of it, and the pin propagates a declaration only when that changes
+  (`zenoh/src/net/routing/dispatcher/queries.rs` @ `tables.hats[dst].propagate_queryable(ctx.reborrow(), res.clone(), other_info);`).
+  `LinkstateForwarder` declares the key again, complete as before.
+
+Three tests grade the queue on the region-hat peer: the single echo is given once
+after the delivery, a handler that always echoes is given the queue's size and the
+delivery ends, and a retracted handler is given nothing of what was left in the
+queue.
 
 ## 12. Open
 

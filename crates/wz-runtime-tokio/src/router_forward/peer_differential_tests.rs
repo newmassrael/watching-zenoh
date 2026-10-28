@@ -125,6 +125,8 @@ pub(super) enum Seen {
     /// after each step, so that a plane that sends the same frames while
     /// learning a different topology is a difference.
     Graph { nodes: usize, edges: usize },
+    /// What a handler the node hosts was given: a sample, or a query.
+    Hosted(String),
     /// Anything else, by the name of its kind, so that a kind one node sends
     /// and the other does not is a difference and its contents are not.
     Other(&'static str),
@@ -183,6 +185,14 @@ enum Step {
     /// The node's own session deletes.
     #[cfg(feature = "pubsub-delete")]
     NodeDelete(&'static str),
+    /// The node hosts a subscriber on a keyexpr.
+    NodeHost(&'static str),
+    /// The node takes the subscribers it hosts on a keyexpr back.
+    NodeUnhost(&'static str),
+    /// The node hosts a queryable: keyexpr, completeness, the name it answers with.
+    NodeHostQueryable(&'static str, bool, &'static str),
+    /// The node takes the queryables it hosts on a keyexpr back.
+    NodeUnhostQueryable(&'static str),
 }
 
 /// What a querier asks beyond the keyexpr. Every field left `None` is absent
@@ -220,6 +230,8 @@ struct Node {
     /// The id each declaration of a face was made with, by the key and the kind,
     /// so that its retraction names it.
     declared: BTreeMap<(u64, &'static str, &'static str), u64>,
+    /// What the handlers the node hosts were given since the last step.
+    hosted: HostedLog,
     self_zid: u8,
 }
 
@@ -234,7 +246,19 @@ impl Node {
             ended_request: BTreeMap::new(),
             next_declaration: std::cell::Cell::new(1),
             declared: BTreeMap::new(),
+            hosted: HostedLog::default(),
             self_zid,
+        }
+    }
+
+    /// What the hosted handlers were given since the last call.
+    fn heard_by_hosts(&self) -> Sent {
+        let mut log = self.hosted.lock().unwrap();
+        let heard: Vec<Seen> = log.drain(..).map(Seen::Hosted).collect();
+        if heard.is_empty() {
+            Sent::new()
+        } else {
+            Sent::from([(0, heard)])
         }
     }
 
@@ -410,6 +434,13 @@ impl Node {
             }
             #[cfg(feature = "pubsub-delete")]
             Step::NodeDelete(keyexpr) => self.fwd.publish_delete(keyexpr),
+            Step::NodeHost(keyexpr) => self.fwd.host_subscriber(keyexpr, Arc::clone(&self.hosted)),
+            Step::NodeUnhost(keyexpr) => self.fwd.unhost_subscriber(keyexpr),
+            Step::NodeHostQueryable(keyexpr, complete, name) => {
+                self.fwd
+                    .host_queryable(keyexpr, *complete, name, Arc::clone(&self.hosted))
+            }
+            Step::NodeUnhostQueryable(keyexpr) => self.fwd.unhost_queryable(keyexpr),
         }
         self.drain()
     }
@@ -668,6 +699,19 @@ pub(super) enum Plane {
     RegionHat,
 }
 
+/// What the handlers a node hosts were given, in order.
+pub(super) type HostedLog = Arc<std::sync::Mutex<Vec<String>>>;
+
+/// A sample as a hosted subscriber was given it.
+fn heard(sample: &dyn wz_session_core::sink::SampleView) -> String {
+    format!(
+        "{:?} {} {:?}",
+        sample.kind(),
+        sample.keyexpr(),
+        sample.payload()
+    )
+}
+
 /// What a node does as the owner of its own session, which the two planes spell
 /// the same way: publish, and read the size of the graph it learned. Step 6 of
 /// the note adds an entry here for each surface a plane has and a scene can
@@ -680,6 +724,15 @@ pub(super) trait NodeSession: FaceForwarder {
     fn publish_delete(&self, keyexpr: &str);
     /// Advertise the node's dial locators on the floods it originates.
     fn set_self_locators(&self, locators: Vec<String>);
+    /// Host a subscriber on `keyexpr`; what it is given is written to `log`.
+    fn host_subscriber(&self, keyexpr: &str, log: HostedLog);
+    /// Take the subscribers hosted on `keyexpr` back.
+    fn unhost_subscriber(&self, keyexpr: &str);
+    /// Host a queryable on `keyexpr` that answers every query with its own name;
+    /// the queries it is given are written to `log`.
+    fn host_queryable(&self, keyexpr: &str, complete: bool, name: &'static str, log: HostedLog);
+    /// Take the queryables hosted on `keyexpr` back.
+    fn unhost_queryable(&self, keyexpr: &str);
     /// Nodes in the graph of the peers, self included.
     fn node_count(&self) -> usize;
     /// Mutual links in that graph.
@@ -696,6 +749,30 @@ impl NodeSession for LinkstateForwarder {
     }
     fn set_self_locators(&self, locators: Vec<String>) {
         LinkstateForwarder::set_self_locators(self, locators)
+    }
+    fn host_subscriber(&self, keyexpr: &str, log: HostedLog) {
+        let _ = self.register_local_subscriber(
+            keyexpr,
+            Box::new(move |sample| log.lock().unwrap().push(heard(sample))),
+        );
+    }
+    fn unhost_subscriber(&self, keyexpr: &str) {
+        let _ = self.undeclare_subscription(keyexpr);
+    }
+    fn host_queryable(&self, keyexpr: &str, complete: bool, name: &'static str, log: HostedLog) {
+        let _ = self.register_local_queryable(
+            keyexpr,
+            complete,
+            Box::new(move |query, replies| {
+                log.lock()
+                    .unwrap()
+                    .push(format!("asked {}", query.keyexpr()));
+                replies.reply(name.as_bytes());
+            }),
+        );
+    }
+    fn unhost_queryable(&self, keyexpr: &str) {
+        let _ = self.undeclare_queryable(keyexpr);
     }
     fn node_count(&self) -> usize {
         LinkstateForwarder::node_count(self)
@@ -716,6 +793,30 @@ impl NodeSession for RouterForwarder {
     }
     fn set_self_locators(&self, locators: Vec<String>) {
         self.on_tables_mut().set_self_locators(locators)
+    }
+    fn host_subscriber(&self, keyexpr: &str, log: HostedLog) {
+        self.on_tables_mut().register_local_subscriber(
+            keyexpr,
+            Box::new(move |sample| log.lock().unwrap().push(heard(sample))),
+        );
+    }
+    fn unhost_subscriber(&self, keyexpr: &str) {
+        self.on_tables_mut().unregister_local_subscriber(keyexpr);
+    }
+    fn host_queryable(&self, keyexpr: &str, complete: bool, name: &'static str, log: HostedLog) {
+        self.on_tables_mut().register_local_queryable(
+            keyexpr,
+            complete,
+            Box::new(move |query, replies| {
+                log.lock()
+                    .unwrap()
+                    .push(format!("asked {}", query.keyexpr()));
+                replies.reply(name.as_bytes());
+            }),
+        );
+    }
+    fn unhost_queryable(&self, keyexpr: &str) {
+        self.on_tables_mut().unregister_local_queryable(keyexpr);
     }
     #[cfg(feature = "pubsub-delete")]
     fn publish_delete(&self, keyexpr: &str) {
@@ -803,6 +904,7 @@ fn diverge(scene: &[Step], self_zid: u8, mode: Mode) -> Vec<Divergence> {
             ("data", old_data, new_data),
             ("topology", old_topology, new_topology),
             ("graph", graph(&old), graph(&new)),
+            ("hosted", old.heard_by_hosts(), new.heard_by_hosts()),
         ] {
             if a != b {
                 out.push(Divergence {
@@ -1244,9 +1346,41 @@ fn a_node_publishes() -> Vec<Step> {
     scene
 }
 
+/// The node as a subscriber and a queryable (step 6): what it hosts is told to the
+/// peers, delivered to the handler for a peer's Put and for its own, and taken
+/// back; a client holding the same key keeps the interest alive past the hosted
+/// subscriber's departure. A hosted queryable answers a peer's and a client's
+/// query; a second one on the same key, incomplete, joins it, a client declares
+/// the key incomplete too, and taking the key back removes both hosted ones and
+/// leaves the client's, which the advertisement is lowered to.
+fn a_node_hosts() -> Vec<Step> {
+    vec![
+        Step::Up(0, 0xAA, Wire::Peer),
+        Step::Up(1, 0xC1, Wire::Client),
+        Step::LinkBack(0, 0xAA, 5),
+        Step::Tick,
+        Step::NodeHost("demo/h/**"),
+        Step::Put(0, "demo/h/a", b"from the peer"),
+        Step::Subscribe(1, "demo/h/**"),
+        Step::Put(0, "demo/h/b", b"to both"),
+        Step::NodePut("demo/h/c", b"own", Priority::DEFAULT, false),
+        Step::NodeUnhost("demo/h/**"),
+        Step::Put(0, "demo/h/d", b"to the client only"),
+        Step::Unsubscribe(1, "demo/h/**"),
+        Step::NodeHostQueryable("demo/q/**", true, "first"),
+        Step::Query(0, 7, "demo/q/x"),
+        Step::Query(1, 8, "demo/q/y"),
+        Step::NodeHostQueryable("demo/q/**", false, "second"),
+        Step::Queryable(1, "demo/q/**", false),
+        Step::NodeUnhostQueryable("demo/q/**"),
+        Step::Query(0, 9, "demo/q/z"),
+    ]
+}
+
 fn scenes() -> Vec<(&'static str, Vec<Step>)> {
     #[allow(unused_mut)]
     let mut scenes = vec![
+        ("a node hosts", a_node_hosts()),
         ("a node publishes", a_node_publishes()),
         (
             "a timeout shorter than the default",
@@ -1410,6 +1544,157 @@ fn a_node_advertises_its_locators_in_the_flood_it_originates() {
     }
 }
 
+/// What the hosting scene claims to exercise, counted in what the region-hat peer's hosts
+/// were given and what it sent in `mode`: the hosted subscriber hears a peer's Put and its
+/// own, hears nothing once taken back, and a hosted queryable answers a peer and a client
+/// until it is taken back.
+fn assert_the_hosting_scene_exercises_what_it_claims(mode: Mode) {
+    let (_, mut node) = both(0x01, mode);
+    let mut heard_by_hosts: Vec<Seen> = Vec::new();
+    let mut sent: Vec<(u64, Seen)> = Vec::new();
+    for step in a_node_hosts() {
+        let out = node.apply(&step);
+        heard_by_hosts.extend(node.heard_by_hosts().into_values().flatten());
+        for (face, seen) in out {
+            sent.extend(seen.into_iter().map(|s| (face, s)));
+        }
+    }
+    let heard_payload = |what: &str| {
+        heard_by_hosts
+            .iter()
+            .any(|s| matches!(s, Seen::Hosted(h) if h.contains(what)))
+    };
+    assert!(
+        heard_payload("demo/h/a"),
+        "{mode:?}: the hosted subscriber hears the peer"
+    );
+    assert!(heard_payload("demo/h/b"), "{mode:?}: and the next Put");
+    assert!(heard_payload("demo/h/c"), "{mode:?}: and the node's own");
+    assert!(
+        !heard_payload("demo/h/d"),
+        "{mode:?}: and nothing once taken back"
+    );
+    let answered = |face: u64, name: &[u8]| {
+        sent.iter().any(|(f, s)| {
+            *f == face && matches!(s, Seen::Response { payload: Some(p), .. } if p == name)
+        })
+    };
+    assert!(
+        answered(0, b"first"),
+        "{mode:?}: the hosted queryable answers the peer"
+    );
+    assert!(answered(1, b"first"), "{mode:?}: and the client");
+    assert!(
+        !sent.iter().any(|(_, s)| matches!(
+            s,
+            Seen::Response {
+                request_id: 9,
+                payload: Some(_),
+                ..
+            }
+        )),
+        "{mode:?}: and answers nothing once taken back"
+    );
+}
+
+/// A region-hat peer whose hosted subscriber on `demo/**` writes what it is given to a
+/// log and, while `echoes` allows, publishes into its own pattern from inside itself.
+/// The handler holds the forwarder weakly, as the peer plane's tests do, so that the
+/// forwarder and its handler do not keep each other alive.
+fn a_peer_with_a_subscriber_that_echoes(
+    echoes: impl Fn() -> bool + Send + 'static,
+) -> (Arc<RouterForwarder>, HostedLog) {
+    let fwd = Arc::new(RouterForwarder::peer(zid(0x05)));
+    let log = HostedLog::default();
+    let heard_by = Arc::clone(&log);
+    let weak = Arc::downgrade(&fwd);
+    fwd.on_tables_mut().register_local_subscriber(
+        "demo/**",
+        Box::new(move |sample| {
+            heard_by.lock().unwrap().push(heard(sample));
+            if echoes() {
+                if let Some(fwd) = weak.upgrade() {
+                    fwd.on_tables()
+                        .publish("demo/data", b"echo")
+                        .expect("publish");
+                }
+            }
+        }),
+    );
+    (fwd, log)
+}
+
+/// A hosted subscriber that publishes into its own pattern is given what it published once
+/// the delivery it is in is done: not dropped, as it was until step 6, and not delivered
+/// inside itself, which an `FnMut` cannot take. The peer plane's
+/// `dispatch_self_reentrant_subscriber_redelivers_a_single_self_echo`, on the region-hat peer.
+#[test]
+fn a_hosted_subscriber_hears_what_it_published_into_itself_after_the_delivery() {
+    let once = std::sync::atomic::AtomicBool::new(false);
+    let (fwd, log) = a_peer_with_a_subscriber_that_echoes(move || {
+        !once.swap(true, std::sync::atomic::Ordering::SeqCst)
+    });
+    fwd.on_tables()
+        .publish("demo/data", b"first")
+        .expect("publish");
+    let heard: Vec<String> = log.lock().unwrap().clone();
+    assert_eq!(
+        heard.len(),
+        2,
+        "the Put and its one echo, each given once: {heard:?}"
+    );
+    assert!(heard[0].contains("demo/data") && heard[1].contains("demo/data"));
+}
+
+/// A subscriber that publishes into itself every time is given a bounded number of
+/// deliveries, the queue's size, and the delivery ends: zenoh bounds a channel's memory
+/// and not the loop, and this is the bound a single thread's drain keeps.
+#[test]
+fn a_hosted_subscriber_that_always_echoes_is_given_a_bounded_number_of_deliveries() {
+    let (fwd, log) = a_peer_with_a_subscriber_that_echoes(|| true);
+    fwd.on_tables()
+        .publish("demo/data", b"first")
+        .expect("publish");
+    assert_eq!(
+        log.lock().unwrap().len(),
+        1 + SELF_ECHO_QUEUE_CAP,
+        "the first Put, then one delivery for each of the queue's places"
+    );
+}
+
+/// What is left in the queue when a delivery ends is not given to a subscriber the host took
+/// back, which would be a retracted subscriber still receiving.
+#[test]
+fn a_retracted_subscriber_is_not_given_what_was_queued_for_it() {
+    let (fwd, log) = a_peer_with_a_subscriber_that_echoes(|| true);
+    fwd.on_tables()
+        .publish("demo/data", b"first")
+        .expect("publish");
+    let before = log.lock().unwrap().len();
+    // One echo is still queued: the budget ran out first.
+    assert!(fwd.on_tables_mut().unregister_local_subscriber("demo/**"));
+    // A second subscriber elsewhere makes the next delivery drain the queue.
+    let other = HostedLog::default();
+    let other_log = Arc::clone(&other);
+    fwd.on_tables_mut().register_local_subscriber(
+        "other/**",
+        Box::new(move |sample| other_log.lock().unwrap().push(heard(sample))),
+    );
+    fwd.on_tables()
+        .publish("other/x", b"next")
+        .expect("publish");
+    assert_eq!(
+        other.lock().unwrap().len(),
+        1,
+        "the other one hears its own"
+    );
+    assert_eq!(
+        log.lock().unwrap().len(),
+        before,
+        "the retracted one is given nothing more"
+    );
+}
+
 /// Each thing the query scenes claim to exercise, counted in what the region-hat
 /// peer sent in `mode`. A scene that stopped producing one would still be
 /// "equal", and equal over nothing proves nothing.
@@ -1517,6 +1802,8 @@ fn is_a_node_put(step: &Step) -> bool {
 }
 
 const NODE_PUT_TO_CLIENT: &str = "the node's own Put reaches a client that subscribed";
+const NODE_PUT_TO_OWN_SUBSCRIBER: &str = "the node's own Put reaches a subscriber it hosts";
+const QABL_DECLARED_AGAIN: &str = "a queryable declared again with what it already was";
 const GOSSIP_GRAPH: &str = "the graph a gossip peer keeps";
 const LINK_DOWN_LIST: &str = "a link-state list sent when a link goes down";
 
@@ -1527,6 +1814,8 @@ fn expected_reasons(mode: Mode) -> std::collections::BTreeSet<&'static str> {
         INTEREST_ANSWER_DECLARATIONS,
         ROUTER_INTEREST_REFUSED,
         NODE_PUT_TO_CLIENT,
+        NODE_PUT_TO_OWN_SUBSCRIBER,
+        QABL_DECLARED_AGAIN,
     ]
     .into_iter()
     .collect();
@@ -1558,6 +1847,32 @@ fn explained(mode: Mode, d: &Divergence) -> Option<&'static str> {
     // reaches the clients that subscribed; `LinkstateForwarder::publish` reaches
     // its tree children and its gateways and none of its client faces. Every
     // face it does reach is reached with the same message.
+    // A Put of the node's own session reaches the subscribers the same session
+    // hosts unless it was sent to remote destinations only
+    // (`zenoh/src/api/session.rs` @ `state.subscriber_callbacks(true, SubscriberKind::Subscriber, &wire_expr, false);`);
+    // `LinkstateForwarder::publish` delivers to none of its own.
+    if is_a_node_put(&d.step)
+        && d.plane == "hosted"
+        && d.linkstate.is_empty()
+        && !d.region_hat.is_empty()
+    {
+        return Some(NODE_PUT_TO_OWN_SUBSCRIBER);
+    }
+    // A queryable declaration is propagated when what the other regions fold
+    // out of it changed, and a second, incomplete queryable on a key whose
+    // first is complete changes nothing
+    // (`zenoh/src/net/routing/dispatcher/queries.rs` @ `tables.hats[dst].propagate_queryable(ctx.reborrow(), res.clone(), other_info);`).
+    // `LinkstateForwarder` declares the key again, complete as before.
+    if matches!(d.step, Step::NodeHostQueryable(..))
+        && d.plane == "data"
+        && d.region_hat.is_empty()
+        && d.linkstate
+            .values()
+            .flatten()
+            .all(|s| matches!(s, Seen::DeclareQueryable { .. }))
+    {
+        return Some(QABL_DECLARED_AGAIN);
+    }
     if is_a_node_put(&d.step)
         && d.plane == "data"
         && d.region_hat.len() > d.linkstate.len()
@@ -1794,6 +2109,7 @@ fn in_gossip_mode_the_two_peer_planes_differ_only_where_the_pin_says() {
     );
     assert_the_query_scenes_exercise_what_they_claim(Mode::Gossip);
     assert_the_node_publish_scene_exercises_what_it_claims(Mode::Gossip);
+    assert_the_hosting_scene_exercises_what_it_claims(Mode::Gossip);
 }
 
 /// What the pin's gossip peer tells a new link (`zenoh/src/net/protocol/network.rs`
@@ -1944,4 +2260,5 @@ fn in_link_state_mode_the_two_peer_planes_send_the_same_data_and_topology() {
     );
     assert_the_query_scenes_exercise_what_they_claim(Mode::LinkState);
     assert_the_node_publish_scene_exercises_what_it_claims(Mode::LinkState);
+    assert_the_hosting_scene_exercises_what_it_claims(Mode::LinkState);
 }
