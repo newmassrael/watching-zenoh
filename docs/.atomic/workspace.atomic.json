@@ -296776,6 +296776,38 @@
         "Owed, from the open list of slice Z8a: the context a callback runs in, callback drop in three local variants, cancellation, events, liveliness, routing, the matching status after an undeclare with a namespace, the files that run none, and the router refusals; the words of the listener failure for the protocols not read yet (UDP, TLS, WebSocket, Unix sockets); a lane for the harness; the margin of the main job; the pin bump to 1.10.2."
       ]
     },
+    "Round 3871": {
+      "decision_summary": "Two more upstream test files of slice Z8 pass by doing what upstream does with the callbacks and the queries a session leaves behind. The session holds the root of the groups that count the callbacks in flight, and the group of each entity is its child, so a callback that runs in the background (a subscriber, a queryable, a listener that has no group of its own) counts in the session's, and a close that is asked to wait for callbacks waits for them too. Every get is now tracked by the session; closing it ends the channel of each get that has not been answered, where before the receiver of such a get stayed open past the close. Callback drop in all fourteen tests of the file, and the four tests of the cancellation file, pass as upstream wrote them.",
+      "changes_bullets": [
+        "crates/wz-zenoh/src/api/cancellation.rs: SyncGroup takes an optional parent group, and the notifier of a child holds a permit of its own and one of the parent's; child_of builds one.",
+        "crates/wz-zenoh/src/api/session.rs: callbacks_drop_sync_group, the root; callback_group on Session and WeakSession; close waits on the root when asked to wait for callbacks; PendingQueries, which keeps a weak handle to the fan of each get, prunes by amortized growth, and is released by close; SessionInner::query always creates and registers a fan; two tests of the wait and one of an unanswered get.",
+        "crates/wz-zenoh/src/api/builders: the subscriber, queryable, liveliness, matching listener, querier, info links and info transport builders take their group from the session; the background builders pass the session's notifier where they passed none."
+      ],
+      "verification_bullets": [
+        "Locally: the library tests of the top crate pass (163), the three new ones among them; the upstream callback drop file passes (14 of 14) and the cancellation file passes (4 of 4), where one failed; the 35 static gates and the format check pass. Not run: the other tests of the family against this change, the legs gate and the hosted run."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed, from the open list of slice Z8a: the context a callback runs in (session and unicity), events (the open still ends in an Elapsed error), liveliness, routing, the matching status after an undeclare with a namespace, the files that run none, and the router refusals; the words of the listener failure for the protocols not read yet (UDP, TLS, WebSocket, Unix sockets); a lane for the harness; the margin of the main job; the pin bump to 1.10.2."
+      ],
+      "publishable_decision_summary": "Two more upstream test files of slice Z8 pass by doing what upstream does with the callbacks and the queries a session leaves behind. The session holds the root of the groups that count the callbacks in flight, and the group of each entity is its child, so a callback that runs in the background (a subscriber, a queryable, a listener that has no group of its own) counts in the session's, and a close that is asked to wait for callbacks waits for them too. Every get is now tracked by the session; closing it ends the channel of each get that has not been answered, where before the receiver of such a get stayed open past the close. Callback drop in all fourteen tests of the file, and the four tests of the cancellation file, pass as upstream wrote them.",
+      "publishable_changes_bullets": [
+        "crates/wz-zenoh/src/api/cancellation.rs: SyncGroup takes an optional parent group, and the notifier of a child holds a permit of its own and one of the parent's; child_of builds one.",
+        "crates/wz-zenoh/src/api/session.rs: callbacks_drop_sync_group, the root; callback_group on Session and WeakSession; close waits on the root when asked to wait for callbacks; PendingQueries, which keeps a weak handle to the fan of each get, prunes by amortized growth, and is released by close; SessionInner::query always creates and registers a fan; two tests of the wait and one of an unanswered get.",
+        "crates/wz-zenoh/src/api/builders: the subscriber, queryable, liveliness, matching listener, querier, info links and info transport builders take their group from the session; the background builders pass the session's notifier where they passed none."
+      ],
+      "publishable_verification_bullets": [
+        "Locally: the library tests of the top crate pass (163), the three new ones among them; the upstream callback drop file passes (14 of 14) and the cancellation file passes (4 of 4), where one failed; the 35 static gates and the format check pass. Not run: the other tests of the family against this change, the legs gate and the hosted run."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed, from the open list of slice Z8a: the context a callback runs in (session and unicity), events (the open still ends in an Elapsed error), liveliness, routing, the matching status after an undeclare with a namespace, the files that run none, and the router refusals; the words of the listener failure for the protocols not read yet (UDP, TLS, WebSocket, Unix sockets); a lane for the harness; the margin of the main job; the pin bump to 1.10.2."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
