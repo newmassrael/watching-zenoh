@@ -296404,6 +296404,34 @@
         "Read the hosted run for the Layer Z legs this round touches (the defaults leg's auto claim for gateway/south, the census, the drop-in exception) and for the pico and zenohd legs of the earlier landings. A peer with a partition has no stock zenohd witness yet. The C interface reports gateway/south as mapped through the reader's honoured list although its engine holds no region hat, as it already does for plugins and drop_future_timestamp; a separate overlay would say so. Also open: stale LinkstateForwarder comments and the linkstate_forward module name; the router's subscriber and queryable interest dumps return early on an unrestricted interest; a current subscriber Interest from a north peer; a router node's south peer region relays nothing between link-state peers."
       ]
     },
+    "Round 3859": {
+      "decision_summary": "The build script of the top crate (crates/wz-zenoh/build.rs, added with the Session::config and GIT_VERSION slice) carried this repository's header only, and the family notice gate failed on it: a file of the zenoh family has to carry upstream's notice block and say what it was modified from. The build script reproduces what the top crate's library file does with the version macro, `zenoh/src/lib.rs` @ `git_version::git_version!(` (the arguments of the question asked of git and the fallback), so it derives from that file: the header now carries the Eclipse license paragraph, the ZettaScale copyright line and Contributors line that file has, and the statement that it was modified by newmassrael in 2026 and derives from zenoh 1.10.1 and that file. Upstream's own build script is another thing (it records the rustc version) and is not what this file derives from.\n\nThe gate was red on origin/main after Round 3855; the owning session of the time work was told of it with two other gates that are that work's and are repaired by it.",
+      "changes_bullets": [
+        "crates/wz-zenoh/build.rs: the header carries upstream's notice block and the statement that the file was modified and derives from the top crate's library file at zenoh 1.10.1."
+      ],
+      "verification_bullets": [
+        "family_notice_gate.py --check passes (254 files of 13 family crates), and so does its resolution arm, --check --resolve, against the pinned checkout: the file named exists at the pin and the copyright line of that file is the one this file keeps. The header is comment lines only; the code of the build script is unchanged. Not run: a build, since no code moved."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The gate for a file of the family is run by the deferred static gates and the hosted run, not by the commit hook, so a new derived file reaches origin/main red; a file of the family that is added by a slice should be run through family_notice_gate.py --check before it is committed."
+      ],
+      "publishable_decision_summary": "The build script of the top crate (crates/wz-zenoh/build.rs, added with the Session::config and GIT_VERSION slice) carried this repository's header only, and the family notice gate failed on it: a file of the zenoh family has to carry upstream's notice block and say what it was modified from. The build script reproduces what the top crate's library file does with the version macro, `zenoh/src/lib.rs` @ `git_version::git_version!(` (the arguments of the question asked of git and the fallback), so it derives from that file: the header now carries the Eclipse license paragraph, the ZettaScale copyright line and Contributors line that file has, and the statement that it was modified by newmassrael in 2026 and derives from zenoh 1.10.1 and that file. Upstream's own build script is another thing (it records the rustc version) and is not what this file derives from.\n\nThe gate was red on origin/main after Round 3855; the owning session of the time work was told of it with two other gates that are that work's and are repaired by it.",
+      "publishable_changes_bullets": [
+        "crates/wz-zenoh/build.rs: the header carries upstream's notice block and the statement that the file was modified and derives from the top crate's library file at zenoh 1.10.1."
+      ],
+      "publishable_verification_bullets": [
+        "family_notice_gate.py --check passes (254 files of 13 family crates), and so does its resolution arm, --check --resolve, against the pinned checkout: the file named exists at the pin and the copyright line of that file is the one this file keeps. The header is comment lines only; the code of the build script is unchanged. Not run: a build, since no code moved."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The gate for a file of the family is run by the deferred static gates and the hosted run, not by the commit hook, so a new derived file reaches origin/main red; a file of the family that is added by a slice should be run through family_notice_gate.py --check before it is committed."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
