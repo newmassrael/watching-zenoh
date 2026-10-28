@@ -65,6 +65,18 @@ config WZ_TX_BATCHING
 	  is one datagram for the router to read where there were two. Off, every message is a
 	  datagram of its own.
 
+config WZ_SUBSCRIBE
+	bool "The client declares subscribers and keeps the latest sample of each"
+	depends on WZ_ROLE_CLIENT && WZ_FIXED_MEMORY && WZ_NET_BACKEND_ZEPHYR_SOCKETS
+	default y
+	help
+	  The declaration of a subscriber to the router, which then forwards a PUT on the key to
+	  the node, and the registry that keeps the latest sample of each subscription
+	  (zenoh-pico's Z_FEATURE_SUBSCRIPTION). Off, the client only answers queries: a
+	  declaration of a subscriber is refused and the registry is not in the image, which is
+	  2.4 KB of text and 1 KB of RAM. The image that matches a zenoh-pico built with
+	  Z_FEATURE_SUBSCRIPTION off is the one without it.
+
 config WZ_GET
 	bool "The client asks a query and says how it went"
 	depends on WZ_ROLE_CLIENT && WZ_FIXED_MEMORY && WZ_NET_BACKEND_ZEPHYR_SOCKETS

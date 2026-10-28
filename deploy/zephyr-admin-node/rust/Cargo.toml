@@ -197,9 +197,14 @@ fixed-client = [
     "wz/runtime-coop-core",
     "wz-runtime-zephyr/session-slot",
     "wz-runtime-coop/session-slot",
-    "wz-session-mcu/client-slot",
+    "wz-session-mcu/client-slot-queryable",
     "wz-session-core/session-slot",
 ]
+# The fixed client SUBSCRIBES (`CONFIG_WZ_SUBSCRIBE`): it declares subscribers to the router and
+# keeps the latest sample of each (`wz-session-mcu`'s `client-subscriber`). Off, the client only
+# answers queries, as zenoh-pico does with `Z_FEATURE_SUBSCRIPTION` off: the registry of
+# subscriptions and the declaration of one are not in the image.
+subscribe = ["wz-session-mcu/client-subscriber"]
 # The fixed client ASKS (`CONFIG_WZ_GET`): the getter of `wz_session_mcu::slot_getter`, which
 # `deploy/host-slot-node` runs too, asks the query the build states (`CONFIG_WZ_GET_KEY`,
 # `_COUNT`, ...) over the session and says the round trips on the console. Off, the client only

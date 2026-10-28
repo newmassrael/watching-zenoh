@@ -11629,6 +11629,10 @@ layer_c1m_session_lwip() {
     # them assert is the other half (a token is declared, and is not refused).
     _runci_guarded_test "C1m mcu slot node with tokens" 29 \
         cargo test -p wz-session-mcu --features client-slot,declare-token --lib slot_node --quiet || return 1
+    # The client that answers queries and subscribes to nothing (`client-slot-queryable`, what
+    # `CONFIG_WZ_SUBSCRIBE=n` builds): the declaration of a subscriber is refused and the registry of
+    # subscriptions is not compiled, so what is held here is that the slot client builds without it.
+    cargo check -p wz-session-mcu --no-default-features --features client-slot-queryable --quiet || return 1
     # The latest sample of a subscription (`latest`, the same profile): the cell, its cut at the
     # subscription's capacity, a delete, a key cut at a character, the storage's bounds, and the
     # loop's watch that says each new sample once.

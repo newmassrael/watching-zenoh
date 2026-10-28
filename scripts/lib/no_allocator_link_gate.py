@@ -494,6 +494,17 @@ IMAGES: dict[str, Image] = {
                 label="cyt4bf-sockets-client-fixed",
                 no_default_features=True,
             ),
+            # The client that also SUBSCRIBES (`CONFIG_WZ_SUBSCRIBE`, on by default and turned off
+            # by the fixed client's overlay): the declaration of a subscriber and the registry that
+            # keeps the latest sample of each, which the build above leaves out.
+            Build(
+                V7EMHF,
+                None,
+                ("fixed-client", "rx-in-place", "mac-cyt4bf", "zeth-driver", "subscribe"),
+                env=ZEPHYR_BUILD_VALUES + (("WZ_CLIENT_ENDPOINT", "udp/192.0.2.1:7447"),),
+                label="cyt4bf-sockets-client-fixed-subscribe",
+                no_default_features=True,
+            ),
             # The widest the client is made: the link sleeps until the session's next deadline
             # (`CONFIG_WZ_IDLE_WAIT_MS`) and one send window is one datagram
             # (`CONFIG_WZ_TX_BATCHING`).

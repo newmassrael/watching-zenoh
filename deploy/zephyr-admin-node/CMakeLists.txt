@@ -59,6 +59,11 @@ if(CONFIG_WZ_NET_BACKEND_ZEPHYR_SOCKETS)
     # one datagram. Both only on the fixed-memory profile, the one that has the slot stack's link.
     if(CONFIG_WZ_FIXED_MEMORY)
       list(APPEND backend_env WZ_IDLE_WAIT_MS=${CONFIG_WZ_IDLE_WAIT_MS})
+      # The client subscribes (CONFIG_WZ_SUBSCRIBE): the declaration of a subscriber and the
+      # registry that keeps the latest sample of each.
+      if(CONFIG_WZ_SUBSCRIBE)
+        list(APPEND backend_feature subscribe)
+      endif()
       if(CONFIG_WZ_TX_BATCHING)
         list(APPEND backend_feature batching)
       endif()

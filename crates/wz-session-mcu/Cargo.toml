@@ -131,9 +131,10 @@ dial = [
     "wz-session-core/codec-open-body",
 ]
 # What a CLIENT of a router that answers queries is, whichever memory profile it runs on: the
-# dialer, and the wire halves of a queryable and a subscriber (their declarations, the reply and
-# the final that answers a query). The pico side of the same function is `Z_FEATURE_QUERYABLE`
-# over a UDP client session; no listener, no admin space, no config write.
+# dialer, and the wire half of a queryable (its declaration, the reply and the final that answers
+# a query). The pico side of the same function is `Z_FEATURE_QUERYABLE` over a UDP client
+# session; no listener, no admin space, no config write. It does NOT declare a subscriber
+# (`client-subscriber`): zenoh-pico's `Z_FEATURE_SUBSCRIPTION` is its own switch.
 client-core = [
     "dial",
     "pubsub-put",
@@ -143,15 +144,24 @@ client-core = [
     "wz-session-core/pubsub-delete",
     "wz-session-core/pubsub-encoding",
     "wz-session-core/query-reply-err",
-    "wz-session-core/declare-subscriber",
     "wz-session-core/declare-queryable",
 ]
+# The subscribing half of a client: the declaration of a subscriber, which the router answers by
+# forwarding a PUT on the key to the node (`Z_FEATURE_SUBSCRIPTION`). Without it
+# `send_declare_subscriber` refuses with `FeatureDisabled` and the registry of subscriptions is not
+# compiled: 2.4 KB of text and 1 KB of RAM on the Zephyr fixed client (docs/text-ownership.md).
+client-subscriber = ["wz-session-core/declare-subscriber"]
 # The client on the heap profile: an observer to register queryables and subscribers on, and their
 # declarations sent on every session as it establishes (`client_node`).
-client-node = ["alloc", "client-core"]
-# The client on the slot profile: the same node over the tables its image declared, with no
-# allocator (`slot_client`). Beside `session-slot`, which the image names itself.
-client-slot = ["client-core", "session-slot"]
+client-node = ["alloc", "client-core", "client-subscriber"]
+# The client on the slot profile that answers queries and subscribes to nothing: the pico-shaped
+# client, over the tables its image declared, with no allocator (`slot_client`). Beside
+# `session-slot`, which the image names itself.
+client-slot-queryable = ["client-core", "session-slot"]
+# The client on the slot profile: the same node with the subscriptions it keeps the latest sample
+# of, over the tables its image declared, with no allocator (`slot_client`). Beside
+# `session-slot`, which the image names itself.
+client-slot = ["client-slot-queryable", "client-subscriber"]
 # The client on the slot profile that also TAKES the sessions a peer opens to it (`Listening`): the
 # accept side of the handshake, which a client does not carry. Without it a node cannot be given an
 # acceptor, because one it was given would read an InitSyn and never answer it.

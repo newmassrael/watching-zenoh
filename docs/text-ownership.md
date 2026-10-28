@@ -53,7 +53,18 @@ carries about 6 KB of C library code wz does not, which is why the difference is
   another peer), not zenoh's value, no permutation. The three fixed images fell 2.4 KB of text and
   their worst chain 428 to 500 bytes (the permutation's frame was on it); the kit's readings did not
   move.
-- `wz_session_core` is the owner to split further, by function, before any flag is tried on it.
+- TAKEN: the subscribing half of the client. The single-threaded zenoh-pico it is compared with has
+  `Z_FEATURE_SUBSCRIPTION` off (`deploy/zephyr-pico-compare/prj.conf`); the wz client declared a
+  subscriber and kept the registry of subscriptions all the same, with a limit of zero of them. The
+  declaration is now `wz-session-mcu`'s `client-subscriber`, which `client-core` no longer carries
+  (`client-slot` and `client-node` still do, so no other consumer changed), and the Zephyr node takes
+  it from `CONFIG_WZ_SUBSCRIBE` (on by default, off in the fixed overlay). The three fixed images
+  fell 2.3 to 2.5 KB of text (`wz_session_core` 2.0 KB of it) and 960 bytes of bss; the kit's stack
+  readings and the answers did not change.
+- `wz_session_core` is the owner to split further, by function, before any flag is tried on it. It is
+  a long tail (525 symbols in a build without LTO, none over 1.6 KB), and the generic functions with
+  many instances (`ext_admit::judge_ext_chain` 7, `send_frame_lent` 3) are where a shared
+  non-generic core can be cut out.
 - The machine outliner and `opt-level=z` are weighed per tier (the answer path against the connect
   and declare paths), not on the whole image.
 
