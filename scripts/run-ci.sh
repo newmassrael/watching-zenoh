@@ -6532,6 +6532,14 @@ layer_c1ay_cargo_test_router_hat() {
     # NOT to (`C1AM adminspace`, still 33) were each run directly instead.
     _runci_guarded_test "C1AY router_forward 249" 249 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-router-linkstate --lib router_forward --quiet || return 1
+    # Item 751 step 7c — the peer node's FROZEN scenes (`router_forward/peer_scenes/*.txt`,
+    # `peer_differential_tests::frozen`). A transcript names the lines of every plane the
+    # node has, so it is taken and held with the token tables, delete, the admin
+    # introspection handlers and the peers link view all built, and no arm above builds all
+    # four. Two tests, one for each mode, found by NAME so that an unrelated test landing in
+    # the filter cannot absorb a rename.
+    _runci_guarded_test "C1AY peer scenes frozen 2" 2 \
+        cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables,pubsub-delete,adminspace-introspection-handlers,adminspace-router-linkstate --lib router_forward::peer_differential_tests::frozen --quiet || return 1
     # R311y786 (§5.21 router-connect-reconcile) — the re-dial BACKOFF. Until y786
     # the loop slept a `const RECONNECT_BACKOFF_MS = 1000`, so an unreachable
     # configured peer was re-dialed at 1 Hz for as long as it stayed down; zenoh

@@ -1,25 +1,28 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! A peer node on the region-hat forwarder held equal to `LinkstateForwarder`
-//! (`docs/peer-region-hats.md`, step 3).
+//! A peer node on the region-hat forwarder, played through scenes and graded
+//! (`docs/peer-region-hats.md`, steps 3 to 7).
 //!
-//! The same scene, a list of faces coming up and messages arriving on them, is
-//! played into both forwarders through the one seam they share
-//! ([`FaceForwarder`]), and what each sent to each face after each step is
-//! compared. The comparison is over decoded messages, not bytes: a sequence
-//! number, a declaration id or the order of two messages a single step sent
-//! to different faces says nothing about routing, and the same message sent
-//! twice is a difference. What a scene is compared on is stated by [`Seen`].
+//! A scene is a list of faces coming up and messages arriving on them, played into
+//! one forwarder through the seam every forwarder shares ([`FaceForwarder`]). What
+//! the node sent to each face after each step is read as decoded messages, not
+//! bytes: a sequence number, a declaration id or the order of two messages a single
+//! step sent to different faces says nothing about routing, and the same message
+//! sent twice is a difference. What a scene is read as is stated by [`Seen`].
 //!
-//! A difference this gate finds is one of three things, and each is written
-//! down where it is found: a defect of the region-hat forwarder at node mode
-//! Peer (fixed), a defect of `LinkstateForwarder` (reported and fixed there),
-//! or a difference the pin itself makes (recorded as such, with the citation,
-//! and the scene is graded against the pin's rule instead).
+//! Two things grade the node. The tests that name the pin's rule (the admin legs,
+//! the interests and tokens, the gossip list a new link is told, the node's own
+//! echoes) state it and cite it. And the scenes are FROZEN: `peer_scenes/gossip.txt`
+//! and `peer_scenes/link_state.txt` hold what the node sent in each step of each
+//! scene, and a change to any line fails the test until the file is regenerated
+//! (`WZ_BLESS_PEER_SCENES=<dir>`, then the files copied) and the difference read. The frozen text was taken
+//! at the retirement of the single-net peer forwarder, after every difference
+//! between it and this node had been found and either fixed or attributed to the
+//! pin with a citation (`docs/peer-region-hats.md`, section 14); it is a
+//! regression net over what that comparison established, not a second authority.
 
 use super::*;
-use crate::linkstate_forward::LinkstateForwarder;
 use crate::runtime_impl::TokioRuntime;
 use crate::test_fixtures::{recording_actions, RecordingLinkDriver};
 use sce_forge_runtime::codec::SceBytes;
@@ -724,25 +727,10 @@ pub(super) enum Mode {
     LinkState,
 }
 
-/// The two nodes a scene is played into, both at node zid byte `self_zid` and
-/// both in `mode`.
-fn both(self_zid: u8, mode: Mode) -> (Node, Node) {
-    let began = Instant::now();
-    let (old, moved_old) = make(Plane::LinkstateForwarder, self_zid, mode, began);
-    let (new, moved_new) = make(Plane::RegionHat, self_zid, mode, began);
-    (
-        Node::new(old, moved_old, self_zid),
-        Node::new(new, moved_new, self_zid),
-    )
-}
-
-/// The two peer planes the gate holds equal.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Plane {
-    /// The single-net peer forwarder, which retires at step 7.
-    LinkstateForwarder,
-    /// The region-hat forwarder at node mode Peer.
-    RegionHat,
+/// The peer node a scene is played into, at node zid byte `self_zid` and in `mode`.
+fn peer_node(self_zid: u8, mode: Mode) -> Node {
+    let (fwd, moved) = make(self_zid, mode, Instant::now());
+    Node::new(fwd, moved, self_zid)
 }
 
 /// The keys whose interested nodes the counters count: one each of the scenes' subscribed
@@ -783,10 +771,10 @@ fn heard(sample: &dyn wz_session_core::sink::SampleView) -> String {
     )
 }
 
-/// What a node does as the owner of its own session, which the two planes spell
-/// the same way: publish, and read the size of the graph it learned. Step 6 of
-/// the note adds an entry here for each surface a plane has and a scene can
-/// observe.
+/// What a node under test does as the owner of its own session: publish, host
+/// handlers, and read the counters and the graph it learned. An extension of the
+/// forwarder the scenes play into, so that a scene names what a session does and
+/// not the tables it reaches through.
 pub(super) trait NodeSession: FaceForwarder {
     /// Put `payload` on `keyexpr` at `priority`.
     fn publish(&self, keyexpr: &str, payload: &[u8], priority: Priority, express: bool);
@@ -820,82 +808,6 @@ pub(super) trait NodeSession: FaceForwarder {
     fn node_count(&self) -> usize;
     /// Mutual links in that graph.
     fn edge_count(&self) -> usize;
-}
-
-impl NodeSession for LinkstateForwarder {
-    fn publish(&self, keyexpr: &str, payload: &[u8], priority: Priority, express: bool) {
-        let _ = LinkstateForwarder::publish_qos(self, keyexpr, payload, priority, express);
-    }
-    #[cfg(feature = "pubsub-delete")]
-    fn publish_delete(&self, keyexpr: &str) {
-        let _ = LinkstateForwarder::publish_delete(self, keyexpr);
-    }
-    fn set_self_locators(&self, locators: Vec<String>) {
-        LinkstateForwarder::set_self_locators(self, locators)
-    }
-    fn host_subscriber(&self, keyexpr: &str, log: HostedLog) {
-        let _ = self.register_local_subscriber(
-            keyexpr,
-            Box::new(move |sample| log.lock().unwrap().push(heard(sample))),
-        );
-    }
-    fn unhost_subscriber(&self, keyexpr: &str) {
-        let _ = self.undeclare_subscription(keyexpr);
-    }
-    fn host_queryable(&self, keyexpr: &str, complete: bool, name: &'static str, log: HostedLog) {
-        let _ = self.register_local_queryable(
-            keyexpr,
-            complete,
-            Box::new(move |query, replies| {
-                log.lock()
-                    .unwrap()
-                    .push(format!("asked {}", query.keyexpr()));
-                replies.reply(name.as_bytes());
-            }),
-        );
-    }
-    fn unhost_queryable(&self, keyexpr: &str) {
-        let _ = self.undeclare_queryable(keyexpr);
-    }
-    #[cfg(feature = "adminspace-introspection-handlers")]
-    fn admin_declarations(&self) -> Vec<Seen> {
-        #[allow(unused_mut)]
-        let mut legs = vec![
-            ("subscriber", self.subscriber_sources()),
-            ("queryable", self.queryable_sources()),
-            ("publisher", self.publisher_sources()),
-            ("querier", self.querier_sources()),
-        ];
-        #[cfg(feature = "routing-token-tables")]
-        legs.push(("token", self.token_sources()));
-        admin_rows(legs)
-    }
-    fn counters(&self) -> Vec<usize> {
-        let mut counters = vec![self.client_subs_seen(), self.client_qabls_seen()];
-        // The nodes interested, the node itself apart: `interested` names the node
-        // among them when it hosts a subscriber, and the region-hat forwarder, which
-        // derives what the node hosts and does not store it in its mesh table, does
-        // not. It is a count of the mesh's interest, which is the data route's filter
-        // and not an admin body, so the node's own face is not in it.
-        let own = zid(0x01);
-        counters.extend(
-            PROBE_KEYS
-                .iter()
-                .map(|key| self.interested(key).iter().filter(|z| **z != own).count()),
-        );
-        counters
-    }
-    #[cfg(feature = "adminspace-router-linkstate")]
-    fn peers_dot(&self) -> String {
-        let view = self.net_view();
-        format!("{}{:?}", view.dot(), view.route_successors_hex())
-    }
-    fn node_count(&self) -> usize {
-        LinkstateForwarder::node_count(self)
-    }
-    fn edge_count(&self) -> usize {
-        LinkstateForwarder::edge_count(self)
-    }
 }
 
 impl NodeSession for RouterForwarder {
@@ -975,11 +887,10 @@ impl NodeSession for RouterForwarder {
     }
 }
 
-/// One forwarder of `plane` at node zid byte `self_zid` in `mode`, and the handle
-/// that moves its clock. A node reads its own clock, which a scene moves by the
-/// same amount in both planes; `began` is the instant every clock starts from.
+/// One peer node at node zid byte `self_zid` in `mode`, and the handle that moves
+/// its clock. A node reads its own clock, which a scene moves; `began` is the
+/// instant every clock starts from.
 pub(super) fn make(
-    plane: Plane,
     self_zid: u8,
     mode: Mode,
     began: Instant,
@@ -989,19 +900,9 @@ pub(super) fn make(
     let read = Arc::clone(&moved);
     let now: Box<dyn Fn() -> Instant + Send + Sync> =
         Box::new(move || began + Duration::from_millis(read.load(Ordering::SeqCst)));
-    let forwarder: Box<dyn NodeSession> = match plane {
-        Plane::LinkstateForwarder => {
-            let linkstate = LinkstateForwarder::with_clock(zid(self_zid), WhatAmI::Peer, now);
-            linkstate.set_full_linkstate(full);
-            Box::new(linkstate)
-        }
-        Plane::RegionHat => {
-            let hat = RouterForwarder::peer_with_clock(zid(self_zid), now);
-            hat.on_tables_mut().set_peer_region_full_linkstate(full);
-            Box::new(hat)
-        }
-    };
-    (forwarder, moved)
+    let hat = RouterForwarder::peer_with_clock(zid(self_zid), now);
+    hat.on_tables_mut().set_peer_region_full_linkstate(full);
+    (Box::new(hat), moved)
 }
 
 /// What a step sent, split into the data plane and the link-state list, which
@@ -1024,43 +925,44 @@ fn split(sent: Sent) -> (Sent, Sent) {
     (data, topology)
 }
 
-/// One step on which the two nodes sent different things.
-#[derive(Debug)]
-struct Divergence {
-    step: Step,
-    plane: &'static str,
-    linkstate: Sent,
-    region_hat: Sent,
-}
-
-/// Play `scene` into both nodes in `mode` and return every step on which they
-/// sent something different, per plane. Empty means equal.
-fn diverge(scene: &[Step], self_zid: u8, mode: Mode) -> Vec<Divergence> {
-    let (mut old, mut new) = both(self_zid, mode);
-    let mut out = Vec::new();
-    for step in scene {
-        let (old_data, old_topology) = split(old.apply(step));
-        let (new_data, new_topology) = split(new.apply(step));
-        let graph = |node: &Node| {
-            let (nodes, edges) = node.graph();
-            Sent::from([(0, vec![Seen::Graph { nodes, edges }])])
-        };
-        for (plane, a, b) in [
-            ("data", old_data, new_data),
-            ("topology", old_topology, new_topology),
-            ("graph", graph(&old), graph(&new)),
-            ("hosted", old.heard_by_hosts(), new.heard_by_hosts()),
-            ("admin", old.admin_view(), new.admin_view()),
-            ("counters", old.counters_view(), new.counters_view()),
-            ("linkview", old.dot_view(), new.dot_view()),
+/// Play `scene` into one peer node in `mode` and write down, after each step, what
+/// the node sent to each face and what it holds, plane by plane: one line for each
+/// message, under the step that caused it. This is what is frozen.
+///
+/// The messages of a step (data, topology, what the hosts heard) are written every
+/// time; the planes that are a state the node holds (graph, admin rows, counters,
+/// the link view) are written when they change, so that a line in the text is a change.
+fn transcript_of(scene: &[Step], self_zid: u8, mode: Mode) -> String {
+    let mut node = peer_node(self_zid, mode);
+    let mut out = String::new();
+    let mut held: BTreeMap<&str, Sent> = BTreeMap::new();
+    for (n, step) in scene.iter().enumerate() {
+        out.push_str(&format!("{n}: {step:?}\n"));
+        let (data, topology) = split(node.apply(step));
+        let (nodes, edges) = node.graph();
+        let graph = Sent::from([(0, vec![Seen::Graph { nodes, edges }])]);
+        for (plane, sent, is_state) in [
+            ("data", data, false),
+            ("topology", topology, false),
+            ("hosted", node.heard_by_hosts(), false),
+            ("graph", graph, true),
+            ("admin", node.admin_view(), true),
+            ("counters", node.counters_view(), true),
+            ("linkview", node.dot_view(), true),
         ] {
-            if a != b {
-                out.push(Divergence {
-                    step: step.clone(),
-                    plane,
-                    linkstate: a,
-                    region_hat: b,
-                });
+            if is_state && held.get(plane) == Some(&sent) {
+                continue;
+            }
+            if is_state && sent.is_empty() {
+                out.push_str(&format!("  {plane}: none\n"));
+            }
+            for (face, seen) in &sent {
+                for s in seen {
+                    out.push_str(&format!("  {plane} face {face}: {s:?}\n"));
+                }
+            }
+            if is_state {
+                held.insert(plane, sent);
             }
         }
     }
@@ -1670,7 +1572,7 @@ fn messages_sent(mode: Mode, wanted: impl Fn(&Seen) -> bool) -> usize {
     scenes()
         .iter()
         .map(|(_, scene)| {
-            let (_, mut node) = both(0x01, mode);
+            let mut node = peer_node(0x01, mode);
             scene
                 .iter()
                 .map(|step| {
@@ -1696,7 +1598,7 @@ fn answers_delivered(mode: Mode) -> usize {
 /// region-hat peer sent in `mode`: a Put of the node reaching a peer and a
 /// client, a banded one, a delete, and nothing after a subscriber left.
 fn assert_the_node_publish_scene_exercises_what_it_claims(mode: Mode) {
-    let (_, mut node) = both(0x01, mode);
+    let mut node = peer_node(0x01, mode);
     let mut got: Vec<(u64, Seen)> = Vec::new();
     for step in a_node_publishes() {
         for (face, seen) in node.apply(&step) {
@@ -1752,7 +1654,7 @@ fn the_region_hat_peer_names_the_node_in_the_admin_legs_as_the_pins_merge_does()
     let own = zid_to_zenoh_hex(zid(0x01).as_slice());
     let neighbour = zid_to_zenoh_hex(zid(0xAA).as_slice());
     let client = zid_to_zenoh_hex(zid(0xC1).as_slice());
-    let (_, mut node) = both(0x01, Mode::LinkState);
+    let mut node = peer_node(0x01, Mode::LinkState);
     for step in [
         Step::Up(0, 0xAA, Wire::Peer),
         Step::Up(1, 0xC1, Wire::Client),
@@ -1812,24 +1714,21 @@ fn the_region_hat_peer_names_the_node_in_the_admin_legs_as_the_pins_merge_does()
     );
 }
 
-/// A node's dial locators ride the link-state it originates, in both planes:
-/// the pin asks its runtime for them whenever it builds a net's message.
+/// A node's dial locators ride the link-state it originates: the pin asks its
+/// runtime for them whenever it builds a net's message.
 #[test]
 fn a_node_advertises_its_locators_in_the_flood_it_originates() {
     let locator = "tcp/10.0.0.1:7447";
-    for plane in [Plane::LinkstateForwarder, Plane::RegionHat] {
-        let (fwd, clock) = make(plane, 0x01, Mode::LinkState, Instant::now());
-        let mut node = Node::new(fwd, clock, 0x01);
-        node.fwd.set_self_locators(vec![locator.to_string()]);
-        node.apply(&Step::Up(0, 0xAA, Wire::Peer));
-        let sink = &node.sinks[&0];
-        let carried = (0..sink.frame_count()).any(|i| {
-            sink.frame_bytes(i)
-                .windows(locator.len())
-                .any(|w| w == locator.as_bytes())
-        });
-        assert!(carried, "{plane:?}: the first flood carries the locator");
-    }
+    let mut node = peer_node(0x01, Mode::LinkState);
+    node.fwd.set_self_locators(vec![locator.to_string()]);
+    node.apply(&Step::Up(0, 0xAA, Wire::Peer));
+    let sink = &node.sinks[&0];
+    let carried = (0..sink.frame_count()).any(|i| {
+        sink.frame_bytes(i)
+            .windows(locator.len())
+            .any(|w| w == locator.as_bytes())
+    });
+    assert!(carried, "the first flood carries the locator");
 }
 
 /// What the hosting scene claims to exercise, counted in what the region-hat peer's hosts
@@ -1837,7 +1736,7 @@ fn a_node_advertises_its_locators_in_the_flood_it_originates() {
 /// own, hears nothing once taken back, and a hosted queryable answers a peer and a client
 /// until it is taken back.
 fn assert_the_hosting_scene_exercises_what_it_claims(mode: Mode) {
-    let (_, mut node) = both(0x01, mode);
+    let mut node = peer_node(0x01, mode);
     let mut heard_by_hosts: Vec<Seen> = Vec::new();
     let mut sent: Vec<(u64, Seen)> = Vec::new();
     for step in a_node_hosts() {
@@ -1891,7 +1790,7 @@ fn assert_the_hosting_scene_exercises_what_it_claims(mode: Mode) {
 fn assert_the_admin_legs_are_exercised(mode: Mode) {
     let mut named: std::collections::BTreeSet<(&'static str, &'static str)> = Default::default();
     for (_, scene) in scenes() {
-        let (_, mut node) = both(0x01, mode);
+        let mut node = peer_node(0x01, mode);
         for step in &scene {
             node.apply(step);
             for row in node.fwd.admin_declarations() {
@@ -2113,423 +2012,22 @@ fn assert_the_query_scenes_exercise_what_they_claim(mode: Mode) {
     }
 }
 
-/// The reasons the gate lets the planes differ, each a place where
-/// `LinkstateForwarder` leaves the pin and the region-hat peer follows it. The
-/// first two are about how a gossip peer behaves and so occur in gossip mode
-/// only; the rest are about the interest and token planes, which the link-state
-/// extension does not touch, and occur in both.
-const FACE_UP_LIST: &str = "face-up link-state list";
-const TREE_READVERTISE: &str = "re-advertise to a tree child";
-const INTEREST_ANSWER_DECLARATIONS: &str = "a current interest answered with the declarations";
-const ROUTER_INTEREST_REFUSED: &str = "an interest from a router refused";
-#[cfg(feature = "routing-token-tables")]
-const TOKEN_TO_INTERESTED_CLIENT: &str = "a token pushed to a client that asked for tokens";
-#[cfg(all(
-    feature = "routing-token-tables",
-    feature = "routing-interest-pending-gc"
-))]
-const TOKEN_INTEREST_BROKERED: &str = "a client's token interest brokered to the peers";
-
-/// Whether `step` is the node's own session putting or deleting.
-fn is_a_node_put(step: &Step) -> bool {
-    match step {
-        Step::NodePut(..) => true,
-        #[cfg(feature = "pubsub-delete")]
-        Step::NodeDelete(..) => true,
-        _ => false,
-    }
-}
-
-const NODE_PUT_TO_CLIENT: &str = "the node's own Put reaches a client that subscribed";
-#[cfg(feature = "adminspace-introspection-handlers")]
-const NODE_NAMED_BY_THE_MERGE: &str = "the node named as the pin's merge names it";
-
-/// The admin rows of `sent` as `LinkstateForwarder` would have them if it named the
-/// node as it does: among the peers of what it hosts and nowhere else. A row the node
-/// hosts (the node is among its clients) loses the node from the clients and keeps it
-/// among the peers; any other row loses it from the peers.
-#[cfg(feature = "adminspace-introspection-handlers")]
-fn as_the_peer_plane_names_the_node(sent: &Sent) -> Vec<Seen> {
-    let own = wz_session_core::zid_hex::zid_to_zenoh_hex(zid(0x01).as_slice());
-    sent.values()
-        .flatten()
-        .map(|seen| match seen {
-            Seen::Admin {
-                leg,
-                keyexpr,
-                routers,
-                peers,
-                clients,
-            } => {
-                let hosted = clients.contains(&own);
-                Seen::Admin {
-                    leg,
-                    keyexpr: keyexpr.clone(),
-                    routers: routers.clone(),
-                    peers: peers
-                        .iter()
-                        .filter(|p| hosted || **p != own)
-                        .cloned()
-                        .collect(),
-                    clients: clients.iter().filter(|c| **c != own).cloned().collect(),
-                }
-            }
-            other => other.clone(),
-        })
-        .collect()
-}
-
-const BEST_MATCHING_PER_HAT: &str =
-    "BestMatching asks the Local hat beside the other regions' best";
-const NODE_PUT_TO_OWN_SUBSCRIBER: &str = "the node's own Put reaches a subscriber it hosts";
-const QABL_DECLARED_AGAIN: &str = "a queryable declared again with what it already was";
-const GOSSIP_GRAPH: &str = "the graph a gossip peer keeps";
-const LINK_DOWN_LIST: &str = "a link-state list sent when a link goes down";
-
-/// The reasons each mode must still produce: one no scene reaches any more is
-/// stale, and a stale allowance is a hole.
-fn expected_reasons(mode: Mode) -> std::collections::BTreeSet<&'static str> {
-    let mut reasons: std::collections::BTreeSet<&'static str> = [
-        INTEREST_ANSWER_DECLARATIONS,
-        ROUTER_INTEREST_REFUSED,
-        NODE_PUT_TO_CLIENT,
-        NODE_PUT_TO_OWN_SUBSCRIBER,
-        QABL_DECLARED_AGAIN,
-        BEST_MATCHING_PER_HAT,
-    ]
-    .into_iter()
-    .collect();
-    #[cfg(feature = "adminspace-introspection-handlers")]
-    reasons.insert(NODE_NAMED_BY_THE_MERGE);
-    #[cfg(feature = "routing-token-tables")]
-    reasons.insert(TOKEN_TO_INTERESTED_CLIENT);
-    #[cfg(all(
-        feature = "routing-token-tables",
-        feature = "routing-interest-pending-gc"
-    ))]
-    reasons.insert(TOKEN_INTEREST_BROKERED);
-    if matches!(mode, Mode::Gossip) {
-        reasons.insert(FACE_UP_LIST);
-        reasons.insert(TREE_READVERTISE);
-        reasons.insert(GOSSIP_GRAPH);
-        reasons.insert(LINK_DOWN_LIST);
-    }
-    reasons
-}
-
-/// Why `d` is not a failure, or `None` when it is one.
-fn explained(mode: Mode, d: &Divergence) -> Option<&'static str> {
-    if let Some(reason) = explained_interest_or_token(d) {
-        return Some(reason);
-    }
-    // The pin's broker hat routes a Put to every owned face that holds a
-    // matching subscription, whatever region the Put came from
-    // (`zenoh/src/net/routing/hat/broker/pubsub.rs` @ `if ctx.subs.is_some() {`),
-    // and the node's own session is such a source. The region-hat peer therefore
-    // reaches the clients that subscribed; `LinkstateForwarder::publish` reaches
-    // its tree children and its gateways and none of its client faces. Every
-    // face it does reach is reached with the same message.
-    // The admin legs name the node by the pin's two rules in the region-hat
-    // forwarder: its own face among the clients of what it hosts, because that face
-    // is a client of the `Local` region
-    // (`zenoh/src/net/routing/hat/broker/pubsub.rs` @ `srcs.clients.push(face.zid);`),
-    // and itself in the north bucket of everything a south region sourced
-    // (`zenoh/src/net/routing/dispatcher/tables.rs` @ `fn add_north_source(`). The
-    // region-hat peer is graded on both by
-    // `the_region_hat_peer_names_the_node_in_the_admin_legs_as_the_pins_merge_does`.
-    // `LinkstateForwarder` names the node among the peers of what it hosts and
-    // nowhere else, which the rows must show and nothing more.
-    #[cfg(feature = "adminspace-introspection-handlers")]
-    if d.plane == "admin"
-        && d.linkstate.values().flatten().cloned().collect::<Vec<_>>()
-            == as_the_peer_plane_names_the_node(&d.region_hat)
-    {
-        return Some(NODE_NAMED_BY_THE_MERGE);
-    }
-    // Under BestMatching the pin asks the `Local` hat's queryables beside the best of every
-    // other region, because it picks hat by hat
-    // (`zenoh/src/net/routing/dispatcher/queries.rs` @ `for dst in rtables.hats.regions() {`).
-    // `LinkstateForwarder` answers from its own queryable and forwards nothing when it has
-    // one, so the client that also declared the key is never asked and the query ends at once.
-    // The region-hat peer asks both: its answer goes out and the final waits for the client.
-    if d.plane == "data" {
-        let answers_from_the_client =
-            |sent: &Sent, want: fn(&Seen) -> bool| sent.values().flatten().any(want);
-        let is_the_client_asked = |s: &Seen| matches!(s, Seen::Request { target: None, keyexpr, .. } if keyexpr == "both/z");
-        match &d.step {
-            Step::Query(_, _, "both/z")
-                if answers_from_the_client(&d.region_hat, is_the_client_asked)
-                    && d.linkstate
-                        .values()
-                        .flatten()
-                        .any(|s| matches!(s, Seen::ResponseFinal { .. })) =>
-            {
-                return Some(BEST_MATCHING_PER_HAT);
-            }
-            Step::Reply(_, "both/z", _) | Step::Final(_)
-                if d.linkstate.is_empty() && d.region_hat.values().flatten().all(|s| {
-                    matches!(s, Seen::ResponseFinal { .. })
-                        || matches!(s, Seen::Response { payload: Some(p), .. } if p == b"client")
-                }) && !d.region_hat.is_empty() =>
-            {
-                return Some(BEST_MATCHING_PER_HAT);
-            }
-            _ => {}
-        }
-    }
-    // A Put of the node's own session reaches the subscribers the same session
-    // hosts unless it was sent to remote destinations only
-    // (`zenoh/src/api/session.rs` @ `state.subscriber_callbacks(true, SubscriberKind::Subscriber, &wire_expr, false);`);
-    // `LinkstateForwarder::publish` delivers to none of its own.
-    if is_a_node_put(&d.step)
-        && d.plane == "hosted"
-        && d.linkstate.is_empty()
-        && !d.region_hat.is_empty()
-    {
-        return Some(NODE_PUT_TO_OWN_SUBSCRIBER);
-    }
-    // A queryable declaration is propagated when what the other regions fold
-    // out of it changed, and a second, incomplete queryable on a key whose
-    // first is complete changes nothing
-    // (`zenoh/src/net/routing/dispatcher/queries.rs` @ `tables.hats[dst].propagate_queryable(ctx.reborrow(), res.clone(), other_info);`).
-    // `LinkstateForwarder` declares the key again, complete as before.
-    if matches!(d.step, Step::NodeHostQueryable(..))
-        && d.plane == "data"
-        && d.region_hat.is_empty()
-        && d.linkstate
-            .values()
-            .flatten()
-            .all(|s| matches!(s, Seen::DeclareQueryable { .. }))
-    {
-        return Some(QABL_DECLARED_AGAIN);
-    }
-    if is_a_node_put(&d.step)
-        && d.plane == "data"
-        && d.region_hat.len() > d.linkstate.len()
-        && d.linkstate
-            .iter()
-            .all(|(face, seen)| d.region_hat.get(face) == Some(seen))
-    {
-        return Some(NODE_PUT_TO_CLIENT);
-    }
-    if !matches!(mode, Mode::Gossip) {
-        return None;
-    }
-    match (d.plane, &d.step) {
-        // The pin's gossip net adds a node to its graph for what a neighbour
-        // told it and not for a link coming up
-        // (`zenoh/src/net/protocol/network.rs` @ `if self.full_linkstate || self.gossip_multihop {`
-        // in `add_link`), and a gossip flood forms no edge. `LinkstateForwarder`
-        // adds the node at once and, after a recompute, an edge. Nothing routes
-        // by a gossip graph, so this is a count of what each plane keeps and not
-        // a routing difference; the link-state extension keeps the same graph
-        // in both planes, which the other mode's test holds.
-        // The graph the admin leg renders is the same graph.
-        ("graph", _) | ("linkview", _) => Some(GOSSIP_GRAPH),
-        // The pin's gossip `remove_link` forgets the link and sends nothing:
-        // the flood to the remaining links is inside the `full_linkstate ||
-        // gossip_multihop` branch that follows
-        // (`zenoh/src/net/protocol/network.rs` @ `self.graph[self.idx].links.retain(|dest, _| dest != zid);`).
-        // `LinkstateForwarder` tells the faces that remain its own entry.
-        ("topology", Step::Down(..))
-            if d.region_hat.is_empty()
-                && d.linkstate
-                    .values()
-                    .flatten()
-                    .all(|s| matches!(s, Seen::LinkState { .. })) =>
-        {
-            Some(LINK_DOWN_LIST)
-        }
-        // The pin's gossip `add_link` sends a new link the entries of the nodes
-        // the graph holds AND that are linked neighbours, zid only
-        // (`zenoh/src/net/protocol/network.rs` @ `// Send all nodes linkstate on new link`),
-        // which never includes self; `LinkstateForwarder` sends its own entry
-        // and every node it knows. The list the region-hat peer sends is graded
-        // against the pin by
-        // `a_gossip_peer_tells_a_new_link_the_neighbours_it_knows_and_not_itself`.
-        ("topology", Step::Up(..)) => Some(FACE_UP_LIST),
-        // The pin's peer hat has no tree, so a recompute tells no child
-        // anything (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `if ctx.subs.is_some() && self.region() != *src_region {`
-        // for the rule that a peer hat offers its faces nothing from its own
-        // region). `LinkstateForwarder` re-advertises a declaration it already
-        // told the face at face-up when the tick recomputes its tree.
-        ("data", Step::Tick)
-            if d.region_hat.is_empty()
-                && d.linkstate.values().flatten().all(|s| {
-                    matches!(
-                        s,
-                        Seen::DeclareSubscriber { .. } | Seen::DeclareQueryable { .. }
-                    )
-                }) =>
-        {
-            Some(TREE_READVERTISE)
-        }
-        _ => None,
-    }
-}
-
-/// A client's current-and-future token interest that `LinkstateForwarder` brokers to the peers
-/// while the region-hat peer does not.
-///
-/// This peer's token table does not carry the mesh tier (see `dump_interest_tokens`), so with
-/// `routing-interest-pending-gc` it asks its peers as well as its gateways, answers the client
-/// with the tokens it holds and owes the client's final until the peers have answered. The
-/// pin's peer hat holds the mesh tier and answers from its own table: it sends a current-and-future
-/// interest on only to the faces whose remote bound is south
-/// (`zenoh/src/net/routing/hat/peer/interests.rs` @ `.filter(|f| f.remote_bound.is_south())`),
-/// which the peers of this node are not, and closes the interest with the final at once. So the
-/// difference is exactly: a copy of the interest on another face, and the asker's answer the same
-/// but for the final.
-#[cfg(all(
-    feature = "routing-token-tables",
-    feature = "routing-interest-pending-gc"
-))]
-fn token_interest_brokered(
-    d: &Divergence,
-    face: u64,
-    kinds: &InterestKinds,
-) -> Option<&'static str> {
-    let is_final = |s: &Seen| matches!(s, Seen::DeclareFinal { .. });
-    let copied_to_another_face = d.linkstate.iter().any(|(other, seen)| {
-        *other != face
-            && !seen.is_empty()
-            && seen.iter().all(|s| matches!(s, Seen::Interest { .. }))
-    });
-    let told_the_asker: Vec<&Seen> = d
-        .linkstate
-        .get(&face)
-        .map(|seen| seen.iter().collect())
-        .unwrap_or_default();
-    let region_hat_told: Vec<&Seen> = d
-        .region_hat
-        .get(&face)
-        .map(|seen| seen.iter().filter(|s| !is_final(s)).collect())
-        .unwrap_or_default();
-    let region_hat_closed = d
-        .region_hat
-        .get(&face)
-        .is_some_and(|seen| seen.iter().any(is_final));
-    (*kinds == InterestKinds::TOKENS
-        && copied_to_another_face
-        && region_hat_closed
-        && d.region_hat.keys().all(|f| *f == face)
-        && told_the_asker == region_hat_told)
-        .then_some(TOKEN_INTEREST_BROKERED)
-}
-
-#[cfg(not(all(
-    feature = "routing-token-tables",
-    feature = "routing-interest-pending-gc"
-)))]
-fn token_interest_brokered(_: &Divergence, _: u64, _: &InterestKinds) -> Option<&'static str> {
-    None
-}
-
-/// The differences in the interest and token planes, in either mode.
-fn explained_interest_or_token(d: &Divergence) -> Option<&'static str> {
-    if d.plane != "data" {
-        return None;
-    }
-    match &d.step {
-        Step::Interest(face, _, kinds, ..) => {
-            let asked = d.linkstate.get(face).map(Vec::as_slice);
-            let region_hat = d.region_hat.get(face).map(Vec::as_slice);
-            let only_a_final =
-                |seen: Option<&[Seen]>| matches!(seen, Some([Seen::DeclareFinal { .. }]));
-            // The pin's dispatcher refuses an Interest from a router
-            // (`zenoh/src/net/routing/dispatcher/interests.rs` @ `if self.state.whatami.is_router() {`),
-            // so the region-hat peer says nothing to it; `LinkstateForwarder`
-            // answers with a final.
-            if only_a_final(asked) && region_hat.is_none() && d.region_hat.is_empty() {
-                return Some(ROUTER_INTEREST_REFUSED);
-            }
-            // The pin's dispatcher answers a current Interest with the
-            // declarations the OTHER hats hold, then a final
-            // (`zenoh/src/net/routing/dispatcher/interests.rs` @ `hats[region].send_current_subscribers(`
-            // and `@ hats[region].send_declare_final(ctx.reborrow(), msg.id, &src);`).
-            // A current subscriber Interest from a peer in the north region is
-            // itself outside the pin's protocol (its peer hat asserts that a
-            // current Interest from the north asks for tokens only), so this is
-            // the dispatcher's release behaviour, which the region-hat peer
-            // follows; `LinkstateForwarder` sends the final alone.
-            if only_a_final(asked)
-                && matches!(
-                    region_hat,
-                    Some([.., Seen::DeclareFinal { .. }]) if region_hat.is_some_and(|r| r.len() > 1)
-                )
-            {
-                return Some(INTEREST_ANSWER_DECLARATIONS);
-            }
-            token_interest_brokered(d, *face, kinds)
-        }
-        // The copy of a brokered interest is withdrawn from the peers when its asker ends it.
-        #[cfg(all(
-            feature = "routing-token-tables",
-            feature = "routing-interest-pending-gc"
-        ))]
-        Step::InterestFinal(..) => (d.region_hat.is_empty()
-            && !d.linkstate.is_empty()
-            && d.linkstate
-                .values()
-                .flatten()
-                .all(|s| matches!(s, Seen::InterestFinal)))
-        .then_some(TOKEN_INTEREST_BROKERED),
-        #[cfg(feature = "routing-token-tables")]
-        Step::Token(..) | Step::Untoken(..) => {
-            // A token declared or withdrawn at a peer reaches a client that asked
-            // for tokens with a future interest: the pin's broker hat propagates
-            // a token to a south face that holds a matching remote interest.
-            // `LinkstateForwarder`'s token plane is partial and does not.
-            let is_token = |s: &Seen| matches!(s, Seen::DeclareToken { .. } | Seen::UndeclareToken);
-            let extra_to_a_face_linkstate_left_out = d
-                .region_hat
-                .iter()
-                .any(|(face, seen)| seen.iter().any(is_token) && !d.linkstate.contains_key(face));
-            let linkstate_subset = d.linkstate.iter().all(|(face, seen)| {
-                d.region_hat
-                    .get(face)
-                    .is_some_and(|r| seen.iter().all(|s| r.contains(s)))
-            });
-            (extra_to_a_face_linkstate_left_out && linkstate_subset)
-                .then_some(TOKEN_TO_INTERESTED_CLIENT)
-        }
-        _ => None,
-    }
-}
-
-/// Every step of every scene in `mode` whose difference `explained` does not
-/// explain, and the set of reasons that did explain one.
-fn unexplained(mode: Mode) -> (Vec<String>, std::collections::BTreeSet<&'static str>) {
-    let mut failures = Vec::new();
-    let mut reasons = std::collections::BTreeSet::new();
+/// A frozen text means something only if a scene replays to the same text: nothing
+/// the node reads, a clock or a counter, differs between two runs of one scene.
+fn assert_the_scenes_replay_identically(mode: Mode) {
     for (name, scene) in scenes() {
-        for d in diverge(&scene, 0x01, mode) {
-            match explained(mode, &d) {
-                Some(reason) => {
-                    reasons.insert(reason);
-                }
-                None => failures.push(format!(
-                    "{mode:?} / {name} / {:?} / {}\n  linkstate:  {:?}\n  region-hat: {:?}",
-                    d.step, d.plane, d.linkstate, d.region_hat
-                )),
-            }
-        }
+        assert_eq!(
+            transcript_of(&scene, 0x01, mode),
+            transcript_of(&scene, 0x01, mode),
+            "{mode:?}: the scene \"{name}\" does not replay to the same transcript"
+        );
     }
-    (failures, reasons)
 }
 
-/// In the pin's mode (gossip) the two peer planes send the same data and the
-/// same topology but for two differences, both explained by the pin, and both
-/// of which must still occur: a reason no scene reaches any more is stale.
+/// In the pin's mode (gossip) the scenes must send something, and answer a
+/// querier, for a transcript of them to mean anything.
 #[test]
-fn in_gossip_mode_the_two_peer_planes_differ_only_where_the_pin_says() {
-    let (failures, reasons) = unexplained(Mode::Gossip);
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
-    assert_eq!(
-        reasons,
-        expected_reasons(Mode::Gossip),
-        "each allowed difference must be one a scene produces"
-    );
+fn in_gossip_mode_the_scenes_exercise_what_they_claim() {
     assert!(
         data_messages_sent(Mode::Gossip) >= 8,
         "the scenes must send something for the comparison to mean anything"
@@ -2538,6 +2036,7 @@ fn in_gossip_mode_the_two_peer_planes_differ_only_where_the_pin_says() {
         answers_delivered(Mode::Gossip) >= 2,
         "the query scenes must deliver an answer to a querier for the comparison to mean anything"
     );
+    assert_the_scenes_replay_identically(Mode::Gossip);
     assert_the_query_scenes_exercise_what_they_claim(Mode::Gossip);
     assert_the_node_publish_scene_exercises_what_it_claims(Mode::Gossip);
     assert_the_hosting_scene_exercises_what_it_claims(Mode::Gossip);
@@ -2557,7 +2056,7 @@ fn a_gossip_peer_tells_a_new_link_the_neighbours_it_knows_and_not_itself() {
         Step::LinkBack(0, 0xAA, 5),
         Step::Up(1, 0xBB, Wire::Peer),
     ];
-    let (_, mut node) = both(0x01, Mode::Gossip);
+    let mut node = peer_node(0x01, Mode::Gossip);
     let told: Vec<Sent> = scene.iter().map(|s| split(node.apply(s)).1).collect();
     let nodes_told = |sent: &Sent, face: u64| -> Vec<Vec<u8>> {
         match sent.get(&face).map(Vec::as_slice) {
@@ -2578,16 +2077,14 @@ fn a_gossip_peer_tells_a_new_link_the_neighbours_it_knows_and_not_itself() {
 }
 
 /// What the region-hat peer does with an Interest and a token, graded against
-/// the pin and not against `LinkstateForwarder`, which the pin-explained
-/// differences above leave out: an Interest from a router is refused (nothing is
-/// sent to it, not even a final), a current Interest from a peer is answered with
-/// the declarations the other hats hold and then its final, and a client that
-/// asked for tokens with a future interest is sent a token a peer declares and
-/// the withdrawal of it.
+/// the pin: an Interest from a router is refused (nothing is sent to it, not even
+/// a final), a current Interest from a peer is answered with the declarations the
+/// other hats hold and then its final, and a client that asked for tokens with a
+/// future interest is sent a token a peer declares and the withdrawal of it.
 #[test]
 fn the_region_hat_peer_answers_interests_and_tokens_as_the_pins_dispatcher_does() {
     for mode in [Mode::Gossip, Mode::LinkState] {
-        let (_, mut node) = both(0x01, mode);
+        let mut node = peer_node(0x01, mode);
         let steps = [
             Step::Up(0, 0xAA, Wire::Peer),
             Step::Up(1, 0xCC, Wire::Client),
@@ -2669,19 +2166,11 @@ fn the_region_hat_peer_answers_interests_and_tokens_as_the_pins_dispatcher_does(
     }
 }
 
-/// In wz's link-state extension the two planes send the same data AND the same
-/// topology: the region-hat peer relays inside its region along the tree, as
-/// `LinkstateForwarder` does. The only differences are the interest and token
-/// planes' ones, which the extension does not touch.
+/// In wz's link-state extension the region-hat peer relays inside its region along
+/// the tree, which gossip does not; the scenes must send enough, and reach far
+/// enough, for a transcript of them to mean anything.
 #[test]
-fn in_link_state_mode_the_two_peer_planes_send_the_same_data_and_topology() {
-    let (failures, reasons) = unexplained(Mode::LinkState);
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
-    assert_eq!(
-        reasons,
-        expected_reasons(Mode::LinkState),
-        "each allowed difference must be one a scene produces"
-    );
+fn in_link_state_mode_the_scenes_relay_between_peers_and_exercise_what_they_claim() {
     assert!(
         data_messages_sent(Mode::LinkState) > data_messages_sent(Mode::Gossip),
         "the extension relays between peers, which gossip does not: \
@@ -2691,9 +2180,88 @@ fn in_link_state_mode_the_two_peer_planes_send_the_same_data_and_topology() {
         answers_delivered(Mode::LinkState) > answers_delivered(Mode::Gossip),
         "the extension answers a query across peers, which gossip does not"
     );
+    assert_the_scenes_replay_identically(Mode::LinkState);
     assert_the_query_scenes_exercise_what_they_claim(Mode::LinkState);
     assert_the_node_publish_scene_exercises_what_it_claims(Mode::LinkState);
     assert_the_hosting_scene_exercises_what_it_claims(Mode::LinkState);
     #[cfg(feature = "adminspace-introspection-handlers")]
     assert_the_admin_legs_are_exercised(Mode::LinkState);
+}
+
+/// The frozen scenes. A transcript names the lines of every plane the node has, the
+/// admin legs, the graph view and the tokens among them, so it is taken and held with
+/// all of those built; a build without one of them reads the scenes through the tests
+/// above and not through this text.
+#[cfg(all(
+    feature = "routing-token-tables",
+    feature = "pubsub-delete",
+    feature = "adminspace-introspection-handlers",
+    feature = "adminspace-router-linkstate"
+))]
+mod frozen {
+    use super::*;
+
+    /// The scenes as one text for `mode`: a heading for each scene, then each step with the
+    /// lines it caused.
+    fn transcripts(mode: Mode) -> String {
+        scenes()
+            .iter()
+            .map(|(name, scene)| format!("=== {name}\n{}", transcript_of(scene, 0x01, mode)))
+            .collect()
+    }
+
+    /// Hold `mode`'s scenes to the text frozen in `file`, or write the file into the
+    /// directory named by `WZ_BLESS_PEER_SCENES` when it is set (the directory is
+    /// where the file is then copied from; it is not written over the frozen one, so
+    /// that a run on another machine can hand it back). A difference names the scene
+    /// and the first line.
+    fn assert_the_scenes_are_frozen(mode: Mode, frozen: &str, file: &str) {
+        let now = transcripts(mode);
+        if let Some(dir) = std::env::var_os("WZ_BLESS_PEER_SCENES") {
+            let dir = std::path::PathBuf::from(dir);
+            std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("creating {dir:?}: {e}"));
+            let path = dir.join(file);
+            std::fs::write(&path, &now).unwrap_or_else(|e| panic!("writing {path:?}: {e}"));
+            return;
+        }
+        if now == frozen {
+            return;
+        }
+        let (want, got): (Vec<&str>, Vec<&str>) = (frozen.lines().collect(), now.lines().collect());
+        let at = want
+            .iter()
+            .zip(&got)
+            .position(|(w, g)| w != g)
+            .unwrap_or_else(|| want.len().min(got.len()));
+        let scene = got[..=at.min(got.len().saturating_sub(1))]
+            .iter()
+            .rev()
+            .find_map(|line| line.strip_prefix("=== "))
+            .unwrap_or("(before the first scene)");
+        panic!(
+        "{mode:?}: the scenes differ from {file} at line {} (scene \"{scene}\")\n  frozen: {}\n  now:    {}\n\
+         Read the difference, then regenerate with WZ_BLESS_PEER_SCENES=<dir> and copy the files.",
+        at + 1,
+        want.get(at).copied().unwrap_or("(end of the file)"),
+        got.get(at).copied().unwrap_or("(end of the output)"),
+    );
+    }
+
+    #[test]
+    fn in_gossip_mode_the_scenes_send_what_they_were_frozen_sending() {
+        assert_the_scenes_are_frozen(
+            Mode::Gossip,
+            include_str!("peer_scenes/gossip.txt"),
+            "gossip.txt",
+        );
+    }
+
+    #[test]
+    fn in_link_state_mode_the_scenes_send_what_they_were_frozen_sending() {
+        assert_the_scenes_are_frozen(
+            Mode::LinkState,
+            include_str!("peer_scenes/link_state.txt"),
+            "link_state.txt",
+        );
+    }
 }

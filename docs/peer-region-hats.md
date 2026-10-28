@@ -692,6 +692,12 @@ from the call sites in `crates/wz-ap-demo/src/runner.rs`:
   set or read, and `wz_peer_interest_pending_gc_pico_interop` asserts the copy that
   the pin's peer hat does not make, so it moves with the flag.
 
+**7c-1, landed: the oracle is replaced.** The differential and network gates no
+longer play the single-net forwarder. The one-node scenes are frozen into
+`peer_scenes/gossip.txt` and `peer_scenes/link_state.txt`; the network scenes keep their
+stated delivery counts; every departure the comparison allowed is stated with its pin
+line in section 14. Nothing outside the test modules changed.
+
 **7c: retirement.** `LinkstateForwarder` goes with the tests that only it carries; what
 the router also uses (`NetHandle`, the route cores, `QueryFan`) stays where it is. The
 differential gate has no oracle left then: it is either frozen into expectations that
@@ -727,3 +733,68 @@ honoured, and the census pins move in the same commit.
 - Hosted verdicts for the peer E2E files that need a foreign binary are not
   available locally; steps 3 to 5 depend on reading them.
 - Peer-mode partitions are witnessed against a stock zenohd only after step 7.
+
+## 14. Where the region-hat peer departs from the retired single-net peer
+
+Steps 3 to 7b held the region-hat peer equal to `LinkstateForwarder` scene by scene,
+and every difference the comparison found was either a defect of one plane (fixed) or
+a place where the single-net forwarder left the pin and the region-hat peer follows it.
+The comparison is gone with its oracle at step 7c, and what it established is held
+two ways: the tests that state each rule below and cite it, and the frozen scenes
+(`crates/wz-runtime-tokio/src/router_forward/peer_scenes/`), which fail on any change
+to what the node sends. The rules, with the pin 1.10.1 line each rests on:
+
+- **The node's own Put reaches the client faces that subscribed**
+  (`zenoh/src/net/routing/hat/broker/pubsub.rs` @ `if ctx.subs.is_some() {`); the
+  single-net forwarder reached its tree children and gateways and no client face.
+- **The node's own Put reaches the subscribers the same session hosts**
+  (`zenoh/src/api/session.rs` @ `state.subscriber_callbacks(true, SubscriberKind::Subscriber, &wire_expr, false);`).
+- **The admin legs name the node twice**: its own face among the clients of what it
+  hosts (`zenoh/src/net/routing/hat/broker/pubsub.rs` @ `srcs.clients.push(face.zid);`),
+  and itself in the north bucket of everything a south region sourced
+  (`zenoh/src/net/routing/dispatcher/tables.rs` @ `fn add_north_source(`). The
+  single-net forwarder named it among the peers of what it hosted and nowhere else.
+  Graded by `the_region_hat_peer_names_the_node_in_the_admin_legs_as_the_pins_merge_does`.
+- **BestMatching asks the `Local` hat beside the best of every other region**
+  (`zenoh/src/net/routing/dispatcher/queries.rs` @ `for dst in rtables.hats.regions() {`);
+  a node with a complete hosted queryable and a client that declared the same key asks
+  both, and the query ends when the client has answered.
+- **A queryable declared again with what it already was is not propagated again**
+  (`zenoh/src/net/routing/dispatcher/queries.rs` @ `tables.hats[dst].propagate_queryable(ctx.reborrow(), res.clone(), other_info);`).
+- **A gossip peer's graph is built from what neighbours tell it**, not from a link
+  coming up (`zenoh/src/net/protocol/network.rs` @ `if self.full_linkstate || self.gossip_multihop {`
+  in `add_link`), so a gossip flood forms no edge; nothing routes by that graph. The
+  link-state extension keeps the same graph in both planes.
+- **A gossip peer sends nothing when a link goes down**: the flood to the remaining
+  links is inside the `full_linkstate || gossip_multihop` branch that follows
+  (`zenoh/src/net/protocol/network.rs` @ `self.graph[self.idx].links.retain(|dest, _| dest != zid);`).
+- **A gossip peer tells a new link the nodes its graph holds that are linked
+  neighbours**, by zid and never itself
+  (`zenoh/src/net/protocol/network.rs` @ `// Send all nodes linkstate on new link`).
+  Graded by `a_gossip_peer_tells_a_new_link_the_neighbours_it_knows_and_not_itself`.
+- **The peer hat offers its faces nothing from its own region**, so a recompute
+  re-advertises nothing to a tree child
+  (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `if ctx.subs.is_some() && self.region() != *src_region {`).
+- **An Interest from a router is refused**, with no final
+  (`zenoh/src/net/routing/dispatcher/interests.rs` @ `if self.state.whatami.is_router() {`).
+- **A current Interest is answered with the declarations the other hats hold, then
+  its final** (`zenoh/src/net/routing/dispatcher/interests.rs` @ `hats[region].send_current_subscribers(`
+  and `hats[region].send_declare_final(ctx.reborrow(), msg.id, &src);`). A current
+  subscriber Interest from a peer in the north region is itself outside the pin's
+  protocol (its peer hat asserts that a current Interest from the north asks for tokens
+  only), so this is the dispatcher's release behaviour, which the region-hat peer
+  follows.
+- **A token declared or withdrawn at a peer reaches a client that asked for tokens
+  with a future interest**; the single-net forwarder's token plane was partial.
+- **A client's token interest is not brokered to the peers**: the peer hat sends a
+  current-and-future interest on only to the faces whose remote bound is south
+  (`zenoh/src/net/routing/hat/peer/interests.rs` @ `.filter(|f| f.remote_bound.is_south())`),
+  which the peers of this node are not. Graded by
+  `the_region_hat_peer_answers_interests_and_tokens_as_the_pins_dispatcher_does`.
+
+The frozen scenes are read as a regression net over these rules and not as a second
+authority: a line that changes is read against the rule it touches before the files
+are regenerated (`WZ_BLESS_PEER_SCENES=<dir>` on the test, then the files copied).
+They are taken with the token tables, delete, the admin introspection handlers and the
+peers link view all built (`C1AY peer scenes frozen`), and a build with fewer of them
+reads the same scenes through the tests that state the rules.

@@ -1,27 +1,27 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! A NETWORK of peer nodes on the region-hat forwarder held equal to the same
-//! network of `LinkstateForwarder` nodes (`docs/peer-region-hats.md`, steps 3 and
-//! 4, past the one node).
+//! A NETWORK of peer nodes on the region-hat forwarder, graded on what the end
+//! points receive (`docs/peer-region-hats.md`, steps 3 and 4, past the one node).
 //!
-//! The one-node gate ([`super::peer_differential_tests`]) scripts what arrives
-//! on each face, so it cannot see what only a network does: a message crossing
+//! The one-node scenes ([`super::peer_differential_tests`]) script what arrives
+//! on each face, so they cannot see what only a network does: a message crossing
 //! more than one hop, a flood that returns to the node it came from, two paths
 //! to one subscriber, a link-state graph that has to be exchanged rather than
 //! handed over. Here the nodes are wired to each other by a deterministic
 //! frame pump: what a node sent on a face is delivered, in order, to the face
 //! at the far end, until nothing is in flight; then every node ticks, and the
-//! pump runs again, until a tick sends nothing. The same topology and the same
-//! script are built once from `LinkstateForwarder` nodes and once from
-//! region-hat peers, and what the END POINTS (clients attached to a node)
-//! received after each step is compared.
+//! pump runs again, until a tick sends nothing. What the END POINTS (clients
+//! attached to a node) received after each step is read.
 //!
-//! What a network adds to the one-node gate's rules: a message delivered twice
-//! is a difference, and a pump that does not settle is a failure of its own (a
-//! loop), so loop freedom is graded by the same run that grades delivery.
+//! What a network grades: a message delivered twice is a failure, a message that
+//! should cross a link and does not is one, and a pump that does not settle is a
+//! failure of its own (a loop), so loop freedom is graded by the same run that
+//! grades delivery. The counts below are stated, scene by scene, from the pin's
+//! rules: a gossip peer sends across one link and relays none, the link-state
+//! extension relays along the tree.
 
-use super::peer_differential_tests::{decode, make, zid, Mode, NodeSession, Plane, Seen, Wire};
+use super::peer_differential_tests::{decode, make, zid, Mode, NodeSession, Seen, Wire};
 use super::*;
 use crate::runtime_impl::TokioRuntime;
 use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
@@ -127,13 +127,13 @@ struct Outcome {
 }
 
 impl Network {
-    fn new(plane: Plane, mode: Mode, nodes: &[u8]) -> Self {
+    fn new(mode: Mode, nodes: &[u8]) -> Self {
         let began = Instant::now();
         Self {
             nodes: nodes
                 .iter()
                 .map(|&n| {
-                    let (fwd, _clock) = make(plane, n, mode, began);
+                    let (fwd, _clock) = make(n, mode, began);
                     (
                         n,
                         NetNode {
@@ -447,9 +447,9 @@ impl Network {
     }
 }
 
-/// What every step of `script` made the end points receive on `plane`.
-fn run(plane: Plane, mode: Mode, nodes: &[u8], script: &[NetStep]) -> Vec<Outcome> {
-    let mut network = Network::new(plane, mode, nodes);
+/// What every step of `script` made the end points receive.
+fn run(mode: Mode, nodes: &[u8], script: &[NetStep]) -> Vec<Outcome> {
+    let mut network = Network::new(mode, nodes);
     script.iter().map(|step| network.apply(step)).collect()
 }
 
@@ -766,150 +766,23 @@ fn scenes() -> Vec<Scene> {
     scenes
 }
 
-/// Every step of every scene in `mode` on which the two planes' end points
-/// received something different, or the nodes carried a different number of
-/// data messages to do it.
-///
-/// Returned with how many of the differences are each of the two the pin explains,
-/// a token pushed to an end point that asked for tokens (see
-/// [`is_a_token_pushed_to_an_interested_client`]) and a token interest brokered
-/// to the peers (see [`is_an_interest_brokered_to_the_peers`]); every other
-/// difference is a failure.
-fn differences(mode: Mode) -> (Vec<String>, usize, usize, usize) {
-    let mut out = Vec::new();
-    let mut explained = 0;
-    let mut brokered = 0;
-    let mut node_puts = 0;
-    for scene in scenes() {
-        let old = run(Plane::LinkstateForwarder, mode, &scene.nodes, &scene.script);
-        let new = run(Plane::RegionHat, mode, &scene.nodes, &scene.script);
-        for (n, (a, b)) in old.iter().zip(&new).enumerate() {
-            if a == b {
-                continue;
-            }
-            if is_a_token_pushed_to_an_interested_client(&scene.script[n], a, b) {
-                explained += 1;
-                continue;
-            }
-            if is_an_interest_brokered_to_the_peers(&scene.script[n], a, b) {
-                brokered += 1;
-                continue;
-            }
-            if is_a_node_put_to_a_client(&scene.script[n], a, b) {
-                node_puts += 1;
-                continue;
-            }
-            out.push(format!(
-                "{mode:?} / {} / step {n} {:?}\n  linkstate:  {a:?}\n  region-hat: {b:?}",
-                scene.name, scene.script[n]
-            ));
-        }
-    }
-    (out, explained, brokered, node_puts)
-}
-
-/// The one difference the network gate allows, and the same one the one-node gate
-/// does (`TOKEN_TO_INTERESTED_CLIENT`): a token declared or withdrawn at a node
-/// reaches an end point that asked for tokens with a future interest, which the
-/// pin's broker hat does (it propagates a token to a south face that holds a
-/// matching remote interest) and `LinkstateForwarder`'s partial token plane does
-/// not. The two networks must carry as many messages to do it, and what
-/// `LinkstateForwarder` delivered must be a part of what the region-hat peer did.
-#[cfg(feature = "routing-token-tables")]
-fn is_a_token_pushed_to_an_interested_client(step: &NetStep, a: &Outcome, b: &Outcome) -> bool {
-    let is_token = |s: &Seen| matches!(s, Seen::DeclareToken { .. } | Seen::UndeclareToken);
-    matches!(step, NetStep::Token(..) | NetStep::Untoken(..))
-        && a.carried == b.carried
-        && b.received
-            .iter()
-            .any(|(ep, seen)| seen.iter().any(is_token) && !a.received.contains_key(ep))
-        && a.received.iter().all(|(ep, seen)| {
-            b.received
-                .get(ep)
-                .is_some_and(|r| seen.iter().all(|s| r.contains(s)))
-        })
-}
-
-#[cfg(not(feature = "routing-token-tables"))]
-fn is_a_token_pushed_to_an_interested_client(_: &NetStep, _: &Outcome, _: &Outcome) -> bool {
-    false
-}
-
-/// The third difference the network gate allows, and the one the one-node gate does
-/// (`NODE_PUT_TO_CLIENT`): the pin's broker hat routes the node's own Put to every
-/// client face that subscribed
-/// (`zenoh/src/net/routing/hat/broker/pubsub.rs` @ `if ctx.subs.is_some() {`),
-/// and `LinkstateForwarder::publish` reaches its tree children and gateways and no
-/// client face. What `LinkstateForwarder` delivered must be a part of what the
-/// region-hat peer did, and the nodes carry as many messages between them.
-fn is_a_node_put_to_a_client(step: &NetStep, a: &Outcome, b: &Outcome) -> bool {
-    matches!(step, NetStep::NodePut(..))
-        && a.carried == b.carried
-        && b.received.keys().any(|ep| !a.received.contains_key(ep))
-        && a.received
-            .iter()
-            .all(|(ep, seen)| b.received.get(ep) == Some(seen))
-}
-
-/// The second difference the network gate allows, and the one the one-node gate does
-/// (`TOKEN_INTEREST_BROKERED`): with `routing-interest-pending-gc`, `LinkstateForwarder` carries
-/// a client's token interest on to its peers, and its withdrawal after it, because its token table
-/// does not hold the mesh tier. The pin's peer hat does, and sends a current-and-future interest
-/// on only to the faces whose remote bound is south
-/// (`zenoh/src/net/routing/hat/peer/interests.rs` @ `.filter(|f| f.remote_bound.is_south())`).
-/// What the end points received is the same; the nodes carried more messages to do it.
-#[cfg(all(
-    feature = "routing-token-tables",
-    feature = "routing-interest-pending-gc"
-))]
-fn is_an_interest_brokered_to_the_peers(step: &NetStep, a: &Outcome, b: &Outcome) -> bool {
-    matches!(step, NetStep::Interest(..) | NetStep::InterestFinal(..))
-        && a.received == b.received
-        && a.carried > b.carried
-}
-
-#[cfg(not(all(
-    feature = "routing-token-tables",
-    feature = "routing-interest-pending-gc"
-)))]
-fn is_an_interest_brokered_to_the_peers(_: &NetStep, _: &Outcome, _: &Outcome) -> bool {
-    false
-}
-
-/// How many messages of the kind `wanted` the end points of `scene` received on
-/// the region-hat plane over the whole script.
+/// How many messages of the kind `wanted` the end points of `scene` received over
+/// the whole script.
 fn received(mode: Mode, scene: &Scene, wanted: impl Fn(&Seen) -> bool) -> usize {
-    run(Plane::RegionHat, mode, &scene.nodes, &scene.script)
+    run(mode, &scene.nodes, &scene.script)
         .iter()
         .flat_map(|o| o.received.values().flatten())
         .filter(|s| wanted(s))
         .count()
 }
 
+/// The pin's peer hat sends a message across one link and relays none between two
+/// peers, so gossip delivers across a link and not across a second one. The node's
+/// own session reaches the end point attached to it: the pin's broker hat routes
+/// the node's own Put to every client face that subscribed
+/// (`zenoh/src/net/routing/hat/broker/pubsub.rs` @ `if ctx.subs.is_some() {`).
 #[test]
-fn in_gossip_mode_a_network_of_either_plane_delivers_the_same() {
-    let (differing, explained, brokered, node_puts) = differences(Mode::Gossip);
-    assert!(differing.is_empty(), "{}", differing.join("\n"));
-    assert!(
-        node_puts > 0,
-        "the node's own Put reaches the client attached to it, and a stale allowance is a hole"
-    );
-    assert_eq!(
-        explained, 0,
-        "gossip carries no token across a link to explain"
-    );
-    assert_eq!(
-        brokered > 0,
-        cfg!(all(
-            feature = "routing-token-tables",
-            feature = "routing-interest-pending-gc"
-        )),
-        "the brokered interest occurs exactly when the forwarder brokers one, \
-         and a stale allowance is a hole"
-    );
-    // Equal is not the whole claim: the pin's peer hat sends a message across
-    // one link and relays none between two peers, so gossip delivers across a
-    // link and not across a second one, in both planes.
+fn in_gossip_mode_a_network_delivers_across_one_link_and_relays_none() {
     let is_put = |s: &Seen| matches!(s, Seen::Push { .. });
     let named = |name: &str| {
         scenes()
@@ -917,6 +790,14 @@ fn in_gossip_mode_a_network_of_either_plane_delivers_the_same() {
             .find(|s| s.name == name)
             .expect("a scene of that name")
     };
+    assert!(
+        received(
+            Mode::Gossip,
+            &named("a node publishes along a chain"),
+            is_put
+        ) > 0,
+        "the node's own Put reaches the client attached to it"
+    );
     assert_eq!(
         received(Mode::Gossip, &named("two nodes"), is_put),
         1,
@@ -936,29 +817,10 @@ fn in_gossip_mode_a_network_of_either_plane_delivers_the_same() {
     }
 }
 
+/// In the link-state extension the region-hat peer relays along the tree, so every
+/// subscriber of every scene hears every Put exactly once.
 #[test]
-fn in_link_state_mode_a_network_of_either_plane_delivers_the_same() {
-    let (differing, explained, brokered, node_puts) = differences(Mode::LinkState);
-    assert!(differing.is_empty(), "{}", differing.join("\n"));
-    assert!(
-        node_puts > 0,
-        "the node's own Put reaches the client attached to it, and a stale allowance is a hole"
-    );
-    assert_eq!(
-        explained > 0,
-        cfg!(feature = "routing-token-tables"),
-        "the allowed token difference occurs exactly when the token plane is built, \
-         and a stale allowance is a hole"
-    );
-    assert_eq!(
-        brokered > 0,
-        cfg!(all(
-            feature = "routing-token-tables",
-            feature = "routing-interest-pending-gc"
-        )),
-        "the brokered interest occurs exactly when the forwarder brokers one, \
-         and a stale allowance is a hole"
-    );
+fn in_link_state_mode_a_network_delivers_each_put_to_each_subscriber_once() {
     let is_put = |s: &Seen| matches!(s, Seen::Push { .. });
     // Each subscriber of each scene got each Put exactly once: across three
     // links, through a hub, round a ring, along two equal paths, and from a
