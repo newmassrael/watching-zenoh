@@ -61,10 +61,19 @@ carries about 6 KB of C library code wz does not, which is why the difference is
   it from `CONFIG_WZ_SUBSCRIBE` (on by default, off in the fixed overlay). The three fixed images
   fell 2.3 to 2.5 KB of text (`wz_session_core` 2.0 KB of it) and 960 bytes of bss; the kit's stack
   readings and the answers did not change.
-- `wz_session_core` is the owner to split further, by function, before any flag is tried on it. It is
-  a long tail (525 symbols in a build without LTO, none over 1.6 KB), and the generic functions with
-  many instances (`ext_admit::judge_ext_chain` 7, `send_frame_lent` 3) are where a shared
-  non-generic core can be cut out.
+- TAKEN: the codec's builder path of the reply writer. A line table of the shipped image (a build with
+  `CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`, whose text is the same) puts 6.2 KB in
+  `heapless::Vec`, 2.7 KB of it `push_unchecked`: whole extension entries copied by value into the
+  chains of `ResponseWriter::encode_generic`. A reply with the responder's identity and an Err are now
+  written by the direct writer as well (the tests hold each to the codec's bytes), and
+  `encode_generic` is called only where a timestamp, an attachment or a source info can be staged or a
+  sink hands out no window (`GENERIC_REACHABLE`); elsewhere it is not linked. The fixed images fell
+  1.5 to 2.2 KB. The responder and Err replies were not run on the kit (its queries get a Put).
+- NOT TAKEN, measured: taking `judge_ext_chain`'s two helpers out of line (7 instances) moved the
+  text by +16 bytes; the link-time optimizer already shares them.
+- `wz_session_core` is a long tail (525 symbols in a build without LTO, none over 1.6 KB) and the
+  line table is the way to rank it: the largest source files are `session_actions.rs` (3.1 KB),
+  `drive.rs` (1.7 KB) and `peer_planner.rs` (1.3 KB, the planner of a client with one endpoint).
 - The machine outliner and `opt-level=z` are weighed per tier (the answer path against the connect
   and declare paths), not on the whole image.
 

@@ -104,12 +104,66 @@ impl Window<'_> {
     }
 }
 
-/// What a plain reply writes besides its fixed parts (see `ResponseWriter::plain_view`).
+/// The bytes an encoding takes after its header: the packed id, and the schema's length and text
+/// when it carries one.
+fn encoding_len(encoding: Option<crate::reply_stage::EncodingParts<'_>>) -> usize {
+    let Some(encoding) = encoding else {
+        return 0;
+    };
+    let mut len = vle_len(u64::from(encoding.packed_id), VLE_U32);
+    if let Some(schema) = encoding.schema {
+        len += vle_len(schema.len() as u64, VLE_U64) + schema.len();
+    }
+    len
+}
+
+/// [`encoding_len`]'s bytes into the window.
+fn write_encoding(out: &mut Window<'_>, encoding: Option<crate::reply_stage::EncodingParts<'_>>) {
+    let Some(encoding) = encoding else {
+        return;
+    };
+    out.vle(u64::from(encoding.packed_id), VLE_U32);
+    if let Some(schema) = encoding.schema {
+        out.vle(schema.len() as u64, VLE_U64);
+        out.bytes(schema.as_bytes());
+    }
+}
+
+/// What a directly written reply writes besides its fixed parts (see
+/// `ResponseWriter::direct_view`).
 struct PartsView<'a> {
-    payload: Option<&'a [u8]>,
-    encoding: Option<crate::reply_stage::EncodingParts<'a>>,
+    body: BodyView<'a>,
     qos_extension: bool,
 }
+
+/// The body of a directly written reply.
+enum BodyView<'a> {
+    /// A Put: its payload and the encoding a build that emits one writes.
+    Put {
+        payload: &'a [u8],
+        encoding: Option<crate::reply_stage::EncodingParts<'a>>,
+    },
+    Del,
+    /// An Err: its payload and encoding, the id packed as the owned builder packs it.
+    #[cfg(feature = "query-reply-err")]
+    Err {
+        payload: &'a [u8],
+        encoding: Option<crate::reply_stage::EncodingParts<'a>>,
+    },
+}
+
+/// Whether [`ResponseWriter::encode_generic`] can be reached in this build: a reply that carries
+/// a timestamp, an attachment or a source info, which only a build with those features can stage,
+/// or a sink that hands out no window, which only the fragment window of `transport-fragmentation`
+/// is. Where none can happen the branches that call it fold away, and the codec's builder path
+/// (chains of eight extension entries at three levels, pushed by value into `heapless::Vec`s) is
+/// not in the image: 2.6 KB of text on the Zephyr fixed client.
+const GENERIC_REACHABLE: bool = cfg!(any(
+    feature = "pubsub-timestamp",
+    feature = "pubsub-attachment",
+    feature = "reply-source-info",
+    feature = "transport-fragmentation",
+));
 
 /// The Reply body's header: `_Z_MID_Z_REPLY`, with no consolidation and no
 /// extension of its own (they ride the Put or Del inside it).
@@ -265,14 +319,11 @@ impl<'a> ResponseWriter<'a> {
         self.encode_generic(sink)
     }
 
-    /// Whether the reply is one [`Self::write_plain`] writes: the envelope with no extension
-    /// but the QoS, around a Put or a Del with at most an encoding.
-    fn is_plain(&self) -> bool {
-        let parts = &self.parts;
-        if parts.responder.is_some() {
-            return false;
-        }
-        match &parts.kind {
+    /// Whether the reply is one [`Self::write_direct`] writes: the envelope with the QoS and the
+    /// responder as its extensions, around a Put or a Del with at most an encoding, or an Err. What
+    /// it does not write is a reply with a timestamp, an attachment or a source info.
+    fn is_direct(&self) -> bool {
+        match &self.parts.kind {
             PartsKind::Reply {
                 timestamp,
                 attachment,
@@ -294,7 +345,7 @@ impl<'a> ResponseWriter<'a> {
                 true
             }
             #[cfg(feature = "query-reply-err")]
-            PartsKind::Err { .. } => false,
+            PartsKind::Err { .. } => true,
         }
     }
 
@@ -312,62 +363,70 @@ impl<'a> ResponseWriter<'a> {
         &self,
         sink: &mut crate::tx_buf::TxSink<'_, B>,
     ) -> Result<(), CodecError> {
-        if !self.is_plain() {
+        if GENERIC_REACHABLE && !self.is_direct() {
             return self.encode_generic(sink);
         }
-        match sink.reserve(self.plain_len())? {
+        match sink.reserve(self.direct_len())? {
             Some(window) => {
-                self.write_plain(window);
+                self.write_direct(window);
                 Ok(())
             }
-            None => self.encode_generic(sink),
+            None if GENERIC_REACHABLE => self.encode_generic(sink),
+            // Every buffer of a build without fragmentation hands out a window.
+            None => Err(CodecError::BufferOverflow),
         }
     }
 
-    /// The bytes [`Self::write_plain`] writes, counted: the same layout, summed.
-    fn plain_len(&self) -> usize {
+    /// The bytes [`Self::write_direct`] writes, counted: the same layout, summed.
+    fn direct_len(&self) -> usize {
         let parts = &self.parts;
         let PartsView {
-            payload,
-            encoding,
+            body,
             qos_extension,
-        } = self.plain_view();
+        } = self.direct_view();
         let mut len =
             1 + vle_len(parts.rid, VLE_U64) + 1 + vle_len(parts.keyexpr.len() as u64, VLE_U64);
         len += parts.keyexpr.len();
         if qos_extension {
             len += 1 + vle_len(u64::from(parts.qos.raw), VLE_U64);
         }
-        len += 1 + 1;
-        if let Some(bytes) = payload {
-            if let Some(encoding) = encoding {
-                len += vle_len(u64::from(encoding.packed_id), VLE_U32);
-                if let Some(schema) = encoding.schema {
-                    len += vle_len(schema.len() as u64, VLE_U64) + schema.len();
-                }
-            }
-            len += vle_len(bytes.len() as u64, VLE_U64) + bytes.len();
+        if self.responder.len != 0 {
+            len += 1 + vle_len(self.responder.len as u64, VLE_U64) + self.responder.len;
         }
+        len += match body {
+            BodyView::Put { payload, encoding } => {
+                1 + 1
+                    + encoding_len(encoding)
+                    + vle_len(payload.len() as u64, VLE_U64)
+                    + payload.len()
+            }
+            BodyView::Del => 1 + 1,
+            #[cfg(feature = "query-reply-err")]
+            BodyView::Err { payload, encoding } => {
+                1 + encoding_len(encoding) + vle_len(payload.len() as u64, VLE_U64) + payload.len()
+            }
+        };
         len
     }
 
-    /// The plain reply's bytes into a window of exactly [`Self::plain_len`] bytes, in the order
-    /// the generated encoders write them: the envelope's header (the `Local` arm of the key sets
-    /// its bit), the request id, the key as an id of 0 and a suffix, the QoS extension if there
-    /// is one, the Reply body's header, then the Put's header, its encoding and its payload, or
-    /// the Del's header.
-    fn write_plain(&self, window: &mut [u8]) {
+    /// The reply's bytes into a window of exactly [`Self::direct_len`] bytes, in the order the
+    /// generated encoders write them: the envelope's header (the `Local` arm of the key sets its
+    /// bit, and the chain flag is set when an extension follows), the request id, the key as an
+    /// id of 0 and a suffix, the QoS extension and the responder's if there are any (the chain
+    /// flag on each but the last), then the body: the Reply's header and a Put's (its header,
+    /// encoding and payload) or a Del's header, or an Err's (its header, encoding and payload).
+    fn write_direct(&self, window: &mut [u8]) {
         let parts = &self.parts;
         let PartsView {
-            payload,
-            encoding,
+            body,
             qos_extension,
-        } = self.plain_view();
+        } = self.direct_view();
+        let responder = self.responder.len != 0;
         let mut out = Window {
             bytes: window,
             at: 0,
         };
-        let header = if qos_extension {
+        let header = if qos_extension || responder {
             with_z(RESPONSE_HEADER)
         } else {
             RESPONSE_HEADER
@@ -378,70 +437,87 @@ impl<'a> ResponseWriter<'a> {
         out.vle(parts.keyexpr.len() as u64, VLE_U64);
         out.bytes(parts.keyexpr.as_bytes());
         if qos_extension {
-            out.byte(qos_entry(parts.qos).header & !EXT_FLAG_Z);
+            let entry = qos_entry(parts.qos).header & !EXT_FLAG_Z;
+            out.byte(if responder { entry | EXT_FLAG_Z } else { entry });
             out.vle(u64::from(parts.qos.raw), VLE_U64);
         }
-        out.byte(REPLY_HEADER);
-        let Some(bytes) = payload else {
-            out.byte(DEL_HEADER);
-            debug_assert_eq!(out.at, out.bytes.len());
-            return;
-        };
-        let mut header = PUT_HEADER;
-        if encoding.is_some() {
-            header |= wire_const::FLAG_Z_PUT_E;
+        if responder {
+            out.byte(RESPONDER_EXT_HEADER & !EXT_FLAG_Z);
+            out.vle(self.responder.len as u64, VLE_U64);
+            out.bytes(&self.responder.bytes[..self.responder.len]);
         }
-        out.byte(header);
-        if let Some(encoding) = encoding {
-            out.vle(u64::from(encoding.packed_id), VLE_U32);
-            if let Some(schema) = encoding.schema {
-                out.vle(schema.len() as u64, VLE_U64);
-                out.bytes(schema.as_bytes());
+        match body {
+            BodyView::Put { payload, encoding } => {
+                out.byte(REPLY_HEADER);
+                let mut header = PUT_HEADER;
+                if encoding.is_some() {
+                    header |= wire_const::FLAG_Z_PUT_E;
+                }
+                out.byte(header);
+                write_encoding(&mut out, encoding);
+                out.vle(payload.len() as u64, VLE_U64);
+                out.bytes(payload);
+            }
+            BodyView::Del => {
+                out.byte(REPLY_HEADER);
+                out.byte(DEL_HEADER);
+            }
+            #[cfg(feature = "query-reply-err")]
+            BodyView::Err { payload, encoding } => {
+                let mut header = ERR_HEADER;
+                if encoding.is_some() {
+                    header |= wire_const::FLAG_Z_ERR_E;
+                }
+                out.byte(header);
+                write_encoding(&mut out, encoding);
+                out.vle(payload.len() as u64, VLE_U64);
+                out.bytes(payload);
             }
         }
-        out.vle(bytes.len() as u64, VLE_U64);
-        out.bytes(bytes);
         debug_assert_eq!(out.at, out.bytes.len());
     }
 
-    /// What a plain reply writes besides its fixed parts, read once for the length and again for
-    /// the bytes: the payload (a Put's; `None` is a Del), the encoding a build that emits it
-    /// writes, and whether the envelope carries the QoS.
-    fn plain_view(&self) -> PartsView<'_> {
+    /// What a directly written reply writes besides its fixed parts, read once for the length and
+    /// again for the bytes: the body (a Put's payload and the encoding a build that emits it
+    /// writes, a Del, or an Err's payload and encoding), and whether the envelope carries the QoS.
+    fn direct_view(&self) -> PartsView<'_> {
         let parts = &self.parts;
-        let (body, encoding) = match &parts.kind {
-            PartsKind::Reply { body, encoding, .. } => (body, encoding),
-            // Only a plain reply is measured; an error never is.
-            #[cfg(feature = "query-reply-err")]
-            PartsKind::Err { .. } => {
-                return PartsView {
-                    payload: None,
-                    encoding: None,
-                    qos_extension: false,
+        let body = match &parts.kind {
+            PartsKind::Reply { body, encoding, .. } => {
+                let payload: Option<&[u8]> = match body {
+                    PartsBody::Put(bytes) => Some(bytes),
+                    PartsBody::Del => None,
+                    #[cfg(feature = "transport-shm")]
+                    PartsBody::Shared(handle) => Some(handle.bytes()),
+                };
+                #[cfg(feature = "pubsub-encoding")]
+                let encoding = if payload.is_some() { *encoding } else { None };
+                #[cfg(not(feature = "pubsub-encoding"))]
+                let encoding: Option<crate::reply_stage::EncodingParts<'a>> = {
+                    let _ = encoding;
+                    None
+                };
+                match payload {
+                    Some(payload) => BodyView::Put { payload, encoding },
+                    None => BodyView::Del,
                 }
             }
-        };
-        let payload: Option<&[u8]> = match body {
-            PartsBody::Put(bytes) => Some(bytes),
-            PartsBody::Del => None,
-            #[cfg(feature = "transport-shm")]
-            PartsBody::Shared(handle) => Some(handle.bytes()),
-        };
-        #[cfg(feature = "pubsub-encoding")]
-        let encoding = if payload.is_some() { *encoding } else { None };
-        #[cfg(not(feature = "pubsub-encoding"))]
-        let encoding: Option<crate::reply_stage::EncodingParts<'a>> = {
-            let _ = encoding;
-            None
+            #[cfg(feature = "query-reply-err")]
+            PartsKind::Err { encoding, payload } => BodyView::Err {
+                payload,
+                encoding: encoding.map(|(id, schema)| crate::reply_stage::EncodingParts {
+                    packed_id: (id << 1) | u32::from(schema.is_some()),
+                    schema,
+                }),
+            },
         };
         PartsView {
-            payload,
-            encoding,
+            body,
             qos_extension: parts.qos != QosLevel::DEFAULT,
         }
     }
 
-    /// The `Response` through the codec's own encoder: the reference for [`Self::write_plain`]
+    /// The `Response` through the codec's own encoder: the reference for [`Self::write_direct`]
     /// and the path of every reply that carries more than the plain one.
     ///
     /// Not inlined: the `Response` it builds holds chains of eight extension entries at three
@@ -788,14 +864,14 @@ mod tests {
                                 },
                             };
                             let writer = ResponseWriter::new(parts).expect("writable");
-                            assert!(writer.is_plain(), "rid {rid}, {keyexpr:?}, {payload_len}");
+                            assert!(writer.is_direct(), "rid {rid}, {keyexpr:?}, {payload_len}");
                             let mut generic = [0u8; 2048];
                             let mut sink = SliceSink::new(&mut generic);
                             writer.encode_generic(&mut sink).expect("fits");
                             let generic_len = sink.position();
                             // The bytes through a window of a slice buffer, of a capped one,
                             // and of a vector, against the codec's own encoder.
-                            assert_eq!(writer.plain_len(), generic_len, "the measure");
+                            assert_eq!(writer.direct_len(), generic_len, "the measure");
                             let mut storage = [0u8; 2048];
                             let mut slice = crate::tx_buf::SliceTxBuf::new(&mut storage);
                             let mut tx = crate::tx_buf::TxSink::over(&mut slice);
@@ -842,7 +918,7 @@ mod tests {
             },
         };
         let writer = ResponseWriter::new(parts).expect("writable");
-        let whole = writer.plain_len();
+        let whole = writer.direct_len();
         for room in [0, 1, whole - 1] {
             let mut storage = [0u8; 256];
             let mut slice = crate::tx_buf::SliceTxBuf::new(&mut storage[..room]);
@@ -892,6 +968,101 @@ mod tests {
             }
         }
         assert_eq!(compared, 3 * 2 * 2 * 2);
+    }
+
+    /// The bytes the direct path writes for `parts` against the codec's own encoder, through a window
+    /// of a slice buffer; the measure equals the length written.
+    fn direct_matches_generic(parts: ReplyParts<'_>) {
+        let writer = ResponseWriter::new(parts).expect("writable");
+        assert!(writer.is_direct());
+        let mut generic = [0u8; 2048];
+        let mut sink = SliceSink::new(&mut generic);
+        writer.encode_generic(&mut sink).expect("fits");
+        let generic_len = sink.position();
+        assert_eq!(writer.direct_len(), generic_len, "the measure");
+        let mut storage = [0u8; 2048];
+        let mut slice = crate::tx_buf::SliceTxBuf::new(&mut storage);
+        let mut tx = crate::tx_buf::TxSink::over(&mut slice);
+        writer.encode_tx(&mut tx).expect("fits");
+        assert_eq!(slice_bytes(&slice), &generic[..generic_len]);
+    }
+
+    /// The responder's identity rides the envelope beside the QoS, and the direct path writes it:
+    /// the chain flag on each extension but the last, the zid at either end of its lengths, an
+    /// entity id past the width of a byte, for a Put with and without an encoding and for a Del.
+    #[test]
+    fn a_responder_is_written_directly_and_as_the_codec_writes_it() {
+        let big = [0xA5u8; 1000];
+        let responders: [Option<(&[u8], u32)>; 4] = [
+            None,
+            Some((&[1], 0)),
+            Some((&[1, 2, 3, 4], 5)),
+            Some((&[9u8; 16], 300)),
+        ];
+        let mut taken = 0usize;
+        for responder in responders {
+            for qos in [QosLevel::DEFAULT, QOS_DECLARE] {
+                for payload_len in [0usize, 1, 127, 128, 1000] {
+                    for (del, with_encoding) in [(false, false), (false, true), (true, false)] {
+                        let encoding = with_encoding.then_some(EncodingParts {
+                            packed_id: (5 << 1) | 1,
+                            schema: Some("v=1"),
+                        });
+                        direct_matches_generic(ReplyParts {
+                            rid: 7,
+                            keyexpr: "demo/a",
+                            responder,
+                            qos,
+                            kind: PartsKind::Reply {
+                                body: if del {
+                                    PartsBody::Del
+                                } else {
+                                    PartsBody::Put(&big[..payload_len])
+                                },
+                                encoding,
+                                timestamp: None,
+                                attachment: None,
+                                source_info: None,
+                            },
+                        });
+                        taken += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(taken, 4 * 2 * 5 * 3, "the matrix ran whole");
+    }
+
+    /// An Err is written directly too: its header with the encoding flag, the encoding, and its
+    /// payload, for every payload length a VLE changes width at, with the QoS and the responder.
+    #[cfg(feature = "query-reply-err")]
+    #[test]
+    fn an_err_is_written_directly_and_as_the_codec_writes_it() {
+        let big = [0x5Au8; 1000];
+        let encodings: [Option<(u32, Option<&str>)>; 3] =
+            [None, Some((5, None)), Some((70_000, Some("v=1")))];
+        let responders: [Option<(&[u8], u32)>; 2] = [None, Some((&[1, 2, 3, 4], 5))];
+        let mut taken = 0usize;
+        for encoding in encodings {
+            for qos in [QosLevel::DEFAULT, QOS_DECLARE] {
+                for responder in responders {
+                    for payload_len in [0usize, 1, 127, 128, 1000] {
+                        direct_matches_generic(ReplyParts {
+                            rid: 300,
+                            keyexpr: "demo/err",
+                            responder,
+                            qos,
+                            kind: PartsKind::Err {
+                                encoding,
+                                payload: &big[..payload_len],
+                            },
+                        });
+                        taken += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(taken, 3 * 2 * 2 * 5, "the matrix ran whole");
     }
 
     #[test]
