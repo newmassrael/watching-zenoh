@@ -295558,6 +295558,42 @@
         "Not run: the pico and heap images with smaller kernel heap pools (the ram cell's caveat), and the pico C ABI programs (step M5)."
       ]
     },
+    "Round 3836": {
+      "decision_summary": "The zenoh verdict's null side gains two database stream protocols from real implementations in containers on a bridge of their own, chosen because neither opens with GET, HTTP or a TLS ClientHello, so both reach the stream reader: Redis 7 (60 connections: a one-shot redis-cli, a pipelining client, a small redis-benchmark) and PostgreSQL 16 (24 connections: one-shot psql queries, a statement script, queries returning thousands of rows). No flow reads yes; three of PostgreSQL's read no and the rest stay undecided. Redis frames no unit and loses all 120 stream directions; PostgreSQL frames 531 units, all residual, and loses 48 directions. Both are measured into the weights: a unit read whole now weighs +3982 on the no sum (from +3858), a residual -8860, an undecoded -9365, a held framing +4032 yes and +7043 no. A unit read whole is now within 12 millibits of a broken SN step (-3994), so the ordered-fold test takes the length of its repeated-SN flow from the two weights.",
+      "changes_bullets": [
+        "`captures/corpus/`: `stack-redis` and `stack-postgres`, listed in `corpus.json5` and the README table; the corpus holds 42 files, all fixed points of the anonymiser.",
+        "`zenoh_evidence.rs`: two members of `measured::NULL` (Redis framing [0, 120]; PostgreSQL units [0, 531, 0], framing [0, 48]) and the five weights computed from them; `zenoh_corpus_tests.rs` pins the tallies (0, 0, 60) and (0, 3, 21).",
+        "`ordered_fold_tests.rs`: the Frame count of the repeated-SN flow follows from the unit and SN-break weights; the example sums follow in `session_table_tests.rs`, the C ABI test and `wz_dissect.h`; design note 6.1 and 6.2 follow."
+      ],
+      "verification_bullets": [
+        "Measured: Redis reads (0 yes, 0 no, 60 undecided), units [0, 0, 0], framing held 0 and lost 120; PostgreSQL reads (0, 3, 21), units [0, 531, 0], framing 0 and 48. The new weights were first computed offline with a port of the test's formulas, then confirmed by `model_weights_are_their_stated_probabilities`. wz-capture 1609 tests pass (6 ignored), wz-capi-dissect 227 and its C consumer 4 pass, clippy -D warnings on wz-capture is clean, and the corpus verifies as 42 fixed points.",
+        "The pre-push static gate array was run whole on the tree: all 120 pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "A unit read whole (+3982) is within 12 millibits of a broken SN step (-3994) on the no sum: one more null member with few units read whole raises it past the step, and the ordered-fold test then fails with a sentence instead of building a flow; whether a flow of valid units that repeats an SN should drift toward yes at all is the model's question and is not decided here. Zenoh clients of a release other than 1.10.1 and links other than loopback, one emulated lossy link and one Wi-Fi link, are still to measure."
+      ],
+      "publishable_decision_summary": "The zenoh verdict's null side gains two database stream protocols from real implementations in containers on a bridge of their own, chosen because neither opens with GET, HTTP or a TLS ClientHello, so both reach the stream reader: Redis 7 (60 connections: a one-shot redis-cli, a pipelining client, a small redis-benchmark) and PostgreSQL 16 (24 connections: one-shot psql queries, a statement script, queries returning thousands of rows). No flow reads yes; three of PostgreSQL's read no and the rest stay undecided. Redis frames no unit and loses all 120 stream directions; PostgreSQL frames 531 units, all residual, and loses 48 directions. Both are measured into the weights: a unit read whole now weighs +3982 on the no sum (from +3858), a residual -8860, an undecoded -9365, a held framing +4032 yes and +7043 no. A unit read whole is now within 12 millibits of a broken SN step (-3994), so the ordered-fold test takes the length of its repeated-SN flow from the two weights.",
+      "publishable_changes_bullets": [
+        "`captures/corpus/`: `stack-redis` and `stack-postgres`, listed in `corpus.json5` and the README table; the corpus holds 42 files, all fixed points of the anonymiser.",
+        "`zenoh_evidence.rs`: two members of `measured::NULL` (Redis framing [0, 120]; PostgreSQL units [0, 531, 0], framing [0, 48]) and the five weights computed from them; `zenoh_corpus_tests.rs` pins the tallies (0, 0, 60) and (0, 3, 21).",
+        "`ordered_fold_tests.rs`: the Frame count of the repeated-SN flow follows from the unit and SN-break weights; the example sums follow in `session_table_tests.rs`, the C ABI test and `wz_dissect.h`; design note 6.1 and 6.2 follow."
+      ],
+      "publishable_verification_bullets": [
+        "Measured: Redis reads (0 yes, 0 no, 60 undecided), units [0, 0, 0], framing held 0 and lost 120; PostgreSQL reads (0, 3, 21), units [0, 531, 0], framing 0 and 48. The new weights were first computed offline with a port of the test's formulas, then confirmed by `model_weights_are_their_stated_probabilities`. wz-capture 1609 tests pass (6 ignored), wz-capi-dissect 227 and its C consumer 4 pass, clippy -D warnings on wz-capture is clean, and the corpus verifies as 42 fixed points.",
+        "The pre-push static gate array was run whole on the tree: all 120 pass."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A unit read whole (+3982) is within 12 millibits of a broken SN step (-3994) on the no sum: one more null member with few units read whole raises it past the step, and the ordered-fold test then fails with a sentence instead of building a flow; whether a flow of valid units that repeats an SN should drift toward yes at all is the model's question and is not decided here. Zenoh clients of a release other than 1.10.1 and links other than loopback, one emulated lossy link and one Wi-Fi link, are still to measure."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
