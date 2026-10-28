@@ -488,7 +488,6 @@ const PEERS_REGION: Region = Region::default_south(WhatAmI::Peer);
 /// name a message from the node itself is routed under, so that no other face
 /// is mistaken for its sender. It is never registered in `faces`, and no
 /// transport face is given this id, which counts up from zero.
-#[cfg(test)]
 const LOCAL_FACE: FaceId = FaceId(u64::MAX);
 
 /// How a data message leaves this node: the reliability of the frame that carries
@@ -1013,10 +1012,11 @@ impl<T: std::ops::Deref<Target = Tables>> GatewayView<Zid> for OnTables<'_, T> {
 /// The pin's propagate loop folds `remote_subscribers_of` over every hat but
 /// the destination
 /// (`zenoh/src/net/routing/dispatcher/pubsub.rs` @ `hats[dst].propagate_subscriber(ctx.reborrow(), res.clone(), other_info);`),
-/// so "some holder outside `dst` has it" is the whole question. Two of wz's
-/// holders are not hats: the multicast group aggregate and the subscribers
-/// this router hosts. Both sit in no mesh, so neither is ever the destination,
-/// which is how the pin treats a multicast face and its own session face.
+/// so "some holder outside `dst` has it" is the whole question. One of wz's
+/// holders is not a hat: the multicast group aggregate. It sits in no mesh, so it
+/// is never the destination, which is how the pin treats a multicast face. The
+/// node's own session face is a hat's holder like any other since item 751 step
+/// 6e (the `Local` region's broker hat), where it was a third kind of holder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Holder {
     /// The hat of a region: a mesh hat's native sources, or a broker hat's
@@ -1024,8 +1024,6 @@ enum Holder {
     Hat(Region),
     /// The multicast group's subscriber aggregate.
     Group,
-    /// The subscribers this router hosts itself.
-    Host,
 }
 
 impl Holder {
@@ -1036,7 +1034,7 @@ impl Holder {
     fn region(self) -> Option<Region> {
         match self {
             Holder::Hat(region) => Some(region),
-            Holder::Group | Holder::Host => None,
+            Holder::Group => None,
         }
     }
 }
@@ -1801,11 +1799,6 @@ impl RouterDeclarationsView {
         let clients = client_keyexprs(tables.broker_hats().map(|hat| &hat.subs), |by_id| {
             by_id.values().cloned().collect()
         });
-        let hosted: Vec<String> = tables
-            .local_subscribers
-            .iter()
-            .map(|sub| sub.keyexpr.clone())
-            .collect();
         Self::bucket_by_tier(
             &tables,
             &tables
@@ -1817,7 +1810,6 @@ impl RouterDeclarationsView {
                 .map(|(region, hat)| (region, &hat.subs))
                 .collect::<Vec<_>>(),
             &clients,
-            &hosted,
         )
     }
 
@@ -1830,11 +1822,6 @@ impl RouterDeclarationsView {
         let clients = client_keyexprs(tables.broker_hats().map(|hat| &hat.qabls), |by_id| {
             by_id.values().map(|(keyexpr, _)| keyexpr.clone()).collect()
         });
-        let hosted: Vec<String> = tables
-            .local_queryables
-            .iter()
-            .map(|qabl| qabl.keyexpr.clone())
-            .collect();
         Self::bucket_by_tier(
             &tables,
             &tables
@@ -1846,7 +1833,6 @@ impl RouterDeclarationsView {
                 .map(|(region, hat)| (region, &hat.qabls))
                 .collect::<Vec<_>>(),
             &clients,
-            &hosted,
         )
     }
 
@@ -1881,7 +1867,6 @@ impl RouterDeclarationsView {
         let clients = client_keyexprs(tables.broker_hats().map(|hat| &hat.tokens), |by_id| {
             by_id.values().cloned().collect()
         });
-        // A node hosts no token on this plane, so the `Local` face has none to name.
         Self::bucket_by_tier(
             &tables,
             &tables
@@ -1893,7 +1878,6 @@ impl RouterDeclarationsView {
                 .map(|(region, hat)| (region, &hat.tokens))
                 .collect::<Vec<_>>(),
             &clients,
-            &[],
         )
     }
 
@@ -1965,8 +1949,8 @@ impl RouterDeclarationsView {
     /// (`docs/peer-region-hats.md`, section 12):
     ///
     /// - The NODE'S OWN face is a client of the `Local` region, so what the node
-    ///   hosts (`hosted`) is named among the `clients` under the node's own zid,
-    ///   as a client's declaration is
+    ///   hosts, held in that region's hat under [`LOCAL_FACE`], is named among the
+    ///   `clients` under the node's own zid, as a client's declaration is
     ///   (`zenoh/src/net/routing/hat/broker/pubsub.rs` @ `srcs.clients.push(face.zid);`).
     /// - Every entity a SOUTH region sourced (the leaf regions, `Local` included,
     ///   and a custom partition's subregions) also names the node's own zid in the
@@ -1981,7 +1965,6 @@ impl RouterDeclarationsView {
         routers: &[(Region, &LinkstatepeerInterest<A>)],
         peers: &[(Region, &LinkstatepeerInterest<B>)],
         clients: &HashMap<FaceId, HashSet<String>>,
-        hosted: &[String],
     ) -> Vec<(String, wz_session_core::adminspace::AdminSources)>
     where
         A: Clone,
@@ -2027,14 +2010,20 @@ impl RouterDeclarationsView {
                     .push(zid_to_zenoh_hex(zid.as_slice()));
             }
         }
+        let own = zid_to_zenoh_hex(tables.north_net().self_zid().as_slice());
         for (face, keys) in clients.iter() {
-            let Some(zid) = tables.faces.get(face).and_then(|f| f.peer_zid) else {
-                // A face whose handshake carried no routing zid contributes no
-                // SOURCE. Skipping is the honest answer: an entry naming no zid
-                // would claim a declaration nobody can be named for.
-                continue;
+            // The node's own face is held in no face table: its zid is the node's.
+            let hex = if *face == LOCAL_FACE {
+                own.clone()
+            } else {
+                let Some(zid) = tables.faces.get(face).and_then(|f| f.peer_zid) else {
+                    // A face whose handshake carried no routing zid contributes no
+                    // SOURCE. Skipping is the honest answer: an entry naming no zid
+                    // would claim a declaration nobody can be named for.
+                    continue;
+                };
+                zid_to_zenoh_hex(zid.as_slice())
             };
-            let hex = zid_to_zenoh_hex(zid.as_slice());
             for keyexpr in keys {
                 sourced_from_the_south.insert(keyexpr.clone());
                 by_key
@@ -2043,15 +2032,6 @@ impl RouterDeclarationsView {
                     .clients
                     .push(hex.clone());
             }
-        }
-        let own = zid_to_zenoh_hex(tables.north_net().self_zid().as_slice());
-        for keyexpr in hosted {
-            sourced_from_the_south.insert(keyexpr.clone());
-            by_key
-                .entry(keyexpr.clone())
-                .or_insert_with(empty)
-                .clients
-                .push(own.clone());
         }
         for keyexpr in &sourced_from_the_south {
             if let Some(sources) = by_key.get_mut(keyexpr) {
@@ -2172,6 +2152,10 @@ pub(crate) struct Tables {
     /// derive every other contributor uses rather than through a parallel path, and
     /// self is still never stored in either mesh's table.
     local_subscribers: Vec<HostedSubscriber>,
+    /// The id the next declaration of the node's own face gets in the `Local` hat's stores, which
+    /// is keyed by declaration id as a client's is. Counts from 1; only the node's own face uses
+    /// it, so it cannot meet the id a client chose.
+    next_hosted_id: u64,
     /// FUTURE-mode subscriber-interest store (R311y146) — which CLIENT faces
     /// declared a FUTURE (`f()`) subscriber `Interest`, and which
     /// `DeclareSubscriber`s wz has pushed back to them (zenoh's per-`FaceState`
@@ -2640,14 +2624,26 @@ impl<H> Hosted<H> {
 }
 
 /// A queryable HOSTED BY THIS ROUTER: its keyexpr, whether it answers completely, and its handler.
+///
+/// This is the callback of the node's own session, which the pin keeps in the session and not
+/// in its routing tables. The DECLARATION is the `Local` face's, in the `Local` region's broker
+/// hat under [`LOCAL_FACE`] and the `id` kept here (item 751, step 6e), so the fold of what the
+/// node advertises and the admin legs read one table for the node and for a client.
 struct HostedQueryable {
+    /// Read by the unregistration, which is test-only until step 7 gives it a caller.
+    #[cfg_attr(not(test), allow(dead_code))]
+    id: u64,
     keyexpr: String,
     complete: bool,
     handler: Arc<Hosted<HostedQueryHandler>>,
 }
 
-/// A subscriber HOSTED BY THIS ROUTER: its keyexpr (a pattern) and its handler.
+/// A subscriber HOSTED BY THIS ROUTER: its keyexpr (a pattern), its handler, and the id its
+/// declaration holds in the `Local` hat (see [`HostedQueryable`]).
 struct HostedSubscriber {
+    /// Read by the unregistration, which is test-only until step 7 gives it a caller.
+    #[cfg_attr(not(test), allow(dead_code))]
+    id: u64,
     keyexpr: String,
     handler: Arc<Hosted<HostedSubscriberHandler>>,
 }
@@ -2725,12 +2721,28 @@ impl Tables {
         self.broker_regions().map(|(_, hat)| hat)
     }
 
+    /// The hats of [`client_regions`](Self::client_regions).
+    fn client_hats(&self) -> impl Iterator<Item = &BrokerHat> {
+        self.client_regions().map(|(_, hat)| hat)
+    }
+
     /// Every broker hat with the region it serves, for a fan-out that has to
     /// scope its sends to the faces that hat owns.
     fn broker_regions(&self) -> impl Iterator<Item = (Region, &BrokerHat)> {
         self.hats
             .iter()
             .filter_map(|(region, hat)| hat.broker().map(|hat| (region, hat)))
+    }
+
+    /// The broker hats of the regions that hold CLIENT faces: every one but `Local`, whose
+    /// only face is the node's own session (item 751, step 6e). A fold that sends to a
+    /// client over a wire, or counts the clients a router has, is a fold over these; one
+    /// that asks what the node and its clients declare is a fold over
+    /// [`broker_regions`](Self::broker_regions), the node's own face included, as the pin's
+    /// is.
+    fn client_regions(&self) -> impl Iterator<Item = (Region, &BrokerHat)> {
+        self.broker_regions()
+            .filter(|(region, _)| *region != Region::Local)
     }
 
     /// The broker hat that OWNS a face placed in the leaf `region`: where that
@@ -3188,6 +3200,7 @@ impl RouterForwarder {
                 joined_links: HashMap::new(),
                 local_queryables: Vec::new(),
                 local_subscribers: Vec::new(),
+                next_hosted_id: 1,
                 future_subs: FutureSubStore::new(),
                 future_qabls: FutureQablStore::new(),
                 #[cfg(feature = "routing-token-tables")]
@@ -3848,7 +3861,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// fires its one-shot query, making that e2e a barrier rather than a race.
     pub fn queryables_seen(&self) -> usize {
         let client: usize = self
-            .broker_hats()
+            .client_hats()
             .map(|h| h.qabls.values().map(|m| m.len()).sum::<usize>())
             .sum();
         let mesh: usize = self.mesh_hats().map(|h| h.qabls.count()).sum();
@@ -3862,7 +3875,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// data e2e gate a publisher spawn on a router-CONFIRMED subscription rather than
     /// racing declare-propagation with a Put burst.
     pub fn client_subs_seen(&self) -> usize {
-        self.broker_hats()
+        self.client_hats()
             .map(|h| h.subs.values().map(|s| s.len()).sum::<usize>())
             .sum()
     }
@@ -3874,7 +3887,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// readiness barrier for a CLIENT's queryable must not count.
     #[cfg(test)]
     pub fn client_queryables_seen(&self) -> usize {
-        self.broker_hats()
+        self.client_hats()
             .map(|h| h.qabls.values().map(|m| m.len()).sum::<usize>())
             .sum()
     }
@@ -4147,18 +4160,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     .any(|ids| ids.values().any(|(k, _)| k == keyexpr))
                 || client_tokens_name(hat, keyexpr)
         });
-        in_mesh
-            || in_clients
-            || self
-                .tables
-                .local_queryables
-                .iter()
-                .any(|q| q.keyexpr == keyexpr)
-            || self
-                .tables
-                .local_subscribers
-                .iter()
-                .any(|s| s.keyexpr == keyexpr)
+        // The node's own declarations are the `Local` hat's, and `in_clients` folds it.
+        in_mesh || in_clients
     }
 
     /// R2348 — the EGRESS twin of
@@ -4253,15 +4256,21 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         self.tables.broker_hats()
     }
 
-    /// Every broker hat with the region it serves, for a fan-out that has to
-    /// scope its sends to the faces that hat owns.
-    fn broker_regions(&self) -> impl Iterator<Item = (Region, &BrokerHat)> {
-        self.tables.broker_regions()
+    /// The broker hats of the regions that hold client faces (see [`Tables::client_regions`]).
+    fn client_regions(&self) -> impl Iterator<Item = (Region, &BrokerHat)> {
+        self.tables.client_regions()
     }
 
-    /// Whether any broker hat holds a client subscription at all.
+    /// The hats of [`client_regions`](Self::client_regions).
+    fn client_hats(&self) -> impl Iterator<Item = &BrokerHat> {
+        self.tables.client_hats()
+    }
+
+    /// Whether any client face holds a subscription at all. The node's own session is not a
+    /// client here: what it hosts is delivered by its own dispatch, and a client's deferral is
+    /// counted only where a client was owed a copy.
     fn any_client_sub(&self) -> bool {
-        self.tables.broker_hats().any(|hat| !hat.subs.is_empty())
+        self.tables.client_hats().any(|hat| !hat.subs.is_empty())
     }
 
     /// The north region's graph (see [`Tables::north_net`]).
@@ -6648,7 +6657,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         //
         // R2873 (step 3d) — one fan-out per broker hat, each scoped to the
         // region that hat owns and reading that hat's own table.
-        for (region, hat) in self.broker_regions() {
+        for (region, hat) in self.client_regions() {
             let clients = client_route(
                 &hat.subs,
                 Cached {
@@ -7091,7 +7100,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             .hats
             .regions()
             .map(Holder::Hat)
-            .chain([Holder::Group, Holder::Host])
+            .chain([Holder::Group])
     }
 
     /// How many contributions `holder` has for the EXACT `keyexpr`: a mesh
@@ -7117,12 +7126,6 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 None => 0,
             },
             Holder::Group => usize::from(self.group_subscribes(keyexpr)),
-            Holder::Host => self
-                .tables
-                .local_subscribers
-                .iter()
-                .filter(|sub| sub.keyexpr == keyexpr)
-                .count(),
         }
     }
 
@@ -7253,12 +7256,6 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             Holder::Group => self.group_subs.read().iter().cloned().collect(),
             #[cfg(not(feature = "router-multicast-faces"))]
             Holder::Group => Vec::new(),
-            Holder::Host => self
-                .tables
-                .local_subscribers
-                .iter()
-                .map(|sub| sub.keyexpr.clone())
-                .collect(),
         }
     }
 
@@ -7338,7 +7335,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     Some(Hat::Broker(_)) => self.token_contributions(holder, keyexpr) > 0,
                     None => false,
                 },
-                Holder::Group | Holder::Host => false,
+                Holder::Group => false,
             })
     }
 
@@ -7376,7 +7373,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     .collect(),
                 None => Vec::new(),
             },
-            Holder::Group | Holder::Host => Vec::new(),
+            Holder::Group => Vec::new(),
         }
     }
 
@@ -7400,7 +7397,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     .sum(),
                 None => 0,
             },
-            Holder::Group | Holder::Host => 0,
+            Holder::Group => 0,
         }
     }
 
@@ -7517,13 +7514,6 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     .reduce(QueryableInfo::merge),
             },
             Holder::Group => None,
-            Holder::Host => self
-                .tables
-                .local_queryables
-                .iter()
-                .filter(|lq| lq.keyexpr == keyexpr)
-                .map(|lq| QueryableInfo::local(lq.complete))
-                .reduce(QueryableInfo::merge),
         }
     }
 
@@ -7546,12 +7536,6 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 None => Vec::new(),
             },
             Holder::Group => Vec::new(),
-            Holder::Host => self
-                .tables
-                .local_queryables
-                .iter()
-                .map(|lq| lq.keyexpr.clone())
-                .collect(),
         }
     }
 
@@ -7680,7 +7664,18 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         T: std::ops::DerefMut,
     {
         let snapshot = self.snapshot::<QablPlane>(keyexpr);
+        let id = self.tables.next_hosted_id;
+        self.tables.next_hosted_id += 1;
+        // The declaration is the node's own face's, in the `Local` hat, as a client's is in its
+        // region's (item 751, step 6e); the callback is the session's.
+        self.tables
+            .owner_broker_mut(Region::Local)
+            .qabls
+            .entry(LOCAL_FACE)
+            .or_default()
+            .insert(id, (keyexpr.to_string(), QueryableInfo::local(complete)));
         self.tables.local_queryables.push(HostedQueryable {
+            id,
             keyexpr: keyexpr.to_string(),
             complete,
             handler: Hosted::new(handler),
@@ -7715,7 +7710,15 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         T: std::ops::DerefMut,
     {
         let snapshot = self.snapshot::<SubPlane>(keyexpr);
+        let id = self.tables.next_hosted_id;
+        self.tables.next_hosted_id += 1;
+        self.tables.owner_broker_mut(Region::Local).subs.insert(
+            LOCAL_FACE,
+            id,
+            keyexpr.to_string(),
+        );
         self.tables.local_subscribers.push(HostedSubscriber {
+            id,
             keyexpr: keyexpr.to_string(),
             handler: Hosted::new(handler),
         });
@@ -7734,17 +7737,21 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         T: std::ops::DerefMut,
     {
         let snapshot = self.snapshot::<SubPlane>(keyexpr);
-        let mut hosted = false;
+        let mut withdrawn: Vec<u64> = Vec::new();
         self.tables.local_subscribers.retain(|sub| {
             if sub.keyexpr != keyexpr {
                 return true;
             }
             sub.handler.retract();
-            hosted = true;
+            withdrawn.push(sub.id);
             false
         });
+        let hat = self.tables.owner_broker_mut(Region::Local);
+        for id in &withdrawn {
+            hat.subs.remove_id(LOCAL_FACE, *id);
+        }
         self.repropagate(snapshot);
-        hosted
+        !withdrawn.is_empty()
     }
 
     /// Item 751, step 6 — take back the queryables this node hosts on `keyexpr`, the inverse of
@@ -7758,13 +7765,25 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         T: std::ops::DerefMut,
     {
         let snapshot = self.snapshot::<QablPlane>(keyexpr);
-        let before = self.tables.local_queryables.len();
-        self.tables
-            .local_queryables
-            .retain(|qabl| qabl.keyexpr != keyexpr);
-        let hosted = self.tables.local_queryables.len() != before;
+        let mut withdrawn: Vec<u64> = Vec::new();
+        self.tables.local_queryables.retain(|qabl| {
+            if qabl.keyexpr != keyexpr {
+                return true;
+            }
+            withdrawn.push(qabl.id);
+            false
+        });
+        let store = &mut self.tables.owner_broker_mut(Region::Local).qabls;
+        if let Some(by_id) = store.get_mut(&LOCAL_FACE) {
+            for id in &withdrawn {
+                by_id.remove(id);
+            }
+            if by_id.is_empty() {
+                store.remove(&LOCAL_FACE);
+            }
+        }
         self.repropagate(snapshot);
-        hosted
+        !withdrawn.is_empty()
     }
 
     /// R2393 — deliver a routed Put to any subscriber HOSTED BY THIS ROUTER whose
@@ -8076,12 +8095,17 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// Request's rid, which at a transit router IS the qid it stamped on the
     /// forward hop, so multi-hop route-back (`forward_response`) resolves it with
     /// no new pending state here.
+    ///
+    /// `close` says this branch is the whole route and so ends the query with its
+    /// `ResponseFinal`; a branch beside others (item 751, step 6e) only answers, and the
+    /// fan's last-out gate sends the one final when the others are done.
     fn dispatch_router_local_queryables(
         &self,
         inbound: FaceId,
         reliable: bool,
         request: &RequestOwned,
         keyexpr: &str,
+        close: bool,
     ) -> bool {
         let query_chunks: Vec<&str> = keyexpr.split('/').collect();
         let target = read_request_target(request);
@@ -8130,13 +8154,15 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 });
             }
         }
-        let final_msg = wz_session_core::response_final_build::build_response_final(
-            request.rid,
-            wz_session_core::declare_ext_qos::read_request_qos(request),
-        );
-        self.send_to_face(inbound, reliable, || {
-            NetworkMessage::ResponseFinal(final_msg.clone())
-        });
+        if close {
+            let final_msg = wz_session_core::response_final_build::build_response_final(
+                request.rid,
+                wz_session_core::declare_ext_qos::read_request_qos(request),
+            );
+            self.send_to_face(inbound, reliable, || {
+                NetworkMessage::ResponseFinal(final_msg.clone())
+            });
+        }
         true
     }
 
@@ -8364,6 +8390,21 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             ),
         };
 
+        // The node's own face, a branch of the route (item 751, step 6e) under every target. The
+        // pin picks a target's queryables hat by hat, `compute_final_route` being run once for
+        // each region (`zenoh/src/net/routing/dispatcher/queries.rs` @ `for dst in rtables.hats.regions() {`),
+        // so the `Local` hat answers for itself beside the best of every other region. It answers
+        // and does not close unless it is the whole route: the replies go out now and the final
+        // belongs to the fan's last-out gate, as for the peer plane's local queryables (R2902).
+        // The router's own pick above is still ONE winner across the meshes and the clients;
+        // that it is not the pin's per-region pick is a finding about this router, in the note.
+        let local_answered = self.dispatch_router_local_queryables(
+            inbound,
+            reliable,
+            request,
+            &keyexpr,
+            forwarded == 0,
+        );
         if forwarded == 0 {
             // §5.23 adminspace-router-linkstate — a GET whose only match is a
             // queryable HOSTED BY THIS router (self is excluded from the routing
@@ -8371,7 +8412,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             // the empty-route tail) self-dispatches to its handler, replying +
             // emitting its own closing Final. Mirrors the peer's
             // `finish_unrouted_request`. A non-admin empty route falls through.
-            if self.dispatch_router_local_queryables(inbound, reliable, request, &keyexpr) {
+            if local_answered {
                 return;
             }
             // zenoh route_query EMPTY route: no queryable matched, so PROMPT a
@@ -8598,7 +8639,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// hat's [`ClientQueryRoutes`] ([`client_query_route`]).
     fn client_query_legs(&self, keyexpr: &str, wire: bool) -> Vec<Arc<[ClientQueryable]>> {
         let names = |k: &str| self.names_a_resource(k);
-        self.broker_regions()
+        // The node's own session is answered by its own dispatch at the empty-route tail
+        // (`dispatch_router_local_queryables`), not forwarded to as a client over a wire.
+        self.client_regions()
             .map(|(_, hat)| {
                 client_query_route(
                     &hat.qabls,
@@ -8734,7 +8777,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let mut forwarded = 0;
         // R2873 (step 3d) — one fan-out per broker hat, scoped to its region.
         // R2911 — each hat's matching faces are its leg of this query's route.
-        for ((region, _hat), leg) in self.broker_regions().zip(clients) {
+        for ((region, _hat), leg) in self.client_regions().zip(clients) {
             if leg.is_empty() {
                 continue;
             }

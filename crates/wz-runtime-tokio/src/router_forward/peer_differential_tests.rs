@@ -1546,9 +1546,53 @@ fn queriers_declare_themselves() -> Vec<Step> {
     ]
 }
 
+/// A query that has both a queryable the node hosts and one a client declared (step 6e):
+/// the node's own face is a member of the route as a client is, so the hosted queryable
+/// answers beside the remote one and not only when nothing else does. Asked by a peer under
+/// each target, with the client answering.
+fn a_hosted_queryable_beside_a_client_s() -> Vec<Step> {
+    vec![
+        Step::Up(0, 0xAA, Wire::Peer),
+        Step::Up(1, 0xCC, Wire::Client),
+        Step::LinkBack(0, 0xAA, 5),
+        Step::Tick,
+        Step::NodeHostQueryable("both/**", true, "hosted"),
+        Step::Queryable(1, "both/**", true),
+        Step::QueryWith(
+            0,
+            21,
+            "both/x",
+            Asked {
+                target: Some(QueryTarget::All),
+                ..Asked::default()
+            },
+        ),
+        Step::Reply(1, "both/x", b"client"),
+        Step::Final(1),
+        Step::QueryWith(
+            0,
+            22,
+            "both/y",
+            Asked {
+                target: Some(QueryTarget::AllComplete),
+                ..Asked::default()
+            },
+        ),
+        Step::Reply(1, "both/y", b"client"),
+        Step::Final(1),
+        Step::Query(0, 23, "both/z"),
+        Step::Reply(1, "both/z", b"client"),
+        Step::Final(1),
+    ]
+}
+
 fn scenes() -> Vec<(&'static str, Vec<Step>)> {
     #[allow(unused_mut)]
     let mut scenes = vec![
+        (
+            "a hosted queryable beside a client's",
+            a_hosted_queryable_beside_a_client_s(),
+        ),
         ("queriers declare themselves", queriers_declare_themselves()),
         ("a node hosts", a_node_hosts()),
         ("a node publishes", a_node_publishes()),
@@ -2135,6 +2179,8 @@ fn as_the_peer_plane_names_the_node(sent: &Sent) -> Vec<Seen> {
         .collect()
 }
 
+const BEST_MATCHING_PER_HAT: &str =
+    "BestMatching asks the Local hat beside the other regions' best";
 const NODE_PUT_TO_OWN_SUBSCRIBER: &str = "the node's own Put reaches a subscriber it hosts";
 const QABL_DECLARED_AGAIN: &str = "a queryable declared again with what it already was";
 const GOSSIP_GRAPH: &str = "the graph a gossip peer keeps";
@@ -2149,6 +2195,7 @@ fn expected_reasons(mode: Mode) -> std::collections::BTreeSet<&'static str> {
         NODE_PUT_TO_CLIENT,
         NODE_PUT_TO_OWN_SUBSCRIBER,
         QABL_DECLARED_AGAIN,
+        BEST_MATCHING_PER_HAT,
     ]
     .into_iter()
     .collect();
@@ -2198,6 +2245,37 @@ fn explained(mode: Mode, d: &Divergence) -> Option<&'static str> {
             == as_the_peer_plane_names_the_node(&d.region_hat)
     {
         return Some(NODE_NAMED_BY_THE_MERGE);
+    }
+    // Under BestMatching the pin asks the `Local` hat's queryables beside the best of every
+    // other region, because it picks hat by hat
+    // (`zenoh/src/net/routing/dispatcher/queries.rs` @ `for dst in rtables.hats.regions() {`).
+    // `LinkstateForwarder` answers from its own queryable and forwards nothing when it has
+    // one, so the client that also declared the key is never asked and the query ends at once.
+    // The region-hat peer asks both: its answer goes out and the final waits for the client.
+    if d.plane == "data" {
+        let answers_from_the_client =
+            |sent: &Sent, want: fn(&Seen) -> bool| sent.values().flatten().any(want);
+        let is_the_client_asked = |s: &Seen| matches!(s, Seen::Request { target: None, keyexpr, .. } if keyexpr == "both/z");
+        match &d.step {
+            Step::Query(_, _, "both/z")
+                if answers_from_the_client(&d.region_hat, is_the_client_asked)
+                    && d.linkstate
+                        .values()
+                        .flatten()
+                        .any(|s| matches!(s, Seen::ResponseFinal { .. })) =>
+            {
+                return Some(BEST_MATCHING_PER_HAT);
+            }
+            Step::Reply(_, "both/z", _) | Step::Final(_)
+                if d.linkstate.is_empty() && d.region_hat.values().flatten().all(|s| {
+                    matches!(s, Seen::ResponseFinal { .. })
+                        || matches!(s, Seen::Response { payload: Some(p), .. } if p == b"client")
+                }) && !d.region_hat.is_empty() =>
+            {
+                return Some(BEST_MATCHING_PER_HAT);
+            }
+            _ => {}
+        }
     }
     // A Put of the node's own session reaches the subscribers the same session
     // hosts unless it was sent to remote destinations only

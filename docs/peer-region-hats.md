@@ -620,7 +620,25 @@ The structure that follows, in the order it is built:
   advertises, the client delivery and the admin legs read one table for the node's
   own declarations and for a client's, as the pin does, and the `host` contributors
   of the fold (`local_subscribers`, `local_queryables`) go. The output of 6d does
-  not move; the gates hold it.
+  not move; the gates hold it. Landed, in two parts:
+  - **The declarations.** The node's subscriptions and queryables are held by the
+    `Local` broker hat under `LOCAL_FACE`, keyed by declaration id as a client's are.
+    `Holder::Host` and its eight arms are gone: the fold reads the hat. The admin
+    legs name the face by the node's zid. What the session does with a Put or a Query
+    addressed to it stays the session's callbacks (`local_subscribers`,
+    `local_queryables`), which are kept for delivery only, as the pin keeps them in the
+    session and not in its tables. The folds that mean "the clients a router has" or
+    "who a wire send reaches" read `client_regions`, every region but `Local`.
+  - **The query route.** The node's face is a branch of every query, as it was never
+    before: the router answered from its hosted queryables only when nothing else was
+    routed to. It now answers beside the others and closes the query only when it is the
+    whole route; under `All` and `AllComplete` the two planes agree on the new scene
+    (a hosted queryable and a client's on one key). Under BestMatching the planes
+    differ, and the pin says which is right: it computes the final route region by
+    region, `for dst in rtables.hats.regions()` calling `compute_final_route` for each, so the `Local` hat answers
+    for itself beside the best of every other region. `LinkstateForwarder` answers from
+    its own queryable and asks no one else, and the gate records that as its departure
+    (`BEST_MATCHING_PER_HAT`).
 
 The gate's reason `HOSTED_IN_ADMIN_LEGS` is therefore not a standing allowance: at
 6d it is replaced by the two rules above, graded on the region-hat forwarder
@@ -628,6 +646,17 @@ against the pin, and the `LinkstateForwarder` side is a departure recorded as th
 others are (the first rule missing for a hosted declaration).
 
 ## 13. Open
+
+- **The router's BestMatching is one winner across the meshes and the clients; the
+  pin's is one for each region.** Step 6e read `compute_final_route` for the `Local`
+  hat and found that the pin 1.10.1 runs it once for every hat and merges the
+  routes, where `best_query_winner` takes the globally nearest complete queryable
+  and forwards to that one (its comment cites a union route sorted by distance, which
+  is the shape of an earlier layout). A router with a complete queryable in the
+  router region and another in the client region forwards the query to one of them
+  and the pin forwards it to both. It is the router's, was not introduced here, and
+  changes what every router with several regions sends; it needs its own step with its
+  own gate, and is recorded and not fixed here.
 
 - The size of step 1's list is unknown until it is made, and the number of
   rounds after it follows from it. The router's own program ran from round 2865
