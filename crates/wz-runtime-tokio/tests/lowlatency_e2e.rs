@@ -395,7 +395,7 @@ async fn a_lean_unit_is_read_in_place_and_handed_over_as_the_copying_path_reads_
                 &actions,
                 &mut engine,
                 &mut record,
-                &mut |event| match event {
+                &mut |event: IterationEvent<'_>| match event {
                     IterationEvent::InPlace(_) => {
                         handed += 1;
                         lent_puts += 1;
@@ -455,7 +455,7 @@ async fn a_lean_unit_is_read_in_place_and_handed_over_as_the_copying_path_reads_
             &actions,
             &mut engine,
             &mut record,
-            &mut |event| match event {
+            &mut |event: IterationEvent<'_>| match event {
                 IterationEvent::InPlace(lent) => got.push(
                     lent.push()
                         .expect("only Puts and an OAM were encoded")
@@ -479,7 +479,13 @@ async fn a_lean_unit_is_read_in_place_and_handed_over_as_the_copying_path_reads_
 
     // A KeepAlive is not a lean batch: the copying path decodes it.
     let keep_alive = [wire_const::T_MID_KEEP_ALIVE];
-    let path = dispatch_datagram(&keep_alive, &actions, &mut engine, &mut record, &mut |_| {});
+    let path = dispatch_datagram(
+        &keep_alive,
+        &actions,
+        &mut engine,
+        &mut record,
+        &mut |_: IterationEvent<'_>| {},
+    );
     assert_eq!(
         path,
         DatagramPath::Copied(wz_session_core::drive::CopyReason::NotAFrame)

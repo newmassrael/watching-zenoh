@@ -443,7 +443,10 @@ impl Pair {
         let mut established = false;
         for _ in 0..64 {
             runtime.run_until_idle();
-            assert!(initiator.step(&mut |_| {}).is_none(), "the initiator ended");
+            assert!(
+                initiator.step(&mut |_: IterationEvent<'_>| {}).is_none(),
+                "the initiator ended"
+            );
             assert!(acceptor.step(&mut on_event).is_none(), "the acceptor ended");
             if acceptor_actions.is_established() {
                 established = true;
@@ -454,7 +457,7 @@ impl Pair {
         // The initiator has nothing more to say; settle whatever the last turn
         // left in flight so the measured iterations start from a quiet link.
         for _ in 0..4 {
-            assert!(initiator.step(&mut |_| {}).is_none());
+            assert!(initiator.step(&mut |_: IterationEvent<'_>| {}).is_none());
             assert!(acceptor.step(&mut on_event).is_none());
         }
 
