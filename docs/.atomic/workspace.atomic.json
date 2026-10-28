@@ -295374,6 +295374,42 @@
         "Read the first hosted run for the router query legs: a router with a queryable in more than one region now forwards a BestMatching query to one in each, where it forwarded to one, which a test or an end-to-end leg written against the old rule could show. Step 7 is next: run_peer takes the region-hat forwarder, LinkstateForwarder is retired with its tests moved, --gateway-south is accepted on --peer, the config key is honoured with the census pins, the test-only surfaces of steps 1, 5 and 6 become public, the three e2e files that pin clients empty for a hosted declaration change to {\"routers\":[],\"peers\":[<zid>],\"clients\":[<zid>]}, the two bare declarations of run_peer become a registration with a no-op handler, and wz_peer_interest_pending_gc_pico_interop moves. Open from before: a current subscriber Interest from a north peer, and a router node's south peer region relaying nothing between link-state peers."
       ]
     },
+    "Round 3831": {
+      "decision_summary": "The zenoh side of the verdict's corpus gains four more releases, captured from the upstream eclipse/zenoh images pulled for the purpose: a 1.10.0, 1.9.0, 1.8.0 and 1.7.2 router in a container on the host network, with the 1.10.1 publisher and subscriber as clients, over TCP and UDP unicast from before the first Init, eight files. Every one of the 16 new flows reads yes, so the reader's version header, Init roles, cookie echo and framing hold across the releases from 1.7.2 to 1.10.1 (and 1.5.0 before). The zenoh counts grow, units 3062 to 3594, framing 268 to 284, cookie and roles 264 to 280, versions 528 to 560, and the bounds they give shrink: the handshake violations weigh more against a flow (cookie differing -6554, Inits of one kind -5554, another version -7545), a residual or undecoded unit -10229 on the yes sum, and a lost framing -6574, while the confirming outcomes move by at most one millibit. The clients are all 1.10.1; a client of another release is not yet captured.",
+      "changes_bullets": [
+        "`captures/corpus/`: `zenoh-v1-10-0`, `-v1-9-0`, `-v1-8-0` and `-v1-7-2`, each `tcp-full` and `udp-full`, listed in `corpus.json5` and the README table; the corpus holds 40 files, all fixed points of the anonymiser.",
+        "`zenoh_evidence.rs`: the five zenoh counts of `measured` and the eleven weights computed from them, with their doc comments; `zenoh_corpus_tests.rs` pins the eight tallies at 2 yes flows each.",
+        "The example sums follow in `session_table_tests.rs`, the C ABI test and `wz_dissect.h`; design note 6.2 follows in its counts, its table and its open list."
+      ],
+      "verification_bullets": [
+        "Measured: the eight files read (2 yes, 0 no, 0 undecided) each; the zenoh counts re-measured by the corpus test. The new weights were first computed offline with a port of the test's own formulas, which reproduced every old weight from the old counts, then confirmed by `model_weights_are_their_stated_probabilities`. wz-capture 1609 tests pass (6 ignored), wz-capi-dissect 227 and its C consumer 4 pass, clippy -D warnings on wz-capture is clean, and the corpus verifies as 40 fixed points.",
+        "The pre-push static gate array was run whole on the tree: all 120 pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "Zenoh clients of a release other than 1.10.1, zenoh versions beyond 1.10.1 once a newer one is published, and links other than loopback, one emulated lossy link and one Wi-Fi link, are still to measure; the null framing still rests on two protocols (MQTT, and HTTP opening with another method)."
+      ],
+      "publishable_decision_summary": "The zenoh side of the verdict's corpus gains four more releases, captured from the upstream eclipse/zenoh images pulled for the purpose: a 1.10.0, 1.9.0, 1.8.0 and 1.7.2 router in a container on the host network, with the 1.10.1 publisher and subscriber as clients, over TCP and UDP unicast from before the first Init, eight files. Every one of the 16 new flows reads yes, so the reader's version header, Init roles, cookie echo and framing hold across the releases from 1.7.2 to 1.10.1 (and 1.5.0 before). The zenoh counts grow, units 3062 to 3594, framing 268 to 284, cookie and roles 264 to 280, versions 528 to 560, and the bounds they give shrink: the handshake violations weigh more against a flow (cookie differing -6554, Inits of one kind -5554, another version -7545), a residual or undecoded unit -10229 on the yes sum, and a lost framing -6574, while the confirming outcomes move by at most one millibit. The clients are all 1.10.1; a client of another release is not yet captured.",
+      "publishable_changes_bullets": [
+        "`captures/corpus/`: `zenoh-v1-10-0`, `-v1-9-0`, `-v1-8-0` and `-v1-7-2`, each `tcp-full` and `udp-full`, listed in `corpus.json5` and the README table; the corpus holds 40 files, all fixed points of the anonymiser.",
+        "`zenoh_evidence.rs`: the five zenoh counts of `measured` and the eleven weights computed from them, with their doc comments; `zenoh_corpus_tests.rs` pins the eight tallies at 2 yes flows each.",
+        "The example sums follow in `session_table_tests.rs`, the C ABI test and `wz_dissect.h`; design note 6.2 follows in its counts, its table and its open list."
+      ],
+      "publishable_verification_bullets": [
+        "Measured: the eight files read (2 yes, 0 no, 0 undecided) each; the zenoh counts re-measured by the corpus test. The new weights were first computed offline with a port of the test's own formulas, which reproduced every old weight from the old counts, then confirmed by `model_weights_are_their_stated_probabilities`. wz-capture 1609 tests pass (6 ignored), wz-capi-dissect 227 and its C consumer 4 pass, clippy -D warnings on wz-capture is clean, and the corpus verifies as 40 fixed points.",
+        "The pre-push static gate array was run whole on the tree: all 120 pass."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Zenoh clients of a release other than 1.10.1, zenoh versions beyond 1.10.1 once a newer one is published, and links other than loopback, one emulated lossy link and one Wi-Fi link, are still to measure; the null framing still rests on two protocols (MQTT, and HTTP opening with another method)."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
