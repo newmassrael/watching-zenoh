@@ -57,7 +57,7 @@ what that means for each instrument:
 | `feature-model` (ADR 0057) | The cargo features of a crate as a model a statechart may gate on with `sce:requires`. Generated from `Cargo.toml` by `scripts/lib/sce_feature_model.py`; wz does not edit it. | Each capability below is a cargo feature of `wz-session-core` or `wz-node-time`; the statecharts gate their states and transitions on it, so a build without a capability has a machine without those states. |
 | `statechart` with host-raised events | A lifecycle whose duties (`sce:action effect="duty"`) the host performs and whose deadlines the host raises. This is how the session machines already work (`init_ack.timeout`, `link.lost`). | Clock quality (M1) and supervision (M3). |
 | `timer` | One PERIODIC event with `<sce:period>`, `<sce:reset-on>` and `<sce:cancel-on state-exit>`. No one-shot (`SCE_FORGE.md` 4.10). The period is a build-time constant. | The cadence of the resource sampler (M4). NOT the supervision deadline: that is chosen by the application when it starts the supervision, at run time. |
-| `queue` | Bounded FIFO hand-off between contexts, with `producers`, `consumers` and `progress` declared. Documents no policy for a full queue. | The shape of the event ring (M2), except for its full policy: see the request below. |
+| `queue` | Bounded FIFO hand-off between contexts, with `producers`, `consumers` and `progress` declared. Documents no policy for a full queue. | Not the event ring (M2): the ring is a broadcast with overwrite, which a queue is not (see the limit below). |
 | `buffer-pool`, `bounded-collection` | Sized pools and tables; SCE emits the numbers (`SLOT_COUNT`, `SLOT_SIZE`). | The numbers of the plane (sizes of the ring and of the snapshot), as the session-slot pool states its own. |
 | `algorithm` | Pure functions generated for several backends, under an integer contract: an overflow or an out-of-range read is a named failure and never a value. | The deadline comparison, once, for the Rust and C11 backends. |
 | `stdlib` (`sce:std/...`) | Algorithms SCE ships and tests against reference implementations. Read, not assumed: `merge/hlc_send`, `hlc_receive`, `hlc_compare`, `hlc_within_drift` (Kulkarni et al. 2014; wall time in milliseconds as `int64`, a `uint32` counter, a `uint64` node id) and `rate/gcra_admit` (a generic cell rate limiter). | `hlc_within_drift` is the drift bound of M1, as it is written. The HLC itself stays `uhlc` on the wire (below). `gcra_admit` is the candidate for a querier quota that is a rate and not a count. |
@@ -70,10 +70,17 @@ Two honest limits, so that nothing is built on a feature SCE does not have:
   session machines take theirs. The timer kind is right for the sampler, whose cadence is a
   build-time number: that file is generated from the limit by a script with a `--check`, like the
   feature model, so Kconfig still states the period.
-* **The queue kind has no full policy.** The ring overwrites the oldest record where a queue would
-  refuse the newest. Expressing that is a request to the SCE repository (SCE is read-only from
-  wz): an `sce:on-full` element with `reject` and `overwrite-oldest`. Until it exists the ring is
-  a Rust type with a model test, as `DeliveryLane` is, and the SCXML states its sizes only.
+* **The queue kind has no full policy, and no attribute would give the ring.** The ring overwrites
+  the oldest record where a queue refuses the newest. SCE was asked and answered that no document,
+  schema or code states a full policy (a push returns `Full`, and that is all), that nothing is
+  decided, and that one attribute would not be enough: a queue pop consumes, while every reader of
+  the ring keeps its own cursor and reads every record (broadcast), so the ring needs per-reader
+  cursors and a way for a late reader to learn which span was overwritten; overwriting makes the
+  producer touch the consumer side, which reopens the declared progress guarantee and the
+  linearizability and model-checker work; so it is closer to a new kind than to a queue option.
+  That is SCE's owner's decision (extend the queue, add a kind, or leave the ring a wz library).
+  So the ring is a Rust type with a model test, as `DeliveryLane` is, and the SCXML states at most
+  its sizes.
 
 ## The switches
 
@@ -176,8 +183,9 @@ where records were lost, and no two live records overlap. A concurrency model ch
 workspace takes it, otherwise a stress run on the build host) for the single-producer,
 many-reader publication. A link-level check that the off build has no symbol.
 
-**SCE.** The queue kind states the ring's sizes and its producers and consumers; `sce:on-full` is
-the request above.
+**SCE.** The ring is not a queue (see above), so it is not declared as one. Once the contract (read
+semantics, loss reporting, single-producer assumption) is fixed by the model test, that text is
+what SCE asked to receive as the ground for reopening the question.
 
 ## M3 Supervision: a deadline the application feeds
 
@@ -233,7 +241,7 @@ sampler symbol.
 |---|---|---|
 | 1 | `ClockSource`, `ClockQuality` machine, `NodeHlc<C>` over a source, `clock-source` and its limits | The stamp and wire tests pass on the tokio host and on the cooperative engine; slot bytes unchanged off; the `algorithm` for the comparison is generated and used by Rust. |
 | 2 | Clock registration in the C ABIs | `capi-c` ABI revision and the pico export pins updated in the same change; the drop-in leg stays green. |
-| 3 | `EventRing` and the `log` sink | The model test and the concurrency check pass; off build has no symbol; the SCE request for `sce:on-full` is filed. |
+| 3 | `EventRing` and the `log` sink | The model test and the concurrency check pass; off build has no symbol; the ring contract is written down and sent to SCE. |
 | 4 | Supervision machine and its checkpoints | Conformance over every event order; the cooperative engine hosts it with no task. |
 | 5 | Snapshot and its generated timer | Histogram test against the reference; admin-space and dissector read it. |
 | 6 | Cross-instrument: events carry M1 time, supervision expiry writes an event, the snapshot reads the ring's loss count | One integration test per link. |
@@ -252,14 +260,13 @@ reads it.
 3. **Loss accounting in the ring.** Sequence gaps (recommended), or a counter as well.
 4. **Whether a missed `synchronized-only` stamp is an error to the sender or a silent omission.**
    Silent is upstream's behaviour for a missing timestamp, and the recommended default.
-5. **The SCE request.** What wz needs from SCE is one thing, and nothing blocks on it:
-   `sce:on-full` (`reject`, `overwrite-oldest`) on the `queue` kind. SCE's documents for the kind
-   (`SCE_FORGE.md`, the queue admission note, `schemas/sce-forge-ext.xsd`) state no policy for a
-   full queue, and a search for one found none. The ring is built as a Rust type first, so the
-   request is for the day the ring should be an SCE artifact and not for the day it works.
-   Whether to file it now is the owner's call; SCE is read-only from wz, and this repository
-   records no channel for requests, so the text is written here and handed to whoever owns SCE.
-   Two things were considered and need no request: a one-shot timer (the supervision deadline is
+5. **The SCE request: asked, answered, and now SCE's decision.** wz asked for `sce:on-full`
+   (`reject`, `overwrite-oldest`) on the `queue` kind. SCE answered that it has no such policy and
+   no decision, that a queue option does not fit a broadcast ring with per-reader cursors, and
+   that the choice (extend the queue, add a ring kind, or keep the ring a wz library) belongs to
+   SCE's owner; a new kind must pass SCE's admission axes, where one consumer is a weak case for
+   reuse. Nothing in wz waits on it: the ring is a Rust type first. wz owes SCE the written ring
+   contract after step 3. Two things were considered and need no request: a one-shot timer (the supervision deadline is
    a duty the host raises, as the session machines' are) and a build-time parameter for the
    sampler's period (the generated-SCXML-with-`--check` pattern the feature model already uses).
    A native build-time parameter would remove the generator and is worth asking for, but it is a
