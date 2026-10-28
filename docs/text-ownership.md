@@ -77,6 +77,19 @@ carries about 6 KB of C library code wz does not, which is why the difference is
   bytes (the main frame 1,792 to 1,256). On the kit the get image's stack reading fell 440 bytes;
   the others did not move. The lesson, in the shape of the first not-taken lever below: a generic
   function with many callers is a copy for each, and the optimizer shares it only when it is small.
+- TAKEN: the session's link driver named by its type. The session read its driver through a trait
+  object (`dyn BoxedLinkDriver`) on every image, so each call to the link was a register call the
+  optimizer could not see through, and the transmit lease, the session slot and the pump carried that
+  object type through every layer. `SessionRuntime::Driver` is now an associated type: the run-time
+  profiles (tokio, and the coop runtime by default) keep the trait object, and the fixed-memory
+  profile, whose stack the Kconfig choice names, passes the concrete driver down, so the calls into
+  the link are direct calls and the generic code is one copy for the one driver. The fixed image fell
+  1,704 bytes of text, the batching image 2,280 and the get image 1,808; the register calls on the
+  fixed path fell 12 to 9. On the kit the stack peaks of the fixed (5,904) and batching (5,908) images
+  and the query's in-to-out time (41.3 us, noise 0.6 to 1.2) did not move, and the get image's peak
+  fell 48 bytes. The worst chain read by `stack_frame_gate.py` fell 5,512 to 5,480 (fixed) and
+  5,520 to 5,480 (batching); it is a reading, not a bound: it follows direct calls only, so a callee
+  behind a register call is not on it (the connect manager's trait object above hid one in `ask`).
 - NOT TAKEN, measured: taking `judge_ext_chain`'s two helpers out of line (7 instances) moved the
   text by +16 bytes; the link-time optimizer already shares them.
 - `wz_session_core` is a long tail (525 symbols in a build without LTO, none over 1.6 KB) and the
