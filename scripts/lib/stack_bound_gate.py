@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""The stack bound of a fixed-memory image, with the calls through a register followed.
+"""R3847 (no register item) -- the stack bound of a fixed-memory image, with the calls through a register followed.
 
 `stack_frame_gate.py` reads the worst chain of DIRECT calls, which is a reading and not a bound: a call
 through a register (a trait object, a function pointer, a C callback) hides its callee's frame from it,
