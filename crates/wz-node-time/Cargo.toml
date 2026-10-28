@@ -10,7 +10,7 @@
 # first and, for a while, the only host; an engine that is not the tokio one (the cooperative
 # engine behind the pico C ABI) needs the same node clock and the same stamp rules, and linking the
 # tokio crate for them is what its size gate refuses. So it is here, with no runtime in it: `std`
-# for `SystemTime`, `uhlc` (zenoh's own crate, `no_std`) for the HLC, and the session core's types.
+# for `SystemTime`, the session core's clock arithmetic for the HLC, and the session core's types.
 #
 # `rlib` only: a Rust-internal seam, like `wz-host-net` and `wz-ext-pubsub`.
 
@@ -34,7 +34,7 @@ default = []
 # The node clock is a Hybrid Logical Clock (zenoh's `Option<Arc<HLC>>` on the Runtime). Off, a node
 # holds none: `NodeHlc` is zero-sized, nothing stamps, and every consumer falls back to the wall
 # clock, which is zenoh's own `None` arm. The tokio runtime's feature of the same name forwards here.
-time-hlc = ["dep:uhlc"]
+time-hlc = []
 # The forward-path stamp (`NodeHlc::treat_timestamp`) works on a Push, so it needs the Push codec.
 codec-push = ["wz-codecs/codec-push", "wz-session-core/codec-push"]
 # The send-side gate `set_push_timestamp` routes through: with it off a forward stamp is a
@@ -47,9 +47,11 @@ pubsub-timestamp = ["wz-session-core/pubsub-timestamp"]
 wz-session-core = { path = "../wz-session-core", default-features = false, features = ["alloc"] }
 # The node's role, which the per-role switch reads.
 wz-codecs = { path = "../wz-codecs", default-features = false }
-# zenoh's own Hybrid Logical Clock crate, at the pin zenoh uses, with its `std` feature off: the
-# physical clock is injected, so the crate needs none of what that feature brings.
-uhlc = { version = "0.8", default-features = false, optional = true }
+[dev-dependencies]
+# zenoh's own Hybrid Logical Clock crate, at the pin zenoh uses. The node clock is no longer built
+# on it (`wz_session_core::hlc` is), and this is the reference that clock is held to: the
+# differential test in `tests/` drives both over the same random clock traces.
+uhlc = { version = "0.8", default-features = false }
 
 [lints]
 workspace = true

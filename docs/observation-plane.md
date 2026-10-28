@@ -142,14 +142,18 @@ timestamp, so the reject path allocates.
   time part, the stamp is that word, otherwise the last stamp plus one; and absorbing a remote
   stamp takes the larger of the reading, the remote time and the last stamp, refusing a remote
   time more than the bound ahead of the reading. The state is one `AtomicU64` advanced by
-  compare-and-swap, so no lock is held and a refusal allocates nothing. `uhlc` is not removed
-  from the build: it becomes the REFERENCE the core is tested against, over random clock traces
-  that step back, freeze and jump, and the two must agree on every stamp and every refusal. A
-  reading that moves more than `CLOCK_MAX_FORWARD_STEP_MS` past the last stamp is refused and
-  counted, which is zenoh's own drift check (`uhlc`'s `max_delta`) and is the answer to an
-  external clock that steps. Superior only where measured: the allocation-free reject path and
-  the lock-free state are read from the code, and the cost of a stamp is compared with `uhlc`'s
-  in a test before the core replaces it.
+  compare-and-swap, so no lock is held and a refusal allocates nothing. `uhlc` leaves the
+  production build (landed, step 1b): it is a dev-dependency, the REFERENCE the core is tested
+  against over random clock traces that step back, freeze and jump, and the two must agree on
+  every stamp and every refusal. A reading that moves more than `CLOCK_MAX_FORWARD_STEP_MS` past
+  the last stamp is refused and counted, which is zenoh's own drift check (`uhlc`'s `max_delta`)
+  and is the answer to an external clock that steps. Measured before the swap (release, build
+  machine, one clock read per stamp): one thread 15 ns for both, four threads 29 ns per stamp for
+  the core against 52 ns for `uhlc`, a refused remote stamp 13 ns against 78 ns. The one-thread
+  parity is the clock read; the gain is under contention and on refusal. Two behaviours changed
+  and are documented where they happen: a source with no date stamps nothing (`uhlc`'s clock
+  could not say so), and the bound reads `UHLC_MAX_DELTA_MS` itself, since the crate that read it
+  is no longer in the path.
 * `clock-quality-stamping = synchronized-only` makes a node with no good clock stamp nothing and
   say so, instead of stamping with a time it does not trust. The default stamps, as a node does
   today.
@@ -260,7 +264,7 @@ sampler symbol.
 
 | Step | Builds | Done when |
 |---|---|---|
-| 1 | `HlcCore` over `EpochSource` tested against `uhlc`, `ClockQuality` machine, `NodeHlc` on the core, `clock-source` and its limits | The stamp and wire tests pass on the tokio host and on the cooperative engine; slot bytes unchanged off; the `algorithm` for the comparison is generated and used by Rust. |
+| 1 | `HlcCore` over `EpochSource` tested against `uhlc` (done), `NodeHlc` on the core (done), `ClockQuality` machine, `clock-source` and its limits | The stamp and wire tests pass on the tokio host and on the cooperative engine; slot bytes unchanged off; the `algorithm` for the comparison is generated and used by Rust. |
 | 2 | Clock registration in the C ABIs | `capi-c` ABI revision and the pico export pins updated in the same change; the drop-in leg stays green. |
 | 3 | `EventRing` and the `log` sink | The model test and the concurrency check pass; off build has no symbol; the ring contract is written down and sent to SCE. |
 | 4 | Supervision machine and its checkpoints | Conformance over every event order; the cooperative engine hosts it with no task. |

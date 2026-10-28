@@ -19,6 +19,18 @@
 //! uniqueness guarantee rests on. This module is that deferred promotion: ONE
 //! clock per node, borrowed by every consumer.
 //!
+//! ## The arithmetic is wz's, the rules are `uhlc`'s
+//!
+//! The clock is [`wz_session_core::hlc::Hlc`] over an `EpochSource`, not a `uhlc::HLC`. It is
+//! `uhlc`'s stamp and absorb rules, held to `uhlc` by a differential test over random clock
+//! traces, in one atomic word. Measured on the build machine (release, one stamp per call): a
+//! single thread stamps in the same time as `uhlc` (15 ns, nearly all of it the clock read), four
+//! threads stamp in 29 ns each where `uhlc`'s lock costs 52 ns, and a refused remote stamp costs
+//! 13 ns where `uhlc` costs 78 ns because it formats a message that nobody here reads. Two
+//! behaviours differ and are stated where they happen: a source that cannot say what time it is
+//! stamps nothing (`uhlc`'s clock had no way to say so), and the bound reads `UHLC_MAX_DELTA_MS`
+//! itself since the crate that read it is no longer in the path.
+//!
 //! ## The zenoh shape this mirrors
 //!
 //! zenoh builds the node clock once, in the Runtime, and hands `Arc` clones out:
@@ -216,21 +228,54 @@ pub enum TimestampVerdict {
 }
 
 /// The clock plus the identity its stamps carry. Held behind one `Arc` so a
-/// clone cannot separate the two — the `uhlc::ID` inside `hlc` is DERIVED from
-/// `zid`, and a stamp pairing one node's time word with another's zid would be
-/// the same uniqueness break this module exists to remove.
+/// clone cannot separate the two: a stamp pairing one node's time word with
+/// another's zid would be the same uniqueness break this module exists to remove.
 #[cfg(feature = "time-hlc")]
 struct NodeClock {
-    hlc: uhlc::HLC,
+    hlc: wz_session_core::hlc::Hlc<NodeEpoch>,
     /// This node's zid, as `TimestampHint::zid` carries it on every stamp.
     zid: Vec<u8>,
 }
 
+/// The time source a node's clock reads, behind a pointer so the node can be handed a source other
+/// than the system clock (the application's own clock, or a frozen one in a test) without the
+/// type of the clock changing.
+#[cfg(feature = "time-hlc")]
+struct NodeEpoch(Box<dyn wz_session_core::epoch::EpochSource + Send + Sync>);
+
+#[cfg(feature = "time-hlc")]
+impl wz_session_core::epoch::EpochSource for NodeEpoch {
+    fn try_since_epoch(
+        &self,
+    ) -> Result<wz_session_core::epoch::SinceEpoch, wz_session_core::epoch::EpochUnavailable> {
+        self.0.try_since_epoch()
+    }
+}
+
+/// How far ahead of the clock a remote timestamp may be before the clock refuses it, in
+/// milliseconds: `uhlc`'s `DEFAULT_DELTA_MS`, which zenoh's node clock runs with.
+#[cfg(feature = "time-hlc")]
+const DEFAULT_MAX_DELTA_MS: u64 = 500;
+
+/// The bound, from the value of `UHLC_MAX_DELTA_MS` (or its absence). `uhlc` reads that variable
+/// on its `std` profile and a zenoh node therefore honours it; the same variable moves this
+/// node's bound, so an operator's setting means the same on both. A value that is not a whole
+/// number of milliseconds is ignored in favour of the default: refusing to start a node over a
+/// clock tolerance would be worse than running with zenoh's own.
+#[cfg(feature = "time-hlc")]
+fn max_delta_from(raw: Option<&str>) -> wz_session_core::ntp64::Ntp64 {
+    let ms = raw
+        .and_then(|text| text.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_MAX_DELTA_MS);
+    wz_session_core::ntp64::Ntp64::from_duration(core::time::Duration::from_millis(ms))
+}
+
 impl NodeHlc {
     /// Build this node's clock: `Some` when [`TimestampingEnabled`] says a node
-    /// of role `whatami` timestamps, `None` otherwise. The `uhlc::ID` derives
-    /// from `zid` (`hlc_id_from_zid`) and the physical clock is wz's
-    /// [`wall_clock_ntp64`](crate::timestamp_source::wall_clock_ntp64) SSOT.
+    /// of role `whatami` timestamps, `None` otherwise. Its stamps carry `zid`
+    /// and its time is the system clock through
+    /// [`SystemEpoch`](crate::timestamp_source::SystemEpoch), the same source
+    /// as the [`wall_clock_ntp64`](crate::timestamp_source::wall_clock_ntp64) SSOT.
     ///
     /// Mirrors zenoh's `(*..enabled().get(whatami)).then(|| Arc::new(..))` — the
     /// gate is evaluated ONCE at node construction, not per stamp, so a build
@@ -246,7 +291,7 @@ impl NodeHlc {
         {
             let clock = enabled
                 .get(whatami)
-                .then(|| build_clock(zid, wz_physical_clock));
+                .then(|| build_clock(zid, crate::timestamp_source::SystemEpoch));
             // Upstream's shipped default; `with_drop_future_timestamp` is how a
             // host that read the key states otherwise.
             Self {
@@ -314,8 +359,12 @@ impl NodeHlc {
         #[cfg(feature = "time-hlc")]
         {
             let clock = self.clock.as_deref()?;
+            // A source that cannot say what time it is stamps nothing: a node that does not know
+            // the date does not invent one, and its caller falls back as it does for a node with
+            // no clock.
+            let time = clock.hlc.new_timestamp().ok()?.as_word();
             Some(wz_session_core::sample::TimestampHint {
-                time: clock.hlc.new_timestamp().get_time().as_u64(),
+                time,
                 zid: clock.zid.clone(),
             })
         }
@@ -375,12 +424,16 @@ impl NodeHlc {
                 return TimestampVerdict::Relay;
             }
             if let Some(inbound) = wz_session_core::push_build::read_push_timestamp(push) {
-                if clock
+                match clock
                     .hlc
-                    .update_with_timestamp(&to_uhlc_timestamp(&inbound))
-                    .is_ok()
+                    .update_with_timestamp(wz_session_core::ntp64::Ntp64::from_word(inbound.time))
                 {
-                    return TimestampVerdict::Relay;
+                    Ok(Ok(())) => return TimestampVerdict::Relay,
+                    // A clock that cannot say what time it is cannot judge the timestamp either:
+                    // the message goes on as it came, neither dropped for a reading this node
+                    // could not take nor re-stamped from a date it does not know.
+                    Err(_) => return TimestampVerdict::Relay,
+                    Ok(Err(_)) => {}
                 }
                 // Absorb rejected the inbound timestamp (beyond the drift
                 // bound). This is the ONLY arm either branch of
@@ -427,8 +480,7 @@ impl NodeHlc {
 
 impl core::fmt::Debug for NodeHlc {
     /// Prints the OBSERVABLE state (does this node stamp) rather than the
-    /// clock's interior. `uhlc::HLC`'s `last_time` is behind a spin lock and
-    /// reading it to format a debug line would contend with live stamping.
+    /// clock's interior, which is a word that live stamping is advancing.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("NodeHlc")
             .field("stamping", &self.is_stamping())
@@ -436,57 +488,31 @@ impl core::fmt::Debug for NodeHlc {
     }
 }
 
-/// Lift a wz [`TimestampHint`](wz_session_core::sample::TimestampHint) into the
-/// `uhlc::Timestamp` the absorb path needs. The hint's `zid` becomes the
-/// `uhlc::ID` through the same `hlc_id_from_zid` clamp the node's own id uses,
-/// so a malformed inbound zid degrades to the guard value instead of failing the
-/// absorb for a reason unrelated to the time word.
-#[cfg(all(feature = "time-hlc", feature = "codec-push"))]
-fn to_uhlc_timestamp(hint: &wz_session_core::sample::TimestampHint) -> uhlc::Timestamp {
-    uhlc::Timestamp::new(uhlc::NTP64(hint.time), hlc_id_from_zid(&hint.zid))
-}
-
-/// Assemble one node clock over an injectable physical `clock`.
+/// Assemble one node clock over an injectable time `source`.
 ///
-/// The physical clock is a parameter for one reason, and it is a testing reason
+/// The source is a parameter for one reason, and it is a testing reason
 /// worth stating: with the REAL wall clock, two independently built HLCs still
 /// produce a strictly increasing interleaved sequence, because the physical
 /// clock advances between reads and masks the fork. Only a FROZEN clock isolates
 /// the shared logical counter, so only a frozen clock can tell "one shared
-/// clock" apart from "two clocks with the same id" — the precise defect R311y450
+/// clock" apart from "two clocks with one identity" — the precise defect R311y450
 /// removes. A test that cannot make that distinction would pass on the broken
 /// code, which is worse than no test.
+///
+/// The arithmetic is [`wz_session_core::hlc::HlcCore`], `uhlc`'s rules in one atomic word, held to
+/// `uhlc` by the differential test in `tests/hlc_core_agrees_with_uhlc.rs`. Its stamp carries no
+/// identity: the node's zid rides beside the time word, as it did with `uhlc`, whose own id was
+/// never read here.
 #[cfg(feature = "time-hlc")]
-fn build_clock(zid: &[u8], clock: fn() -> uhlc::NTP64) -> std::sync::Arc<NodeClock> {
+fn build_clock(
+    zid: &[u8],
+    source: impl wz_session_core::epoch::EpochSource + Send + Sync + 'static,
+) -> std::sync::Arc<NodeClock> {
+    let max_delta = max_delta_from(std::env::var("UHLC_MAX_DELTA_MS").ok().as_deref());
     std::sync::Arc::new(NodeClock {
-        hlc: uhlc::HLCBuilder::new()
-            .with_clock(clock)
-            .with_id(hlc_id_from_zid(zid))
-            .build(),
+        hlc: wz_session_core::hlc::Hlc::new(NodeEpoch(Box::new(source)), max_delta),
         zid: zid.to_vec(),
     })
-}
-
-/// The HLC's physical clock: wz's wall-clock NTP64 SSOT lifted into a
-/// `uhlc::NTP64` (byte-identical to uhlc's own `system_time_clock`, but routed
-/// through wz's single recipe so the HLC, the digest publisher's Hot-era bound
-/// and the aligner's answer `now` cannot drift apart). A plain `fn` so it
-/// satisfies `HLCBuilder::with_clock(fn() -> NTP64)`.
-#[cfg(feature = "time-hlc")]
-fn wz_physical_clock() -> uhlc::NTP64 {
-    uhlc::NTP64(crate::timestamp_source::wall_clock_ntp64())
-}
-
-/// Derive a non-zero `uhlc::ID` from a node `zid`. `uhlc::ID` is 1..=16
-/// little-endian bytes and must be non-zero; a real zid satisfies both, but
-/// clamp to `MAX_SIZE` and guard the all-zero / empty edge so clock construction
-/// (and the absorb path, which derives an id from an INBOUND zid) can never
-/// panic on a value that arrived off the wire.
-#[cfg(feature = "time-hlc")]
-fn hlc_id_from_zid(zid: &[u8]) -> uhlc::ID {
-    let len = zid.len().min(uhlc::ID::MAX_SIZE);
-    uhlc::ID::try_from(&zid[..len])
-        .unwrap_or_else(|_| uhlc::ID::try_from(&[1u8][..]).expect("constant non-zero id is valid"))
 }
 
 #[cfg(test)]

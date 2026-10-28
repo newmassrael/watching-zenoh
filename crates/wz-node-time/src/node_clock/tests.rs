@@ -62,17 +62,66 @@ fn a_stamping_node_mints_strictly_increasing_stamps_carrying_its_zid() {
 /// increase is the HLC's logical counter. See `build_clock` for why the
 /// discriminating tests below cannot use the real one.
 #[cfg(feature = "time-hlc")]
-fn frozen_clock() -> uhlc::NTP64 {
-    uhlc::NTP64(0x0000_1234_0000_0000)
+struct FrozenEpoch;
+
+#[cfg(feature = "time-hlc")]
+impl wz_session_core::epoch::EpochSource for FrozenEpoch {
+    fn try_since_epoch(
+        &self,
+    ) -> Result<wz_session_core::epoch::SinceEpoch, wz_session_core::epoch::EpochUnavailable> {
+        Ok(wz_session_core::epoch::SinceEpoch {
+            secs: 1_700_000_000,
+            nanos: 0,
+        })
+    }
+}
+
+/// A source that cannot say what time it is: a clock never set.
+#[cfg(feature = "time-hlc")]
+struct UnsetEpoch;
+
+#[cfg(feature = "time-hlc")]
+impl wz_session_core::epoch::EpochSource for UnsetEpoch {
+    fn try_since_epoch(
+        &self,
+    ) -> Result<wz_session_core::epoch::SinceEpoch, wz_session_core::epoch::EpochUnavailable> {
+        Err(wz_session_core::epoch::EpochUnavailable)
+    }
 }
 
 /// A stamping node whose physical clock is frozen.
 #[cfg(feature = "time-hlc")]
 fn frozen_node(zid: &[u8]) -> NodeHlc {
     NodeHlc {
-        clock: Some(build_clock(zid, frozen_clock)),
+        clock: Some(build_clock(zid, FrozenEpoch)),
         drop_future_timestamp: false,
     }
+}
+
+#[cfg(feature = "time-hlc")]
+#[test]
+fn a_node_whose_source_cannot_say_the_time_stamps_nothing() {
+    let node = NodeHlc {
+        clock: Some(build_clock(&[0x01], UnsetEpoch)),
+        drop_future_timestamp: false,
+    };
+    assert!(
+        node.is_stamping(),
+        "the node has a clock; the clock has no date"
+    );
+    assert!(node.stamp().is_none());
+}
+
+#[cfg(feature = "time-hlc")]
+#[test]
+fn the_bound_is_zenohs_unless_the_variable_says_a_whole_number_of_milliseconds() {
+    use wz_session_core::ntp64::Ntp64;
+    let ms = |n: u64| Ntp64::from_duration(core::time::Duration::from_millis(n));
+    assert_eq!(max_delta_from(None), ms(500));
+    assert_eq!(max_delta_from(Some("20")), ms(20));
+    assert_eq!(max_delta_from(Some(" 3000 ")), ms(3000));
+    assert_eq!(max_delta_from(Some("soon")), ms(500));
+    assert_eq!(max_delta_from(Some("-5")), ms(500));
 }
 
 #[cfg(feature = "time-hlc")]

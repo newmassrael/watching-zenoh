@@ -3400,7 +3400,6 @@ dependencies = [
 name = "wz-node-time"
 version = "0.1.0"
 dependencies = [
- "uhlc",
  "wz-codecs",
  "wz-session-core",
 ]
