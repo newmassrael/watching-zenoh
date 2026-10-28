@@ -359,6 +359,19 @@ PY
     else
         bad "$key" "the stack gate refuses the image ($out/stack-gate.log)"
     fi
+    # The text of the image told by who owns it, held to the rows of deploy/text_budget.json; an image
+    # with no row is not held, and a compare build is not the gate's.
+    local text_rows
+    text_rows="$(python3 "$ROOT/scripts/lib/text_owner_gate.py" --list)"
+    if is_compare_image "$key" || [[ "${BUILD_VARIANT:-}" == compare ]]; then
+        :
+    elif [[ $'\n'"$text_rows"$'\n' == *$'\n'"$key"$'\n'* ]]; then
+        if python3 "$ROOT/scripts/lib/text_owner_gate.py" --check "$key" --elf "$elf" >"$out/text-gate.log" 2>&1; then
+            ok "$key" "the text gate holds the image ($(grep -a 'text-owner: OK' "$out/text-gate.log" | head -n 1 | cut -c1-120))"
+        else
+            bad "$key" "the text gate refuses the image ($out/text-gate.log)"
+        fi
+    fi
     echo "$out" >"$LANE_HOME/last-out-$name"
     [[ "$fails" -eq "$before" ]]
 }

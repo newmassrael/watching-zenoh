@@ -2053,6 +2053,9 @@ layer_c0_test_discipline() {
     # The ELF half runs in Layer Q (Q.frt, Q.frt2), where the images are built.
     python3 scripts/lib/stack_frame_gate.py --selftest || return 1
     python3 scripts/lib/stack_frame_gate.py --population || return 1
+    # The text of an image told by who owns it: the symbol reader and the rule driven over a small
+    # table. The ELF half is the kit lane's build step, where the images are built.
+    python3 scripts/lib/text_owner_gate.py --selftest || return 1
     # R3449 -- the resource budget (D5, build-configuration step 13): each image whose worst chain
     # the stack gate commits has a row of figures the kit measured, the row copies that chain, and a
     # measured peak lies under it. No hardware here; `--measure` is the kit lane's.
