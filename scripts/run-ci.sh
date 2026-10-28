@@ -2061,6 +2061,9 @@ layer_c0_test_discipline() {
     # measured peak lies under it. No hardware here; `--measure` is the kit lane's.
     python3 scripts/lib/resource_budget_gate.py --selftest || return 1
     python3 scripts/lib/resource_budget_gate.py --check || return 1
+    # The stack bound of the fixed-memory images with the calls through a register followed: its rules driven
+    # on a small model here; the images themselves are held by `kit-lane.sh build`, where the ELF is.
+    python3 scripts/lib/stack_bound_gate.py --selftest || return 1
     # R311y717 (§C G5) — the DISCARD-SITE gate. R311y713 made the flow table's
     # exit an obligation a TYPE enforces and closed that one invariant; the
     # register carried "the other multi-exit sites have not been looked at" as

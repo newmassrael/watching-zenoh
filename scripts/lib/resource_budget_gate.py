@@ -21,6 +21,9 @@ looked the same as one that did not.
 * `static_chain_bytes` is a COPY of that figure, and is held equal to `stack_frame_gate.py`'s. The
   copy is the point: a commit that moves the static figure alone, or the row alone, is a red, so
   moving it is a decision made in both places;
+* `static_bound_bytes` (optional, the images `stack_bound_gate.py` holds): the worst chain with the
+  calls through a register followed, which that gate computes from the image and holds equal to this
+  copy. It is the quantity the quarter of free stack applies to, and the measured peak lies under it;
 * `peak_stack_bytes` and `peak_stack_tolerance_bytes`: the firmware's own reading over a dial, a
   handshake and the queries the kit harness asks. It is a count of words the stack has written, the
   same on every run of an image, so its tolerance is small and a change that moves it is visible;
@@ -87,6 +90,9 @@ OPTIONAL_KEYS = {
     "latency_source": str,
 }
 
+#: The bound `stack_bound_gate.py` computes, committed for the images it holds.
+BOUND_KEY = "static_bound_bytes"
+
 LATENCY_SOURCES = ("rest-probe", "getter-line")
 
 #: The line the firmware prints when its stack high-water mark moves (`StackWatch`).
@@ -132,7 +138,7 @@ def problems(table: dict, images: dict[str, "stack.Image"], declared: dict[str, 
                 out.append(f"{key}: `{field}` is empty")
             elif kind is int and row[field] <= 0:
                 out.append(f"{key}: `{field}` is not positive")
-        for field in sorted(set(row) - set(ROW_KEYS) - set(OPTIONAL_KEYS)):
+        for field in sorted(set(row) - set(ROW_KEYS) - set(OPTIONAL_KEYS) - {BOUND_KEY}):
             out.append(f"{key}: `{field}` is a key nothing reads")
         for field, kind in OPTIONAL_KEYS.items():
             if field in row and (not isinstance(row[field], kind) or not row[field].strip()):
@@ -167,6 +173,23 @@ def problems(table: dict, images: dict[str, "stack.Image"], declared: dict[str, 
             )
         if key in declared and peak > declared[key]:
             out.append(f"{key}: the measured peak {peak} is over the declared stack {declared[key]}")
+        if BOUND_KEY in row:
+            bound = row[BOUND_KEY]
+            if not isinstance(bound, int) or isinstance(bound, bool) or bound <= 0:
+                out.append(f"{key}: `{BOUND_KEY}` is not a positive int")
+            else:
+                if bound < peak:
+                    out.append(
+                        f"{key}: the measured peak {peak} is above `{BOUND_KEY}` {bound}: a bound the "
+                        f"measurement exceeds is a hole in the model"
+                    )
+                if bound < chain:
+                    out.append(f"{key}: `{BOUND_KEY}` {bound} is under the direct chain {chain}, which it contains")
+                if key in declared and bound * 4 > declared[key] * 3:
+                    out.append(
+                        f"{key}: `{BOUND_KEY}` {bound} is over three quarters of the declared stack "
+                        f"{declared[key]}"
+                    )
         if not 0 < row["get_median_tolerance_pct"] < 100:
             out.append(f"{key}: get_median_tolerance_pct is not between 0 and 100")
     return out
@@ -319,6 +342,16 @@ def selftest() -> int:
     case("an empty reason", {"schema": 1, "images": {"k": dict(asker, chain_misses=" ")}}, want="non-empty")
     case("a latency source nothing reads", {"schema": 1, "images": {"k": dict(row, latency_source="guess")}}, want="latency_source")
     case("a key nothing reads", {"schema": 1, "images": {"k": dict(row, extra=1)}}, want="nothing reads")
+    # The bound the stack bound gate computes: over the chain and the reading, under three quarters
+    # of the stack (6,912 of the 9,216 bytes here).
+    case("a bound that holds", {"schema": 1, "images": {"k": dict(row, static_bound_bytes=6900)}})
+    case("a bound under the measured peak: a hole in the model",
+         {"schema": 1, "images": {"k": dict(row, static_bound_bytes=5900)}}, want="hole in the model")
+    case("a bound under the direct chain it contains",
+         {"schema": 1, "images": {"k": dict(row, peak_stack_bytes=5000, static_bound_bytes=6800)}}, want="under the direct chain")
+    case("a bound over three quarters of the stack",
+         {"schema": 1, "images": {"k": dict(row, static_bound_bytes=7000)}}, want="three quarters")
+    case("a bound that is not a number", {"schema": 1, "images": {"k": dict(row, static_bound_bytes="x")}}, want="positive int")
     case("a missing figure", {"schema": 1, "images": {"k": {f: v for f, v in row.items() if f != "get_median_us"}}}, want="no `get_median_us`")
     case("a tolerance of nothing", {"schema": 1, "images": {"k": dict(row, get_median_tolerance_pct=0)}}, want="between 0 and 100")
     case("a wrong schema", {"schema": 2, "images": {"k": row}}, want="schema")

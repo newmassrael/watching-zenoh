@@ -98,8 +98,11 @@ carries about 6 KB of C library code wz does not, which is why the difference is
   is read). A call graph tells the two apart because they are two slots of one trait object. The
   fixed image fell 568 bytes of text (wz_runtime_coop 796 of them), the batching image's total did
   not move, the get image's grew 72. The get image's worst chain by the register-call reading fell
-  7,640 to 6,768 bytes, inside the 6,912 of the 75 percent rule; the fixed and batching images stay at
-  6,216.
+  7,640 to 6,768 bytes; the fixed and batching images stay at 6,216. Of the 75 percent rule's limits
+  (6,912 for the fixed image's 9,216 bytes of stack, 7,680 for the batching image's 10,240, 9,216 for
+  the get image's 12,288) every one of the three readings was inside its own before and after, so
+  the fall is margin and not a repair: Rounds 3845 and 3846 said the get image's 7,640 was over the
+  rule, which read the fixed image's limit against the get image.
 - NOT TAKEN, measured: taking `judge_ext_chain`'s two helpers out of line (7 instances) moved the
   text by +16 bytes; the link-time optimizer already shares them.
 - `wz_session_core` is a long tail (525 symbols in a build without LTO, none over 1.6 KB) and the

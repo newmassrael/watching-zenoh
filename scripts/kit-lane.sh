@@ -311,6 +311,9 @@ build() {
     . "$ZEPHYR_HOME/.venv/bin/activate"
     export ZEPHYR_BASE="$ZEPHYR_HOME/zephyr"
     export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-8}" CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-8}"
+    # The Rust half carries its line tables, which the stack bound gate reads to name the source line of each
+    # call through a register; they are debug sections the flashed binary does not hold, and the text is the same.
+    export CARGO_PROFILE_RELEASE_DEBUG=line-tables-only
     local extra=()
     if [[ -n "$confs" ]]; then
         extra+=(-DEXTRA_CONF_FILE="$confs")
@@ -358,6 +361,19 @@ PY
         ok "$key" "the stack gate holds the image ($(grep -a 'stack-chain: OK' "$out/stack-gate.log" | head -n 1 | cut -c1-120))"
     else
         bad "$key" "the stack gate refuses the image ($out/stack-gate.log)"
+    fi
+    # The stack bound with the calls through a register followed, held to the rows of deploy/resource_budget.json
+    # that commit one; it is the figure the quarter of free stack applies to, and the kit's reading lies under it.
+    local bound_rows
+    bound_rows="$(python3 "$ROOT/scripts/lib/stack_bound_gate.py" --list)"
+    if [[ "$KIND" == measure || "$KIND" == verify ]] || is_compare_image "$key" || [[ "${BUILD_VARIANT:-}" == compare ]]; then
+        :
+    elif [[ $'\n'"$bound_rows"$'\n' == *$'\n'"$key"$'\n'* ]]; then
+        if python3 "$ROOT/scripts/lib/stack_bound_gate.py" --check "$key" --elf "$elf" >"$out/stack-bound.log" 2>&1; then
+            ok "$key" "the stack bound holds the image ($(grep -a 'stack-bound: OK' "$out/stack-bound.log" | head -n 1 | cut -c1-120))"
+        else
+            bad "$key" "the stack bound refuses the image ($out/stack-bound.log)"
+        fi
     fi
     # The text of the image told by who owns it, held to the rows of deploy/text_budget.json; an image
     # with no row is not held, and a compare build is not the gate's.

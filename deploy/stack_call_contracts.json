@@ -1,0 +1,368 @@
+{
+  "about": "Who a call through a register may reach, for the stack bound of the fixed-memory images (scripts/lib/stack_bound_gate.py, docs/text-ownership.md). A register can hold only an address the image holds somewhere (a data word, a literal pool, a movw/movt pair, an adr), so a rule names, among those functions, the ones its site may call. Every call by register in a function the bound reaches needs a rule; there is no reading of the vtable slot or of the method named on the line. `where` is a source file (the end of its path) and line, or, for C, a regex on the function's name. `callees` is a regex on the demangled name without generic arguments, or WAKER (the four functions of the executor's RawWakerVTable, read from the image), or TRAIT_METHODS (every trait-impl method the image holds, for a site that is shallow), or NONE. A NONE rule states a premise, and `absent` (a regex on the functions the image holds an address of) or `absent_reached` (on the functions the bound reaches) is that premise: the gate fails when it stops being true. A rule is written by a person and read against the code; the gate holds it to the image.",
+  "schema": 1,
+  "cold": [
+    "^core::str::slice_error_fail"
+  ],
+  "recursion": [
+    {
+      "function": "session_slot::release_cell$",
+      "depth": 3,
+      "why": "a slot's release drops what the slot holds, which holds a handle to another slot: the session's slot inside the pump's cell, two or three deep"
+    },
+    {
+      "function": "core::fmt::builders::PadAdapter as core::fmt::Write>::(write_str|write_char)$",
+      "depth": 4,
+      "why": "a pretty-printing adapter wraps the writer it was given, once for each level of nesting of the value printed; the values printed here are enums and tuples of depth three at most"
+    }
+  ],
+  "rules": [
+    {
+      "id": "exec-poll",
+      "where": {"file": "static_executor.rs", "line": 450},
+      "callees": "^wz_runtime_coop::executor_static::poll_erased$",
+      "why": "the task cell's poll"
+    },
+    {
+      "id": "exec-drop",
+      "where": {"file": "static_executor.rs"},
+      "callees": "^wz_runtime_coop::executor_static::drop_erased$|^core::ptr::drop_glue$",
+      "why": "the task cell's drop_future and drop_output"
+    },
+    {
+      "id": "slot-release",
+      "where": {"file": "session_slot.rs", "line": 119},
+      "callees": "session_slot::release_cell$",
+      "why": "the release function a slot's claim set"
+    },
+    {
+      "id": "waker",
+      "where": {"file": "wake.rs"},
+      "callees": "WAKER",
+      "why": "clone, wake, wake_by_ref and drop of the executor's RawWakerVTable"
+    },
+    {
+      "id": "queryable",
+      "where": {"file": "query_sink.rs", "line": 883},
+      "callees": "slot_client::answer",
+      "why": "the function a queryable was registered with"
+    },
+    {
+      "id": "planner-call",
+      "where": {"file": "connect_manager.rs"},
+      "callees": "ConnectManager>::(fire_due|observe|open_node|reconcile)::\\{closure#\\d+\\}",
+      "why": "the planner calls the connect manager passes to ask"
+    },
+    {
+      "id": "planner-emit",
+      "where": {"file": "peer_planner.rs"},
+      "callees": "ConnectManager>::ask::\\{closure#0\\}::\\{closure#0\\}",
+      "why": "the emit closure ask hands the planner"
+    },
+    {
+      "id": "engine-clock",
+      "where": {"file": "engine.rs", "line": 1386},
+      "callees": "mac_cyt4bf::now_us$",
+      "why": "the clock source the engine was given"
+    },
+    {
+      "id": "entropy-make",
+      "where": {"file": "slot_node.rs", "line": 678},
+      "callees": "ZephyrEntropy|^trng_get_entropy$|fixed_client::run::\\{closure#1\\}",
+      "why": "the function that makes the node's entropy source"
+    },
+    {
+      "id": "entropy-draw",
+      "where": {"file": "session_actions.rs", "line": 5976},
+      "callees": "EntropySource>::try_next_u64$",
+      "why": "the draw of the session's initial value"
+    },
+    {
+      "id": "record",
+      "where": {"file": "driver_loop.rs"},
+      "callees": "driver_loop::EventSink>::record$",
+      "why": "a record the receive lends goes to the sink's record, and to nothing a turn's own event reaches"
+    },
+    {
+      "id": "sink",
+      "where": {"file": "drive.rs"},
+      "callees": "driver_loop::EventSink>::(event|record)$",
+      "why": "the receive chain reports to its sink"
+    },
+    {
+      "id": "own-mapping",
+      "where": {"file": "wireexpr_resolve.rs"},
+      "callees": "NONE",
+      "absent": "OwnMappingSpace",
+      "why": "the image holds no implementation of OwnMappingSpace, so the own mapping space is absent"
+    },
+    {
+      "id": "latest-put",
+      "where": {"file": "latest.rs", "line": 206},
+      "callees": "NONE",
+      "absent": "LatestSlots",
+      "why": "the image holds no implementation of LatestSlots"
+    },
+    {
+      "id": "latest-with",
+      "where": {"file": "slot_client.rs", "line": 534},
+      "callees": "NONE",
+      "absent": "LatestSlots",
+      "why": "the image holds no implementation of LatestSlots"
+    },
+    {
+      "id": "answer-reply",
+      "where": {"file": "slot_client.rs"},
+      "callees": "ReplyOut>::reply_keyed_encoded_parts$|ReplyOut>::reply_keyed$|QueryView>::keyexpr$",
+      "why": "the queryable's answer reads the query's key and replies with a document or the latest value"
+    },
+    {
+      "id": "byte-cells",
+      "where": {"file": "udp_link.rs"},
+      "callees": "ByteCells as .*ByteSource>::claim$",
+      "why": "the byte cells of the link"
+    },
+    {
+      "id": "txbuf-len",
+      "where": {"file": "tx_buf.rs", "line": 205},
+      "callees": "TxBuf>::len$",
+      "why": "the capped buffer asks the buffer it wraps for its length"
+    },
+    {
+      "id": "txbuf-len-217",
+      "where": {"file": "tx_buf.rs", "line": 217},
+      "callees": "TxBuf>::len$",
+      "why": "the capped buffer asks the buffer it wraps for its length"
+    },
+    {
+      "id": "txbuf-len-226",
+      "where": {"file": "tx_buf.rs", "line": 226},
+      "callees": "TxBuf>::len$",
+      "why": "the capped buffer asks the buffer it wraps for its length"
+    },
+    {
+      "id": "txbuf-len-234",
+      "where": {"file": "tx_buf.rs", "line": 234},
+      "callees": "TxBuf>::len$",
+      "why": "the capped buffer asks the buffer it wraps for its length"
+    },
+    {
+      "id": "txbuf-append-byte",
+      "where": {"file": "tx_buf.rs", "line": 229},
+      "callees": "TxBuf>::append_byte$",
+      "why": "the capped buffer appends to the buffer it wraps"
+    },
+    {
+      "id": "txbuf-append-byte-sink",
+      "where": {"file": "tx_buf.rs", "line": 318},
+      "callees": "TxBuf>::append_byte$",
+      "why": "the codec's sink appends to the buffer it writes"
+    },
+    {
+      "id": "txbuf-append",
+      "where": {"file": "tx_buf.rs", "line": 314},
+      "callees": "TxBuf>::append$",
+      "why": "the codec's sink appends a slice to the buffer it writes"
+    },
+    {
+      "id": "txbuf-reserve",
+      "where": {"file": "tx_buf.rs", "line": 308},
+      "callees": "TxBuf>::reserve$",
+      "why": "the codec's sink reserves in the buffer it writes"
+    },
+    {
+      "id": "fmt-arg",
+      "where": {"file": "fmt/mod.rs", "line": 1665},
+      "callees": "::fmt$",
+      "why": "a formatting argument's own fmt function"
+    },
+    {
+      "id": "fmt-arg-1677",
+      "where": {"file": "fmt/mod.rs", "line": 1677},
+      "callees": "::fmt$",
+      "why": "a formatting argument's own fmt function"
+    },
+    {
+      "id": "fmt-arg-rt",
+      "where": {"file": "fmt/rt.rs", "line": 152},
+      "callees": "::fmt$",
+      "why": "a formatting argument's own fmt function"
+    },
+    {
+      "id": "fmt-write-1757",
+      "where": {"file": "fmt/mod.rs", "line": 1757},
+      "callees": "core::fmt::Write>::(write_str|write_char)$",
+      "why": "the writer a formatter writes to"
+    },
+    {
+      "id": "fmt-write-1849",
+      "where": {"file": "fmt/mod.rs", "line": 1849},
+      "callees": "core::fmt::Write>::(write_str|write_char)$",
+      "why": "the writer a formatter writes to"
+    },
+    {
+      "id": "fmt-write-1867",
+      "where": {"file": "fmt/mod.rs", "line": 1867},
+      "callees": "core::fmt::Write>::(write_str|write_char)$",
+      "why": "the writer a formatter writes to"
+    },
+    {
+      "id": "fmt-write-1875",
+      "where": {"file": "fmt/mod.rs", "line": 1875},
+      "callees": "core::fmt::Write>::(write_str|write_char)$",
+      "why": "the writer a formatter writes to"
+    },
+    {
+      "id": "fmt-write-1939",
+      "where": {"file": "fmt/mod.rs", "line": 1939},
+      "callees": "core::fmt::Write>::(write_str|write_char)$",
+      "why": "the writer a formatter writes to"
+    },
+    {
+      "id": "fmt-write-1967",
+      "where": {"file": "fmt/mod.rs", "line": 1967},
+      "callees": "core::fmt::Write>::(write_str|write_char)$",
+      "why": "the writer a formatter writes to"
+    },
+    {
+      "id": "fmt-write-2100",
+      "where": {"file": "fmt/mod.rs", "line": 2100},
+      "callees": "core::fmt::Write>::(write_str|write_char)$",
+      "why": "the writer a formatter writes to"
+    },
+    {
+      "id": "fmt-builders",
+      "where": {"file": "fmt/builders.rs"},
+      "callees": "core::fmt::Write>::(write_str|write_char)$",
+      "why": "the writers a formatter writes to"
+    },
+    {
+      "id": "app-main",
+      "where": {"function": "^wz_app_main$"},
+      "callees": "TRAIT_METHODS",
+      "why": "the two trait-object calls of the entry function, at the top of the stack"
+    },
+    {
+      "id": "zsock-sendto",
+      "where": {"function": "^z_impl_zsock_sendto$"},
+      "callees": "^sock_sendto_vmeth$",
+      "why": "the fd table's sendto"
+    },
+    {
+      "id": "zsock-recvfrom",
+      "where": {"function": "^z_impl_zsock_recvfrom$"},
+      "callees": "^sock_recvfrom_vmeth$",
+      "why": "the fd table's recvfrom"
+    },
+    {
+      "id": "zsock-bind",
+      "where": {"function": "^z_impl_zsock_bind$"},
+      "callees": "^sock_bind_vmeth$",
+      "why": "the fd table's bind"
+    },
+    {
+      "id": "zsock-getsockname",
+      "where": {"function": "^z_impl_zsock_getsockname$"},
+      "callees": "^sock_getsockname_vmeth$",
+      "why": "the fd table's getsockname"
+    },
+    {
+      "id": "zsock-setsockopt",
+      "where": {"function": "^z_impl_zsock_setsockopt$"},
+      "callees": "^sock_setsockopt_vmeth$",
+      "why": "the fd table's setsockopt"
+    },
+    {
+      "id": "zsock-socket",
+      "where": {"function": "^z_impl_zsock_socket$"},
+      "callees": "^zsock_socket_internal$",
+      "why": "the socket family's handler"
+    },
+    {
+      "id": "zvfs-close",
+      "where": {"function": "^zvfs_close$"},
+      "callees": "^sock_close2_vmeth$",
+      "why": "the fd table's close"
+    },
+    {
+      "id": "zvfs-ioctl",
+      "where": {"function": "^zvfs_fdtable_call_ioctl$"},
+      "callees": "^sock_ioctl_vmeth$",
+      "why": "the fd table's ioctl"
+    },
+    {
+      "id": "stdio-put",
+      "where": {"function": "^__l_vfprintf$"},
+      "callees": "^picolibc_put$|^__file_str_put$",
+      "why": "the stream's put function"
+    },
+    {
+      "id": "stdio-hook",
+      "where": {"function": "^picolibc_put$"},
+      "callees": "^stdinout_write_vmeth$|^char_out$",
+      "why": "the stdout write hook"
+    },
+    {
+      "id": "stdout-console",
+      "where": {"function": "^z_impl_zephyr_write_stdout$"},
+      "callees": "^console_out$|^char_out$",
+      "why": "the console hook"
+    },
+    {
+      "id": "console-uart",
+      "where": {"function": "^console_out$"},
+      "callees": "^ifx_cat1_uart_poll_out$",
+      "why": "the uart driver's poll_out"
+    },
+    {
+      "id": "csrand",
+      "where": {"function": "^z_impl_sys_csrand_get$|^z_impl_sys_rand_get$"},
+      "callees": "^trng_get_entropy$",
+      "why": "the entropy driver"
+    },
+    {
+      "id": "net-if-send",
+      "where": {"function": "^net_if_tx$|^net_if_try_send_data$"},
+      "callees": "^ethernet_send$",
+      "why": "the L2 send of the interface"
+    },
+    {
+      "id": "eth-driver-send",
+      "where": {"function": "^ethernet_send$"},
+      "callees": "^zeth_send$",
+      "why": "the ethernet driver's send"
+    },
+    {
+      "id": "link-callbacks",
+      "where": {"function": "^net_if_call_link_cb$"},
+      "callees": "NONE",
+      "absent_reached": "^net_if_register_link_cb$",
+      "why": "no link callback is registered by anything the bound reaches"
+    },
+    {
+      "id": "buf-alloc",
+      "where": {"function": "^net_buf_alloc_len$"},
+      "callees": "^fixed_data_alloc$",
+      "why": "the fixed buffer pool's allocator"
+    },
+    {
+      "id": "buf-unref",
+      "where": {"function": "^net_buf_unref$|^net_pkt_frag_unref"},
+      "callees": "^fixed_data_unref$",
+      "why": "the fixed buffer pool's unref"
+    },
+    {
+      "id": "pkt-alloc-hook",
+      "where": {"function": "^net_pkt_alloc_buffer$"},
+      "callees": "NONE",
+      "absent": "^ethernet_alloc$",
+      "why": "the ethernet L2 has no alloc hook"
+    },
+    {
+      "id": "connect-cb",
+      "where": {"function": "^net_context_connect$"},
+      "callees": "^zsock_connected_cb$",
+      "why": "the socket layer's connect callback"
+    }
+  ]
+}

@@ -1048,6 +1048,7 @@ round_fed_gates=(
     # R3449 -- the measured figures of an image are a row that copies the stack gate's worst
     # chain; a text and JSON read, no build.
     "resource_budget_gate.py --check"
+    "stack_bound_gate.py --selftest"
     "prose_build_closure_gate.py --check"
     "root_relative_exclusion_lint.py"
     "negotiated_axis_witness_gate.py --check"

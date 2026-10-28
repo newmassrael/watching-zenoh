@@ -4,6 +4,7 @@
     "zephyr-client-fixed": {
       "built_as": "the fixed-memory client of overlays/t2g_client_fixed.conf with the idle wait and batching off (main stack 9216 bytes), its node wz_session_mcu::slot_node",
       "static_chain_bytes": 5480,
+      "static_bound_bytes": 6216,
       "peak_stack_bytes": 5904,
       "peak_stack_tolerance_bytes": 16,
       "chain_misses": "calls through a register (9 on the path of the chain), which the stack gate's reader does not follow; the firmware's own reading is 424 bytes over the chain, since the initial sequence number stopped taking the permutation's frame (CONFIG_WZ_INITIAL_SN_COMPACT) and the connect manager's planner call became a trait object, and the path that sets the reading was not identified",
@@ -15,6 +16,7 @@
     "zephyr-client-fixed-batching": {
       "built_as": "the fixed-memory client of overlays/t2g_client_batching.conf with one send window sent as one datagram, the idle wait off (main stack 10240 bytes), its node wz_session_mcu::slot_node",
       "static_chain_bytes": 5480,
+      "static_bound_bytes": 6216,
       "peak_stack_bytes": 5908,
       "peak_stack_tolerance_bytes": 16,
       "chain_misses": "calls through a register (9 on the path of the chain), which the stack gate's reader does not follow; the firmware's own reading is 428 bytes over the chain, since the initial sequence number stopped taking the permutation's frame (CONFIG_WZ_INITIAL_SN_COMPACT) and the connect manager's planner call became a trait object, and the path that sets the reading was not identified",
@@ -26,6 +28,7 @@
     "zephyr-client-fixed-get": {
       "built_as": "the fixed-memory client of overlays/t2g_client_get.conf, which also asks one query at a time (two pending rows), the idle wait and batching off (main stack 12288 bytes); its node is wz_session_mcu::slot_node and its getter wz_session_mcu::slot_getter",
       "static_chain_bytes": 5768,
+      "static_bound_bytes": 6768,
       "peak_stack_bytes": 6020,
       "peak_stack_tolerance_bytes": 16,
       "get_median_us": 300,
