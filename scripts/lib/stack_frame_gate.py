@@ -232,6 +232,14 @@ IMAGES = (
     # `open` is a frame of 856 bytes beneath it, which holds them while the bundle is built. The
     # kit's reading did not move, 5,904, so it is 924 bytes over the chain: the path that sets it
     # is not this one (the bound, 6,084, follows the calls through a register).
+    #
+    # `peak` is 4,172 bytes once the connect manager's actions are one buffer that `drive` fills
+    # through `ask` and `take` reads in place (`drive` 800 to 536 bytes, `ask` gone from the chain)
+    # and `reconcile` puts the rows in the list's order in place (it held two copies of the table,
+    # and left the chain). The worst chain is now the receive's: `poll_erased`,
+    # `dispatch_datagram_unit`, `dispatch_copied`, `dispatch_unit_borrowed` (756), `decode_unit_in`
+    # under the main frame, 13 frames and 3 calls through a register. The kit's reading is 4,280,
+    # 108 over the chain (it was 5,248 while the dial and the planner were the worst paths).
     Image(
         key="zephyr-client-fixed",
         elf=None,
@@ -239,7 +247,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=4980,
+        peak=4172,
     ),
     # The same client with the session coalescing a send window into one datagram
     # (`overlays/t2g_client_batching.conf`). The batch writer and its flush path are two more
@@ -265,6 +273,10 @@ IMAGES = (
     #
     # 5,004 bytes with the dial handing the slot the function that makes the session's parameters
     # (see the fixed client's row): 476 less, the slot's `open` 880 bytes here.
+    #
+    # 4,172 bytes with the connect manager's actions as one buffer and its rows reordered in place
+    # (see the fixed client's row): the same chain as the client without batching; the kit's
+    # reading is 4,280.
     Image(
         key="zephyr-client-fixed-batching",
         elf=None,
@@ -272,7 +284,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=5004,
+        peak=4172,
     ),
     # The fixed client that ASKS (`overlays/t2g_client_get.conf`): the getter of
     # `wz_session_mcu::slot_getter` is the application layer the observer's drain runs inside, and
@@ -313,6 +325,10 @@ IMAGES = (
     #
     # 5,224 bytes with the dial handing the slot the function that makes the session's parameters
     # (see the fixed client's row): 544 less. The kit's reading, 6,020, is 796 over the chain.
+    #
+    # 4,756 bytes with the connect manager's actions as one buffer and its rows reordered in place
+    # (see the fixed client's row), 13 frames and 4 calls through a register, the receive's chain
+    # under the getter's larger main frame (1,368). The kit's reading is 5,104.
     Image(
         key="zephyr-client-fixed-get",
         elf=None,
@@ -320,7 +336,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=5224,
+        peak=4756,
     ),
     # The fixed client over the secure channel (`overlays/t2g_client_tls.conf`, decision D9):
     # the dial completes a TLS 1.3 handshake in Mbed TLS before the session sees a byte, and every

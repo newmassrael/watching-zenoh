@@ -1551,24 +1551,34 @@ impl<D: Dialer> ConnectManager<D> {
     /// loop, the ports and the table, and the thirteen calls of the manager would each have its
     /// own copy of them, one for every closure type. A call through the object is a few cycles
     /// in a path that dials a router, and the copies were 1.7 KB of text.
+    ///
+    /// The actions are one buffer that every call fills and every turn reads in place: handed
+    /// back by value, the six of them (about 300 bytes) were a copy in `ask`, one in this frame
+    /// and one more for `take`, on the stack of the thread that ticks the manager.
     fn drive(&mut self, now_ms: u64, call: &mut PlannerCall<'_, D>) {
-        let mut actions = self.ask(now_ms, call);
+        let mut actions = Actions::new();
         let mut failed: FixedVec<u64, 6> = FixedVec::new();
+        self.ask(now_ms, call, &mut actions);
         loop {
-            self.take(actions, now_ms, &mut failed);
+            self.take(&actions, now_ms, &mut failed);
             let Some(id) = failed.pop() else {
                 return;
             };
             // The turn after a failed dial asks for no dial, so the list only shrinks.
-            actions = self.ask(now_ms, &mut |planner, ports, next_id, emit| {
-                planner.dial_ended(id, DialEnd::Failed, ports, next_id, emit);
-            });
+            actions.clear();
+            self.ask(
+                now_ms,
+                &mut |planner, ports, next_id, emit| {
+                    planner.dial_ended(id, DialEnd::Failed, ports, next_id, emit);
+                },
+                &mut actions,
+            );
         }
     }
 
-    /// One call of the planner against this profile's ports, and what it asked for.
-    fn ask(&mut self, now_ms: u64, call: &mut PlannerCall<'_, D>) -> Actions {
-        let mut actions = Actions::new();
+    /// One call of the planner against this profile's ports, and what it asked for, pushed to
+    /// `actions`.
+    fn ask(&mut self, now_ms: u64, call: &mut PlannerCall<'_, D>, actions: &mut Actions) {
         let next_id = &mut self.next_id;
         self.store.get().with(|tables| {
             let mut ports = Ports {
@@ -1584,14 +1594,13 @@ impl<D: Dialer> ConnectManager<D> {
                 let _ = actions.push(action);
             })
         });
-        actions
     }
 
     /// Take the actions of one call: start the dials, arm the waits, hang up the sessions.
     /// The faces of the dials that did not start go to `failed`.
-    fn take(&mut self, actions: Actions, now_ms: u64, failed: &mut FixedVec<u64, 6>) {
+    fn take(&mut self, actions: &Actions, now_ms: u64, failed: &mut FixedVec<u64, 6>) {
         for action in actions {
-            match action {
+            match *action {
                 PeerAction::Dial { id, key, .. } => match self.dial_peer(&key, now_ms) {
                     Ok(session) => {
                         if let Some(row) = self.row_mut(&key) {
@@ -1861,25 +1870,20 @@ impl<D: Dialer> ConnectManager<D> {
             }
         }
 
-        // Keep the list's order, and the nodes after it in the order they were asked for.
-        let mut kept: BoundedVec<Option<Row<D::Session>>, PEERS> = BoundedVec::new();
-        for row in core::mem::take(&mut self.rows) {
-            let _ = kept.push(Some(row));
-        }
+        // Keep the list's order, and the nodes after it in the order they were asked for: each
+        // entry's row is rotated to the front of the rows not yet placed, which leaves the rest in
+        // the order they had. In place: taking the table out and building it again held two
+        // copies of it (a kilobyte each) in this frame, under every tick that reconciles.
+        let mut placed = 0;
         for entry in list.iter().filter(|e| dialable(e)) {
-            let held = kept
+            let rest = &mut self.rows[placed..];
+            if let Some(at) = rest
                 .iter()
-                .position(|row| {
-                    row.as_ref()
-                        .is_some_and(|row| row.endpoint() == Some(entry.endpoint.as_str()))
-                })
-                .and_then(|at| kept[at].take());
-            if let Some(row) = held {
-                let _ = self.rows.push(row);
+                .position(|row| row.endpoint() == Some(entry.endpoint.as_str()))
+            {
+                rest[..=at].rotate_right(1);
+                placed += 1;
             }
-        }
-        for row in kept.into_iter().flatten() {
-            let _ = self.rows.push(row);
         }
     }
 }

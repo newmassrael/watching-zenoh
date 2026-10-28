@@ -51,7 +51,7 @@ use wz_session_core::sink::FnSink;
 use wz_session_core::sink::SampleView;
 #[cfg(feature = "session-slot")]
 use wz_session_core::text_out::FixedText;
-#[cfg(feature = "adminspace-fixed")]
+#[cfg(any(feature = "adminspace-fixed", feature = "session-slot"))]
 use wz_session_core::text_out::TextOut;
 
 struct State {

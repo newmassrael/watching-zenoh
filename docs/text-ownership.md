@@ -139,6 +139,19 @@ carries about 6 KB of C library code wz does not, which is why the difference is
   entry is still copied from the call's result into the table, which the kit's reading falling 656
   bytes and not the 1,080 of the local suggests; a table of cells written once, as the session slots
   are, would remove that copy (the frame was not measured after this change).
+- TAKEN: the connect manager's frames. What stays on the main thread's stack is the node's own
+  frames, and the kit's thread table shows every other thread of the image equal to the single-threaded
+  zenoh-pico image's (`wz_zeth_rx` 1,948, `rx_q` 200 to 500, `net_mgmt` 248, `sysworkq` 248, idle 64,
+  the report thread 220 to 300), so the 2,488 bytes the image reads over it in the matrix are the main
+  thread's alone: 5,248 against 2,888 at the time. `drive` held the planner's actions (six, about 300
+  bytes) as the result of `ask`, again in its own frame and a third time as the argument of `take`;
+  they are one buffer now, filled by `ask` and read by `take` in place (`drive` 800 to 536 bytes, `ask`
+  out of the chain). `reconcile` took the table of rows out and built it again to put the rows in the
+  list's order, two copies of a table in one frame; the rows are rotated into place instead (the
+  frame left the chain, `wz_session_mcu` 1,068 bytes less of text). The kit's reading fell to 4,280
+  bytes (fixed and batching) and 5,104 (get), the direct chain to 4,172, 4,172 and 4,756, the bound
+  stays 5,972 (6,768). The worst path is the receive's, under the 1,256 bytes of the main frame:
+  `dispatch_unit_borrowed` 756, `decode_unit_in` 312, and `lend_declare` 2,064 under a query's answer.
 - NOT TAKEN, measured: taking `judge_ext_chain`'s two helpers out of line (7 instances) moved the
   text by +16 bytes; the link-time optimizer already shares them.
 - `wz_session_core` is a long tail (525 symbols in a build without LTO, none over 1.6 KB) and the
