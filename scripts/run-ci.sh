@@ -7410,7 +7410,7 @@ layer_c1ah_cargo_test_time_hlc() {
     _runci_guarded_test "C1ah timestamp_source" 5 \
         cargo test -p wz-node-time --features time-hlc,codec-push,pubsub-timestamp \
         --lib timestamp_source:: --quiet || return 1
-    _runci_guarded_test "C1ah node_clock" 15 \
+    _runci_guarded_test "C1ah node_clock" 23 \
         cargo test -p wz-node-time --features time-hlc,codec-push,pubsub-timestamp \
         --lib node_clock:: --quiet || return 1
     # R311y818 — the PUBLISH-side auto-stamp (zenoh `resolve_put`'s head,

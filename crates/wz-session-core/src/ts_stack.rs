@@ -240,16 +240,19 @@ pub fn record_on_message(
     at: u8,
     timestamp: impl FnOnce() -> Option<Vec<u8>>,
 ) -> bool {
-    use crate::network_message::NetworkMessage;
+    // The type is named in each arm and not imported: a build with none of the three codecs has
+    // no arm that names it, and an import would be unused there.
     match message {
         #[cfg(feature = "codec-push")]
-        NetworkMessage::Push(push) => record_interception(&mut push.extensions, at, timestamp),
+        crate::network_message::NetworkMessage::Push(push) => {
+            record_interception(&mut push.extensions, at, timestamp)
+        }
         #[cfg(feature = "codec-request")]
-        NetworkMessage::Request(request) => {
+        crate::network_message::NetworkMessage::Request(request) => {
             record_interception(&mut request.extensions, at, timestamp)
         }
         #[cfg(feature = "codec-response")]
-        NetworkMessage::Response(response) => {
+        crate::network_message::NetworkMessage::Response(response) => {
             record_interception(&mut response.extensions, at, timestamp)
         }
         _ => {
