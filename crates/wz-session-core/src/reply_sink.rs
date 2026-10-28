@@ -171,6 +171,19 @@ pub trait ReplyView {
     fn qos(&self) -> Option<crate::sample::QosLevel> {
         None
     }
+    /// The timestamp stack the Response carried (extension `0x7`), when it was instrumented: the
+    /// stack of the query it answers and what the nodes it crossed recorded on it. Default
+    /// `None`.
+    #[cfg(feature = "pubsub-ts-stack")]
+    fn ts_stack(&self) -> Option<&crate::ts_stack::TsStack> {
+        None
+    }
+    /// Whether the Response came in over a link, and so was routed to this node, as against a
+    /// reply of this session's own queryable. Default `false`.
+    #[cfg(feature = "pubsub-ts-stack")]
+    fn routed(&self) -> bool {
+        false
+    }
 }
 
 /// A [`ReplyView`] over loose borrowed fields — the canonical impl for a
@@ -803,6 +816,7 @@ mod consolidating_sink_tests {
             },
             responder: None,
             qos: None,
+            stamp: Default::default(),
         }
     }
 
@@ -904,6 +918,7 @@ mod consolidating_sink_tests {
             },
             responder: None,
             qos: None,
+            stamp: Default::default(),
         }
     }
 

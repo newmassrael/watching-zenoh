@@ -193,9 +193,26 @@ pub struct QueryMetadata {
     /// Push side's DEFAULT suppression, so "set it to the default" and
     /// "do not set it" produce the same bytes.
     pub qos: Option<QosLevel>,
+    /// The timestamp stack of the Request (extension `0x7` of the Request, after the others),
+    /// which the node that asks starts and the nodes that route and receive add to.
+    #[cfg(feature = "pubsub-ts-stack")]
+    pub ts_stack: Option<crate::ts_stack::TsStack>,
 }
 
 impl QueryMetadata {
+    /// `true` when the metadata starts no timestamp stack, which a build without
+    /// `pubsub-ts-stack` has no slot for.
+    fn carries_no_ts_stack(&self) -> bool {
+        #[cfg(feature = "pubsub-ts-stack")]
+        {
+            self.ts_stack.is_none()
+        }
+        #[cfg(not(feature = "pubsub-ts-stack"))]
+        {
+            true
+        }
+    }
+
     /// `true` when every wire-propagatable slot is empty — callers
     /// can use this to short-circuit
     /// `SessionLinkActions::send_request_query`'s no-metadata fast
@@ -209,6 +226,7 @@ impl QueryMetadata {
             && self.value.is_none()
             && self.timeout_ms == 0
             && self.qos.is_none()
+            && self.carries_no_ts_stack()
     }
 }
 
@@ -274,5 +292,45 @@ mod tests {
             ..Default::default()
         };
         assert!(!meta.is_empty());
+    }
+
+    /// A query that holds only a timestamp stack is not empty, or the sender would take the
+    /// no-metadata path and drop the stack.
+    #[cfg(feature = "pubsub-ts-stack")]
+    #[test]
+    fn query_metadata_with_a_timestamp_stack_is_not_empty() {
+        let meta = QueryMetadata {
+            ts_stack: Some(crate::ts_stack::TsStack::new(crate::ts_stack::point::SEND)),
+            ..Default::default()
+        };
+        assert!(!meta.is_empty());
+    }
+
+    /// The Request that leaves has the wire's stack and the loopback leg has the other: a stack of
+    /// the options for the session's own queryables, and one for the Request, which has one more
+    /// record of routing.
+    #[cfg(all(feature = "pubsub-ts-stack", feature = "query-get"))]
+    #[test]
+    fn the_request_and_the_loopback_leg_of_a_query_each_have_their_own_timestamp_stack() {
+        use crate::query_options::QueryOptions;
+        use crate::ts_stack::{point, TsStack};
+
+        let mut local = TsStack::new(point::SEND | point::ROUTE);
+        local.record(point::SEND, alloc::vec![1], false);
+        let mut wire = local.clone();
+        wire.record(point::ROUTE, alloc::vec![2], false);
+
+        let both = QueryOptions::get().with_ts_stack(Some(local.clone()), Some(wire.clone()));
+        assert_eq!(both.query_metadata().ts_stack, Some(wire));
+        assert_eq!(both.ts_stack, Some(local.clone()));
+
+        // With no stack of its own the Request has the loopback leg's.
+        let same = QueryOptions::get().with_ts_stack(Some(local.clone()), None);
+        assert_eq!(same.query_metadata().ts_stack, Some(local));
+
+        // A query that is not instrumented has none, and is empty.
+        let plain = QueryOptions::get();
+        assert_eq!(plain.query_metadata().ts_stack, None);
+        assert!(plain.query_metadata().is_empty());
     }
 }

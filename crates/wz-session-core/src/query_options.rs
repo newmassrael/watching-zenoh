@@ -277,6 +277,16 @@ pub struct QueryOptions {
     /// because the Request outer QoS ext is part of the Request envelope every
     /// query build emits into, not a separately composable codec vertical.
     pub qos: Option<QosLevel>,
+    /// The timestamp stack the query has for the session's own queryables, on the loopback leg: the
+    /// interceptions of the node that asks, which the node that answers adds to. `None` (default)
+    /// is a query that is not instrumented.
+    #[cfg(feature = "pubsub-ts-stack")]
+    pub ts_stack: Option<crate::ts_stack::TsStack>,
+    /// The timestamp stack the query leaves with, as extension `0x7` of the Request, when it is not
+    /// the one of the loopback leg: the node records one more interception on a message it routes
+    /// out. `None` is the same stack as [`Self::ts_stack`].
+    #[cfg(feature = "pubsub-ts-stack")]
+    pub wire_ts_stack: Option<crate::ts_stack::TsStack>,
     /// Whether the callback sees the timestamp of the replies: see [`Self::with_expose_timestamp`].
     expose_timestamp: crate::timestamp_visibility::ExposeTimestamp,
     /// Whether the matching status of a querier made with these options counts a queryable of a
@@ -335,6 +345,20 @@ impl QueryOptions {
     /// preserve the sub-fields they do not name.
     pub fn with_qos(mut self, qos: QosLevel) -> Self {
         self.qos = Some(qos);
+        self
+    }
+
+    /// Give the query the timestamp stack `local` for the session's own queryables and `wire` for
+    /// the Request that leaves (`None` for the same stack as `local`), so that the nodes it crosses
+    /// record on it. `None` for both is a query that is not instrumented.
+    #[cfg(feature = "pubsub-ts-stack")]
+    pub fn with_ts_stack(
+        mut self,
+        local: Option<crate::ts_stack::TsStack>,
+        wire: Option<crate::ts_stack::TsStack>,
+    ) -> Self {
+        self.ts_stack = local;
+        self.wire_ts_stack = wire;
         self
     }
 
@@ -855,6 +879,8 @@ impl QueryOptions {
             // down in `build_request_query_with_meta` so both this path and any
             // direct `QueryMetadata` construction get it.
             qos: self.qos,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: self.wire_ts_stack.clone().or_else(|| self.ts_stack.clone()),
         }
     }
 

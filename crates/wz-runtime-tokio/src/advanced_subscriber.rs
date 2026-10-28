@@ -4215,6 +4215,7 @@ mod tests {
             },
             responder: None,
             qos: None,
+            stamp: Default::default(),
         };
         session
             .observer()

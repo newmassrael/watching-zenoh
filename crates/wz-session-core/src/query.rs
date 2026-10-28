@@ -631,6 +631,11 @@ pub enum QueryReply {
         /// `ResponseReplyBuilder::qos` (a code span: that builder needs
         /// `codec-response`, which this staging type does not).
         qos: QosLevel,
+        /// The timestamp stack the Response goes out with (extension `0x7`): the stack of the
+        /// query it answers, and the interception of the node that replies. `None` is a reply
+        /// that is not instrumented.
+        #[cfg(feature = "pubsub-ts-stack")]
+        ts_stack: Option<crate::ts_stack::TsStack>,
     },
     /// Error reply — `MID = _Z_MID_Z_ERR(0x05)`. The `encoding` tuple
     /// (id, optional schema) maps onto
@@ -661,6 +666,9 @@ pub enum QueryReply {
         /// R2594 — mirror of [`Self::Reply::qos`]: upstream's Err reply is
         /// seeded from the query's QoS the same way.
         qos: QosLevel,
+        /// Mirror of [`Self::Reply::ts_stack`].
+        #[cfg(feature = "pubsub-ts-stack")]
+        ts_stack: Option<crate::ts_stack::TsStack>,
     },
 }
 
@@ -718,6 +726,8 @@ impl QueryReply {
                 attachment: attachment.map(<[u8]>::to_vec),
                 source_info: source_info.cloned(),
                 qos: parts.qos,
+                #[cfg(feature = "pubsub-ts-stack")]
+                ts_stack: parts.ts_stack.cloned(),
             },
             #[cfg(feature = "query-reply-err")]
             PartsKind::Err { encoding, payload } => QueryReply::Err {
@@ -727,6 +737,8 @@ impl QueryReply {
                 payload: payload.to_vec(),
                 responder,
                 qos: parts.qos,
+                #[cfg(feature = "pubsub-ts-stack")]
+                ts_stack: parts.ts_stack.cloned(),
             },
         }
     }
@@ -813,6 +825,8 @@ impl QueryReply {
                 attachment,
                 source_info,
                 qos,
+                #[cfg(feature = "pubsub-ts-stack")]
+                ts_stack,
             } => {
                 let mut builder = match body {
                     ReplyBody::Put(payload) => {
@@ -875,6 +889,10 @@ impl QueryReply {
                 if let Some((zid, eid)) = responder {
                     builder = builder.responder(&zid, eid);
                 }
+                #[cfg(feature = "pubsub-ts-stack")]
+                if let Some(stack) = &ts_stack {
+                    builder = builder.ts_stack(stack);
+                }
                 builder.qos(qos).build()
             }
             #[cfg(feature = "query-reply-err")]
@@ -885,6 +903,8 @@ impl QueryReply {
                 payload,
                 responder,
                 qos,
+                #[cfg(feature = "pubsub-ts-stack")]
+                ts_stack,
             } => {
                 let mut builder = crate::response_build::ResponseErrBuilder::new(
                     rid,
@@ -897,6 +917,10 @@ impl QueryReply {
                 }
                 if let Some((zid, eid)) = responder {
                     builder = builder.responder(&zid, eid);
+                }
+                #[cfg(feature = "pubsub-ts-stack")]
+                if let Some(stack) = &ts_stack {
+                    builder = builder.ts_stack(stack);
                 }
                 builder.qos(qos).build()
             }
@@ -956,6 +980,10 @@ pub struct QueryResponder<'a> {
     /// and a remote query's QoS is the `ext_qos` its Request arrived with
     /// ([`crate::declare_ext_qos::read_request_qos`]).
     qos: QosLevel,
+    /// The timestamp stack every reply this responder stages goes out with: the stack of the
+    /// query, and the interception of the node that replies. Set by [`Self::with_ts_stack`].
+    #[cfg(feature = "pubsub-ts-stack")]
+    ts_stack: Option<crate::ts_stack::TsStack>,
 }
 
 /// The query's keyexpr as a responder holds it: a `Cow`, so a caller that hands one
@@ -1036,6 +1064,8 @@ impl<'a> QueryResponder<'a> {
             responder: None,
             accept,
             qos,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
         }
     }
 
@@ -1057,6 +1087,8 @@ impl<'a> QueryResponder<'a> {
             responder: None,
             accept,
             qos,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
         }
     }
 
@@ -1106,6 +1138,8 @@ impl<'a> QueryResponder<'a> {
             keyexpr: key_str(&self.keyexpr_literal),
             responder: responder_parts(&self.responder),
             qos: self.qos,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: self.ts_stack.as_ref(),
             kind: PartsKind::Reply {
                 body: PartsBody::Put(payload),
                 encoding: None,
@@ -1135,6 +1169,8 @@ impl<'a> QueryResponder<'a> {
             keyexpr,
             responder: responder_parts(&self.responder),
             qos: self.qos,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: self.ts_stack.as_ref(),
             kind: PartsKind::Reply {
                 body: PartsBody::Put(payload),
                 encoding: None,
@@ -1169,6 +1205,8 @@ impl<'a> QueryResponder<'a> {
             keyexpr,
             responder: responder_parts(&self.responder),
             qos: self.qos,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: self.ts_stack.as_ref(),
             kind: PartsKind::Reply {
                 body: PartsBody::Put(payload),
                 encoding: encoding.map(EncodingParts::of),
@@ -1206,6 +1244,8 @@ impl<'a> QueryResponder<'a> {
             keyexpr,
             responder: responder_parts(&self.responder),
             qos: self.qos,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: self.ts_stack.as_ref(),
             kind: PartsKind::Reply {
                 body: PartsBody::Put(payload),
                 encoding: encoding.map(EncodingParts::of),
@@ -1245,6 +1285,8 @@ impl<'a> QueryResponder<'a> {
             keyexpr,
             responder: responder_parts(&self.responder),
             qos: self.qos,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: self.ts_stack.as_ref(),
             kind: PartsKind::Reply {
                 body: PartsBody::Put(payload),
                 encoding: encoding.map(EncodingParts::of),
@@ -1277,6 +1319,8 @@ impl<'a> QueryResponder<'a> {
             keyexpr,
             responder: responder_parts(&self.responder),
             qos: self.qos,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: self.ts_stack.as_ref(),
             kind: PartsKind::Reply {
                 body: PartsBody::Put(payload),
                 encoding: encoding.map(EncodingParts::of),
@@ -1302,6 +1346,8 @@ impl<'a> QueryResponder<'a> {
             keyexpr,
             responder: responder_parts(&self.responder),
             qos: self.qos,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: self.ts_stack.as_ref(),
             kind: PartsKind::Reply {
                 body: PartsBody::Put(payload),
                 encoding: Some(encoding),
@@ -1322,6 +1368,8 @@ impl<'a> QueryResponder<'a> {
             keyexpr: key_str(&self.keyexpr_literal),
             responder: responder_parts(&self.responder),
             qos: self.qos,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: self.ts_stack.as_ref(),
             kind: PartsKind::Reply {
                 body: PartsBody::Del,
                 encoding: None,
@@ -1361,6 +1409,8 @@ impl<'a> QueryResponder<'a> {
             keyexpr,
             responder: responder_parts(&self.responder),
             qos: self.qos,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: self.ts_stack.as_ref(),
             kind: PartsKind::Reply {
                 body: PartsBody::Del,
                 encoding: None,
@@ -1394,6 +1444,8 @@ impl<'a> QueryResponder<'a> {
             keyexpr: key_str(&self.keyexpr_literal),
             responder: responder_parts(&self.responder),
             qos: self.qos,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: self.ts_stack.as_ref(),
             kind: PartsKind::Reply {
                 body: PartsBody::Del,
                 encoding: None,
@@ -1434,6 +1486,8 @@ impl<'a> QueryResponder<'a> {
             keyexpr,
             responder: responder_parts(&self.responder),
             qos: self.qos,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: self.ts_stack.as_ref(),
             kind: PartsKind::Reply {
                 body: PartsBody::Del,
                 encoding: None,
@@ -1482,6 +1536,8 @@ impl<'a> QueryResponder<'a> {
             // R2596 — a per-reply override BEATS the query's QoS; absent one,
             // the reply inherits, which is what R2594 built.
             qos: meta.qos.unwrap_or(self.qos),
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: self.ts_stack.as_ref(),
             kind: PartsKind::Reply {
                 body,
                 encoding: meta.encoding.map(EncodingParts::of),
@@ -1530,6 +1586,8 @@ impl<'a> QueryResponder<'a> {
             // R2596 — the Del arm honours the override too: a cache replays a
             // cached DELETE on its own terms exactly as it replays a Put.
             qos: meta.qos.unwrap_or(self.qos),
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: self.ts_stack.as_ref(),
             kind: PartsKind::Reply {
                 body: PartsBody::Del,
                 encoding: None,
@@ -1563,6 +1621,8 @@ impl<'a> QueryResponder<'a> {
             keyexpr: key_str(&self.keyexpr_literal),
             responder: responder_parts(&self.responder),
             qos: self.qos,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: self.ts_stack.as_ref(),
             kind: PartsKind::Err {
                 encoding: encoding_id.map(|id| (id, schema)),
                 payload,
@@ -1609,6 +1669,16 @@ impl<'a> QueryResponder<'a> {
     /// invoked again.
     pub fn clear_responder(&mut self) -> &mut Self {
         self.responder = None;
+        self
+    }
+
+    /// Give every reply this responder stages from now on the timestamp stack `stack`
+    /// (extension `0x7` of its Response): the stack of the query it answers and the
+    /// interception of the node that replies, which the host composes. Calling it again
+    /// replaces the stack (last-wins).
+    #[cfg(feature = "pubsub-ts-stack")]
+    pub fn with_ts_stack(&mut self, stack: &crate::ts_stack::TsStack) -> &mut Self {
+        self.ts_stack = Some(stack.clone());
         self
     }
 
@@ -1803,6 +1873,10 @@ impl ReplyOut for QueryResponder<'_> {
     }
     fn responder(&self) -> Option<(&[u8], u32)> {
         QueryResponder::responder(self)
+    }
+    #[cfg(feature = "pubsub-ts-stack")]
+    fn with_ts_stack(&mut self, stack: &crate::ts_stack::TsStack) {
+        QueryResponder::with_ts_stack(self, stack);
     }
 }
 
@@ -2325,6 +2399,9 @@ struct QueryProjection<'q> {
     /// The attachment held as shareable bytes, beside `attachment`.
     #[cfg(feature = "alloc")]
     attachment_shared: Option<crate::link::RxBytes>,
+    /// The timestamp stack the query carried, when it is instrumented.
+    #[cfg(feature = "pubsub-ts-stack")]
+    ts_stack: Option<&'q crate::ts_stack::TsStack>,
 }
 
 #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
@@ -2497,13 +2574,18 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
             target,
             qos,
         };
-        let matched = self.fire_matching_queryables(
-            envelope,
-            resolved,
+        // The timestamp stack the Request carries: the nodes it crossed recorded on it.
+        #[cfg(feature = "pubsub-ts-stack")]
+        let ts_stack =
+            crate::ts_stack::read_ts_stack(request.extensions.as_deref().unwrap_or(&[]).iter());
+        let projection = Self::project_owned_query(
             query,
             unswapped_value,
-            replies,
-            /* is_remote = */ true,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack.as_ref(),
+        );
+        let matched = self.fire_matching_queryables(
+            envelope, resolved, projection, replies, /* is_remote = */ true,
         );
         DispatchOutcome {
             dispatched: true,
@@ -2648,8 +2730,34 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
         value: Option<(crate::sample::EncodingHint, crate::link::RxBytes)>,
         replies: &mut ReplyStage,
     ) -> usize {
+        let projection = Self::project_owned_query(
+            query,
+            value,
+            #[cfg(feature = "pubsub-ts-stack")]
+            None,
+        );
         self.fire_matching_queryables(
-            envelope, keyexpr, query, value, replies, /* is_remote = */ false,
+            envelope, keyexpr, projection, replies, /* is_remote = */ false,
+        )
+    }
+
+    /// [`Self::local_query_with_value`] for a query that is instrumented: every matched queryable
+    /// is shown `ts_stack` as the timestamp stack of the query, which for a query of the
+    /// session's own is the one of its loopback leg (the interceptions of the node that asked,
+    /// and the one of the node that answers).
+    #[cfg(all(feature = "alloc", feature = "pubsub-ts-stack"))]
+    pub fn local_query_with_stack(
+        &mut self,
+        envelope: QueryEnvelope,
+        keyexpr: &str,
+        query: &QueryOwned,
+        value: Option<(crate::sample::EncodingHint, crate::link::RxBytes)>,
+        ts_stack: Option<&crate::ts_stack::TsStack>,
+        replies: &mut ReplyStage,
+    ) -> usize {
+        let projection = Self::project_owned_query(query, value, ts_stack);
+        self.fire_matching_queryables(
+            envelope, keyexpr, projection, replies, /* is_remote = */ false,
         )
     }
 
@@ -2675,12 +2783,23 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
         &mut self,
         envelope: QueryEnvelope,
         keyexpr: &str,
-        query: &QueryOwned,
-        unswapped_value: Option<(crate::sample::EncodingHint, crate::link::RxBytes)>,
+        projection: QueryProjection<'_>,
         replies: &mut ReplyStage,
         is_remote: bool,
     ) -> usize {
-        let QueryEnvelope { rid, target, qos } = envelope;
+        self.fire_projection(envelope, keyexpr, projection, replies, is_remote)
+    }
+
+    /// What a queryable is shown of the owned query `query`, read off it ONCE for every
+    /// queryable it is matched against; the fan-out is [`Self::fire_projection`]. `ts_stack` is
+    /// the timestamp stack the query arrived with: the Request's extension, or the stack of a
+    /// query of the session's own.
+    #[cfg(feature = "alloc")]
+    fn project_owned_query<'q>(
+        query: &'q QueryOwned,
+        unswapped_value: Option<(crate::sample::EncodingHint, crate::link::RxBytes)>,
+        #[cfg(feature = "pubsub-ts-stack")] ts_stack: Option<&'q crate::ts_stack::TsStack>,
+    ) -> QueryProjection<'q> {
         // The projection inputs, extracted ONCE; the fan-out is
         // `fire_projection`.
         //
@@ -2730,20 +2849,16 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
         let unswapped_value = unswapped_value.or_else(|| extract_query_value_shared(query));
         // The attachment likewise: the range of the frame, lent beside the value.
         let attachment_shared = extract_query_attachment_shared(query);
-        self.fire_projection(
-            QueryEnvelope { rid, target, qos },
-            keyexpr,
-            QueryProjection {
-                parameters: parameters_view,
-                attachment: attachment_view,
-                source_info: source_info_view,
-                plain_value,
-                shared_value: unswapped_value,
-                attachment_shared,
-            },
-            replies,
-            is_remote,
-        )
+        QueryProjection {
+            parameters: parameters_view,
+            attachment: attachment_view,
+            source_info: source_info_view,
+            plain_value,
+            shared_value: unswapped_value,
+            attachment_shared,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack,
+        }
     }
 
     /// The fan-out itself, over a query already projected into what a
@@ -2771,6 +2886,8 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
                 shared_value: unswapped_value,
             #[cfg(feature = "alloc")]
             attachment_shared,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack,
         } = projection;
         #[cfg(all(feature = "alloc", feature = "query-value"))]
         let value_view: Option<(crate::sample::EncodingHint, &[u8])> = match &unswapped_value {
@@ -2843,12 +2960,18 @@ impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
                 #[cfg(feature = "alloc")]
                 {
                     let lent_value = unswapped_value.as_ref().map(|(_, shared)| shared);
-                    if lent_value.is_some() || attachment_shared.is_some() {
+                    #[cfg(feature = "pubsub-ts-stack")]
+                    let carries_stack = ts_stack.is_some();
+                    #[cfg(not(feature = "pubsub-ts-stack"))]
+                    let carries_stack = false;
+                    if lent_value.is_some() || attachment_shared.is_some() || carries_stack {
                         queryable.sink.handle(
                             &crate::query_sink::SharedQuery {
                                 base: query_view,
                                 value: lent_value,
                                 attachment: attachment_shared.as_ref(),
+                                #[cfg(feature = "pubsub-ts-stack")]
+                                ts_stack,
                             },
                             &mut responder,
                         )
@@ -4219,6 +4342,125 @@ mod tests {
         );
     }
 
+    /// A queryable that gives its responder a timestamp stack sends it with every reply from then
+    /// on, a reply and an error alike, as the last extension of the Response: the bytes are the
+    /// builder's own.
+    #[cfg(feature = "pubsub-ts-stack")]
+    #[test]
+    fn a_responder_with_a_timestamp_stack_sends_it_with_each_reply_after() {
+        use crate::ts_stack::{point, read_ts_stack, TsStack, TS_STACK_EXT_HEADER};
+
+        let mut stack = TsStack::new(point::SEND | point::RECEIVE);
+        stack.record(point::SEND, vec![4, 5], false);
+        let given = stack.clone();
+        let mut reg = QueryableRegistry::new();
+        reg.register("home/temp", move |_q, responder| {
+            responder.with_responder(&[0xBB; 1], 1);
+            // The reply before the stack is given carries none.
+            responder.reply(b"before");
+            responder.with_ts_stack(&given);
+            responder.reply(b"after");
+            responder.reply_err(None, None, b"oops");
+        });
+
+        let mut replies = ReplyStage::new();
+        reg.dispatch_request(
+            &request_query(42, 0, Some("home/temp")),
+            &HashMap::new(),
+            &mut replies,
+        );
+        let responses: Vec<_> = replies
+            .drain_staged()
+            .map(|reply| reply.into_response().unwrap())
+            .collect();
+        assert_eq!(responses.len(), 3);
+
+        let exts = |response: &ResponseOwned| response.extensions.clone().unwrap_or_default();
+        assert_eq!(read_ts_stack(exts(&responses[0]).iter()), None);
+        for response in &responses[1..] {
+            let chain = exts(response);
+            assert_eq!(read_ts_stack(chain.iter()), Some(stack.clone()));
+            assert_eq!(
+                chain.last().map(|ext| ext.header & 0x7f),
+                Some(TS_STACK_EXT_HEADER),
+                "the stack is the last extension, after the responder"
+            );
+            assert_eq!(response.header & 0x80, 0x80);
+        }
+        let expected = ResponseReplyBuilder::new(42, 0, Some("home/temp"), b"after")
+            .responder(&[0xBB; 1], 1)
+            .ts_stack(&stack)
+            .build()
+            .unwrap()
+            .wire();
+        assert_eq!(responses[1].clone().wire(), expected);
+    }
+
+    /// A Request that carries a timestamp stack hands it to the queryables it reaches, as does a
+    /// local query given one, and a query that carries none hands them none.
+    #[cfg(all(feature = "pubsub-ts-stack", feature = "query-get"))]
+    #[test]
+    fn a_queryable_is_shown_the_timestamp_stack_of_its_query() {
+        use crate::request_build::RequestQueryBuilder;
+        use crate::ts_stack::{point, TsStack};
+
+        let mut stack = TsStack::new(point::SEND | point::RECEIVE);
+        stack.record(point::SEND, vec![7, 7], false);
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let mut reg = QueryableRegistry::new();
+        reg.register("home/temp", move |view, _out| {
+            log.lock()
+                .unwrap()
+                .push((view.ts_stack().cloned(), view.is_local()));
+        });
+
+        // Over a link.
+        let request = RequestQueryBuilder::new(42, 0, Some("home/temp"))
+            .request_ts_stack(&stack)
+            .build()
+            .unwrap();
+        let mut replies = ReplyStage::new();
+        reg.dispatch_request(&request, &HashMap::new(), &mut replies);
+        reg.dispatch_request(
+            &request_query(43, 0, Some("home/temp")),
+            &HashMap::new(),
+            &mut replies,
+        );
+        // Of the session's own, given the stack of its loopback leg.
+        let query = crate::query_options::QueryOptions::get().loopback_query();
+        reg.local_query_with_stack(
+            QueryEnvelope {
+                rid: 44,
+                target: None,
+                qos: QosLevel::DEFAULT,
+            },
+            "home/temp",
+            &query,
+            None,
+            Some(&stack),
+            &mut replies,
+        );
+        reg.local_query(
+            45,
+            "home/temp",
+            &query,
+            None,
+            QosLevel::DEFAULT,
+            &mut replies,
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                (Some(stack.clone()), false),
+                (None, false),
+                (Some(stack), true),
+                (None, true),
+            ]
+        );
+    }
+
     #[test]
     fn query_reply_into_response_put_path_round_trips_via_builder() {
         let reply = QueryReply::Reply {
@@ -4231,6 +4473,8 @@ mod tests {
             attachment: None,
             source_info: None,
             qos: QosLevel::DEFAULT,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
         };
         let response = reply.into_response().unwrap();
         // The Response should encode to the same bytes as the
@@ -4265,6 +4509,8 @@ mod tests {
             attachment: None,
             source_info: Some(si.clone()),
             qos: QosLevel::DEFAULT,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
         };
         let via_chain = reply.into_response().unwrap().wire();
         let via_builder = ResponseReplyBuilder::new(42, 0, Some("demo/data"), b"v")
@@ -4775,6 +5021,8 @@ mod tests {
             attachment: None,
             source_info: None,
             qos: QosLevel::DEFAULT,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
         };
         let response = reply.into_response().unwrap();
         let via_builder = ResponseReplyBuilder::new(42, 0, Some("clear/me"), &[])
@@ -4798,6 +5046,8 @@ mod tests {
             payload: b"oops".to_vec(),
             responder: None,
             qos: QosLevel::DEFAULT,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
         };
         let response = reply.into_response().unwrap();
         let via_builder =
@@ -5667,6 +5917,8 @@ mod tests {
             responder: None,
             accept: ReplyKeyExpr::MatchingQuery,
             qos: QosLevel::DEFAULT,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
         };
         let fired = reg.dispatch_borrowed(
             &BorrowedQuery {

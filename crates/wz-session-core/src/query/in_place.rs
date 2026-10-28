@@ -54,6 +54,10 @@ enum Fallback {
     SlicedValue,
     /// Its keyexpr does not fit the bounded buffer.
     KeyexprPastBound,
+    /// It carries a timestamp stack, which the delivering node adds to: the stack is an owned
+    /// value the lent form has none of.
+    #[cfg(feature = "pubsub-ts-stack")]
+    Instrumented,
 }
 
 /// The target and the QoS a Request's extension chain carries, each by the rule the owned path
@@ -133,6 +137,8 @@ fn lent_projection<'q>(query: &QueryView<'q>) -> QueryProjection<'q> {
         shared_value: None,
         #[cfg(feature = "alloc")]
         attachment_shared: None,
+        #[cfg(feature = "pubsub-ts-stack")]
+        ts_stack: None,
     }
 }
 
@@ -177,6 +183,10 @@ impl<C: QuerySink, P: crate::bounded::Storage> QueryableRegistry<C, P> {
             Err(Fallback::SlicedValue | Fallback::KeyexprPastBound) => {
                 self.dispatch_owned_projection(request, spaces, pending_replies, pending_final_rids)
             }
+            #[cfg(feature = "pubsub-ts-stack")]
+            Err(Fallback::Instrumented) => {
+                self.dispatch_owned_projection(request, spaces, pending_replies, pending_final_rids)
+            }
             // With no allocator there is no owned projection to fall back on, so a
             // Request the lent form cannot represent reaches no queryable, and is
             // owed its Final as a query that matched nobody is: the requester's
@@ -203,6 +213,16 @@ impl<C: QuerySink, P: crate::bounded::Storage> QueryableRegistry<C, P> {
         };
         if has_sliced_value(walked(query.extensions.as_ref())) {
             return Err(Fallback::SlicedValue);
+        }
+        // A Request the nodes record on is delivered with a stack of its own to add to.
+        #[cfg(feature = "pubsub-ts-stack")]
+        if crate::ext_view::find_by_eid_in(
+            walked(request.extensions.as_ref()),
+            crate::ext_header::ext_eid(crate::ts_stack::TS_STACK_EXT_HEADER),
+        )
+        .is_some()
+        {
+            return Err(Fallback::Instrumented);
         }
         let mut composed = KeyexprBuf::new();
         let keyexpr = match resolve_wireexpr_viewed(&request.keyexpr.body, spaces, &mut composed) {
@@ -289,6 +309,8 @@ mod tests {
         rid: u64,
         is_local: bool,
         qos: QosLevel,
+        #[cfg(feature = "pubsub-ts-stack")]
+        ts_stack: Option<crate::ts_stack::TsStack>,
     }
 
     /// What one dispatch left behind: what the queryables saw, the replies they
@@ -312,6 +334,8 @@ mod tests {
                 rid: view.rid(),
                 is_local: view.is_local(),
                 qos: view.qos(),
+                #[cfg(feature = "pubsub-ts-stack")]
+                ts_stack: view.ts_stack().cloned(),
             });
             out.reply(b"answer");
         });
@@ -431,6 +455,36 @@ mod tests {
             finals += owned.2.len();
         }
         assert_eq!(finals, cases.len() - 1, "every case but the unroutable one");
+    }
+
+    /// A Request that carries a timestamp stack is dispatched with it: the lent form has no stack
+    /// of its own for the nodes to add to, so it takes the owned path, and a queryable is shown
+    /// the same stack either way. A Request that carries none is shown none.
+    #[cfg(feature = "pubsub-ts-stack")]
+    #[test]
+    fn an_instrumented_query_is_dispatched_with_its_stack_on_both_paths() {
+        use crate::ts_stack::{point, TsStack};
+
+        let mut stack = TsStack::new(point::SEND | point::RECEIVE);
+        stack.record(point::SEND, alloc::vec![9, 8, 7], false);
+        let instrumented = RequestQueryBuilder::new(21, 0, Some("demo/a"))
+            .request_qos(0x0D)
+            .request_ts_stack(&stack)
+            .build()
+            .expect("build");
+        let (owned, lent) = both(&instrumented);
+        assert_eq!(lent, owned, "the lent path is the owned one");
+        assert_eq!(owned.0.len(), 1);
+        assert_eq!(owned.0[0].ts_stack.as_ref(), Some(&stack));
+        assert!(!owned.0[0].is_local, "it came in over a link");
+        assert_eq!(owned.2.len(), 1, "the query is owed its Final");
+
+        let plain = RequestQueryBuilder::new(22, 0, Some("demo/a"))
+            .build()
+            .expect("build");
+        let (owned, lent) = both(&plain);
+        assert_eq!(lent, owned);
+        assert_eq!(owned.0[0].ts_stack, None);
     }
 
     /// The fixed backing's refusal holds on the lent path too: a Query that would

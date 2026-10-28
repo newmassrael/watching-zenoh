@@ -192,6 +192,23 @@ impl crate::reply_sink::ReplyView for HiddenReplyTimestamp<'_> {
     fn attachment_shared(&self) -> Option<&crate::link::RxBytes> {
         self.0.attachment_shared()
     }
+    // What is not the sample's timestamp stays as the inner view has it: the node that answered,
+    // the quality of service, and the timestamp stack the Response carried.
+    fn responder(&self) -> Option<(&[u8], u32)> {
+        self.0.responder()
+    }
+    #[cfg(feature = "storage-profile")]
+    fn qos(&self) -> Option<crate::sample::QosLevel> {
+        self.0.qos()
+    }
+    #[cfg(feature = "pubsub-ts-stack")]
+    fn ts_stack(&self) -> Option<&crate::ts_stack::TsStack> {
+        self.0.ts_stack()
+    }
+    #[cfg(feature = "pubsub-ts-stack")]
+    fn routed(&self) -> bool {
+        self.0.routed()
+    }
 }
 
 #[cfg(test)]
@@ -256,5 +273,45 @@ mod tests {
         let hidden = HiddenTimestamp(&sample);
         assert_eq!(hidden.ts_stack(), Some(&stack));
         assert!(hidden.routed());
+    }
+
+    /// Hiding the timestamp of a reply hides that and nothing else: the node that answered, the
+    /// quality of service and the stack of the Response are the inner view's.
+    #[cfg(feature = "pubsub-ts-stack")]
+    #[test]
+    fn a_hidden_reply_view_shows_what_is_not_the_timestamp_as_the_inner_view_has_it() {
+        use crate::{
+            reply::{InboundReply, InboundReplyBody, ReplyStamp},
+            reply_sink::ReplyView,
+            ts_stack::{point, TsStack},
+        };
+        let mut stack = TsStack::new(point::SEND);
+        stack.record(point::SEND, alloc::vec![1, 2], false);
+        let reply = InboundReply {
+            rid: 1,
+            keyexpr_literal: "a/b".into(),
+            body: InboundReplyBody::Err {
+                encoding: None,
+                payload: alloc::vec![b'e'],
+            },
+            responder: Some((alloc::vec![0xAB], 4)),
+            qos: Some(crate::sample::QosLevel::from_raw(0b0001_1010)),
+            stamp: ReplyStamp {
+                ts_stack: Some(stack.clone()),
+                routed: true,
+            },
+        };
+        let hidden = HiddenReplyTimestamp(&reply);
+        assert_eq!(hidden.responder(), Some((&[0xAB][..], 4)));
+        assert_eq!(
+            hidden.qos(),
+            Some(crate::sample::QosLevel::from_raw(0b0001_1010))
+        );
+        assert_eq!(hidden.ts_stack(), Some(&stack));
+        assert!(hidden.routed());
+        assert!(
+            hidden.timestamp().is_none(),
+            "the timestamp is what is hidden"
+        );
     }
 }

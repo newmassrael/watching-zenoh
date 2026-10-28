@@ -152,6 +152,13 @@ pub trait QueryView {
     fn is_local(&self) -> bool {
         false
     }
+    /// The timestamp stack the query carried (extension `0x7` of its Request, or the stack of a
+    /// session-local query), if it was instrumented: what the nodes it crossed recorded on it.
+    /// Defaults to `None`.
+    #[cfg(feature = "pubsub-ts-stack")]
+    fn ts_stack(&self) -> Option<&crate::ts_stack::TsStack> {
+        None
+    }
     /// R2594 — the QoS the query arrived with: the `ext_qos` of its Request,
     /// or the requester's options for a local query. `QosLevel::DEFAULT` when
     /// the Request carried none.
@@ -706,6 +713,12 @@ pub trait ReplyOut {
     /// subsequent [`Self::reply`] / [`Self::reply_del`] /
     /// [`Self::reply_err`] call.
     fn with_responder(&mut self, zid: &[u8], eid: u32);
+    /// Give every subsequent [`Self::reply`] / [`Self::reply_del`] / [`Self::reply_err`] the
+    /// timestamp stack `stack` (extension `0x7` of its Response): the stack of the query this
+    /// answers and the interception of the node that replies. A sink that carries none ignores
+    /// it, which is the default.
+    #[cfg(feature = "pubsub-ts-stack")]
+    fn with_ts_stack(&mut self, _stack: &crate::ts_stack::TsStack) {}
     /// Clear the responder identity set via [`Self::with_responder`].
     fn clear_responder(&mut self);
     /// Current responder identity (read-only view), or `None` when no
@@ -817,6 +830,9 @@ pub struct SharedQuery<'a> {
     pub value: Option<&'a crate::link::RxBytes>,
     /// The attachment, shareable, when the view holds it so.
     pub attachment: Option<&'a crate::link::RxBytes>,
+    /// The timestamp stack the query carried, when it is instrumented.
+    #[cfg(feature = "pubsub-ts-stack")]
+    pub ts_stack: Option<&'a crate::ts_stack::TsStack>,
 }
 
 #[cfg(feature = "alloc")]
@@ -850,6 +866,10 @@ impl QueryView for SharedQuery<'_> {
     }
     fn is_local(&self) -> bool {
         self.base.is_local()
+    }
+    #[cfg(feature = "pubsub-ts-stack")]
+    fn ts_stack(&self) -> Option<&crate::ts_stack::TsStack> {
+        self.ts_stack
     }
     fn qos(&self) -> crate::sample::QosLevel {
         self.base.qos()
@@ -1126,6 +1146,8 @@ mod tests {
             base: BorrowedQuery { ..base },
             value: Some(&value),
             attachment: Some(&attachment),
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
         };
         let shared = view.payload_shared().expect("the view carries the buffer");
         assert_eq!(shared.as_slice().as_ptr(), value.as_slice().as_ptr());

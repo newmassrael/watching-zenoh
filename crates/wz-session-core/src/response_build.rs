@@ -445,6 +445,9 @@ pub fn build_response_timeout_err(
         &mut err,
         crate::sample::QosLevel::DEFAULT,
         Some((silent_face_zid.to_vec(), 0)),
+        // The synthesized Timeout carries no stack, as upstream's does not.
+        #[cfg(feature = "pubsub-ts-stack")]
+        None,
     )?;
     Ok(err)
 }
@@ -725,6 +728,9 @@ pub struct ResponseReplyBuilder {
     // queryable's reply seeds it from its query's own QoS. DEFAULT is omitted
     // on the wire, so a builder nobody sets stays byte-identical.
     qos: crate::sample::QosLevel,
+    // The timestamp stack of the Response (extension `0x7`, last in the envelope chain).
+    #[cfg(feature = "pubsub-ts-stack")]
+    ts_stack: Option<crate::ts_stack::TsStack>,
     // R3062: the descriptor of a buffer of shared memory the Put reply's payload is. When set,
     // the inner MsgPut goes out in the sliced layout with the descriptor as its one SHM_PTR slice
     // and the 0x2 marker in its body chain (the shape `build_msg_put_shm` writes for a Push), and
@@ -747,6 +753,7 @@ fn stamp_envelope_extensions(
     response: &mut ResponseOwned,
     qos: crate::sample::QosLevel,
     responder: Option<(Vec<u8>, u32)>,
+    #[cfg(feature = "pubsub-ts-stack")] ts_stack: Option<&crate::ts_stack::TsStack>,
 ) -> Result<(), CodecError> {
     let mut exts: Vec<ExtEntryOwned> = Vec::new();
     if qos != crate::sample::QosLevel::DEFAULT {
@@ -762,6 +769,13 @@ fn stamp_envelope_extensions(
                 value: owned_bytes(&value)?,
             }),
         });
+    }
+    // The timestamp stack (id 0x07) is the last Response extension, as in upstream's codec.
+    #[cfg(feature = "pubsub-ts-stack")]
+    if let Some(stack) = ts_stack {
+        let mut chain = Some(core::mem::take(&mut exts));
+        crate::ts_stack::set_ts_stack(&mut chain, Some(stack));
+        exts = chain.unwrap_or_default();
     }
     if exts.is_empty() {
         return Ok(());
@@ -814,6 +828,8 @@ impl ResponseReplyBuilder {
             source_info: None,
             responder: None,
             qos: crate::sample::QosLevel::DEFAULT,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
             #[cfg(feature = "transport-shm")]
             shm: None,
         }
@@ -845,6 +861,15 @@ impl ResponseReplyBuilder {
     /// value carries.
     pub fn qos(mut self, qos: crate::sample::QosLevel) -> Self {
         self.qos = qos;
+        self
+    }
+
+    /// Set the timestamp stack of the Response (extension `0x7`), which follows the other
+    /// envelope extensions: the stack of the query this answers, and the interception of the node
+    /// that replies.
+    #[cfg(feature = "pubsub-ts-stack")]
+    pub fn ts_stack(mut self, stack: &crate::ts_stack::TsStack) -> Self {
+        self.ts_stack = Some(stack.clone());
         self
     }
 
@@ -1135,7 +1160,13 @@ impl ResponseReplyBuilder {
 
         // Envelope-level extensions (Response.extensions): qos, then the
         // responder (R121j-3c), through the one chain body both builders share.
-        stamp_envelope_extensions(&mut response, self.qos, self.responder)?;
+        stamp_envelope_extensions(
+            &mut response,
+            self.qos,
+            self.responder,
+            #[cfg(feature = "pubsub-ts-stack")]
+            self.ts_stack.as_ref(),
+        )?;
 
         Ok(response)
     }
@@ -1178,6 +1209,9 @@ pub struct ResponseErrBuilder {
     // `ResponseReplyBuilder::qos`. Upstream's `reply_err` seeds it from the
     // query exactly as `reply` does.
     qos: crate::sample::QosLevel,
+    // The timestamp stack of the Response, the twin of `ResponseReplyBuilder::ts_stack`.
+    #[cfg(feature = "pubsub-ts-stack")]
+    ts_stack: Option<crate::ts_stack::TsStack>,
 }
 
 #[cfg(feature = "codec-response")]
@@ -1201,6 +1235,8 @@ impl ResponseErrBuilder {
             source_info: None,
             responder: None,
             qos: crate::sample::QosLevel::DEFAULT,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
         }
     }
 
@@ -1211,6 +1247,13 @@ impl ResponseErrBuilder {
     /// the `ReplyErrBuilder` constructor carries as the `ReplyBuilder` ones do).
     pub fn qos(mut self, qos: crate::sample::QosLevel) -> Self {
         self.qos = qos;
+        self
+    }
+
+    /// Mirror of [`ResponseReplyBuilder::ts_stack`] for an Err reply.
+    #[cfg(feature = "pubsub-ts-stack")]
+    pub fn ts_stack(mut self, stack: &crate::ts_stack::TsStack) -> Self {
+        self.ts_stack = Some(stack.clone());
         self
     }
 
@@ -1329,7 +1372,13 @@ impl ResponseErrBuilder {
         // Envelope-level extensions (Response.extensions). The same chain body
         // as [`ResponseReplyBuilder::build`] — qos and the responder are shared
         // between Reply and Err envelopes.
-        stamp_envelope_extensions(&mut response, self.qos, self.responder)?;
+        stamp_envelope_extensions(
+            &mut response,
+            self.qos,
+            self.responder,
+            #[cfg(feature = "pubsub-ts-stack")]
+            self.ts_stack.as_ref(),
+        )?;
 
         Ok(response)
     }

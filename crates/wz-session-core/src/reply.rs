@@ -307,6 +307,64 @@ pub struct InboundReply {
     /// congestion control and express (`zenoh/src/api/session.rs` @ `Sample::from_push(`,
     /// which is given the `ext_qos` of the Response).
     pub qos: Option<crate::sample::QosLevel>,
+    /// What the timestamp stack adds to the reply, which is nothing in a build without
+    /// `pubsub-ts-stack`: see [`ReplyStamp`].
+    pub stamp: ReplyStamp,
+}
+
+/// What the timestamp stack adds to a delivered reply: the stack the Response carried and whether
+/// it came in over a link. One value, and not two fields of [`InboundReply`], so that a record of
+/// the reply is written the same in a build with the feature and in one without (`..` or
+/// `Default::default()`), and is zero-sized in the second.
+#[cfg(feature = "alloc")]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReplyStamp {
+    /// The timestamp stack the Response carried (extension `0x7`), or `None` for a Response that
+    /// was not instrumented: the stack of the query it answers, and what the nodes it crossed
+    /// recorded on it.
+    #[cfg(feature = "pubsub-ts-stack")]
+    pub ts_stack: Option<crate::ts_stack::TsStack>,
+    /// Whether the Response came in over a link, and so was routed to this node, as against a
+    /// reply of this session's own queryable: the node that delivers a routed reply records its
+    /// own routing on the stack, one that did not route it does not.
+    #[cfg(feature = "pubsub-ts-stack")]
+    pub routed: bool,
+}
+
+#[cfg(feature = "alloc")]
+impl ReplyStamp {
+    /// What a view of a reply holds, to be kept past its borrow.
+    fn of(view: &dyn ReplyView) -> Self {
+        #[cfg(feature = "pubsub-ts-stack")]
+        {
+            Self {
+                ts_stack: view.ts_stack().cloned(),
+                routed: view.routed(),
+            }
+        }
+        #[cfg(not(feature = "pubsub-ts-stack"))]
+        {
+            let _ = view;
+            Self::default()
+        }
+    }
+
+    /// What a Response read off a link carries in its extension chain.
+    #[cfg(feature = "codec-response")]
+    fn received(extensions: &[crate::wire::parts::ExtEntryOwned]) -> Self {
+        #[cfg(feature = "pubsub-ts-stack")]
+        {
+            Self {
+                ts_stack: crate::ts_stack::read_ts_stack(extensions.iter()),
+                routed: true,
+            }
+        }
+        #[cfg(not(feature = "pubsub-ts-stack"))]
+        {
+            let _ = extensions;
+            Self::default()
+        }
+    }
 }
 
 /// R311gb-3c — connect the owned [`InboundReply`] (the AP retention form)
@@ -405,6 +463,14 @@ impl ReplyView for InboundReply {
     fn qos(&self) -> Option<crate::sample::QosLevel> {
         self.qos
     }
+    #[cfg(feature = "pubsub-ts-stack")]
+    fn ts_stack(&self) -> Option<&crate::ts_stack::TsStack> {
+        self.stamp.ts_stack.as_ref()
+    }
+    #[cfg(feature = "pubsub-ts-stack")]
+    fn routed(&self) -> bool {
+        self.stamp.routed
+    }
 }
 
 #[cfg(feature = "alloc")]
@@ -453,6 +519,7 @@ impl InboundReply {
             body,
             responder: view.responder().map(|(zid, eid)| (zid.to_vec(), eid)),
             qos: view.qos(),
+            stamp: ReplyStamp::of(view),
         }
     }
 }
@@ -789,6 +856,10 @@ impl From<QueryReply> for InboundReply {
                 // decode surfaces from the Response's `ext_qos` and this projection
                 // from the staged reply, so the two origins show the same.
                 qos,
+                // The stack the reply was staged with: the stack of the query it answers and the
+                // interception of the node that replies.
+                #[cfg(feature = "pubsub-ts-stack")]
+                ts_stack,
             } => {
                 // R3062 -- the payload of a Put reply, whichever way it was staged: the
                 // responder's own vector, moved in, or a buffer of shared memory, which the
@@ -840,6 +911,10 @@ impl From<QueryReply> for InboundReply {
                     body,
                     responder,
                     qos: Some(qos),
+                    stamp: local_stamp(
+                        #[cfg(feature = "pubsub-ts-stack")]
+                        ts_stack,
+                    ),
                 }
             }
             // R311y315 — the staged `QueryReply::Err` variant is gated on
@@ -855,6 +930,8 @@ impl From<QueryReply> for InboundReply {
                 payload,
                 responder,
                 qos,
+                #[cfg(feature = "pubsub-ts-stack")]
+                ts_stack,
             } => Self {
                 rid,
                 keyexpr_literal,
@@ -868,8 +945,31 @@ impl From<QueryReply> for InboundReply {
                 },
                 responder,
                 qos: Some(qos),
+                stamp: local_stamp(
+                    #[cfg(feature = "pubsub-ts-stack")]
+                    ts_stack,
+                ),
             },
         }
+    }
+}
+
+/// The stamp of a reply of this session's own queryable: the stack it was staged with, and not
+/// routed to this node.
+#[cfg(all(feature = "query-queryable", feature = "alloc"))]
+fn local_stamp(
+    #[cfg(feature = "pubsub-ts-stack")] ts_stack: Option<crate::ts_stack::TsStack>,
+) -> ReplyStamp {
+    #[cfg(feature = "pubsub-ts-stack")]
+    {
+        ReplyStamp {
+            ts_stack,
+            routed: false,
+        }
+    }
+    #[cfg(not(feature = "pubsub-ts-stack"))]
+    {
+        ReplyStamp::default()
     }
 }
 
@@ -1284,6 +1384,8 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
             body,
             responder: response_responder(extensions).map(|(zid, eid)| (zid.to_vec(), eid)),
             qos: crate::sample::extract_qos(extensions),
+            // The timestamp stack the Response carries, and that it came in over a link.
+            stamp: ReplyStamp::received(extensions),
         };
         self.fire_replies_for(&inbound, true);
     }
@@ -2841,6 +2943,8 @@ mod tests {
             attachment: None,
             source_info: Some(si.clone()),
             qos: crate::sample::QosLevel::DEFAULT,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
         };
         let inbound: InboundReply = qr.into();
         let got = inbound
@@ -2917,6 +3021,8 @@ mod tests {
             attachment: None,
             source_info: Some(si.clone()),
             qos: crate::sample::QosLevel::DEFAULT,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
         };
         let inbound: InboundReply = qr.into();
         assert_eq!(inbound.kind(), ReplyKind::Del);
@@ -3051,6 +3157,7 @@ mod tests {
                 body,
                 responder: None,
                 qos: None,
+                stamp: Default::default(),
             };
 
             let kept = InboundReply::from_view(&live);
@@ -3072,6 +3179,71 @@ mod tests {
                 "the kept reply holds the very bytes the live one does, not a copy"
             );
         }
+    }
+
+    /// The stack a Response carries reaches the application as a reply's, with the fact that it
+    /// came in over a link; a reply of the session's own queryable has the stack it was staged
+    /// with and was not routed; the copy a consolidating sink keeps has both.
+    #[cfg(feature = "pubsub-ts-stack")]
+    #[test]
+    fn a_reply_is_delivered_with_the_timestamp_stack_of_its_response() {
+        use crate::ts_stack::{point, TsStack};
+
+        let mut stack = TsStack::new(point::SEND | point::RECEIVE);
+        stack.record(point::SEND, vec![3, 1, 4], false);
+
+        /// The stack a reply was delivered with, and whether it came in over a link.
+        type Delivered = (Option<TsStack>, bool);
+        let seen: Arc<Mutex<Vec<Delivered>>> = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let mut reg = ReplyRegistry::new();
+        reg.register(
+            9,
+            1,
+            None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
+            move |reply| {
+                log.lock()
+                    .unwrap()
+                    .push((reply.ts_stack().cloned(), reply.routed()));
+            },
+            |_| {},
+        );
+
+        let response = crate::response_build::ResponseReplyBuilder::new(9, 0, Some("a/b"), b"v")
+            .ts_stack(&stack)
+            .build()
+            .unwrap();
+        reg.dispatch_response(&response, &HashMap::new());
+        let plain = response_reply_del(9, "clear/me");
+        reg.dispatch_response(&plain, &HashMap::new());
+
+        let staged = QueryReply::Reply {
+            rid: 9,
+            keyexpr_literal: "a/b".to_string(),
+            body: ReplyBody::Put(b"v".to_vec()),
+            encoding: None,
+            timestamp: None,
+            responder: None,
+            attachment: None,
+            source_info: None,
+            qos: crate::sample::QosLevel::DEFAULT,
+            ts_stack: Some(stack.clone()),
+        };
+        let local: InboundReply = staged.into();
+        reg.deliver_local_reply(&local);
+        // What a consolidating sink retains is a copy of the view, with both.
+        let kept = InboundReply::from_view(&local);
+        assert_eq!(kept.stamp, local.stamp);
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                (Some(stack.clone()), true),
+                (None, true),
+                (Some(stack), false),
+            ]
+        );
     }
 
     #[test]
@@ -3438,6 +3610,7 @@ mod tests {
             },
             responder: None,
             qos: None,
+            stamp: Default::default(),
         };
         reg.deliver_local_reply(&inbound);
 
@@ -3473,6 +3646,7 @@ mod tests {
             },
             responder: None,
             qos: None,
+            stamp: Default::default(),
         };
         reg.deliver_local_reply(&inbound);
         assert_eq!(count.load(Ordering::SeqCst), 0);
@@ -3556,6 +3730,7 @@ mod tests {
                 },
                 responder: None,
                 qos: None,
+                stamp: Default::default(),
             });
         }
 
@@ -3587,6 +3762,7 @@ mod tests {
             },
             responder: None,
             qos: None,
+            stamp: Default::default(),
         };
         let refused = InboundReply {
             rid: 7,
@@ -3598,6 +3774,7 @@ mod tests {
             },
             responder: None,
             qos: None,
+            stamp: Default::default(),
         };
         assert_eq!(reg.dispatch_borrowed(&admitted), 1);
         assert_eq!(reg.dispatch_borrowed(&refused), 0);
@@ -3835,6 +4012,8 @@ mod tests {
             attachment: None,
             source_info: None,
             qos: crate::sample::QosLevel::DEFAULT,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
         };
         let inbound: InboundReply = qr.into();
         assert_eq!(inbound.rid, 11);
@@ -3871,6 +4050,8 @@ mod tests {
             attachment: None,
             source_info: None,
             qos: crate::sample::QosLevel::DEFAULT,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
         };
         let address_of = |reply: QueryReply| match InboundReply::from(reply).body {
             InboundReplyBody::Put { payload, .. } => payload.as_slice().as_ptr() as usize,
@@ -3923,6 +4104,8 @@ mod tests {
             attachment: Some(b"align".to_vec()),
             source_info: None,
             qos: crate::sample::QosLevel::DEFAULT,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
         };
         let inbound: InboundReply = qr.into();
         match inbound.body {
@@ -3955,6 +4138,8 @@ mod tests {
             attachment: None,
             source_info: None,
             qos: crate::sample::QosLevel::from_raw(0b0001_0011),
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
         };
         let inbound: InboundReply = qr.into();
         assert_eq!(inbound.rid, 12);
@@ -3989,6 +4174,8 @@ mod tests {
             payload: b"err-payload".to_vec(),
             responder: Some((vec![0x01], 9)),
             qos: crate::sample::QosLevel::from_raw(0b0000_0110),
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
         };
         let inbound: InboundReply = qr.into();
         assert_eq!(inbound.rid, 13);
@@ -4517,6 +4704,7 @@ mod tests {
             },
             responder: None,
             qos: None,
+            stamp: Default::default(),
         };
         reg.deliver_local_reply(&own);
         assert_eq!(hits.load(Ordering::SeqCst), 3);

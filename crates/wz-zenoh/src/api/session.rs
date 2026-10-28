@@ -198,6 +198,9 @@ pub(crate) struct QueryableDeclaration<'a> {
     pub(crate) zid: ZenohId,
     /// The entity id of the queryable, which the replies say they come from.
     pub(crate) eid: Id,
+    /// What records on the timestamp stack of a query it receives and of the replies it sends.
+    #[cfg(feature = "unstable")]
+    pub(crate) timestamps: Arc<TimestampSource>,
 }
 
 /// What a get asks of the engine, in the types of this crate: the key as the wire names it, the
@@ -223,6 +226,17 @@ pub(crate) struct QueryRequest<'a> {
     pub(crate) attachment: Option<ZBytes>,
     #[cfg(feature = "unstable")]
     pub(crate) source_info: Option<SourceInfo>,
+    /// The stack of a query that asks for its instrumentation: the points to record at, and what
+    /// this node recorded at the send.
+    #[cfg(feature = "unstable")]
+    pub(crate) ts_stack: Option<zenoh_protocol::network::timestamp_stack::TimestampStack>,
+    /// The stack of the query as it leaves the node: the one above with what the node records on
+    /// a message it routes out.
+    #[cfg(feature = "unstable")]
+    pub(crate) wire_ts_stack: Option<zenoh_protocol::network::timestamp_stack::TimestampStack>,
+    /// What records on the stack of each reply the query is given.
+    #[cfg(feature = "unstable")]
+    pub(crate) timestamps: Arc<TimestampSource>,
     /// What each reply is handed to; it is dropped when the last reply has been, which ends the
     /// channel of a handler.
     pub(crate) callback: Callback<Reply>,
@@ -626,6 +640,8 @@ impl Engine {
                     keeps,
                     zid,
                     eid,
+                    #[cfg(feature = "unstable")]
+                    timestamps,
                 } = queryable;
                 let wire = tokio_engine::wire_key_of(scope, suffix).keeping(keeps);
                 state
@@ -637,7 +653,14 @@ impl Engine {
                         complete,
                         tokio_engine::engine_locality(origin),
                         None,
-                        tokio_engine::queryable_sink(callback, notifier, zid, eid),
+                        tokio_engine::queryable_sink(
+                            callback,
+                            notifier,
+                            zid,
+                            eid,
+                            #[cfg(feature = "unstable")]
+                            timestamps,
+                        ),
                     )
                     .ok_or_else(|| zerror!("this engine answers no queries").into())
             }
@@ -1607,24 +1630,36 @@ mod tokio_engine {
         notifier: Option<SyncGroupNotifier>,
         zid: ZenohId,
         eid: Id,
+        #[cfg(feature = "unstable")] timestamps: Arc<TimestampSource>,
     ) -> QueryableSink {
         struct Delivery {
             callback: Callback<Query>,
             _notifier: Option<SyncGroupNotifier>,
             zid: ZenohId,
             eid: Id,
+            #[cfg(feature = "unstable")]
+            timestamps: Arc<TimestampSource>,
         }
         let delivery = Arc::new(Delivery {
             callback,
             _notifier: notifier,
             zid,
             eid,
+            #[cfg(feature = "unstable")]
+            timestamps,
         });
         Arc::new(move |holder: Arc<dyn QueryHolder>| {
             let delivery = Arc::clone(&delivery);
             Box::new(move |view: &dyn QueryView, _out: &mut dyn ReplyOut| {
                 let held = holder.hold_query(view);
-                match query_of(view, held, delivery.zid, delivery.eid) {
+                match query_of(
+                    view,
+                    held,
+                    delivery.zid,
+                    delivery.eid,
+                    #[cfg(feature = "unstable")]
+                    &delivery.timestamps,
+                ) {
                     Ok(query) => delivery.callback.call(query),
                     Err(error) => tracing::error!("a query could not be delivered: {error}"),
                 }
@@ -1638,6 +1673,7 @@ mod tokio_engine {
         held: Box<dyn HeldQuery>,
         zid: ZenohId,
         eid: Id,
+        #[cfg(feature = "unstable")] timestamps: &Arc<TimestampSource>,
     ) -> ZResult<Query> {
         let key_expr = KeyExpr::try_from(view.keyexpr().to_owned())?;
         let parameters = Parameters::from(
@@ -1652,12 +1688,50 @@ mod tokio_engine {
             )
         });
         let attachment = view.attachment().map(|bytes| ZBytes::from(bytes.to_vec()));
+        // The stack the query arrives with: what the nodes it crossed recorded on it, and what
+        // this node records on receiving it (its routing first, when the query came in over a
+        // link). Every reply starts from it.
+        #[cfg(feature = "unstable")]
+        let wire_query = !view.is_local();
+        #[cfg(feature = "unstable")]
+        let received = view.ts_stack().map(|stack| {
+            let mut stack = protocol_stack_of(stack);
+            if wire_query {
+                timestamps.record(&mut stack, interception_point::ROUTE);
+            }
+            timestamps.record(&mut stack, interception_point::RECEIVE);
+            stack
+        });
+        #[cfg(feature = "unstable")]
+        let timestamp_stack = received
+            .as_ref()
+            .and_then(|stack| crate::api::timestamp_stack::TimestampStack::try_from(stack).ok());
+        #[cfg(feature = "unstable")]
+        let reply_timestamps = Arc::clone(timestamps);
         let held = std::sync::Mutex::new(held);
         let replier: Replier = Box::new(move |answer| {
             let held = held.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            // A reply starts from the stack of its query and records its send, and its routing
+            // when it goes out over a link, at the time it is made.
+            #[cfg(feature = "unstable")]
+            let reply_stack = received.as_ref().map(|base| {
+                let mut stack = base.clone();
+                reply_timestamps.record(&mut stack, interception_point::SEND);
+                if wire_query {
+                    reply_timestamps.record(&mut stack, interception_point::ROUTE);
+                }
+                engine_stack_of(&stack)
+            });
             let mut outcome = Ok(());
             held.reply(&mut |out: &mut dyn ReplyOut| {
-                outcome = write_answer(out, &answer, zid, eid);
+                outcome = write_answer(
+                    out,
+                    &answer,
+                    zid,
+                    eid,
+                    #[cfg(feature = "unstable")]
+                    reply_stack.as_ref(),
+                );
             });
             outcome
         });
@@ -1668,6 +1742,8 @@ mod tokio_engine {
                 qos: qos_from(view.qos()),
                 #[cfg(feature = "unstable")]
                 source_info: view.source_info().and_then(source_info_from),
+                #[cfg(feature = "unstable")]
+                timestamp_stack,
                 replier,
             }),
             value,
@@ -1677,9 +1753,21 @@ mod tokio_engine {
 
     /// Write what `answer` says into the engine's responder of a query, as the queryable `eid` of
     /// the session `zid`.
-    fn write_answer(out: &mut dyn ReplyOut, answer: &Answer, zid: ZenohId, eid: Id) -> ZResult<()> {
+    fn write_answer(
+        out: &mut dyn ReplyOut,
+        answer: &Answer,
+        zid: ZenohId,
+        eid: Id,
+        #[cfg(feature = "unstable")] stack: Option<&TsStack>,
+    ) -> ZResult<()> {
         let zid = zenoh_protocol::core::ZenohIdProto::from(zid);
         out.with_responder(&zid.to_le_bytes()[..zid.size()], eid);
+        // The reply goes out with the timestamp stack it was given, when its query was
+        // instrumented.
+        #[cfg(feature = "unstable")]
+        if let Some(stack) = stack {
+            out.with_ts_stack(stack);
+        }
         match answer {
             Answer::Err { payload, encoding } => {
                 let hint = encoding_hint_of(encoding);
@@ -1735,6 +1823,12 @@ mod tokio_engine {
             attachment,
             #[cfg(feature = "unstable")]
             source_info,
+            #[cfg(feature = "unstable")]
+            ts_stack,
+            #[cfg(feature = "unstable")]
+            wire_ts_stack,
+            #[cfg(feature = "unstable")]
+            timestamps,
             callback,
             #[cfg(feature = "unstable")]
             cancellation_token,
@@ -1789,7 +1883,19 @@ mod tokio_engine {
         if let Some(info) = &source_info {
             options = options.with_source_info(source_info_hint_of(info));
         }
-        let mut leg = leg_minter(callback, fan.clone());
+        #[cfg(feature = "unstable")]
+        if ts_stack.is_some() {
+            options = options.with_ts_stack(
+                ts_stack.as_ref().map(engine_stack_of),
+                wire_ts_stack.as_ref().map(engine_stack_of),
+            );
+        }
+        let mut leg = leg_minter(
+            callback,
+            fan.clone(),
+            #[cfg(feature = "unstable")]
+            Some(timestamps),
+        );
         let issued = engine.get_on_wire(key, &wire, &options, fan.as_deref(), &mut leg);
         // The closure holds the delivery the legs share: what it let go of is the last hold, when
         // no leg is left.
@@ -1824,7 +1930,13 @@ mod tokio_engine {
         // As for a query, `0` is the default timeout of the engine and a timeout of nothing is an
         // instant one.
         let timeout_ms = u32::try_from(timeout.as_millis().max(1)).unwrap_or(u32::MAX);
-        let mut leg = leg_minter(callback, fan.clone());
+        let mut leg = leg_minter(
+            callback,
+            fan.clone(),
+            // A liveliness query is not instrumented.
+            #[cfg(feature = "unstable")]
+            None,
+        );
         let issued =
             engine.liveliness_get_on_wire(key, &wire, timeout_ms, fan.as_deref(), &mut leg);
         drop(leg);
@@ -1839,16 +1951,25 @@ mod tokio_engine {
     fn leg_minter(
         callback: Callback<Reply>,
         fan: Option<Arc<CancellableFan>>,
+        #[cfg(feature = "unstable")] timestamps: Option<Arc<TimestampSource>>,
     ) -> impl FnMut() -> ReplyCallback {
         let delivery = Arc::new(ReplyDelivery {
             callback,
             _fan: fan,
+            #[cfg(feature = "unstable")]
+            timestamps,
         });
         move || -> ReplyCallback {
             let delivery = Arc::clone(&delivery);
-            Box::new(move |view: &dyn ReplyView| match reply_of(view) {
-                Ok(reply) => delivery.callback.call(reply),
-                Err(error) => tracing::error!("a reply could not be delivered: {error}"),
+            Box::new(move |view: &dyn ReplyView| {
+                match reply_of(
+                    view,
+                    #[cfg(feature = "unstable")]
+                    delivery.timestamps.as_deref(),
+                ) {
+                    Ok(reply) => delivery.callback.call(reply),
+                    Err(error) => tracing::error!("a reply could not be delivered: {error}"),
+                }
             })
         }
     }
@@ -1911,6 +2032,9 @@ mod tokio_engine {
         /// What stops the legs, held for as long as the query is under way: whoever keeps a
         /// `Weak` of it reads the end of the query in it.
         _fan: Option<Arc<CancellableFan>>,
+        /// What records on the stack of each reply, for a query that is instrumented.
+        #[cfg(feature = "unstable")]
+        timestamps: Option<Arc<TimestampSource>>,
     }
 
     /// Have the callback of the query tell, when it is dropped with the last leg, whoever waits on
@@ -1955,12 +2079,29 @@ mod tokio_engine {
     ///
     /// As with a sample, the payload is copied out of the frame. The qualities a response does
     /// not carry read as upstream reads them: the default quality of service, and no timestamp.
-    fn reply_of(view: &dyn ReplyView) -> ZResult<Reply> {
+    fn reply_of(
+        view: &dyn ReplyView,
+        #[cfg(feature = "unstable")] receive: Option<&TimestampSource>,
+    ) -> ZResult<Reply> {
+        // The stack of the response as the application is given it: what the nodes it crossed
+        // recorded, and what this node records on delivering it.
+        #[cfg(feature = "unstable")]
+        let timestamp_stack = view
+            .ts_stack()
+            .and_then(|stack| received_stack(stack, view.routed(), receive));
         let result = match view.kind() {
-            ReplyKind::Err => Err(ReplyError::new(
-                ZBytes::from(view.payload().to_vec()),
-                encoding_of_parts(view.err_encoding()),
-            )),
+            ReplyKind::Err => {
+                #[allow(unused_mut)] // only an instrumented reply sets the stack
+                let mut error = ReplyError::new(
+                    ZBytes::from(view.payload().to_vec()),
+                    encoding_of_parts(view.err_encoding()),
+                );
+                #[cfg(feature = "unstable")]
+                {
+                    error.timestamp_stack = timestamp_stack;
+                }
+                Err(error)
+            }
             kind => Ok(Sample {
                 key_expr: KeyExpr::try_from(view.keyexpr().to_owned())?,
                 payload: ZBytes::from(view.payload().to_vec()),
@@ -1977,7 +2118,7 @@ mod tokio_engine {
                 source_info: view.source_info().and_then(source_info_from),
                 attachment: view.attachment().map(|bytes| ZBytes::from(bytes.to_vec())),
                 #[cfg(feature = "unstable")]
-                timestamp_stack: None,
+                timestamp_stack,
             }),
         };
         Ok(Reply {
@@ -2672,6 +2813,8 @@ impl SessionInner {
             keeps: Arc::new(key_expr.clone().into_owned()),
             zid: self.zid,
             eid,
+            #[cfg(feature = "unstable")]
+            timestamps: Arc::clone(&self.timestamps),
         })?;
         self.queryables().push((eid, engine_id));
         // A close that ran between the check and the record has not seen this queryable.
@@ -2818,15 +2961,20 @@ impl SessionInner {
         if self.engine.is_closed() {
             return Err(SessionClosedError.into());
         }
-        // See `resolve_put`: a query that asks for its messages to be instrumented is refused, and
-        // not sent without.
+        // A query that asks for its instrumentation starts the stack the nodes it crosses record
+        // on, with what this node records at the send, and the one that leaves the node has what
+        // it records on routing the message out as well (as for a publication, `resolve_put`).
         #[cfg(feature = "unstable")]
-        if timestamp_instrumentation.is_some() {
-            bail!(
-                "the timestamp instrumentation of a query is not carried by this engine yet \
-                 (slice Z6b of docs/zenoh-api-on-the-engine.md)"
-            );
-        }
+        let ts_stack = timestamp_instrumentation.map(|instrumentation| {
+            self.timestamps
+                .start(instrumentation, interception_point::SEND)
+        });
+        #[cfg(feature = "unstable")]
+        let wire_ts_stack = ts_stack.clone().map(|mut stack| {
+            self.timestamps
+                .record(&mut stack, interception_point::ROUTE);
+            stack
+        });
         // `Auto` is resolved here, once, as upstream's session does: to `Latest`, or to `None` for
         // a query that asks for a time range, whose replies are not versions of one value.
         let consolidation = match consolidation.mode {
@@ -2868,6 +3016,12 @@ impl SessionInner {
             attachment,
             #[cfg(feature = "unstable")]
             source_info,
+            #[cfg(feature = "unstable")]
+            ts_stack,
+            #[cfg(feature = "unstable")]
+            wire_ts_stack,
+            #[cfg(feature = "unstable")]
+            timestamps: Arc::clone(&self.timestamps),
             callback,
             #[cfg(feature = "unstable")]
             cancellation_token,
@@ -7630,6 +7784,211 @@ mod tests {
                     "Send:custom:first@a1b2c9".to_owned(),
                     "Receive:custom:second@a1b2ca".to_owned()
                 ])
+            );
+        }
+
+        /// A queryable of `demo/q/**` that sends the stack of each query it is given, and answers
+        /// it with a reply, or with an error on a key that ends in `err`.
+        fn answering(session: &Session) -> mpsc::Receiver<Option<Vec<String>>> {
+            let (sender, received) = mpsc::channel();
+            let sender = std::sync::Mutex::new(sender);
+            let queryable = session
+                .declare_queryable("demo/q/**")
+                .callback(move |query| {
+                    let _ = sender
+                        .lock()
+                        .unwrap()
+                        .send(query.timestamp_stack().map(records));
+                    if query.key_expr().as_str().ends_with("err") {
+                        query.reply_err("e").wait().expect("replies");
+                    } else {
+                        query
+                            .reply(query.key_expr().clone(), "v")
+                            .wait()
+                            .expect("replies");
+                    }
+                })
+                .wait()
+                .expect("declares");
+            std::mem::forget(queryable);
+            received
+        }
+
+        /// The stack of each reply to a get on `key` instrumented at `points` (none for no
+        /// point), and whether the reply is an error.
+        fn asked(session: &Session, key: &str, points: &str) -> Vec<(bool, Option<Vec<String>>)> {
+            let instrumentation = (!points.is_empty()).then(|| at(points));
+            session
+                .get(key)
+                .timestamp_instrumentation(instrumentation)
+                .timeout(WAIT)
+                .wait()
+                .expect("asks")
+                .iter()
+                .map(|reply| match reply.result() {
+                    Ok(sample) => (false, sample.timestamp_stack().map(records)),
+                    Err(error) => (true, error.timestamp_stack().map(records)),
+                })
+                .collect()
+        }
+
+        /// Two connected nodes, the second of which answers `demo/q/**`.
+        fn answering_pair(
+            ids: (&str, &str),
+        ) -> (Session, Session, mpsc::Receiver<Option<Vec<String>>>) {
+            let (first, endpoint) = listening(ids.0);
+            let second = dialling(ids.1, &endpoint);
+            assert_eq!(connected(&first, 1).1.len(), 1, "the nodes are linked");
+            let received = answering(&second);
+            // The queryable of the second node reaches the first.
+            std::thread::sleep(Duration::from_millis(500));
+            (first, second, received)
+        }
+
+        fn of(points: &[&str]) -> Option<Vec<String>> {
+            Some(points.iter().map(|point| (*point).to_owned()).collect())
+        }
+
+        #[test]
+        fn a_query_that_is_not_instrumented_nor_its_reply_carries_a_stack() {
+            let (first, _second, queried) = answering_pair(("a1b2d0", "a1b2d1"));
+            assert_eq!(asked(&first, "demo/q/x", ""), vec![(false, None)]);
+            assert_eq!(queried.recv_timeout(WAIT).expect("a query"), None);
+        }
+
+        /// The queryable is given the stack of the get, with the receive of its node; the reply
+        /// starts from it, records its send, and is given to the getter with its receive.
+        #[test]
+        fn a_query_and_its_reply_are_recorded_by_the_nodes_they_cross() {
+            let (first, _second, queried) = answering_pair(("a1b2d2", "a1b2d3"));
+            assert_eq!(
+                asked(&first, "demo/q/x", "SE"),
+                vec![(
+                    false,
+                    of(&[
+                        "Send:uhlc:a1b2d2",
+                        "Receive:uhlc:a1b2d3",
+                        "Send:uhlc:a1b2d3",
+                        "Receive:uhlc:a1b2d2",
+                    ])
+                )]
+            );
+            assert_eq!(
+                queried.recv_timeout(WAIT).expect("a query"),
+                of(&["Send:uhlc:a1b2d2", "Receive:uhlc:a1b2d3"])
+            );
+        }
+
+        #[test]
+        fn each_node_that_routes_a_query_and_its_reply_records_it() {
+            let (first, _second, queried) = answering_pair(("a1b2d4", "a1b2d5"));
+            assert_eq!(
+                asked(&first, "demo/q/x", "SRE"),
+                vec![(
+                    false,
+                    of(&[
+                        "Send:uhlc:a1b2d4",
+                        "Route:uhlc:a1b2d4",
+                        "Route:uhlc:a1b2d5",
+                        "Receive:uhlc:a1b2d5",
+                        "Send:uhlc:a1b2d5",
+                        "Route:uhlc:a1b2d5",
+                        "Route:uhlc:a1b2d4",
+                        "Receive:uhlc:a1b2d4",
+                    ])
+                )]
+            );
+            assert_eq!(
+                queried.recv_timeout(WAIT).expect("a query"),
+                of(&[
+                    "Send:uhlc:a1b2d4",
+                    "Route:uhlc:a1b2d4",
+                    "Route:uhlc:a1b2d5",
+                    "Receive:uhlc:a1b2d5",
+                ])
+            );
+        }
+
+        #[test]
+        fn an_error_reply_carries_the_stack_as_a_reply_does() {
+            let (first, _second, queried) = answering_pair(("a1b2d6", "a1b2d7"));
+            assert_eq!(
+                asked(&first, "demo/q/err", "SE"),
+                vec![(
+                    true,
+                    of(&[
+                        "Send:uhlc:a1b2d6",
+                        "Receive:uhlc:a1b2d7",
+                        "Send:uhlc:a1b2d7",
+                        "Receive:uhlc:a1b2d6",
+                    ])
+                )]
+            );
+            assert!(queried.recv_timeout(WAIT).expect("a query").is_some());
+        }
+
+        /// A query of the session's own queryable is not routed, and neither is its reply.
+        #[test]
+        fn a_query_of_the_session_own_queryable_has_no_route() {
+            let session = on("a1b2d8", "", "");
+            let queried = answering(&session);
+            assert_eq!(
+                asked(&session, "demo/q/x", "SRE"),
+                vec![(
+                    false,
+                    of(&[
+                        "Send:uhlc:a1b2d8",
+                        "Receive:uhlc:a1b2d8",
+                        "Send:uhlc:a1b2d8",
+                        "Receive:uhlc:a1b2d8",
+                    ])
+                )]
+            );
+            assert_eq!(
+                queried.recv_timeout(WAIT).expect("a query"),
+                of(&["Send:uhlc:a1b2d8", "Receive:uhlc:a1b2d8"])
+            );
+        }
+
+        #[test]
+        fn a_callback_gives_the_timestamps_of_a_query_and_its_reply() {
+            let open_with = |id: &str, text: &'static str, listen: &str, connect: &str| {
+                let config = Config::from_json5(&format!(
+                    r#"{{ id: "{id}", mode: "peer",
+                          listen: {{ endpoints: [{listen}] }},
+                          connect: {{ endpoints: [{connect}] }},
+                          scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                ))
+                .expect("a configuration zenoh reads");
+                open(config)
+                    .with_timestamp_callback(move |context| {
+                        format!("{text}@{}", context.zid).into_bytes()
+                    })
+                    .wait()
+                    .expect("opens")
+            };
+            let port = unautoselected_port();
+            let endpoint = format!(r#""tcp/127.0.0.1:{port}""#);
+            let first = open_with("a1b2d9", "first", &endpoint, "");
+            let second = open_with("a1b2da", "second", r#""tcp/127.0.0.1:0""#, &endpoint);
+            assert_eq!(connected(&first, 1).1.len(), 1, "the nodes are linked");
+            let queried = answering(&second);
+            std::thread::sleep(Duration::from_millis(500));
+            assert_eq!(
+                asked(&first, "demo/q/x", "SE"),
+                vec![(
+                    false,
+                    of(&[
+                        "Send:custom:first@a1b2d9",
+                        "Receive:custom:second@a1b2da",
+                        "Send:custom:second@a1b2da",
+                        "Receive:custom:first@a1b2d9",
+                    ])
+                )]
+            );
+            assert_eq!(
+                queried.recv_timeout(WAIT).expect("a query"),
+                of(&["Send:custom:first@a1b2d9", "Receive:custom:second@a1b2da"])
             );
         }
 

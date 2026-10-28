@@ -743,8 +743,9 @@ Each lands whole with its surface lines, tests and faults in one round.
   `Caller` session use it, and a `DriveTask` session, whose host may hold a lock the drive task's
   callbacks want, drains as before. 4 injected faults, none missed (one hung where it should fail,
   and a test of its own now fails it).
-- **Z6b (in part landed). The unstable arm: timestamps.** Landed: `Session::new_timestamp`,
-  `OpenBuilder::with_timestamp_callback`, and the instrumentation of puts and deletes.
+- **Z6b (landed). The unstable arm: timestamps.** Landed: `Session::new_timestamp`,
+  `OpenBuilder::with_timestamp_callback`, the instrumentation of puts and deletes, and that of
+  gets, queries and replies (`Query::timestamp_stack`).
   **Decision: the engine carries the stack and the session records on it.** The timestamp stack is
   Push extension `0x7`, a ZBuf a node may skip, and wz's engine had no model for it:
   `wz_session_core::ts_stack` now holds its bytes (the format of `zenoh-codec`) and its place in a
@@ -761,12 +762,31 @@ Each lands whole with its surface lines, tests and faults in one round.
   it (the C and pico client images) neither compiles the module nor holds the fields, and the
   capability cost gate holds it to that. The differential has a
   node of each side publish, with every combination of the three points and with a callback, to a
-  subscriber of the other and to its own, and compares the stacks record by record. Carried: the
-  query side (`Query::timestamp_stack` and the stacks of requests and responses, which this engine
-  still refuses by name), a wz node that forwards a message in its mesh does not record its own
-  route, and a subscriber offloaded to a lane is handed no stack. The surface falls to 1, 3 and 6
-  lines of the three arms; 15 injected faults, none missed in the end (the first test of a plain
-  Put could not tell, and one assertion was changed so that it can).
+  subscriber of the other and to its own, and compares the stacks record by record.
+
+  The query side is the same stack on the other two messages that carry it, as the last extension
+  of a Request and of a Response: `QueryOptions::with_ts_stack` gives a get the stack of its
+  loopback leg and that of the Request that leaves; a queryable is shown the stack its query
+  arrived with (`QueryView::ts_stack`), which the session completes with its routing, when the
+  query came in over a link, and its receive; every reply and error reply a queryable stages
+  starts from that stack and records its send, and its routing when the query was a remote one
+  (`ReplyOut::with_ts_stack`, then the Response builders); and the reply is handed to the getter
+  with the stack of its Response, which the session completes the same way
+  (`ReplyView::ts_stack`, with `ReplyStamp` holding it, zero-sized in a build without the feature).
+  A Request or a Response read in place that carries a stack is delivered through the owned path,
+  as a Push is. The differential has a node of each side ask the queryable of the other and its
+  own, with the clock and with a callback, at every combination of points, and for an error
+  reply, and compares the stacks record by record. Hiding the timestamp of a reply
+  (`HiddenReplyTimestamp`) no longer hides the responder and the quality of service of it.
+
+  Carried: a wz node that forwards a message in its mesh (the router and the linkstate peer) does
+  not record its own route, a subscriber offloaded to a lane is handed no stack, and the receive
+  of a reply is recorded when the callback is called, which for a consolidating query is after
+  the consolidation, where upstream records it on arrival. The surface falls to 1, 2 and 5 lines of
+  the three arms; 15 faults were injected into the publish side and 24 into the query side, one
+  at a time, none missed in the end (the first test of a plain Put could not tell, and one assertion
+  was changed so that it can; one fault that deleted a fallback failed to compile and was redone as
+  a condition that never holds).
 - **Z6c. The unstable arm: the rest.** `Session::config` and `GIT_VERSION`.
 - **Z7. The shared-memory arm.** `get_shm_provider`, the provider state and the transport.
 - **Z8. The graph.** Upstream's tests and examples and `zenoh-ext` built and run against the

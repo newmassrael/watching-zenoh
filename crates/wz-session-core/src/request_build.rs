@@ -279,6 +279,10 @@ pub fn build_request_query_with_meta(
             builder = builder.request_qos(qos.raw);
         }
     }
+    #[cfg(feature = "pubsub-ts-stack")]
+    if let Some(stack) = &meta.ts_stack {
+        builder = builder.request_ts_stack(stack);
+    }
     builder.build()
 }
 
@@ -601,6 +605,8 @@ pub struct RequestQueryBuilder {
     request_target: Option<QueryTarget>,
     request_budget: Option<Budget>,
     request_timeout_ms: Option<u64>,
+    #[cfg(feature = "pubsub-ts-stack")]
+    request_ts_stack: Option<crate::ts_stack::TsStack>,
 }
 
 #[cfg(feature = "codec-request")]
@@ -627,6 +633,8 @@ impl RequestQueryBuilder {
             request_target: None,
             request_budget: None,
             request_timeout_ms: None,
+            #[cfg(feature = "pubsub-ts-stack")]
+            request_ts_stack: None,
         }
     }
 
@@ -864,6 +872,14 @@ impl RequestQueryBuilder {
         self
     }
 
+    /// Set the Request-level timestamp stack (extension `0x7`), which follows the other Request
+    /// extensions. The nodes the Request crosses add their interceptions to it.
+    #[cfg(feature = "pubsub-ts-stack")]
+    pub fn request_ts_stack(mut self, stack: &crate::ts_stack::TsStack) -> Self {
+        self.request_ts_stack = Some(stack.clone());
+        self
+    }
+
     /// Materialise the Request. Constructs the baseline envelope via
     /// [`build_request_query`], applies all Query-layer settings to
     /// the inner Query body, then assembles Request-level extensions
@@ -1033,6 +1049,13 @@ impl RequestQueryBuilder {
                 header: 0x20 | TIMEOUT_EXT_ID,
                 body: ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint { value: timeout_ms }),
             });
+        }
+        // The timestamp stack (id 0x07) is the last Request extension, as in upstream's codec.
+        #[cfg(feature = "pubsub-ts-stack")]
+        if let Some(stack) = &self.request_ts_stack {
+            let mut chain = Some(core::mem::take(&mut request_exts));
+            crate::ts_stack::set_ts_stack(&mut chain, Some(stack));
+            request_exts = chain.unwrap_or_default();
         }
 
         if !request_exts.is_empty() {
@@ -2462,6 +2485,69 @@ mod tests {
             0x20 | 0x06,
             "timeout ext at index 2 (last) must NOT carry Z"
         );
+    }
+
+    /// The timestamp stack is the last Request extension (upstream's codec writes it after the
+    /// timeout), alone or after the others, with the chain's `Z` bits and the Request's `N_Z` right,
+    /// and a stack set through the metadata reaches the Request as the builder sets it.
+    #[cfg(all(feature = "codec-request", feature = "pubsub-ts-stack"))]
+    #[test]
+    fn the_timestamp_stack_is_the_last_request_extension() {
+        use crate::metadata::QueryMetadata;
+        use crate::ts_stack::{point, read_ts_stack, TsStack, TS_STACK_EXT_HEADER};
+
+        let mut stack = TsStack::new(point::SEND | point::RECEIVE);
+        stack.record(point::SEND, vec![1, 2, 3], false);
+
+        let alone = RequestQueryBuilder::new(42, 7, None)
+            .request_ts_stack(&stack)
+            .build()
+            .unwrap();
+        let exts = alone
+            .extensions
+            .as_ref()
+            .expect("the stack is an extension");
+        assert_eq!(exts.len(), 1);
+        assert_eq!(exts[0].header & 0x7f, TS_STACK_EXT_HEADER);
+        assert_eq!(exts[0].header & 0x80, 0, "the last extension has no Z");
+        assert_eq!(
+            alone.header & 0x80,
+            0x80,
+            "the Request says it has extensions"
+        );
+        assert_eq!(read_ts_stack(exts.iter()), Some(stack.clone()));
+
+        let after_all = RequestQueryBuilder::new(42, 7, None)
+            .request_qos(0x0D)
+            .request_target(QueryTarget::All)
+            .request_timeout_ms(1000)
+            .request_ts_stack(&stack)
+            .build()
+            .unwrap();
+        let exts = after_all.extensions.as_ref().expect("four extensions");
+        assert_eq!(exts.len(), 4, "qos, target, timeout and the stack");
+        assert_eq!(exts[2].header & 0x7f, 0x20 | TIMEOUT_EXT_ID);
+        assert_eq!(
+            exts[2].header & 0x80,
+            0x80,
+            "the timeout is followed by the stack"
+        );
+        assert_eq!(exts[3].header & 0x7f, TS_STACK_EXT_HEADER);
+        assert_eq!(exts[3].header & 0x80, 0);
+        assert_eq!(read_ts_stack(exts.iter()), Some(stack.clone()));
+
+        // Through the metadata: the one-shot builder threads it, and a metadata that holds only a
+        // stack is not empty, so that the sender does not take the no-metadata path.
+        let meta = QueryMetadata {
+            ts_stack: Some(stack.clone()),
+            ..Default::default()
+        };
+        assert!(!meta.is_empty());
+        let built = build_request_query_with_meta(42, 7, None, &meta).unwrap();
+        let exts = built.extensions.as_ref().expect("the stack");
+        assert_eq!(read_ts_stack(exts.iter()), Some(stack));
+        let none = build_request_query_with_meta(42, 7, None, &QueryMetadata::default()).unwrap();
+        assert!(none.extensions.is_none());
     }
 
     /// R121j-1g — RequestQueryBuilder.request_budget emits a single

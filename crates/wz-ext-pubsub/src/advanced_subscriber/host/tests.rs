@@ -340,6 +340,7 @@ fn reply(sn: u32, v: u8) -> InboundReply {
         },
         responder: None,
         qos: None,
+        stamp: Default::default(),
     }
 }
 

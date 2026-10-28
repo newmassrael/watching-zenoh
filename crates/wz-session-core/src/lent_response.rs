@@ -799,6 +799,8 @@ mod tests {
                                         keyexpr: "demo/a",
                                         responder,
                                         qos,
+                                        #[cfg(feature = "pubsub-ts-stack")]
+                                        ts_stack: None,
                                         kind: PartsKind::Reply {
                                             body,
                                             encoding,
@@ -851,6 +853,8 @@ mod tests {
                                 keyexpr,
                                 responder: None,
                                 qos,
+                                #[cfg(feature = "pubsub-ts-stack")]
+                                ts_stack: None,
                                 kind: PartsKind::Reply {
                                     body: if del {
                                         PartsBody::Del
@@ -909,6 +913,8 @@ mod tests {
             keyexpr: "demo/status",
             responder: None,
             qos: QosLevel::DEFAULT,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
             kind: PartsKind::Reply {
                 body: PartsBody::Put(&[1u8; 40]),
                 encoding: None,
@@ -955,6 +961,8 @@ mod tests {
                             keyexpr: "demo/err",
                             responder,
                             qos,
+                            #[cfg(feature = "pubsub-ts-stack")]
+                            ts_stack: None,
                             kind: PartsKind::Err { encoding, payload },
                         };
                         assert_eq!(
@@ -1013,6 +1021,8 @@ mod tests {
                             keyexpr: "demo/a",
                             responder,
                             qos,
+                            #[cfg(feature = "pubsub-ts-stack")]
+                            ts_stack: None,
                             kind: PartsKind::Reply {
                                 body: if del {
                                     PartsBody::Del
@@ -1052,6 +1062,8 @@ mod tests {
                             keyexpr: "demo/err",
                             responder,
                             qos,
+                            #[cfg(feature = "pubsub-ts-stack")]
+                            ts_stack: None,
                             kind: PartsKind::Err {
                                 encoding,
                                 payload: &big[..payload_len],
@@ -1079,6 +1091,8 @@ mod tests {
             keyexpr,
             responder,
             qos: QosLevel::DEFAULT,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
             kind,
         };
         assert!(matches!(

@@ -18,9 +18,10 @@
 // final when it is dropped, this one holds a `Replier`, a closure over the engine's hold on the
 // query that answers with the reply as this crate's types say it (`Answer`) and lets go of the hold
 // when it is dropped, which is what ends the query; the response is the engine's to write, so the
-// responder identity, the timestamp stack and the primitives are not here, and `QueryableState`,
-// the table entry upstream's session keeps, is not either (docs/zenoh-api-on-the-engine.md,
-// decision D3). The timestamp stack of a query arrives with slice Z6b. The documentation examples
+// responder identity and the primitives are not here, and `QueryableState`, the table entry
+// upstream's session keeps, is not either (docs/zenoh-api-on-the-engine.md, decision D3). The
+// query keeps the timestamp stack it arrived with (slice Z6b), and the reply starts from it,
+// which the `Replier` hands the engine's responder. The documentation examples
 // leave out the `get` that would send the query, which arrives with slice Z3b.
 
 use std::{
@@ -36,7 +37,8 @@ use zenoh_protocol::core::Parameters;
 use zenoh_result::ZResult;
 #[cfg(feature = "unstable")]
 use {
-    crate::api::sample::SourceInfo, zenoh_config::wrappers::EntityGlobalId,
+    crate::api::{sample::SourceInfo, timestamp_stack::TimestampStack},
+    zenoh_config::wrappers::EntityGlobalId,
     zenoh_protocol::core::EntityGlobalIdProto,
 };
 
@@ -74,6 +76,9 @@ pub(crate) struct QueryInner {
     pub(crate) qos: QoS,
     #[cfg(feature = "unstable")]
     pub(crate) source_info: Option<SourceInfo>,
+    /// The timestamp stack the query arrived with, and what this node recorded on receiving it.
+    #[cfg(feature = "unstable")]
+    pub(crate) timestamp_stack: Option<TimestampStack>,
     pub(crate) replier: Replier,
 }
 
@@ -266,6 +271,16 @@ impl Query {
         self.inner.source_info.as_ref()
     }
 
+    /// Gets the timestamp stack of this Query.
+    ///
+    /// The timestamp stack carries interception records (Send, Route, Receive)
+    /// collected along the message's path through the network.
+    #[zenoh_macros::unstable]
+    #[inline]
+    pub fn timestamp_stack(&self) -> Option<&TimestampStack> {
+        self.inner.timestamp_stack.as_ref()
+    }
+
     /// Sends a reply in the form of [`Sample`] to this Query.
     ///
     /// This api is for internal use only.
@@ -389,6 +404,8 @@ impl Query {
                 qos: QoS::default(),
                 #[cfg(feature = "unstable")]
                 source_info: None,
+                #[cfg(feature = "unstable")]
+                timestamp_stack: None,
                 replier: Box::new(|_| Ok(())),
             }),
             value: None,

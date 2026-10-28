@@ -111,6 +111,11 @@ impl ReplyView for LentReply<'_> {
     fn qos(&self) -> Option<crate::sample::QosLevel> {
         self.qos
     }
+    // A Response is read in place only off a link, so it was routed to this node.
+    #[cfg(feature = "pubsub-ts-stack")]
+    fn routed(&self) -> bool {
+        true
+    }
     // `payload_shared` and `attachment_shared` keep their `None` defaults: the
     // bytes are the link's, lent for the call, and a sink that keeps them copies
     // them.
@@ -136,6 +141,10 @@ enum Fallback {
     Sliced,
     /// Its keyexpr does not fit the bounded buffer.
     KeyexprPastBound,
+    /// It carries a timestamp stack, which the delivering node adds to: the stack is an owned
+    /// value the lent form has none of.
+    #[cfg(feature = "pubsub-ts-stack")]
+    Instrumented,
 }
 
 /// The source info of a reply body's chain, under the gate the owned path
@@ -296,6 +305,8 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
             Err(Fallback::Sliced) => self.dispatch_owned_projection(response, spaces),
             #[cfg(feature = "alloc")]
             Err(Fallback::KeyexprPastBound) => self.dispatch_owned_projection(response, spaces),
+            #[cfg(feature = "pubsub-ts-stack")]
+            Err(Fallback::Instrumented) => self.dispatch_owned_projection(response, spaces),
             // With no allocator there is no owned projection to fall back on: a reply the
             // lent form cannot represent is dropped, and the pending get it answers
             // ends by its own timeout, as it does for a reply that never came.
@@ -318,6 +329,16 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
         };
         let extensions: &[wz_codecs::ext_entry::ExtEntry<'_>] =
             response.extensions.as_deref().unwrap_or(&[]);
+        // A Response the nodes record on is delivered with a stack of its own to add to.
+        #[cfg(feature = "pubsub-ts-stack")]
+        if crate::ext_view::find_by_eid(
+            extensions,
+            crate::ext_header::ext_eid(crate::ts_stack::TS_STACK_EXT_HEADER),
+        )
+        .is_some()
+        {
+            return Err(Fallback::Instrumented);
+        }
         let mut composed = KeyexprBuf::new();
         let keyexpr = match resolve_wireexpr_view(&response.keyexpr.body, spaces, &mut composed) {
             Ok(Some(keyexpr)) => keyexpr,
@@ -403,6 +424,10 @@ mod tests {
         timestamp: Option<TimestampHint>,
         responder: Option<(Vec<u8>, u32)>,
         qos: Option<crate::sample::QosLevel>,
+        #[cfg(feature = "pubsub-ts-stack")]
+        ts_stack: Option<crate::ts_stack::TsStack>,
+        #[cfg(feature = "pubsub-ts-stack")]
+        routed: bool,
     }
 
     fn seen(view: &dyn ReplyView) -> Seen {
@@ -418,6 +443,10 @@ mod tests {
             timestamp: view.timestamp().cloned(),
             responder: view.responder().map(|(zid, eid)| (zid.to_vec(), eid)),
             qos: view.qos(),
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: view.ts_stack().cloned(),
+            #[cfg(feature = "pubsub-ts-stack")]
+            routed: view.routed(),
         }
     }
 
@@ -474,6 +503,44 @@ mod tests {
         let owned_seen = owned_log.lock().expect("not poisoned").clone();
         let lent_seen = lent_log.lock().expect("not poisoned").clone();
         (owned_seen, lent_seen)
+    }
+
+    /// A Response that carries a timestamp stack is delivered with it, as one routed to this node:
+    /// the lent form has no stack of its own for the nodes to add to, so it takes the owned path,
+    /// for a reply and for an error alike.
+    #[cfg(feature = "pubsub-ts-stack")]
+    #[test]
+    fn an_instrumented_response_is_delivered_with_its_stack_on_both_paths() {
+        use crate::ts_stack::{point, TsStack};
+
+        let mut stack = TsStack::new(point::SEND | point::RECEIVE);
+        stack.record(point::SEND, alloc::vec![5, 6], false);
+        for response in [
+            ResponseReplyBuilder::new(RID, 0, Some("demo/a"), b"v")
+                .ts_stack(&stack)
+                .build()
+                .expect("build"),
+            ResponseErrBuilder::new(RID, 0, Some("demo/b"), b"oops")
+                .ts_stack(&stack)
+                .qos(crate::sample::QosLevel::from_raw(0b0001_1010))
+                .responder(&[0xCA, 0xFE], 3)
+                .build()
+                .expect("build"),
+        ] {
+            let (owned, lent) = both(&response);
+            assert_eq!(lent, owned, "the lent path is the owned one");
+            assert_eq!(owned.len(), 1);
+            assert_eq!(owned[0].ts_stack.as_ref(), Some(&stack));
+            assert!(owned[0].routed, "it came in over a link");
+        }
+        // One that carries none is delivered with none, and as routed all the same.
+        let plain = ResponseReplyBuilder::new(RID, 0, Some("demo/a"), b"v")
+            .build()
+            .expect("build");
+        let (owned, lent) = both(&plain);
+        assert_eq!(lent, owned);
+        assert_eq!(owned[0].ts_stack, None);
+        assert!(owned[0].routed);
     }
 
     #[test]

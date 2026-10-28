@@ -310,6 +310,9 @@ struct OwnedQueryEvent {
     // above: the deferred job rebuilds the responder after the borrowed view
     // is gone, and every reply it stages inherits this value.
     qos: wz_session_core::sample::QosLevel,
+    // The timestamp stack the query carried, which the handler reads at drain time.
+    #[cfg(feature = "pubsub-ts-stack")]
+    ts_stack: Option<wz_session_core::ts_stack::TsStack>,
 }
 
 #[cfg(feature = "query-queryable")]
@@ -338,6 +341,8 @@ impl OwnedQueryEvent {
             rid: view.rid(),
             is_local: view.is_local(),
             qos: view.qos(),
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: view.ts_stack().cloned(),
         }
     }
 
@@ -362,10 +367,18 @@ impl OwnedQueryEvent {
     /// as it would be had it been called in the dispatcher's own borrow. `None` when
     /// neither was, and the handler is given [`Self::borrowed`] as it always was.
     fn lent(&self) -> Option<crate::query_sink::SharedQuery<'_>> {
-        (self.payload_lent || self.attachment_lent).then(|| crate::query_sink::SharedQuery {
-            base: self.borrowed(),
-            value: self.payload.as_ref().filter(|_| self.payload_lent),
-            attachment: self.attachment.as_ref().filter(|_| self.attachment_lent),
+        #[cfg(feature = "pubsub-ts-stack")]
+        let carries_stack = self.ts_stack.is_some();
+        #[cfg(not(feature = "pubsub-ts-stack"))]
+        let carries_stack = false;
+        (self.payload_lent || self.attachment_lent || carries_stack).then(|| {
+            crate::query_sink::SharedQuery {
+                base: self.borrowed(),
+                value: self.payload.as_ref().filter(|_| self.payload_lent),
+                attachment: self.attachment.as_ref().filter(|_| self.attachment_lent),
+                #[cfg(feature = "pubsub-ts-stack")]
+                ts_stack: self.ts_stack.as_ref(),
+            }
         })
     }
 }
@@ -915,6 +928,8 @@ mod tests {
             base: borrowed(value.as_slice(), attachment.as_slice()),
             value: Some(&value),
             attachment: Some(&attachment),
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
         };
 
         let event = OwnedQueryEvent::from_view(&view);
@@ -967,6 +982,8 @@ mod tests {
             base: borrowed(&value, attachment.as_slice()),
             value: None,
             attachment: Some(&attachment),
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
         };
 
         let event = OwnedQueryEvent::from_view(&view);

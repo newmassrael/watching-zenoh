@@ -150,6 +150,11 @@ pub struct ReplyParts<'a> {
     pub responder: Option<(&'a [u8], u32)>,
     /// The `ext_qos` the response goes out with.
     pub qos: QosLevel,
+    /// The timestamp stack the response goes out with (extension `0x7`), when it is
+    /// instrumented: the stack of the query it answers, and the interception of the node that
+    /// replies.
+    #[cfg(feature = "pubsub-ts-stack")]
+    pub ts_stack: Option<&'a crate::ts_stack::TsStack>,
     /// What the reply is.
     pub kind: PartsKind<'a>,
 }
@@ -275,6 +280,8 @@ struct Row<P: Storage> {
     qos: QosLevel,
     keyexpr: Span<P>,
     responder: Option<(BoundedVec<u8, ZID_BYTES, P>, u32)>,
+    #[cfg(feature = "pubsub-ts-stack")]
+    ts_stack: Option<crate::ts_stack::TsStack>,
     kind: RowKind<P>,
 }
 
@@ -447,6 +454,8 @@ impl<P: Storage> ReplyStage<P> {
             keyexpr: self.text(row.keyexpr),
             responder: row.responder.as_ref().map(|(zid, eid)| (&zid[..], *eid)),
             qos: row.qos,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: row.ts_stack.as_ref(),
             kind,
         }
     }
@@ -651,6 +660,8 @@ impl<P: Storage> ReplyStaging for ReplyStage<P> {
             qos: parts.qos,
             keyexpr,
             responder,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: parts.ts_stack.cloned(),
             kind,
         });
         Ok(())
@@ -921,6 +932,8 @@ mod tests {
             keyexpr,
             responder: None,
             qos: QosLevel::DEFAULT,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
             kind: PartsKind::Reply {
                 body: PartsBody::Put(payload),
                 encoding: None,
@@ -939,6 +952,8 @@ mod tests {
             keyexpr: key,
             responder: None,
             qos: QosLevel::DEFAULT,
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: None,
             kind: PartsKind::Reply {
                 body: PartsBody::Put(payload),
                 encoding: None,
@@ -1032,6 +1047,8 @@ mod tests {
                 keyexpr: "home/temp",
                 responder: Some((&zid, 5)),
                 qos: QosLevel::DEFAULT,
+                #[cfg(feature = "pubsub-ts-stack")]
+                ts_stack: None,
                 kind: PartsKind::Reply {
                     body: PartsBody::Put(&payload),
                     encoding: Some(EncodingParts {

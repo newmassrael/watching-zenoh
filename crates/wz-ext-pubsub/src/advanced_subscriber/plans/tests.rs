@@ -176,6 +176,7 @@ fn a_recovered_sample_holds_the_storage_its_reply_holds() {
         },
         responder: None,
         qos: None,
+        stamp: Default::default(),
     };
 
     let sample = recovered_sample_from_reply(&reply).expect("a Put reply recovers");

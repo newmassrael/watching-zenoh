@@ -741,6 +741,8 @@ mod observer {
         session: Session,
         _subscriber: up_zenoh::pubsub::Subscriber<()>,
         seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        _queryable: up_zenoh::query::Queryable<()>,
+        queried: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     }
 
     pub fn stacker(id: &str, port: u16, custom: Option<&'static str>) -> Result<Stacker, String> {
@@ -768,10 +770,35 @@ mod observer {
             })
             .wait()
             .map_err(|error| error.to_string())?;
+        // A queryable on `demo/qo/**` that keeps the stack of each query and answers it, with an
+        // error on a key that ends in `err`.
+        let queried = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = queried.clone();
+        let queryable = session
+            .declare_queryable("demo/qo/**")
+            .callback(move |query| {
+                sink.lock().unwrap().push(format!(
+                    "{} {}",
+                    query.key_expr(),
+                    stack_line(query.timestamp_stack())
+                ));
+                if query.key_expr().as_str().ends_with("err") {
+                    query.reply_err("e").wait().expect("replies");
+                } else {
+                    query
+                        .reply(query.key_expr().clone(), "v")
+                        .wait()
+                        .expect("replies");
+                }
+            })
+            .wait()
+            .map_err(|error| error.to_string())?;
         Ok(Stacker {
             session,
             _subscriber: subscriber,
             seen,
+            _queryable: queryable,
+            queried,
         })
     }
 
@@ -805,6 +832,36 @@ mod observer {
                 .timestamp_instrumentation(Self::instrumentation(points))
                 .wait()
                 .expect("puts");
+        }
+
+        /// What the queryable received since it was last asked: the key and the stack of each
+        /// query.
+        pub fn take_queries(&self) -> Vec<String> {
+            std::mem::take(&mut *self.queried.lock().unwrap())
+        }
+
+        /// A get on `key` whose messages are instrumented at `points`: the key and the stack of
+        /// each reply, or of each error, once the get is over.
+        pub fn get(&self, key: &str, points: &str) -> Vec<String> {
+            use up_zenoh::internal::traits::TimestampInstrumentationBuilderTrait;
+            let replies = self
+                .session
+                .get(key)
+                .timestamp_instrumentation(Self::instrumentation(points))
+                .timeout(Duration::from_secs(5))
+                .wait()
+                .expect("asks");
+            replies
+                .iter()
+                .map(|reply| match reply.result() {
+                    Ok(sample) => format!(
+                        "{} {}",
+                        sample.key_expr(),
+                        stack_line(sample.timestamp_stack())
+                    ),
+                    Err(error) => format!("error {}", stack_line(error.timestamp_stack())),
+                })
+                .collect()
         }
 
         /// A delete of `key` whose messages are instrumented at `points`.
@@ -1945,6 +2002,71 @@ macro_rules! session_cases {
                 )
             }
 
+            /// A timestamp stack as one line: the points instrumented, and each record as
+            /// `Point:uhlc:<id>` (the id of the node whose clock made it) or `Point:custom:<text>`.
+            fn line(stack: Option<&$z::timestamp_stack::TimestampStack>) -> String {
+                use $z::timestamp_stack::{InstrumentationTimestamp, InterceptionPoint};
+
+                let Some(stack) = stack else {
+                    return "no stack".to_owned();
+                };
+                let point = |p: InterceptionPoint| stack.instrumentation().is_instrumented(p);
+                let flags = format!(
+                    "{}{}{}",
+                    if point(InterceptionPoint::Send) { "S" } else { "-" },
+                    if point(InterceptionPoint::Route) { "R" } else { "-" },
+                    if point(InterceptionPoint::Receive) { "E" } else { "-" },
+                );
+                let records: Vec<String> = stack
+                    .records()
+                    .iter()
+                    .map(|record| match record.timestamp() {
+                        InstrumentationTimestamp::UHLC(ts) => {
+                            format!("{:?}:uhlc:{}", record.point(), ts.get_id())
+                        }
+                        InstrumentationTimestamp::Custom(bytes) => format!(
+                            "{:?}:custom:{}",
+                            record.point(),
+                            String::from_utf8_lossy(bytes)
+                        ),
+                    })
+                    .collect();
+                format!("{flags} {records:?}")
+            }
+
+            /// The instrumentation of the points named by their letters (`S`, `R`, `E`), `None`
+            /// for no point.
+            fn instrumentation(points: &str) -> Option<$z::timestamp_stack::TimestampInstrumentation> {
+                use $z::timestamp_stack::TimestampInstrumentationBuilder;
+
+                if points.is_empty() {
+                    return None;
+                }
+                Some(
+                    TimestampInstrumentationBuilder::new()
+                        .set_send(points.contains('S'))
+                        .set_route(points.contains('R'))
+                        .set_receive(points.contains('E'))
+                        .build()
+                        .expect("a point to instrument"),
+                )
+            }
+
+            /// The replies of a get as lines: the key and the stack of each reply, or of each error.
+            fn reply_lines(
+                replies: $z::handlers::FifoChannelHandler<$z::query::Reply>,
+            ) -> Vec<String> {
+                replies
+                    .iter()
+                    .map(|reply| match reply.result() {
+                        Ok(sample) => {
+                            format!("{} {}", sample.key_expr(), line(sample.timestamp_stack()))
+                        }
+                        Err(error) => format!("error {}", line(error.timestamp_stack())),
+                    })
+                    .collect()
+            }
+
             /// The timestamp stack of a message, as each side reads it: what a node of this crate
             /// publishes with its instrumentation reaches an upstream subscriber with, what an
             /// upstream node publishes reaches a subscriber of this crate with, and the session's
@@ -1954,52 +2076,6 @@ macro_rules! session_cases {
                 use std::sync::{Arc, Mutex};
 
                 use $z::internal::traits::TimestampInstrumentationBuilderTrait;
-                use $z::timestamp_stack::{
-                    InstrumentationTimestamp, InterceptionPoint, TimestampInstrumentation,
-                    TimestampInstrumentationBuilder, TimestampStack,
-                };
-
-                fn line(stack: Option<&TimestampStack>) -> String {
-                    let Some(stack) = stack else {
-                        return "no stack".to_owned();
-                    };
-                    let point = |p: InterceptionPoint| stack.instrumentation().is_instrumented(p);
-                    let flags = format!(
-                        "{}{}{}",
-                        if point(InterceptionPoint::Send) { "S" } else { "-" },
-                        if point(InterceptionPoint::Route) { "R" } else { "-" },
-                        if point(InterceptionPoint::Receive) { "E" } else { "-" },
-                    );
-                    let records: Vec<String> = stack
-                        .records()
-                        .iter()
-                        .map(|record| match record.timestamp() {
-                            InstrumentationTimestamp::UHLC(ts) => {
-                                format!("{:?}:uhlc:{}", record.point(), ts.get_id())
-                            }
-                            InstrumentationTimestamp::Custom(bytes) => format!(
-                                "{:?}:custom:{}",
-                                record.point(),
-                                String::from_utf8_lossy(bytes)
-                            ),
-                        })
-                        .collect();
-                    format!("{flags} {records:?}")
-                }
-
-                fn instrumentation(points: &str) -> Option<TimestampInstrumentation> {
-                    if points.is_empty() {
-                        return None;
-                    }
-                    Some(
-                        TimestampInstrumentationBuilder::new()
-                            .set_send(points.contains('S'))
-                            .set_route(points.contains('R'))
-                            .set_receive(points.contains('E'))
-                            .build()
-                            .expect("a point to instrument"),
-                    )
-                }
 
                 let mut out = vec![];
                 for (label, subject_text, upstream_text) in
@@ -2058,6 +2134,90 @@ macro_rules! session_cases {
                         "{label}: the deletes at 'SE': the other node is given {:?}, the subject {:?}",
                         other.take(),
                         std::mem::take(&mut *seen.lock().unwrap())
+                    ));
+                }
+                out
+            }
+
+            /// The timestamp stack of a query and of its replies, as each side reads it: a node of
+            /// this crate asks an upstream queryable and is answered, an upstream node asks the
+            /// queryable of this crate, and the node asks its own queryable, at every combination
+            /// of points that matters, with the clock of the node and with a callback, and for a
+            /// reply that is an error.
+            pub fn instrumented_queries() -> Vec<String> {
+                use std::sync::{Arc, Mutex};
+
+                use $z::internal::traits::TimestampInstrumentationBuilderTrait;
+
+                let mut out = vec![];
+                for (label, subject_text, upstream_text) in
+                    [("clock", None, None), ("callback", Some("subject"), Some("upstream"))]
+                {
+                    let port = free_port();
+                    let mut builder = $z::open(peer("5a00c0", port));
+                    if let Some(text) = subject_text {
+                        builder = builder.with_timestamp_callback(move |_| text.as_bytes().to_vec());
+                    }
+                    let subject = builder.wait().expect("opens");
+                    let other = observer::stacker("b000c0", port, upstream_text).expect("opens");
+                    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+                    let sink = seen.clone();
+                    let _queryable = subject
+                        .declare_queryable("demo/qs/**")
+                        .callback(move |query| {
+                            sink.lock().unwrap().push(format!(
+                                "{} {}",
+                                query.key_expr(),
+                                line(query.timestamp_stack())
+                            ));
+                            if query.key_expr().as_str().ends_with("err") {
+                                query.reply_err("e").wait().expect("replies");
+                            } else {
+                                query
+                                    .reply(query.key_expr().clone(), "v")
+                                    .wait()
+                                    .expect("replies");
+                            }
+                        })
+                        .wait()
+                        .expect("declares");
+                    std::thread::sleep(Duration::from_millis(1000));
+                    let ask = |key: &str, points: &str| {
+                        reply_lines(
+                            subject
+                                .get(key)
+                                .timestamp_instrumentation(instrumentation(points))
+                                .timeout(Duration::from_secs(5))
+                                .wait()
+                                .expect("asks"),
+                        )
+                    };
+                    for points in ["SE", "S", "E", "SRE", ""] {
+                        out.push(format!(
+                            "{label}: the other node asks the subject at '{points}': it is answered {:?}, the queryable is given {:?}",
+                            other.get("demo/qs/x", points),
+                            std::mem::take(&mut *seen.lock().unwrap())
+                        ));
+                        out.push(format!(
+                            "{label}: the subject asks the other node at '{points}': it is answered {:?}, the queryable is given {:?}",
+                            ask("demo/qo/x", points),
+                            other.take_queries()
+                        ));
+                        out.push(format!(
+                            "{label}: the subject asks itself at '{points}': it is answered {:?}, the queryable is given {:?}",
+                            ask("demo/qs/y", points),
+                            std::mem::take(&mut *seen.lock().unwrap())
+                        ));
+                    }
+                    out.push(format!(
+                        "{label}: the other node asks the subject for an error: it is answered {:?}, the queryable is given {:?}",
+                        other.get("demo/qs/err", "SE"),
+                        std::mem::take(&mut *seen.lock().unwrap())
+                    ));
+                    out.push(format!(
+                        "{label}: the subject asks the other node for an error: it is answered {:?}, the queryable is given {:?}",
+                        ask("demo/qo/err", "SE"),
+                        other.take_queries()
                     ));
                 }
                 out
@@ -3173,6 +3333,15 @@ fn what_a_message_carries_in_its_timestamp_stack_is_what_upstream_carries() {
     let (u, w) = (up::instrumentations(), wz::instrumentations());
     assert!(u.iter().any(|l| l.contains("Send:uhlc:")), "{u:#?}");
     compare("instrumentations", &u, &w);
+}
+
+#[test]
+fn what_a_query_and_its_replies_carry_in_their_timestamp_stack_is_what_upstream_carries() {
+    // The log of upstream's nodes, for a run that is asked for it with `RUST_LOG`.
+    up_zenoh::try_init_log_from_env();
+    let (u, w) = (up::instrumented_queries(), wz::instrumented_queries());
+    assert!(u.iter().any(|l| l.contains("Receive:uhlc:")), "{u:#?}");
+    compare("instrumented_queries", &u, &w);
 }
 
 #[test]

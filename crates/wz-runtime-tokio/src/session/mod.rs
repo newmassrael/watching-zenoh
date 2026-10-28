@@ -5276,6 +5276,18 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                                 .qos
                                 .unwrap_or(wz_session_core::sample::QosLevel::DEFAULT),
                         };
+                        // The stack of the loopback leg is the query's own, not the wire's:
+                        // the session's own queryables are not reached through a route.
+                        #[cfg(feature = "pubsub-ts-stack")]
+                        observer.queryables.local_query_with_stack(
+                            envelope,
+                            selector.loopback_keyexpr,
+                            &query,
+                            local_value,
+                            opts.ts_stack.as_ref(),
+                            &mut replies,
+                        );
+                        #[cfg(not(feature = "pubsub-ts-stack"))]
                         observer.queryables.local_query_with_value(
                             envelope,
                             selector.loopback_keyexpr,

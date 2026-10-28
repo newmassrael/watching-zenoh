@@ -194,6 +194,7 @@ fn zenoh::query::Query::reply_del<'0, TryIntoKeyExpr>(&Self, TryIntoKeyExpr) -> 
 fn zenoh::query::Query::reply_err<IntoZBytes>(&Self, IntoZBytes) -> zenoh::query::ReplyErrBuilder<'_> where IntoZBytes: core::convert::Into<zenoh::bytes::ZBytes> ; in impl zenoh::query::Query
 fn zenoh::query::Query::selector(&Self) -> zenoh::query::Selector<'_> ; in impl zenoh::query::Query
 fn zenoh::query::Query::source_info(&Self) -> core::option::Option<&zenoh::sample::SourceInfo> ; in impl zenoh::query::Query
+fn zenoh::query::Query::timestamp_stack(&Self) -> core::option::Option<&zenoh::timestamp_stack::TimestampStack> ; in impl zenoh::query::Query
 fn zenoh::query::QueryConsolidation::mode(&Self) -> zenoh::query::ConsolidationMode ; in impl zenoh::query::QueryConsolidation
 fn zenoh::query::Queryable::handler(&Self) -> &Handler ; in impl<Handler> zenoh::query::Queryable<Handler>
 fn zenoh::query::Queryable::handler_mut(&mut Self) -> &mut Handler ; in impl<Handler> zenoh::query::Queryable<Handler>
