@@ -1267,7 +1267,7 @@ mod tokio_engine {
     /// pass filter, the QoS overwrite of the network) and, when the access control is enabled,
     /// its rules, subjects and policies, which upstream builds only then.
     pub(super) fn refuse_repeated_ids(document: &serde_json::Value) -> ZResult<()> {
-        fn repeated<'a>(entries: Option<&'a serde_json::Value>) -> Option<&'a str> {
+        fn repeated(entries: Option<&serde_json::Value>) -> Option<&str> {
             let mut seen = std::collections::HashSet::new();
             entries?
                 .as_array()?
@@ -3338,7 +3338,7 @@ impl Session {
                 .queries_default_timeout()
                 .unwrap_or(zenoh_config::defaults::queries_default_timeout),
         );
-        Ok(Session(Arc::new(SessionInner {
+        let session = Session(Arc::new(SessionInner {
             strong_counter: AtomicUsize::new(1),
             engine,
             id,
@@ -3369,7 +3369,10 @@ impl Session {
             transport_listeners: std::sync::Mutex::new(vec![]),
             #[cfg(feature = "unstable")]
             link_listeners: std::sync::Mutex::new(vec![]),
-        })))
+        }));
+        #[cfg(feature = "unstable")]
+        crate::api::admin::init(session.downgrade());
+        Ok(session)
     }
 }
 
@@ -3550,6 +3553,21 @@ impl WeakSession {
     ) -> ZResult<Id> {
         self.0
             .declare_transport_events_listener_inner(callback, history, notifier)
+    }
+
+    /// Answer the queries for `key_expr` into `callback` as [`Session::declare_queryable_inner`]
+    /// does, for an entity of the session that holds it by this reference.
+    #[cfg(feature = "unstable")]
+    pub(crate) fn declare_queryable_inner(
+        &self,
+        key_expr: &KeyExpr,
+        complete: bool,
+        origin: Locality,
+        callback: Callback<Query>,
+        notifier: Option<SyncGroupNotifier>,
+    ) -> ZResult<Id> {
+        self.0
+            .declare_queryable_inner(key_expr, complete, origin, callback, notifier)
     }
 
     /// Undeclare the transport events listener `id`. A closed session has none, and undeclaring on
@@ -5826,6 +5844,8 @@ mod tests {
         #[test]
         fn an_undeclared_queryable_answers_nothing_and_a_stranger_is_refused() {
             let session = open(peer("a1b2c3")).wait().expect("opens");
+            // The queryables of the session's own admin space are there from the open.
+            let own = session.0.queryables().len();
             let answering = |key: &str| {
                 let key = key.to_owned();
                 move |query: Query| query.reply(key.clone(), "v").wait().expect("replies")
@@ -5840,16 +5860,16 @@ mod tests {
                 .callback(answering("demo/undeclare/b"))
                 .wait()
                 .expect("declares");
-            assert_eq!(session.0.queryables().len(), 2);
+            assert_eq!(session.0.queryables().len(), own + 2);
             assert_eq!(ask(&session, "demo/undeclare/*", everyone()).len(), 2);
             first.undeclare().wait().expect("undeclares");
-            assert_eq!(session.0.queryables().len(), 1);
+            assert_eq!(session.0.queryables().len(), own + 1);
             assert_eq!(
                 ask(&session, "demo/undeclare/*", everyone()),
                 ["demo/undeclare/b Put v"]
             );
             drop(second);
-            assert_eq!(session.0.queryables().len(), 0);
+            assert_eq!(session.0.queryables().len(), own);
             assert!(ask(&session, "demo/undeclare/*", everyone()).is_empty());
             let error = session
                 .downgrade()
@@ -5900,11 +5920,12 @@ mod tests {
         #[test]
         fn a_closed_session_declares_nothing_and_lets_its_queryables_go() {
             let session = open(peer("a1b2c4")).wait().expect("opens");
+            let own = session.0.queryables().len();
             let queryable = session
                 .declare_queryable("demo/closed")
                 .wait()
                 .expect("declares");
-            assert_eq!(session.0.queryables().len(), 1);
+            assert_eq!(session.0.queryables().len(), own + 1);
             session.close().wait().expect("closes");
             assert_eq!(session.0.queryables().len(), 0);
             let error = session
@@ -7250,7 +7271,8 @@ mod tests {
     /// What a subscriber's undeclaration waits for. Upstream's test of it (`callback_drop_on_undeclare`)
     /// gives the callback a call that takes a while and a drop that takes a while and then states
     /// that it ran, and asks that `wait_callbacks` return after both, whichever thread the sample
-    /// was delivered on.
+    /// was delivered on. `wait_callbacks` is the API of the `unstable` and `internal` builds.
+    #[cfg(any(feature = "unstable", feature = "internal"))]
     mod subscriber_undeclaration {
         use std::{
             sync::{
