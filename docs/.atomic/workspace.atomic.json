@@ -295492,6 +295492,36 @@
         "Layer Z was read only to the failures of one run; the legs behind a first error may carry their own red."
       ]
     },
+    "Round 3834": {
+      "decision_summary": "Open-debt item 751, step (b), step 7a of docs/peer-region-hats.md: the door. The node surfaces steps 1, 5 and 6 left test-only become public entry points of RouterForwarder (publish, publish_qos, publish_delete, unregister_local_subscriber, unregister_local_queryable, set_self_locators, north_net_node_count, north_net_edge_count, client_queryables_seen, north_interested), and RouterForwarder::peer_with_timestamping builds the peer node from the whole timestamping.enabled map as with_timestamping does for a router. Nothing outside the tests calls them yet, so no door changes its answer. The note gains section 12a, which divides step 7 into four parts and records the measured mapping of run_peer's calls onto the region-hat forwarder, the two gaps that are not renames (handlers must be Send, and the interest collector is absent), and the e2e files that change with run_peer.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward.rs: the cfg(test) is removed from set_self_locators, north_net_edge_count, client_queryables_seen, north_interested, the two unregistrations, publish, publish_qos, publish_delete, route_local_push and Hosted::retract; the dead-code allowances on the hosted id fields go; the router_entry_points lists gain the public entries; peer_with_timestamping is the public constructor, peer and peer_with_clock stay test-only. docs/peer-region-hats.md: section 12a. No test function is added, so no C1AY guard moves."
+      ],
+      "verification_bullets": [
+        "On pc2 the 353 router_forward tests pass with all features, as before. Clippy with -D warnings is clean under all features, the defaults, routing-router-hat and for the demo crate; the first run found Hosted::retract still test-only, which is fixed. rustfmt and the citation gate pass. Not run: the hosted run, and the demo's end-to-end legs, which this part cannot move since nothing calls the new entries."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Step 7b: run_peer takes the region-hat forwarder, by the mapping in section 12a of the note; the hosted handlers it registers become Send (Arc and a mutex for the Rc buffers); the three e2e files that pin clients empty for a hosted declaration change to {\"routers\":[],\"peers\":[<zid>],\"clients\":[<zid>]}; the two bare declarations become a registration with a handler that does nothing; --interest-timeout and the interest counters of the shutdown summary have nothing to set or read, and wz_peer_interest_pending_gc_pico_interop moves with the flag, which needs its own decision on what the flag becomes. Then 7c, the retirement and what grades the region-hat peer once the oracle is gone, and 7d, the partition on --peer and the config key with its census pins. Read the first hosted run for the router admin and query legs (6d, 6e and the per-region BestMatching). Open from before: a current subscriber Interest from a north peer, and a router node's south peer region relaying nothing between link-state peers."
+      ],
+      "publishable_decision_summary": "Open-debt item 751, step (b), step 7a of docs/peer-region-hats.md: the door. The node surfaces steps 1, 5 and 6 left test-only become public entry points of RouterForwarder (publish, publish_qos, publish_delete, unregister_local_subscriber, unregister_local_queryable, set_self_locators, north_net_node_count, north_net_edge_count, client_queryables_seen, north_interested), and RouterForwarder::peer_with_timestamping builds the peer node from the whole timestamping.enabled map as with_timestamping does for a router. Nothing outside the tests calls them yet, so no door changes its answer. The note gains section 12a, which divides step 7 into four parts and records the measured mapping of run_peer's calls onto the region-hat forwarder, the two gaps that are not renames (handlers must be Send, and the interest collector is absent), and the e2e files that change with run_peer.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward.rs: the cfg(test) is removed from set_self_locators, north_net_edge_count, client_queryables_seen, north_interested, the two unregistrations, publish, publish_qos, publish_delete, route_local_push and Hosted::retract; the dead-code allowances on the hosted id fields go; the router_entry_points lists gain the public entries; peer_with_timestamping is the public constructor, peer and peer_with_clock stay test-only. docs/peer-region-hats.md: section 12a. No test function is added, so no C1AY guard moves."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2 the 353 router_forward tests pass with all features, as before. Clippy with -D warnings is clean under all features, the defaults, routing-router-hat and for the demo crate; the first run found Hosted::retract still test-only, which is fixed. rustfmt and the citation gate pass. Not run: the hosted run, and the demo's end-to-end legs, which this part cannot move since nothing calls the new entries."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 7b: run_peer takes the region-hat forwarder, by the mapping in section 12a of the note; the hosted handlers it registers become Send (Arc and a mutex for the Rc buffers); the three e2e files that pin clients empty for a hosted declaration change to {\"routers\":[],\"peers\":[<zid>],\"clients\":[<zid>]}; the two bare declarations become a registration with a handler that does nothing; --interest-timeout and the interest counters of the shutdown summary have nothing to set or read, and wz_peer_interest_pending_gc_pico_interop moves with the flag, which needs its own decision on what the flag becomes. Then 7c, the retirement and what grades the region-hat peer once the oracle is gone, and 7d, the partition on --peer and the config key with its census pins. Read the first hosted run for the router admin and query legs (6d, 6e and the per-region BestMatching). Open from before: a current subscriber Interest from a north peer, and a router node's south peer region relaying nothing between link-state peers."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
