@@ -294994,6 +294994,48 @@
         "None in this tree. The bx declaration form has no way to name machine configuration that is not a package (here the AppArmor userns profile for bwrap); that is the bx repository's, and was reported to its session."
       ]
     },
+    "Round 3820": {
+      "decision_summary": "The text of an MCU image was held to nothing but the parity matrix's total (the fixed client at 1.20 of single-threaded zenoh-pico), so a lever on size was chosen by a guess about where the bytes were and its worth could be read only as a change of the total. A gate now reads the symbol table of the linked ELF, gives every symbol of code or read-only data to an owner (the first crate of a Rust path, the prefix of a C name) and holds the image's text and each owner to a committed row within a kilobyte, the text twin of the resource budget. It is not provenance: with link-time inlining a callee's code is counted under the symbol that carries it, which is stated in the document. The first reading puts the platform (the network stack, the drivers, the toolchain) at the same size in the fixed and in the single-threaded pico image, so the 31 KB of difference is the two libraries' own code, about 92 KB of wz against about 55 KB of zenoh-pico. It also ranked the levers: the SHAKE128 permutation of the initial sequence number is 2.2 KB that zenoh-pico does not carry, and the machine outliner (2.2 KB for 5.1 us in the answer to a query, measured) is a lever for the connect and declare paths and not for the answer path.",
+      "changes_bullets": [
+        "scripts/lib/text_owner_gate.py (new): --check, --emit, --selftest and --list over the symbols of a linked ELF; docs/text-ownership.md (new): the method, its limit and the first reading.",
+        "deploy/text_budget.json (new): the rows of the zephyr-client-fixed, -batching and -get images (text and 35 owners each, tolerance 1,024 bytes).",
+        "scripts/kit-lane.sh: the build step runs the gate for an image with a row, and not for a compare build; scripts/run-ci.sh: the gate's selftest beside the stack gate's."
+      ],
+      "verification_bullets": [
+        "The selftest (python3 scripts/lib/text_owner_gate.py --selftest) reads crate paths, trait impls and C prefixes, sums code and read-only data and not bss, folds the small owners, and judges a moved text, a moved owner and an owner with no row.",
+        "Kit (scripts/kit-lane.sh build, tree at origin's round 3818): the three images build, the stack gate holds them, and the text gate holds them against the rows emitted from the same builds (174,100, 178,652 and 185,600 bytes; 35 or 36 owners within 1,024).",
+        "The first reading is from nm -S -C of the compare builds of run 20261028T005644 (fixed 176,352 bytes, single-threaded pico 145,364); the symbols account for 171,575 and 142,413 of those bytes."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "The rows fence the total and show where a change landed; they do not say whose source a byte came from. Provenance needs a build without LTO, which has other sizes, and wz_session_core (41.6 KB) is not split by function yet.",
+        "The levers it ranked are not taken: a build switch for the initial sequence number's derivation (2.2 KB of keccak), the owners of the answer path against the connect and declare paths for the outliner and opt-level, and the feature set of the fixed preset against zenoh-pico's.",
+        "Only the three gated fixed images have rows; the pico and heap images, and the images of other targets, have none."
+      ],
+      "publishable_decision_summary": "The text of an MCU image was held to nothing but the parity matrix's total (the fixed client at 1.20 of single-threaded zenoh-pico), so a lever on size was chosen by a guess about where the bytes were and its worth could be read only as a change of the total. A gate now reads the symbol table of the linked ELF, gives every symbol of code or read-only data to an owner (the first crate of a Rust path, the prefix of a C name) and holds the image's text and each owner to a committed row within a kilobyte, the text twin of the resource budget. It is not provenance: with link-time inlining a callee's code is counted under the symbol that carries it, which is stated in the document. The first reading puts the platform (the network stack, the drivers, the toolchain) at the same size in the fixed and in the single-threaded pico image, so the 31 KB of difference is the two libraries' own code, about 92 KB of wz against about 55 KB of zenoh-pico. It also ranked the levers: the SHAKE128 permutation of the initial sequence number is 2.2 KB that zenoh-pico does not carry, and the machine outliner (2.2 KB for 5.1 us in the answer to a query, measured) is a lever for the connect and declare paths and not for the answer path.",
+      "publishable_changes_bullets": [
+        "scripts/lib/text_owner_gate.py (new): --check, --emit, --selftest and --list over the symbols of a linked ELF; docs/text-ownership.md (new): the method, its limit and the first reading.",
+        "deploy/text_budget.json (new): the rows of the zephyr-client-fixed, -batching and -get images (text and 35 owners each, tolerance 1,024 bytes).",
+        "scripts/kit-lane.sh: the build step runs the gate for an image with a row, and not for a compare build; scripts/run-ci.sh: the gate's selftest beside the stack gate's."
+      ],
+      "publishable_verification_bullets": [
+        "The selftest (python3 scripts/lib/text_owner_gate.py --selftest) reads crate paths, trait impls and C prefixes, sums code and read-only data and not bss, folds the small owners, and judges a moved text, a moved owner and an owner with no row.",
+        "Kit (scripts/kit-lane.sh build, tree at origin's round 3818): the three images build, the stack gate holds them, and the text gate holds them against the rows emitted from the same builds (174,100, 178,652 and 185,600 bytes; 35 or 36 owners within 1,024).",
+        "The first reading is from nm -S -C of the compare builds of run 20261028T005644 (fixed 176,352 bytes, single-threaded pico 145,364); the symbols account for 171,575 and 142,413 of those bytes."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The rows fence the total and show where a change landed; they do not say whose source a byte came from. Provenance needs a build without LTO, which has other sizes, and wz_session_core (41.6 KB) is not split by function yet.",
+        "The levers it ranked are not taken: a build switch for the initial sequence number's derivation (2.2 KB of keccak), the owners of the answer path against the connect and declare paths for the outliner and opt-level, and the feature set of the fixed preset against zenoh-pico's.",
+        "Only the three gated fixed images have rows; the pico and heap images, and the images of other targets, have none."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
