@@ -383,8 +383,8 @@ fn zenohd_gateways_carry_each_put_across_a_router_subregion_once() {
 }
 
 /// THE CLAIM: two wz gateways do the same.
-// wz-proves: none -- the gateway/south key is still unhonoured (the demo flag is
-// the only way to run a partition), so no atom claims the partition yet.
+// wz-proves: none -- the gateway/south key is honoured now, but no atom claims the
+// partition's routing across two gateways yet.
 #[test]
 #[ignore = "binary-dep e2e (zenohd + zenoh-pico + wz-ap-demo --features router-hat-router,zenoh-config); Layer Z runs via --ignored"]
 fn wz_gateways_carry_each_put_across_a_router_subregion_once_like_zenohd() {

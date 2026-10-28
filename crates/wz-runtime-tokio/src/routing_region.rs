@@ -153,8 +153,8 @@ fn index_to_region(idx: usize) -> Region {
 }
 
 /// The regions a node of `mode` builds a hat for on the `Auto` gateway preset,
-/// which is every wz node (`gateway/south` is not a key wz honours), in the
-/// pin's order (`zenoh/src/net/routing/gateway.rs`
+/// which is every wz node whose `gateway/south` is the preset (the key's
+/// default), in the pin's order (`zenoh/src/net/routing/gateway.rs`
 /// @ `GatewaySouthConf::Preset(GatewayPresetConf::Auto) => match mode {`):
 /// `North` first, then the default south subregions the mode serves, then
 /// `Local`.

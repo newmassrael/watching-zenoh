@@ -733,10 +733,16 @@ honoured, and the census pins move in the same commit.
   query twin), and the binary test `peer_gateway_south_binary` holds the flag at argv.
   Not witnessed here: a peer with a partition against a stock zenohd, which needs the
   foreign binary (the router's twin is `wz_south_partition_region_zenohd_interop`).
-- **7d-2, the config key (open).** `gateway/south` stays in `UNHONOURED_BEYOND_WZ` and the
-  expansion emits no flag for it. Honouring it moves the key between the surface lists,
-  adds the row of the expansion table and the reader field, and moves the census pins that
-  count the honoured fraction in the same commit.
+- **7d-2, the config key (landed).** `gateway/south` moved from `UNHONOURED_BEYOND_WZ` to
+  `HONOURED_CONFIG_KEYS` (its `GatewayConf` group and its not-this-key row went with it,
+  the surface total is unchanged). `ZenohNodeConfig.gateway_south` carries the partition,
+  its default is the preset because the pinned `DEFAULT_CONFIG.json5` states `"auto"`, and
+  `gateway_south_json` writes a partition in the spelling `gateway_south_of` reads back, so
+  the config emitter and the `--gateway-south` expansion take their text from one place. The
+  expansion withholds the key from a run that is neither `--peer` nor `--router-hat`, and the
+  drop-in fixture excepts it for a connecting client as its fourth role exception. Not
+  witnessed here: the Layer Z legs (the defaults leg's `"auto"` claim and the census), which
+  need a built zenohd.
 
 ## 13. Open
 

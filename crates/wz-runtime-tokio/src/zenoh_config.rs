@@ -1149,6 +1149,15 @@ pub struct ZenohNodeConfig {
     /// `want_bool_for_mode`, and it is absent from `MODE_TABLE_UPSTREAM_KEYS`
     /// for the same reason.
     pub drop_future_timestamp: bool,
+    /// Item 751 — `gateway/south`: how this node partitions its remotes into
+    /// subregions, read through [`gateway_south_of`].
+    ///
+    /// A plain value with the preset as its default rather than an `Option`,
+    /// because upstream's `DEFAULT_CONFIG.json5` states `south: "auto"` and a
+    /// resolved tree therefore answers it for a silent file. The partition
+    /// reaches the node as `--gateway-south` (`RouterForwarder::with_south_partition`),
+    /// which the router-hat and peer run-modes take.
+    pub gateway_south: SouthPartition,
     /// `adminspace` — `None` leaves the block out entirely, which is not the
     /// same as emitting `enabled: false`: an omitted key takes zenoh's
     /// default, and saying so explicitly is a decision the caller should have
@@ -1493,6 +1502,9 @@ impl Default for ZenohNodeConfig {
             // @ `    pub const drop_future_timestamp: bool = false;`), so an
             // unset key relays the re-stamped message.
             drop_future_timestamp: false,
+            // Item 751 — upstream's shipped preset
+            // (`DEFAULT_CONFIG.json5` @ `    south: "auto"`).
+            gateway_south: SouthPartition::Auto,
             adminspace: None,
             // R311y844 — every one of these is zenoh's own resolved value for
             // an unset key, taken from a running zenohd rather than from
@@ -1925,6 +1937,11 @@ impl ZenohNodeConfig {
             ", \"drop_future_timestamp\": {}",
             self.drop_future_timestamp
         );
+        // Item 751 — `gateway.south`, in `DEFAULT_CONFIG.json5`'s order (after
+        // `timestamping`, before `transport`), so a partition survives a round
+        // trip through this emitter.
+        out.push_str(" },\n  \"gateway\": { \"south\": ");
+        out.push_str(&gateway_south_json(&self.gateway_south));
         out.push_str(" },\n  \"transport\": {\n    \"unicast\": {\n");
         let _ = writeln!(out, "      \"accept_timeout\": {},", self.accept_timeout_ms);
         let _ = writeln!(out, "      \"accept_pending\": {},", self.accept_pending);
@@ -2313,6 +2330,15 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // Its deeper leaves are claimed by `HONOURED_VALUES`: the whole value is
     // served, so no leaf below it is one wz ignores.
     "metadata",
+    // Item 751 (step 7d-2) — `gateway/south`, MOVED here from
+    // `UNHONOURED_UPSTREAM_CONFIG_KEYS` / `UNHONOURED_BEYOND_WZ` / the
+    // `GatewayConf` beyond-group, so the surface total is unchanged. The reader
+    // carries the partition (`gateway_south_of`) and a node of every mode that
+    // can hold one acts on it: a router-hat and a peer node hand it to
+    // `RouterForwarder::with_south_partition`, which places every remote by it
+    // and announces each remote's bound. The group said wz had no
+    // "gateway region-partitioning plane", and `region_partition` is one.
+    "gateway/south",
 ];
 
 /// R311y849 — the leaves that live INSIDE a honoured key which is a subtree
@@ -2520,9 +2546,11 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // keeps the denominator and only shifts the fraction.
     // R2230 (open-debt item 579) — ARRIVED in 1.10.0, and the census leg is what
     // found it: upstream's own resolved tree carried a key wz's surface did not
-    // name. Seven arrived this way; each is beyond-wz and each earned that
-    // classification from a search that states what it looked for.
-    "gateway/south",
+    // name. Seven arrived this way; each was classed beyond-wz from a search
+    // that states what it looked for.
+    // Item 751 (step 7d-2) — `gateway/south` LEFT this list for
+    // `HONOURED_CONFIG_KEYS`: the reader carries the partition and the router-hat
+    // and peer nodes act on it. Same partition, same total.
     // R2650 — `low_pass_filter` LEFT this list for `HONOURED_CONFIG_KEYS`. The
     // surface total is unchanged: this partition's two halves sum to the upstream
     // surface, so a move keeps the denominator and only shifts the fraction.
@@ -2676,9 +2704,10 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 ///   retired `routing.peer` and `routing.router.peers_failover_brokering` to
 ///   deprecated no-ops, so they are [`WZ_EXTENSION_CONFIG_KEYS`] and not an
 ///   upstream capability wz lacks.
-/// * `gateway/south` — a gateway region-partitioning plane (`GatewayConf`), and
-///   `region_name` — a node region identity (`RegionName`), its other half.
-///   Both ARRIVED in 1.10.0 (R2230).
+/// * (Item 751, step 7d-2: `gateway/south` LEFT this list. Its row said wz had
+///   no "gateway region-partitioning plane" (`GatewayConf`), and the region-hat
+///   forwarder applies one. Its other half, `region_name`, left earlier for
+///   [`UNHONOURED_READER_GAP`].)
 /// * `stats/filters` — per-keyexpr statistics (`StatsFilterConfig`). ⚠ Not
 ///   answered by wz's `transport-stats`, which answers upstream's `stats`
 ///   FEATURE; see the row's own comment.
@@ -2738,7 +2767,11 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // The nearest wz mechanism matching upstream's filter FIELDS (modes,
     // interfaces, zids) is the ACL subject selector, which is an authorization
     // predicate on an established session and assigns no subregion.
-    "gateway/south",
+    //
+    // ⚠ Item 751 (step 7d-2) — `gateway/south` LEFT THIS LIST for
+    // `HONOURED_CONFIG_KEYS`, and the search above stopped being true: wz has the
+    // plane (`wz_session_core::region_partition`, applied by the region-hat
+    // forwarder), which is the direction this list cannot express.
     // R2159 (open-debt item 229) — `connect/exit_on_failure` and the three
     // `listen/*` LEFT here, and the `ListenConfig` group left with them: their
     // group sentence said wz would need "a dial/listen failure policy", which
@@ -3091,11 +3124,10 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
     // Each states the thing wz would need as a NAME that must not exist in wz's
     // code, which is what makes a future capability red its own row rather than
     // leave the group quietly stale.
-    (
-        "a gateway region-partitioning plane",
-        "GatewayConf",
-        &["gateway/south"],
-    ),
+    // Item 751 (step 7d-2) — the `GatewayConf` group is GONE, not emptied: wz
+    // grew "a gateway region-partitioning plane" (`region_partition`, applied by
+    // the region-hat forwarder), and its one key moved to
+    // [`HONOURED_CONFIG_KEYS`].
     // ⚠ R2539 — the `RegionName` group is GONE from this list, not edited.
     // Every row here claims wz has no such thing, and `unhonoured_kind_evidence
     // _gate` checks that claim against wz's own code: it found `RegionName` at
@@ -3254,11 +3286,9 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
     // the key now, and `AdminLocalData`'s "not this key" disclaimer went with it.
     // R2788 — `plugins`' row is GONE: the reader honours the key now, and this
     // ledger carries evidence for unhonoured keys only.
-    // R2864 — the citing site is `extbound.rs`'s module doc, which names the key
-    // to say why a wz node never sends the OPEN `RemoteBound` extension. The
-    // mechanism there is that extension's reader, not the gateway plane the
-    // key configures, which stays in the `GatewayConf` beyond-wz group.
-    ("gateway/south", "not-this-key", "REMOTE_BOUND_EXT_HEADER"),
+    // R2864 — `gateway/south`'s row is GONE (item 751, step 7d-2): the reader
+    // honours the key now, and `extbound.rs`'s "not this key" disclaimer went
+    // with it.
     ("plugins_loading/enabled", "wz-has-it", "PluginRegistry"),
     // The citing site is `PluginRegistry`'s doc, drawing the line at this key:
     // the host is wz's, the DISCOVERY is not. A citation that says "not this
@@ -4885,11 +4915,11 @@ const GATEWAY_SOUTH_SHAPE: &str = "\"auto\", or a list of subregions { filters?:
 /// * a zid is [`zenoh_hex_to_zid`]'s alphabet, and a region name is
 ///   [`RegionName::new`](wz_session_core::extregion::RegionName::new)'s.
 ///
-/// The config ingest does not read the key through this yet: it stays in
-/// [`UNHONOURED_BEYOND_WZ`] until a node of every mode acts on every placement
-/// the partition can make. A ROUTER does (open-debt item 751, its subregions'
-/// router regions included), and wz-ap-demo's `--router-hat --gateway-south`
-/// hands its text here; a peer with a partition does not yet.
+/// The config ingest reads the key through this, and wz-ap-demo's
+/// `--gateway-south` hands its text here too, so a file and the flag cannot
+/// accept different documents. A router (its subregions' router regions
+/// included) and a peer node act on the partition it reads
+/// (open-debt item 751).
 pub fn gateway_south_of(value: &Json5Value) -> Result<SouthPartition, ConfigIngestError> {
     let refuse = || ConfigIngestError::WrongType {
         path: GATEWAY_SOUTH_PATH,
@@ -4906,6 +4936,90 @@ pub fn gateway_south_of(value: &Json5Value) -> Result<SouthPartition, ConfigInge
             .map(SouthPartition::Custom),
         _ => Err(refuse()),
     }
+}
+
+/// The inverse of [`gateway_south_of`]: a partition as the document an operator
+/// would write for it, which `gateway_south_of` reads back to the same value.
+///
+/// The one spelling of each part, not every spelling the reader takes: the
+/// preset is `"auto"`, a subregion is `{ "filters": [..] }` (or `{}` when it has
+/// none), and a filter lists only the fields it sets, `negated` only when true.
+/// It is what the config emitter writes and what the argv expansion hands the
+/// `--gateway-south` flag, so both ends take their text from the one place.
+pub fn gateway_south_json(partition: &SouthPartition) -> String {
+    let SouthPartition::Custom(subregions) = partition else {
+        return String::from("\"auto\"");
+    };
+    let mut out = String::from("[");
+    for (i, subregion) in subregions.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_str("{ ");
+        if let Some(filters) = &subregion.filters {
+            out.push_str("\"filters\": [");
+            for (j, filter) in filters.iter().enumerate() {
+                if j > 0 {
+                    out.push_str(", ");
+                }
+                push_region_filter(filter, &mut out);
+            }
+            out.push_str("] ");
+        }
+        out.push('}');
+    }
+    out.push(']');
+    out
+}
+
+/// One filter of [`gateway_south_json`], as the object of the fields it sets.
+fn push_region_filter(filter: &RegionFilter, out: &mut String) {
+    out.push('{');
+    let mut first = true;
+    let mut field = |name: &str, out: &mut String| {
+        if !first {
+            out.push(',');
+        }
+        first = false;
+        let _ = write!(out, " \"{name}\": ");
+    };
+    if let Some(modes) = filter.modes {
+        field("modes", out);
+        out.push('[');
+        let mut first_mode = true;
+        for role in [WhatAmI::Router, WhatAmI::Peer, WhatAmI::Client] {
+            if !modes.matches(role) {
+                continue;
+            }
+            if !first_mode {
+                out.push_str(", ");
+            }
+            first_mode = false;
+            escape_into(role.to_str(), out);
+        }
+        out.push(']');
+    }
+    if let Some(interfaces) = &filter.interfaces {
+        field("interfaces", out);
+        push_endpoints(interfaces, out);
+    }
+    if let Some(zids) = &filter.zids {
+        field("zids", out);
+        let hex: Vec<String> = zids
+            .iter()
+            .map(|zid| wz_session_core::zid_hex::zid_to_zenoh_hex(zid))
+            .collect();
+        push_endpoints(&hex, out);
+    }
+    if let Some(names) = &filter.region_names {
+        field("region_names", out);
+        push_endpoints(names, out);
+    }
+    if filter.negated {
+        field("negated", out);
+        out.push_str("true");
+    }
+    out.push_str(" }");
 }
 
 /// `{ auto: null }`: serde's externally tagged spelling of the unit variant, one
@@ -6721,6 +6835,13 @@ impl ZenohNodeConfig {
             out.drop_future_timestamp = v;
             named.push("timestamping/drop_future_timestamp");
         }
+        // Item 751 — the partition, read whole by `gateway_south_of`. `honoured`
+        // is right here: `null` is the preset's own spelling and so, like an
+        // absent key, leaves the default standing.
+        if let Some(value) = honoured(&doc, "gateway/south") {
+            out.gateway_south = gateway_south_of(value)?;
+            named.push("gateway/south");
+        }
         if let Some(v) = want_u64(&doc, "transport/unicast/accept_timeout")? {
             out.accept_timeout_ms = v;
             named.push("transport/unicast/accept_timeout");
@@ -7100,6 +7221,59 @@ mod tests {
         ] {
             assert!(south(text).is_err(), "{text} is refused upstream");
         }
+    }
+
+    /// Item 751 — `gateway_south_json` is the inverse of `gateway_south_of`: each
+    /// partition below, written and read back, is the partition that was written.
+    /// The argv expansion and the config emitter both take their text from it, so
+    /// a spelling the reader would not take back is a node that refuses its own
+    /// flag.
+    #[test]
+    fn a_south_partition_is_written_in_a_spelling_the_reader_takes_back() {
+        for text in [
+            r#""auto""#,
+            "[]",
+            "[{}]",
+            "[{ filters: [] }]",
+            "[{ filters: [{}] }]",
+            r#"[{ filters: [{ modes: [] }] }]"#,
+            r#"[{ filters: [{ modes: ["router", "client"], negated: true }] }]"#,
+            r#"[{ filters: [{ interfaces: ["eth0", "wlan0"] }] }]"#,
+            r#"[{ filters: [{ zids: ["cc", "1234abcd"] }] }, { filters: [{ modes: ["peer"] }] }]"#,
+            r#"[{ filters: [{ region_names: ["edge", "dc.1"] }] }]"#,
+            r#"[{ filters: [{ modes: ["peer"], interfaces: ["lo"], zids: ["aa"], region_names: ["r"], negated: true }, { modes: ["client"] }] }]"#,
+        ] {
+            let want = south(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+            let written = gateway_south_json(&want);
+            assert_eq!(south(&written).as_ref(), Ok(&want), "{text} -> {written}");
+        }
+    }
+
+    /// Item 751 — a partition a file states reaches the config's field, and the
+    /// emitter writes it back: the key is read, named, and not lost on a round
+    /// trip. A silent file leaves the preset.
+    #[test]
+    fn the_south_partition_is_read_from_a_file_and_survives_the_emitter() {
+        let silent = ZenohNodeConfig::from_json5("{}").expect("an empty document reads");
+        assert_eq!(silent.config.gateway_south, SouthPartition::Auto);
+        assert!(!silent.named.contains(&"gateway/south"));
+
+        let source = r#"{ gateway: { south: [{ filters: [{ modes: ["peer"] }] }] } }"#;
+        let read = ZenohNodeConfig::from_json5(source).expect("the partition reads");
+        assert!(read.named.contains(&"gateway/south"), "{:?}", read.named);
+        assert!(read.ignored.is_empty(), "{:?}", read.ignored);
+        let SouthPartition::Custom(subregions) = &read.config.gateway_south else {
+            panic!(
+                "a custom partition was stated: {:?}",
+                read.config.gateway_south
+            );
+        };
+        assert_eq!(subregions.len(), 1);
+
+        let again = ZenohNodeConfig::from_json5(&read.config.to_json5()).expect("it round-trips");
+        assert_eq!(again.config.gateway_south, read.config.gateway_south);
+        // A document the reader refuses is refused whole, not read as the preset.
+        assert!(ZenohNodeConfig::from_json5(r#"{ gateway: { south: 7 } }"#).is_err());
     }
 
     /// Item 751 — a list of subregions, each filter field read into the value
@@ -8450,6 +8624,13 @@ mod tests {
             (
                 "metadata",
                 r#"{ "metadata": { "name": "strawberry", "floor": 3 } }"#,
+            ),
+            // Item 751 — a custom partition, because the shipped default is the
+            // `auto` preset and this gate requires the ingest to MOVE. In the
+            // table's order, which is `HONOURED_CONFIG_KEYS`'s.
+            (
+                "gateway/south",
+                r#"{ "gateway": { "south": [{ "filters": [{ "modes": ["peer"] }] }] } }"#,
             ),
             // R2230 (items 579 / 582) — this row MOVED to the tail of the table
             // when the key left `HONOURED_CONFIG_KEYS` for

@@ -78,10 +78,10 @@ use wz_integration_tests::common::{
 };
 use wz_integration_tests::wire_tap::{synthesise_pcap, tap_proxy, Recording};
 use wz_runtime_tokio::zenoh_config::{
-    default_listen_endpoint, honoured_surface, ZenohNodeConfig, CONFIG_KEYS_PROVEN_ON_THE_WIRE,
-    DAEMON_DEFAULT_MODE, DEEPENABLE_UPSTREAM_KEYS, HONOURED_CONFIG_KEYS, LIBRARY_DEFAULT_MODE,
-    UNHONOURED_UPSTREAM_CONFIG_KEYS, UPSTREAM_INERT_CONFIG_KEYS, WZ_EXTENSION_CONFIG_KEYS,
-    WZ_EXTENSION_HONOURED_KEYS,
+    default_listen_endpoint, gateway_south_json, honoured_surface, ZenohNodeConfig,
+    CONFIG_KEYS_PROVEN_ON_THE_WIRE, DAEMON_DEFAULT_MODE, DEEPENABLE_UPSTREAM_KEYS,
+    HONOURED_CONFIG_KEYS, LIBRARY_DEFAULT_MODE, UNHONOURED_UPSTREAM_CONFIG_KEYS,
+    UPSTREAM_INERT_CONFIG_KEYS, WZ_EXTENSION_CONFIG_KEYS, WZ_EXTENSION_HONOURED_KEYS,
 };
 use wz_runtime_tokio_test_support::zenoh_interop_session_init_params;
 use wz_session_core::dissect::{dissect_transport_message, FieldValue};
@@ -803,6 +803,12 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
             "access_control/default_permission",
             quoted(&wz.access_control.default_permission),
         ),
+        // Item 751 (step 7d-2) — the preset, which the pinned
+        // `DEFAULT_CONFIG.json5` states (`south: "auto"`), so a silent file
+        // resolves to it and the tree answers. Rendered by the reader's own
+        // writer for the reason the row above is: a string literal in the value
+        // position is read by `config_key_fixture_gate.py` as a second key.
+        ("gateway/south", gateway_south_json(&wz.gateway_south)),
         ("transport/unicast/max_links", wz.max_links.to_string()),
         (
             "transport/unicast/max_sessions",
@@ -3783,6 +3789,10 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
     // the demo's `plugins` site). A client whose file names a section therefore
     // carries nothing this leg could ask the binary to accept. Item 722's
     // redraw now has three members sharing one reason.
+    // Item 751 (step 7d-2) — `gateway/south` is the FOURTH, for the same kind of
+    // reason: only a region-hat node (`--peer` or `--router-hat`) places its
+    // remotes by a partition, and a connecting client holds no hat, so its run is
+    // told the key was withheld from it rather than handed `--gateway-south`.
     let mut every_honoured: Vec<&str> = HONOURED_CONFIG_KEYS
         .iter()
         .chain(WZ_EXTENSION_HONOURED_KEYS)
@@ -3790,6 +3800,7 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
         .filter(|k| *k != "listen/endpoints")
         .filter(|k| *k != "transport/auth/usrpwd/dictionary_file")
         .filter(|k| *k != "plugins")
+        .filter(|k| *k != "gateway/south")
         .collect();
     fixture_names.sort_unstable();
     every_honoured.sort_unstable();

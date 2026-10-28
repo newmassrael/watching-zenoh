@@ -1764,6 +1764,28 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             ),
         }
     }
+    // Item 751 (step 7d-2) — the south PARTITION. Its sinks are the two nodes
+    // that hold a region-hat forwarder, `--peer` and `--router-hat`, which is the
+    // mesh precondition the lifecycle keys use: any other run mode has no hat to
+    // place a remote by and `--gateway-south` is refused there by name. The
+    // preset is upstream's shipped value and what the flag's absence means, so a
+    // document stating it asks for the behaviour the node already has.
+    if named("gateway/south") {
+        let not_a_region_hat_run = (!mesh).then_some(KeyEffect::WithheldFromThisRun(
+            "only a --peer or --router-hat node places its remotes by a partition",
+        ));
+        let blocked = no_sink("gateway/south").or(not_a_region_hat_run);
+        if cfg.gateway_south == wz::runtime_tokio::region_partition::SouthPartition::Auto {
+            exp.record("gateway/south", KeyEffect::AlreadyTheBehaviour);
+        } else {
+            exp.pair(
+                "gateway/south",
+                "--gateway-south",
+                wz::runtime_tokio::zenoh_config::gateway_south_json(&cfg.gateway_south),
+                blocked,
+            );
+        }
+    }
     if named("listen/retry") {
         let blocked = no_sink("listen/retry").or(not_a_mesh_run);
         match cfg.listen_retry {
@@ -3048,6 +3070,19 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          no leg does yet is drive it from the FILE: the flooded weight is read \
          off a frame today only by a unit test that calls the setter directly.",
     ),
+    (
+        "gateway/south",
+        KIND_NOT_YET_READ,
+        "expands to `--gateway-south <partition>`. A custom partition makes a \
+         node announce each remote's bound in the OPEN `RemoteBound` extension \
+         (wz-session-core/src/extbound.rs, upstream `open.rs` @ `let \
+         ext_remote_bound`), and a stock node sends it under no other \
+         configuration, so a fixture pair of the preset and a partition shows \
+         the extension absent and present. No leg reads it off a frame yet: the \
+         router's zenohd witness (`wz_south_partition_region_zenohd_interop`) \
+         judges the ROUTING the partition causes, and a peer with a partition \
+         has none.",
+    ),
     // ── (2) no frame field carries it ───────────────────────────────────
     (
         "scouting/delay",
@@ -3816,6 +3851,9 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
         out.push("open/return_conditions/connect_scouted");
     }
     if !cfg!(any(feature = "routing-peer", feature = "router-hat-router")) {
+        // Item 751 — the partition's sinks are the same two run modes, which is
+        // also what gates `--gateway-south`'s own parser.
+        out.push("gateway/south");
         out.push("connect/exit_on_failure");
         out.push("listen/retry");
         out.push("listen/timeout_ms");
@@ -4757,6 +4795,9 @@ mod stock_config_tests {
             | "listen/retry"
             | "listen/timeout_ms"
             | "listen/exit_on_failure" => &["--config", "z.json5", "--peer", "tcp/127.0.0.1:0"],
+            // Item 751 — the partition's sinks are the two region-hat run modes,
+            // and `--peer` is the one every build with a sink compiles.
+            "gateway/south" => &["--config", "z.json5", "--peer", "tcp/127.0.0.1:0"],
             // R2788 — `plugins`' precondition is the one run-mode that runs a
             // storage manager. A file cannot select it (`mode` never maps to
             // it), so the row types it, and the role-parity sweep below skips
@@ -4815,6 +4856,14 @@ mod stock_config_tests {
                 LISTEN_ONLY,
                 r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      timestamping: { drop_future_timestamp: true } }"#,
+            ),
+            // Item 751 — a custom partition, because the preset is what the node
+            // already runs and a fixture naming it reaches nothing.
+            (
+                "gateway/south",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     gateway: { south: [{ filters: [{ modes: ["peer"] }] }] } }"#,
             ),
             (
                 "transport/unicast/max_links",
@@ -5742,7 +5791,10 @@ mod stock_config_tests {
             (token.len() > 2).then_some(token)
         }
 
-        let mut pairs: Vec<(String, String)> = Vec::new();
+        // `(flag, alternatives)`: a refusal reading `X requires --a or --b` is
+        // satisfied by EITHER, so a rule carries every flag the sentence offers
+        // (item 751's `--gateway-south` is the first with two).
+        let mut pairs: Vec<(String, Vec<String>)> = Vec::new();
         let mut feature_gated: Vec<String> = Vec::new();
         for lit in REFUSAL_SOURCES.iter().flat_map(|s| string_literals(s)) {
             let flat = flatten(lit);
@@ -5763,9 +5815,20 @@ mod stock_config_tests {
                 feature_gated.push(flag);
                 continue;
             }
-            let Some(needs) = first_flag(after) else {
+            // The leading flag, then each ` or --flag` that follows it; a segment
+            // that does not open with `--` ends the list, so a parenthesis that
+            // happens to say "or" adds nothing.
+            let mut segments = after.split(" or ");
+            let Some(needs) = segments.next().and_then(first_flag) else {
                 continue;
             };
+            let needs: Vec<String> = core::iter::once(needs)
+                .chain(
+                    segments
+                        .take_while(|segment| segment.trim_start().starts_with("--"))
+                        .filter_map(first_flag),
+                )
+                .collect();
             if !pairs.iter().any(|(f, n)| *f == flag && *n == needs) {
                 pairs.push((flag, needs));
             }
@@ -5815,7 +5878,8 @@ mod stock_config_tests {
                         continue;
                     }
                     checked.push(format!("{key}/{flag}"));
-                    if !argv.contains(&needs.as_str()) {
+                    if !needs.iter().any(|n| argv.contains(&n.as_str())) {
+                        let needs = needs.join("` or `");
                         violations.push(format!(
                             "{key} in shape {shape:?}: the argv carries `{flag}` \
                              without `{needs}`, and main refuses exactly that \
@@ -5858,7 +5922,7 @@ mod stock_config_tests {
             emitted_seen.len()
         );
         for (flag, needs) in &pairs {
-            eprintln!("  rule {flag} requires {needs}");
+            eprintln!("  rule {flag} requires {}", needs.join(" or "));
         }
         for flag in &unreached {
             eprintln!("  skip {flag} — no shape emits it, so no argv here can break the rule");

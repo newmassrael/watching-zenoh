@@ -31,17 +31,10 @@
 //! A wz session sends it on the same rule
 //! ([`encode_remote_bound_ext`](crate::extbound::encode_remote_bound_ext)): the
 //! bound its node's south partition gives the peer, decided once the peer's
-//! facts are known and staged on the Open. No wz node sends one yet, and that
-//! is upstream's answer for wz's configuration: `gateway/south` is not a key wz
-//! honours, so a wz node is always on the `Auto` preset, where the callback
-//! answers `None`.
-//!
-//! NOT-THIS-KEY: gateway/south
-//!
-//! That marker is load-bearing (R2155, open-debt item 541). This module names
-//! the key to say what a wz node SENDS in its absence; the mechanism here is
-//! the extension's reader and the region a session lands in, which is not the
-//! gateway region-partitioning plane the key configures.
+//! facts are known and staged on the Open. A wz node on the `Auto` preset, which
+//! is what a configuration without `gateway/south` gives, sends none, as
+//! upstream's callback answers `None` there; a node whose `gateway/south` is a
+//! custom partition sends one.
 //!
 //! ## What a present-but-invalid value does
 //!
