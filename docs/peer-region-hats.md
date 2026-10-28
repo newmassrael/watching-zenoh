@@ -593,12 +593,13 @@ So on a peer node a subscription the node hosts is
 `{routers: [], peers: [that peer], clients: []}` and gets no north source, because
 the north region is not south. A router node does the same with `routers`.
 
-Against it, as measured by the gate and by reading: `LinkstateForwarder` has the
-second rule (its `peers` carry the node for a client's subscription, which is what
-the e2e files pin) and lacks the first for a hosted one; the region-hat forwarder
-has neither, which is also the router's state, and a router unit test pins it from
-a reading of the router hat's own filter that is about the router hat's table and
-not about the merge.
+Against it, as measured by the gate and by reading: `LinkstateForwarder` names the
+node among the `peers` of what the node HOSTS and nowhere else (which is what the
+e2e files pin), so it has neither rule as the pin states them: a client's
+subscription gets no north source, and a hosted one gets no `clients` entry. The
+region-hat forwarder had neither rule, which is also the router's state, and a
+router unit test pinned it from a reading of the router hat's own filter that is
+about the router hat's table and not about the merge.
 
 The structure that follows, in the order it is built:
 
@@ -606,11 +607,13 @@ The structure that follows, in the order it is built:
   merge rule: for the entities a south-bound hat sourced, the node is added to the
   north bucket by the north hat's mode. The node's own hosted declarations are
   listed among the `clients` under its own zid. The router host changes with it, as
-  it shares the view, and its unit test and the three e2e files that pin
-  `clients: []` for a hosted declaration (`wz_peer_adminspace_to_pico_zget`,
-  `wz_peer_adminspace_introspection`, `apfull_adminspace_pico_interop`) are changed
-  in the same commit to the pin's body. None of those legs can be run here: the
-  first hosted run is read for them.
+  it shares the view, and its unit tests are changed in the same commit to the
+  pin's body. Landed. The three e2e files that pin `clients: []` for a hosted
+  declaration (`wz_peer_adminspace_to_pico_zget`, `wz_peer_adminspace_introspection`,
+  `apfull_adminspace_pico_interop`) drive `run_peer`, which is still
+  `LinkstateForwarder` and so still answers `clients: []`; they change in step 7,
+  in the commit that moves `run_peer`, to `{"routers":[],"peers":[<zid>],"clients":[<zid>]}`.
+  None of those legs can be run here: the first hosted run is read for them.
 - **Step 6e, the structure.** The hosted entries stop being a side list. They
   become the declarations of the `Local` face in the `Local` broker hat, with the
   handler held by the declaration, so that routing, the fold of what the node

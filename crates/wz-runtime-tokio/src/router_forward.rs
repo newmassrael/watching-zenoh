@@ -1785,29 +1785,39 @@ impl RouterDeclarationsView {
     /// and `zenoh/src/net/routing/hat/peer/pubsub.rs` @ `srcs.peers.push(face.zid);`
     /// with the router hat's own, cited on the self-exclusion below.
     ///
-    /// REMOTE declarations only, self EXCLUDED — the pin is explicit about it
+    /// ⛔ Item 751 step 6d REPLACED THE CLAIM THAT STOOD HERE, that this node's own
+    /// declarations do not appear because the pin excludes self
     /// (`zenoh/src/net/routing/hat/router/pubsub.rs` @
-    /// `.filter(|router| router != &tables.zid)`), and the other two hats reach
-    /// the same place by reading `remote_subs` per owned face. This node's OWN
-    /// `local_queryables` (the admin queryable it hosts) therefore do NOT appear
-    /// here, which is why an isolated router answers these legs with nothing:
-    /// what it knows about declarations is what its neighbours told it.
+    /// `.filter(|router| router != &tables.zid)`). That filter is about the router
+    /// hat's own table, and the legs are the dispatcher's merge of ALL the hats,
+    /// two rules of which put the node in the body (see
+    /// [`bucket_by_tier`](Self::bucket_by_tier)): the node's own face is a client of
+    /// the `Local` region, so what it hosts, the admin queryable included, is named
+    /// among the `clients` under the node's zid; and the node is named in the north
+    /// bucket of everything a south region sourced. An isolated router therefore
+    /// answers these legs with its own admin queryable and nothing else.
     pub fn subscribers(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
         let tables = self.tables.read();
         let clients = client_keyexprs(tables.broker_hats().map(|hat| &hat.subs), |by_id| {
             by_id.values().cloned().collect()
         });
+        let hosted: Vec<String> = tables
+            .local_subscribers
+            .iter()
+            .map(|sub| sub.keyexpr.clone())
+            .collect();
         Self::bucket_by_tier(
             &tables,
             &tables
                 .router_mesh_hats()
-                .map(|hat| &hat.subs)
+                .map(|(region, hat)| (region, &hat.subs))
                 .collect::<Vec<_>>(),
             &tables
                 .peer_mesh_hats()
-                .map(|hat| &hat.subs)
+                .map(|(region, hat)| (region, &hat.subs))
                 .collect::<Vec<_>>(),
             &clients,
+            &hosted,
         )
     }
 
@@ -1820,17 +1830,23 @@ impl RouterDeclarationsView {
         let clients = client_keyexprs(tables.broker_hats().map(|hat| &hat.qabls), |by_id| {
             by_id.values().map(|(keyexpr, _)| keyexpr.clone()).collect()
         });
+        let hosted: Vec<String> = tables
+            .local_queryables
+            .iter()
+            .map(|qabl| qabl.keyexpr.clone())
+            .collect();
         Self::bucket_by_tier(
             &tables,
             &tables
                 .router_mesh_hats()
-                .map(|hat| &hat.qabls)
+                .map(|(region, hat)| (region, &hat.qabls))
                 .collect::<Vec<_>>(),
             &tables
                 .peer_mesh_hats()
-                .map(|hat| &hat.qabls)
+                .map(|(region, hat)| (region, &hat.qabls))
                 .collect::<Vec<_>>(),
             &clients,
+            &hosted,
         )
     }
 
@@ -1865,17 +1881,19 @@ impl RouterDeclarationsView {
         let clients = client_keyexprs(tables.broker_hats().map(|hat| &hat.tokens), |by_id| {
             by_id.values().cloned().collect()
         });
+        // A node hosts no token on this plane, so the `Local` face has none to name.
         Self::bucket_by_tier(
             &tables,
             &tables
                 .router_mesh_hats()
-                .map(|hat| &hat.tokens)
+                .map(|(region, hat)| (region, &hat.tokens))
                 .collect::<Vec<_>>(),
             &tables
                 .peer_mesh_hats()
-                .map(|hat| &hat.tokens)
+                .map(|(region, hat)| (region, &hat.tokens))
                 .collect::<Vec<_>>(),
             &clients,
+            &[],
         )
     }
 
@@ -1942,11 +1960,28 @@ impl RouterDeclarationsView {
     /// Fold three tier tables into one keyexpr -> `Sources` list, sorted by
     /// keyexpr so two GETs of one unchanged state reply identically (a
     /// `HashMap` iteration order would not).
+    ///
+    /// Item 751, step 6d — the fold of the pin's dispatcher, in its two rules
+    /// (`docs/peer-region-hats.md`, section 12):
+    ///
+    /// - The NODE'S OWN face is a client of the `Local` region, so what the node
+    ///   hosts (`hosted`) is named among the `clients` under the node's own zid,
+    ///   as a client's declaration is
+    ///   (`zenoh/src/net/routing/hat/broker/pubsub.rs` @ `srcs.clients.push(face.zid);`).
+    /// - Every entity a SOUTH region sourced (the leaf regions, `Local` included,
+    ///   and a custom partition's subregions) also names the node's own zid in the
+    ///   bucket of the north hat's mode, `peers` on a peer node and `routers` on a
+    ///   router (`zenoh/src/net/routing/dispatcher/tables.rs` @ `fn add_north_source(`).
+    ///   What the north region sourced gets none.
+    ///
+    /// The pin appends, so a key sourced by two south hats names the node twice
+    /// there; the buckets here are sets, which is what the body means.
     fn bucket_by_tier<A, B>(
         tables: &Tables,
-        routers: &[&LinkstatepeerInterest<A>],
-        peers: &[&LinkstatepeerInterest<B>],
+        routers: &[(Region, &LinkstatepeerInterest<A>)],
+        peers: &[(Region, &LinkstatepeerInterest<B>)],
         clients: &HashMap<FaceId, HashSet<String>>,
+        hosted: &[String],
     ) -> Vec<(String, wz_session_core::adminspace::AdminSources)>
     where
         A: Clone,
@@ -1961,10 +1996,16 @@ impl RouterDeclarationsView {
             clients: Vec::new(),
         };
         let mut by_key: HashMap<String, AdminSources> = HashMap::new();
+        // The keys a south region sourced: each of them names the node in the
+        // north bucket below.
+        let mut sourced_from_the_south: HashSet<String> = HashSet::new();
         // Every router hat's table fills the one `routers` bucket: `North`, and on
         // a custom partition each subregion's router region.
-        for table in routers {
+        for (region, table) in routers {
             for (keyexpr, zid, _) in table.entries() {
+                if region.bound().is_south() {
+                    sourced_from_the_south.insert(keyexpr.clone());
+                }
                 by_key
                     .entry(keyexpr)
                     .or_insert_with(empty)
@@ -1974,8 +2015,11 @@ impl RouterDeclarationsView {
         }
         // Every peer region's table fills the one `peers` bucket, as the pin's
         // peer hats each fill theirs and the dispatcher merges them per resource.
-        for table in peers {
+        for (region, table) in peers {
             for (keyexpr, zid, _) in table.entries() {
+                if region.bound().is_south() {
+                    sourced_from_the_south.insert(keyexpr.clone());
+                }
                 by_key
                     .entry(keyexpr)
                     .or_insert_with(empty)
@@ -1992,6 +2036,7 @@ impl RouterDeclarationsView {
             };
             let hex = zid_to_zenoh_hex(zid.as_slice());
             for keyexpr in keys {
+                sourced_from_the_south.insert(keyexpr.clone());
                 by_key
                     .entry(keyexpr.clone())
                     .or_insert_with(empty)
@@ -1999,14 +2044,37 @@ impl RouterDeclarationsView {
                     .push(hex.clone());
             }
         }
+        let own = zid_to_zenoh_hex(tables.north_net().self_zid().as_slice());
+        for keyexpr in hosted {
+            sourced_from_the_south.insert(keyexpr.clone());
+            by_key
+                .entry(keyexpr.clone())
+                .or_insert_with(empty)
+                .clients
+                .push(own.clone());
+        }
+        for keyexpr in &sourced_from_the_south {
+            if let Some(sources) = by_key.get_mut(keyexpr) {
+                match tables.node_mode {
+                    WhatAmI::Router => sources.routers.push(own.clone()),
+                    WhatAmI::Peer => sources.peers.push(own.clone()),
+                    WhatAmI::Client => sources.clients.push(own.clone()),
+                }
+            }
+        }
         // Within a bucket too: the zid order otherwise follows the table's
         // hashing, and a body that reorders between two identical GETs is a
         // difference an operator has to explain.
         let mut out: Vec<(String, AdminSources)> = by_key.into_iter().collect();
         for (_, sources) in out.iter_mut() {
-            sources.routers.sort();
-            sources.peers.sort();
-            sources.clients.sort();
+            for bucket in [
+                &mut sources.routers,
+                &mut sources.peers,
+                &mut sources.clients,
+            ] {
+                bucket.sort();
+                bucket.dedup();
+            }
         }
         out.sort_by(|a, b| a.0.cmp(&b.0));
         out
@@ -2627,21 +2695,21 @@ impl Tables {
     /// an admin leg, as each of the pin's router hats fills its own and the dispatcher merges
     /// them per resource.
     #[cfg(feature = "adminspace-introspection-handlers")]
-    fn router_mesh_hats(&self) -> impl Iterator<Item = &MeshHat> {
+    fn router_mesh_hats(&self) -> impl Iterator<Item = (Region, &MeshHat)> {
         self.hats
             .iter()
             .filter(|(region, _)| is_router_hat(*region, self.node_mode))
-            .filter_map(|(_, hat)| hat.mesh())
+            .filter_map(|(region, hat)| hat.mesh().map(|hat| (region, hat)))
     }
 
     /// The hats of the regions the pin's PEER hat serves, in region order: one on the `auto`
     /// preset, one per subregion on a custom partition.
     #[cfg(feature = "adminspace-introspection-handlers")]
-    fn peer_mesh_hats(&self) -> impl Iterator<Item = &MeshHat> {
+    fn peer_mesh_hats(&self) -> impl Iterator<Item = (Region, &MeshHat)> {
         self.hats
             .iter()
             .filter(|(region, _)| is_peer_hat(*region, self.node_mode))
-            .filter_map(|(_, hat)| hat.mesh())
+            .filter_map(|(region, hat)| hat.mesh().map(|hat| (region, hat)))
     }
 
     /// The hat of `region` when it is a leaf region's BROKER hat, `None`
@@ -11137,18 +11205,21 @@ mod tests {
                 .map(|(k, s)| (k, s.routers, s.peers, s.clients))
                 .collect::<Vec<_>>()
         };
+        // The router's own zid is named in the `routers` bucket of what a SOUTH
+        // region sourced, the client's and the south peer's, and of nothing the
+        // north region sourced (the pin's merge, `add_north_source`).
         assert_eq!(
             flatten(fwd.admin_subscribers()),
             vec![
                 (
                     String::from("leaf/client/sub"),
-                    vec![],
+                    vec![hex(0x01)],
                     vec![],
                     vec![hex(0xCC)]
                 ),
                 (
                     String::from("mesh/peer/sub"),
-                    vec![],
+                    vec![hex(0x01)],
                     vec![hex(0xBB)],
                     vec![]
                 ),
@@ -11159,20 +11230,21 @@ mod tests {
                     vec![]
                 ),
             ],
-            "each tier's table fills its OWN `Sources` bucket, sorted by keyexpr"
+            "each tier's table fills its OWN `Sources` bucket, sorted by keyexpr, and \
+             the node is named among the routers of what the south sourced"
         );
         assert_eq!(
             flatten(fwd.admin_queryables()),
             vec![
                 (
                     String::from("leaf/client/qabl"),
-                    vec![],
+                    vec![hex(0x01)],
                     vec![],
                     vec![hex(0xCC)]
                 ),
                 (
                     String::from("mesh/peer/qabl"),
-                    vec![],
+                    vec![hex(0x01)],
                     vec![hex(0xBB)],
                     vec![]
                 ),
@@ -11187,17 +11259,18 @@ mod tests {
              here would report the `sub` keyexprs and type-check while doing it"
         );
 
-        // The router's OWN hosted queryable is NOT a source of itself. The pin is
-        // explicit (`zenoh/src/net/routing/hat/router/pubsub.rs` @
-        // `.filter(|router| router != &tables.zid)`), and it is why an isolated
-        // router answers these legs empty.
+        // The router's OWN hosted queryable is the declaration of its own face, a
+        // client of the `Local` region: it is named among the clients under the
+        // router's zid, and, as a south region sourced it, among the routers too.
         fwd.register_local_queryable("wz/self/hosted", true, Box::new(|_, _| {}));
         assert!(
-            !flatten(fwd.admin_queryables())
-                .iter()
-                .any(|(k, ..)| k == "wz/self/hosted"),
-            "a locally hosted queryable is this node's own declaration, not a \
-             source it learned from a neighbour"
+            flatten(fwd.admin_queryables()).contains(&(
+                String::from("wz/self/hosted"),
+                vec![hex(0x01)],
+                vec![],
+                vec![hex(0x01)],
+            )),
+            "a locally hosted queryable is the declaration of the node's own face"
         );
 
         // The view the admin handler actually holds answers the same, and LIVE —
@@ -11269,13 +11342,13 @@ mod tests {
             vec![
                 (
                     String::from("leaf/client/token"),
-                    vec![],
+                    vec![hex(0x01)],
                     vec![],
                     vec![hex(0xCC)]
                 ),
                 (
                     String::from("mesh/peer/token"),
-                    vec![],
+                    vec![hex(0x01)],
                     vec![hex(0xBB)],
                     vec![]
                 ),

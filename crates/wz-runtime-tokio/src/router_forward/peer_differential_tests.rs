@@ -874,8 +874,9 @@ impl NodeSession for LinkstateForwarder {
         let mut counters = vec![self.client_subs_seen(), self.client_qabls_seen()];
         // The nodes interested, the node itself apart: `interested` names the node
         // among them when it hosts a subscriber, and the region-hat forwarder, which
-        // derives what the node hosts and does not store it as a source, does not.
-        // It is the rule of the admin legs again (`HOSTED_IN_ADMIN_LEGS`).
+        // derives what the node hosts and does not store it in its mesh table, does
+        // not. It is a count of the mesh's interest, which is the data route's filter
+        // and not an admin body, so the node's own face is not in it.
         let own = zid(0x01);
         counters.extend(
             PROBE_KEYS
@@ -1693,6 +1694,80 @@ fn assert_the_node_publish_scene_exercises_what_it_claims(mode: Mode) {
     );
 }
 
+/// The region-hat peer graded against the pin's two rules for the admin legs
+/// (`docs/peer-region-hats.md`, section 12), on a peer node with a subscription it
+/// hosts, one a client holds, one a neighbouring peer holds, and one both the node
+/// and the client hold: the node's own face is named among the clients of what it
+/// hosts, and the node is named among the peers of everything a south region
+/// sourced and of nothing the north region did.
+#[cfg(feature = "adminspace-introspection-handlers")]
+#[test]
+fn the_region_hat_peer_names_the_node_in_the_admin_legs_as_the_pins_merge_does() {
+    use wz_session_core::zid_hex::zid_to_zenoh_hex;
+
+    let own = zid_to_zenoh_hex(zid(0x01).as_slice());
+    let neighbour = zid_to_zenoh_hex(zid(0xAA).as_slice());
+    let client = zid_to_zenoh_hex(zid(0xC1).as_slice());
+    let (_, mut node) = both(0x01, Mode::LinkState);
+    for step in [
+        Step::Up(0, 0xAA, Wire::Peer),
+        Step::Up(1, 0xC1, Wire::Client),
+        Step::LinkBack(0, 0xAA, 5),
+        Step::Tick,
+        Step::Subscribe(0, "by/peer"),
+        Step::Subscribe(1, "by/client"),
+        Step::Subscribe(1, "by/both"),
+        Step::NodeHost("hosted"),
+        Step::NodeHost("by/both"),
+    ] {
+        node.apply(&step);
+    }
+    /// A body: the routers, the peers and the clients it names.
+    type Body = (Vec<String>, Vec<String>, Vec<String>);
+    let rows: std::collections::BTreeMap<String, Body> = node
+        .fwd
+        .admin_declarations()
+        .into_iter()
+        .filter_map(|row| match row {
+            Seen::Admin {
+                leg: "subscriber",
+                keyexpr,
+                routers,
+                peers,
+                clients,
+            } => Some((keyexpr, (routers, peers, clients))),
+            _ => None,
+        })
+        .collect();
+    let row = |key: &str| {
+        rows.get(key)
+            .cloned()
+            .unwrap_or_else(|| panic!("no row {key}"))
+    };
+    assert_eq!(
+        row("by/peer"),
+        (vec![], vec![neighbour.clone()], vec![]),
+        "what the north region sourced gets no north source"
+    );
+    assert_eq!(
+        row("by/client"),
+        (vec![], vec![own.clone()], vec![client.clone()]),
+        "what a client sourced names the node among the peers"
+    );
+    assert_eq!(
+        row("hosted"),
+        (vec![], vec![own.clone()], vec![own.clone()]),
+        "what the node hosts is a client of the Local region, and south"
+    );
+    let mut both_clients = vec![own.clone(), client.clone()];
+    both_clients.sort();
+    assert_eq!(
+        row("by/both"),
+        (vec![], vec![own.clone()], both_clients),
+        "two south sources name the node once among the peers: the buckets are sets"
+    );
+}
+
 /// A node's dial locators ride the link-state it originates, in both planes:
 /// the pin asks its runtime for them whenever it builds a net's message.
 #[test]
@@ -2023,16 +2098,18 @@ fn is_a_node_put(step: &Step) -> bool {
 
 const NODE_PUT_TO_CLIENT: &str = "the node's own Put reaches a client that subscribed";
 #[cfg(feature = "adminspace-introspection-handlers")]
-const HOSTED_IN_ADMIN_LEGS: &str = "the node named among the sources of its own declarations";
+const NODE_NAMED_BY_THE_MERGE: &str = "the node named as the pin's merge names it";
 
-/// The admin rows of `sent` with the node taken out of the peers each names, and the
-/// rows that named nobody else dropped.
+/// The admin rows of `sent` as `LinkstateForwarder` would have them if it named the
+/// node as it does: among the peers of what it hosts and nowhere else. A row the node
+/// hosts (the node is among its clients) loses the node from the clients and keeps it
+/// among the peers; any other row loses it from the peers.
 #[cfg(feature = "adminspace-introspection-handlers")]
-fn without_the_node(sent: &Sent) -> Vec<Seen> {
+fn as_the_peer_plane_names_the_node(sent: &Sent) -> Vec<Seen> {
     let own = wz_session_core::zid_hex::zid_to_zenoh_hex(zid(0x01).as_slice());
     sent.values()
         .flatten()
-        .filter_map(|seen| match seen {
+        .map(|seen| match seen {
             Seen::Admin {
                 leg,
                 keyexpr,
@@ -2040,20 +2117,20 @@ fn without_the_node(sent: &Sent) -> Vec<Seen> {
                 peers,
                 clients,
             } => {
-                let peers: Vec<String> = peers.iter().filter(|p| **p != own).cloned().collect();
-                if routers.is_empty() && peers.is_empty() && clients.is_empty() {
-                    None
-                } else {
-                    Some(Seen::Admin {
-                        leg,
-                        keyexpr: keyexpr.clone(),
-                        routers: routers.clone(),
-                        peers,
-                        clients: clients.clone(),
-                    })
+                let hosted = clients.contains(&own);
+                Seen::Admin {
+                    leg,
+                    keyexpr: keyexpr.clone(),
+                    routers: routers.clone(),
+                    peers: peers
+                        .iter()
+                        .filter(|p| hosted || **p != own)
+                        .cloned()
+                        .collect(),
+                    clients: clients.iter().filter(|c| **c != own).cloned().collect(),
                 }
             }
-            other => Some(other.clone()),
+            other => other.clone(),
         })
         .collect()
 }
@@ -2076,7 +2153,7 @@ fn expected_reasons(mode: Mode) -> std::collections::BTreeSet<&'static str> {
     .into_iter()
     .collect();
     #[cfg(feature = "adminspace-introspection-handlers")]
-    reasons.insert(HOSTED_IN_ADMIN_LEGS);
+    reasons.insert(NODE_NAMED_BY_THE_MERGE);
     #[cfg(feature = "routing-token-tables")]
     reasons.insert(TOKEN_TO_INTERESTED_CLIENT);
     #[cfg(all(
@@ -2105,17 +2182,22 @@ fn explained(mode: Mode, d: &Divergence) -> Option<&'static str> {
     // reaches the clients that subscribed; `LinkstateForwarder::publish` reaches
     // its tree children and its gateways and none of its client faces. Every
     // face it does reach is reached with the same message.
-    // The admin legs list the declarations the node itself hosts differently: the
-    // region-hat forwarder keeps the rule the router's host has always had, that a
-    // node is not a source of its own declarations; `LinkstateForwarder` names the
-    // node among the peers. The pin agrees with NEITHER (its broker hat serves the
-    // `Local` region and names the node's own face among the clients,
-    // `zenoh/src/net/routing/hat/broker/pubsub.rs` @ `srcs.clients.push(face.zid);`),
-    // which is an open question of the note and not a reading this gate decides. The
-    // rows must be equal once the node is taken out of the peers they name.
+    // The admin legs name the node by the pin's two rules in the region-hat
+    // forwarder: its own face among the clients of what it hosts, because that face
+    // is a client of the `Local` region
+    // (`zenoh/src/net/routing/hat/broker/pubsub.rs` @ `srcs.clients.push(face.zid);`),
+    // and itself in the north bucket of everything a south region sourced
+    // (`zenoh/src/net/routing/dispatcher/tables.rs` @ `fn add_north_source(`). The
+    // region-hat peer is graded on both by
+    // `the_region_hat_peer_names_the_node_in_the_admin_legs_as_the_pins_merge_does`.
+    // `LinkstateForwarder` names the node among the peers of what it hosts and
+    // nowhere else, which the rows must show and nothing more.
     #[cfg(feature = "adminspace-introspection-handlers")]
-    if d.plane == "admin" && without_the_node(&d.linkstate) == without_the_node(&d.region_hat) {
-        return Some(HOSTED_IN_ADMIN_LEGS);
+    if d.plane == "admin"
+        && d.linkstate.values().flatten().cloned().collect::<Vec<_>>()
+            == as_the_peer_plane_names_the_node(&d.region_hat)
+    {
+        return Some(NODE_NAMED_BY_THE_MERGE);
     }
     // A Put of the node's own session reaches the subscribers the same session
     // hosts unless it was sent to remote destinations only
