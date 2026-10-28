@@ -1448,6 +1448,10 @@ pub struct SharedSession {
     /// The authentication the node's config asks for, installed on every session the node opens
     /// before its first wire byte. See [`SessionResources::auth`].
     auth: Option<crate::node_auth::NodeAuth>,
+    /// The prefix the node's keys carry on the wire, installed on every session the node opens
+    /// before its first wire byte. See [`SessionResources::namespace`].
+    #[cfg(feature = "routing-namespace")]
+    namespace: Option<wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr>,
     /// The policy the node's config states for its traffic, installed on every face. When it is
     /// not inert the send and receive lanes that step around a per-message verdict are off for
     /// this node's sessions. See [`SessionResources::policy`].
@@ -1543,6 +1547,11 @@ pub struct SessionResources {
     /// `downsampling`). Inert for a node that states none, which is every node until the keys
     /// reached a session.
     pub policy: crate::node_policy::NodePolicy,
+    /// The `namespace` the node's config states: every key a session of the node publishes
+    /// leaves prefixed with it and every key it receives is relative to it. `None` is a node
+    /// whose keys are the wire's, which every node was until the key reached a session.
+    #[cfg(feature = "routing-namespace")]
+    pub namespace: Option<wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr>,
 }
 
 /// What a node that gossips is given: the role it gossips as, how it gossips (whom it tells, whom
@@ -1570,6 +1579,8 @@ impl Default for SessionResources {
             gossip: None,
             auth: None,
             policy: crate::node_policy::NodePolicy::default(),
+            #[cfg(feature = "routing-namespace")]
+            namespace: None,
         }
     }
 }
@@ -1657,6 +1668,8 @@ impl SharedSession {
             gossip,
             auth,
             policy,
+            #[cfg(feature = "routing-namespace")]
+            namespace,
         } = resources;
         // Built over the node's own wire zid, before `zid` is moved into the plane's params.
         // A zid the graph cannot hold (empty or all zero) leaves the node not gossiping rather
@@ -1758,6 +1771,8 @@ impl SharedSession {
             #[cfg(feature = "gossip")]
             gossip,
             auth,
+            #[cfg(feature = "routing-namespace")]
+            namespace,
             policy,
             closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(feature = "advanced")]
@@ -1779,6 +1794,12 @@ impl SharedSession {
     /// The authentication the node holds, for the sessions it dials and accepts.
     pub fn node_auth(&self) -> Option<&crate::node_auth::NodeAuth> {
         self.auth.as_ref()
+    }
+
+    /// The namespace the node's keys are prefixed with, for the sessions it dials and accepts.
+    #[cfg(feature = "routing-namespace")]
+    pub fn node_namespace(&self) -> Option<&wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr> {
+        self.namespace.as_ref()
     }
 
     /// Whether this node states a traffic policy. Read on the data path, so it is a pointer test.
@@ -4853,6 +4874,12 @@ impl FaceForwarder for CApiForwarder {
         self.shared
             .node_auth()
             .map(crate::node_auth::NodeAuth::session_auth)
+    }
+
+    /// The prefix the node's keys carry on the wire, for the sessions its listener accepts.
+    #[cfg(feature = "routing-namespace")]
+    fn session_namespace(&self) -> Option<wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr> {
+        self.shared.node_namespace().cloned()
     }
 
     /// A node the DIAL role already holds a face to.

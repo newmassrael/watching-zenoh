@@ -252,6 +252,12 @@ rx-busy-poll = []
 # wz-runtime-tokio's own default set — a session that never negotiated the ext
 # reports `is_qos == false`, which is the measured answer and not a stand-in.
 transport-qos = ["wz-runtime-tokio/transport-qos"]
+# The `namespace` key of the configuration, carried out: the decorator that prefixes every key a
+# session publishes and strips it from every key it receives, installed on each link the session
+# dials and accepts before its first wire byte. Off by default, like the capabilities an ABI
+# names for itself: a build without it REFUSES a document that states `namespace`
+# (`OpenRefusal::Namespace`) and does not run it unprefixed.
+routing-namespace = ["wz-runtime-tokio/routing-namespace", "wz-session-core/routing-namespace"]
 # R2259 (open-debt item 593) — the SHM ext, named for the same reason as
 # `transport-qos` above: `FaceSnapshot::of` reads `SessionLinkActions::is_shm`,
 # which is `transport-shm`-gated upstream. It feeds the SHM arm's twentieth

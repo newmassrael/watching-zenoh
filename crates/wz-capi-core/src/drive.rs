@@ -161,6 +161,10 @@ struct Dialer {
     /// What the node presents to a peer it dials (`transport/auth/usrpwd/{user,password}`),
     /// installed on every session this dialer opens before its first wire byte.
     auth: Option<crate::node_auth::NodeAuth>,
+    /// The prefix the node's keys carry on the wire, installed on every session this dialer opens
+    /// before its first wire byte.
+    #[cfg(feature = "routing-namespace")]
+    namespace: Option<wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr>,
 }
 
 impl Dialer {
@@ -217,9 +221,15 @@ impl Dialer {
         // authentication offer. A node that states no credential installs nothing and dials as
         // it always did.
         let auth = self.auth.clone();
+        #[cfg(feature = "routing-namespace")]
+        let namespace = self.namespace.clone();
         let stage = move |actions: &Arc<wz_runtime_tokio::session_glue::SessionLinkActions>| {
             if let Some(zid) = expected {
                 actions.expect_peer_zid(zid);
+            }
+            #[cfg(feature = "routing-namespace")]
+            if let Some(namespace) = &namespace {
+                actions.set_namespace(namespace.clone());
             }
             #[cfg(any(feature = "access-extauth-usrpwd", feature = "access-extauth-pubkey"))]
             if let Some(dispatch) = auth.as_ref().and_then(|auth| auth.dial_dispatch()) {
@@ -1369,6 +1379,8 @@ fn prepare_dial(
         #[cfg(feature = "scout")]
         tls: tls.clone(),
         auth: ctx.shared.node_auth().cloned(),
+        #[cfg(feature = "routing-namespace")]
+        namespace: ctx.shared.node_namespace().cloned(),
     });
     Some(DialSetup { scheduled, dialer })
 }
@@ -3981,6 +3993,11 @@ pub struct OpenStance {
     /// compiles `access_control`, `low_pass_filter` and `downsampling` into it, and an inert
     /// policy is a node that states none. zenoh-pico's ABI reads no such keys and says inert.
     pub policy: crate::node_policy::NodePolicy,
+    /// The prefix the session's keys carry on the wire (`namespace`), installed on every link it
+    /// dials and every link it accepts before the first wire byte. `None` is a session whose keys
+    /// are the wire's. A build without `routing-namespace` has no decorator to install one with,
+    /// and an open that is handed a prefix it cannot install fails ([`OpenError::DriveFailed`]).
+    pub namespace: Option<String>,
     /// Open-debt item 913 — the multicast groups the session joins, each one face to every
     /// member beside the unicast ones, bound before the open answers. The calling ABI decides
     /// which of its endpoints names a group and what the group's beacon advertises; empty for
@@ -4213,9 +4230,35 @@ pub fn open_blocking(
         face_drive,
         auth,
         policy,
+        namespace,
         groups,
         ..
     } = stance;
+    // The prefix as the decorator takes it. The plan validated the text, so a text that does not
+    // convert here came from a caller that built its stance by hand; the open fails with it, and
+    // so does a build that has no decorator to install one with, and neither is run unprefixed.
+    #[cfg(feature = "routing-namespace")]
+    let namespace = match namespace
+        .as_deref()
+        .map(wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr::new)
+    {
+        None => None,
+        Some(Ok(prefix)) => Some(prefix),
+        Some(Err(error)) => {
+            log_open_failure("namespace", &error);
+            return Err(OpenError::DriveFailed);
+        }
+    };
+    // Without the decorator the plan has already refused a document that states a namespace
+    // (`OpenRefusal::Namespace`), so a stance that carries one was built by hand. That is a
+    // programmer's error, and it is asserted and not branched on: a branch here moved the
+    // inlining of this function and grew every image of the C ABIs by about seven kilobytes
+    // (measured, `pico-client-small` 1,513,660 -> 1,520,432), for a case no document reaches.
+    #[cfg(not(feature = "routing-namespace"))]
+    debug_assert!(
+        namespace.is_none(),
+        "a namespace reached an open of a build that has no decorator to install it"
+    );
     // A build without the transport has no group to join, and a session that was asked to
     // join one is not opened as one that joins none.
     #[cfg(not(feature = "multicast-transport"))]
@@ -4288,6 +4331,8 @@ pub fn open_blocking(
                 }),
                 auth,
                 policy,
+                #[cfg(feature = "routing-namespace")]
+                namespace,
             },
         )
         .map_err(|_| OpenError::DriveFailed)?,
@@ -4686,6 +4731,8 @@ mod tests {
                 clock: TokioTime::new(),
                 tls: CapiTlsConfig::default(),
                 auth: None,
+                #[cfg(feature = "routing-namespace")]
+                namespace: None,
             };
             let opened = dialer
                 .open_scouted(&format!("tcp/{addr}"), expected)
@@ -5276,6 +5323,7 @@ mod tests {
             face_drive: FaceDrive::Serial,
             auth: None,
             policy: crate::node_policy::NodePolicy::default(),
+            namespace: None,
             groups: Vec::new(),
         }
     }

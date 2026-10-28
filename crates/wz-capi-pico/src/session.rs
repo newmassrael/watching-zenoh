@@ -751,6 +751,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             // And no `access_control`, `low_pass_filter` or `downsampling` keys either: its
             // node states no traffic policy, as it never has.
             policy: wz_capi_core::node_policy::NodePolicy::default(),
+            namespace: None,
             // The group its listen endpoint names, when it names one.
             groups,
         },

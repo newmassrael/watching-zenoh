@@ -102,7 +102,7 @@ uhlc = { version = "0.8.0", default-features = false, features = ["std"] }
 # replaces upstream's, names the same set: QoS and lowlatency, the endpoint's QoS band, and
 # fragmentation of what is larger than a batch. Compression and the user and password method are
 # capabilities of the engine that its default features carry.
-wz-capi-core = { path = "../wz-capi-core", optional = true, features = ["transport-qos"] }
+wz-capi-core = { path = "../wz-capi-core", optional = true, features = ["transport-qos", "routing-namespace"] }
 # The vocabulary of the port the engine is run through: the query a queryable keeps and answers
 # later, which the engine's crate does not re-export.
 wz-capi-port = { path = "../wz-capi-port", optional = true }

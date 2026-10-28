@@ -76,7 +76,8 @@ fn refusal_code(refusal: OpenRefusal) -> ZResult {
         | OpenRefusal::ZenohId
         | OpenRefusal::Scouting
         | OpenRefusal::RoleNotInBuild
-        | OpenRefusal::TimestampingNotInBuild => Z_EINVAL,
+        | OpenRefusal::TimestampingNotInBuild
+        | OpenRefusal::Namespace => Z_EINVAL,
         OpenRefusal::QosWithLowlatency
         | OpenRefusal::GossipTarget
         | OpenRefusal::NothingToDial

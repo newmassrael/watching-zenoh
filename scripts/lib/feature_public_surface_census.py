@@ -380,8 +380,12 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "(`wz-capi-c`'s `zenoh-c-shared-memory`). What a C program can reach is "
         "that crate's symbol set, graded against upstream's own library, and the "
         "gated methods are exercised by that arm's legs against upstream's own "
-        "subscriber",
-        frozenset({"transport-shm"}),
+        "subscriber; `routing-namespace` gates the `namespace` of the node (the field of "
+        "`SessionResources`, the accessor of the shared session) and is turned on by the top "
+        "crate `zenoh`, whose upstream namespace tests run against it (slice Z8a of "
+        "docs/zenoh-api-on-the-engine.md), while the plan's own test holds both its "
+        "arms, a build that carries the prefix and a build that refuses it by its key",
+        frozenset({"routing-namespace", "transport-shm"}),
     ),
     "wz-capi-coop": (
         "the cooperative engine behind a wz C ABI: a workspace-internal rlib the C ABI crate "

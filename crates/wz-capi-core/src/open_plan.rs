@@ -43,6 +43,8 @@ use wz_runtime_tokio::zenoh_config::{
     UNHONOURED_READER_GAP, UNHONOURED_UPSTREAM_CONFIG_KEYS, UPSTREAM_INERT_CONFIG_KEYS,
     WZ_EXTENSION_CONFIG_KEYS,
 };
+#[cfg(feature = "routing-namespace")]
+use wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr;
 
 use crate::drive::{
     names_a_group, open_blocking, CapiTlsConfig, ConfiguredZid, DialPhase, FaceDrive,
@@ -206,6 +208,11 @@ pub enum OpenRefusal {
     GroupInConnect,
     /// A client's only endpoints are multicast groups, which no unicast link can dial.
     NoDialableEndpoint,
+    /// The document states a `namespace` the open cannot carry out: it is not a key expression a
+    /// prefix can be (it holds a wildcard, or is empty), or the build has no `routing-namespace`.
+    /// A session told to prefix every key it publishes that opens and does not is worse than one
+    /// that does not open: its keys leave unprefixed and nothing says so.
+    Namespace,
 }
 
 impl OpenRefusal {
@@ -223,6 +230,7 @@ impl OpenRefusal {
             Self::GossipTarget => "scouting/gossip/target",
             Self::NothingToDial => "connect/endpoints, scouting/multicast/enabled",
             Self::GroupInConnect | Self::NoDialableEndpoint => "connect/endpoints",
+            Self::Namespace => "namespace",
         }
     }
 }
@@ -578,6 +586,12 @@ pub struct OpenPlan {
     pub auth: Option<NodeAuth>,
     /// The traffic policy the node holds.
     pub policy: NodePolicy,
+    /// The prefix every key the session publishes carries on the wire and every key it receives
+    /// is relative to: the `namespace` of the document. A text that is a key expression a prefix
+    /// can be is what [`Self::resolve`] lets through, and a build without `routing-namespace` has
+    /// no decorator to install it with and refuses a document that states one
+    /// ([`OpenRefusal::Namespace`]); so a plan that carries one is one the build can carry out.
+    pub namespace: Option<String>,
     /// The certificate material for the `tls/` and `quic/` links.
     pub tls: CapiTlsConfig,
     /// The files [`Self::resolve`] read for the material above and for the authentication, in the
@@ -613,6 +627,7 @@ impl OpenPlan {
             .as_ref()
             .map_or_else(Vec::new, |ingest| ingest.ignored.clone());
         let node = ingest.map(|ingest| ingest.config);
+        let namespace_text = node.as_ref().and_then(|node| node.namespace.clone());
         let batch_size = node
             .as_ref()
             .map_or(DEFAULT_BATCH_SIZE, |node| node.batch_size);
@@ -708,6 +723,19 @@ impl OpenPlan {
         if timestamping.get(role) {
             return Err(OpenRefusal::TimestampingNotInBuild);
         }
+        // The namespace the session prefixes its keys with, or the refusal of a document that
+        // states one this open cannot carry out: a build without `routing-namespace` has no
+        // decorator to install, and a text that is not a plain key expression is no prefix. Neither
+        // is run as a session that states no namespace.
+        #[cfg(feature = "routing-namespace")]
+        if let Some(text) = &namespace_text {
+            OwnedNonWildKeyExpr::new(text).map_err(|_| OpenRefusal::Namespace)?;
+        }
+        #[cfg(not(feature = "routing-namespace"))]
+        if namespace_text.is_some() {
+            return Err(OpenRefusal::Namespace);
+        }
+        let namespace = namespace_text;
 
         // How the session gossips, from the four `scouting/gossip` keys a C session reads, or
         // nothing when its config turns gossip off. A client has no gossip to configure (it is
@@ -840,6 +868,7 @@ impl OpenPlan {
             gossip,
             auth,
             policy,
+            namespace,
             tls,
             read_files,
             ignored,
@@ -959,6 +988,7 @@ impl OpenPlan {
                 face_drive: abi.face_drive,
                 auth: self.auth,
                 policy: self.policy,
+                namespace: self.namespace,
                 groups,
             },
         }
@@ -1426,6 +1456,40 @@ mod tests {
             assert_eq!(found, expected);
             assert!(!found.key().is_empty());
         }
+    }
+
+    /// A `namespace` is carried out or refused by its key, and never opened without. With the
+    /// decorator it reaches the plan as the prefix the document states, and a text that cannot be
+    /// a prefix (a wildcard) is refused; without it any `namespace` is refused, so that a session
+    /// told to prefix its keys is not run with them unprefixed.
+    #[test]
+    fn a_namespace_reaches_the_plan_or_is_refused_by_its_key() {
+        let off = r#"scouting: { multicast: { enabled: false } }"#;
+        let with = |namespace: &str| {
+            plan_of(
+                WhatAmI::Client,
+                &["tcp/127.0.0.1:1"],
+                &[],
+                &format!("{{ {off}, namespace: {namespace} }}"),
+            )
+        };
+        let none = plan_of(
+            WhatAmI::Client,
+            &["tcp/127.0.0.1:1"],
+            &[],
+            &format!("{{ {off} }}"),
+        )
+        .expect("a document with no namespace opens");
+        assert_eq!(none.namespace, None);
+        #[cfg(feature = "routing-namespace")]
+        {
+            let plan = with(r#""demo/ns""#).expect("a plain key expression is a prefix");
+            assert_eq!(plan.namespace.as_deref(), Some("demo/ns"));
+            assert_eq!(with(r#""demo/*""#).err(), Some(OpenRefusal::Namespace));
+        }
+        #[cfg(not(feature = "routing-namespace"))]
+        assert_eq!(with(r#""demo/ns""#).err(), Some(OpenRefusal::Namespace));
+        assert_eq!(OpenRefusal::Namespace.key(), "namespace");
     }
 
     /// A document the reader refuses is refused AFTER every refusal that needs no document, which

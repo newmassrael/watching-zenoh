@@ -940,6 +940,15 @@ pub trait FaceForwarder {
         None
     }
 
+    /// The prefix this node's keys carry on the wire (`namespace`), which the loop installs on
+    /// every session it opens before the first wire byte, as it does the authentication. `None`,
+    /// the default, is a node whose keys are the wire's. Each participant's namespace is its own:
+    /// the two ends of a link need not hold the same one.
+    #[cfg(feature = "routing-namespace")]
+    fn session_namespace(&self) -> Option<wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr> {
+        None
+    }
+
     /// The §5.16 INGRESS admission of the owned frame the face `id` just decoded, run before it
     /// is reported: `outcome` may be edited in place (a denied message is dropped from the
     /// batch). Called for a whole frame and again for a fragment chain that completes, so a
@@ -1149,6 +1158,10 @@ struct FaceTemplate {
     /// beside the partition.
     #[cfg(feature = "session-extauth")]
     auth: Option<SessionAuth>,
+    /// The node's namespace ([`FaceForwarder::session_namespace`]), installed on each session
+    /// beside the partition.
+    #[cfg(feature = "routing-namespace")]
+    namespace: Option<wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr>,
 }
 
 /// Which side of a handshake a session is opened on: the authentication a node holds is
@@ -1185,6 +1198,8 @@ impl FaceTemplate {
         let partition = self.partition;
         #[cfg(feature = "session-extauth")]
         let auth = self.auth;
+        #[cfg(feature = "routing-namespace")]
+        let namespace = self.namespace;
         #[cfg(not(feature = "session-extauth"))]
         let _ = role;
         (self.params, move |actions: &Arc<SessionLinkActions>| {
@@ -1192,6 +1207,10 @@ impl FaceTemplate {
                 actions.expect_peer_zid(zid);
             }
             actions.set_south_partition((*partition).clone());
+            #[cfg(feature = "routing-namespace")]
+            if let Some(namespace) = &namespace {
+                actions.set_namespace(namespace.clone());
+            }
             #[cfg(feature = "session-extauth")]
             if let Some(dispatch) = auth.as_ref().and_then(|build| build(role)) {
                 actions.install_auth_dispatch(dispatch);
@@ -2765,6 +2784,8 @@ where
         partition: Arc::new(forwarder.south_partition()),
         #[cfg(feature = "session-extauth")]
         auth: forwarder.session_auth(),
+        #[cfg(feature = "routing-namespace")]
+        namespace: forwarder.session_namespace(),
     };
 
     // R2233 (open-debt item 585) — fold the configured dial targets into their
