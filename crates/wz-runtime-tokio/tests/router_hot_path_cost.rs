@@ -254,8 +254,8 @@ fn measure(case: &str, congestion: CongestionControl, subscribers: usize, n: usi
 /// them. `(case, congestion control, subscribers, allocations, bytes)`.
 ///
 /// One record per build the cost differs in: with `time-hlc` the router stamps every put it forwards
-/// from the hybrid clock: six more allocations and 76 more bytes a forward to one subscriber, 21 and
-/// 676 to sixteen. Measured on a build host with `routing-router-hat` alone, and with the features
+/// from the hybrid clock: five more allocations and 60 more bytes a forward to one subscriber, 20 and
+/// 660 to sixteen. Measured on a build host with `routing-router-hat` alone, and with the features
 /// of the crate's wide leg beside it in groups: only `time-hlc` moves the figure.
 #[cfg(not(feature = "time-hlc"))]
 const BUDGET: [(&str, CongestionControl, usize, usize, usize); 4] = [
