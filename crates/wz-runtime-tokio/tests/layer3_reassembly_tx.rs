@@ -67,6 +67,11 @@ const MID_CHAIN_BUDGET: usize = 2;
 /// reassembly slot so the slot decides neither answer.
 const SMALL_RX_BOUND: usize = 100;
 const LARGE_RX_BOUND: usize = 4096;
+/// How many 30 ms polls a scenario waits for a delivery that is on its way: the wait ends the
+/// moment it arrives, so the budget is paid only by a delivery that never does. A budget of about
+/// 3 s made a test fail on a build host that was busy with other work (the delivery took 3.5 s
+/// to get its turn), where nothing about the crate was wrong.
+const DELIVERY_POLLS: usize = 600;
 
 /// An oversize unicast `Session::publish` fragments on TX and the peer's
 /// drive loop reassembles it into exactly one delivered Sample carrying the
@@ -219,13 +224,13 @@ async fn unicast_oversize_put_fragments_on_tx_and_reassembles_on_rx() {
             .publish(KEYEXPR, &payload, PublishOptions::put())
             .expect("oversize publish builds and routes through the send seam");
         assert_eq!(delivered, 0, "no local subscriber on the publisher side");
-        for _ in 0..100 {
+        for _ in 0..DELIVERY_POLLS {
             if fired_probe.load(Ordering::SeqCst) > 0 {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(30)).await;
         }
-        panic!("subscriber did not fire within the ~3s budget");
+        panic!("subscriber did not fire within the delivery budget");
     };
 
     tokio::select! {
@@ -425,7 +430,7 @@ async fn an_exhausted_fragment_budget_abandons_the_chain_and_says_so_on_the_wire
             n: usize,
             what: &str,
         ) -> usize {
-            for _ in 0..200 {
+            for _ in 0..DELIVERY_POLLS {
                 if fired.load(Ordering::SeqCst) >= n {
                     return frags.load(Ordering::SeqCst);
                 }
@@ -788,13 +793,13 @@ async fn two_nodes_with_different_rx_bounds_answer_one_message_apart() {
         large_session
             .publish(KEYEXPR, &barrier, PublishOptions::put())
             .expect("the large node sends the unfragmented barrier");
-        for _ in 0..100 {
+        for _ in 0..DELIVERY_POLLS {
             if !large_probe.lock().unwrap().is_empty() && !small_probe.lock().unwrap().is_empty() {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(30)).await;
         }
-        panic!("a delivery did not arrive within the ~3s budget");
+        panic!("a delivery did not arrive within the delivery budget");
     };
 
     tokio::select! {

@@ -2128,6 +2128,9 @@ macro_rules! session_cases {
                         .timestamp_instrumentation(instrumentation("SE"))
                         .wait()
                         .expect("deletes");
+                    // As between the puts above: the one delete is where it is going before the
+                    // other is made, so the order each node is given them in is not a race.
+                    std::thread::sleep(Duration::from_millis(300));
                     other.delete("demo/e", "SE");
                     std::thread::sleep(Duration::from_millis(500));
                     out.push(format!(
