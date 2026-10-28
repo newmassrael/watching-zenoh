@@ -1085,7 +1085,10 @@ mod tokio_engine {
         crate::api::info::{Face, FaceSink, Link, Transport},
         crate::api::timestamp_stack::TimestampSource,
         wz_capi_core::faces::{FaceEventKind, FaceEventSink, FaceSnapshot, LinkSnapshot},
-        wz_capi_core::runtime::ts_stack::{Interception as EngineInterception, TsStack},
+        wz_capi_core::runtime::{
+            reply_sink::ReplyArrival,
+            ts_stack::{Interception as EngineInterception, TsStack},
+        },
         zenoh_protocol::core::{Locator, Priority as WirePriority, Reliability as WireReliability},
         zenoh_protocol::network::timestamp_stack::interception_point,
     };
@@ -1885,17 +1888,24 @@ mod tokio_engine {
         }
         #[cfg(feature = "unstable")]
         if ts_stack.is_some() {
-            options = options.with_ts_stack(
-                ts_stack.as_ref().map(engine_stack_of),
-                wire_ts_stack.as_ref().map(engine_stack_of),
-            );
+            options = options
+                .with_ts_stack(
+                    ts_stack.as_ref().map(engine_stack_of),
+                    wire_ts_stack.as_ref().map(engine_stack_of),
+                )
+                // The node records on a reply when it arrives, ahead of the consolidation that
+                // may hold it until the query is final: its routing first, when the reply came
+                // in over a link, then its receive.
+                .with_reply_arrival(ReplyArrival::new(move |stack, routed| {
+                    let mut arrived = protocol_stack_of(stack);
+                    if routed {
+                        timestamps.record(&mut arrived, interception_point::ROUTE);
+                    }
+                    timestamps.record(&mut arrived, interception_point::RECEIVE);
+                    *stack = engine_stack_of(&arrived);
+                }));
         }
-        let mut leg = leg_minter(
-            callback,
-            fan.clone(),
-            #[cfg(feature = "unstable")]
-            Some(timestamps),
-        );
+        let mut leg = leg_minter(callback, fan.clone());
         let issued = engine.get_on_wire(key, &wire, &options, fan.as_deref(), &mut leg);
         // The closure holds the delivery the legs share: what it let go of is the last hold, when
         // no leg is left.
@@ -1930,13 +1940,7 @@ mod tokio_engine {
         // As for a query, `0` is the default timeout of the engine and a timeout of nothing is an
         // instant one.
         let timeout_ms = u32::try_from(timeout.as_millis().max(1)).unwrap_or(u32::MAX);
-        let mut leg = leg_minter(
-            callback,
-            fan.clone(),
-            // A liveliness query is not instrumented.
-            #[cfg(feature = "unstable")]
-            None,
-        );
+        let mut leg = leg_minter(callback, fan.clone());
         let issued =
             engine.liveliness_get_on_wire(key, &wire, timeout_ms, fan.as_deref(), &mut leg);
         drop(leg);
@@ -1951,25 +1955,16 @@ mod tokio_engine {
     fn leg_minter(
         callback: Callback<Reply>,
         fan: Option<Arc<CancellableFan>>,
-        #[cfg(feature = "unstable")] timestamps: Option<Arc<TimestampSource>>,
     ) -> impl FnMut() -> ReplyCallback {
         let delivery = Arc::new(ReplyDelivery {
             callback,
             _fan: fan,
-            #[cfg(feature = "unstable")]
-            timestamps,
         });
         move || -> ReplyCallback {
             let delivery = Arc::clone(&delivery);
-            Box::new(move |view: &dyn ReplyView| {
-                match reply_of(
-                    view,
-                    #[cfg(feature = "unstable")]
-                    delivery.timestamps.as_deref(),
-                ) {
-                    Ok(reply) => delivery.callback.call(reply),
-                    Err(error) => tracing::error!("a reply could not be delivered: {error}"),
-                }
+            Box::new(move |view: &dyn ReplyView| match reply_of(view) {
+                Ok(reply) => delivery.callback.call(reply),
+                Err(error) => tracing::error!("a reply could not be delivered: {error}"),
             })
         }
     }
@@ -2032,9 +2027,6 @@ mod tokio_engine {
         /// What stops the legs, held for as long as the query is under way: whoever keeps a
         /// `Weak` of it reads the end of the query in it.
         _fan: Option<Arc<CancellableFan>>,
-        /// What records on the stack of each reply, for a query that is instrumented.
-        #[cfg(feature = "unstable")]
-        timestamps: Option<Arc<TimestampSource>>,
     }
 
     /// Have the callback of the query tell, when it is dropped with the last leg, whoever waits on
@@ -2079,16 +2071,14 @@ mod tokio_engine {
     ///
     /// As with a sample, the payload is copied out of the frame. The qualities a response does
     /// not carry read as upstream reads them: the default quality of service, and no timestamp.
-    fn reply_of(
-        view: &dyn ReplyView,
-        #[cfg(feature = "unstable")] receive: Option<&TimestampSource>,
-    ) -> ZResult<Reply> {
+    fn reply_of(view: &dyn ReplyView) -> ZResult<Reply> {
         // The stack of the response as the application is given it: what the nodes it crossed
-        // recorded, and what this node records on delivering it.
+        // recorded, and what this node recorded when the response arrived (the query's
+        // `ReplyArrival` did, ahead of any consolidation).
         #[cfg(feature = "unstable")]
-        let timestamp_stack = view
-            .ts_stack()
-            .and_then(|stack| received_stack(stack, view.routed(), receive));
+        let timestamp_stack = view.ts_stack().and_then(|stack| {
+            crate::api::timestamp_stack::TimestampStack::try_from(&protocol_stack_of(stack)).ok()
+        });
         let result = match view.kind() {
             ReplyKind::Err => {
                 #[allow(unused_mut)] // only an instrumented reply sets the stack
@@ -8097,6 +8087,92 @@ mod tests {
                 queried.recv_timeout(WAIT).expect("a query"),
                 of(&["Send:custom:first@a1b2d9", "Receive:custom:second@a1b2da"])
             );
+        }
+
+        /// A reply is received when it arrives, and not when the final lets a `Latest` query go
+        /// of it: upstream records the receive at the top of `send_response`, ahead of the
+        /// consolidation. The callback numbers every record the node makes, so the receive of
+        /// the first reply is before the send of the second only when it was recorded on arrival.
+        #[test]
+        fn a_reply_a_latest_query_holds_back_is_received_when_it_arrives() {
+            use std::sync::{
+                atomic::{AtomicU64, Ordering},
+                Arc,
+            };
+
+            let clock = Arc::new(AtomicU64::new(0));
+            let session = open(
+                Config::from_json5(
+                    r#"{ id: "a1b2db", mode: "peer", scouting: { multicast: { enabled: false } } }"#,
+                )
+                .expect("a configuration zenoh reads"),
+            )
+            .with_timestamp_callback({
+                let clock = Arc::clone(&clock);
+                move |_| clock.fetch_add(1, Ordering::SeqCst).to_string().into_bytes()
+            })
+            .wait()
+            .expect("opens");
+            let queryable = session
+                .declare_queryable("demo/q/**")
+                .callback(|query| {
+                    for key in ["demo/q/a", "demo/q/b"] {
+                        query.reply(key, "v").wait().expect("replies");
+                    }
+                })
+                .wait()
+                .expect("declares");
+            let replies = session
+                .get("demo/q/*")
+                .consolidation(ConsolidationMode::Latest)
+                .timestamp_instrumentation(at("SE"))
+                .timeout(WAIT)
+                .wait()
+                .expect("asks");
+            let replies: Vec<_> = replies.iter().collect();
+            // The point and the tick of each record of the reply on `key`.
+            let ticks = |key: &str| -> Vec<(String, u64)> {
+                let sample = replies
+                    .iter()
+                    .filter_map(|reply| reply.result().ok())
+                    .find(|sample| sample.key_expr().as_str() == key)
+                    .expect("a reply on the key");
+                sample
+                    .timestamp_stack()
+                    .map(records)
+                    .expect("a reply with a stack")
+                    .iter()
+                    .map(|record| {
+                        let (point, tick) = record.rsplit_once(':').expect("a custom record");
+                        (point.to_owned(), tick.parse().expect("a tick"))
+                    })
+                    .collect()
+            };
+            let (first, second) = (ticks("demo/q/a"), ticks("demo/q/b"));
+            for stack in [&first, &second] {
+                assert_eq!(
+                    stack
+                        .iter()
+                        .map(|(point, _)| point.as_str())
+                        .collect::<Vec<_>>(),
+                    [
+                        "Send:custom",
+                        "Receive:custom",
+                        "Send:custom",
+                        "Receive:custom"
+                    ],
+                    "the query's send and receive, then the reply's"
+                );
+            }
+            assert!(
+                first[3].1 < second[2].1,
+                "the first reply was received at tick {} but the second was sent at tick {}: \
+                 the receive was recorded after the replies were released",
+                first[3].1,
+                second[2].1
+            );
+            assert!(second[3].1 > second[2].1);
+            drop(queryable);
         }
 
         #[test]

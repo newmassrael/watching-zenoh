@@ -261,6 +261,106 @@ impl ReplyView for BorrowedReply<'_> {
     }
 }
 
+/// What a node records on the timestamp stack of a reply as the reply ARRIVES: its routing, when
+/// the reply came in over a link, and its receive. The host supplies it, for it owns the clock and
+/// the user's timestamp callback, and a consolidating sink calls it on every reply that carries a
+/// stack, before consolidation can hold the reply back.
+///
+/// It runs on the thread that dispatches the reply, under whatever lock the dispatcher holds, so
+/// it must not re-enter the session.
+#[cfg(feature = "pubsub-ts-stack")]
+#[derive(Clone)]
+pub struct ReplyArrival(alloc::sync::Arc<ArrivalRecorder>);
+
+/// The function a [`ReplyArrival`] holds: the stack to complete, and whether the reply was routed.
+#[cfg(feature = "pubsub-ts-stack")]
+type ArrivalRecorder = dyn Fn(&mut crate::ts_stack::TsStack, bool) + Send + Sync;
+
+#[cfg(feature = "pubsub-ts-stack")]
+impl ReplyArrival {
+    /// A hook that completes the stack it is given; the flag says whether the reply was routed to
+    /// this node over a link.
+    pub fn new(
+        record: impl Fn(&mut crate::ts_stack::TsStack, bool) + Send + Sync + 'static,
+    ) -> Self {
+        Self(alloc::sync::Arc::new(record))
+    }
+
+    fn record(&self, stack: &mut crate::ts_stack::TsStack, routed: bool) {
+        (self.0)(stack, routed);
+    }
+}
+
+#[cfg(feature = "pubsub-ts-stack")]
+impl core::fmt::Debug for ReplyArrival {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("ReplyArrival")
+    }
+}
+
+/// A reply as it is once the node has recorded its arrival: the view it arrived as, with the
+/// timestamp stack completed. Everything else is the view's own.
+#[cfg(feature = "pubsub-ts-stack")]
+struct ArrivedReply<'a> {
+    inner: &'a dyn ReplyView,
+    ts_stack: crate::ts_stack::TsStack,
+}
+
+#[cfg(feature = "pubsub-ts-stack")]
+impl ReplyView for ArrivedReply<'_> {
+    fn rid(&self) -> u64 {
+        self.inner.rid()
+    }
+    fn keyexpr(&self) -> &str {
+        self.inner.keyexpr()
+    }
+    fn kind(&self) -> ReplyKind {
+        self.inner.kind()
+    }
+    fn payload(&self) -> &[u8] {
+        self.inner.payload()
+    }
+    fn err_encoding(&self) -> Option<(u32, Option<&str>)> {
+        self.inner.err_encoding()
+    }
+    fn attachment(&self) -> Option<&[u8]> {
+        self.inner.attachment()
+    }
+    fn put_encoding(&self) -> Option<(u32, Option<&str>)> {
+        self.inner.put_encoding()
+    }
+    #[cfg(feature = "storage-profile")]
+    fn source_info(&self) -> Option<&crate::sample::SourceInfo> {
+        self.inner.source_info()
+    }
+    #[cfg(feature = "storage-profile")]
+    fn timestamp_parts(&self) -> Option<crate::reply_stage::TimestampParts<'_>> {
+        self.inner.timestamp_parts()
+    }
+    fn timestamp(&self) -> Option<&crate::sample::TimestampHint> {
+        self.inner.timestamp()
+    }
+    fn payload_shared(&self) -> Option<&crate::link::RxBytes> {
+        self.inner.payload_shared()
+    }
+    fn attachment_shared(&self) -> Option<&crate::link::RxBytes> {
+        self.inner.attachment_shared()
+    }
+    fn responder(&self) -> Option<(&[u8], u32)> {
+        self.inner.responder()
+    }
+    #[cfg(feature = "storage-profile")]
+    fn qos(&self) -> Option<crate::sample::QosLevel> {
+        self.inner.qos()
+    }
+    fn ts_stack(&self) -> Option<&crate::ts_stack::TsStack> {
+        Some(&self.ts_stack)
+    }
+    fn routed(&self) -> bool {
+        self.inner.routed()
+    }
+}
+
 /// Reply-delivery sink: the Dependency-Inversion seam a pending z_get
 /// dispatches its inbound replies + terminal final through. See the
 /// [module docs](self) for the AP ([`BoxedReplySink`]) vs MCU (consumer-
@@ -475,6 +575,10 @@ pub struct ConsolidatingSink<S: ReplySink> {
     /// non-consolidating pending pays one empty `HashMap` — no allocation until
     /// the first insert.
     cache: hashbrown::HashMap<alloc::string::String, crate::reply::InboundReply>,
+    /// What the node records on the timestamp stack of a reply as it arrives, for a query that is
+    /// instrumented: see [`Self::with_arrival`].
+    #[cfg(feature = "pubsub-ts-stack")]
+    arrival: Option<ReplyArrival>,
 }
 
 #[cfg(feature = "alloc")]
@@ -488,7 +592,17 @@ impl<S: ReplySink> ConsolidatingSink<S> {
             inner,
             mode,
             cache: hashbrown::HashMap::new(),
+            #[cfg(feature = "pubsub-ts-stack")]
+            arrival: None,
         }
+    }
+
+    /// Have the node complete the timestamp stack of each reply that carries one as the reply
+    /// ARRIVES, before the mode of the sink holds it back, with `arrival` when there is one.
+    #[cfg(feature = "pubsub-ts-stack")]
+    pub fn with_arrival(mut self, arrival: Option<ReplyArrival>) -> Self {
+        self.arrival = arrival;
+        self
     }
 
     /// Wrap `inner` in passthrough mode — the constructor every non-z_get
@@ -533,6 +647,60 @@ impl<S: ReplySink> ConsolidatingSink<S> {
 #[cfg(feature = "alloc")]
 impl<S: ReplySink> ReplySink for ConsolidatingSink<S> {
     fn on_reply(&mut self, reply: &dyn ReplyView) {
+        // A reply that carries a timestamp stack is completed as it ARRIVES, before consolidation
+        // can hold it back: the node that receives a reply records its routing and its receive at
+        // that moment (upstream's `send_response` does), and not at the call of the callback that
+        // a `Latest` cache defers to the final.
+        #[cfg(feature = "pubsub-ts-stack")]
+        if let Some(arrival) = self.arrival.clone() {
+            if let Some(stack) = reply.ts_stack() {
+                let mut stack = stack.clone();
+                arrival.record(&mut stack, reply.routed());
+                self.consolidate(&ArrivedReply {
+                    inner: reply,
+                    ts_stack: stack,
+                });
+                return;
+            }
+        }
+        self.consolidate(reply);
+    }
+
+    /// R311y323 — zenoh's timeout ORDER, which the default `on_timeout` cannot
+    /// produce: flush the `Latest` cache FIRST, then the synthetic
+    /// `Err("Timeout")`, then the final.
+    ///
+    /// zenoh's timeout task does exactly this — remove the query, `if
+    /// reception_mode == Latest` replay the cached replies, then call back the
+    /// error (`api/session.rs`). Reaching it through the default would invert
+    /// the first two: `on_reply(err)` forwards immediately (the Err guard), and
+    /// only the following `on_final` drains — so the caller would see the
+    /// timeout error and THEN the data it had already earned.
+    ///
+    /// The `Latest` check is not duplicated here; `flush_latest` owns it, so the
+    /// normal-final path and this one cannot disagree about when a flush is due.
+    fn on_timeout(&mut self, rid: u64) {
+        self.flush_latest();
+        self.inner.on_reply(&timeout_reply(rid));
+        self.inner.on_final(rid);
+    }
+
+    fn on_final(&mut self, rid: u64) {
+        // Drain BEFORE the inner final so the consumer sees every reply ahead of
+        // the terminal signal — the ordering zenoh produces (it flushes, then
+        // closes the query) and the one the Reply-before-Final contract already
+        // requires everywhere else in this crate.
+        self.flush_latest();
+        self.inner.on_final(rid);
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<S: ReplySink> ConsolidatingSink<S> {
+    /// What the sink does with a reply, by the mode it was made with: forwards it, caches it, or
+    /// drops it as stale ([`ReplySink::on_reply`] hands it here, completed on arrival if it
+    /// carries a timestamp stack).
+    fn consolidate(&mut self, reply: &dyn ReplyView) {
         use crate::query_mode::ConsolidationMode;
         // An Err reply is NEVER consolidated — forwarded immediately, in every
         // mode, and never cached.
@@ -593,34 +761,6 @@ impl<S: ReplySink> ReplySink for ConsolidatingSink<S> {
                 }
             }
         }
-    }
-
-    /// R311y323 — zenoh's timeout ORDER, which the default `on_timeout` cannot
-    /// produce: flush the `Latest` cache FIRST, then the synthetic
-    /// `Err("Timeout")`, then the final.
-    ///
-    /// zenoh's timeout task does exactly this — remove the query, `if
-    /// reception_mode == Latest` replay the cached replies, then call back the
-    /// error (`api/session.rs`). Reaching it through the default would invert
-    /// the first two: `on_reply(err)` forwards immediately (the Err guard), and
-    /// only the following `on_final` drains — so the caller would see the
-    /// timeout error and THEN the data it had already earned.
-    ///
-    /// The `Latest` check is not duplicated here; `flush_latest` owns it, so the
-    /// normal-final path and this one cannot disagree about when a flush is due.
-    fn on_timeout(&mut self, rid: u64) {
-        self.flush_latest();
-        self.inner.on_reply(&timeout_reply(rid));
-        self.inner.on_final(rid);
-    }
-
-    fn on_final(&mut self, rid: u64) {
-        // Drain BEFORE the inner final so the consumer sees every reply ahead of
-        // the terminal signal — the ordering zenoh produces (it flushes, then
-        // closes the query) and the one the Reply-before-Final contract already
-        // requires everywhere else in this crate.
-        self.flush_latest();
-        self.inner.on_final(rid);
     }
 }
 
@@ -1184,6 +1324,228 @@ mod consolidating_sink_tests {
                 alloc::vec![("a/b".to_string(), want.as_bytes().to_vec())],
                 "the stamped reply must win"
             );
+        }
+    }
+
+    /// The timestamp stack of a reply is completed as the reply ARRIVES: the node that receives it
+    /// records its routing and its receive then, as upstream's `send_response` does ahead of any
+    /// consolidation, and the `Latest` cache that holds the reply back until the final does not
+    /// move that moment.
+    #[cfg(feature = "pubsub-ts-stack")]
+    mod arrival {
+        use super::*;
+        use crate::ts_stack::{point, Interception, TsStack};
+        use alloc::sync::Arc;
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        /// What reached the consumer: each reply's payload, its stack, and how many arrivals the
+        /// node had recorded when it was delivered.
+        #[derive(Default)]
+        struct Delivered {
+            replies: Vec<(Vec<u8>, Option<TsStack>, usize)>,
+        }
+
+        struct StackRecorder<'a> {
+            delivered: &'a mut Delivered,
+            arrivals: Arc<AtomicUsize>,
+        }
+
+        impl ReplySink for StackRecorder<'_> {
+            fn on_reply(&mut self, reply: &dyn ReplyView) {
+                self.delivered.replies.push((
+                    reply.payload().to_vec(),
+                    reply.ts_stack().cloned(),
+                    self.arrivals.load(Ordering::SeqCst),
+                ));
+            }
+            fn on_final(&mut self, _rid: u64) {}
+        }
+
+        /// A node that records its routing (when the reply was routed to it) and its receive,
+        /// numbering its arrivals in the bytes of the receive.
+        fn node(arrivals: &Arc<AtomicUsize>) -> ReplyArrival {
+            let arrivals = Arc::clone(arrivals);
+            ReplyArrival::new(move |stack, routed| {
+                let number = arrivals.fetch_add(1, Ordering::SeqCst) + 1;
+                if routed {
+                    stack.stack.push(Interception {
+                        flags: point::ROUTE,
+                        timestamp: alloc::vec![0xAA],
+                    });
+                }
+                stack.stack.push(Interception {
+                    flags: point::RECEIVE,
+                    timestamp: alloc::vec![number as u8],
+                });
+            })
+        }
+
+        /// `reply` as the Response of an instrumented query, with the one interception the
+        /// answering node recorded.
+        fn stamped(mut reply: InboundReply, routed: bool) -> InboundReply {
+            let mut stack = TsStack::new(point::SEND | point::ROUTE | point::RECEIVE);
+            stack.stack.push(Interception {
+                flags: point::SEND,
+                timestamp: alloc::vec![0x01],
+            });
+            reply.stamp.ts_stack = Some(stack);
+            reply.stamp.routed = routed;
+            reply
+        }
+
+        fn flags(stack: &TsStack) -> Vec<u8> {
+            stack.stack.iter().map(|record| record.flags).collect()
+        }
+
+        #[test]
+        fn latest_records_each_arrival_before_the_final_releases_the_replies() {
+            let arrivals = Arc::new(AtomicUsize::new(0));
+            let mut delivered = Delivered::default();
+            {
+                let mut sink = ConsolidatingSink::new(
+                    ConsolidationMode::Latest,
+                    StackRecorder {
+                        delivered: &mut delivered,
+                        arrivals: Arc::clone(&arrivals),
+                    },
+                )
+                .with_arrival(Some(node(&arrivals)));
+                sink.on_reply(&stamped(put("a", b"one", Some(ts(1))), true));
+                sink.on_reply(&stamped(put("b", b"two", Some(ts(2))), true));
+                // Nothing is delivered yet, and both arrivals are already recorded.
+                assert_eq!(arrivals.load(Ordering::SeqCst), 2);
+                sink.on_final(1);
+            }
+            assert_eq!(delivered.replies.len(), 2);
+            for (payload, stack, at_delivery) in &delivered.replies {
+                let stack = stack
+                    .as_ref()
+                    .expect("an instrumented reply keeps its stack");
+                assert_eq!(
+                    flags(stack),
+                    alloc::vec![point::SEND, point::ROUTE, point::RECEIVE],
+                    "{payload:?}: the node recorded its routing and its receive"
+                );
+                assert_eq!(
+                    *at_delivery, 2,
+                    "{payload:?}: both arrivals were recorded first"
+                );
+            }
+            // Each reply carries the number of ITS arrival, whatever the order the cache lets
+            // them go in (it is a hash map, so that order is not the arrival's).
+            for (payload, stack, _) in &delivered.replies {
+                let receive = stack.as_ref().unwrap().stack[2].timestamp[0];
+                let arrived = match payload.as_slice() {
+                    b"one" => 1,
+                    b"two" => 2,
+                    other => panic!("a reply nobody sent: {other:?}"),
+                };
+                assert_eq!(receive, arrived, "{payload:?}: the number of its arrival");
+            }
+        }
+
+        #[test]
+        fn a_reply_that_was_not_routed_records_no_routing() {
+            let arrivals = Arc::new(AtomicUsize::new(0));
+            let mut delivered = Delivered::default();
+            {
+                let mut sink = ConsolidatingSink::new(
+                    ConsolidationMode::None,
+                    StackRecorder {
+                        delivered: &mut delivered,
+                        arrivals: Arc::clone(&arrivals),
+                    },
+                )
+                .with_arrival(Some(node(&arrivals)));
+                sink.on_reply(&stamped(put("a", b"local", None), false));
+            }
+            let stack = delivered.replies[0].1.as_ref().unwrap();
+            assert_eq!(flags(stack), alloc::vec![point::SEND, point::RECEIVE]);
+        }
+
+        #[test]
+        fn a_stale_reply_the_consolidation_drops_still_records_its_arrival() {
+            let arrivals = Arc::new(AtomicUsize::new(0));
+            let mut delivered = Delivered::default();
+            {
+                let mut sink = ConsolidatingSink::new(
+                    ConsolidationMode::Monotonic,
+                    StackRecorder {
+                        delivered: &mut delivered,
+                        arrivals: Arc::clone(&arrivals),
+                    },
+                )
+                .with_arrival(Some(node(&arrivals)));
+                sink.on_reply(&stamped(put("a", b"new", Some(ts(9))), true));
+                sink.on_reply(&stamped(put("a", b"old", Some(ts(1))), true));
+            }
+            assert_eq!(delivered.replies.len(), 1, "the stale reply is dropped");
+            assert_eq!(
+                arrivals.load(Ordering::SeqCst),
+                2,
+                "it arrived all the same"
+            );
+        }
+
+        #[test]
+        fn an_err_reply_records_its_arrival() {
+            let arrivals = Arc::new(AtomicUsize::new(0));
+            let mut delivered = Delivered::default();
+            {
+                let mut sink = ConsolidatingSink::new(
+                    ConsolidationMode::Latest,
+                    StackRecorder {
+                        delivered: &mut delivered,
+                        arrivals: Arc::clone(&arrivals),
+                    },
+                )
+                .with_arrival(Some(node(&arrivals)));
+                sink.on_reply(&stamped(err("a", b"boom"), true));
+            }
+            let stack = delivered.replies[0].1.as_ref().unwrap();
+            assert_eq!(
+                flags(stack),
+                alloc::vec![point::SEND, point::ROUTE, point::RECEIVE]
+            );
+        }
+
+        #[test]
+        fn a_reply_with_no_stack_is_left_as_it_is() {
+            let arrivals = Arc::new(AtomicUsize::new(0));
+            let mut delivered = Delivered::default();
+            {
+                let mut sink = ConsolidatingSink::new(
+                    ConsolidationMode::Latest,
+                    StackRecorder {
+                        delivered: &mut delivered,
+                        arrivals: Arc::clone(&arrivals),
+                    },
+                )
+                .with_arrival(Some(node(&arrivals)));
+                sink.on_reply(&put("a", b"plain", Some(ts(1))));
+                sink.on_final(1);
+            }
+            assert_eq!(arrivals.load(Ordering::SeqCst), 0);
+            assert!(delivered.replies[0].1.is_none());
+        }
+
+        #[test]
+        fn a_sink_with_no_arrival_hands_the_stack_on_as_it_came() {
+            let arrivals = Arc::new(AtomicUsize::new(0));
+            let mut delivered = Delivered::default();
+            {
+                let mut sink = ConsolidatingSink::new(
+                    ConsolidationMode::Latest,
+                    StackRecorder {
+                        delivered: &mut delivered,
+                        arrivals: Arc::clone(&arrivals),
+                    },
+                );
+                sink.on_reply(&stamped(put("a", b"one", Some(ts(1))), true));
+                sink.on_final(1);
+            }
+            let stack = delivered.replies[0].1.as_ref().unwrap();
+            assert_eq!(flags(stack), alloc::vec![point::SEND]);
         }
     }
 }

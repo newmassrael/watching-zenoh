@@ -5092,6 +5092,11 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                 opts.resolved_consolidation(),
                 self.deferred_reply_sink(on_reply, on_final),
             );
+            // `pubsub-ts-stack`: a reply of an instrumented query is completed as it reaches the
+            // registry, ahead of what the consolidation does with it, so a `Latest` query records
+            // the receive of a reply when it arrives and not when the final releases it.
+            #[cfg(feature = "pubsub-ts-stack")]
+            let sink = sink.with_arrival(opts.reply_arrival().cloned());
 
             // R311dc — observer access migrates from `.lock().expect()` to
             // R::with_mutex_mut closure form (R311ct API). The closure body

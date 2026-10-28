@@ -2223,6 +2223,100 @@ macro_rules! session_cases {
                 out
             }
 
+            /// A get that holds its replies back until the final (`Latest`) and is instrumented,
+            /// asked of the session's own queryable that answers two keys in turn. A callback
+            /// that numbers every record the node makes tells when each was made: upstream
+            /// records the receive of a reply as it arrives, so the first reply is received
+            /// before the second is sent, and a node that recorded it when the consolidation lets
+            /// the reply go would receive it after.
+            pub fn latest_instrumented_queries() -> Vec<String> {
+                use std::sync::{
+                    atomic::{AtomicU64, Ordering},
+                    Arc,
+                };
+
+                use $z::{
+                    internal::traits::TimestampInstrumentationBuilderTrait,
+                    query::ConsolidationMode,
+                    timestamp_stack::{InstrumentationTimestamp, InterceptionPoint},
+                };
+
+                let clock = Arc::new(AtomicU64::new(0));
+                let session = $z::open(peer("5a00e0", free_port()))
+                    .with_timestamp_callback({
+                        let clock = Arc::clone(&clock);
+                        move |_| clock.fetch_add(1, Ordering::SeqCst).to_string().into_bytes()
+                    })
+                    .wait()
+                    .expect("opens");
+                let _queryable = session
+                    .declare_queryable("demo/ql/**")
+                    .callback(|query| {
+                        for key in ["demo/ql/a", "demo/ql/b"] {
+                            query.reply(key, "v").wait().expect("replies");
+                        }
+                    })
+                    .wait()
+                    .expect("declares");
+                let mut out = vec![];
+                for (label, consolidation) in [
+                    ("none", ConsolidationMode::None),
+                    ("monotonic", ConsolidationMode::Monotonic),
+                    ("latest", ConsolidationMode::Latest),
+                ] {
+                    let replies: Vec<_> = session
+                        .get("demo/ql/*")
+                        .consolidation(consolidation)
+                        .timestamp_instrumentation(instrumentation("SE"))
+                        .timeout(Duration::from_secs(5))
+                        .wait()
+                        .expect("asks")
+                        .iter()
+                        .collect();
+                    // The point and the tick of each record of the reply on `key`.
+                    let records = |key: &str| -> Vec<(String, u64)> {
+                        let sample = replies
+                            .iter()
+                            .filter_map(|reply| reply.result().ok())
+                            .find(|sample| sample.key_expr().as_str() == key)
+                            .expect("a reply on the key");
+                        sample
+                            .timestamp_stack()
+                            .expect("a stack")
+                            .records()
+                            .iter()
+                            .map(|record| {
+                                let InstrumentationTimestamp::Custom(bytes) = record.timestamp()
+                                else {
+                                    panic!("a callback's record");
+                                };
+                                let point = match record.point() {
+                                    InterceptionPoint::Send => "Send",
+                                    InterceptionPoint::Route => "Route",
+                                    InterceptionPoint::Receive => "Receive",
+                                };
+                                (
+                                    point.to_owned(),
+                                    String::from_utf8_lossy(bytes).parse().expect("a tick"),
+                                )
+                            })
+                            .collect()
+                    };
+                    let (first, second) = (records("demo/ql/a"), records("demo/ql/b"));
+                    let points = |records: &[(String, u64)]| {
+                        records.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>()
+                    };
+                    out.push(format!(
+                        "{label}: {} replies, the points are {:?} and {:?}, the first is received before the second is sent: {}",
+                        replies.len(),
+                        points(&first),
+                        points(&second),
+                        first[3].1 < second[2].1
+                    ));
+                }
+                out
+            }
+
             /// What a session says of its configuration (`Session::config`): the values it reads,
             /// the error of a key that is not there, the text of the whole, the typed reads, and
             /// what a write does for a key of a plugin and for one that is not; and the shape of
@@ -3415,6 +3509,16 @@ fn what_a_query_and_its_replies_carry_in_their_timestamp_stack_is_what_upstream_
     let (u, w) = (up::instrumented_queries(), wz::instrumented_queries());
     assert!(u.iter().any(|l| l.contains("Receive:uhlc:")), "{u:#?}");
     compare("instrumented_queries", &u, &w);
+}
+
+#[test]
+fn a_reply_a_query_holds_back_is_received_when_it_arrives_as_upstream_receives_it() {
+    let (u, w) = (up::latest_instrumented_queries(), wz::latest_instrumented_queries());
+    assert!(
+        u.iter().any(|l| l.starts_with("latest: 2 replies") && l.ends_with("sent: true")),
+        "{u:#?}"
+    );
+    compare("latest_instrumented_queries", &u, &w);
 }
 
 #[test]

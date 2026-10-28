@@ -287,6 +287,10 @@ pub struct QueryOptions {
     /// out. `None` is the same stack as [`Self::ts_stack`].
     #[cfg(feature = "pubsub-ts-stack")]
     pub wire_ts_stack: Option<crate::ts_stack::TsStack>,
+    /// What the node records on the timestamp stack of each reply as it arrives: see
+    /// [`Self::with_reply_arrival`].
+    #[cfg(feature = "pubsub-ts-stack")]
+    reply_arrival: Option<crate::reply_sink::ReplyArrival>,
     /// Whether the callback sees the timestamp of the replies: see [`Self::with_expose_timestamp`].
     expose_timestamp: crate::timestamp_visibility::ExposeTimestamp,
     /// Whether the matching status of a querier made with these options counts a queryable of a
@@ -360,6 +364,22 @@ impl QueryOptions {
         self.ts_stack = local;
         self.wire_ts_stack = wire;
         self
+    }
+
+    /// Have the node complete the timestamp stack of each reply to the query when the reply
+    /// arrives, with `arrival`: its routing and its receive are recorded then, ahead of the
+    /// consolidation that may hold the reply back until the query is final, which is when
+    /// upstream's node records them.
+    #[cfg(feature = "pubsub-ts-stack")]
+    pub fn with_reply_arrival(mut self, arrival: crate::reply_sink::ReplyArrival) -> Self {
+        self.reply_arrival = Some(arrival);
+        self
+    }
+
+    /// See [`Self::with_reply_arrival`].
+    #[cfg(feature = "pubsub-ts-stack")]
+    pub fn reply_arrival(&self) -> Option<&crate::reply_sink::ReplyArrival> {
+        self.reply_arrival.as_ref()
     }
 
     /// Set the query's transmission priority, merging it into the low 3 bits of

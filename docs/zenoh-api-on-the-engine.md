@@ -779,10 +779,15 @@ Each lands whole with its surface lines, tests and faults in one round.
   reply, and compares the stacks record by record. Hiding the timestamp of a reply
   (`HiddenReplyTimestamp`) no longer hides the responder and the quality of service of it.
 
+  A reply is received when it arrives, as upstream records it at the top of `send_response`: an
+  instrumented get hands the engine a `ReplyArrival` (`QueryOptions::with_reply_arrival`), which
+  the consolidating sink calls on every reply that carries a stack, an error reply and one the
+  consolidation then drops included, ahead of what the mode does with it. A `Latest` query so
+  records the receive of a reply when it lands, and not when the final lets it go.
+
   Carried: a wz node that forwards a message in its mesh (the router and the linkstate peer) does
-  not record its own route, a subscriber offloaded to a lane is handed no stack, and the receive
-  of a reply is recorded when the callback is called, which for a consolidating query is after
-  the consolidation, where upstream records it on arrival. The surface falls to 1, 2 and 5 lines of
+  not record its own route, and a subscriber offloaded to a lane is handed no stack. The surface
+  falls to 1, 2 and 5 lines of
   the three arms; 15 faults were injected into the publish side and 24 into the query side, one
   at a time, none missed in the end (the first test of a plain Put could not tell, and one assertion
   was changed so that it can; one fault that deleted a fallback failed to compile and was redone as
