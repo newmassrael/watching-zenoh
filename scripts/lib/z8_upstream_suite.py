@@ -305,6 +305,14 @@ def generate(src: pathlib.Path, out: pathlib.Path) -> list[str]:
     )
     member = member_third_party((src / "zenoh" / "Cargo.toml").read_text(encoding="utf-8"))
     (out / "Cargo.toml").write_text(manifest(deps, member, out), encoding="utf-8")
+    # The compiler the repository pins. The package is generated under `target/` of the clone on
+    # a build host, where cargo finds the repository's own file by walking up, and anywhere else
+    # (a scratch directory of a local run) it finds nothing and builds with whatever the machine
+    # calls default: the first local measurement stopped on a deprecation the pinned compiler does
+    # not have. The file is copied, not written here, so it stays the one place the channel lives.
+    pin = ROOT / "rust-toolchain.toml"
+    if pin.is_file():
+        shutil.copyfile(pin, out / "rust-toolchain.toml")
     (out / "src").mkdir()
     (out / "src" / "lib.rs").write_text("", encoding="utf-8")
     names = sorted(p.stem for p in (out / "tests").glob("*.rs"))
