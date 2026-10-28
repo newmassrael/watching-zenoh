@@ -6555,7 +6555,11 @@ layer_c1ay_cargo_test_router_hat() {
     # forwarder (a client's interest reaches a gateway and its final waits; no gateway answers
     # inline; one gateway for a Current interest and every one for a CurrentFuture; the client's
     # Final and departure end the copy; the deadline; a gateway going down).
-    _runci_guarded_test "C1AY router_forward interest broker 253" 253 \
+    # R2901/R2902/R2904 -- 253 -> 257: a client's Put and Query reach a gateway that declared
+    # nothing, and a gateway that finalized the key is left out until it declares (two tests
+    # for each plane). Gated on `routing-interest-pending-gc` through their fixture, so this
+    # is the one arm that moves.
+    _runci_guarded_test "C1AY router_forward interest broker 257" 257 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-interest-pending-gc --lib router_forward --quiet || return 1
     _runci_guarded_test "C1AY peer scenes frozen 2" 2 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables,pubsub-delete,adminspace-introspection-handlers,adminspace-router-linkstate --lib router_forward::peer_differential_tests::frozen --quiet || return 1

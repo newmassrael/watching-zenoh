@@ -740,10 +740,24 @@ honoured, and the census pins move in the same commit.
   `router_forward/brokered_interest.rs` is the broker on the region-hat forwarder;
   the flag and the config key work again; and the frozen-upstream legs of the pico e2e use
   a wz `--router-hat` for the silent node, since a silent wz PEER is not asked. The one
-  piece not ported is R2904, a gateway that finalized its interest on a key and declared
-  nothing matching is not sent that key's data (the pin's `subscriber_interest_finalized`);
-  the atom is graded PARTIAL for it. Read the first hosted run for the Layer Z leg and the
-  Layer E6 pending-gc legs, which no local run reaches.
+  piece left out was R2904, and it is ported in the same step (below). Read the first hosted
+  run for the Layer Z leg and the Layer E6 pending-gc legs, which no local run reaches.
+- **The same misreading dropped the default send to a gateway (R2901, R2902), found while
+  porting R2904.** The pin's peer hat sends data and queries whose source region is south to
+  every face whose remote bound is south, unless that face finalized its interest on the
+  resource (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `dst.has_unfinalized_subscriber_interest = true`
+  and `zenoh/src/net/routing/hat/peer/queries.rs` @ `dst.has_unfinalized_queryable_interest = true`).
+  A gateway does not declare what its other remotes host, so without the send a client's Put
+  never left a peer node for a stock router's subscribers. 7b dropped it with the single-net
+  forwarder, and 7c-1's frozen scenes could not see it, having no gateway in them; a probe
+  test (a client's Put reaches a gateway that declared nothing) failed 0 against 1 before the
+  fix. The send is now one seam, `gateways_owed`: the data plane takes it in
+  `self_publish_into_tier` for the node's own and its clients' Puts, and the query plane in
+  `forward_request_to_gateways`, where a gateway has no queryable info and so joins All,
+  AllComplete, and BestMatching when the peer hat's region has no complete queryable. A
+  gateway that finalized exactly the key (R2904) is left out unless it declared a matching
+  entity, and a gateway that is also a tree hop is asked once. The atom
+  `routing-interest-pending-gc` is graded COMPLETE.
 - **Rule 7b's 'asks no one' also reached the unrestricted interest.** An Interest carrying no
   keyexpr is answered with the whole token table (R2614, upstream's `res.is_none_or`) and
   was answered by the single-net forwarder only; the router's token dump now does it too

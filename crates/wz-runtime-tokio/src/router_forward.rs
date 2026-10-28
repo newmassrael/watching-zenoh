@@ -6566,6 +6566,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 },
                 push,
                 keyexpr,
+                // A mesh source is not south of a gateway (R2901 takes only a south source).
+                &[],
                 |dst| self.crosses(inbound_tier, target_tier, src_zid, fwd_zid, Some(dst)),
             );
         }
@@ -6821,7 +6823,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             // dropped there, its source being a gateway itself. (Zenoh also
             // inserts `mcast_groups` faces -- an unbuilt wz plane, deferred with
             // multicast.)
-            self.self_publish_into_tier(tier, egress, push, keyexpr, |dst| {
+            // R2901 — and, on a peer node, every gateway of the hat: the source is south.
+            let gateways = self.gateways_owed(tier, keyexpr, false);
+            self.self_publish_into_tier(tier, egress, push, keyexpr, &gateways, |dst| {
                 self.crosses(source_tier, tier, None, None, Some(dst))
             });
         }
@@ -6846,6 +6850,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         egress: Egress,
         push: &PushOwned,
         keyexpr: &str,
+        gateways: &[FaceId],
         admits: impl Fn(&Zid) -> bool,
     ) {
         let Egress {
@@ -6868,7 +6873,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             },
             keyexpr,
             wireexpr_names_a_declaration(&push.keyexpr.body),
-            false,
+            !gateways.is_empty(),
             || reliteralize_push(push, keyexpr),
         );
         let Ok(Some((carrier, children))) = carrier_children else {
@@ -6885,10 +6890,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // C3b client->mesh re-inject preserves whatever band the client frame carried
         // (a pico client negotiates no unicast ext_qos, so that band is typically
         // DEFAULT — but the seam does not rely on it).
-        let _ = self.fan_out_tier_qos(tier, reliable, priority, express, |_id, zid| {
-            Ok(zid
-                .filter(|z| children.contains(z) && admits(z))
-                .map(|_| NetworkMessage::Push(Box::new(carrier.clone()))))
+        //
+        // One send per FACE: a gateway that also declared a matching subscriber is a child too,
+        // and is reached once.
+        let _ = self.fan_out_tier_qos(tier, reliable, priority, express, |id, zid| {
+            let reached =
+                gateways.contains(&id) || zid.is_some_and(|z| children.contains(&z) && admits(&z));
+            Ok(reached.then(|| NetworkMessage::Push(Box::new(carrier.clone()))))
         });
     }
 
@@ -7238,6 +7246,62 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             .iter()
             .filter_map(|(region, hat)| hat.mesh().map(|_| region))
             .collect()
+    }
+
+    /// The faces that are this node's gateways: the faces whose remote end is a gateway to it,
+    /// which a stock router is to a peer (`zenoh/src/net/routing/hat/peer/pubsub.rs` @
+    /// `.filter(|f| f.remote_bound.is_south())`). A face with no graph link, a client leaf or a
+    /// face whose handshake carried no zid, is never one.
+    ///
+    /// Read off the LINK rather than the graph node on purpose: the node's `is_gateway` is what
+    /// the gossip announces and depends on the graph's mode, while the pin's data route reads the
+    /// face's own `remote_bound` in every mode.
+    fn gateway_faces(&self) -> Vec<FaceId> {
+        let net = self.north_net();
+        let mut faces: Vec<FaceId> = self
+            .tables
+            .faces
+            .iter()
+            .filter(|(_, state)| {
+                state
+                    .link
+                    .and_then(|link| net.get_link(link))
+                    .is_some_and(|link| link.remote_is_gateway)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        faces.sort_unstable();
+        faces
+    }
+
+    /// R2901 — the gateways a message whose source lies SOUTH of this peer node is owed on the
+    /// `tier` hat: every gateway face, whether or not a declaration names it, less the gateways
+    /// that have finalized their interest on exactly this resource and declared nothing matching
+    /// it ([`gateway_withholds`](Self::gateway_withholds), R2904).
+    ///
+    /// A gateway does not tell its peer what its other remotes subscribe to. The pin's peer hat
+    /// is in PULL mode toward it: declarations cross only in answer to an interest
+    /// (`zenoh/src/net/routing/hat/peer/mod.rs` @ `let do_initial_interest =`, false unless both
+    /// ends are north-bound), so the data route does not wait to be told: data whose source
+    /// region is south goes to every south-bound face unless that face's interest for the
+    /// resource was finalized (`zenoh/src/net/routing/hat/peer/pubsub.rs` @
+    /// `dst.has_unfinalized_subscriber_interest = true`), and the gateway, which knows its own
+    /// subscribers, routes it on or drops it. Data whose source is not south, a transit message
+    /// from another peer, takes no part of it (`src_region.bound().is_south()`).
+    fn gateways_owed(&self, tier: Region, keyexpr: &str, queryables: bool) -> Vec<FaceId> {
+        if self.tables.node_mode != WhatAmI::Peer || !is_peer_hat(tier, self.tables.node_mode) {
+            return Vec::new();
+        }
+        let mut gateways = self.gateway_faces();
+        gateways.retain(|g| !self.gateway_withholds(*g, keyexpr, queryables));
+        gateways
+    }
+
+    /// Without the interest broker nothing is ever brokered, so nothing is ever finalized and no
+    /// gateway is withheld.
+    #[cfg(not(feature = "routing-interest-pending-gc"))]
+    fn gateway_withholds(&self, _face: FaceId, _keyexpr: &str, _queryables: bool) -> bool {
+        false
     }
 
     /// Read `P`'s fold outside every mesh region for `keyexpr`, before a
@@ -8422,12 +8486,28 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 .collect(),
             clients: self.client_query_legs(&keyexpr, wire),
         };
+        // R2902 — the query twin of the data plane's gateway arm: a query whose source lies SOUTH
+        // of this peer node (a client of its own) is owed to every gateway as well, because a
+        // gateway does not declare what its other remotes host. The pin adds each south-bound
+        // face with no queryable info (`zenoh/src/net/routing/hat/peer/queries.rs` @
+        // `dst.has_unfinalized_queryable_interest = true`), so a gateway is never the complete
+        // BestMatching winner and joins exactly the fanned cases: All, AllComplete (a branch with
+        // no info passes its completeness filter), and BestMatching when its region has no
+        // complete queryable. A query from a peer is transit and does not take the arm; R2904
+        // leaves out the gateways that finalized a QUERYABLES interest on this resource.
+        let mut gateways = if is_leaf(tier, self.tables.node_mode) {
+            self.gateways_owed(NORTH_REGION, &keyexpr, true)
+        } else {
+            Vec::new()
+        };
+        gateways.retain(|g| *g != inbound);
         let forwarded = match read_request_target(request) {
             // BestMatching (wire default): one pick for each region, the nearest COMPLETE
             // queryable of that region or all of its matching ones when none is complete.
             None => self.forward_request_best_matching(
                 &blocks,
                 &route,
+                &gateways,
                 client_gate,
                 reliable,
                 inbound,
@@ -8439,6 +8519,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             Some(QueryTarget::All) => self.forward_request_all(
                 &blocks,
                 &route,
+                &gateways,
                 client_gate,
                 false,
                 reliable,
@@ -8451,6 +8532,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             Some(QueryTarget::AllComplete) => self.forward_request_all(
                 &blocks,
                 &route,
+                &gateways,
                 client_gate,
                 true,
                 reliable,
@@ -8636,6 +8718,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         &self,
         blocks: &[MeshQueryBlock],
         route: &QueryRoute,
+        gateways: &[FaceId],
         client_gate: bool,
         reliable: bool,
         inbound: FaceId,
@@ -8646,15 +8729,23 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     ) -> usize {
         let mut forwarded = 0;
         for (block, candidates) in blocks.iter().zip(&route.mesh) {
-            let hops = match select_best_matching(candidates, block.inbound_for_net, |hop| {
-                self.query_block_admits(block, hop)
-            }) {
-                Some((_, hop)) => vec![hop],
-                None => all_query_directions(candidates),
-            };
+            let (hops, picked_complete) =
+                match select_best_matching(candidates, block.inbound_for_net, |hop| {
+                    self.query_block_admits(block, hop)
+                }) {
+                    Some((_, hop)) => (vec![hop], true),
+                    None => (all_query_directions(candidates), false),
+                };
             forwarded += self.forward_request_to_tier(
                 block, reliable, inbound, &hops, request, keyexpr, fan, deadline,
             );
+            // The gateways belong to the peer hat's region, whose gateway has no queryable info
+            // and is therefore asked only when that region has no complete queryable.
+            if !picked_complete && is_peer_hat(block.tier, self.tables.node_mode) {
+                forwarded += self.forward_request_to_gateways(
+                    gateways, &hops, reliable, request, keyexpr, fan, deadline,
+                );
+            }
         }
         if client_gate {
             let mut template = request.clone();
@@ -8737,6 +8828,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         &self,
         blocks: &[MeshQueryBlock],
         route: &QueryRoute,
+        gateways: &[FaceId],
         client_gate: bool,
         complete_only: bool,
         reliable: bool,
@@ -8756,6 +8848,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             forwarded += self.forward_request_to_tier(
                 block, reliable, inbound, &hops, request, keyexpr, fan, deadline,
             );
+            if is_peer_hat(block.tier, self.tables.node_mode) {
+                forwarded += self.forward_request_to_gateways(
+                    gateways, &hops, reliable, request, keyexpr, fan, deadline,
+                );
+            }
         }
         if client_gate {
             forwarded += self.forward_request_to_clients(
@@ -8899,6 +8996,33 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             Ok(Some(NetworkMessage::Request(Box::new(carrier))))
         });
         forwarded
+    }
+
+    /// The Query to each of `gateways` (R2902), one pending-return entry apiece, stamped as a
+    /// client's query is: a literal keyexpr and no node id. A gateway that declared a matching
+    /// queryable is a tree hop too, so one `hops` already names is not asked a second time.
+    /// Returns the faces forwarded to.
+    #[allow(clippy::too_many_arguments)]
+    fn forward_request_to_gateways(
+        &self,
+        gateways: &[FaceId],
+        hops: &[Zid],
+        reliable: bool,
+        request: &RequestOwned,
+        keyexpr: &str,
+        fan: &Arc<QueryFan>,
+        deadline: Instant,
+    ) -> usize {
+        gateways
+            .iter()
+            .filter(|gateway| {
+                let zid = self.tables.faces.get(gateway).and_then(|s| s.peer_zid);
+                !zid.is_some_and(|z| hops.contains(&z))
+            })
+            .map(|gateway| {
+                self.forward_request_to_face(*gateway, 0, reliable, request, keyexpr, fan, deadline)
+            })
+            .sum()
     }
 
     /// Forward the Query to ONE specific face — the single-target send the GLOBAL
@@ -13005,6 +13129,131 @@ mod tests {
         fwd.deregister(FaceId(1));
         assert_eq!(fwd.pending_interests_len(), 0, "the client's entries go");
         assert_eq!(sink_client.frame_count(), 0, "with nobody left to tell");
+    }
+
+    /// One Put on `keyexpr` from the client on face 1.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    fn client_puts(fwd: &RouterForwarder, keyexpr: &str) {
+        let push =
+            wz_session_core::push_build::build_push_literal(keyexpr, b"x").expect("build push");
+        forward_one(fwd, FaceId(1), NetworkMessage::Push(Box::new(push)));
+    }
+
+    /// R2901 — a gateway does not declare what its other remotes subscribe to, so the pin sends
+    /// it every Put whose source lies south of the node and lets it route on or drop. A client's
+    /// Put and the node's own both reach a gateway that declared nothing; a Put from another
+    /// peer, whose source is not south, is transit and does not.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    #[test]
+    fn a_south_sourced_put_reaches_a_gateway_that_declared_nothing() {
+        let (fwd, sink_gateway, _sink_client) = gateway_and_client();
+        client_puts(&fwd, "demo/a");
+        assert_eq!(sink_gateway.frame_count(), 1, "the client's Put");
+        sink_gateway.reset();
+        fwd.publish("demo/b", b"y").expect("publish");
+        assert_eq!(sink_gateway.frame_count(), 1, "the node's own Put");
+    }
+
+    /// R2902 — the query twin: a client's Query is owed to a gateway that declared no queryable,
+    /// since the gateway does not say what its other remotes host. A gateway has no queryable
+    /// info, so it is never the complete BestMatching winner and is asked when the peer hat's
+    /// region has no complete queryable of its own.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    #[test]
+    fn a_clients_query_reaches_a_gateway_that_declared_nothing() {
+        let (fwd, sink_gateway, _sink_client) = gateway_and_client();
+        forward_one(&fwd, FaceId(1), request_best(3, "demo/q"));
+        assert_eq!(sink_gateway.frame_count(), 1, "the gateway is asked");
+        let asked = forwarded_request(&sink_gateway.frame_bytes(0));
+        assert_eq!(read_request_source(&asked), 0, "as a client's query is");
+    }
+
+    /// R2904 on the queryable plane: a gateway that finalized a QUERYABLES interest on the
+    /// resource and declared no queryable matching it is not asked, and is again once it does.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    #[test]
+    fn a_gateway_that_finalized_the_queryables_of_a_key_is_not_asked_for_it() {
+        use wz_session_core::interest_build::build_interest_queryables;
+
+        let (fwd, sink_gateway, _sink_client) = gateway_and_client();
+        let interest =
+            build_interest_queryables(3, true, true, 0, Some("demo/q")).expect("build interest");
+        forward_one(&fwd, FaceId(1), NetworkMessage::Interest(interest));
+        let copy = forwarded_interest(&sink_gateway.frame_bytes(0));
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(build_declare_final_reply(copy.interest_id))),
+        );
+        sink_gateway.reset();
+
+        forward_one(&fwd, FaceId(1), request_best(4, "demo/q"));
+        assert_eq!(sink_gateway.frame_count(), 0, "finalized, declared nothing");
+        forward_one(&fwd, FaceId(1), request_best(5, "demo/r"));
+        assert_eq!(sink_gateway.frame_count(), 1, "another key is asked");
+        sink_gateway.reset();
+
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/q", false));
+        sink_gateway.reset();
+        forward_one(&fwd, FaceId(1), request_best(6, "demo/q"));
+        assert_eq!(
+            sink_gateway.frame_count(),
+            1,
+            "a declared one is asked, once"
+        );
+    }
+
+    /// R2904 — a gateway that FINALIZED its interest on a resource and declared nothing matching
+    /// it is not sent that resource's data: it has told this node everything it holds there. The
+    /// flag is the resource's own (a neighbouring key is still sent), and a subscriber the
+    /// gateway declares afterwards routes to it again.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    #[test]
+    fn a_gateway_that_finalized_a_key_is_sent_its_data_only_once_it_declares() {
+        use wz_session_core::interest_build::build_interest_subscribers;
+
+        let (fwd, sink_gateway, _sink_client) = gateway_and_client();
+        let interest =
+            build_interest_subscribers(3, true, true, 0, Some("demo/a")).expect("build interest");
+        forward_one(&fwd, FaceId(1), NetworkMessage::Interest(interest));
+        let copy = forwarded_interest(&sink_gateway.frame_bytes(0));
+        client_puts(&fwd, "demo/a");
+        assert_eq!(
+            sink_gateway.frame_count(),
+            2,
+            "until it answers, the gateway is owed the key"
+        );
+        sink_gateway.reset();
+
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(build_declare_final_reply(copy.interest_id))),
+        );
+        client_puts(&fwd, "demo/a");
+        assert_eq!(
+            sink_gateway.frame_count(),
+            0,
+            "finalized and declared nothing: withheld"
+        );
+        fwd.publish("demo/a", b"y").expect("publish");
+        assert_eq!(sink_gateway.frame_count(), 0, "the node's own Put too");
+        client_puts(&fwd, "demo/b");
+        assert_eq!(
+            sink_gateway.frame_count(),
+            1,
+            "a key it did not finalize is still sent"
+        );
+        sink_gateway.reset();
+
+        forward_one(&fwd, FaceId(0), declare_sub("demo/a"));
+        sink_gateway.reset();
+        client_puts(&fwd, "demo/a");
+        assert_eq!(
+            sink_gateway.frame_count(),
+            1,
+            "and a subscriber it declared routes to it again, once"
+        );
     }
 
     // The typed-config proofs of the peer node: a `WzConfig` drives the LIVE forwarder through

@@ -29,11 +29,12 @@
 //! - THE END: a client's `Interest(Final)`, or its departure, is passed on to every gateway
 //!   still holding a `CurrentFuture` copy, under the id that gateway was given.
 //!
-//! NOT PORTED: the single-net peer forwarder also withheld data for a key from a gateway that
-//! had FINALIZED its interest on exactly that key and declared nothing matching (R2904; the pin's
-//! `subscriber_interest_finalized`, `zenoh/src/net/routing/hat/peer/pubsub.rs`). That rule
-//! belongs to the data route toward a gateway, and this forwarder's is the hats' own; it is an
-//! open residual of the atom, not a decision.
+//! - THE FINALIZED KEY (R2904): a gateway's `DeclareFinal` for a brokered CurrentFuture copy on a
+//!   restricted keyexpr finalizes that resource for the planes the copy named, and a Put or a
+//!   Query whose source lies south of this node, which is owed to every gateway
+//!   ([`gateways_owed`](OnTables::gateways_owed)), leaves out a gateway that finalized exactly
+//!   its key and declared nothing matching it (the pin's `subscriber_interest_finalized` and
+//!   `queryable_interest_finalized`, `zenoh/src/net/routing/hat/peer/pubsub.rs`).
 //!
 //! It acts for a node of mode Peer and for a client face only: the pin's other hats propagate by
 //! their own rules, which wz's router hats carry separately.
@@ -54,14 +55,30 @@ const DEFAULT_INTEREST_TIMEOUT: Duration = Duration::from_millis(10_000);
 pub(super) struct BrokeredCopy {
     upstream: FaceId,
     up_id: u64,
+    /// R2904 — what the copy asked about: the resource of a restricted interest and the planes it
+    /// named, which is what its `DeclareFinal` finalizes on the gateway.
+    target: Option<String>,
+    subscribers: bool,
+    queryables: bool,
 }
 
-/// What the broker keeps: the pending table, its deadline and the live CurrentFuture copies.
-/// State of the node and not of any one region, so it is the forwarder's and not the tables'.
+/// R2904 — the exact resources whose brokered interest one gateway has FINALIZED, by plane: the
+/// pin's per-resource, per-face `subscriber_interest_finalized` / `queryable_interest_finalized`.
+#[derive(Default)]
+struct FinalizedResources {
+    subscribers: HashSet<String>,
+    queryables: HashSet<String>,
+}
+
+/// What the broker keeps: the pending table, its deadline, the live CurrentFuture copies and
+/// what each gateway has finalized. State of the node and not of any one region, so it is the
+/// forwarder's and not the tables'.
 pub(super) struct InterestBroker {
     pending: PlainMutex<PendingCurrentInterests>,
     timeout: PlainCell<Duration>,
     future: PlainMutex<HashMap<(FaceId, u64), Vec<BrokeredCopy>>>,
+    /// Lives as long as the gateway's face, as the pin's face context does.
+    finalized: PlainMutex<HashMap<FaceId, FinalizedResources>>,
 }
 
 impl InterestBroker {
@@ -70,6 +87,7 @@ impl InterestBroker {
             pending: PlainMutex::new(PendingCurrentInterests::new()),
             timeout: PlainCell::new(DEFAULT_INTEREST_TIMEOUT),
             future: PlainMutex::new(HashMap::new()),
+            finalized: PlainMutex::new(HashMap::new()),
         }
     }
 }
@@ -146,28 +164,6 @@ impl RouterForwarder {
 }
 
 impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
-    /// The faces that are this node's gateways: the faces whose remote end is a gateway to it,
-    /// which a stock router is to a peer (`zenoh/src/net/routing/hat/peer/pubsub.rs` @
-    /// `.filter(|f| f.remote_bound.is_south())`). A face with no graph link, a client leaf or a
-    /// face whose handshake carried no zid, is never one.
-    fn gateway_faces(&self) -> Vec<FaceId> {
-        let net = self.north_net();
-        let mut faces: Vec<FaceId> = self
-            .tables
-            .faces
-            .iter()
-            .filter(|(_, state)| {
-                state
-                    .link
-                    .and_then(|link| net.get_link(link))
-                    .is_some_and(|link| link.remote_is_gateway)
-            })
-            .map(|(id, _)| *id)
-            .collect();
-        faces.sort_unstable();
-        faces
-    }
-
     /// R2903 — WHERE a client's interest is brokered: every gateway for a `CurrentFuture`
     /// interest, one for a `Current` one (`let dsts = if msg.mode == InterestMode::Current {`),
     /// never the face it came from.
@@ -253,6 +249,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     .push(BrokeredCopy {
                         upstream: up,
                         up_id,
+                        target: target.map(str::to_owned),
+                        subscribers: options.su(),
+                        queryables: options.qu(),
                     });
             }
             sent += 1;
@@ -393,6 +392,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             {
                 return false;
             }
+            self.mark_brokered_finalized(upstream, up_id);
             let finished = self.broker.pending.guard().resolve(upstream, up_id);
             if let Some(interest) = finished {
                 self.finish_brokered_interest(&interest);
@@ -427,5 +427,75 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             copies.retain(|c| c.upstream != departed);
             !copies.is_empty()
         });
+        self.broker.finalized.guard().remove(&departed);
+    }
+
+    /// R2904 — a gateway has sent the `DeclareFinal` for the brokered copy it knows as `up_id`:
+    /// when that copy was a CurrentFuture interest on a restricted keyexpr, the gateway has now
+    /// told this node everything it holds there, and the resource is FINALIZED on that face for
+    /// each plane the copy asked about. The pin sets the same flags when a local interest is
+    /// finalized (`zenoh/src/net/routing/dispatcher/face.rs` @ `ctx.subscriber_interest_finalized = true;`),
+    /// on the interest's own resource and no other.
+    fn mark_brokered_finalized(&self, upstream: FaceId, up_id: u64) {
+        let copy = self
+            .broker
+            .future
+            .guard()
+            .values()
+            .flatten()
+            .find(|c| c.upstream == upstream && c.up_id == up_id)
+            .cloned();
+        let Some(BrokeredCopy {
+            target: Some(target),
+            subscribers,
+            queryables,
+            ..
+        }) = copy
+        else {
+            return;
+        };
+        let mut finalized = self.broker.finalized.guard();
+        let entry = finalized.entry(upstream).or_default();
+        if subscribers {
+            entry.subscribers.insert(target.clone());
+        }
+        if queryables {
+            entry.queryables.insert(target);
+        }
+    }
+
+    /// R2904 — whether `face` is a gateway this node must NOT send `keyexpr` to, on the
+    /// subscriber plane (`queryables == false`) or the queryable plane: the gateway has FINALIZED
+    /// its interest on exactly that resource AND declared no entity matching it. The pin reads
+    /// the flag of the data's own resource (`zenoh/src/net/routing/hat/peer/pubsub.rs` @
+    /// `.is_some_and(|ctx| ctx.subscriber_interest_finalized);`), so a key the interest merely
+    /// matched, or a wildcard, is not withheld.
+    ///
+    /// The declaration half is part of the rule, and the pin's route inserts a face that
+    /// declared a subscriber before it consults the flag
+    /// (`route.insert(..)` then `route.try_insert(..)` in the same function).
+    pub(super) fn gateway_withholds(&self, face: FaceId, keyexpr: &str, queryables: bool) -> bool {
+        let finalized = self.broker.finalized.guard().get(&face).is_some_and(|f| {
+            if queryables {
+                f.queryables.contains(keyexpr)
+            } else {
+                f.subscribers.contains(keyexpr)
+            }
+        });
+        if !finalized {
+            return false;
+        }
+        let Some(zid) = self.tables.faces.get(&face).and_then(|s| s.peer_zid) else {
+            return true;
+        };
+        let Some(hat) = self.mesh_hat(NORTH_REGION) else {
+            return true;
+        };
+        let declared = if queryables {
+            hat.qabls.interested(keyexpr).contains(&zid)
+        } else {
+            hat.subs.interested(keyexpr).contains(&zid)
+        };
+        !declared
     }
 }

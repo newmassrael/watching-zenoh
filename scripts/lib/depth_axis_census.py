@@ -1242,7 +1242,12 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # census is deferred to hosted CI. READ off the census's own FAIL line, `reached: 3 against a
 # pin of 2`, and attributed by `routing-interest-pending-gc` being the one PARTIAL atom outside
 # the two (`api-compat-rust`, `session-close-ingress`) the pin already counted.
-PIN_REACHED = 3
+# R3852 -- REACHED 3 -> 2, a RETIREMENT of the arrival above. `routing-interest-pending-gc` is
+# regraded PARTIAL -> COMPLETE when the finalized-key rule (R2904), and the default send to a
+# gateway it qualifies (R2901 data, R2902 queries), are ported to the region-hat forwarder. It
+# leaves the PARTIAL set, so the atoms the pin counted before the retirement are the two again
+# (`api-compat-rust`, `session-close-ingress`). UNREACHED and NO_SYMBOL hold at 0 and 0.
+PIN_REACHED = 2
 PIN_UNREACHED = 0
 PIN_NO_SYMBOL = 0
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
