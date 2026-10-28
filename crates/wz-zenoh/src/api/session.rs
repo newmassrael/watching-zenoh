@@ -2077,17 +2077,153 @@ mod tokio_engine {
             callback,
             _notifier: notifier,
         });
+        let presence = Arc::new(std::sync::Mutex::new(Presence::default()));
         Arc::new(move || {
             let delivery = Arc::clone(&delivery);
-            Box::new(
-                move |change: LivelinessSample<'_>| match liveliness_sample_of(&change) {
+            let mut leg = PresenceLeg::mint(&presence);
+            Box::new(move |change: LivelinessSample<'_>| {
+                let told = match change.kind {
+                    LivelinessSampleKind::Put => leg.arrives(change.keyexpr, change.token_id),
+                    LivelinessSampleKind::Delete => leg.leaves(change.keyexpr, change.token_id),
+                };
+                if !told {
+                    return;
+                }
+                match liveliness_sample_of(&change) {
                     Ok(sample) => delivery.callback.call(sample),
                     Err(error) => {
                         tracing::error!("a liveliness change could not be delivered: {error}")
                     }
-                },
-            )
+                }
+            })
         })
+    }
+
+    /// Which tokens a liveliness subscription has been told of, by key: a token is alive on a key
+    /// while any source holds one there, and the subscriber hears of the key when the first comes
+    /// and of its going when the last is retracted. Upstream's routing tables do this between a
+    /// node's faces and its session (a key has one declaration toward the session however many
+    /// tokens sit on it, and the same session may declare several), and this engine's session is
+    /// told by each face directly. A source is a leg of the subscription (a face, or the session
+    /// itself) and the id the token has there.
+    #[derive(Default)]
+    struct Presence {
+        next_leg: u64,
+        alive: std::collections::HashMap<String, std::collections::HashSet<(u64, u64)>>,
+    }
+
+    /// One leg's view of the [`Presence`] its subscription shares.
+    struct PresenceLeg {
+        presence: Arc<std::sync::Mutex<Presence>>,
+        leg: u64,
+    }
+
+    impl PresenceLeg {
+        fn mint(presence: &Arc<std::sync::Mutex<Presence>>) -> Self {
+            let mut shared = presence
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let leg = shared.next_leg;
+            shared.next_leg += 1;
+            Self {
+                presence: Arc::clone(presence),
+                leg,
+            }
+        }
+
+        /// Token `id` is alive on `key` at this leg: whether it is the first source of the key.
+        fn arrives(&mut self, key: &str, id: u64) -> bool {
+            let mut shared = self
+                .presence
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let sources = shared.alive.entry(key.to_owned()).or_default();
+            let first = sources.is_empty();
+            sources.insert((self.leg, id));
+            first
+        }
+
+        /// Token `id` is retracted on `key` at this leg: whether no source of the key is left. A
+        /// retraction of a token this leg never told of (one a peer names by its key) is told when
+        /// nothing else keeps the key alive.
+        fn leaves(&mut self, key: &str, id: u64) -> bool {
+            let mut shared = self
+                .presence
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(sources) = shared.alive.get_mut(key) else {
+                return true;
+            };
+            sources.remove(&(self.leg, id));
+            if sources.is_empty() {
+                shared.alive.remove(key);
+                true
+            } else {
+                false
+            }
+        }
+    }
+
+    impl Drop for PresenceLeg {
+        /// A leg that goes (its face is down) holds no token alive any longer.
+        fn drop(&mut self) {
+            let mut shared = self
+                .presence
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let leg = self.leg;
+            shared.alive.retain(|_, sources| {
+                sources.retain(|(source, _)| *source != leg);
+                !sources.is_empty()
+            });
+        }
+    }
+
+    #[cfg(test)]
+    mod presence_tests {
+        use super::*;
+
+        fn legs(n: usize) -> Vec<PresenceLeg> {
+            let presence = Arc::new(std::sync::Mutex::new(Presence::default()));
+            (0..n).map(|_| PresenceLeg::mint(&presence)).collect()
+        }
+
+        #[test]
+        fn a_key_is_told_when_its_first_token_comes_and_its_last_goes() {
+            let mut leg = legs(1).remove(0);
+            assert!(leg.arrives("a/b", 1));
+            assert!(!leg.arrives("a/b", 2), "a second token on the key");
+            assert!(!leg.leaves("a/b", 1), "one of two is retracted");
+            assert!(leg.leaves("a/b", 2), "the last one");
+            assert!(leg.arrives("a/b", 3), "the key is alive again");
+        }
+
+        #[test]
+        fn tokens_of_two_faces_on_one_key_keep_it_alive_together() {
+            let mut all = legs(2);
+            let (mut first, mut second) = (all.remove(0), all.remove(0));
+            // The same id at two faces is two tokens.
+            assert!(first.arrives("k", 7));
+            assert!(!second.arrives("k", 7));
+            assert!(!first.leaves("k", 7));
+            assert!(second.leaves("k", 7));
+        }
+
+        #[test]
+        fn a_retraction_of_a_key_nobody_told_of_is_told() {
+            let mut leg = legs(1).remove(0);
+            assert!(leg.leaves("sourced/key", 0));
+        }
+
+        #[test]
+        fn a_leg_that_goes_keeps_nothing_alive() {
+            let mut all = legs(2);
+            let (mut first, mut second) = (all.remove(0), all.remove(0));
+            assert!(first.arrives("k", 1));
+            assert!(!second.arrives("k", 1));
+            drop(first);
+            assert!(second.leaves("k", 1), "the other face's token was the last");
+        }
     }
 
     /// The sample a token coming alive or going is: its key, with no payload, as upstream makes
