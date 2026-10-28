@@ -17,4 +17,6 @@
 #[cfg(feature = "clock-source")]
 pub mod clock_registry;
 pub mod node_clock;
+#[cfg(feature = "time-hlc")]
+pub mod standing_cell;
 pub mod timestamp_source;

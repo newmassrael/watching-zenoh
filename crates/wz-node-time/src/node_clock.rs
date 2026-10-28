@@ -241,13 +241,33 @@ struct NodeClock {
     hlc: wz_session_core::hlc::Hlc<NodeEpoch>,
     /// This node's zid, as `TimestampHint::zid` carries it on every stamp.
     zid: Vec<u8>,
-    /// How far the clock is to be trusted, as the host last reported it. Moved only by the host's
-    /// reports, under the lock; read by `trusted`, which is what the stamping path looks at.
-    standing: std::sync::Mutex<wz_session_core::clock_standing::ClockStanding>,
-    /// `standing.is_trusted()` as of the last report, so a stamp reads one atomic and not a lock.
-    trusted: core::sync::atomic::AtomicBool,
+    /// How far the clock is to be trusted, as the host last reported it.
+    standing: StandingHome,
     /// Data this node passed on unstamped because of the `trusted-only` policy.
     unstamped: core::sync::atomic::AtomicU32,
+}
+
+/// Where a node's clock keeps its standing. A node over the system clock has a cell of its own. A
+/// node over a registry shares the registry's, because the registered clocks are the process's and
+/// so is what the host knows about them: one report moves every node that reads them.
+#[cfg(feature = "time-hlc")]
+enum StandingHome {
+    /// Built outside a `clock-source` build, and by the tests of one.
+    #[cfg_attr(feature = "clock-source", allow(dead_code))]
+    Own(Box<crate::standing_cell::StandingCell>),
+    #[cfg(feature = "clock-source")]
+    Shared(&'static crate::clock_registry::ClockRegistry),
+}
+
+#[cfg(feature = "time-hlc")]
+impl StandingHome {
+    fn cell(&self) -> &crate::standing_cell::StandingCell {
+        match self {
+            Self::Own(cell) => cell,
+            #[cfg(feature = "clock-source")]
+            Self::Shared(registry) => registry.standing(),
+        }
+    }
 }
 
 /// The time source a node's clock reads, behind a pointer so the node can be handed a source other
@@ -303,16 +323,17 @@ impl NodeHlc {
     pub fn for_node(zid: &[u8], whatami: WhatAmI, enabled: TimestampingEnabled) -> Self {
         #[cfg(all(feature = "time-hlc", feature = "clock-source"))]
         {
+            Self::for_node_with_registry(zid, whatami, enabled, &crate::clock_registry::GLOBAL)
+        }
+        #[cfg(all(feature = "time-hlc", not(feature = "clock-source")))]
+        {
             Self::over_source(
                 zid,
                 whatami,
                 enabled,
-                crate::clock_registry::RegisteredOrSystem(&crate::clock_registry::GLOBAL),
+                crate::timestamp_source::SystemEpoch,
+                StandingHome::Own(Box::default()),
             )
-        }
-        #[cfg(all(feature = "time-hlc", not(feature = "clock-source")))]
-        {
-            Self::over_source(zid, whatami, enabled, crate::timestamp_source::SystemEpoch)
         }
         #[cfg(not(feature = "time-hlc"))]
         {
@@ -335,18 +356,23 @@ impl NodeHlc {
             whatami,
             enabled,
             crate::clock_registry::RegisteredOrSystem(registry),
+            StandingHome::Shared(registry),
         )
     }
 
-    /// The node over `source`, for the role gate `enabled` says.
+    /// The node over `source`, for the role gate `enabled` says, keeping its standing in
+    /// `standing`.
     #[cfg(feature = "time-hlc")]
     fn over_source(
         zid: &[u8],
         whatami: WhatAmI,
         enabled: TimestampingEnabled,
         source: impl wz_session_core::epoch::EpochSource + Send + Sync + 'static,
+        standing: StandingHome,
     ) -> Self {
-        let clock = enabled.get(whatami).then(|| build_clock(zid, source));
+        let clock = enabled
+            .get(whatami)
+            .then(|| build_clock(zid, source, standing));
         // Upstream's shipped default; `with_drop_future_timestamp` is how a
         // host that read the key states otherwise.
         Self {
@@ -376,7 +402,9 @@ impl NodeHlc {
     pub fn report_sync_acquired(&self) -> bool {
         #[cfg(feature = "time-hlc")]
         {
-            self.report(|standing| standing.sync_acquired())
+            self.clock
+                .as_deref()
+                .is_some_and(|clock| clock.standing.cell().report_sync_acquired())
         }
         #[cfg(not(feature = "time-hlc"))]
         {
@@ -389,7 +417,9 @@ impl NodeHlc {
     pub fn report_sync_lost(&self) -> bool {
         #[cfg(feature = "time-hlc")]
         {
-            self.report(|standing| standing.sync_lost())
+            self.clock
+                .as_deref()
+                .is_some_and(|clock| clock.standing.cell().report_sync_lost())
         }
         #[cfg(not(feature = "time-hlc"))]
         {
@@ -400,38 +430,17 @@ impl NodeHlc {
     /// The host reports that its bound on running without a reference has passed.
     #[cfg(feature = "clock-source")]
     pub fn report_holdover_expired(&self) -> bool {
-        self.report(|standing| standing.holdover_expired())
-    }
-
-    /// Give the standing machine one event, then refresh the atomic the stamping path reads.
-    #[cfg(feature = "time-hlc")]
-    fn report(
-        &self,
-        event: impl FnOnce(&mut wz_session_core::clock_standing::ClockStanding) -> bool,
-    ) -> bool {
-        let Some(clock) = self.clock.as_deref() else {
-            return false;
-        };
-        let mut standing = clock
-            .standing
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let changed = event(&mut standing);
-        clock
-            .trusted
-            .store(standing.is_trusted(), core::sync::atomic::Ordering::Release);
-        changed
+        self.clock
+            .as_deref()
+            .is_some_and(|clock| clock.standing.cell().report_holdover_expired())
     }
 
     /// How far the clock is to be trusted now, or `None` on a node with no clock.
     #[cfg(feature = "time-hlc")]
     pub fn clock_standing(&self) -> Option<wz_session_core::clock_quality::ClockQualityState> {
-        let clock = self.clock.as_deref()?;
-        let standing = clock
-            .standing
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Some(standing.state())
+        self.clock
+            .as_deref()
+            .map(|clock| clock.standing.cell().state())
     }
 
     /// How many data messages this node passed on unstamped because the `trusted-only` policy
@@ -452,7 +461,7 @@ impl NodeHlc {
     /// Whether the `trusted-only` policy forbids stamping now.
     #[cfg(feature = "time-hlc")]
     fn quality_forbids_stamping(&self, clock: &NodeClock) -> bool {
-        self.trusted_only && !clock.trusted.load(core::sync::atomic::Ordering::Acquire)
+        self.trusted_only && !clock.standing.cell().is_trusted()
     }
 
     /// A node that does not timestamp. Distinct from [`Self::for_node`] with a
@@ -668,13 +677,13 @@ impl core::fmt::Debug for NodeHlc {
 fn build_clock(
     zid: &[u8],
     source: impl wz_session_core::epoch::EpochSource + Send + Sync + 'static,
+    standing: StandingHome,
 ) -> std::sync::Arc<NodeClock> {
     let max_delta = max_delta_from(std::env::var("UHLC_MAX_DELTA_MS").ok().as_deref());
     std::sync::Arc::new(NodeClock {
         hlc: wz_session_core::hlc::Hlc::new(NodeEpoch(Box::new(source)), max_delta),
         zid: zid.to_vec(),
-        standing: std::sync::Mutex::new(wz_session_core::clock_standing::ClockStanding::new()),
-        trusted: core::sync::atomic::AtomicBool::new(false),
+        standing,
         unstamped: core::sync::atomic::AtomicU32::new(0),
     })
 }

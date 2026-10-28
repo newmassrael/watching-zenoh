@@ -22,10 +22,11 @@
 //! afresh each time, so the order of `register` and the node's construction does not matter.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::RwLock;
+use std::sync::{OnceLock, RwLock};
 
 use wz_session_core::epoch::{EpochSource, EpochUnavailable, SinceEpoch};
 
+use crate::standing_cell::StandingCell;
 use crate::timestamp_source::SystemEpoch;
 
 /// A registered source, by which it is removed again.
@@ -53,6 +54,10 @@ pub struct ClockRegistry {
     /// `entries.len()` as of the last change, so the empty registry is read without a lock.
     count: AtomicUsize,
     table: RwLock<Table>,
+    /// How far the registered clocks are to be trusted, as the host reports it. The registered
+    /// clocks are the process's, and so is what the host knows about them: every node that reads
+    /// the registry shares this one standing.
+    standing: OnceLock<StandingCell>,
 }
 
 impl ClockRegistry {
@@ -65,7 +70,13 @@ impl ClockRegistry {
                 next_id: 0,
                 entries: Vec::new(),
             }),
+            standing: OnceLock::new(),
         }
+    }
+
+    /// The standing of the clocks registered here, which the host reports through it.
+    pub fn standing(&self) -> &StandingCell {
+        self.standing.get_or_init(StandingCell::new)
     }
 
     /// Register `source` after the ones already here.

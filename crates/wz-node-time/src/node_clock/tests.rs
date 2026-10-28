@@ -89,11 +89,17 @@ impl wz_session_core::epoch::EpochSource for UnsetEpoch {
     }
 }
 
+/// A standing of a node's own, as a node over the system clock keeps.
+#[cfg(feature = "time-hlc")]
+fn own_standing() -> StandingHome {
+    StandingHome::Own(Box::default())
+}
+
 /// A stamping node whose physical clock is frozen.
 #[cfg(feature = "time-hlc")]
 fn frozen_node(zid: &[u8]) -> NodeHlc {
     NodeHlc {
-        clock: Some(build_clock(zid, FrozenEpoch)),
+        clock: Some(build_clock(zid, FrozenEpoch, own_standing())),
         drop_future_timestamp: false,
         trusted_only: false,
     }
@@ -190,6 +196,35 @@ fn a_node_reads_a_source_registered_after_it_was_built_and_none_it_stamps_nothin
     );
 }
 
+#[cfg(feature = "clock-source")]
+#[test]
+fn nodes_over_one_registry_share_its_standing_and_the_host_reports_through_either() {
+    use crate::clock_registry::ClockRegistry;
+    let registry: &'static ClockRegistry = Box::leak(Box::new(ClockRegistry::new(1)));
+    let build = |zid: u8| {
+        NodeHlc::for_node_with_registry(
+            &[zid],
+            WhatAmI::Router,
+            TimestampingEnabled::default(),
+            registry,
+        )
+        .with_trusted_only_stamping(true)
+    };
+    let (one, two) = (build(1), build(2));
+    assert!(
+        one.stamp().is_none() && two.stamp().is_none(),
+        "nothing reported yet"
+    );
+
+    // The host reports to the registry, which it holds, and not to either node.
+    assert!(registry.standing().report_sync_acquired());
+    assert!(one.stamp().is_some() && two.stamp().is_some());
+
+    // A report through a node is the same report.
+    assert!(one.report_sync_lost());
+    assert_eq!(registry.standing().changes(), 2);
+}
+
 #[cfg(feature = "time-hlc")]
 #[test]
 fn clones_share_one_standing() {
@@ -214,7 +249,7 @@ fn a_node_with_no_clock_has_no_standing_to_report() {
 #[test]
 fn a_node_whose_source_cannot_say_the_time_stamps_nothing() {
     let node = NodeHlc {
-        clock: Some(build_clock(&[0x01], UnsetEpoch)),
+        clock: Some(build_clock(&[0x01], UnsetEpoch, own_standing())),
         drop_future_timestamp: false,
         trusted_only: false,
     };
