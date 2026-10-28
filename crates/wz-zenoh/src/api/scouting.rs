@@ -211,8 +211,7 @@ mod tests {
     /// A group and port of this test's own, so that tests that run side by side, and nodes that
     /// run beside them, do not answer each other's scouts.
     fn group() -> String {
-        let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("a free port");
-        let port = socket.local_addr().expect("an address").port();
+        let port = wz_runtime_tokio_test_support::free_port();
         format!("224.0.0.231:{port}")
     }
 
@@ -240,11 +239,7 @@ mod tests {
     }
 
     fn free_tcp_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0")
-            .expect("a free port")
-            .local_addr()
-            .expect("an address")
-            .port()
+        wz_runtime_tokio_test_support::free_port()
     }
 
     #[test]

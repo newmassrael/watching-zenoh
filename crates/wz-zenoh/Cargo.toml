@@ -121,6 +121,9 @@ zenoh-util = { path = "../wz-zenoh-util" }
 # The tests of the cancellation token run on a runtime of several threads.
 [dev-dependencies]
 tokio ={ version = "1.47.1", default-features = false, features = ["macros", "rt-multi-thread", "sync", "time"] }
+# The numbers the scouting tests give to sockets of their own (a group's port, a TCP listener's):
+# a number the kernel never autoselects, taken without a socket bound for the moment of the pick.
+wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support" }
 
 [lints]
 workspace = true

@@ -4598,6 +4598,7 @@ dependencies = [
  "wz-capi-core",
  "wz-capi-port",
  "wz-runtime-tokio",
+ "wz-runtime-tokio-test-support",
  "zenoh-buffers",
  "zenoh-codec",
  "zenoh-collections",
