@@ -256,6 +256,7 @@ impl<V> LinkstatepeerInterest<V> {
     /// at both of its liveliness sites), so this is reachable only from a peer
     /// that builds the message itself -- but wz is a drop-in for the node that
     /// ANSWERS, and upstream answers it.
+    #[cfg(feature = "routing-token-tables")]
     pub(crate) fn unrestricted_entries(&self, exclude: Option<&Zid>) -> Vec<(&str, Zid, &V)> {
         self.entries_matching(None, exclude)
     }

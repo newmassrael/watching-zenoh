@@ -1028,7 +1028,7 @@ routing-interest-broker = []
 # `routing-peer` (the LinkstateForwarder owns the pending table) and the
 # runtime-crate feature that carries the cfg sites.
 routing-interest-pending-gc = [
-    "routing-peer",
+    "routing-router-hat",
     "wz-runtime-tokio?/routing-interest-pending-gc",
 ]
 routing-namespace = ["wz-runtime-tokio?/routing-namespace"]

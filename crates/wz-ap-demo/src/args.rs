@@ -3717,13 +3717,12 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
     if !cfg!(any(feature = "routing-peer", feature = "router-hat-router")) {
         out.push("timestamping/drop_future_timestamp");
     }
-    // Item 751 step 7b — in EVERY build, no longer only one without
-    // `routing-interest-pending-gc`: the peer is the region-hat forwarder, which brokers no
-    // interest to its peers (`docs/peer-region-hats.md`, sections 10 and 12a), so there is no
-    // pending interest for a deadline to bound and a document naming the key has nothing to
-    // reach. Reported as read-and-not-applied, with the build as the reason, and never
-    // expanded into a `--interest-timeout` the peer would refuse.
-    out.push("routing/interests/timeout");
+    // `routing/interests/timeout`'s sink is the interest broker's deadline
+    // (`--interest-timeout`), which a build without `routing-interest-pending-gc` does not
+    // carry: the peer node brokers a client's interest to its gateways only with it.
+    if !cfg!(feature = "routing-interest-pending-gc") {
+        out.push("routing/interests/timeout");
+    }
     if !cfg!(feature = "transport-qos") {
         out.push("transport/multicast/qos/enabled");
     }

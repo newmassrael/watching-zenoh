@@ -1,24 +1,41 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `routing/interests/timeout` read from a `--config` FILE, on a peer that brokers no
-//! interest (item 751 step 7b, `docs/peer-region-hats.md` sections 10 and 12a).
+//! `routing/interests/timeout` read from a `--config` FILE: the frozen-gateway
+//! arm of `wz_peer_interest_pending_gc_pico_interop.rs`, with the brokered
+//! interest's timeout stated in a stock zenoh document instead of
+//! `--interest-timeout`.
 //!
-//! This file was the document-to-flag half of `wz_peer_interest_pending_gc_pico_interop.rs`:
-//! the brokered interest's deadline stated in a stock zenoh document instead of
-//! `--interest-timeout`, and a frozen upstream that the deadline had to outlast. The
-//! region-hat peer has no pending interest for a deadline to bound, so the key has nothing
-//! to reach, and what the file can still show is two things:
+//! ## What this adds over the flag-level arm
 //!
-//! - A document naming the key does NOT stop the peer, and is reported read-and-not-applied
-//!   with the build as the reason, never expanded into a `--interest-timeout` the peer
-//!   refuses. The foreign client's current interest is answered promptly, the upstream
-//!   frozen as before.
-//! - The control: a document that does not name the key changes nothing about that, and
-//!   is not reported.
+//! The flag arm proves the GC deadline follows `--interest-timeout`. The step
+//! from `routing.interests.timeout` to that flag is covered by argv unit tests
+//! only. Here the broker peer is given `--peer 127.0.0.1:0 --connect <gateway>
+//! --config <file>` and no timeout flag, so a foreign `z_get_liveliness` returns
+//! inside the window below only if the FILE'S millisecond value reached the
+//! forwarder's deadline.
 //!
-//! Requires: wz-ap-demo built with `--features routing-peer,zenoh-config` and the zenoh-pico
-//! CLI. Layer E6's lane owns that build.
+//! The upstream is a wz `--router-hat`, because the broker asks gateways and no other peer (the
+//! pin sends an interest on only to the faces whose remote bound is south,
+//! `zenoh/src/net/routing/hat/peer/interests.rs` @ `.filter(|f| f.remote_bound.is_south())`;
+//! `docs/peer-region-hats.md`, section 14).
+//!
+//! ## The control
+//!
+//! The same topology and the same frozen gateway, with a file that does not name
+//! the key. The forwarder's own default is 10 s, so the foreign client must still
+//! be waiting at the budget (8 s, under both the default deadline and the session
+//! lease) and the GC must not yet have reaped anything. A broker that ignored the
+//! file would behave as the control in both legs; one that applied it to everything
+//! would return early in the control.
+//!
+//! The bounds are the flag-level file's: pico has no timeout of its own for a
+//! current interest (the note in the flag-level file's header, which cites the
+//! pico source), so its process exit is the wire observable, a frozen gateway
+//! cannot answer, and the lease cannot expire in under 10s.
+//!
+//! Requires: wz-ap-demo built with `--features routing-peer,router-hat-router,routing-interest-pending-gc,zenoh-config`
+//! and the zenoh-pico CLI. Layer E6's lane owns that build.
 
 use std::fs::File;
 use std::io::Write;
@@ -31,26 +48,51 @@ use wz_integration_tests::common::{
     wait_for_exit, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
 };
 
-/// The keyexpr pico solicits. RESTRICTED (a literal prefix + `**`), because the
-/// broker deliberately declines to propagate a match-all interest.
+/// The keyexpr pico solicits. RESTRICTED (a literal prefix + `**`).
 const GET_KEYEXPR: &str = "group1/**";
 
-/// The document: the interest deadline the retired broker would have honoured, 2.5 s.
+/// The document: a brokered interest's GC deadline of 2.5 s.
 const DOC_INTEREST_TIMEOUT: &str = "{ routing: { interests: { timeout: 2500 } } }";
 /// The document: names another key and leaves the interest timeout unnamed.
 const DOC_WITHOUT_THE_KEY: &str = "{ timestamping: { enabled: false } }";
 
-/// Upper bound on the arm, under the 10 s lease so a return cannot come from the face-down
-/// path.
-const ARM_BUDGET: Duration = Duration::from_secs(8);
+/// The GC deadline `DOC_INTEREST_TIMEOUT` states, in milliseconds.
+const INTEREST_TIMEOUT_MS: u64 = 2500;
 
-/// How soon the foreign client must be answered: well under the 2.5 s the retired broker's
-/// deadline named.
-const PROMPT: Duration = Duration::from_millis(1_500);
+/// Upper bound on the frozen arm. Below the 10 s lease and the 10 s default
+/// deadline by a wide margin, so a pass cannot have come from either.
+const FROZEN_ARM_BUDGET: Duration = Duration::from_secs(8);
 
-/// A `--peer` demo on an ephemeral port, optionally dialing `connect` and
-/// optionally given a `--config` document.
-struct Peer {
+/// Lower bound on the frozen arm. A frozen process cannot answer, so nothing can
+/// terminate the client before the GC deadline.
+const FROZEN_ARM_FLOOR: Duration = Duration::from_millis(1_500);
+
+/// What a node is run as.
+#[derive(Clone, Copy)]
+enum Kind {
+    Peer,
+    RouterHat,
+}
+
+impl Kind {
+    fn flag(self) -> &'static str {
+        match self {
+            Kind::Peer => "--peer",
+            Kind::RouterHat => "--router-hat",
+        }
+    }
+
+    fn listening(self) -> &'static str {
+        match self {
+            Kind::Peer => "peer: listening on 127.0.0.1:",
+            Kind::RouterHat => "router-hat: listening on 127.0.0.1:",
+        }
+    }
+}
+
+/// A demo node on an ephemeral port, optionally dialing `connect` and optionally given a
+/// `--config` document.
+struct Node {
     guard: ChildGuard,
     stderr: File,
     port: u16,
@@ -58,9 +100,9 @@ struct Peer {
     _config: Option<tempfile::NamedTempFile>,
 }
 
-fn spawn_peer(label: &str, connect: Option<u16>, document: Option<&str>) -> Peer {
-    let stderr = tempfile::tempfile().expect("tempfile for peer stderr");
-    let writer = stderr.try_clone().expect("dup peer stderr handle");
+fn spawn(label: &str, kind: Kind, connect: Option<u16>, document: Option<&str>) -> Node {
+    let stderr = tempfile::tempfile().expect("tempfile for node stderr");
+    let writer = stderr.try_clone().expect("dup node stderr handle");
     let mut reader = stderr;
 
     let config = document.map(|text| {
@@ -76,7 +118,7 @@ fn spawn_peer(label: &str, connect: Option<u16>, document: Option<&str>) -> Peer
     let demo = wz_ap_demo_binary();
     assert_demo_binary_newer_than_sources(&demo);
     let mut cmd = Command::new(demo);
-    cmd.args(["--peer", "127.0.0.1:0"]);
+    cmd.args([kind.flag(), "127.0.0.1:0"]);
     let dial;
     if let Some(port) = connect {
         dial = format!("127.0.0.1:{port}");
@@ -86,29 +128,32 @@ fn spawn_peer(label: &str, connect: Option<u16>, document: Option<&str>) -> Peer
         cmd.arg("--config").arg(file.path());
     }
     let mut guard = ChildGuard::wrap(
-        format!("region-hat peer {label}"),
+        format!("interest-broker {label}"),
         cmd.env("RUST_LOG", "info")
             .stdout(Stdio::null())
             .stderr(Stdio::from(writer))
             .spawn()
-            .expect("spawn wz-ap-demo --peer"),
+            .expect("spawn wz-ap-demo"),
     );
-    let captured = wait_for_substring(
-        &mut reader,
-        "peer: listening on 127.0.0.1:",
-        Duration::from_secs(5),
-    )
-    .unwrap_or_else(|c| {
-        let _ = guard.child_mut().kill();
-        let _ = guard.child_mut().wait();
-        panic!(
-            "wz-ap-demo did not bind a peer listener within 5s (is the binary built with \
-             --features routing-peer,zenoh-config?)\n\
-             --- peer {label} stderr ---\n{c}"
-        );
-    });
+    let captured = wait_for_substring(&mut reader, kind.listening(), Duration::from_secs(5))
+        .unwrap_or_else(|c| {
+            let _ = guard.child_mut().kill();
+            let _ = guard.child_mut().wait();
+            panic!(
+                "wz-ap-demo did not bind a listener within 5s (is the binary built with \
+                 --features routing-peer,router-hat-router,routing-interest-pending-gc,zenoh-config?)\n\
+                 --- {label} stderr ---\n{c}"
+            );
+        });
+    // Every feature-set lane writes the SAME artifact path, so a stale binary from
+    // a neighbouring lane is the standing hazard; the demo prints its own closure.
+    assert!(
+        captured.contains("routing-interest-pending-gc"),
+        "{label} was built WITHOUT routing-interest-pending-gc — this lane would \
+         measure the wrong binary.\n--- BUILD FEATURES line ---\n{captured}"
+    );
     let port = listen_port(&captured);
-    Peer {
+    Node {
         guard,
         stderr: reader,
         port,
@@ -116,7 +161,7 @@ fn spawn_peer(label: &str, connect: Option<u16>, document: Option<&str>) -> Peer
     }
 }
 
-impl Peer {
+impl Node {
     fn signal(&mut self, sig: &str) {
         let pid = self.guard.child_mut().id().to_string();
         let status = Command::new("kill")
@@ -170,81 +215,115 @@ fn run_pico_get(port: u16, budget: Duration) -> (bool, Duration, String) {
 }
 
 /// Parse the `reaped by the GC` count out of the demo's own broker witness line.
-fn ask_with_the_upstream_frozen(document: &str) -> (bool, Duration, String, String) {
-    let mut upstream = spawn_peer("upstream", None, None);
-    let mut peer = spawn_peer("peer", Some(upstream.port), Some(document));
-    // The mesh face exists BEFORE the upstream is frozen, so the peer has an upstream that
-    // answers nothing, the case the retired broker had to time out.
-    let mesh = wait_for_substring(&mut peer.stderr, "face 0 UP", Duration::from_secs(10))
-        .unwrap_or_else(|c| panic!("the peer never linked to its upstream\n{c}"));
-    assert!(
-        mesh.contains("whatami Some(Peer)"),
-        "the upstream face must be a PEER face.\n{mesh}"
-    );
-
-    upstream.signal("-STOP");
-    let (exited, elapsed, pico_out) = run_pico_get(peer.port, ARM_BUDGET);
-    upstream.signal("-CONT");
-
-    let peer_log = peer.finish();
-    let _ = upstream.finish();
-    (exited, elapsed, pico_out, peer_log)
+fn gc_reaped(captured: &str) -> u64 {
+    let line = captured
+        .lines()
+        .find(|l| l.contains("peer: interest broker;"))
+        .unwrap_or_else(|| {
+            panic!(
+                "the broker witness line is absent — the peer was not built with the atom's \
+                 feature.\n--- peer stderr ---\n{captured}"
+            )
+        });
+    let (before, _) = line
+        .rsplit_once(" reaped by the GC")
+        .expect("the witness line ends with the GC count");
+    before
+        .rsplit(", ")
+        .next()
+        .expect("a count precedes `reaped by the GC`")
+        .trim()
+        .parse()
+        .expect("the GC count is a number")
 }
 
-/// A `--config` file stating `routing.interests.timeout: 2500` does not stop the peer, is
-/// reported as read and not applied, and the foreign client is answered promptly with the
-/// upstream frozen.
-// wz-proves: none -- the DOCUMENT half of the frozen arm in
-// wz_peer_interest_pending_gc_pico_interop.rs; it shows a document naming the retired key is
-// reported and does not wedge the peer, and claims no atom of its own.
+/// Start a gateway and a broker peer given `document`, freeze the gateway AFTER the mesh face
+/// is up, and run one foreign liveliness get against the broker. Returns what the foreign
+/// client did and what the broker logged.
+fn freeze_the_gateway_and_ask(document: &str) -> (bool, Duration, String, String) {
+    let mut gateway = spawn("gateway", Kind::RouterHat, None, None);
+    let mut broker = spawn("broker", Kind::Peer, Some(gateway.port), Some(document));
+    // The mesh face must exist BEFORE the gateway is frozen, else there is nothing to
+    // propagate to and this degrades into an inline answer.
+    let mesh = wait_for_substring(&mut broker.stderr, "face 0 UP", Duration::from_secs(10))
+        .unwrap_or_else(|c| panic!("the broker never linked to its gateway\n{c}"));
+    assert!(
+        mesh.contains("whatami Some(Router)"),
+        "the upstream face must be a ROUTER face — the gateway the broker propagates to.\n{mesh}"
+    );
+
+    gateway.signal("-STOP");
+    let (exited, elapsed, pico_out) = run_pico_get(broker.port, FROZEN_ARM_BUDGET);
+    gateway.signal("-CONT");
+
+    let broker_log = broker.finish();
+    let _ = gateway.finish();
+    (exited, elapsed, pico_out, broker_log)
+}
+
+/// A `--config` file stating `routing.interests.timeout: 2500` makes the broker's
+/// GC finalize the foreign client inside the window, with exactly one entry
+/// reaped.
+// wz-proves: none -- the DOCUMENT -> flag half of the flag-level frozen arm in
+// wz_peer_interest_pending_gc_pico_interop.rs, which carries the atom claim; pico only
+// reads the broker's decision.
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer,zenoh-config + zenoh-pico z_get_liveliness); Layer E6 runs via --ignored"]
-fn wz_peer_reports_a_config_files_interest_timeout_as_not_applied_and_answers_promptly() {
-    let (exited, elapsed, pico_out, peer_log) = ask_with_the_upstream_frozen(DOC_INTEREST_TIMEOUT);
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer,router-hat-router,routing-interest-pending-gc,zenoh-config + zenoh-pico z_get_liveliness); Layer E6 runs via --ignored"]
+fn wz_peer_gc_terminates_a_pico_liveliness_get_at_the_timeout_a_config_file_states() {
+    let (exited, elapsed, pico_out, broker_log) = freeze_the_gateway_and_ask(DOC_INTEREST_TIMEOUT);
 
     assert!(
-        !peer_log.contains("\"--interest-timeout\""),
-        "the file's `routing.interests.timeout` was expanded into `--interest-timeout`, which \
-         the peer refuses.\n--- peer stderr ---\n{peer_log}"
-    );
-    assert!(
-        peer_log.contains("routing/interests/timeout"),
-        "the peer does not say it read `routing/interests/timeout` and applied nothing.\n\
-         --- peer stderr ---\n{peer_log}"
+        broker_log.contains("\"--interest-timeout\""),
+        "the broker's report of the expansion does not name `--interest-timeout`, so the \
+         file's `routing.interests.timeout` never became the flag\n--- broker stderr ---\n{broker_log}"
     );
     assert!(
         exited,
-        "z_get_liveliness never returned within {ARM_BUDGET:?} against a frozen upstream.\n\
-         --- z_get_liveliness stdout ---\n{pico_out}\n--- peer stderr ---\n{peer_log}"
+        "z_get_liveliness never returned within {FROZEN_ARM_BUDGET:?}: the file's \
+         {INTEREST_TIMEOUT_MS}ms deadline did not reach the GC, so the foreign client \
+         waited out the 10s default. pico has no timeout of its own.\n--- \
+         z_get_liveliness stdout ---\n{pico_out}\n--- broker stderr ---\n{broker_log}"
     );
     assert!(
-        elapsed < PROMPT,
-        "z_get_liveliness took {elapsed:?}: the peer waited on its upstream.\n\
-         --- peer stderr ---\n{peer_log}"
+        elapsed >= FROZEN_ARM_FLOOR,
+        "z_get_liveliness returned in {elapsed:?}, sooner than the {INTEREST_TIMEOUT_MS}ms \
+         GC deadline — the interest was answered INLINE, so this leg proves nothing.\n\
+         --- broker stderr ---\n{broker_log}"
+    );
+    assert_eq!(
+        gc_reaped(&broker_log),
+        1,
+        "the GC must have reaped exactly the one propagated interest.\n\
+         --- broker stderr ---\n{broker_log}"
     );
 }
 
-/// CONTROL, key absent: a file that leaves `routing.interests.timeout` unnamed is not
-/// reported for it, and the answer is as prompt.
-// wz-proves: none -- the key-absent control of the leg above; it shows the report is caused
-// by the file's key and claims no atom of its own.
+/// CONTROL, key absent: the same frozen gateway and a file that leaves
+/// `routing.interests.timeout` unnamed keep the forwarder's 10 s default, so the
+/// foreign client is still waiting at the 8 s budget and nothing was reaped.
+// wz-proves: none -- the key-absent control of the leg above; it shows the early
+// return is caused by the file's key and claims no atom of its own.
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer,zenoh-config + zenoh-pico z_get_liveliness); Layer E6 runs via --ignored"]
-fn wz_peer_without_the_interest_timeout_key_reports_nothing_and_answers_promptly() {
-    let (exited, elapsed, pico_out, peer_log) = ask_with_the_upstream_frozen(DOC_WITHOUT_THE_KEY);
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer,router-hat-router,routing-interest-pending-gc,zenoh-config + zenoh-pico z_get_liveliness); Layer E6 runs via --ignored"]
+fn wz_peer_keeps_a_pico_liveliness_get_pending_when_a_config_file_omits_the_timeout() {
+    let (exited, elapsed, pico_out, broker_log) = freeze_the_gateway_and_ask(DOC_WITHOUT_THE_KEY);
 
     assert!(
-        !peer_log.contains("routing/interests/timeout"),
-        "a file that does not name `routing.interests.timeout` was reported for it.\n\
-         --- peer stderr ---\n{peer_log}"
+        !broker_log.contains("\"--interest-timeout\""),
+        "a file that does not name `routing.interests.timeout` expanded to \
+         `--interest-timeout`\n--- broker stderr ---\n{broker_log}"
     );
     assert!(
-        exited,
-        "z_get_liveliness never returned within {ARM_BUDGET:?} against a frozen upstream.\n\
-         --- z_get_liveliness stdout ---\n{pico_out}\n--- peer stderr ---\n{peer_log}"
+        !exited,
+        "z_get_liveliness returned after {elapsed:?} with the default 10s deadline and a \
+         frozen gateway — the interest was not held by the pending table, so the \
+         sibling leg's early return is not attributable to the file's key.\n--- \
+         z_get_liveliness stdout ---\n{pico_out}\n--- broker stderr ---\n{broker_log}"
     );
-    assert!(
-        elapsed < PROMPT,
-        "z_get_liveliness took {elapsed:?}.\n--- peer stderr ---\n{peer_log}"
+    assert_eq!(
+        gc_reaped(&broker_log),
+        0,
+        "the 10s default deadline had not passed, so the GC must have reaped NOTHING.\n\
+         --- broker stderr ---\n{broker_log}"
     );
 }

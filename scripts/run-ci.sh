@@ -5877,10 +5877,10 @@ layer_c1bb_cargo_test_qos() {
     (cd crates \
         && cargo clippy -p wz-session-core --all-targets --no-default-features --features session-extqos,codec-init-body,codec-push,codec-close --quiet -- -D warnings) \
         || return 1
-    _runci_guarded_test C1bb + cargo test -p wz-runtime-tokio --features routing-peer,transport-qos --lib linkstate --quiet \
+    _runci_guarded_test C1bb + cargo test -p wz-runtime-tokio --features routing-router-hat,transport-qos --lib linkstate --quiet \
         || return 1
     (cd crates \
-        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-peer,transport-qos --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat,transport-qos --quiet -- -D warnings \
         && cargo check -p wz --features transport-qos --quiet)
 }
 
@@ -6432,10 +6432,12 @@ layer_c1ay_cargo_test_router_hat() {
     # The router's counts (`counter`): four UNGATED witnesses of the atomic count (it rises by one,
     # by n and to a peak; many threads lose none; a peak taken from many threads is the greatest
     # offered) and of the gauge (added to and subtracted from many threads, it returns to where it
-    # started). The module is behind `routing-peer` alone, so that is the feature the leg builds.
+    # started). The leg builds `routing-router-hat`: `routing-peer` alone is no longer a
+    # configuration of the runtime crate that stands by itself, since the peer node is the
+    # region-hat forwarder (item 751 step 7).
     # PRINTED by its own command: 4.
     _runci_guarded_test "C1AY counter 4" 4 \
-        cargo test -p wz-runtime-tokio --features routing-peer --lib counter:: --quiet || return 1
+        cargo test -p wz-runtime-tokio --features routing-router-hat --lib counter:: --quiet || return 1
     # The router's uncongested data path in heap allocations and bytes a forward
     # (docs/router-task-per-face.md, Step 6): the same number on every host and in
     # debug and release, so it is a per-commit gate where a wall clock is not. A change that
@@ -6481,7 +6483,10 @@ layer_c1ay_cargo_test_router_hat() {
     # unattributable message, which would strand a face that has merely not
     # finished its handshake. Still `#[cfg(feature = "access-acl")]`, so the
     # five sibling resolutions are unchanged for R2346's reason.
-    _runci_guarded_test "C1AY router_forward 252" 252 \
+    # Item 751 step 7c -- 252 -> 253: `wzconfig_reconfigure_is_inert_without_config_mutate_runtime`,
+    # moved from the retired single-net peer forwarder. Ungated apart from `access-acl`, and
+    # `config-mutate-runtime` must be OFF, which this arm and the hotreload arm below both are.
+    _runci_guarded_test "C1AY router_forward 253" 253 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,access-acl --lib router_forward --quiet || return 1
     # R2348 — a NEW arm, and it exists because without it this round's central
     # tests would have been compiled out while the lane stayed green. The router
@@ -6499,7 +6504,8 @@ layer_c1ay_cargo_test_router_hat() {
     # before the cache is consulted (the same vacuity that made R311y508's first
     # cross-impl leg prove nothing), so a cache test with no policy installed
     # tests nothing.
-    _runci_guarded_test "C1AY router_forward hotreload 255" 255 \
+    # Item 751 step 7c -- 255 -> 256, the same inert witness as the arm above.
+    _runci_guarded_test "C1AY router_forward hotreload 256" 256 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-interceptor-hotreload,access-acl --lib router_forward --quiet || return 1
     # R311y464 — 171 -> 173: y463 added token_current_future_interest_replies_with_a
     # _client_token and token_current_future_interest_matches_a_wildcard_target, both
@@ -6511,7 +6517,10 @@ layer_c1ay_cargo_test_router_hat() {
     # this arm red and the other twenty-seven it reached OK.
     # R3334 — 246 -> 247, and ONLY this arm: the token-arm witness of a token
     # older than a FUTURE-only interest is cfg(routing-token-tables).
-    _runci_guarded_test "C1AY router_forward 294" 294 \
+    # Item 751 step 7c -- 294 -> 295: `an_unrestricted_token_interest_is_answered_with_every_token`
+    # (R2614), moved from the retired single-net peer forwarder, which was the only one that
+    # answered an Interest carrying no keyexpr with the whole table.
+    _runci_guarded_test "C1AY router_forward 295" 295 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --lib router_forward --quiet || return 1
     # R2415 — 146 -> 140. NOT this round's tests: `d7cd078f` re-gated the mcast
     # egress plane from `transport-multicast` onto `router-multicast-faces`, so six
@@ -6538,6 +6547,13 @@ layer_c1ay_cargo_test_router_hat() {
     # introspection handlers and the peers link view all built, and no arm above builds all
     # four. Two tests, one for each mode, found by NAME so that an unrelated test landing in
     # the filter cannot absorb a rename.
+    # Item 751 step 7c -- the interest BROKER (`routing-interest-pending-gc`) on the region-hat
+    # forwarder: 247 -> 253, the six tests it moved here from the retired single-net peer
+    # forwarder (a client's interest reaches a gateway and its final waits; no gateway answers
+    # inline; one gateway for a Current interest and every one for a CurrentFuture; the client's
+    # Final and departure end the copy; the deadline; a gateway going down).
+    _runci_guarded_test "C1AY router_forward interest broker 253" 253 \
+        cargo test -p wz-runtime-tokio --features routing-router-hat,routing-interest-pending-gc --lib router_forward --quiet || return 1
     _runci_guarded_test "C1AY peer scenes frozen 2" 2 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables,pubsub-delete,adminspace-introspection-handlers,adminspace-router-linkstate --lib router_forward::peer_differential_tests::frozen --quiet || return 1
     # R311y786 (§5.21 router-connect-reconcile) — the re-dial BACKOFF. Until y786
@@ -6920,8 +6936,8 @@ layer_c1ay_cargo_test_router_hat() {
         `# dead-code the type nor lose the import. The falsify that removed the` \
         `# growth call reddened exactly here (next_ms unused under -D warnings),` \
         `# which is what makes these two arms load-bearing rather than decorative.` \
-        && cargo clippy -p wz-runtime-tokio --all-targets --no-default-features --features routing-peer,transport-link-tcp,router-connect-reconcile --quiet -- -D warnings \
-        && cargo clippy -p wz-runtime-tokio --all-targets --no-default-features --features routing-peer,transport-link-tcp,transport-multilink --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets --no-default-features --features routing-router-hat,transport-link-tcp,router-connect-reconcile --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets --no-default-features --features routing-router-hat,transport-link-tcp,transport-multilink --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat,adminspace-router-linkstate --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-router-hat,adminspace-router-linkstate --quiet -- -D warnings \
         && cargo build -p wz-ap-demo --features router-multicast-faces --quiet \
@@ -7203,12 +7219,15 @@ layer_c1af_cargo_test_shm() {
     # TWENTY-SEVEN, MEASURED by running this exact command (the 24 above and the three).
     _runci_guarded_test C1af 27 cargo test -p wz-runtime-tokio --features session-extshm,transport-multilink,transport-unicast,transport-link-tcp,transport-qos,codec-push,codec-close --lib shm_auth_segment --quiet \
         || return 1
-    # R3123 -- the routing peer's forwarder with a link joined to its first face, which compiles
-    # only with the routing peer, the extension, multilink and the push codec together and so is
-    # in no other leg: a slice that arrives on the joined link is acknowledged to the joined
-    # link's peer and not to the first link's, and a new establishment on a link withdraws that
-    # link's handoff and leaves the other's alone. TWO, MEASURED by running this exact command.
-    _runci_guarded_test C1af 2 cargo test -p wz-runtime-tokio --features routing-peer,session-extshm,transport-multilink,transport-unicast,transport-link-tcp,transport-qos,codec-push,codec-close --lib shm_joined_tests --quiet \
+    # R3123 -- the region-hat forwarder with a link joined to its first face, which compiles
+    # only with the router hat, the extension, multilink and the push codec together and so is
+    # in no other leg: a Put on the joined link is routed as the first face's (item 751 step 7:
+    # the retired single-net peer forwarder did this and the router did not, and a frame on a
+    # second link was dropped at the face table); a slice that arrives on the joined link is
+    # acknowledged to the joined link's peer and not to the first link's; and a new
+    # establishment on a link withdraws that link's handoff and leaves the other's alone.
+    # THREE, MEASURED by running this exact command.
+    _runci_guarded_test C1af 3 cargo test -p wz-runtime-tokio --features routing-router-hat,session-extshm,transport-multilink,transport-unicast,transport-link-tcp,transport-qos,codec-push,codec-close --lib joined_link_tests --quiet \
         || return 1
     # R3056 -- the provider's two new modules, which the filter above does not select:
     # `shm_backend` (the value types an allocation speaks in, 4 tests) and
@@ -7247,7 +7266,7 @@ layer_c1af_cargo_test_shm() {
         && cargo clippy -p wz-session-core --no-default-features --features transport-shm --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --no-default-features --features session-extshm --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features session-extshm,transport-multilink,transport-unicast,transport-link-tcp,transport-qos,codec-push,codec-close --quiet -- -D warnings \
-        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-peer,session-extshm,transport-multilink,transport-unicast,transport-link-tcp,transport-qos,codec-push,codec-close --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat,session-extshm,transport-multilink,transport-unicast,transport-link-tcp,transport-qos,codec-push,codec-close --quiet -- -D warnings \
         && cargo clippy -p wz-session-core --no-default-features --features session-extshm,codec-declare --quiet -- -D warnings)
 }
 
@@ -8081,8 +8100,10 @@ layer_c1am_cargo_test_adminspace() {
     # path matches `admin_`) behind `adminspace-write`, where the resolver now
     # lives, and this build names only `adminspace-core` through the
     # introspection handlers. Hosted run 35959132777 printed 13.
-    _runci_guarded_test "C1AM peer introspection admin_ 13" 13 \
-        cargo test -p wz-runtime-tokio --features routing-peer,adminspace-introspection-handlers --lib admin_ --quiet || return 1
+    # Item 751 step 7c -- this leg is gone. Its tests were the single-net peer forwarder's, and
+    # the peer node is the region-hat forwarder now, so the leg built `routing-peer` alone
+    # (no longer a configuration of the runtime crate that stands by itself) to run tests that
+    # no longer exist; the router leg below builds the same node and counts what is left.
     # The router half of the same hole, found by asking the question of the twin
     # rather than only of the test this round wrote: R2685's
     # `admin_declarations_bucket_each_tier_into_its_own_sources_field` is gated on
@@ -8100,16 +8121,18 @@ layer_c1am_cargo_test_adminspace() {
     # legs for that same implication.
     # R2832 — 17 -> 16, the same `admin_write_permit_tests` leaving this build
     # for the same reason as the peer leg above.
-    _runci_guarded_test "C1AM router introspection admin_ 16" 16 \
+    # Item 751 step 7c -- 16 -> 11: the single-net peer forwarder's `admin_` tests (five) left
+    # with it. Read off this command: `11 passed`.
+    _runci_guarded_test "C1AM router introspection admin_ 11" 11 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-introspection-handlers --lib admin_ --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-core,query-get --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-metrics,query-get --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-read,adminspace-metrics,query-get --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-write,query-get --quiet -- -D warnings \
-        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-peer,adminspace-introspection-handlers --quiet -- -D warnings \
-        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-peer,adminspace-plugins-handlers,storage-backend --quiet -- -D warnings \
-        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-peer,adminspace-plugins-handlers --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat,adminspace-introspection-handlers --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat,adminspace-plugins-handlers,storage-backend --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat,adminspace-plugins-handlers --quiet -- -D warnings \
         && cargo clippy -p wz-ap-demo --all-targets --features router-hat-router,adminspace-plugins-handlers,storage-backend --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features adminspace-config-hotreload --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features zenoh-config,adminspace-config-hotreload --quiet -- -D warnings \
@@ -8203,15 +8226,17 @@ layer_c1ao_cargo_test_config_mutate_runtime() {
         cargo test -p wz-runtime-tokio --features config-mutate-runtime,access-acl --lib to_admin_json --quiet || return 1
     _runci_guarded_test "C1AO to_admin_json 4" 4 \
         cargo test -p wz-runtime-tokio --features config-mutate-runtime,access-acl,access-downsampling,access-quota --lib to_admin_json --quiet || return 1
-    # R2702 — `routing-peer` NAMED here, where it used to arrive for free.
-    # This test lives in `linkstate_forward.rs` and drives a FORWARDER as the
+    # R2702 — `routing-peer` NAMED here, where it used to arrive for free; item 751 step 7c
+    # names `routing-router-hat`, the forwarder the test now drives (it lives in
+    # `router_forward.rs` since the single-net peer forwarder retired).
+    # This test drives a FORWARDER as the
     # `InterceptorSink`, so it genuinely needs a routing build; it was selected
     # only because `access-acl` implied one. Decomposing that implication made
     # this command select ZERO tests, and the count guard caught it. The fix is
     # to name the real dependency, NOT to move the count to 0 — a guard whose
     # number follows the coverage away is a guard that reports nothing.
     _runci_guarded_test "C1AO wzconfig_reconfigure_is_inert 1" 1 \
-        cargo test -p wz-runtime-tokio --features routing-peer,access-acl --lib wzconfig_reconfigure_is_inert --quiet || return 1
+        cargo test -p wz-runtime-tokio --features routing-router-hat,access-acl --lib wzconfig_reconfigure_is_inert --quiet || return 1
     # R2702 — the §5.16 CLIENT-TRANSPORT arm, and its feature list is the claim:
     # `--no-default-features --features access-acl` enables NO routing feature at
     # all. `access-acl`'s residual said enforcement "needs a routing build while
@@ -9201,8 +9226,14 @@ layer_c1y_cargo_test_routing_peer() {
     # client query leg, the timeout Err's responder). R2908-R2911 pushed them
     # while count guards were deferred to hosted, so those runs read C1y red
     # here. Each arm read off its own command with `-- --list`: 223 219 234.
-    _runci_guarded_test "C1y linkstate" 223 \
-        cargo test -p wz-runtime-tokio --features routing-peer --lib linkstate --quiet || return 1
+    # Item 751 step 7c -- 223 -> 26, and the filter is `linkstate_`: the 197 tests of the
+    # single-net peer forwarder left with it, and what remains under the name is the shared
+    # link-state tables (`linkstate_interest`, `linkstate_pending`) the router hats are built on.
+    # The three arms stay, for the reason they were three (default, bare, access subset): a
+    # table compiled under a feature set no lane builds is not known to compile. They count the
+    # same 26 now. Read off each command's own output.
+    _runci_guarded_test "C1y linkstate" 26 \
+        cargo test -p wz-runtime-tokio --features routing-router-hat --lib linkstate_ --quiet || return 1
     # R311y513 — the BARE routing peer, and the pin that would have caught the
     # defect this round fixed. Every arm above passes `--features routing-peer`
     # WITHOUT `--no-default-features`, so what they actually measure is
@@ -9217,9 +9248,9 @@ layer_c1y_cargo_test_routing_peer() {
     # R2614 202 -> 203: the unrestricted-interest witness is ungated, so it lands
     # here exactly as the sibling comment above predicts.
     # R2904 205 -> 211, the six above.
-    _runci_guarded_test "C1y linkstate bare" 219 \
-        cargo test -p wz-runtime-tokio --no-default-features --features routing-peer \
-        --lib linkstate --quiet || return 1
+    _runci_guarded_test "C1y linkstate bare" 26 \
+        cargo test -p wz-runtime-tokio --no-default-features --features routing-router-hat \
+        --lib linkstate_ --quiet || return 1
     # R311y451 — 10 -> 16: the six low-pass fidelity tests (attachment in the
     # budget, checked-add overflow, minimum-across-overlapping-rules, the
     # `messages` selector, the `flows` selector + no-interceptor-on-an-ungoverned-
@@ -9346,8 +9377,10 @@ layer_c1y_cargo_test_routing_peer() {
     # be reporting that the access subset changes what a Del origination test
     # sees, which it does not.
     # R2904 220 -> 226, the same six.
-    _runci_guarded_test "C1y linkstate+access" 234 \
-        cargo test -p wz-runtime-tokio --features "$access" --lib linkstate --quiet || return 1
+    # Item 751 step 7c -- 234 -> 26 (see "C1y linkstate" above); the access subset names the
+    # router hat in place of the retired peer forwarder's `routing-peer`.
+    _runci_guarded_test "C1y linkstate+access" 26 \
+        cargo test -p wz-runtime-tokio --features routing-router-hat,access-acl,access-downsampling,access-quota --lib linkstate_ --quiet || return 1
     # R2567 — the three usrpwd counts move together because ONE structure landed
     # under them: the shared credential store that closed `access-extauth-usrpwd`.
     # 10 -> 17 is the `CredentialSource` seam and the dictionary parser (the pure
@@ -9421,8 +9454,8 @@ layer_c1y_cargo_test_routing_peer() {
     (cd crates \
         && cargo test -p wz-routing-graph --quiet \
         && cargo clippy -p wz-routing-graph --all-targets --quiet -- -D warnings \
-        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-peer --quiet -- -D warnings \
-        && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-peer --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets --features routing-router-hat --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --no-default-features --features routing-router-hat --quiet -- -D warnings \
         && cargo clippy -p wz-ap-demo --all-targets --features routing-peer --quiet -- -D warnings \
         && cargo clippy -p wz-ap-demo --all-targets --features routing-peer,adminspace-write --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features "$access" --quiet -- -D warnings \
@@ -19739,7 +19772,10 @@ layer_z_zenohd_interop() {
     # atom; without it a pico publisher on the peer finalizes an empty write
     # filter and `pico_publisher_on_a_wz_peer_reaches_a_pico_subscriber_on_zenohd`
     # has nothing to measure. Additive: the broker acts only for a client face
-    # whose interest has an upstream to ask. Both restatements carry it.
+    # whose interest has an upstream to ask. Both restatements carry it. Item 751
+    # step 7 moved the broker from the single-net peer forwarder to the region-hat
+    # forwarder (`router_forward::brokered_interest`); no local run reaches this
+    # leg, so it is the one to read in the first hosted run after that move.
     (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,udp-reliable,routing-router,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,time-hlc,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,routing-interest-pending-gc,transport-multilink,zenoh-config --quiet) || return 1
     # R311y442 review (REVIEWER 3, finding 3) added a clippy of the demo's
     # `advanced` arm right here, closing the `-D warnings` hole R311y433 closed
@@ -21437,22 +21473,19 @@ layer_e6_peer_mesh() {
     # feature closure, which A4-5 containment requires before any test may claim
     # it — an unnamed feature is compiled OUT and the claim would be vacuous.
     # R311y512 — `routing-interest-pending-gc` joins the SAME binary so the peer's
-    # p2p_peer-shaped INTEREST BROKER (and the GC on its pending table) is compiled
-    # in, which A4-5 containment requires before the new leg below may claim the
-    # atom — an unnamed feature is compiled OUT and the claim would be vacuous.
-    # Additive to every OTHER E6 leg by construction: the broker fires only on a
-    # CLIENT face's CURRENT interest that carries the TOKEN bit AND finds an
-    # upstream face (`is_client && body.to() && propagate.. > 0`), so the sub /
-    # queryable / adminspace legs never reach it. The one family that DOES reach it
-    # is the liveliness-token pair, and both its client-leaf and mesh arms were
-    # re-run under this feature set before it was added here.
+    # interest BROKER (and the GC on its pending table) is compiled in, which A4-5
+    # containment requires before the legs below may claim the atom — an unnamed
+    # feature is compiled OUT and the claim would be vacuous. Since item 751 step 7
+    # the broker is the region-hat forwarder's. It acts only for a CLIENT face's
+    # CURRENT interest that finds a GATEWAY face (a stock router), so a leg whose
+    # peers are wz peers never reaches it.
     # `session-close-ingress` joins the SAME binary so the session lifecycle queries
     # (`--session-lifecycle`) are compiled in for the leg below. Additive: nothing
     # hosts them unless that flag is typed, so no other E6 leg changes behaviour.
     # `tls` with it: the verbs compile only beside a secure channel (decision D2
     # of docs/session-lifecycle-intent.md), and the build is refused without one.
     (cd crates && cargo build -p wz-ap-demo \
-        --features routing-peer,adminspace-write,routing-interceptor-hotreload,routing-interest-pending-gc,session-close-ingress,tls,zenoh-config --quiet) || return 1
+        --features routing-peer,router-hat-router,adminspace-write,routing-interceptor-hotreload,routing-interest-pending-gc,session-close-ingress,tls,zenoh-config --quiet) || return 1
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_peer_mesh -- --ignored --quiet) || return 1
     # R311rs — the subscription-filtered data-forward e2e (c3c-3) rides the
@@ -21559,19 +21592,24 @@ layer_e6_peer_mesh() {
     else
         _pico_cli_unavailable "E6 leg wz_peer_liveliness_token_pico_interop" || return 1
     fi
-    # Item 751 step 7b — a real pico `z_get_liveliness` against a wz peer whose
-    # upstream is SIGSTOPped. Pico carries NO timeout for a CURRENT interest
-    # (`net/liveliness.c:348`), so its return IS the peer's answer arriving. The
-    # peer is the region-hat forwarder, which brokers no interest to its peers, so
-    # the answer is prompt: frozen upstream, live upstream, and no upstream. The
-    # fixtures freeze processes, so --test-threads=1 keeps them from overlapping.
+    # R311y512 — §5.21 routing-interest-pending-gc, on the SAME E6 binary. A real
+    # pico `z_get_liveliness` against a wz peer whose upstream is SIGSTOPped: pico
+    # carries NO timeout for a CURRENT interest (`net/liveliness.c:348`), so its
+    # return IS the GC's DeclareFinal arriving. Item 751 step 7 moved the broker to
+    # the region-hat forwarder, which asks GATEWAYS only (the pin's peer hat), so
+    # the upstream that can wedge a client is a wz `--router-hat`. Four arms: a
+    # frozen gateway (the atom), a live gateway (0 reaped, so the atom arm is not
+    # "the broker always reaps"), a frozen PEER upstream (not asked, answered
+    # promptly) and no upstream (inline). One arm holds a 2.5s GC window inside an
+    # 8s budget, so --test-threads=1 keeps the fixtures' ports and frozen
+    # processes from overlapping.
     if [[ -x target/zenoh-pico-cli/z_get_liveliness ]]; then
         (cd crates && cargo test -p wz-integration-tests \
             --test wz_peer_interest_pending_gc_pico_interop -- --ignored --quiet --test-threads=1) \
             || return 1
-        # `routing/interests/timeout` from a CONFIG FILE, on the same binary: a document
-        # naming the key is reported read-and-not-applied and the get is still answered
-        # promptly; a document that omits the key is not reported for it.
+        # R3362 — `routing/interests/timeout` from a CONFIG FILE, on the same binary: a
+        # document stating 2500 ms ends the frozen-gateway get at that deadline, and a
+        # document that omits the key leaves the default 10 s window pending.
         _runci_guarded_test "E6 interest timeout from a config file" 2 \
             cargo test -p wz-integration-tests \
             --test wz_peer_interest_pending_gc_pico_interop_from_a_config_file -- --ignored --quiet --test-threads=1 || return 1

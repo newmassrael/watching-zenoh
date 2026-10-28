@@ -28,7 +28,7 @@
 //!   under `config-mutate-runtime`, re-installs the chain on the live
 //!   forwarder via the [`InterceptorSink`]
 //!   seam (the production impl is
-//!   [`LinkstateForwarder`](crate::linkstate_forward::LinkstateForwarder)) so
+//!   [`RouterForwarder`](crate::router_forward::RouterForwarder)) so
 //!   the change takes effect at runtime.
 //!
 //! `config-mutate-runtime` is the inert-vs-driven toggle: OFF, a config

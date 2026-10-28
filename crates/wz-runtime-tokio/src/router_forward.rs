@@ -444,9 +444,13 @@ use wz_session_core::request_routing_context::{
 };
 use wz_session_core::wire::{PushOwned, PushOwnedVariant, RequestOwned, ResponseOwned};
 
+#[cfg(feature = "routing-interest-pending-gc")]
+mod brokered_interest;
 mod egress;
 #[cfg(test)]
 mod egress_tests;
+#[cfg(all(test, feature = "transport-multilink"))]
+mod joined_link_tests;
 #[cfg(test)]
 mod peer_differential_tests;
 #[cfg(test)]
@@ -1620,9 +1624,7 @@ pub struct RouterSessionsView {
 
 #[cfg(feature = "adminspace-core")]
 impl RouterSessionsView {
-    /// ONE entry per face, read LIVE — the same enumeration
-    /// [`LinkstateForwarder::admin_sessions`](crate::linkstate_forward::LinkstateForwarder::admin_sessions)
-    /// gives the peer host, and upstream gives per transport
+    /// ONE entry per face, read LIVE — the enumeration upstream gives per transport
     /// (`zenoh/src/net/runtime/adminspace.rs` @
     /// `let transport_unicast_to_json = move |transport: &TransportUnicast| {`).
     /// ⚠ That needle is the closure's DECLARATION and not the `"links"` line
@@ -1678,10 +1680,46 @@ impl RouterSessionsView {
     }
 }
 
+/// A joined aggregated link: the session's PRIMARY registered face, which the link's inbound
+/// is routed as, and the link's own session actions. A shared-memory slice that arrives on the
+/// link is acknowledged through those, not the primary's, because the counters it is owed are
+/// the ones the link's peer named: each link of a wz session is established on its own, with a
+/// handoff of its own, and only then joined (`crate::multilink::join_link`).
+struct JoinedLink {
+    primary: FaceId,
+    actions: Arc<SessionLinkActions>,
+}
+
+thread_local! {
+    /// The session of the joined link whose frame this thread is routing, `None` for a frame on
+    /// a face's own link. Set for the span of [`RouterForwarder::forward_frame`] and read when a
+    /// received shared-memory slice is acknowledged.
+    static RECEIVING_LINK: RefCell<Option<Arc<SessionLinkActions>>> = const { RefCell::new(None) };
+}
+
+/// Marks, for the span of one [`RouterForwarder::forward_frame`], the joined link the frame
+/// arrived on, and puts back what was marked before when it ends: a hosted subscriber that
+/// publishes in its handler re-enters the router, and that inner frame is on a link of its own.
+struct ReceivingLink {
+    previous: Option<Arc<SessionLinkActions>>,
+}
+
+impl ReceivingLink {
+    fn enter(link: Option<Arc<SessionLinkActions>>) -> Self {
+        let previous = RECEIVING_LINK.with(|slot| slot.replace(link));
+        Self { previous }
+    }
+}
+
+impl Drop for ReceivingLink {
+    fn drop(&mut self) {
+        RECEIVING_LINK.with(|slot| slot.replace(self.previous.take()));
+    }
+}
+
 /// The sessions a router holds, as the lifecycle close query reads them: every
-/// registered face and every joined aggregated link. The linkstate peer's
-/// directory (`LinkstateSessionDirectory`) for the third host, with the same
-/// reasoning: a close ends the session with a peer, which is every link to it.
+/// registered face and every joined aggregated link. A close ends the session with a peer,
+/// which is every link to it.
 #[cfg(feature = "session-close-ingress")]
 pub struct RouterSessionDirectory {
     tables: Arc<PlainRwLock<Tables>>,
@@ -1697,7 +1735,7 @@ impl RouterSessionDirectory {
             .faces
             .values()
             .map(|face| &*face.actions)
-            .chain(tables.joined_links.values().map(|link| &**link))
+            .chain(tables.joined_links.values().map(|link| &*link.actions))
             .collect())
     }
 }
@@ -1777,8 +1815,7 @@ impl RouterDeclarationsView {
     /// (`zenoh/src/net/routing/hat/router/pubsub.rs` @
     /// `.filter(|router| router != &tables.zid)`). That filter is about the router
     /// hat's own table, and the legs are the dispatcher's merge of ALL the hats,
-    /// two rules of which put the node in the body (see
-    /// [`bucket_by_tier`](Self::bucket_by_tier)): the node's own face is a client of
+    /// two rules of which put the node in the body (see `bucket_by_tier`): the node's own face is a client of
     /// the `Local` region, so what it hosts, the admin queryable included, is named
     /// among the `clients` under the node's zid; and the node is named in the north
     /// bucket of everything a south region sourced. An isolated router therefore
@@ -2100,11 +2137,12 @@ pub(crate) struct Tables {
     faces: HashMap<FaceId, RouterFaceState>,
     /// The joined aggregated links of the sessions in [`Self::faces`]: a second or
     /// later physical link of a peer's session is not a face of its own, so the
-    /// table above holds only the primary. Kept so a lifecycle close can order
-    /// EVERY link to a peer closed ([`RouterForwarder::lifecycle_directory`]), the joined ones
-    /// as well as the registered one.
-    #[cfg(feature = "session-close-ingress")]
-    joined_links: HashMap<FaceId, Arc<SessionLinkActions>>,
+    /// table above holds only the primary. Two readers: a frame that arrives on a
+    /// joined link is routed as its session's primary face's
+    /// ([`RouterForwarder::forward_frame`]), and a lifecycle close orders EVERY link to a
+    /// peer closed ([`RouterForwarder::lifecycle_directory`]), the joined ones as well as
+    /// the registered one.
+    joined_links: HashMap<FaceId, JoinedLink>,
     /// Queryables HOSTED BY THIS ROUTER (§5.23 `adminspace-router-linkstate`) —
     /// e.g. the built-in admin queryable on `@/<self-zid>/router/**`. The
     /// router-idiom `derive-not-store` analogue of the peer
@@ -2288,6 +2326,11 @@ pub struct RouterForwarder {
     /// The standalone [`PendingQueries`] struct is reused verbatim (the same one the
     /// single-net `LinkstateForwarder`(crate::linkstate_forward) holds).
     pending: PlainMutex<PendingQueries>,
+    /// §5.21 `routing-interest-pending-gc` — the interests a peer node brokers for its clients to
+    /// its gateways: the pending table, its deadline and the live CurrentFuture copies (see
+    /// [`brokered_interest`]). The interest twin of [`pending`](Self#structfield.pending).
+    #[cfg(feature = "routing-interest-pending-gc")]
+    broker: brokered_interest::InterestBroker,
     /// Running total of `Request` (Query) messages received — the query-plane
     /// reception witness, the query twin of
     /// [`data_seen`](Self#structfield.data_seen).
@@ -3000,20 +3043,15 @@ router_entry_points! { on_tables:
 }
 
 impl RouterForwarder {
-    /// The SPF-throttle coalescing window — the SAME default the single-net
-    /// `LinkstateForwarder`(crate::linkstate_forward::LinkstateForwarder)
-    /// uses (zenoh's `TREES_COMPUTATION_DELAY_MS`), referenced rather than
-    /// re-literal-ed so the two forwarders share one source of the value.
-    pub const DEFAULT_TREES_DELAY: Duration =
-        crate::linkstate_forward::LinkstateForwarder::DEFAULT_TREES_DELAY;
+    /// The SPF-throttle coalescing window, zenoh's `TREES_COMPUTATION_DELAY_MS`
+    /// (100 ms): a burst of topology changes collapses to one tree recompute per window.
+    pub const DEFAULT_TREES_DELAY: Duration = Duration::from_millis(100);
 
-    /// The default per-query timeout — zenoh's `queries_default_timeout` (10s),
-    /// referenced from the single-net forwarder so the two share ONE source of the
-    /// value. A forwarded Query's pending return entry is abandoned this long after
-    /// it is recorded if no `ResponseFinal` routes back (the C5c tick sweep). A
-    /// deploy overrides via [`set_query_timeout`](Self::set_query_timeout).
-    pub const DEFAULT_QUERY_TIMEOUT: Duration =
-        crate::linkstate_forward::LinkstateForwarder::DEFAULT_QUERY_TIMEOUT;
+    /// The default per-query timeout — zenoh's `queries_default_timeout` (10s). A
+    /// forwarded Query's pending return entry is abandoned this long after it is
+    /// recorded if no `ResponseFinal` routes back (the C5c tick sweep). A deploy
+    /// overrides via [`set_query_timeout`](Self::set_query_timeout).
+    pub const DEFAULT_QUERY_TIMEOUT: Duration = Duration::from_millis(10_000);
 
     /// A router driver seeded with the local node (`self_zid`), using the
     /// production `Instant::now` clock. Self is a `WhatAmI::Router` in BOTH meshes,
@@ -3055,9 +3093,7 @@ impl RouterForwarder {
         )
     }
 
-    /// R2626 — set zenoh's `timestamping.drop_future_timestamp` (builder), the
-    /// router twin of
-    /// [`LinkstateForwarder::with_drop_future_timestamp`](crate::linkstate_forward::LinkstateForwarder::with_drop_future_timestamp).
+    /// R2626 — set zenoh's `timestamping.drop_future_timestamp` (builder).
     pub fn with_drop_future_timestamp(mut self, drop_future: bool) -> Self {
         self.node_hlc = self.node_hlc.with_drop_future_timestamp(drop_future);
         self
@@ -3140,8 +3176,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
 impl RouterForwarder {
     /// As [`new`](Self::new), but with an INJECTED monotonic clock — the dependency
     /// injection a deterministic pending-query-timeout test uses to advance "now"
-    /// across a deadline (the router twin of
-    /// [`LinkstateForwarder::with_clock`](crate::linkstate_forward::LinkstateForwarder::with_clock)).
+    /// across a deadline.
     pub fn with_clock(self_zid: Zid, clock: Box<dyn Fn() -> Instant + Send + Sync>) -> Self {
         Self::build(
             WhatAmI::Router,
@@ -3209,7 +3244,6 @@ impl RouterForwarder {
                 node_mode,
                 partition: SouthPartition::Auto,
                 faces: HashMap::new(),
-                #[cfg(feature = "session-close-ingress")]
                 joined_links: HashMap::new(),
                 local_queryables: Vec::new(),
                 local_subscribers: Vec::new(),
@@ -3248,6 +3282,8 @@ impl RouterForwarder {
             #[cfg(feature = "router-multicast-faces")]
             group_subs: PlainRwLock::new(HashSet::new()),
             pending: PlainMutex::new(PendingQueries::new()),
+            #[cfg(feature = "routing-interest-pending-gc")]
+            broker: brokered_interest::InterestBroker::new(),
             queries_seen: Counter::new(),
             query_timeout: PlainCell::new(Self::DEFAULT_QUERY_TIMEOUT),
             timed_out: Counter::new(),
@@ -3708,11 +3744,16 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         inbound: FaceId,
         message: crate::shm_relay::Routed<'_>,
     ) -> Option<crate::shm_relay::RelayPass<'_>> {
-        let actions = self
-            .tables
-            .faces
-            .get(&inbound)
-            .map(|state| Arc::clone(&state.actions));
+        // The session of the link the message arrived on: a joined link's own, else the face's.
+        // A slice is acknowledged through the handoff of THAT link, because its peer is the one
+        // that named the counters.
+        let arrived_on = RECEIVING_LINK.with(|slot| slot.borrow().clone());
+        let actions = arrived_on.or_else(|| {
+            self.tables
+                .faces
+                .get(&inbound)
+                .map(|state| Arc::clone(&state.actions))
+        });
         let pass = self
             .shm_relay
             .open_inbound_message(actions.as_deref(), message);
@@ -5513,6 +5554,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             self.tables
                 .future_tokens
                 .remove_interest(inbound, interest.interest_id);
+            // R2903 — and a copy of it a gateway still holds is ended there.
+            #[cfg(feature = "routing-interest-pending-gc")]
+            self.finalize_brokered_future(inbound, Some(interest.interest_id));
             return;
         }
         let Some(body) = interest.body.as_ref() else {
@@ -5684,6 +5728,26 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     interest_id,
                     store_future_token,
                 );
+            }
+            // R311y512 (`routing-interest-pending-gc`) — the peer hat's BROKER leg. zenoh does
+            // not close a client's CURRENT interest with what it already knows: it PROPAGATES
+            // it to its gateways and withholds the terminating `DeclareFinal` until the last
+            // one has answered (`zenoh/src/net/routing/hat/peer/interests.rs` @
+            // `Arc::into_inner`, which FAILS while any propagated copy is outstanding). A
+            // gateway keeps its other remotes' declarations to itself, so a publisher's write
+            // filter answered here alone would finalize empty. A non-zero count means the
+            // client's final is now OWED BY THE UNWIND (`finish_brokered_interest`), not by
+            // this line.
+            #[cfg(feature = "routing-interest-pending-gc")]
+            if self.broker_current_interest(
+                inbound,
+                interest_id,
+                body,
+                interest.f(),
+                target.as_deref(),
+            ) > 0
+            {
+                return;
             }
             self.send_one_to_face(
                 inbound,
@@ -5882,32 +5946,52 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     ) where
         T: std::ops::DerefMut,
     {
-        let Some(target) = target else {
-            return; // match-all deferred; the caller's DeclareFinal still closes it.
-        };
+        // R2614 — `target: None` is an UNRESTRICTED interest (the wire's `R` flag clear: no
+        // keyexpr, which the protocol defines as asking for all key expressions,
+        // `commons/zenoh-protocol/src/network/interest.rs` @ `then the interest is restricted to the matching key expression, else it is for all key expressions`).
+        // Upstream answers it with the whole table, because its matcher treats an absent
+        // resource as matching everything (`zenoh/src/net/routing/hat/peer/token.rs` @
+        // `res.is_none_or`). Neither reference emits one (zenoh derives `R` from
+        // `wire_expr.is_some()` and its liveliness GET always supplies one; pico sets
+        // `_Z_INTEREST_FLAG_RESTRICTED` at both of its liveliness sites), so it is reachable
+        // only from a peer that builds the message itself, but wz is a drop-in for the node
+        // that ANSWERS.
+        let target_chunks: Option<Vec<&str>> = target.map(|t| t.split('/').collect());
         let mut per_ke: HashMap<String, ()> = HashMap::new();
         for table in self.mesh_hats().map(|hat| &hat.tokens) {
-            for (ke, _zid, ()) in table.matching_entries(target, Some(self_zid)) {
+            let hits = match target {
+                Some(target) => table.matching_entries(target, Some(self_zid)),
+                None => table.unrestricted_entries(Some(self_zid)),
+            };
+            for (ke, _zid, ()) in hits {
                 per_ke.insert(ke.to_string(), ());
             }
         }
-        let target_chunks: Vec<&str> = target.split('/').collect();
         for hat in self.broker_hats() {
             for (face, ids) in hat.tokens.iter() {
                 if *face == inbound {
                     continue; // never replay a face its own token
                 }
                 for k in ids.values() {
-                    if keyexpr_intersects_target(k, &target_chunks) {
+                    let matched = match target_chunks.as_deref() {
+                        None => true,
+                        Some(chunks) => keyexpr_intersects_target(k, chunks),
+                    };
+                    if matched {
                         per_ke.insert(k.clone(), ());
                     }
                 }
             }
         }
+        // An unrestricted interest cannot aggregate: the aggregate reply is keyed on the
+        // interest's own keyexpr, which it does not carry. Upstream never aggregates a token
+        // dump (its peer hat emits one `DeclareToken` per match,
+        // `zenoh/src/net/routing/hat/peer/interests.rs` @ `fn send_current_tokens`).
+        let aggregate = aggregate && target.is_some();
         let mut replies = Vec::new();
         emit_current_interest_replies(
             interest_id,
-            target,
+            target.unwrap_or(""),
             aggregate,
             per_ke,
             |a, _b| a,
@@ -9403,6 +9487,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // departed face has nobody left to notify (skipped).
         let drained = self.pending.guard().remove_face(&id);
         synthesize_drained_fan_finals(&drained, id, |face, msg| self.send_one_to_face(face, msg));
+        // R311y512 — the INTEREST twin of the drain above (zenoh's `finalize_pending_interests`
+        // on face close).
+        #[cfg(feature = "routing-interest-pending-gc")]
+        self.drain_brokered_interests(id);
         // R2348 — drop this face's precomputed interceptor verdicts, on BOTH
         // flows, with the face. A `FaceId` is reusable, so an entry that outlived
         // its face could serve a NEW peer a verdict computed for the OLD peer's
@@ -9586,6 +9674,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // cadence (C5c) — a cheap empty sweep when nothing timed out, exactly as
         // the sibling forwarder's tick.
         self.reap_timed_out_queries();
+        // R311y512 — and the interests this node brokered, past their deadline.
+        #[cfg(feature = "routing-interest-pending-gc")]
+        self.reap_timed_out_interests();
         // What destinations hold back: offered the room they have, and a destination that has
         // not taken its oldest message in `wait_before_close` is closed, as a send that waited
         // that long would have closed it.
@@ -9593,25 +9684,37 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         self.sweep_egress();
     }
 
-    /// A joined link of a peer's session: remembered so a lifecycle close reaches
-    /// it. Routing is unchanged -- the router has always served a joined link's
-    /// inbound as the primary's, and this adds no routing state.
-    #[cfg(feature = "session-close-ingress")]
+    /// A joined link of a peer's session. It is not a routing neighbour of its own (the
+    /// primary already is the graph link to the peer), only a second physical carrier for
+    /// the same session, so it adds no routing state beyond the mapping: its inbound is routed
+    /// as the primary's, against the one face table, and a lifecycle close reaches it.
     fn register_joined(
         &mut self,
         joined_id: FaceId,
-        _primary_id: FaceId,
+        primary_id: FaceId,
         actions: &Arc<SessionLinkActions>,
     ) where
         T: std::ops::DerefMut,
     {
-        self.tables
-            .joined_links
-            .insert(joined_id, Arc::clone(actions));
+        self.tables.joined_links.insert(
+            joined_id,
+            JoinedLink {
+                primary: primary_id,
+                actions: Arc::clone(actions),
+            },
+        );
+    }
+
+    /// The face a frame that arrived on `id` is routed as, and the joined link's own session
+    /// when it was one: `id` itself, with none, for a primary or a single-link face.
+    fn resolve_joined(&self, id: FaceId) -> (FaceId, Option<Arc<SessionLinkActions>>) {
+        match self.tables.joined_links.get(&id) {
+            Some(joined) => (joined.primary, Some(Arc::clone(&joined.actions))),
+            None => (id, None),
+        }
     }
 
     /// The joined link left the aggregate.
-    #[cfg(feature = "session-close-ingress")]
     fn deregister_joined(&mut self, joined_id: FaceId)
     where
         T: std::ops::DerefMut,
@@ -9828,6 +9931,17 @@ impl RouterForwarder {
         // face, which is what `source` records until the guard drops.
         let on = self.on_tables();
         on.drain_egress();
+        // A frame that arrived on a JOINED aggregated link is routed as its session's primary
+        // face's, against the one face table (keyexpr aliases, graph link, ACL subject): the
+        // aggregate is ONE logical face, as in zenoh, and no Put or Declare on a secondary link
+        // is dropped at the `faces.get` gate below. The joined link's own session is kept for the
+        // span of the frame, so that a shared-memory slice that arrives on it is acknowledged to
+        // its peer. A primary or a single-link face resolves to itself and marks nothing.
+        // Merging both links' inbound into the primary's one `keyexpr_table` cannot collide
+        // because a faithful peer mints keyexpr ids per SESSION, not per link; literal keyexprs
+        // (id 0) are table-independent regardless.
+        let (id, arrived_on) = on.resolve_joined(id);
+        let _arrival = ReceivingLink::enter(arrived_on);
         let _routing = self.credit.routing_from(id);
         // The inbound face's tier selects which net topology ingests into and
         // which faces a re-flood reaches; with the remote's mode it also
@@ -9894,6 +10008,13 @@ impl RouterForwarder {
                     // link-local alias for resolution; the Request/Response query
                     // plane is the COMPUTE slice.
                     NetworkMessage::Declare(declare) => {
+                        // A solicited answer on a gateway face, to an interest THIS node
+                        // brokered, belongs to the client that is waiting: consumed here, and
+                        // not a topology change for the ordinary ingest.
+                        #[cfg(feature = "routing-interest-pending-gc")]
+                        if on.absorb_brokered_declare(id, declare) {
+                            continue;
+                        }
                         on.route_declaration(id, tier, whatami, *reliable, declare);
                     }
                     // An Interest solicitation (the zenoh-1.x interest-declaration
@@ -10003,7 +10124,6 @@ impl FaceForwarder for RouterForwarder {
         true
     }
 
-    #[cfg(feature = "session-close-ingress")]
     fn register_joined(
         &self,
         joined_id: FaceId,
@@ -10014,7 +10134,6 @@ impl FaceForwarder for RouterForwarder {
             .register_joined(joined_id, primary_id, actions)
     }
 
-    #[cfg(feature = "session-close-ingress")]
     fn deregister_joined(&self, joined_id: FaceId) {
         self.on_tables_mut().deregister_joined(joined_id)
     }
@@ -12617,6 +12736,542 @@ mod tests {
         assert_eq!(fwd.data_seen(), 1, "the Put is counted");
         assert_eq!(sink_c.frame_count(), 1, "a non-denied Put relays to C");
         assert_eq!(fwd.interceptor_dropped(), 0, "nothing dropped");
+    }
+
+    // §5.21 `routing-interest-pending-gc` — the interest a peer node BROKERS for its clients to
+    // its gateways (`brokered_interest`). They moved here from the retired single-net peer
+    // forwarder with the peer node (item 751 step 7). The gateway is a stock router: the face a
+    // peer node is attached to whose remote end is a gateway to it.
+
+    /// Decode the FIRST message of a recorded frame as an `InterestOwned`.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    fn forwarded_interest(frame: &[u8]) -> InterestOwned {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        let InboundFrame::Frame { payload, .. } =
+            parse_inbound(frame).expect("parse forwarded frame")
+        else {
+            panic!("forwarded bytes are not a Frame");
+        };
+        let msgs = parse_frame_payload(&payload).expect("parse frame payload");
+        match msgs.into_iter().next() {
+            Some(NetworkMessage::Interest(i)) => i,
+            other => panic!("expected a forwarded Interest, got {other:?}"),
+        }
+    }
+
+    /// A peer node with a stock router attached as face 0 and a client as face 1, every sink
+    /// empty.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    fn gateway_and_client() -> (
+        RouterForwarder,
+        Arc<RecordingLinkDriver>,
+        Arc<RecordingLinkDriver>,
+    ) {
+        let fwd = RouterForwarder::peer(zid(0x05));
+        let (gateway, sink_gateway) = face(zid(0xAA), WIRE_ROUTER);
+        let (client, sink_client) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &gateway);
+        fwd.register(FaceId(1), &client);
+        sink_gateway.reset();
+        sink_client.reset();
+        (fwd, sink_gateway, sink_client)
+    }
+
+    /// The BROKER's propagation reaches the WIRE, and the client's final is withheld until the
+    /// gateway has answered; then the client is sent its own final, under its own id.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    #[test]
+    fn a_brokered_interest_reaches_the_gateway_and_withholds_the_clients_final() {
+        use wz_session_core::interest_build::build_interest_liveliness_get;
+
+        let (fwd, sink_gateway, sink_client) = gateway_and_client();
+        let get = build_interest_liveliness_get(7, 0, Some("demo/**")).expect("build get");
+        forward_one(&fwd, FaceId(1), NetworkMessage::Interest(get));
+
+        assert_eq!(
+            fwd.pending_interests_len(),
+            1,
+            "the client's CURRENT interest is held pending against the one gateway"
+        );
+        assert_eq!(
+            sink_gateway.frame_count(),
+            1,
+            "the propagated Interest reaches the WIRE; a send seam that does not leaves this at 0 \
+             while every other assertion still passes"
+        );
+        assert_eq!(
+            sink_client.frame_count(),
+            0,
+            "the client's terminating DeclareFinal is OWED BY THE UNWIND while a gateway copy is \
+             outstanding; sending it here would close the get before the gateway could answer"
+        );
+
+        // The gateway is done: the client is finalized, under ITS id and not the minted one.
+        let copy = forwarded_interest(&sink_gateway.frame_bytes(0));
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(build_declare_final_reply(copy.interest_id))),
+        );
+        assert_eq!(fwd.pending_interests_len(), 0, "the entry is retired");
+        assert_eq!(
+            sink_client.frame_count(),
+            1,
+            "and the client is finalized once"
+        );
+        let done = forwarded_declare(&sink_client.frame_bytes(0));
+        assert!(matches!(
+            done.body,
+            DeclareOwnedVariant::CodecZenohDeclFinal(_)
+        ));
+        assert_eq!(done.interest_id, Some(7), "under the client's own id");
+    }
+
+    /// A node with no gateway answers the client at once: there is nobody to ask.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    #[test]
+    fn a_subscribers_interest_without_a_gateway_is_answered_inline() {
+        use wz_session_core::interest_build::build_interest_subscribers;
+
+        let fwd = RouterForwarder::peer(zid(0x05));
+        let (peer, _sink_peer) = face(zid(0xBB), WIRE_PEER);
+        let (client, sink_client) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &peer);
+        fwd.register(FaceId(1), &client);
+        sink_client.reset();
+        let interest = build_interest_subscribers(5, true, false, 0, Some("demo/**"))
+            .expect("build subscribers interest");
+        forward_one(&fwd, FaceId(1), NetworkMessage::Interest(interest));
+        assert_eq!(fwd.pending_interests_len(), 0, "nothing was brokered");
+        assert_eq!(
+            sink_client.frame_count(),
+            1,
+            "the client is finalized inline"
+        );
+        assert_eq!(
+            forwarded_declare(&sink_client.frame_bytes(0)).interest_id,
+            Some(5)
+        );
+    }
+
+    /// A `Current` interest is brokered to ONE gateway, so that a stateless answer is not
+    /// duplicated; a `CurrentFuture` one to ALL of them. A peer beside the gateways is the
+    /// control: it floods its declarations to this node already, so the pin does not ask it and
+    /// neither does this.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    #[test]
+    fn a_current_interest_asks_one_gateway_and_a_current_future_one_asks_all() {
+        use wz_session_core::interest_build::build_interest_subscribers;
+
+        let fwd = RouterForwarder::peer(zid(0x05));
+        let (gateway_a, sink_a) = face(zid(0xAA), WIRE_ROUTER);
+        let (gateway_b, sink_b) = face(zid(0xAB), WIRE_ROUTER);
+        let (peer, sink_peer) = face(zid(0xBB), WIRE_PEER);
+        let (client, _sink_client) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &gateway_a);
+        fwd.register(FaceId(1), &gateway_b);
+        fwd.register(FaceId(2), &peer);
+        fwd.register(FaceId(3), &client);
+        for sink in [&sink_a, &sink_b, &sink_peer] {
+            sink.reset();
+        }
+
+        let current = build_interest_subscribers(1, true, false, 0, Some("demo/**"))
+            .expect("build current interest");
+        forward_one(&fwd, FaceId(3), NetworkMessage::Interest(current));
+        assert_eq!(
+            sink_a.frame_count() + sink_b.frame_count(),
+            1,
+            "a Current interest is brokered to ONE gateway"
+        );
+        assert_eq!(sink_peer.frame_count(), 0, "a flooding peer is not asked");
+
+        for sink in [&sink_a, &sink_b] {
+            sink.reset();
+        }
+        let current_future = build_interest_subscribers(2, true, true, 0, Some("demo/**"))
+            .expect("build current-future interest");
+        forward_one(&fwd, FaceId(3), NetworkMessage::Interest(current_future));
+        assert_eq!(
+            (sink_a.frame_count(), sink_b.frame_count()),
+            (1, 1),
+            "a CurrentFuture interest is brokered to EVERY gateway"
+        );
+        assert_eq!(sink_peer.frame_count(), 0, "and still not to a peer");
+    }
+
+    /// A CurrentFuture copy stays live at the gateway after its current answer, so the client's
+    /// `Interest(Final)` is passed on under the id the gateway was given, and so is the client's
+    /// departure.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    #[test]
+    fn a_clients_final_and_departure_end_the_brokered_future_interest() {
+        use wz_session_core::interest_build::{build_interest_final, build_interest_subscribers};
+
+        let (fwd, sink_gateway, _sink_client) = gateway_and_client();
+        let interest = build_interest_subscribers(4, true, true, 0, Some("demo/**"))
+            .expect("build current-future interest");
+        forward_one(&fwd, FaceId(1), NetworkMessage::Interest(interest));
+        let copy = forwarded_interest(&sink_gateway.frame_bytes(0));
+        sink_gateway.reset();
+
+        forward_one(
+            &fwd,
+            FaceId(1),
+            NetworkMessage::Interest(build_interest_final(4)),
+        );
+        assert_eq!(sink_gateway.frame_count(), 1, "the Final is passed on");
+        let ended = forwarded_interest(&sink_gateway.frame_bytes(0));
+        assert!(!ended.c() && !ended.f(), "it is a Final");
+        assert_eq!(
+            ended.interest_id, copy.interest_id,
+            "under the id the gateway was given, not the client's"
+        );
+
+        // The same for a client that leaves with a CurrentFuture interest still live.
+        let again = build_interest_subscribers(9, true, true, 0, Some("demo/x/**"))
+            .expect("build current-future interest");
+        forward_one(&fwd, FaceId(1), NetworkMessage::Interest(again));
+        let second = forwarded_interest(&sink_gateway.frame_bytes(1));
+        sink_gateway.reset();
+        fwd.deregister(FaceId(1));
+        assert_eq!(sink_gateway.frame_count(), 1, "the departure is passed on");
+        assert_eq!(
+            forwarded_interest(&sink_gateway.frame_bytes(0)).interest_id,
+            second.interest_id
+        );
+    }
+
+    /// A gateway that never answers is abandoned at its deadline and the client finalized anyway:
+    /// zenoh-pico carries no timeout for a CURRENT interest (`vendor/zenoh-pico/src/net/
+    /// liveliness.c:348`), so the final is the only thing that can close its handler.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    #[test]
+    fn a_silent_gateway_is_abandoned_at_its_deadline_and_the_client_finalized() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use wz_session_core::interest_build::build_interest_liveliness_get;
+
+        let began = Instant::now();
+        let moved = Arc::new(AtomicU64::new(0));
+        let read = Arc::clone(&moved);
+        let fwd = RouterForwarder::peer_with_clock(
+            zid(0x05),
+            Box::new(move || began + Duration::from_millis(read.load(Ordering::SeqCst))),
+        );
+        fwd.set_interest_timeout(Duration::from_millis(2_500));
+        let (gateway, _sink_gateway) = face(zid(0xAA), WIRE_ROUTER);
+        let (client, sink_client) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &gateway);
+        fwd.register(FaceId(1), &client);
+        sink_client.reset();
+        let get = build_interest_liveliness_get(7, 0, Some("demo/**")).expect("build get");
+        forward_one(&fwd, FaceId(1), NetworkMessage::Interest(get));
+        assert_eq!(fwd.pending_interests_len(), 1);
+
+        moved.store(2_400, Ordering::SeqCst);
+        fwd.tick();
+        assert_eq!(fwd.pending_interests_len(), 1, "not before its deadline");
+        assert_eq!(sink_client.frame_count(), 0);
+
+        moved.store(2_600, Ordering::SeqCst);
+        fwd.tick();
+        assert_eq!(fwd.pending_interests_len(), 0, "abandoned at its deadline");
+        assert_eq!(fwd.pending_interests_timed_out(), 1, "and counted");
+        assert_eq!(sink_client.frame_count(), 1, "the client is finalized");
+        assert_eq!(
+            forwarded_declare(&sink_client.frame_bytes(0)).interest_id,
+            Some(7)
+        );
+    }
+
+    /// A gateway that dies before it answers finalizes the client at once, without waiting for
+    /// the deadline of a node that is already gone; a client that dies drops its entries silently.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    #[test]
+    fn a_gateway_face_down_finalizes_the_client_without_waiting_for_the_deadline() {
+        use wz_session_core::interest_build::build_interest_liveliness_get;
+
+        let (fwd, _sink_gateway, sink_client) = gateway_and_client();
+        let get = build_interest_liveliness_get(7, 0, Some("demo/**")).expect("build get");
+        forward_one(&fwd, FaceId(1), NetworkMessage::Interest(get));
+        assert_eq!(fwd.pending_interests_len(), 1);
+        fwd.deregister(FaceId(0));
+        assert_eq!(fwd.pending_interests_len(), 0);
+        assert_eq!(sink_client.frame_count(), 1, "the client is finalized now");
+
+        let (fwd, _sink_gateway, sink_client) = gateway_and_client();
+        let get = build_interest_liveliness_get(8, 0, Some("demo/**")).expect("build get");
+        forward_one(&fwd, FaceId(1), NetworkMessage::Interest(get));
+        fwd.deregister(FaceId(1));
+        assert_eq!(fwd.pending_interests_len(), 0, "the client's entries go");
+        assert_eq!(sink_client.frame_count(), 0, "with nobody left to tell");
+    }
+
+    // The typed-config proofs of the peer node: a `WzConfig` drives the LIVE forwarder through
+    // the `InterceptorSink` seam. They moved here from the retired single-net peer forwarder
+    // with the peer node (item 751 step 7), over the same topology: a peer publisher (face 0)
+    // and a client subscribed to `demo/data` (face 1).
+
+    /// A peer node `S`, a peer publisher on face 0 and a client subscriber on face 1 holding
+    /// `demo/data`, with the sink of the client emptied.
+    #[cfg(feature = "access-acl")]
+    fn typed_config_topology() -> (RouterForwarder, Arc<RecordingLinkDriver>) {
+        let fwd = RouterForwarder::peer(zid(0x05));
+        let (publisher, _sink_publisher) = face(zid(0x0A), WIRE_PEER);
+        let (subscriber, sink) = face(zid(0x0B), WIRE_CLIENT);
+        fwd.register(FaceId(0), &publisher);
+        fwd.register(FaceId(1), &subscriber);
+        advertise_link_back(&fwd, FaceId(0), 0x05, 0x0A, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_sub("demo/data"));
+        sink.reset();
+        (fwd, sink)
+    }
+
+    /// One Put on `demo/data` from the publisher.
+    #[cfg(feature = "access-acl")]
+    fn put_on_demo_data(fwd: &RouterForwarder) {
+        let push =
+            wz_session_core::push_build::build_push_literal("demo/data", b"x").expect("build push");
+        forward_one(fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
+    }
+
+    // R311y39 — config-DRIVEN proof: a typed `WzConfig` mutation re-installs the
+    // interceptor chain on the LIVE forwarder, so the admit/deny verdict flips at
+    // runtime. The ON arm proves the drive; the inert arm (below) proves the
+    // `config-mutate-runtime` toggle is load-bearing (OFF = stored-but-not-applied).
+    #[cfg(all(feature = "config-mutate-runtime", feature = "access-acl"))]
+    #[test]
+    fn wzconfig_reconfigure_drives_the_live_forwarder() {
+        let (fwd, sink) = typed_config_topology();
+        // An empty (admit-all) typed config installed at setup — the same seam the
+        // runtime reconfigure re-uses.
+        let mut config = crate::config::WzConfig::new();
+        config.install_interceptors(&fwd);
+
+        // Phase 1 — no rule yet: the Put is admitted + relayed to the subscriber.
+        put_on_demo_data(&fwd);
+        assert_eq!(fwd.data_seen(), 1, "phase 1: admitted before any rule");
+        assert_eq!(fwd.interceptor_dropped(), 0, "phase 1: nothing dropped");
+        assert_eq!(sink.frame_count(), 1, "phase 1: relayed to the subscriber");
+
+        // RUNTIME RECONFIGURE — mutate the typed config to DENY demo/**; under
+        // config-mutate-runtime the live forwarder is re-driven.
+        config.reconfigure_interceptors(
+            InterceptorConfig::default().with_acl(deny_put_policy("demo/**", AclFlow::Ingress)),
+            &fwd,
+        );
+
+        // Phase 2 — the SAME Put is now DROPPED (the live verdict flipped).
+        sink.reset();
+        put_on_demo_data(&fwd);
+        assert_eq!(
+            fwd.interceptor_dropped(),
+            1,
+            "phase 2: denied after the LIVE reconfigure"
+        );
+        assert_eq!(
+            fwd.data_seen(),
+            1,
+            "phase 2: a denied Put is not counted as received data"
+        );
+        assert_eq!(
+            sink.frame_count(),
+            0,
+            "phase 2: not relayed after the live reconfigure"
+        );
+    }
+
+    // R311y48 (§5.23 Phase 3b) — the config-WRITE merge pattern the demo's
+    // adminspace handler drives: a partial write (set only the ACL slice) reads the
+    // LIVE interceptor config via `WzConfig::interceptors()`, clones it, swaps the
+    // one slice, and reconfigures the WHOLE — so the getter is the read leg of a
+    // read-modify-write that never drops the unrelated interceptors. Here the
+    // pre-write config already denies an UNRELATED key (`other/**`); the
+    // config-write swaps the ACL to deny `demo/**`; the forwarder's verdict flips
+    // to drop demo/data, proving the getter + clone-merge-reapply round-trips.
+    #[cfg(all(feature = "config-mutate-runtime", feature = "access-acl"))]
+    #[test]
+    fn wzconfig_interceptors_getter_backs_the_config_write_merge() {
+        let (fwd, sink) = typed_config_topology();
+        // Pre-write config denies an UNRELATED key; demo/data is admitted.
+        let mut config = crate::config::WzConfig::new().with_interceptors(
+            InterceptorConfig::default().with_acl(deny_put_policy("other/**", AclFlow::Ingress)),
+        );
+        config.install_interceptors(&fwd);
+        put_on_demo_data(&fwd);
+        assert_eq!(
+            fwd.data_seen(),
+            1,
+            "pre-write: demo/data admitted (only other/** denied)"
+        );
+
+        // CONFIG-WRITE merge: read the live config via the getter, clone, swap
+        // ONLY the ACL slice, reconfigure the whole — the demo handler's pattern.
+        let mut merged = config.interceptors().clone();
+        merged.acl = Some(deny_put_policy("demo/**", AclFlow::Ingress));
+        config.reconfigure_interceptors(merged, &fwd);
+
+        sink.reset();
+        put_on_demo_data(&fwd);
+        assert_eq!(
+            fwd.interceptor_dropped(),
+            1,
+            "post-write: demo/data denied after the getter-clone-merge-reapply"
+        );
+        assert_eq!(
+            sink.frame_count(),
+            0,
+            "post-write: not relayed after the config-write merge"
+        );
+    }
+
+    // R311y49 (§5.23) — the admin config GET is OBSERVABLE under a runtime
+    // reconfigure: to_admin_json's acl_deny array is [] before any ACL, then
+    // carries the denied keyexpr after a config-write deny -> the read path
+    // witnesses the flip (the counterpart to the data-plane drop). Needs
+    // config-mutate-runtime (the reconfigure is the live drive) + access-acl (the
+    // ACL slice exists).
+    #[cfg(all(feature = "config-mutate-runtime", feature = "access-acl"))]
+    #[test]
+    fn wzconfig_to_admin_json_reflects_a_reconfigure() {
+        let fwd = RouterForwarder::peer(zid(0x05));
+        let mut config = crate::config::WzConfig::new();
+        config.install_interceptors(&fwd);
+        // Before any ACL: the deny list is empty (GET shows nothing denied).
+        assert!(
+            config.to_admin_json().contains(r#""acl_deny":[]"#),
+            "pre-reconfigure admin JSON should carry an empty acl_deny: {}",
+            config.to_admin_json()
+        );
+        // A config-write deny reconfigure -> the denied keyexpr now appears in
+        // the GET view (observable on the SAME instance the forwarder drives).
+        config.reconfigure_interceptors(
+            InterceptorConfig::default().with_acl(deny_put_policy("demo/**", AclFlow::Ingress)),
+            &fwd,
+        );
+        assert!(
+            config.to_admin_json().contains(r#""acl_deny":["demo/**"]"#),
+            "post-reconfigure admin JSON should carry the denied keyexpr: {}",
+            config.to_admin_json()
+        );
+    }
+
+    // R311y43 — §5.23 combined-node FOUNDATION proof (binding level): ONE WzConfig
+    // BINDING both DRIVES the live forwarder (the deny verdict flips, as in the
+    // test above) AND serves the admin read-at-open view (`to_admin_json`) — the
+    // same `config` value backs both surfaces. The read assertion checks the
+    // CONCRETE JSON (falsifiable on the serialization contract), not a
+    // from_init_params self-comparison; the ACL is in `to_admin_json` (the
+    // `acl_deny` array), so the read view OBSERVES the SAME reconfigure that drove
+    // the forwarder: the binding's two surfaces stay mutually consistent, while the
+    // handshake-fixed read-at-open fields (batch/lease/whatami) stay invariant.
+    #[cfg(all(feature = "config-mutate-runtime", feature = "access-acl"))]
+    #[test]
+    fn wzconfig_one_instance_drives_forwarder_and_serves_admin_read() {
+        use wz_runtime_tokio_test_support::fixture_session_init_params;
+
+        let (fwd, sink) = typed_config_topology();
+        // ONE typed config, populated from the handshake params (so to_admin_json
+        // carries real read-at-open values) + an empty admit-all interceptor set.
+        let params = fixture_session_init_params();
+        let mut config = crate::config::WzConfig::from_init_params(&params)
+            .with_interceptors(InterceptorConfig::default());
+        config.install_interceptors(&fwd);
+
+        // DRIVE surface — admit, then (after a deny reconfigure on the SAME
+        // instance) drop: the live verdict flips.
+        put_on_demo_data(&fwd);
+        assert_eq!(fwd.data_seen(), 1, "admitted before any rule");
+        config.reconfigure_interceptors(
+            InterceptorConfig::default().with_acl(deny_put_policy("demo/**", AclFlow::Ingress)),
+            &fwd,
+        );
+        sink.reset();
+        put_on_demo_data(&fwd);
+        assert_eq!(
+            fwd.interceptor_dropped(),
+            1,
+            "denied after the live reconfigure"
+        );
+        assert_eq!(
+            sink.frame_count(),
+            0,
+            "not relayed after the live reconfigure"
+        );
+
+        // READ surface — the SAME `config` binding that just drove the forwarder
+        // serves the admin JSON. Assert the CONCRETE expected string (falsifiable:
+        // catches key-order / whatami-string / numeric-format drift). The fixture
+        // params resolve to batch_size 0 -> effective 65535, lease_ms 10000,
+        // whatami Peer -> "peer". The string is ASSEMBLED from the same `#[cfg]`s
+        // the renderer uses, in `to_admin_json`'s alphabetical key order, rather
+        // than written out as one literal: a literal is right for one feature set
+        // and wrong for another (`--all-features` renders four more keys).
+        let mut expected = String::from(
+            r#"{"acl_default":"allow","acl_deny":["demo/**"],"acl_rules":[{"flow":"ingress","key_exprs":["demo/**"],"messages":["put"],"permission":"deny","subject":"any"}],"batch_size":65535"#,
+        );
+        // The adminspace permit, behind the feature that owns the value; it sorts
+        // between `acl_rules` and `batch_size`, so it is inserted into the literal.
+        #[cfg(feature = "adminspace-core")]
+        {
+            let at = expected
+                .find(r#","batch_size""#)
+                .expect("the base literal carries batch_size, which the permit sorts before");
+            expected.insert_str(
+                at,
+                r#","adminspace":{"permissions":{"read":true,"write":false}}"#,
+            );
+        }
+        // The re-dial schedule is base config on both sides of the port (zenoh's
+        // `connect.retry` sits outside any feature), and sorts between
+        // `batch_size` and `downsampling`.
+        expected.push_str(
+            r#","connect_retry":{"period_increase_factor":2.0,"period_init_ms":1000,"period_max_ms":4000}"#,
+        );
+        #[cfg(all(feature = "routing-peer", feature = "access-downsampling"))]
+        expected.push_str(r#","downsampling":[]"#);
+        expected.push_str(r#","lease_ms":10000"#);
+        #[cfg(all(feature = "routing-peer", feature = "access-quota"))]
+        expected.push_str(r#","low_pass":[]"#);
+        #[cfg(feature = "transport-multilink")]
+        expected.push_str(r#","max_links":1"#);
+        #[cfg(feature = "transport-qos")]
+        expected.push_str(r#","qos":false"#);
+        expected.push_str(r#","whatami":"peer"}"#);
+        assert_eq!(
+            config.to_admin_json(),
+            expected,
+            "one binding: the config that drove the forwarder's deny also SHOWS it \
+             in the admin read view (acl_default + acl_deny summary + acl_rules detail)"
+        );
+    }
+
+    #[cfg(all(not(feature = "config-mutate-runtime"), feature = "access-acl"))]
+    #[test]
+    fn wzconfig_reconfigure_is_inert_without_config_mutate_runtime() {
+        // Same topology; WITHOUT config-mutate-runtime the reconfigure stores the
+        // new typed value (the introspection SSOT updates) but does NOT re-drive
+        // the forwarder — the deny never takes effect (the inert-mirror arm).
+        let (fwd, sink) = typed_config_topology();
+        let mut config = crate::config::WzConfig::new();
+        config.install_interceptors(&fwd);
+
+        put_on_demo_data(&fwd);
+        // Store a DENY rule, but with the feature OFF it is not re-applied.
+        config.reconfigure_interceptors(
+            InterceptorConfig::default().with_acl(deny_put_policy("demo/**", AclFlow::Ingress)),
+            &fwd,
+        );
+        put_on_demo_data(&fwd);
+
+        assert_eq!(
+            fwd.interceptor_dropped(),
+            0,
+            "inert: the deny never takes effect without config-mutate-runtime"
+        );
+        assert_eq!(fwd.data_seen(), 2, "inert: both Puts admitted");
+        assert_eq!(sink.frame_count(), 2, "inert: both Puts relayed");
     }
 
     // The config-document proofs. Each test drives a json5 document through the
@@ -18246,6 +18901,75 @@ mod tests {
                 DeclareOwnedVariant::CodecZenohDeclToken(_)
             ),
             "the C+F replay carries a DeclToken (the interned-id branch)"
+        );
+    }
+
+    /// R2614 — an UNRESTRICTED CURRENT token interest is answered with EVERY token, not
+    /// with silence. "Unrestricted" is the wire's `R` flag CLEAR: the interest carries no
+    /// keyexpr at all, which the protocol defines as asking for all key expressions, and
+    /// upstream answers it with the whole table (`res.is_none_or`, see
+    /// [`RouterForwarder::dump_interest_tokens`]). Moved here from the retired single-net
+    /// peer forwarder's tests when the peer node took this forwarder (item 751 step 7).
+    ///
+    /// THE TWO TOKENS SHARE NO PREFIX AND COME FROM BOTH TIERS ON PURPOSE: a mesh token and a
+    /// client's. A reply that still matched some target could not produce both; only a
+    /// genuine match-everything can. THE CONTROL IS THE SECOND HALF: the same two tokens asked
+    /// for with a RESTRICTED interest naming one of them yield exactly ONE, or "unrestricted
+    /// returns 2" would be as consistent with a dump that ignores its target.
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn an_unrestricted_token_interest_is_answered_with_every_token() {
+        use wz_session_core::interest_build::{build_interest_propagated, InterestKinds};
+
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (router, _sr) = face(zid(0xAA), WIRE_ROUTER); // mesh token source
+        let (holder, _sh) = face(zid(0xA1), WIRE_CLIENT); // client token source
+        let (asker, sink) = face(zid(0xBB), WIRE_CLIENT); // requester
+        fwd.register(FaceId(0), &router);
+        fwd.register(FaceId(1), &holder);
+        fwd.register(FaceId(2), &asker);
+        forward_one(&fwd, FaceId(0), declare_token_msg("demo/alive"));
+        forward_one(&fwd, FaceId(1), declare_client_token_msg(7, "other/thing"));
+        let tokens_told = |sink: &RecordingLinkDriver| {
+            (0..sink.frame_count())
+                .filter(|i| {
+                    matches!(
+                        forwarded_declare(&sink.frame_bytes(*i)).body,
+                        DeclareOwnedVariant::CodecZenohDeclToken(_)
+                    )
+                })
+                .count()
+        };
+
+        // THE SUBJECT: no keyexpr at all.
+        sink.reset();
+        let unrestricted = build_interest_propagated(
+            9,
+            InterestKinds::TOKENS,
+            /* aggregate */ false,
+            /* current_future */ false,
+            None,
+        )
+        .expect("build unrestricted get");
+        forward_one(&fwd, FaceId(2), NetworkMessage::Interest(unrestricted));
+        assert_eq!(
+            tokens_told(&sink),
+            2,
+            "an unrestricted CURRENT token interest is answered with EVERY token, as upstream's \
+             `res.is_none_or` matcher does"
+        );
+
+        // THE CONTROL: a RESTRICTED interest over the same two tokens still discriminates.
+        sink.reset();
+        forward_one(
+            &fwd,
+            FaceId(2),
+            token_interest_msg(10, "demo/**", true, false, false),
+        );
+        assert_eq!(
+            tokens_told(&sink),
+            1,
+            "the RESTRICTED arm still matches only `demo/**`, or the assertion above proves nothing"
         );
     }
 

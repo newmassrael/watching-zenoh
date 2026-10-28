@@ -370,8 +370,10 @@ peer graded against it by `the_region_hat_peer_answers_interests_and_tokens_as_t
   interest. The pin's peer hat holds the mesh tier and sends a current-and-future
   interest on only to the faces whose remote bound is south
   (`zenoh/src/net/routing/hat/peer/interests.rs` @ `.filter(|f| f.remote_bound.is_south())`),
-  which a peer of this node is not, so the region-hat peer closes the interest at
-  once and carries nothing. What the client receives is the same but for the
+  which a peer of this node is not, so the region-hat peer asks no peer. (Those faces
+  are the node's GATEWAYS, a stock router among them, and the region-hat peer asks
+  them: section 13 records that this note first read the filter as selecting
+  nobody.) What the client receives is the same but for the
   final's place; the nodes carry more to get there. This reason exists only in a
   build with both `routing-token-tables` and `routing-interest-pending-gc`: the
   gates were red on hosted CI in the one build that has both (the 83-feature leg
@@ -443,11 +445,10 @@ Declared absent, with the reason, so step 7 does not look for them:
   The router forwarder says the same of itself (`set_gossip_multihop`).
 - **The interest garbage collector** (`set_interest_timeout`,
   `pending_interests_len`, `interests_timed_out`). It collects the copies of a
-  client's token interest that `LinkstateForwarder` brokers to its peers. The
-  pin's peer hat sends such an interest on only to south-bound faces and the
-  region-hat peer holds none, so there is nothing to collect
-  (section 10, `TOKEN_INTEREST_BROKERED`). Step 7 has to move
-  `wz_peer_interest_pending_gc_pico_interop`, which asserts the brokered copy.
+  client's interest that the node brokers. Step 7c ports it to the region-hat
+  forwarder (`router_forward/brokered_interest.rs`): the pin's peer hat sends such
+  an interest on to the faces whose remote bound is south, which are the node's
+  gateways and not its peers, so the broker asks gateways only (section 13).
 
 Still to do in step 6 after this part: the admin sources, the north net view and
 the counters `run_peer` prints, which part three has.
@@ -658,8 +659,10 @@ entry points of `RouterForwarder` (`publish`, `publish_qos`, `publish_delete`,
 node. Nothing calls them from outside yet, so no door changes its answer.
 
 **7b, landed: `run_peer` takes the region-hat forwarder.** The `--peer` node is now the
-region-hat forwarder at node mode Peer; `--interest-timeout` is refused on `--peer` and
-the config key `routing/interests/timeout` is reported read-and-not-applied. The demo's
+region-hat forwarder at node mode Peer. (As landed it refused `--interest-timeout` on
+`--peer` and reported the config key read-and-not-applied, on a reading of the pin
+that step 7c corrected: the broker returned to the region-hat forwarder, and the flag
+and the key are honoured again; section 13.) The demo's
 `routing-peer` feature pulls `wz/routing-router-hat`, which compiles `router_forward`.
 One defect the move introduced and the multilink e2e found: the loop's sources read
 `max_links` and `max_sessions` through two `wz_config.guard()` temporaries in one call
@@ -687,16 +690,26 @@ from the call sites in `crates/wz-ap-demo/src/runner.rs`:
 - Two gaps that are not renames. The region-hat forwarder's hosted handlers are `Send`
   (a router is shared between threads) where `LinkstateForwarder`'s are not, so the
   handlers `run_peer` registers cannot capture the `Rc` buffers they capture now, and
-  take `Arc` and a mutex. And the interest collector is absent (section 11):
-  `--interest-timeout` and the two counters of the shutdown summary have nothing to
-  set or read, and `wz_peer_interest_pending_gc_pico_interop` asserts the copy that
-  the pin's peer hat does not make, so it moves with the flag.
+  take `Arc` and a mutex. And the interest collector was absent from the region-hat
+  forwarder (section 11), which 7b read as "nothing to collect"; 7c put it there
+  (section 13).
 
 **7c-1, landed: the oracle is replaced.** The differential and network gates no
 longer play the single-net forwarder. The one-node scenes are frozen into
 `peer_scenes/gossip.txt` and `peer_scenes/link_state.txt`; the network scenes keep their
 stated delivery counts; every departure the comparison allowed is stated with its pin
 line in section 14. Nothing outside the test modules changed.
+
+**7c-2, landed: the type is gone.** `LinkstateForwarder` (about 20,000 lines with 238 tests) is
+deleted; `linkstate_forward.rs` keeps the route cores, the graph handle and the deploy-facing
+re-exports and is gated on `routing-router-hat`. What the type did that the region-hat peer did
+not is moved, each with the tests it had: a frame on a joined multilink link is routed as the
+primary face's and its shared-memory slices are acknowledged to the link's own peer
+(`joined_link_tests.rs`); an Interest with no keyexpr is answered with the whole token table;
+the five `WzConfig`-drives-the-forwarder tests; and the interest broker (section 13).
+`routing-peer` alone is no longer a configuration of the runtime crate that stands by itself,
+since the peer node is the router hat's forwarder, so the lanes that built it build
+`routing-router-hat`. The module keeps its name; renaming it is a change of its own.
 
 **7c: retirement.** `LinkstateForwarder` goes with the tests that only it carries; what
 the router also uses (`NetHandle`, the route cores, `QueryFan`) stays where it is. The
@@ -710,6 +723,35 @@ honoured, and the census pins move in the same commit.
 
 ## 13. Open
 
+- **The interest broker is the region-hat peer's, and it asks gateways (step 7c).** Steps 5
+  to 7b read `.filter(|f| f.remote_bound.is_south())` in the pin's peer hat
+  (`zenoh/src/net/routing/hat/peer/interests.rs` @ `.filter(|f| f.remote_bound.is_south())`)
+  as selecting no face of a peer node, and retired the broker with the single-net forwarder:
+  the demo refused `--interest-timeout`, and the atom `routing-interest-pending-gc` was
+  headed for the registry's exit. That was wrong. The faces with a south remote bound are the
+  node's GATEWAYS, a stock router among them; the peer hat sends a client's interest on to
+  them, every one for a `CurrentFuture` interest and one for a `Current` one, holds a pending
+  entry for each copy with the timeout `routing.interests.timeout`, and gives the client its
+  `DeclareFinal` when the last has answered. A gateway keeps its other remotes' declarations
+  to itself, so a peer that answered a pico publisher's write-filter interest from its own
+  tables finalized an empty filter, and `pico_publisher_on_a_wz_peer_reaches_a_pico_subscriber_on_zenohd`
+  (R2903) would have measured nothing. It was found while retiring the type, when the
+  `router_interest_qos_gate` reported that no router-plane file builds an interest any more.
+  `router_forward/brokered_interest.rs` is the broker on the region-hat forwarder;
+  the flag and the config key work again; and the frozen-upstream legs of the pico e2e use
+  a wz `--router-hat` for the silent node, since a silent wz PEER is not asked. The one
+  piece not ported is R2904, a gateway that finalized its interest on a key and declared
+  nothing matching is not sent that key's data (the pin's `subscriber_interest_finalized`);
+  the atom is graded PARTIAL for it. Read the first hosted run for the Layer Z leg and the
+  Layer E6 pending-gc legs, which no local run reaches.
+- **Rule 7b's 'asks no one' also reached the unrestricted interest.** An Interest carrying no
+  keyexpr is answered with the whole token table (R2614, upstream's `res.is_none_or`) and
+  was answered by the single-net forwarder only; the router's token dump now does it too
+  (`an_unrestricted_token_interest_is_answered_with_every_token`). The router's subscriber
+  and queryable dumps still return early on it, a debt of their own atoms.
+- **A frame on a joined link was dropped at the face table (7b), now routed as the primary
+  face's** (`router_forward/joined_link_tests.rs`), with the shared-memory acknowledgement
+  going to the joined link's own peer.
 - **The router's BestMatching was one winner across the meshes and the clients; the
   pin's is one for each region. Fixed (owner, 2026-10-28).** Step 6e read
   `compute_final_route` for the `Local` hat and found that the pin 1.10.1 runs it once
@@ -789,7 +831,8 @@ to what the node sends. The rules, with the pin 1.10.1 line each rests on:
 - **A client's token interest is not brokered to the peers**: the peer hat sends a
   current-and-future interest on only to the faces whose remote bound is south
   (`zenoh/src/net/routing/hat/peer/interests.rs` @ `.filter(|f| f.remote_bound.is_south())`),
-  which the peers of this node are not. Graded by
+  which the peers of this node are not; its gateways are, and they are asked
+  (section 13). Graded by
   `the_region_hat_peer_answers_interests_and_tokens_as_the_pins_dispatcher_does`.
 
 The frozen scenes are read as a regression net over these rules and not as a second

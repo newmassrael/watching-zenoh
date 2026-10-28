@@ -2550,7 +2550,7 @@ pub struct FaceSources {
     /// [`Self::offer`].
     pub dial_config: Arc<DialConfig>,
     /// The runtime dial-intent stream (the dynamic outbound source): the
-    /// [`LinkstateForwarder`](crate::linkstate_forward::LinkstateForwarder)'s
+    /// [`RouterForwarder`](crate::router_forward::RouterForwarder)'s
     /// gossip-autoconnect emits a [`DialIntent`] per discovered, policy-admitted
     /// peer; the loop dials each one it does not already hold a face to. `None`
     /// when autoconnect is not enabled (an accept-only loop, or a peer-mesh node

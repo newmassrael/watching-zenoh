@@ -277,8 +277,7 @@ pub enum InterceptorKind {
     /// (`commons/zenoh-stats/src/stats.rs` @ `ReasonLabel::Downsampling`),
     /// because an ACL denial is a policy outcome
     /// its operator already knows about from the policy. It still moves the
-    /// forwarder's own [`crate::linkstate_forward::LinkstateForwarder::interceptor_dropped`]
-    /// witness.
+    /// forwarder's own `interceptor_dropped` witness.
     AccessControl,
     /// The downsampling rate limiter dropped the message.
     Downsampling,
@@ -785,7 +784,7 @@ impl InterceptorConfig {
 /// forwarder type. `WzConfig::install_interceptors` / `reconfigure_interceptors`
 /// take `&dyn InterceptorSink`, so the §5.23 combined node composes the
 /// config-drive surface against this abstraction rather than the concrete
-/// [`crate::linkstate_forward::LinkstateForwarder`] (which is the production
+/// [`RouterForwarder`](crate::router_forward::RouterForwarder) (which is the production
 /// impl). One method — re-install both flow chains from the given config — so a
 /// reconfigure re-drives the live verdict through the same path setup uses.
 pub trait InterceptorSink {

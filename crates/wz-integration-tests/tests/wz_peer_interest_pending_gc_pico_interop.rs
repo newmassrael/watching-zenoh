@@ -1,45 +1,16 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! ⛔ ITEM 751 STEP 7b CHANGED WHAT THIS FILE PROVES, AND IT STILL PROVES THE PROPERTY.
-//! The peer is now the region-hat forwarder (`docs/peer-region-hats.md`), which brokers no
-//! interest to its peers: the pin's peer hat sends an interest on only to the faces whose
-//! remote bound is south (`zenoh/src/net/routing/hat/peer/interests.rs` @
-//! `.filter(|f| f.remote_bound.is_south())`), which a peer of this node is not, and answers
-//! a client from its own table, which holds the mesh tier. So there is no pending interest
-//! to time out, `--interest-timeout` is refused on a peer, and the demo prints no
-//! interest-broker line. What survives is the property the text below names as the
-//! observable: a foreign client's current liveliness interest is ANSWERED, and answered
-//! whatever the peer's upstream does. The three arms now say exactly that: pico returns
-//! promptly against a silent upstream (it can no longer be wedged by one, since nothing is
-//! asked of it), against a live one, and against none. The atom tag below is the retiring
-//! atom's; step 7c takes it out of the registry.
-//!
 //! R311y512 — §5.21 `routing-interest-pending-gc`, witnessed as a real zenoh-pico
-//! `z_get_liveliness` that a watching-zenoh peer UNWEDGES after its upstream goes
-//! silent. (The text from here on is the history of the atom this file was written for.)
+//! `z_get_liveliness` that a watching-zenoh peer UNWEDGES after its GATEWAY goes silent.
 //!
-//! ## Why this atom needed a build, not a better test
-//!
-//! R311y508 proposed this atom as a `FOREIGN_NON_OBSERVABLE` denominator
-//! exclusion, argued from a correct direct read: zenoh populates
-//! `pending_current_interests` in exactly two hats
-//! (`zenoh/src/net/routing/hat/client/interests.rs` @ `pending_current_interests`
-//! and `zenoh/src/net/routing/hat/peer/interests.rs`
-//! @ `pending_current_interests`), the hats wz mirrored held no pending table at
-//! all, and in the only role wz HAD the mechanism the GC's output went to the
-//! LOCAL app. The exclusion carried its own re-open trigger, named rather than
-//! left implicit: *"the only role whose unwind DOES cross the wire is zenoh's
-//! p2p_peer hat brokering a DOWNSTREAM client's current interest, where `src_face`
-//! is a remote face; wz implements no p2p_peer-shaped broker, and if one is ever
-//! built this exclusion is wrong and must come out."*
-//!
-//! R311y512 built it. `LinkstateForwarder` now propagates a CLIENT face's CURRENT
-//! token interest to every upstream face, holds one
-//! [`PendingCurrentInterests`](wz::runtime_tokio::interest_broker::PendingCurrentInterests)
-//! entry per propagated copy, and withholds the client's terminating
-//! `DeclareFinal` until the LAST upstream answers — with the tick sweep as the
-//! backstop when one never does.
+//! Item 751 step 7 moved the broker from the single-net peer forwarder to the region-hat
+//! forwarder (`docs/peer-region-hats.md`), and with it the rule of WHO is asked: the pin's peer
+//! hat propagates a client's interest to the faces whose remote bound is south, the gateways
+//! (`zenoh/src/net/routing/hat/peer/interests.rs` @ `.filter(|f| f.remote_bound.is_south())`),
+//! and to no other peer, because wz peers flood their declarations. So the upstream that can
+//! wedge a client is a ROUTER, and the arms below use a wz `--router-hat` for it; a wz PEER
+//! upstream is asked nothing, which two arms show from the other side.
 //!
 //! ## The observable, and why a foreign client is the only honest witness
 //!
@@ -52,32 +23,26 @@
 //! observable.** That is not a proxy for the property; it is the property, read
 //! off a foreign implementation that has no other way out.
 //!
-//! ## Three arms on ONE binary, differing in ONE fixture variable each
+//! ## Arms on ONE binary, differing in ONE fixture variable each
 //!
-//! Every arm drives the SAME `wz-ap-demo` build. Nothing here is separated by a
-//! feature flag, so no arm can pass because a different binary was measured
-//! (`BUILD FEATURES` is asserted anyway, so a lane that forgot the feature fails
-//! loudly instead of silently).
-//!
-//! - [`wz_peer_answers_a_pico_liveliness_get_promptly_when_the_upstream_goes_silent`]
-//!   — THE ATOM. Broker peer with a live upstream; the upstream is `SIGSTOP`ped
-//!   *before* pico asks, so it holds its TCP link open and answers nothing. pico
-//!   still returns, and the broker reports the GC reaped exactly one entry.
-//!   (Since step 7b: promptly, and no line is printed.)
-//! - [`wz_peer_answers_a_pico_liveliness_get_promptly_with_a_live_upstream`] — the same
-//!   topology with the upstream RUNNING. pico returns promptly and the GC counter
-//!   stays **0**: the unwind came from the upstream's own `DeclareFinal`, so the
-//!   arm above cannot be re-read as "the broker always reaps".
-//! - [`wz_peer_without_an_upstream_answers_a_pico_liveliness_get_inline`] — the
-//!   same binary with `--connect` omitted. With no upstream face there is nothing
-//!   to propagate to, `propagate_current_interest` returns 0, and the final is
-//!   emitted inline exactly as before this round. The control that says the delay
-//!   in arm 1 is the PENDING TABLE and not something the broker build does to
-//!   every interest.
+//! - [`wz_peer_gc_terminates_a_pico_liveliness_get_when_its_gateway_goes_silent`] — THE ATOM.
+//!   A peer with a router upstream, the router `SIGSTOP`ped *before* pico asks, so it holds its
+//!   TCP link open and answers nothing. pico still returns, at the GC deadline, and the peer
+//!   reports the GC reaped exactly one entry.
+//! - [`wz_peer_answers_a_pico_liveliness_get_promptly_with_a_live_gateway`] — the same topology
+//!   with the router RUNNING. pico returns promptly and the GC counter stays **0**: the unwind
+//!   came from the router's own `DeclareFinal`, so the arm above cannot be re-read as "the
+//!   broker always reaps".
+//! - [`wz_peer_does_not_ask_a_silent_peer_upstream`] — a frozen PEER upstream. It is not a
+//!   gateway, so nothing is asked of it and pico is answered promptly from the peer's own table.
+//! - [`wz_peer_without_an_upstream_answers_a_pico_liveliness_get_inline`] — `--connect` omitted.
+//!   With no upstream face there is nothing to propagate to and the final is emitted inline. The
+//!   control that says the delay in the first arm is the PENDING TABLE and not something the
+//!   broker build does to every interest.
 //!
 //! ## The confound, named: face-down is a THIRD retirement path
 //!
-//! A `SIGSTOP`ped peer also stops sending KeepAlives, so its session lease
+//! A `SIGSTOP`ped router also stops sending KeepAlives, so its session lease
 //! (`lease_ms: 10000`, printed in the demo's own config banner) eventually expires
 //! and the face-down drain finalizes the client too. That is correct behaviour —
 //! `drain_face` is zenoh's `finalize_pending_interests` — but it means "pico
@@ -88,12 +53,13 @@
 //! not scheduling races — a frozen process cannot answer early, and the lease
 //! cannot expire in under 10s.
 //!
-//! MEASURED while building, all three arms repeated: live upstream `0.15s`,
-//! frozen upstream `3.24s` (deadline 2500ms + one 100ms tick window + startup),
-//! no upstream `0.15s`. The damage probe — the tick sweep disabled and nothing
-//! else — moved the frozen arm from `3.24s` to `8.89s`, i.e. onto the lease path,
-//! with the demo's own log showing `face 0 DOWN (Terminated)` at that instant.
-//! So the 2.5s..8s window separates the GC from every other way out.
+//! The bounds were measured on the single-net peer forwarder, which this arm was written
+//! against: live upstream `0.15s`, frozen upstream `3.24s` (deadline 2500ms + one 100ms tick
+//! window + startup), no upstream `0.15s`, and with the tick sweep disabled alone the frozen
+//! arm moved to `8.89s`, onto the lease path. They are the same protocol constants here.
+//!
+//! Requires: wz-ap-demo built with `--features routing-peer,router-hat-router,routing-interest-pending-gc`
+//! and the zenoh-pico CLI. Layer E6's lane owns that build.
 
 use std::fs::File;
 use std::process::{Command, Stdio};
@@ -105,77 +71,98 @@ use wz_integration_tests::common::{
     wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
 };
 
-/// The keyexpr pico solicits. RESTRICTED (a literal prefix + `**`), because the
-/// broker deliberately declines to propagate a match-all interest — the dump legs
-/// decline it too, so brokering one would ask upstream a question this node could
-/// not itself answer.
+/// The keyexpr pico solicits. RESTRICTED (a literal prefix + `**`).
 const GET_KEYEXPR: &str = "group1/**";
 
-/// How soon a client's current interest must be answered. Well under the 2.5s deadline the
-/// retired broker needed against a silent upstream and under the 10s session lease, so a
-/// return inside it can come only from the peer answering from its own table.
+/// The interest deadline the GC arm sets, in milliseconds.
+const INTEREST_TIMEOUT_MS: u64 = 2500;
+
+/// How soon a client's current interest must be answered when nothing is waited for. Well under
+/// the 2.5s deadline and the 10s session lease, so a return inside it can come only from an
+/// answer that waited on no one.
 const PROMPT: Duration = Duration::from_millis(1_500);
 
-/// Upper bound on an arm that is answered without waiting for anything. A pico that has not
-/// returned by then is killed, and that is reported as a wedge.
+/// Upper bound on an arm that is answered without waiting for anything.
 const PROMPT_ARM_BUDGET: Duration = Duration::from_secs(5);
 
-/// Spawn a `--peer` demo on an ephemeral port, optionally dialing `connect`. Returns its
-/// guard, its stderr handle, and the port it actually bound.
-fn spawn_peer(label: &str, connect: Option<u16>) -> Peer {
-    let stderr = tempfile::tempfile().expect("tempfile for peer stderr");
-    let writer = stderr.try_clone().expect("dup peer stderr handle");
+/// Upper bound on the GC arm, under the 10 s lease so a return cannot come from the face-down
+/// path.
+const GC_ARM_BUDGET: Duration = Duration::from_secs(8);
+
+/// The GC must not fire before the deadline it was given, less a margin for the clock's phase.
+const GC_FLOOR: Duration = Duration::from_millis(2_400);
+
+/// What a node is run as.
+#[derive(Clone, Copy)]
+enum Kind {
+    Peer,
+    RouterHat,
+}
+
+impl Kind {
+    fn flag(self) -> &'static str {
+        match self {
+            Kind::Peer => "--peer",
+            Kind::RouterHat => "--router-hat",
+        }
+    }
+
+    fn listening(self) -> &'static str {
+        match self {
+            Kind::Peer => "peer: listening on 127.0.0.1:",
+            Kind::RouterHat => "router-hat: listening on 127.0.0.1:",
+        }
+    }
+}
+
+struct Node {
+    guard: ChildGuard,
+    stderr: File,
+    port: u16,
+}
+
+/// Spawn a node of `kind` on an ephemeral port, optionally dialing `connect` and given
+/// `extra` arguments. Returns once it is listening.
+fn spawn(label: &str, kind: Kind, connect: Option<u16>, extra: &[&str]) -> Node {
+    let stderr = tempfile::tempfile().expect("tempfile for node stderr");
+    let writer = stderr.try_clone().expect("dup node stderr handle");
     let mut reader = stderr;
     let mut cmd = Command::new(wz_ap_demo_binary());
-    cmd.args(["--peer", "127.0.0.1:0"]);
+    cmd.args([kind.flag(), "127.0.0.1:0"]);
     let dial;
     if let Some(port) = connect {
         dial = format!("127.0.0.1:{port}");
         cmd.args(["--connect", &dial]);
     }
+    cmd.args(extra);
     let mut guard = ChildGuard::wrap(
-        format!("region-hat peer {label}"),
+        label.to_string(),
         cmd.env("RUST_LOG", "info")
             .stdout(Stdio::null())
             .stderr(Stdio::from(writer))
             .spawn()
-            .expect("spawn wz-ap-demo --peer"),
+            .expect("spawn wz-ap-demo"),
     );
-    let captured = wait_for_substring(
-        &mut reader,
-        "peer: listening on 127.0.0.1:",
-        Duration::from_secs(5),
-    )
-    .unwrap_or_else(|c| {
-        let _ = guard.child_mut().kill();
-        let _ = guard.child_mut().wait();
-        panic!(
-            "wz-ap-demo did not bind a peer listener within 5s (is the binary built with \
-             --features routing-peer?)\n\
-             --- peer {label} stderr ---\n{c}"
-        );
-    });
+    let captured = wait_for_substring(&mut reader, kind.listening(), Duration::from_secs(5))
+        .unwrap_or_else(|c| {
+            let _ = guard.child_mut().kill();
+            let _ = guard.child_mut().wait();
+            panic!(
+                "wz-ap-demo did not bind a listener within 5s (is the binary built with \
+                 --features routing-peer,router-hat-router?)\n--- {label} stderr ---\n{c}"
+            );
+        });
     let port = listen_port(&captured);
-    Peer {
+    Node {
         guard,
         stderr: reader,
         port,
     }
 }
 
-struct Peer {
-    guard: ChildGuard,
-    stderr: File,
-    port: u16,
-}
-
-impl Peer {
-    fn pid(&mut self) -> String {
-        self.guard.child_mut().id().to_string()
-    }
-
+impl Node {
     fn signal(&mut self, sig: &str) {
-        let pid = self.pid();
+        let pid = self.guard.child_mut().id().to_string();
         let status = Command::new("kill")
             .arg(sig)
             .arg(&pid)
@@ -184,8 +171,8 @@ impl Peer {
         assert!(status.success(), "kill {sig} {pid} failed");
     }
 
-    /// Terminate the demo and return everything it logged, so the caller can read
-    /// the interest-broker witness line out of it.
+    /// Terminate the demo and return everything it logged, so the caller can read the
+    /// interest-broker witness line out of it.
     fn finish(mut self) -> String {
         graceful_terminate(self.guard.child_mut(), Duration::from_secs(5));
         read_captured(&mut self.stderr)
@@ -200,14 +187,11 @@ fn run_pico_get(port: u16, budget: Duration) -> (bool, Duration, String) {
     let stdout = tempfile::tempfile().expect("tempfile for pico stdout");
     let writer = stdout.try_clone().expect("dup pico stdout handle");
     let mut reader = stdout;
-    // The clock starts at SPAWN, deliberately, and the bounds absorb pico's
-    // start-up. Gating it on pico's own "Sending liveliness query" banner is the
-    // obvious refinement and it is WRONG here: that banner goes to a redirected
-    // stdout, which glibc block-buffers, so it becomes visible only when the
-    // process exits — a clock gated on it measures ~0 for every arm regardless of
-    // what the broker did. (Measured: the frozen arm read `16.409µs` that way while
-    // the broker's own log showed the GC had reaped its entry.) Start-up is ~0.15s
-    // against a 1.5s floor and a 2.5s deadline, so folding it in costs no margin.
+    // The clock starts at SPAWN, deliberately, and the bounds absorb pico's start-up. Gating it
+    // on pico's own "Sending liveliness query" banner is WRONG here: that banner goes to a
+    // redirected stdout, which glibc block-buffers, so it becomes visible only when the process
+    // exits — a clock gated on it measures ~0 for every arm. Start-up is ~0.15s against a 1.5s
+    // floor and a 2.5s deadline, so folding it in costs no margin.
     let started = Instant::now();
     let mut guard = ChildGuard::wrap(
         "z_get_liveliness".to_string(),
@@ -234,25 +218,117 @@ fn run_pico_get(port: u16, budget: Duration) -> (bool, Duration, String) {
     (exited, elapsed, read_captured(&mut reader))
 }
 
-/// An upstream that holds its link open and answers nothing does not wedge a foreign client.
+/// A gateway that holds its link open and answers nothing does not wedge a foreign client.
 ///
 /// pico cannot time a current interest out itself (`liveliness.c:348`), so its return is the
-/// `DeclareFinal` arriving and nothing else. The region-hat peer sends that final at once,
-/// from its own table, and asks its upstream nothing, so a `SIGSTOP`ped upstream changes
-/// nothing: pico returns inside [`PROMPT`], where the retired broker needed its 2.5s deadline.
-/// The upstream is frozen before pico asks and the mesh face exists, so this is not the
-/// no-upstream arm below.
+/// `DeclareFinal` arriving and nothing else. The peer brokered the interest to its gateway and
+/// owes the final by the unwind; the gateway is `SIGSTOP`ped, so only the GC can pay it.
 // wz-proves: routing-interest-pending-gc wz->pico
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer + zenoh-pico z_get_liveliness); Layer E6 runs via --ignored"]
-fn wz_peer_answers_a_pico_liveliness_get_promptly_when_the_upstream_goes_silent() {
-    let mut upstream = spawn_peer("upstream", None);
-    let mut peer = spawn_peer("peer", Some(upstream.port));
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer,router-hat-router + zenoh-pico z_get_liveliness); Layer E6 runs via --ignored"]
+fn wz_peer_gc_terminates_a_pico_liveliness_get_when_its_gateway_goes_silent() {
+    let mut gateway = spawn("router-hat gateway", Kind::RouterHat, None, &[]);
+    let timeout = INTEREST_TIMEOUT_MS.to_string();
+    let mut peer = spawn(
+        "peer",
+        Kind::Peer,
+        Some(gateway.port),
+        &["--interest-timeout", &timeout],
+    );
+    let mesh = wait_for_substring(&mut peer.stderr, "face 0 UP", Duration::from_secs(10))
+        .unwrap_or_else(|c| panic!("the peer never linked to its gateway\n{c}"));
+    assert!(
+        mesh.contains("whatami Some(Router)"),
+        "the upstream face must be a ROUTER face, the gateway the peer brokers to.\n{mesh}"
+    );
+
+    gateway.signal("-STOP");
+    let (exited, elapsed, pico_out) = run_pico_get(peer.port, GC_ARM_BUDGET);
+    gateway.signal("-CONT");
+
+    let peer_log = peer.finish();
+    let _ = gateway.finish();
+
+    assert!(
+        exited,
+        "z_get_liveliness never returned within {GC_ARM_BUDGET:?} against a silent gateway: \
+         the GC did not finalize the client, and pico has no timeout of its own to rescue it.\n\
+         --- z_get_liveliness stdout ---\n{pico_out}\n--- peer stderr ---\n{peer_log}"
+    );
+    assert!(
+        elapsed >= GC_FLOOR,
+        "z_get_liveliness returned after {elapsed:?}, before the {INTEREST_TIMEOUT_MS}ms deadline: \
+         the client was finalized by something other than the GC.\n--- peer stderr ---\n{peer_log}"
+    );
+    assert!(
+        peer_log.contains("1 reaped by the GC"),
+        "the peer's own broker line does not report the GC reaping the silent gateway's entry.\n\
+         --- peer stderr ---\n{peer_log}"
+    );
+}
+
+/// The gateway RUNNING: the same client is answered promptly and the GC reaps nothing.
+///
+/// Without this arm the one above could be re-read as "the broker always reaps"; here the
+/// unwind comes from the gateway's own final.
+// wz-proves: routing-interest-pending-gc wz->pico
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer,router-hat-router + zenoh-pico z_get_liveliness); Layer E6 runs via --ignored"]
+fn wz_peer_answers_a_pico_liveliness_get_promptly_with_a_live_gateway() {
+    let gateway = spawn("router-hat gateway", Kind::RouterHat, None, &[]);
+    let timeout = INTEREST_TIMEOUT_MS.to_string();
+    let mut peer = spawn(
+        "peer",
+        Kind::Peer,
+        Some(gateway.port),
+        &["--interest-timeout", &timeout],
+    );
+    let _ = wait_for_substring(&mut peer.stderr, "face 0 UP", Duration::from_secs(10));
+
+    let (exited, elapsed, pico_out) = run_pico_get(peer.port, PROMPT_ARM_BUDGET);
+    let peer_log = peer.finish();
+    let _ = gateway.finish();
+
+    assert!(
+        exited,
+        "z_get_liveliness never returned within {PROMPT_ARM_BUDGET:?} against a LIVE gateway.\n\
+         --- z_get_liveliness stdout ---\n{pico_out}\n--- peer stderr ---\n{peer_log}"
+    );
+    assert!(
+        elapsed < PROMPT,
+        "a live gateway's peer answered in {elapsed:?}, at or past the prompt bound.\n\
+         --- peer stderr ---\n{peer_log}"
+    );
+    assert!(
+        peer_log.contains("0 reaped by the GC"),
+        "the GC reaped an entry although the gateway answered: the unwind did not come from the \
+         gateway's own final.\n--- peer stderr ---\n{peer_log}"
+    );
+}
+
+/// A silent PEER upstream is not asked, so it cannot wedge anyone.
+///
+/// The pin sends an interest on to gateways and not to peers, whose declarations arrive by
+/// flood. A frozen peer therefore changes nothing: pico is answered from the peer's own table,
+/// inside [`PROMPT`], where a broker that asked every upstream needed its whole deadline.
+// wz-proves: none -- the pin's WHO-IS-ASKED rule seen from the peer side, a control for the
+// gateway arms above; it claims no atom of its own.
+#[test]
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer,router-hat-router + zenoh-pico z_get_liveliness); Layer E6 runs via --ignored"]
+fn wz_peer_does_not_ask_a_silent_peer_upstream() {
+    let mut upstream = spawn("peer upstream", Kind::Peer, None, &[]);
+    let timeout = INTEREST_TIMEOUT_MS.to_string();
+    let mut peer = spawn(
+        "peer",
+        Kind::Peer,
+        Some(upstream.port),
+        &["--interest-timeout", &timeout],
+    );
     let mesh = wait_for_substring(&mut peer.stderr, "face 0 UP", Duration::from_secs(10))
         .unwrap_or_else(|c| panic!("the peer never linked to its upstream\n{c}"));
     assert!(
         mesh.contains("whatami Some(Peer)"),
-        "the upstream face must be a PEER face, the face the retired broker asked.\n{mesh}"
+        "the upstream face must be a PEER face, which is not a gateway.\n{mesh}"
     );
 
     upstream.signal("-STOP");
@@ -264,63 +340,28 @@ fn wz_peer_answers_a_pico_liveliness_get_promptly_when_the_upstream_goes_silent(
 
     assert!(
         exited,
-        "z_get_liveliness never returned within {PROMPT_ARM_BUDGET:?} against a silent \
-         upstream: the client's current interest was not answered, so it is wedged. pico \
-         has no timeout of its own to rescue it.\n--- z_get_liveliness stdout ---\n\
-         {pico_out}\n--- peer stderr ---\n{peer_log}"
+        "z_get_liveliness never returned within {PROMPT_ARM_BUDGET:?} against a silent peer \
+         upstream: the client's current interest was not answered.\n\
+         --- z_get_liveliness stdout ---\n{pico_out}\n--- peer stderr ---\n{peer_log}"
     );
     assert!(
         elapsed < PROMPT,
-        "z_get_liveliness took {elapsed:?} against a silent upstream, as long as the retired \
-         broker's deadline: the peer is waiting on the upstream, which it must not.\n\
-         --- peer stderr ---\n{peer_log}"
-    );
-    assert!(
-        !peer_log.contains("peer: interest broker;"),
-        "the peer printed the retired interest-broker line: it brokers an interest the pin's \
-         peer hat does not.\n--- peer stderr ---\n{peer_log}"
-    );
-}
-
-/// The upstream RUNNING: the same answer, as prompt.
-///
-/// Without this arm the one above could be re-read as "a frozen upstream is special-cased";
-/// a live one changes nothing either, because the peer asks neither.
-// wz-proves: routing-interest-pending-gc wz->pico
-#[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer + zenoh-pico z_get_liveliness); Layer E6 runs via --ignored"]
-fn wz_peer_answers_a_pico_liveliness_get_promptly_with_a_live_upstream() {
-    let upstream = spawn_peer("upstream", None);
-    let mut peer = spawn_peer("peer", Some(upstream.port));
-    let _ = wait_for_substring(&mut peer.stderr, "face 0 UP", Duration::from_secs(10));
-
-    let (exited, elapsed, pico_out) = run_pico_get(peer.port, PROMPT_ARM_BUDGET);
-    let peer_log = peer.finish();
-    let _ = upstream.finish();
-
-    assert!(
-        exited,
-        "z_get_liveliness never returned within {PROMPT_ARM_BUDGET:?} against a LIVE \
-         upstream.\n--- z_get_liveliness stdout ---\n{pico_out}\n--- peer stderr ---\n{peer_log}"
-    );
-    assert!(
-        elapsed < PROMPT,
-        "a live upstream's peer answered in {elapsed:?}, at or past the prompt bound.\n\
-         --- peer stderr ---\n{peer_log}"
+        "z_get_liveliness took {elapsed:?} against a silent PEER upstream: the peer waited on a \
+         face the pin does not ask.\n--- peer stderr ---\n{peer_log}"
     );
 }
 
 /// The control: the SAME binary with no upstream at all answers inline.
 ///
-/// With no upstream face there was nothing to ask even for the retired broker, so this arm is
-/// the baseline the two above are measured against: the answer's time does not depend on there
-/// being an upstream at all, which is what the region-hat peer makes of the other two.
-// wz-proves: none -- control arm for the two above; it shows the answer does not depend on an
+/// With no upstream face there is nothing to propagate to, so this arm is the baseline the arms
+/// above are measured against: the answer's time does not depend on there being an upstream at
+/// all unless that upstream is a gateway.
+// wz-proves: none -- control arm for the arms above; it shows the answer does not depend on an
 // upstream face existing, and claims no atom of its own.
 #[test]
-#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer + zenoh-pico z_get_liveliness); Layer E6 runs via --ignored"]
+#[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer,router-hat-router + zenoh-pico z_get_liveliness); Layer E6 runs via --ignored"]
 fn wz_peer_without_an_upstream_answers_a_pico_liveliness_get_inline() {
-    let peer = spawn_peer("solo", None);
+    let peer = spawn("solo", Kind::Peer, None, &[]);
 
     let (exited, elapsed, pico_out) = run_pico_get(peer.port, PROMPT_ARM_BUDGET);
     let peer_log = peer.finish();

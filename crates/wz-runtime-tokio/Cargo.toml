@@ -1186,7 +1186,8 @@ routing-router-hat = ["routing-peer"]
 # routing-router-hat), so no declare-token app-surface dep is needed.
 routing-token-tables = ["routing-router-hat"]
 # R311y512 — §5.21 routing-interest-pending-gc: the p2p_peer-shaped INTEREST
-# BROKER on the LinkstateForwarder. A CLIENT face's CURRENT token interest is
+# BROKER (on the single-net peer forwarder until item 751 step 7, on the region-hat
+# forwarder at node mode Peer since). A CLIENT face's CURRENT token interest is
 # PROPAGATED to each upstream (non-client) face with a freshly minted id, a
 # pending entry is held per propagated copy, and the client's terminating
 # DeclareFinal is withheld until the LAST upstream answers -- zenoh
@@ -1200,7 +1201,7 @@ routing-token-tables = ["routing-router-hat"]
 # wz-session-core's interest_build, which (like the declare_build reply builders
 # the forwarder already uses) carries no feature gate, so the broker pulls no
 # app-surface declare-interest / liveliness-* dep.
-routing-interest-pending-gc = ["routing-peer"]
+routing-interest-pending-gc = ["routing-router-hat"]
 # §5.21 router-connect-reconcile — the runtime dynamic connect-list reconcile
 # (zenoh `net/runtime/orchestrator.rs:413` `update_peers`) + peer auto-reconnect
 # (the `closed_session` 1194 Peer/Router re-dial). The shared `face_drive_loop`

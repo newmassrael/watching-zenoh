@@ -198,7 +198,7 @@ BARE_BUDGET = 6
 #: tracked meaning in this tree, and the one citation of `attachment-bytes` they made ambiguous
 #: was rooted at upstream's `commons/zenoh-protocol/src/zenoh/` with a line of its text, which
 #: also resolves an unresolved claim the pair carried.
-FINDINGS_BUDGET = 7
+FINDINGS_BUDGET = 5
 
 #: ROOT-LESS AXIS (open debt 754). The classifier this gate borrows sorts every
 #: citation into EIGHT buckets; until debt 754 was paid this gate held three and
@@ -219,7 +219,7 @@ FINDINGS_BUDGET = 7
 #: tracked tree's directory names (the reasons are flat files, so the tree's
 #: names are passed in rather than derived), which keeps this number a property
 #: of the store alone: moving the source tree cannot move it.
-ROOTLESS_LINE_BUDGET = 74
+ROOTLESS_LINE_BUDGET = 72
 ROOTLESS_BARE_BUDGET = 10
 ROOTLESS_STALE_LINE_BUDGET = 17
 #: THE RESIDUE IS A TABLE, ONE ROW PER SEGMENT (open debt 799, the source gate's
@@ -232,7 +232,7 @@ ROOTLESS_STALE_LINE_BUDGET = 17
 #: Seeded at what the command printed; rows only fall, a row at zero is deleted.
 ROOTLESS_RESIDUE_BY_SEGMENT: dict[str, int] = {
     "auth": 1,
-    "dispatcher": 10,
+    "dispatcher": 9,
     "establishment": 20,
     "ext": 4,
     "router": 1,
@@ -259,7 +259,7 @@ def rootless_undeclared_budget() -> int:
 #: The conservation check, as in the source gate: line + bare + residue. A
 #: declaration moves an occurrence between the three and leaves this alone; a
 #: new citation raises it whatever the others were set to.
-ROOTLESS_TOTAL_BUDGET = 177
+ROOTLESS_TOTAL_BUDGET = 174
 
 
 def live_reasons(root: pathlib.Path | None = None) -> dict[str, str]:

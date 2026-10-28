@@ -511,7 +511,7 @@ pub use wz_session_core::capacity;
 /// R311y220 — the QoS `Priority` band value type (and `CongestionControl`).
 /// Re-exported so a facade consumer (wz-ap-demo's `--express-high` / `--low`
 /// prioritized publish) names `wz::runtime_tokio::qos::Priority` to drive
-/// [`linkstate_forward::LinkstateForwarder::publish_qos`] — the same value type
+/// `RouterForwarder::publish_qos` — the same value type
 /// `accept_loop`'s per-link band assignment already uses internally. Ungated: the
 /// module is an unconditional `pub mod qos` in wz-session-core (DEFAULT priority is
 /// used on every build), and a `pub use` never warns unused.
@@ -2286,13 +2286,14 @@ pub mod routing_region;
 #[cfg(any(feature = "transport-unicast", feature = "transport-multicast"))]
 pub mod node_stats;
 
-// P4 linkstate-peer routing — the driver (step c3) that connects the
-// topology graph (the `wz_routing_graph` crate, lifted out of this
-// runtime crate in R311qw) to the accept/peer-loop face lifecycle: a
-// `accept_loop::FaceForwarder` that connects faces in the
-// graph and ingests inbound `OAM_LINKSTATE` topology. Gated on
-// `routing-peer`.
-#[cfg(feature = "routing-peer")]
+// The link-state routing cores the region-hat forwarder is built from (the data and
+// query routes over a `wz_routing_graph` net and its interest tables, the query
+// return synthesis, the graph handle) and the re-exports a deploy names its policy
+// and configuration by. The single-net peer forwarder that lived here retired with
+// open-debt item 751 step 7: a peer node is the region-hat forwarder at node mode
+// Peer. Gated on `routing-router-hat`, the forwarder these cores have no caller
+// without.
+#[cfg(feature = "routing-router-hat")]
 pub mod linkstate_forward;
 
 /// R2721 — the AP binding for the lifecycle grammar's `open` verb: resolve the
@@ -2438,8 +2439,7 @@ pub mod linkstate_pending;
 // `dispatcher/interests.rs` (`PendingCurrentInterest` /
 // `finalize_pending_interest` / `CurrentInterestCleanup`) driven from
 // `zenoh/src/net/routing/hat/peer/interests.rs` @ `fn route_interest`. Gated on
-// `routing-interest-pending-gc`, which
-// pulls `routing-peer` (the forwarder that owns the table).
+// `routing-interest-pending-gc`, which pulls the forwarder that owns the table.
 #[cfg(feature = "routing-interest-pending-gc")]
 pub mod interest_broker;
 

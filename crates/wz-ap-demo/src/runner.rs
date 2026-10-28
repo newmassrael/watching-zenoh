@@ -3958,8 +3958,8 @@ async fn resolve_dial_targets(
 /// hold-only). It accepts and also dials out to form a mesh. Binds `listen`, parses the
 /// `dial_targets` (TCP socket addresses for this atom), then runs the library
 /// [`peer_loop`](wz::runtime_tokio::accept_loop::peer_loop) with a
-/// [`LinkstateForwarder`](wz::runtime_tokio::linkstate_forward::LinkstateForwarder)
-/// (R311rb / c3d-3): each held face feeds a linkstate-peer topology graph, the
+/// [`RouterForwarder`](wz::runtime_tokio::router_forward::RouterForwarder) at node mode
+/// Peer (item 751 step 7): each held face feeds a peer-hat topology graph, the
 /// peer periodically floods its own link-state so neighbours converge, and an
 /// inbound link-state is re-flooded onward (transitive mesh propagation). Each
 /// face up/down is logged so the live hold set is observable; the shutdown
@@ -4342,10 +4342,9 @@ pub(crate) struct PeerOpts {
     /// `routing.interests.timeout` in milliseconds (`--interest-timeout`): how long
     /// a CLIENT's CURRENT interest, once BROKERED to an upstream face, waits for
     /// that upstream's `DeclareFinal` before the GC abandons it and finalizes the
-    /// client anyway. `None` keeps
-    /// [`LinkstateForwarder::DEFAULT_INTEREST_TIMEOUT`](wz::runtime_tokio::linkstate_forward::LinkstateForwarder::DEFAULT_INTEREST_TIMEOUT)
-    /// (10s, zenoh's own default). A deploy shortens it for a latency-sensitive
-    /// leaf; a test shortens it so the GC edge is reachable inside a bounded run.
+    /// client anyway. `None` keeps zenoh's own default (10s). A deploy shortens it for a
+    /// latency-sensitive leaf; a test shortens it so the GC edge is reachable inside a
+    /// bounded run.
     #[cfg(feature = "routing-interest-pending-gc")]
     pub interest_timeout_ms: Option<u64>,
     /// R311y846 — `--scout-listen` (zenoh `scouting/multicast/listen`): answer
@@ -4607,21 +4606,13 @@ async fn run_peer_until(
     // mode of the north peer hat (`set_peer_region_full_linkstate`), which is
     // wz's link-state peer extension as a flag of that hat.
     forwarder.set_peer_region_full_linkstate(opts.full_linkstate);
-    // R311y512 — `--interest-timeout <ms>` (zenoh `routing.interests.timeout`)
-    // bounded how long an interest this node BROKERED to a peer waited for that
-    // peer's final. The region-hat peer brokers none: the pin's peer hat sends an
-    // interest on only to the faces whose remote bound is south
-    // (`zenoh/src/net/routing/hat/peer/interests.rs` @ `.filter(|f| f.remote_bound.is_south())`)
-    // and answers a client from its own table, which holds the mesh tier. A
-    // deadline for nothing is refused, not accepted and ignored (`docs/peer-region-hats.md`,
-    // sections 10 and 12a).
+    // R311y512 — `--interest-timeout <ms>` (zenoh `routing.interests.timeout`): how long an
+    // interest this node BROKERS to a gateway waits for that gateway's final before the sweep
+    // finalizes the client anyway. The broker is the region-hat forwarder's own
+    // (`router_forward::brokered_interest`); the default is zenoh's 10 s.
     #[cfg(feature = "routing-interest-pending-gc")]
-    if opts.interest_timeout_ms.is_some() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "--interest-timeout: this peer brokers no interest to its peers, so no pending \
-             interest exists to time out; remove the flag",
-        ));
+    if let Some(ms) = opts.interest_timeout_ms {
+        forwarder.set_interest_timeout(std::time::Duration::from_millis(ms));
     }
     // Advertise this peer's listen address as its dial locator BEFORE the first
     // face registers, so self's first FULL flood already carries it. A neighbour
@@ -5906,9 +5897,19 @@ async fn run_peer_until(
         peak_edges.max(forwarder.north_net_edge_count()),
         forwarder.data_seen()
     );
-    // There is no interest-broker line any more (R311y512 printed one): this peer brokers no
-    // interest, so it has no pending interest to count or collect
-    // (`docs/peer-region-hats.md`, section 12a).
+    // R311y512 — the INTEREST-BROKER witness, on its own line rather than appended to the
+    // summary above so the OFF build simply does not print it (the whole block is compiled out)
+    // and a test can tell the two builds apart by presence, not by parsing a number out of a
+    // shared line. `reaped` is the GC's own counter: it rises only when the tick sweep abandoned
+    // a propagated interest whose gateway never answered, which is the event a foreign client
+    // observes as its `z_liveliness_get` terminating anyway.
+    #[cfg(feature = "routing-interest-pending-gc")]
+    log::info!(
+        "wz-ap-demo peer: interest broker; {} propagated interest(s) still \
+         pending, {} reaped by the GC",
+        forwarder.pending_interests_len(),
+        forwarder.pending_interests_timed_out()
+    );
     // Convergence witness the e2e asserts on: emitted ONLY when this peer
     // actually INGESTED a neighbour's link-state flood — proof topology
     // converged over the wire, not just that a face was held. The register-time
