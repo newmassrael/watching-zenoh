@@ -54,6 +54,7 @@
   <sce:feature name="dissect-serde" requires="dissect"/>
   <sce:feature name="ext-pubsub-group-membership" requires="alloc"/>
   <sce:feature name="ext-pubsub-serde-codec" requires="alloc"/>
+  <sce:feature name="initial-sn-compact"/>
   <sce:feature name="key-set-closed"/>
   <sce:feature name="keyexpr-dollar-star"/>
   <sce:feature name="keyexpr-includes"/>

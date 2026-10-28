@@ -689,6 +689,14 @@ DEFERRED: dict[str, dict[str, str]] = {
                 "switchboard",
             )
         },
+        # `initial_sn::derive_initial_sn` is declared twice, once under the feature (a compact pure
+        # function of the two zids) and once under `not` (zenoh's SHAKE128), so turning the feature
+        # off swaps the body and leaves the path in place: nothing disappears for rustc to annotate.
+        "initial-sn-compact": (
+            "@defer cfg-not-twin -- the only path it gates has a `cfg(not(...))` "
+            "twin, so the feature swaps an implementation rather than removing "
+            "a path; there is no resolution error for rustc to annotate"
+        ),
     },
 }
 

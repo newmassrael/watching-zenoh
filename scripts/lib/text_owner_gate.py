@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-"""The text of a final MCU image, told by who owns it, held against committed rows.
+"""R3821 (no register item) -- the text of a final MCU image, told by who owns it, held against
+committed rows.
 
 ## What was missing
 
