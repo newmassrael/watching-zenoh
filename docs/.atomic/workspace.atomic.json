@@ -294966,6 +294966,34 @@
         "Item 751 step (b) continues in step 6: the node's own declarations (declare_subscription, undeclare_subscription, declare_queryable, undeclare_queryable), the unregistration and redelivery queue of a hosted handler, the admin sources publisher_sources and querier_sources, the north net view and the counters run_peer prints; then step 7, the retirement of LinkstateForwarder. Step 7 must also move wz_peer_interest_pending_gc_pico_interop, which asserts the copy of a client's token interest that the pin's peer hat does not make. The eight arms of the gates were read on pc2 only; the hosted run and the pico or stock zenohd legs were not read. Still open from before: a current subscriber Interest from a north peer (dispatcher release behaviour or the final alone) and the owner question that a router node's south peer region relays nothing between link-state peers."
       ]
     },
+    "Round 3819": {
+      "decision_summary": "The build-machine declaration names what Layer C1st's facility oracle needs: strace, which every run is read through, and bubblewrap, which runs a raw Ethernet group in a namespace of its own (round 3816). A machine without either is now no candidate for this repository, where before it would have been chosen and failed the lane. The package is not the whole requirement: on Ubuntu 24.04 bwrap holds no capability in its namespace without an AppArmor profile allowing it userns, which no package installs; the declaration says so in a comment, the oracle's selftest refuses by name on such a machine, and the gap in the declaration form (no way to name machine configuration that is not a package) is reported to the bx session.",
+      "changes_bullets": [
+        "bx.toml: packages gains strace and bubblewrap, with the comment that the AppArmor userns profile bwrap needs on Ubuntu 24.04 is machine state the declaration cannot name."
+      ],
+      "verification_bullets": [
+        "dpkg-query on pc2, pc3, pc5, hkl001 and hkl002: strace and bubblewrap are installed on each, so no current candidate drops out. bx --host pc3 -- true with the new declaration: exit 0, no package refusal."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "None in this tree. The bx declaration form has no way to name machine configuration that is not a package (here the AppArmor userns profile for bwrap); that is the bx repository's, and was reported to its session."
+      ],
+      "publishable_decision_summary": "The build-machine declaration names what Layer C1st's facility oracle needs: strace, which every run is read through, and bubblewrap, which runs a raw Ethernet group in a namespace of its own (round 3816). A machine without either is now no candidate for this repository, where before it would have been chosen and failed the lane. The package is not the whole requirement: on Ubuntu 24.04 bwrap holds no capability in its namespace without an AppArmor profile allowing it userns, which no package installs; the declaration says so in a comment, the oracle's selftest refuses by name on such a machine, and the gap in the declaration form (no way to name machine configuration that is not a package) is reported to the bx session.",
+      "publishable_changes_bullets": [
+        "bx.toml: packages gains strace and bubblewrap, with the comment that the AppArmor userns profile bwrap needs on Ubuntu 24.04 is machine state the declaration cannot name."
+      ],
+      "publishable_verification_bullets": [
+        "dpkg-query on pc2, pc3, pc5, hkl001 and hkl002: strace and bubblewrap are installed on each, so no current candidate drops out. bx --host pc3 -- true with the new declaration: exit 0, no package refusal."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "None in this tree. The bx declaration form has no way to name machine configuration that is not a package (here the AppArmor userns profile for bwrap); that is the bx repository's, and was reported to its session."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
