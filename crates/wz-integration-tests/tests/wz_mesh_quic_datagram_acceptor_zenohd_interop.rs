@@ -814,8 +814,18 @@ fn wz_peer_reliable_quic_dialer_never_joins_the_datagram_mesh() {
     let demo = wz_ap_demo_binary();
     let (cert_path, key_path, _cleanup) = write_wz_cert("rn");
 
-    let (mut wz_guard, mut wz_reader, udp_port) =
-        spawn_wz_peer_quic_datagram(&demo, &cert_path, &key_path, &[]);
+    // The accept bound is stated, not inherited: the face must give up on the stream
+    // itself. Left at its ten-second default (upstream's), the face outlived the window
+    // in which the dialer was still there, and the hosted run logged the failure at the
+    // ten-second mark as `LinkLost(OsError)`, the dialer's close, where this leg pins
+    // `Terminal`. Before the bound was upstream's the acceptor's window was one second,
+    // so wz always gave up first. Three seconds restores that order without the dialer.
+    let (mut wz_guard, mut wz_reader, udp_port) = spawn_wz_peer_quic_datagram(
+        &demo,
+        &cert_path,
+        &key_path,
+        &["--accept-timeout-ms", "3000"],
+    );
 
     // The ONE variable: DialLink::Reliable drops `?rel=0`, so zenoh picks its stream
     // link. Same endpoint, same cert, same linkstate routing mode as leg 2.
