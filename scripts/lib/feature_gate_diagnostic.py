@@ -237,7 +237,10 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             # derives, which are not gates (see `is_cfg_attr` there).
             "dissect-serde",
             "liveliness-subscriber",
-            "no_std",
+            # `no_std` LEFT this list for `DEFERRED` below, by the route `declare-keyexpr`
+            # took: the claim held until `pub mod hlc` was put behind
+            # `any(target_has_atomic = "64", feature = "no_std")`, a compound cfg, and the
+            # census found the site on the first run after.
             # `pubsub-attachment`, `pubsub-encoding`, `pubsub-qos`,
             # `pubsub-source-info` and `pubsub-timestamp` LEFT this list by the
             # R2386 route: the round that moved `PublishOptions` down from
@@ -607,6 +610,12 @@ DEFERRED: dict[str, dict[str, str]] = {
                 # every public site the feature gates is under a compound cfg
                 # (`session_actions.rs`).
                 "declare-token",
+                # `no_std` MOVED HERE from `NO_PUBLIC_PATH` (see the note there). The
+                # 64-bit word of the node clock exists where the target has a 64-bit atomic
+                # or `no_std` brings `portable-atomic` to provide one, so `pub mod hlc` is
+                # behind `any(target_has_atomic = "64", feature = "no_std")`: one public
+                # site, compound, which rustc's note for a compound cfg does not name.
+                "no_std",
                 # R3291 -- `declare-undeclare` LEFT this list: S9a moved
                 # `mark_aggregate_announced` into an `impl` under a bare
                 # `#[cfg(feature = "declare-undeclare")]` (`pubsub.rs`), a site
