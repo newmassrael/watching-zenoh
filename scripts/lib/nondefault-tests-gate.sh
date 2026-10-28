@@ -663,6 +663,24 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         transport-keepalive,\
         tx-lend-only\
         |"
+    # The COMPACT initial-sequence-number derivation, a row of its own because
+    # `initial-sn-compact` is a selector, not an addition: it swaps the SHAKE
+    # derivation for the FNV-1a and SplitMix64 one and compiles the tests of the
+    # SHAKE vectors out (`initial_sn::tests`, the ones gated `not(...)`). Added to a
+    # row above it would change what those tests mean. The two tests only it reaches,
+    # `the_compact_absorb_keeps_the_split_between_the_zids` and
+    # `the_compact_derivation_spreads_over_a_narrow_ring`, were claimed by no leg,
+    # which the census said, hosted:
+    #
+    #   nondefault-tests: FAIL -- wz-session-core has 2099 test(s) only a feature
+    #     build reaches; legs run 2097 and SKIPS excuses 0, leaving 2 claimed by
+    #     NOTHING.
+    #
+    # The module compiles only with `codec-open-body`, so the row names both: with
+    # `initial-sn-compact` alone the leg ran no test (770 filtered out, none run). The
+    # filter is the module's path, so a compact test added later is claimed without
+    # touching this row.
+    "wz-session-core|hook|codec-open-body,initial-sn-compact|initial_sn::"
     # Open-debt item 900 — `session-unicast-open` and `session-unicast-accept`
     # join. 88fe33b9 added both features and the four `two_session_tests::`
     # (gated on them with `transport-multicast` and `codec-push`) and widened
