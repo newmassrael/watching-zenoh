@@ -296568,6 +296568,34 @@
         "Next in order: Z7t, the shared-memory transport (the engine port: a publish that takes a handle, a receive that carries the descriptor, an adapter from the clients of zenoh::shm, the handshake offer and the implicit promotion); Z8, the graph. Open for the owner of the gateway/south config reader: whether to shrink it, which grew the capic-client-small image by 13.6 KB."
       ]
     },
+    "Round 3864": {
+      "decision_summary": "The hosted run of round 3862 is the first to finish after many that newer pushes cancelled, and it is red in twenty-one jobs, so the debt of several sessions' pushes arrives at once. Decision: each job is read from its own log and attributed, the reds that are this session's are repaid in this push, the clock chain is taken by the session that owns it, and the rest is acknowledged by name in the file the gate requires and left to rounds of their own, none of them swept under a count. Repaid here: an import of the message type that a build with no codec leaves unused, the guard of the node_clock leg (15, and 23 run, after the clock work of others), and the census, which found the tests of four crates run by no leg.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/ts_stack.rs: record_on_message names the message type in each arm and imports nothing; scripts/run-ci.sh: the guard of the node_clock leg is 23; docs/hosted-red-acks.md: the row of run 40729400547, each job read from its own log. The legs table (scripts/lib/nondefault-tests-gate.sh) took its rows in the push that filed round 3863."
+      ],
+      "verification_bullets": [
+        "The census of the legs reports no test claimed by nothing and exits 0; wz-session-core compiles and lints clean with only the allocator and the timestamp stack, the build in which the import was unused; the 33 static gates pass; the non-default legs gate passes with the new rows. The jobs read from their own logs and not repaid here are named in the row, each with the commit that moved it. Not run here: the hosted run."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed, each in a round of its own: the dead code of wz-runtime-tokio with routing-peer and no router hat after the single-net forwarder was retired; the intra-doc links to router_forward in accept_loop.rs and config.rs; the E0308 of the slot allocation test of wz-session-lwip; the ten cost budgets over on the hosted reading (capic-default by 69,898 bytes); the clock chain's two (AtomicU64 on the 32-bit targets, the event_ring thread test), taken by the session that owns it; Layer U and the zenoh source of E6, which look external."
+      ],
+      "publishable_decision_summary": "The hosted run of round 3862 is the first to finish after many that newer pushes cancelled, and it is red in twenty-one jobs, so the debt of several sessions' pushes arrives at once. Decision: each job is read from its own log and attributed, the reds that are this session's are repaid in this push, the clock chain is taken by the session that owns it, and the rest is acknowledged by name in the file the gate requires and left to rounds of their own, none of them swept under a count. Repaid here: an import of the message type that a build with no codec leaves unused, the guard of the node_clock leg (15, and 23 run, after the clock work of others), and the census, which found the tests of four crates run by no leg.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/ts_stack.rs: record_on_message names the message type in each arm and imports nothing; scripts/run-ci.sh: the guard of the node_clock leg is 23; docs/hosted-red-acks.md: the row of run 40729400547, each job read from its own log. The legs table (scripts/lib/nondefault-tests-gate.sh) took its rows in the push that filed round 3863."
+      ],
+      "publishable_verification_bullets": [
+        "The census of the legs reports no test claimed by nothing and exits 0; wz-session-core compiles and lints clean with only the allocator and the timestamp stack, the build in which the import was unused; the 33 static gates pass; the non-default legs gate passes with the new rows. The jobs read from their own logs and not repaid here are named in the row, each with the commit that moved it. Not run here: the hosted run."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed, each in a round of its own: the dead code of wz-runtime-tokio with routing-peer and no router hat after the single-net forwarder was retired; the intra-doc links to router_forward in accept_loop.rs and config.rs; the E0308 of the slot allocation test of wz-session-lwip; the ten cost budgets over on the hosted reading (capic-default by 69,898 bytes); the clock chain's two (AtomicU64 on the 32-bit targets, the event_ring thread test), taken by the session that owns it; Layer U and the zenoh source of E6, which look external."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
