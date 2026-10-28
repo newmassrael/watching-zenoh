@@ -63,12 +63,23 @@ workspace_dir = "crates"
 # `bash scripts/build-zenohd.sh`. `sce-codegen` additionally fails there with
 # `workspace root not detected`, which takes Layers B, B2 and C1 with it -- the
 # two tests C1 names pass locally, so it is provisioning, not the tree.
+#
+# `strace` and `bubblewrap` are Layer C1st's facility oracle
+# (scripts/lib/facility_trace.py): it reads each run through strace, and runs a
+# raw Ethernet group in a user and network namespace of its own with CAP_NET_RAW
+# over it. The package is not the whole requirement: on Ubuntu 24.04
+# (`kernel.apparmor_restrict_unprivileged_userns=1`) bwrap holds no capability in
+# its namespace unless an AppArmor profile allows it userns, which no package
+# installs there. That half is machine state this file cannot name; the oracle's
+# selftest refuses by name on a machine without it (`own_network_refusal`).
 packages = [
     "shellcheck",
     "actionlint",
     "gcc-arm-none-eabi",
     "qemu-user",
     "qemu-system-arm",
+    "strace",
+    "bubblewrap",
 ]
 
 min_ram_gb = 16
