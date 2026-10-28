@@ -109,6 +109,10 @@ probe-wz = { path = "probes/probe-wz" }
 # The trees whose nodes are shared are read through `token-cell`'s trait, which both crates take from
 # the one registry package, so the tests name it too.
 token-cell = { version = "2", default-features = false }
+# The session core, for the one function a node writes the timestamp of an interception of a
+# timestamp stack with (`zenoh_ts_stack_stamp.rs` holds it to upstream's codec). The `wz` crate
+# above is built on it, so it adds nothing to the graph.
+wz_session_core = { package = "wz-session-core", path = "../../crates/wz-session-core", features = ["pubsub-ts-stack"] }
 
 # The exhaustive comparisons run every string of a small alphabet to a length, which is millions of
 # calls of two dynamic programs; optimised, they take seconds.

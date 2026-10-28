@@ -1611,7 +1611,8 @@ pubsub-attachment = ["attachment-bytes", "wz-session-core/pubsub-attachment", "w
 pubsub-timestamp = ["wz-session-core/pubsub-timestamp", "wz-node-time/pubsub-timestamp"]
 pubsub-encoding = ["wz-session-core/pubsub-encoding", "wz-ext-pubsub/pubsub-encoding"]
 pubsub-source-info = ["wz-session-core/pubsub-source-info"]
-pubsub-ts-stack = ["wz-session-core/pubsub-ts-stack"]
+# The node clock the forwarders record the interception of a routed message with is `wz-node-time`'s.
+pubsub-ts-stack = ["wz-session-core/pubsub-ts-stack", "wz-node-time/pubsub-ts-stack"]
 pubsub-qos = ["wz-session-core/pubsub-qos", "wz-ext-pubsub/pubsub-qos"]
 pubsub-priority = ["pubsub-qos", "wz-session-core/pubsub-priority"]
 pubsub-congestion-control = ["pubsub-qos", "wz-session-core/pubsub-congestion-control"]

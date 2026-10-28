@@ -24330,6 +24330,9 @@ layer_e18_zenoh_family_conformance() {
     _runci_guarded_test "Layer E18 (differential, zenoh session open and close)" 25 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_api_session || return 1
+    _runci_guarded_test "Layer E18 (differential, zenoh timestamp stack stamp)" 2 \
+        cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
+        --test zenoh_ts_stack_stamp || return 1
     _runci_guarded_test "Layer E18 (differential, zenoh-config files)" 4 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_config_file || return 1

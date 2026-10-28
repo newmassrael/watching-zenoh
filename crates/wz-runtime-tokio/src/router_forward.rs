@@ -4459,6 +4459,19 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         Ok(sent)
     }
 
+    /// Record this node's routing on the timestamp stack of a message it is about to send on, with
+    /// the clock of the node. A message that carries no stack, or one that does not instrument the
+    /// routing, is left as it is. What upstream's dispatcher does for each face it hands a Push, a
+    /// Request or a Response to (`net/routing/dispatcher/pubsub.rs` and `queries.rs`).
+    #[cfg(feature = "pubsub-ts-stack")]
+    fn record_route(&self, message: &mut NetworkMessage) {
+        wz_session_core::ts_stack::record_on_message(
+            message,
+            wz_session_core::ts_stack::point::ROUTE,
+            || self.node_hlc.interception_timestamp(),
+        );
+    }
+
     /// Send one built message to one held face, through the egress access control
     /// and the router's accounting — the single egress SSOT that
     /// [`fan_out_tier_qos`](Self::fan_out_tier_qos),
@@ -4493,6 +4506,15 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             );
             return false;
         }
+        // `pubsub-ts-stack` -- this router is a node the message passes on its way: it records
+        // its routing on the stack the message carries, once for each destination it goes to
+        // (upstream's dispatcher does, as it hands the message to each face).
+        #[cfg(feature = "pubsub-ts-stack")]
+        let msg = {
+            let mut msg = msg;
+            self.record_route(&mut msg);
+            msg
+        };
         let was_push = matches!(msg, NetworkMessage::Push(_));
         // A message that may not be dropped does not wait for room inside the loop that serves
         // every other face: it leaves now, or it is held for this destination and the face that
@@ -6366,8 +6388,21 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         for group in groups.iter() {
             // Fire-and-forget: a group with no room or no link drops it, the
             // same contract the drive loop's own reply backing carries.
+            // The group is one more face the Push is handed to: the routing is recorded for it as
+            // for any other (the multicast egress does not pass `egress_to_face`).
+            let push = Box::new(carrier.clone());
+            #[cfg(feature = "pubsub-ts-stack")]
+            let push = {
+                let mut push = push;
+                wz_session_core::ts_stack::record_interception(
+                    &mut push.extensions,
+                    wz_session_core::ts_stack::point::ROUTE,
+                    || self.node_hlc.interception_timestamp(),
+                );
+                push
+            };
             let _ = group.tx.push(MulticastTxItem::Push {
-                push: Box::new(carrier.clone()),
+                push,
                 reliable,
                 // R311y227 — the received routing band (the inbound frame's decoded
                 // priority) egresses to the group on its own conduit when the group
@@ -24126,5 +24161,228 @@ mod tests {
             forwarded_declare(&sink_r.frame_bytes(1)).body,
             DeclareOwnedVariant::CodecZenohUndeclToken(_)
         ));
+    }
+
+    /// `pubsub-ts-stack` -- the router is a node a message passes, and records its routing on the
+    /// timestamp stack the message carries, once for each destination it hands it to, as upstream's
+    /// dispatcher does for each face.
+    #[cfg(feature = "pubsub-ts-stack")]
+    mod route_records {
+        use super::*;
+        use wz_session_core::ts_stack::{point, read_ts_stack, set_ts_stack, TsStack};
+
+        /// The stack of a message at the node that sent it: `conf_flags` says which points are
+        /// instrumented, and the send is the sender's one record.
+        fn started(conf_flags: u8) -> TsStack {
+            let mut stack = TsStack::new(conf_flags);
+            stack.record(point::SEND, vec![0x11], false);
+            stack
+        }
+
+        fn stacked_push(conf_flags: u8) -> NetworkMessage {
+            let mut push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+                .expect("build push");
+            let present = set_ts_stack(&mut push.extensions, Some(&started(conf_flags)));
+            wz_session_core::ext_nodeid::sync_header_z(&mut push.header, present);
+            NetworkMessage::Push(Box::new(push))
+        }
+
+        fn stacked_request(rid: u64, conf_flags: u8) -> NetworkMessage {
+            let mut request =
+                wz_session_core::request_build::build_request_query(rid, 0, Some("demo/q"))
+                    .expect("build request");
+            let present = set_ts_stack(&mut request.extensions, Some(&started(conf_flags)));
+            wz_session_core::ext_nodeid::sync_header_z(&mut request.header, present);
+            NetworkMessage::Request(Box::new(request))
+        }
+
+        fn stacked_response(qid: u64, conf_flags: u8) -> NetworkMessage {
+            let mut response =
+                wz_session_core::response_build::build_response_reply_literal(qid, "demo/q", b"hi")
+                    .expect("build response");
+            let present = set_ts_stack(&mut response.extensions, Some(&started(conf_flags)));
+            wz_session_core::ext_nodeid::sync_header_z(&mut response.header, present);
+            NetworkMessage::Response(Box::new(response))
+        }
+
+        fn stack_of_push(frame: &[u8]) -> Option<TsStack> {
+            let push = forwarded_push(frame);
+            push.extensions
+                .as_ref()
+                .and_then(|chain| read_ts_stack(chain.iter()))
+        }
+
+        fn stack_of_request(frame: &[u8]) -> Option<TsStack> {
+            let request = forwarded_request(frame);
+            request
+                .extensions
+                .as_ref()
+                .and_then(|chain| read_ts_stack(chain.iter()))
+        }
+
+        fn stack_of_response(frame: &[u8]) -> Option<TsStack> {
+            let response = forwarded_response(frame);
+            response
+                .extensions
+                .as_ref()
+                .and_then(|chain| read_ts_stack(chain.iter()))
+        }
+
+        /// The points of a stack, in the order they were recorded.
+        fn points(stack: &TsStack) -> Vec<u8> {
+            stack.stack.iter().map(|record| record.flags).collect()
+        }
+
+        /// The time word and the identity of an interception's timestamp.
+        fn read_stamp(bytes: &[u8]) -> (u64, Vec<u8>) {
+            let (time, used) = wz_codecs::vle::decode_zint(bytes).expect("a time word");
+            let rest = &bytes[used..];
+            let (len, used) = wz_codecs::vle::decode_zint(rest).expect("a length");
+            (time, rest[used..used + len as usize].to_vec())
+        }
+
+        const ALL: u8 = point::SEND | point::ROUTE | point::RECEIVE;
+
+        #[test]
+        fn a_routed_push_records_this_router_for_each_destination() {
+            // A Put from router A reaches the within-tier child C and, bridged, the peer R: two
+            // destinations, so two records, each a stamp of its own.
+            let fwd = RouterForwarder::new(zid(0x01));
+            let (a, _sink_a) = face(zid(0xAA), WIRE_ROUTER);
+            let (c, sink_c) = face(zid(0xCC), WIRE_ROUTER);
+            let (r, sink_r) = face(zid(0xDD), WIRE_PEER);
+            fwd.register(FaceId(0), &a);
+            fwd.register(FaceId(1), &c);
+            fwd.register(FaceId(2), &r);
+            advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+            advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
+            advertise_link_back(&fwd, FaceId(2), 0x01, 0xDD, 5);
+            fwd.tick();
+            forward_one(&fwd, FaceId(1), declare_sub("demo/data"));
+            forward_one(&fwd, FaceId(2), declare_sub("demo/data"));
+            sink_c.reset();
+            sink_r.reset();
+
+            forward_one(&fwd, FaceId(0), stacked_push(ALL));
+
+            assert_eq!(sink_c.frame_count(), 1);
+            assert_eq!(sink_r.frame_count(), 1);
+            let (to_c, to_r) = (
+                stack_of_push(&sink_c.frame_bytes(0)).expect("the stack reached C"),
+                stack_of_push(&sink_r.frame_bytes(0)).expect("the stack reached R"),
+            );
+            for stack in [&to_c, &to_r] {
+                assert_eq!(points(stack), [point::SEND, point::ROUTE]);
+                assert_eq!(
+                    stack.stack[0].timestamp,
+                    [0x11],
+                    "the send is the sender's own"
+                );
+                let (_, id) = read_stamp(&stack.stack[1].timestamp);
+                assert_eq!(id, [1, 1, 1, 1], "the route is this router's");
+            }
+            assert_ne!(
+                read_stamp(&to_c.stack[1].timestamp).0,
+                read_stamp(&to_r.stack[1].timestamp).0,
+                "each destination has a stamp of its own"
+            );
+        }
+
+        #[test]
+        fn a_push_delivered_to_a_client_records_this_router_too() {
+            let fwd = RouterForwarder::new(zid(0x01));
+            let (client, sink_client) = face(zid(0xAA), WIRE_CLIENT);
+            let (p, _sp) = face(zid(0xBB), WIRE_PEER);
+            fwd.register(FaceId(0), &client);
+            fwd.register(FaceId(1), &p);
+            advertise_link_back(&fwd, FaceId(1), 0x01, 0xBB, 5);
+            fwd.tick();
+            forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
+            sink_client.reset();
+            forward_one(&fwd, FaceId(1), stacked_push(ALL));
+            let stack = stack_of_push(&sink_client.frame_bytes(0)).expect("a stack");
+            assert_eq!(points(&stack), [point::SEND, point::ROUTE]);
+        }
+
+        #[test]
+        fn a_stack_that_does_not_ask_for_the_route_and_none_are_passed_on_as_they_are() {
+            let fwd = RouterForwarder::new(zid(0x01));
+            let (a, _sink_a) = face(zid(0xAA), WIRE_ROUTER);
+            let (c, sink_c) = face(zid(0xCC), WIRE_ROUTER);
+            fwd.register(FaceId(0), &a);
+            fwd.register(FaceId(1), &c);
+            advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+            advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
+            fwd.tick();
+            forward_one(&fwd, FaceId(1), declare_sub("demo/data"));
+            sink_c.reset();
+
+            forward_one(&fwd, FaceId(0), stacked_push(point::SEND | point::RECEIVE));
+            let stack = stack_of_push(&sink_c.frame_bytes(0)).expect("a stack");
+            assert_eq!(points(&stack), [point::SEND], "the route is not asked for");
+
+            let bare = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+                .expect("build push");
+            forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(bare)));
+            assert!(
+                stack_of_push(&sink_c.frame_bytes(1)).is_none(),
+                "a message with no stack is given none"
+            );
+        }
+
+        #[test]
+        fn a_routed_request_and_its_reply_record_this_router() {
+            let fwd = RouterForwarder::new(zid(0x01));
+            let (a, sink_a) = face(zid(0xAA), WIRE_ROUTER);
+            let (c, sink_c) = face(zid(0xCC), WIRE_ROUTER);
+            fwd.register(FaceId(0), &a);
+            fwd.register(FaceId(1), &c);
+            advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+            advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
+            fwd.tick();
+            forward_one(&fwd, FaceId(1), declare_qabl("demo/q", true));
+            sink_a.reset();
+            sink_c.reset();
+
+            forward_one(&fwd, FaceId(0), stacked_request(99, ALL));
+            let asked = stack_of_request(&sink_c.frame_bytes(0)).expect("the query's stack");
+            assert_eq!(points(&asked), [point::SEND, point::ROUTE]);
+            let qid = forwarded_request(&sink_c.frame_bytes(0)).rid;
+
+            forward_one(&fwd, FaceId(1), stacked_response(qid, ALL));
+            let answered = stack_of_response(&sink_a.frame_bytes(0)).expect("the reply's stack");
+            assert_eq!(points(&answered), [point::SEND, point::ROUTE]);
+            let (_, id) = read_stamp(&answered.stack[1].timestamp);
+            assert_eq!(id, [1, 1, 1, 1]);
+        }
+
+        #[cfg(feature = "router-multicast-faces")]
+        #[test]
+        fn a_push_broadcast_to_a_multicast_group_records_this_router() {
+            let fwd = RouterForwarder::new(zid(0x01));
+            let (tx, mut rx) = group_tap();
+            fwd.attach_mcast_group(tx);
+            let NetworkMessage::Push(push) = stacked_push(ALL) else {
+                unreachable!()
+            };
+            fwd.on_tables().broadcast_to_mcast_groups(
+                true,
+                Priority::DEFAULT,
+                &push,
+                "demo/data",
+                GroupEgressSource {
+                    from_group: false,
+                    from_mesh: false,
+                    origin: None,
+                },
+            );
+            let (received, _) = group_push(&mut rx).expect("the Put reached the group");
+            let stack = received
+                .extensions
+                .as_ref()
+                .and_then(|chain| read_ts_stack(chain.iter()))
+                .expect("a stack");
+            assert_eq!(points(&stack), [point::SEND, point::ROUTE]);
+        }
     }
 }

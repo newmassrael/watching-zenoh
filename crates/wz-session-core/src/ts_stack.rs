@@ -193,6 +193,72 @@ pub fn set_ts_stack<S: CodecStorage>(
     }
 }
 
+/// A timestamp as an interception holds it, which is the form the timestamp of a Put has on the
+/// wire (zenoh's codec for a `uhlc::Timestamp`): the time word as a zint, then the length of the
+/// identity as a zint and the identity bytes.
+pub fn timestamp_bytes(time: u64, zid: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(10 + 2 + zid.len());
+    push_zint(&mut out, time);
+    push_zint(&mut out, zid.len() as u64);
+    out.extend_from_slice(zid);
+    out
+}
+
+/// Record an interception at the point `at` on the stack a chain of extensions carries, with the
+/// timestamp `timestamp` gives, and say whether it was recorded. A chain that carries no stack, a
+/// point the stack does not instrument, a timestamp that is not given (or is empty) and a stack at
+/// its limit leave the chain as it is, and `timestamp` is not asked for unless the point is
+/// instrumented (upstream's `push_ts_interception`).
+pub fn record_interception<S: CodecStorage>(
+    extensions: &mut Option<Vec<ExtEntryOwned<S>>>,
+    at: u8,
+    timestamp: impl FnOnce() -> Option<Vec<u8>>,
+) -> bool {
+    let Some(mut stack) = extensions
+        .as_ref()
+        .and_then(|chain| read_ts_stack(chain.iter()))
+    else {
+        return false;
+    };
+    if !stack.is_instrumented(at) {
+        return false;
+    }
+    let Some(timestamp) = timestamp() else {
+        return false;
+    };
+    if !stack.record(at, timestamp, false) {
+        return false;
+    }
+    set_ts_stack(extensions, Some(&stack));
+    true
+}
+
+/// [`record_interception`] on the message a node is about to send: a Push, a Request or a
+/// Response. Any other message carries no stack, and a message that carries none is left alone.
+pub fn record_on_message(
+    message: &mut crate::network_message::NetworkMessage,
+    at: u8,
+    timestamp: impl FnOnce() -> Option<Vec<u8>>,
+) -> bool {
+    use crate::network_message::NetworkMessage;
+    match message {
+        #[cfg(feature = "codec-push")]
+        NetworkMessage::Push(push) => record_interception(&mut push.extensions, at, timestamp),
+        #[cfg(feature = "codec-request")]
+        NetworkMessage::Request(request) => {
+            record_interception(&mut request.extensions, at, timestamp)
+        }
+        #[cfg(feature = "codec-response")]
+        NetworkMessage::Response(response) => {
+            record_interception(&mut response.extensions, at, timestamp)
+        }
+        _ => {
+            let _ = (at, timestamp);
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,5 +362,116 @@ mod tests {
 
         assert!(!set_ts_stack(&mut chain, None));
         assert!(chain.is_none());
+    }
+
+    #[test]
+    fn a_timestamp_is_written_as_zenoh_writes_it() {
+        // The time word as a zint (a value of 200 takes two bytes), then the length of the
+        // identity and its bytes.
+        assert_eq!(
+            timestamp_bytes(200, &[0xab, 0xcd]),
+            [0xc8, 0x01, 2, 0xab, 0xcd]
+        );
+        assert_eq!(timestamp_bytes(0, &[]), [0, 0]);
+    }
+
+    /// A chain with the stack of `conf_flags` and the one send a publisher records.
+    fn chain_of(conf_flags: u8) -> Option<Vec<ExtEntryOwned>> {
+        let mut chain = None;
+        let mut stack = TsStack::new(conf_flags);
+        stack.record(point::SEND, alloc::vec![1], false);
+        set_ts_stack(&mut chain, Some(&stack));
+        chain
+    }
+
+    #[test]
+    fn a_route_is_recorded_where_the_stack_asks_for_one() {
+        let mut chain = chain_of(point::SEND | point::ROUTE);
+        assert!(record_interception(&mut chain, point::ROUTE, || Some(
+            alloc::vec![7]
+        )));
+        let stack = read_ts_stack(chain.as_ref().unwrap().iter()).unwrap();
+        assert_eq!(
+            stack.stack,
+            [
+                Interception {
+                    flags: point::SEND,
+                    timestamp: alloc::vec![1]
+                },
+                Interception {
+                    flags: point::ROUTE,
+                    timestamp: alloc::vec![7]
+                },
+            ]
+        );
+        assert_eq!(
+            chain.as_ref().unwrap().len(),
+            1,
+            "the stack is replaced, not added"
+        );
+    }
+
+    #[test]
+    fn nothing_is_recorded_without_a_stack_a_point_or_a_timestamp() {
+        let asked = core::cell::Cell::new(0);
+        let timestamp = || {
+            asked.set(asked.get() + 1);
+            Some(alloc::vec![7])
+        };
+
+        let mut bare: Option<Vec<ExtEntryOwned>> = None;
+        assert!(!record_interception(&mut bare, point::ROUTE, timestamp));
+        assert!(bare.is_none());
+
+        let mut chain = chain_of(point::SEND);
+        let before = chain.clone();
+        assert!(!record_interception(&mut chain, point::ROUTE, timestamp));
+        assert_eq!(chain, before, "a point the stack does not instrument");
+        assert_eq!(asked.get(), 0, "and the clock was not read for it");
+
+        let mut chain = chain_of(point::ROUTE);
+        let before = chain.clone();
+        assert!(!record_interception(&mut chain, point::ROUTE, || None));
+        assert!(!record_interception(&mut chain, point::ROUTE, || Some(
+            Vec::new()
+        )));
+        assert_eq!(chain, before, "a clock that gives nothing");
+    }
+
+    #[test]
+    fn a_stack_at_its_limit_is_left_as_it_is() {
+        let mut stack = TsStack::new(point::ROUTE);
+        for _ in 0..MAX_STACK_SIZE {
+            assert!(stack.record(point::ROUTE, alloc::vec![1], false));
+        }
+        let mut chain: Option<Vec<ExtEntryOwned>> = None;
+        set_ts_stack(&mut chain, Some(&stack));
+        let before = chain.clone();
+        assert!(!record_interception(&mut chain, point::ROUTE, || Some(
+            alloc::vec![7]
+        )));
+        assert_eq!(chain, before);
+    }
+
+    #[test]
+    fn the_stack_stays_the_last_extension_of_the_chain() {
+        let mut chain = chain_of(point::ROUTE);
+        // An extension that sorts after the stack in the chain, as the routing context of a
+        // forwarded message does.
+        chain.as_mut().unwrap().insert(
+            0,
+            ExtEntryOwned {
+                header: 0x21,
+                body: ExtEntryOwnedVariant::CodecZenohExtZint(wz_codecs::ext_zint::ExtZint {
+                    value: 3,
+                }),
+            },
+        );
+        assert!(record_interception(&mut chain, point::ROUTE, || Some(
+            alloc::vec![7]
+        )));
+        let chain = chain.unwrap();
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[1].header & 0x0f, TS_STACK_EXT_ID);
     }
 }

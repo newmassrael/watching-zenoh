@@ -98,8 +98,11 @@ fn own_standing() -> StandingHome {
 /// A stamping node whose physical clock is frozen.
 #[cfg(feature = "time-hlc")]
 fn frozen_node(zid: &[u8]) -> NodeHlc {
+    let clock = build_clock(zid, FrozenEpoch, own_standing());
     NodeHlc {
-        clock: Some(build_clock(zid, FrozenEpoch, own_standing())),
+        #[cfg(feature = "pubsub-ts-stack")]
+        interception_clock: Some(clock.clone()),
+        clock: Some(clock),
         drop_future_timestamp: false,
         trusted_only: false,
     }
@@ -248,11 +251,19 @@ fn a_node_with_no_clock_has_no_standing_to_report() {
 #[cfg(feature = "time-hlc")]
 #[test]
 fn a_node_whose_source_cannot_say_the_time_stamps_nothing() {
+    let clock = build_clock(&[0x01], UnsetEpoch, own_standing());
     let node = NodeHlc {
-        clock: Some(build_clock(&[0x01], UnsetEpoch, own_standing())),
+        #[cfg(feature = "pubsub-ts-stack")]
+        interception_clock: Some(clock.clone()),
+        clock: Some(clock),
         drop_future_timestamp: false,
         trusted_only: false,
     };
+    #[cfg(feature = "pubsub-ts-stack")]
+    assert!(
+        node.interception_timestamp().is_none(),
+        "nor does it record an interception with a date it does not have"
+    );
     assert!(
         node.is_stamping(),
         "the node has a clock; the clock has no date"
@@ -621,4 +632,61 @@ fn an_oversized_or_empty_zid_still_yields_a_usable_clock() {
     assert!(long.stamp().is_some());
     let empty = NodeHlc::for_node(&[], WhatAmI::Router, TimestampingEnabled::all(true));
     assert!(empty.stamp().is_some());
+}
+
+/// The time word and the identity of a timestamp as an interception holds it.
+#[cfg(feature = "pubsub-ts-stack")]
+fn read_interception(bytes: &[u8]) -> (u64, Vec<u8>) {
+    let (time, used) = wz_codecs::vle::decode_zint(bytes).expect("a time word");
+    let rest = &bytes[used..];
+    let (len, used) = wz_codecs::vle::decode_zint(rest).expect("a length");
+    (time, rest[used..used + len as usize].to_vec())
+}
+
+#[cfg(feature = "pubsub-ts-stack")]
+#[test]
+fn an_interception_is_stamped_with_the_zid_of_the_node_and_strictly_increases() {
+    let node = NodeHlc::for_node(
+        &[0x0A, 0x0B],
+        WhatAmI::Router,
+        TimestampingEnabled::default(),
+    );
+    let mut prev = 0;
+    for _ in 0..100 {
+        let (time, id) = read_interception(&node.interception_timestamp().expect("a stamp"));
+        assert_eq!(id, [0x0A, 0x0B]);
+        assert!(time > prev);
+        prev = time;
+    }
+}
+
+/// Upstream falls back to a lazy HLC seeded with the zid when the node has none, so a peer that
+/// stamps no data still records its interceptions.
+#[cfg(feature = "pubsub-ts-stack")]
+#[test]
+fn a_node_whose_role_stamps_no_data_still_stamps_its_interceptions() {
+    let peer = NodeHlc::for_node(&[0x01], WhatAmI::Peer, TimestampingEnabled::default());
+    assert!(peer.stamp().is_none(), "no data is stamped on a peer");
+    let (_, id) = read_interception(&peer.interception_timestamp().expect("a stamp"));
+    assert_eq!(id, [0x01]);
+}
+
+#[cfg(feature = "pubsub-ts-stack")]
+#[test]
+fn the_policy_trusted_only_does_not_refuse_an_interception() {
+    let node = frozen_node_with_policy(&[0x01], true);
+    assert!(
+        node.stamp().is_none(),
+        "no reference yet: no data is stamped"
+    );
+    assert!(
+        node.interception_timestamp().is_some(),
+        "the policy is about data passed on as the node's own"
+    );
+}
+
+#[cfg(feature = "pubsub-ts-stack")]
+#[test]
+fn a_node_built_with_no_identity_records_no_interception() {
+    assert!(NodeHlc::disabled().interception_timestamp().is_none());
 }

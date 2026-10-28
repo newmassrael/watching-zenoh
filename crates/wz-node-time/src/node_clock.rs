@@ -212,6 +212,12 @@ pub struct NodeHlc {
     /// and is read once, when the node is built.
     #[cfg(feature = "time-hlc")]
     trusted_only: bool,
+    /// The clock the interceptions of a timestamp stack are recorded with: this node's own when
+    /// its role stamps, and otherwise a clock of its own over the same source and the same
+    /// identity, which is upstream's lazy HLC seeded with the zid (`get_ts_stack_timestamp`).
+    /// `None` only for a node built with no identity ([`Self::disabled`]).
+    #[cfg(feature = "pubsub-ts-stack")]
+    interception_clock: Option<std::sync::Arc<NodeClock>>,
 }
 
 /// R2626 — what [`NodeHlc::treat_timestamp`] tells its caller to do with the
@@ -370,13 +376,14 @@ impl NodeHlc {
         source: impl wz_session_core::epoch::EpochSource + Send + Sync + 'static,
         standing: StandingHome,
     ) -> Self {
-        let clock = enabled
-            .get(whatami)
-            .then(|| build_clock(zid, source, standing));
+        let own = build_clock(zid, source, standing);
+        let clock = enabled.get(whatami).then(|| own.clone());
         // Upstream's shipped default; `with_drop_future_timestamp` is how a
         // host that read the key states otherwise.
         Self {
             clock,
+            #[cfg(feature = "pubsub-ts-stack")]
+            interception_clock: Some(own),
             drop_future_timestamp: false,
             trusted_only: matches!(
                 wz_session_core::policy::SessionPolicy::default().clock_quality_stamping,
@@ -534,6 +541,21 @@ impl NodeHlc {
         {
             None
         }
+    }
+
+    /// A timestamp for an interception of a timestamp stack, in the form the stack holds it: the
+    /// next stamp of the clock of the node, with the zid of the node, or `None` for a node built
+    /// with no identity and for a time source that cannot say what time it is.
+    ///
+    /// Unlike [`Self::stamp`] this is not gated by the role: upstream records an interception of
+    /// a peer or a client with the HLC it falls back to (a lazy one seeded with the zid) when the
+    /// node has none, so a node that does not stamp its data still stamps its stack. Nor does the
+    /// `trusted-only` policy refuse it; the policy is about the data a node passes on as its own.
+    #[cfg(feature = "pubsub-ts-stack")]
+    pub fn interception_timestamp(&self) -> Option<Vec<u8>> {
+        let clock = self.interception_clock.as_deref()?;
+        let time = clock.hlc.new_timestamp().ok()?.as_word();
+        Some(wz_session_core::ts_stack::timestamp_bytes(time, &clock.zid))
     }
 
     /// R311y450 — the forward-path stamp: zenoh's `treat_timestamp!` macro

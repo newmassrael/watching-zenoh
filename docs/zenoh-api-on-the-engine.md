@@ -785,9 +785,19 @@ Each lands whole with its surface lines, tests and faults in one round.
   consolidation then drops included, ahead of what the mode does with it. A `Latest` query so
   records the receive of a reply when it lands, and not when the final lets it go.
 
-  Carried: a wz node that forwards a message in its mesh (the router and the linkstate peer) does
-  not record its own route, and a subscriber offloaded to a lane is handed no stack. The surface
-  falls to 1, 2 and 5 lines of
+  A wz node that forwards a message records its own route, as upstream's dispatcher does for each
+  face it hands a Push, a Request or a Response to. The router hat (which a peer of the mesh is,
+  since the linkstate forwarder was folded into it) records at its one egress, `egress_to_face`,
+  where each destination gets a message and a stamp of its own, and at the multicast group, which
+  does not pass it. `NodeHlc::interception_timestamp` is the clock: the node's own, or, for a node
+  whose role stamps no data, a clock of its own over the same source and zid, as upstream falls
+  back to a lazy HLC; the `trusted-only` policy, which is about data a node passes on as its own,
+  does not refuse it. The bytes are the timestamp of a Put (`ts_stack::timestamp_bytes`), which a
+  differential holds to upstream's codec in both directions. All of it is behind `pubsub-ts-stack`,
+  which `wz-runtime-tokio` forwards to `wz-node-time`.
+
+  Carried: a subscriber offloaded to a lane is handed no stack. The surface falls to 1, 2 and 5
+  lines of
   the three arms; 15 faults were injected into the publish side and 24 into the query side, one
   at a time, none missed in the end (the first test of a plain Put could not tell, and one assertion
   was changed so that it can; one fault that deleted a fallback failed to compile and was redone as

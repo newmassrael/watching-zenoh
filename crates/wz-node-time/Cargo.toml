@@ -42,6 +42,9 @@ time-hlc = ["wz-session-core/clock-quality"]
 # A clock the application registered, which can be held over and can run free once the host's bound
 # on holdover has passed (the two states `clock-source` adds to the standing).
 clock-source = ["time-hlc", "wz-session-core/clock-source"]
+# The clock the interceptions of a timestamp stack are recorded with (`NodeHlc::interception_timestamp`),
+# which a node has whether or not its role stamps data. Off, nothing is held for it.
+pubsub-ts-stack = ["time-hlc", "wz-session-core/pubsub-ts-stack"]
 # The forward-path stamp (`NodeHlc::treat_timestamp`) works on a Push, so it needs the Push codec.
 codec-push = ["wz-codecs/codec-push", "wz-session-core/codec-push"]
 # The send-side gate `set_push_timestamp` routes through: with it off a forward stamp is a
