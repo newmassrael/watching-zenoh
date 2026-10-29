@@ -298896,6 +298896,44 @@
         "Also owed: the gossip core itself sends nothing when a face goes down under multihop, as a chain of peers without a router would need; the files that run none, a build without unstable serves no admin key of its own, a lane for the harness, the margin of the main job, the pin bump to 1.10.2."
       ]
     },
+    "Round 3928": {
+      "decision_summary": "A router node joins a multicast group at its open. It listens on a udp endpoint of a group, either family, with the socket keys of its metadata, settles a port of 0 to the port the system gives before the face binds, and reports the locator of the group with that port among its own, so a member that listens on it joins the same group. The forwarder holds the group's producer, the face loop takes what the members send, and the node leaves the group as it ends. A second group is still refused by what was asked. Upstream's adminspace file passes through the harness, six of six tests, test_adminspace_read among them.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/lib.rs: UdpDriver::multicast_link_port gives the port a multicast link takes, the system's for a port of 0, so a node can report its group before the face binds and every re-join of the face is on that port.",
+        "crates/wz-capi-core/src/drive/router_node.rs: refused_ask refuses more than one group instead of any; join_group resolves the endpoint as a peer's group is, settles the port and spawns the router group face; run_router adds the locator to the node's own, attaches the producer to the forwarder, hands the ingress, members and group subscriptions to the face loop and stops the face when the node ends.",
+        "crates/wz-capi-core/Cargo.toml: router-node enables multicast-transport and the runtime's router-multicast-faces.",
+        "crates/wz-zenoh/src/api/session.rs: a test of a router that listens on a group of port 0 and a peer that joins the locator it reports; the refusal test now asks for two groups."
+      ],
+      "verification_bullets": [
+        "Locally: clippy with warnings denied passes for the runtime with all features, the core of the C API with all features and with router-node alone, and the top crate with the default features and with unstable; the C and pico crates compile; the core's library tests pass (136) and the top crate's (205, one ignored), the two new tests among them. The 35 static gates pass with no pin or budget moved. Upstream: the adminspace file passes through the harness, six of six, test_adminspace_read included. Not run: the other upstream files after this change, the hosted run. A peer that joins the group is opened but no frame is exchanged with the router on it in a test yet."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed, first: the query lost as the direct link of two peers forms (the ignored test of the top crate); it keeps three_node_combination from finishing after other tests, and with it the routing file in the harness. Where the reply or the final of that query goes on the new link wants a trace of the frames, which the engine does not have.",
+        "Owed, from the router session: the members of the router's group as the admin sessions rows after the unicast ones (the node keeps the membership view and drops it), and what a publication sent by a peer on the group reaches through the router, both of which want a test with two nodes on one group; the metadata of a push that a face sent, which a hosted subscriber is not handed; a router liveliness subscriber refused on egress is not ended; the sessions a router holds as the admin sessions leg.",
+        "Also owed: the gossip core itself sends nothing when a face goes down under multihop, as a chain of peers without a router would need; the files that run none, a build without unstable serves no admin key of its own, a lane for the harness, the margin of the main job, the pin bump to 1.10.2."
+      ],
+      "publishable_decision_summary": "A router node joins a multicast group at its open. It listens on a udp endpoint of a group, either family, with the socket keys of its metadata, settles a port of 0 to the port the system gives before the face binds, and reports the locator of the group with that port among its own, so a member that listens on it joins the same group. The forwarder holds the group's producer, the face loop takes what the members send, and the node leaves the group as it ends. A second group is still refused by what was asked. Upstream's adminspace file passes through the harness, six of six tests, test_adminspace_read among them.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/lib.rs: UdpDriver::multicast_link_port gives the port a multicast link takes, the system's for a port of 0, so a node can report its group before the face binds and every re-join of the face is on that port.",
+        "crates/wz-capi-core/src/drive/router_node.rs: refused_ask refuses more than one group instead of any; join_group resolves the endpoint as a peer's group is, settles the port and spawns the router group face; run_router adds the locator to the node's own, attaches the producer to the forwarder, hands the ingress, members and group subscriptions to the face loop and stops the face when the node ends.",
+        "crates/wz-capi-core/Cargo.toml: router-node enables multicast-transport and the runtime's router-multicast-faces.",
+        "crates/wz-zenoh/src/api/session.rs: a test of a router that listens on a group of port 0 and a peer that joins the locator it reports; the refusal test now asks for two groups."
+      ],
+      "publishable_verification_bullets": [
+        "Locally: clippy with warnings denied passes for the runtime with all features, the core of the C API with all features and with router-node alone, and the top crate with the default features and with unstable; the C and pico crates compile; the core's library tests pass (136) and the top crate's (205, one ignored), the two new tests among them. The 35 static gates pass with no pin or budget moved. Upstream: the adminspace file passes through the harness, six of six, test_adminspace_read included. Not run: the other upstream files after this change, the hosted run. A peer that joins the group is opened but no frame is exchanged with the router on it in a test yet."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed, first: the query lost as the direct link of two peers forms (the ignored test of the top crate); it keeps three_node_combination from finishing after other tests, and with it the routing file in the harness. Where the reply or the final of that query goes on the new link wants a trace of the frames, which the engine does not have.",
+        "Owed, from the router session: the members of the router's group as the admin sessions rows after the unicast ones (the node keeps the membership view and drops it), and what a publication sent by a peer on the group reaches through the router, both of which want a test with two nodes on one group; the metadata of a push that a face sent, which a hosted subscriber is not handed; a router liveliness subscriber refused on egress is not ended; the sessions a router holds as the admin sessions leg.",
+        "Also owed: the gossip core itself sends nothing when a face goes down under multihop, as a chain of peers without a router would need; the files that run none, a build without unstable serves no admin key of its own, a lane for the harness, the margin of the main job, the pin bump to 1.10.2."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
