@@ -299044,6 +299044,38 @@
         "Owed, from the regions file: a client that holds a multicast group and keeps a south of its own (scenario 1: the forwarder has no public client constructor and the node role has no client); a peer that holds a group, scouts and dials as a node with the partition (scenarios 2 and 3: such a peer stays on the registry, which has no hats); duplicates when two routers share a group (scenario 7 fails the unique timestamps of its subscribers); and the tracing spans of the pubsub, putsub and queque kinds, whose counts are upstream's steps and no observable of the API. Upstream routing gossip_regression_1 and _2 stay with the peer-on-router session. Query and reply in shared memory, the Join extension of a group, and the pin bump to 1.10.2 stay owed."
       ]
     },
+    "Round 3932": {
+      "decision_summary": "The Layer C0 red of the last completed hosted run is paid. The multicast egress callers gate refused the C ABI router node's one production attach of a multicast group because it looked for the atom's name in the file that holds the call, and that file is gated by a feature of its own crate (router-node, which turns the atom on) written on the module declaration in the parent. The gate now reads both: the cfg bodies on the mod declaration of an out-of-line file, up to the crate root, and the features of the caller's own crate that forward the atom, by closure over its Cargo.toml. No second cfg was added to the call site, since a feature that forwards the atom is as unable to reach the plane with the atom off. The gate stays strict for a caller gated by a feature that does not forward the atom.",
+      "changes_bullets": [
+        "scripts/lib/mcast_egress_callers_gate.py: atom_features (closure over a crate's [features]), crate_atom_features, declared_cfgs (the cfg on a parent's mod declaration, walked up to the crate root), gated_by; audit grades a production caller and an egress-only test against all three; the module docstring states what under the atom means.",
+        "scripts/lib/mcast_egress_callers_gate.py selftest: the closure, a call under a forwarding feature, a call under a feature that does not forward the atom, and a module declared under a cfg inside a module declared under a cfg."
+      ],
+      "verification_bullets": [
+        "The gate reproduced the hosted red on the current tree before the change (the production attach in the C ABI router node, reported ungated) and passes after it: the selftest is ok and the audit reports 2 production attaches, all under the atom. Only this gate was run, because only it failed in the Layer C0 step of that run. The other jobs of that run failed behind it, and a hosted run of the current tree decides whether anything else is red."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted run of the current tree for anything the Layer C0 step hid, and for the Layer Z legs of the gateway/south key (the defaults leg's auto claim, the census, the drop-in exception). A peer with a partition has no stock zenohd witness yet. Also open: stale LinkstateForwarder comments and the linkstate_forward module name; the router's subscriber and queryable interest dumps return early on an unrestricted interest; a current subscriber Interest from a north peer; a router node's south peer region relays nothing between link-state peers."
+      ],
+      "publishable_decision_summary": "The Layer C0 red of the last completed hosted run is paid. The multicast egress callers gate refused the C ABI router node's one production attach of a multicast group because it looked for the atom's name in the file that holds the call, and that file is gated by a feature of its own crate (router-node, which turns the atom on) written on the module declaration in the parent. The gate now reads both: the cfg bodies on the mod declaration of an out-of-line file, up to the crate root, and the features of the caller's own crate that forward the atom, by closure over its Cargo.toml. No second cfg was added to the call site, since a feature that forwards the atom is as unable to reach the plane with the atom off. The gate stays strict for a caller gated by a feature that does not forward the atom.",
+      "publishable_changes_bullets": [
+        "scripts/lib/mcast_egress_callers_gate.py: atom_features (closure over a crate's [features]), crate_atom_features, declared_cfgs (the cfg on a parent's mod declaration, walked up to the crate root), gated_by; audit grades a production caller and an egress-only test against all three; the module docstring states what under the atom means.",
+        "scripts/lib/mcast_egress_callers_gate.py selftest: the closure, a call under a forwarding feature, a call under a feature that does not forward the atom, and a module declared under a cfg inside a module declared under a cfg."
+      ],
+      "publishable_verification_bullets": [
+        "The gate reproduced the hosted red on the current tree before the change (the production attach in the C ABI router node, reported ungated) and passes after it: the selftest is ok and the audit reports 2 production attaches, all under the atom. Only this gate was run, because only it failed in the Layer C0 step of that run. The other jobs of that run failed behind it, and a hosted run of the current tree decides whether anything else is red."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted run of the current tree for anything the Layer C0 step hid, and for the Layer Z legs of the gateway/south key (the defaults leg's auto claim, the census, the drop-in exception). A peer with a partition has no stock zenohd witness yet. Also open: stale LinkstateForwarder comments and the linkstate_forward module name; the router's subscriber and queryable interest dumps return early on an unrestricted interest; a current subscriber Interest from a north peer; a router node's south peer region relays nothing between link-state peers."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
