@@ -299110,6 +299110,40 @@
         "Read the hosted run of the current tree for the Layer Z legs of the gateway/south key and anything the Layer C0 step hid before it was fixed. A peer with a partition has no stock zenohd witness yet. Also open: stale LinkstateForwarder comments (about 70) and the linkstate_forward module name; a current subscriber Interest from a north peer; a router node's south peer region relays nothing between link-state peers."
       ]
     },
+    "Round 3934": {
+      "decision_summary": "A measurement of every upstream test file that nothing compared with anything drifted: the first run of the whole suite on the tree of round 3931 found upstream's liveliness file at 44 of 46, then 43, which no other gate saw. The cause was the open of a node peer, which returned when its first link was up (a held delay had given way to a wait for the link): a subscriber declared at once was told of tokens already alive, because the second node it dialled had not yet told it what it holds. The open now waits for one connected and ingested node for each endpoint it dials, as upstream's start conditions count one connector for each; liveliness is 46 of 46 and the open stays under 400 ms. The comparison is now a lane: docs/z8-expected.tsv holds each file's outcome and fewest passing tests, z8_expectation_gate.py holds a report to it, and Layer Z8 (a job of ci.yml, opt-in on a machine) runs the quick files; regions is in the table and not in the lane.",
+      "changes_bullets": [
+        "crates/wz-capi-core/src/drive/router_node.rs: the open of a node peer waits for as many connected faces and ingested link-states as it has connect endpoints, within its start window.",
+        "scripts/lib/z8_expectation_gate.py (new): parses docs/z8-expected.tsv and the report of the harness, fails a file below its row, notes a file above it, lists the files of the lane (--names), and has a selftest. docs/z8-expected.tsv (new): outcome, fewest passing tests and lane membership of each file of upstream's zenoh/tests, measured on the tree of round 3931.",
+        "scripts/lib/z8_upstream_suite.py: the report rows carry passed=. scripts/run-ci.sh: Layer Z8 (opt-in by --layer Z8 or WZ_RUN_LAYER_Z8) and the selftests of the harness and the gate in the gate layer. .github/workflows/ci.yml: job z8-upstream. .github/cache-classes.json: the job reads the rust-ci class.",
+        "docs/zenoh-api-on-the-engine.md: the lane, the regression it caught, and what stays owed."
+      ],
+      "verification_bullets": [
+        "Locally: the whole upstream suite except regions on the tree of round 3931 (every file at its row but liveliness 44 and then 43 of 46 and routing 5 of 8), then liveliness 46 of 46 and routing 5 of 8 (gossip_regression_1 and _2, and three_node_combination which loses a query about one run in four) with the repair; clippy -D warnings of wz-capi-core in three feature sets; the selftests of the harness and the gate; the lane lint gates (provenance, job budget, cache budget, unwired lane, lane feature membership, cache save). Not run: the lane itself on a hosted runner (its first run is the measurement of its duration) and the other files again after the repair."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed: the first hosted run of Layer Z8 (its duration, a margin gate, and whether three_node_combination, which loses a query about one run in four, makes the routing row flaky: its row holds 5 of 8); the files that ask for a Runtime of the node (the arm with internal) and Windows; the rows of regions that fail today (a client that holds a group and a south of its own, duplicates when two routers share a group, the tracing spans of upstream's routing). Upstream routing gossip_regression_1 and _2 stay with the peer-on-router session. The pin bump to 1.10.2 (56 files changed upstream, among them DEFAULT_CONFIG.json5 and the establishment and link crates) is a round that re-judges the surface and the census, and is not started."
+      ],
+      "publishable_decision_summary": "A measurement of every upstream test file that nothing compared with anything drifted: the first run of the whole suite on the tree of round 3931 found upstream's liveliness file at 44 of 46, then 43, which no other gate saw. The cause was the open of a node peer, which returned when its first link was up (a held delay had given way to a wait for the link): a subscriber declared at once was told of tokens already alive, because the second node it dialled had not yet told it what it holds. The open now waits for one connected and ingested node for each endpoint it dials, as upstream's start conditions count one connector for each; liveliness is 46 of 46 and the open stays under 400 ms. The comparison is now a lane: docs/z8-expected.tsv holds each file's outcome and fewest passing tests, z8_expectation_gate.py holds a report to it, and Layer Z8 (a job of ci.yml, opt-in on a machine) runs the quick files; regions is in the table and not in the lane.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-core/src/drive/router_node.rs: the open of a node peer waits for as many connected faces and ingested link-states as it has connect endpoints, within its start window.",
+        "scripts/lib/z8_expectation_gate.py (new): parses docs/z8-expected.tsv and the report of the harness, fails a file below its row, notes a file above it, lists the files of the lane (--names), and has a selftest. docs/z8-expected.tsv (new): outcome, fewest passing tests and lane membership of each file of upstream's zenoh/tests, measured on the tree of round 3931.",
+        "scripts/lib/z8_upstream_suite.py: the report rows carry passed=. scripts/run-ci.sh: Layer Z8 (opt-in by --layer Z8 or WZ_RUN_LAYER_Z8) and the selftests of the harness and the gate in the gate layer. .github/workflows/ci.yml: job z8-upstream. .github/cache-classes.json: the job reads the rust-ci class.",
+        "docs/zenoh-api-on-the-engine.md: the lane, the regression it caught, and what stays owed."
+      ],
+      "publishable_verification_bullets": [
+        "Locally: the whole upstream suite except regions on the tree of round 3931 (every file at its row but liveliness 44 and then 43 of 46 and routing 5 of 8), then liveliness 46 of 46 and routing 5 of 8 (gossip_regression_1 and _2, and three_node_combination which loses a query about one run in four) with the repair; clippy -D warnings of wz-capi-core in three feature sets; the selftests of the harness and the gate; the lane lint gates (provenance, job budget, cache budget, unwired lane, lane feature membership, cache save). Not run: the lane itself on a hosted runner (its first run is the measurement of its duration) and the other files again after the repair."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed: the first hosted run of Layer Z8 (its duration, a margin gate, and whether three_node_combination, which loses a query about one run in four, makes the routing row flaky: its row holds 5 of 8); the files that ask for a Runtime of the node (the arm with internal) and Windows; the rows of regions that fail today (a client that holds a group and a south of its own, duplicates when two routers share a group, the tracing spans of upstream's routing). Upstream routing gossip_regression_1 and _2 stay with the peer-on-router session. The pin bump to 1.10.2 (56 files changed upstream, among them DEFAULT_CONFIG.json5 and the establishment and link crates) is a round that re-judges the surface and the census, and is not started."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
