@@ -298676,6 +298676,40 @@
         "Owed: shared memory on a multicast group (the engine's groups carry no descriptor, and the two multicast tests of the shm file wait on it); a query value and a reply in shared memory, and the query and reply lists of the optimisation, are read and not acted on; the promotion is made by the top crate before the engine and not at the link, per peer; the offer lists the default protocol (POSIX) whatever clients a storage holds; a differential of a ZShm over a link to an upstream node; a router carries no shared memory. From the router session of this crate: regression_3 and the six clientviapeer (a peer that forwards between its faces), adminspace and routing. Also owed: qos/network through the admin space; transport/link/tls/close_link_on_expiration and the inline certificate keys; the capic-default size; a lane for the harness; the pin bump to 1.10.2."
       ]
     },
+    "Round 3922": {
+      "decision_summary": "A multicast group whose transports are shared-memory ones carries descriptors. Upstream gives a multicast transport a shared-memory context when the session holds one, maps every message it sends to its partner whatever the protocol, and reads every message it receives, with no handoff because the group is unreliable. The engine now does the same per group: Session::enable_shm stamps the group's registries as reading shared memory once, when its session is made (a group negotiates nothing a reconnect could lower), the node's reader is installed on it, and publish_shm_on_group puts ONE descriptor on the wire for every member. The fan-out sends a chunk to such a group as its descriptor and any other group the bytes; has_shm_peer counts these groups, so a large put is promoted for a session whose only peers are a group. The top crate reports its groups as shared-memory ones. The upstream shm file passes 10 of 10.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session/mod.rs: send_shm_descriptor moves to the impl every transport shares; the multicast session gains enable_shm and publish_shm_on_group.",
+        "crates/wz-capi-core/src/faces.rs: LegBytes names the chunk the bytes lie in; the group fan-out sends a shared-memory group the descriptor; has_shm_peer counts those groups; the reader of a node is made by shm_resolver_of.",
+        "crates/wz-capi-core/src/faces/multicast.rs and crates/wz-capi-core/src/drive.rs: a group face session is made shared-memory when its join says so, with the node's reader; the group leg records it.",
+        "crates/wz-zenoh/src/api/session.rs: the top crate reports its groups as shared-memory ones, unless it is a router."
+      ],
+      "verification_bullets": [
+        "Locally: the upstream shm file passes 10 of 10 (the two multicast tests included); clippy with warnings denied passes for the runtime, the core of the C API with and without shared memory, the C ABI with zenoh-c-shared-memory and the top crate; the unit tests of the core of the C API pass. Not run: a differential against an upstream node on a group, the legs gate, the hosted run, and the rest of the upstream files since this change."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed: a unit test of a group descriptor in the engine (the upstream file is its only test); the Join of a shared-memory group does not announce the extension, so a member's admin view of the transport does not say shared memory; a query value and a reply in shared memory, and the query and reply lists of the optimisation; the promotion is made by the top crate and not at the link; a differential of a ZShm over a link and a group to an upstream node; a router carries no shared memory. From the router session of this crate: regression_3 and the six clientviapeer (a peer that forwards between its faces), adminspace and routing. Also owed: qos/network through the admin space; transport/link/tls/close_link_on_expiration and the inline certificate keys; the capic-default size; a lane for the harness; the pin bump to 1.10.2."
+      ],
+      "publishable_decision_summary": "A multicast group whose transports are shared-memory ones carries descriptors. Upstream gives a multicast transport a shared-memory context when the session holds one, maps every message it sends to its partner whatever the protocol, and reads every message it receives, with no handoff because the group is unreliable. The engine now does the same per group: Session::enable_shm stamps the group's registries as reading shared memory once, when its session is made (a group negotiates nothing a reconnect could lower), the node's reader is installed on it, and publish_shm_on_group puts ONE descriptor on the wire for every member. The fan-out sends a chunk to such a group as its descriptor and any other group the bytes; has_shm_peer counts these groups, so a large put is promoted for a session whose only peers are a group. The top crate reports its groups as shared-memory ones. The upstream shm file passes 10 of 10.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session/mod.rs: send_shm_descriptor moves to the impl every transport shares; the multicast session gains enable_shm and publish_shm_on_group.",
+        "crates/wz-capi-core/src/faces.rs: LegBytes names the chunk the bytes lie in; the group fan-out sends a shared-memory group the descriptor; has_shm_peer counts those groups; the reader of a node is made by shm_resolver_of.",
+        "crates/wz-capi-core/src/faces/multicast.rs and crates/wz-capi-core/src/drive.rs: a group face session is made shared-memory when its join says so, with the node's reader; the group leg records it.",
+        "crates/wz-zenoh/src/api/session.rs: the top crate reports its groups as shared-memory ones, unless it is a router."
+      ],
+      "publishable_verification_bullets": [
+        "Locally: the upstream shm file passes 10 of 10 (the two multicast tests included); clippy with warnings denied passes for the runtime, the core of the C API with and without shared memory, the C ABI with zenoh-c-shared-memory and the top crate; the unit tests of the core of the C API pass. Not run: a differential against an upstream node on a group, the legs gate, the hosted run, and the rest of the upstream files since this change."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed: a unit test of a group descriptor in the engine (the upstream file is its only test); the Join of a shared-memory group does not announce the extension, so a member's admin view of the transport does not say shared memory; a query value and a reply in shared memory, and the query and reply lists of the optimisation; the promotion is made by the top crate and not at the link; a differential of a ZShm over a link and a group to an upstream node; a router carries no shared memory. From the router session of this crate: regression_3 and the six clientviapeer (a peer that forwards between its faces), adminspace and routing. Also owed: qos/network through the admin space; transport/link/tls/close_link_on_expiration and the inline certificate keys; the capic-default size; a lane for the harness; the pin bump to 1.10.2."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
