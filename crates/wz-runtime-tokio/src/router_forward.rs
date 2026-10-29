@@ -383,6 +383,7 @@ use wz_session_core::driver_loop::MulticastPeerId;
 #[cfg(feature = "router-multicast-faces")]
 use wz_session_core::extbound::multicast_region_and_bound_of;
 use wz_session_core::extbound::{Bound, Region};
+use wz_session_core::face::{FaceEventKind, FaceEventSink, FaceSnapshot};
 use wz_session_core::keyexpr_match::keyexpr_intersects_target;
 use wz_session_core::linkstate_oam::{
     build_linkstate_oam_owned, try_parse_linkstate_oam, LinkstateOam,
@@ -390,6 +391,7 @@ use wz_session_core::linkstate_oam::{
 #[cfg(feature = "router-multicast-faces")]
 use wz_session_core::multicast_tx::MulticastTxItem;
 use wz_session_core::network_message::NetworkMessage;
+use wz_session_core::publish_options::PublishOptions;
 use wz_session_core::push_build::reliteralize_push;
 use wz_session_core::push_routing_context::{read_push_source, set_push_source};
 use wz_session_core::qos::Priority;
@@ -2712,6 +2714,17 @@ pub struct RouterForwarder {
     /// How many things the node's own face watches in the tables ([`MatchPlane`]): while there
     /// are none, a write of the tables tells the face nothing.
     watchers: std::sync::atomic::AtomicUsize,
+    /// The observers of the faces coming up and going down, by the id [`RouterForwarder::watch_faces`]
+    /// answered: the program that holds the node is told, outside every lock, as a session is told of
+    /// its transports and links.
+    face_watchers: std::sync::Mutex<Vec<(u64, FaceEventSink)>>,
+    /// The allocator of the ids of `face_watchers`.
+    next_face_watcher: std::sync::atomic::AtomicU64,
+    /// The transitions a write of the tables made, to be told once it is released
+    /// ([`WrittenTables`]): an observer runs user code, and the tables are held for writing.
+    face_events: std::sync::Mutex<Vec<(FaceEventKind, FaceSnapshot)>>,
+    /// Whether `face_events` holds something, so that the write that made nothing pays no lock.
+    face_events_pending: std::sync::atomic::AtomicBool,
     /// Whether the face has been told the tables were written since it last looked.
     change_told: std::sync::atomic::AtomicBool,
     /// R2348 — the per-(face, keyexpr) INGRESS verdict cache. zenoh's
@@ -2979,6 +2992,9 @@ struct HostedQueryable {
     /// handed carry the key without it and its replies are put under it. A queryable the router
     /// hosts for itself (the admin space) names its keys in full.
     namespaced: bool,
+    /// Whose queries the queryable answers: those of the node's own session (the `Local` face),
+    /// those of every other face, or both.
+    origin: wz_session_core::locality::Locality,
     handler: Arc<Hosted<HostedQueryHandler>>,
 }
 
@@ -2990,6 +3006,9 @@ struct HostedSubscriber {
     /// Whether the subscriber is the node's own session's (see [`HostedQueryable::namespaced`]):
     /// the samples it is handed carry the key without the namespace.
     namespaced: bool,
+    /// Whose publications the subscriber takes: the node's own session's, every other face's, or
+    /// both.
+    origin: wz_session_core::locality::Locality,
     handler: Arc<Hosted<HostedSubscriberHandler>>,
 }
 
@@ -3258,6 +3277,83 @@ impl RouterForwarder {
         self.change_told
             .store(false, std::sync::atomic::Ordering::Release);
     }
+
+    /// Be told each time a face comes up or goes down, from now on, until
+    /// [`unwatch_faces`](Self::unwatch_faces) is called with the id answered. `sink` runs on the
+    /// thread of the face, outside every lock of the router.
+    pub fn watch_faces(&self, sink: FaceEventSink) -> u64 {
+        let id = self
+            .next_face_watcher
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        self.face_watchers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push((id, sink));
+        id
+    }
+
+    /// End the watch `id`. `false` for one that is gone.
+    pub fn unwatch_faces(&self, id: u64) -> bool {
+        let mut watchers = self
+            .face_watchers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let before = watchers.len();
+        watchers.retain(|(held, _)| *held != id);
+        watchers.len() != before
+    }
+
+    /// Keep a transition of a face to be told when the tables are released. A face whose
+    /// identity the handshake has not given is no transport and is not told.
+    fn queue_face_event(&self, kind: FaceEventKind, actions: &SessionLinkActions) {
+        let watched = !self
+            .face_watchers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty();
+        if !watched {
+            return;
+        }
+        let Some(snapshot) = FaceSnapshot::of_actions(actions) else {
+            return;
+        };
+        self.face_events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push((kind, snapshot));
+        self.face_events_pending
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Tell the observers the transitions queued, in the order they were made. Called with no lock
+    /// of the router held.
+    fn tell_face_events(&self) {
+        if !self
+            .face_events_pending
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            return;
+        }
+        let events = std::mem::take(
+            &mut *self
+                .face_events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+        let sinks: Vec<FaceEventSink> = self
+            .face_watchers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .map(|(_, sink)| sink.clone())
+            .collect();
+        for (kind, snapshot) in &events {
+            for sink in &sinks {
+                sink(*kind, snapshot);
+            }
+        }
+    }
 }
 
 /// The tables held for writing. When they are let go the node's own face is told that they may
@@ -3298,6 +3394,7 @@ impl Drop for WrittenTables<'_> {
                 sink(LocalFaceEvent::Changed);
             }
         }
+        self.fwd.tell_face_events();
     }
 }
 
@@ -3327,7 +3424,20 @@ router_entry_points! { on_tables_mut:
     fn register_local_queryable(&self, keyexpr: &str, complete: bool, handler: HostedQueryHandler);
     fn register_local_subscriber(&self, keyexpr: &str, handler: HostedSubscriberHandler);
     fn host_subscriber(&self, keyexpr: &str, handler: HostedSubscriberHandler) -> u64;
+    fn host_subscriber_from(
+        &self,
+        keyexpr: &str,
+        origin: wz_session_core::locality::Locality,
+        handler: HostedSubscriberHandler,
+    ) -> u64;
     fn host_queryable(&self, keyexpr: &str, complete: bool, handler: HostedQueryHandler) -> u64;
+    fn host_queryable_from(
+        &self,
+        keyexpr: &str,
+        complete: bool,
+        origin: wz_session_core::locality::Locality,
+        handler: HostedQueryHandler,
+    ) -> u64;
     fn unhost_subscriber(&self, id: u64) -> bool;
     fn unhost_queryable(&self, id: u64) -> bool;
     fn attach_local_face(&self, sink: LocalFaceSink);
@@ -3343,6 +3453,7 @@ router_entry_points! { on_tables_mut:
 }
 
 router_entry_points! { on_tables:
+    fn face_snapshots(&self) -> Vec<FaceSnapshot>;
     fn local_get(&self, request: &RequestOwned);
     fn matching(
         &self,
@@ -3353,6 +3464,12 @@ router_entry_points! { on_tables:
     fn reply_held(&self, record: &HeldRecord, answer: &mut dyn FnMut(&mut dyn ReplyOut));
     fn release_held(&self, record: &HeldRecord);
     fn publish(&self, keyexpr: &str, payload: &[u8]) -> Result<(), CodecError>;
+    fn publish_with(
+        &self,
+        keyexpr: &str,
+        payload: &[u8],
+        options: &PublishOptions,
+    ) -> Result<(), CodecError>;
     fn publish_qos(
         &self,
         keyexpr: &str,
@@ -3529,6 +3646,18 @@ impl RouterForwarder {
             prefix,
         });
         self
+    }
+
+    /// Whether the node's own session has a namespace.
+    fn local_namespace_is_set(&self) -> bool {
+        #[cfg(feature = "routing-namespace")]
+        {
+            self.local_namespace.is_some()
+        }
+        #[cfg(not(feature = "routing-namespace"))]
+        {
+            false
+        }
     }
 
     /// The key as the router names it, for a key the node's own session names: under the
@@ -3803,6 +3932,10 @@ impl RouterForwarder {
             egress_interceptors: PlainRwLock::new(InterceptorChain::new()),
             interceptor_version: PlainCell::new(0),
             watchers: std::sync::atomic::AtomicUsize::new(0),
+            face_watchers: std::sync::Mutex::new(Vec::new()),
+            next_face_watcher: std::sync::atomic::AtomicU64::new(0),
+            face_events: std::sync::Mutex::new(Vec::new()),
+            face_events_pending: std::sync::atomic::AtomicBool::new(false),
             change_told: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "routing-namespace")]
             local_namespace: None,
@@ -8539,7 +8672,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     ) where
         T: std::ops::DerefMut,
     {
-        self.host_queryable_in(keyexpr, complete, handler, false);
+        self.host_queryable_in(
+            keyexpr,
+            complete,
+            handler,
+            false,
+            wz_session_core::locality::Locality::Any,
+        );
     }
 
     /// [`register_local_queryable`](Self::register_local_queryable) for the node's own session,
@@ -8555,8 +8694,28 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     where
         T: std::ops::DerefMut,
     {
+        self.host_queryable_from(
+            keyexpr,
+            complete,
+            wz_session_core::locality::Locality::Any,
+            handler,
+        )
+    }
+
+    /// [`host_queryable`](Self::host_queryable) for the queries `origin` admits: those of the
+    /// node's own session, those of the other faces, or both.
+    pub fn host_queryable_from(
+        &mut self,
+        keyexpr: &str,
+        complete: bool,
+        origin: wz_session_core::locality::Locality,
+        handler: HostedQueryHandler,
+    ) -> u64
+    where
+        T: std::ops::DerefMut,
+    {
         let keyexpr = self.fwd.wire_key(keyexpr);
-        self.host_queryable_in(&keyexpr, complete, handler, true)
+        self.host_queryable_in(&keyexpr, complete, handler, true, origin)
     }
 
     fn host_queryable_in(
@@ -8565,6 +8724,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         complete: bool,
         handler: HostedQueryHandler,
         namespaced: bool,
+        origin: wz_session_core::locality::Locality,
     ) -> u64
     where
         T: std::ops::DerefMut,
@@ -8585,6 +8745,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             keyexpr: keyexpr.to_string(),
             complete,
             namespaced,
+            origin,
             handler: Hosted::new(handler),
         });
         self.repropagate(snapshot);
@@ -8617,7 +8778,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     where
         T: std::ops::DerefMut,
     {
-        self.host_subscriber_in(keyexpr, handler, false);
+        self.host_subscriber_in(
+            keyexpr,
+            handler,
+            false,
+            wz_session_core::locality::Locality::Any,
+        );
     }
 
     /// [`register_local_subscriber`](Self::register_local_subscriber) for the node's own session,
@@ -8629,8 +8795,22 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     where
         T: std::ops::DerefMut,
     {
+        self.host_subscriber_from(keyexpr, wz_session_core::locality::Locality::Any, handler)
+    }
+
+    /// [`host_subscriber`](Self::host_subscriber) for the publications `origin` admits: those of
+    /// the node's own session, those of the other faces, or both.
+    pub fn host_subscriber_from(
+        &mut self,
+        keyexpr: &str,
+        origin: wz_session_core::locality::Locality,
+        handler: HostedSubscriberHandler,
+    ) -> u64
+    where
+        T: std::ops::DerefMut,
+    {
         let keyexpr = self.fwd.wire_key(keyexpr);
-        self.host_subscriber_in(&keyexpr, handler, true)
+        self.host_subscriber_in(&keyexpr, handler, true, origin)
     }
 
     fn host_subscriber_in(
@@ -8638,6 +8818,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         keyexpr: &str,
         handler: HostedSubscriberHandler,
         namespaced: bool,
+        origin: wz_session_core::locality::Locality,
     ) -> u64
     where
         T: std::ops::DerefMut,
@@ -8654,6 +8835,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             id,
             keyexpr: keyexpr.to_string(),
             namespaced,
+            origin,
             handler: Hosted::new(handler),
         });
         self.repropagate(snapshot);
@@ -8919,24 +9101,53 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 kind,
                 reliability,
             });
+        // A publication of a face reaches the subscribers that admit a remote origin.
+        self.deliver_to_hosted_subscribers(
+            false,
+            &sample,
+            relative.as_ref().map(|view| view as &dyn SampleView),
+        );
+    }
+
+    /// Hand a publication to the subscribers this router hosts: `full` carries its key as the
+    /// router names it and `relative` as the node's own session does (`None` for a key outside
+    /// the namespace of the session, which is not the session's). `from_local` says whether the
+    /// node's own session made it, which the origin of a subscriber is judged against. The
+    /// handlers run as [`dispatch_local_subscribers`](Self::dispatch_local_subscribers) says.
+    fn deliver_to_hosted_subscribers(
+        &self,
+        from_local: bool,
+        full: &dyn SampleView,
+        relative: Option<&dyn SampleView>,
+    ) {
+        if self.tables.local_subscribers.is_empty() {
+            return;
+        }
         let matched: Vec<(bool, Arc<Hosted<HostedSubscriberHandler>>)> = {
             let locals = &self.tables.local_subscribers;
-            let target_chunks: Vec<&str> = keyexpr.split('/').collect();
+            let target_chunks: Vec<&str> = full.keyexpr().split('/').collect();
             locals
                 .iter()
                 .filter(|sub| keyexpr_intersects_target(&sub.keyexpr, &target_chunks))
+                .filter(|sub| {
+                    if from_local {
+                        sub.origin.allows_local()
+                    } else {
+                        sub.origin.allows_remote()
+                    }
+                })
                 .map(|sub| (sub.namespaced, Arc::clone(&sub.handler)))
                 .collect()
         };
         let inside = HostedDispatch::enter();
         for (namespaced, handler) in &matched {
             let view = if *namespaced {
-                match &relative {
+                match relative {
                     Some(relative) => relative,
                     None => continue,
                 }
             } else {
-                &sample
+                full
             };
             if handler.call(|h| h(view)).is_none() {
                 Self::enqueue_self_echo(handler, view);
@@ -9017,27 +9228,15 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         priority: Priority,
         express: bool,
     ) -> Result<(), CodecError> {
-        let wire = self.fwd.wire_key(keyexpr);
-        let keyexpr = &*wire;
-        let qos = wz_session_core::sample::QosLevel::from_parts(
-            priority,
-            wz_session_core::qos::CongestionControl::Drop,
-            express,
-        );
-        let push = if qos == wz_session_core::sample::QosLevel::DEFAULT {
-            wz_session_core::push_build::build_push_literal(keyexpr, payload)?
+        // A default publish carries no quality of service extension.
+        let options = if priority == Priority::DEFAULT && !express {
+            PublishOptions::put()
         } else {
-            wz_session_core::push_build::build_push_literal_with_meta(
-                keyexpr,
-                payload,
-                &wz_session_core::metadata::PushMetadata {
-                    qos: Some(qos),
-                    ..Default::default()
-                },
-            )?
+            PublishOptions::put()
+                .with_priority(priority)
+                .with_express(express)
         };
-        self.route_local_push(priority, express, &push, keyexpr);
-        Ok(())
+        self.publish_with(keyexpr, payload, &options)
     }
 
     /// The Del twin of [`publish`](Self::publish): a delete takes the route a
@@ -9045,20 +9244,74 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// `MsgDel` carries neither, and QoS belongs to the publisher).
     #[cfg(feature = "pubsub-delete")]
     pub fn publish_delete(&self, keyexpr: &str) -> Result<(), CodecError> {
+        self.publish_with(keyexpr, &[], &PublishOptions::del())
+    }
+
+    /// Originate what `options` say as THIS node's own session: a Put of `payload` or a Del, with
+    /// the metadata the options carry (encoding, timestamp, attachment, source, quality of
+    /// service), to the faces and the subscribers `options.allowed_destination` admits: the
+    /// session's own subscribers get the sample the options describe, as a session's loopback
+    /// does, and the other faces get the Push. `keyexpr` is the session's: under its namespace,
+    /// if it has one ([`RouterForwarder::with_local_namespace`]).
+    pub fn publish_with(
+        &self,
+        keyexpr: &str,
+        payload: &[u8],
+        options: &PublishOptions,
+    ) -> Result<(), CodecError> {
+        use wz_session_core::push_build::{
+            build_push_del_literal, build_push_del_literal_with_meta, build_push_literal,
+            build_push_literal_with_meta,
+        };
         let wire = self.fwd.wire_key(keyexpr);
-        let keyexpr = &*wire;
-        let push = wz_session_core::push_build::build_push_del_literal(keyexpr)?;
-        self.route_local_push(Priority::DEFAULT, false, &push, keyexpr);
+        let meta = options.push_metadata();
+        let push = match options.kind {
+            SampleKind::Put if meta.is_empty() => build_push_literal(&wire, payload)?,
+            SampleKind::Put => build_push_literal_with_meta(&wire, payload, &meta)?,
+            #[cfg(feature = "pubsub-delete")]
+            SampleKind::Del if meta.is_empty() => build_push_del_literal(&wire)?,
+            #[cfg(feature = "pubsub-delete")]
+            SampleKind::Del => build_push_del_literal_with_meta(&wire, &meta)?,
+            // A build without the delete has none to send.
+            #[cfg(not(feature = "pubsub-delete"))]
+            SampleKind::Del => return Ok(()),
+        };
+        // What the session's own subscribers are handed: the key the router names, and the one
+        // the session does (the same one when it has no namespace).
+        let own = options.loopback_sample(&wire, payload);
+        let own_relative = self
+            .fwd
+            .local_namespace_is_set()
+            .then(|| options.loopback_sample(keyexpr, payload));
+        self.route_local_push(
+            options.priority_band(),
+            options.qos.is_some_and(|qos| qos.is_express()),
+            &push,
+            &wire,
+            options.allowed_destination,
+            &own,
+            own_relative.as_ref().unwrap_or(&own),
+        );
         Ok(())
     }
 
     /// Route a Put of this node's own session: the blocks of
     /// [`route_push`](Self::route_push) a leaf-region Put takes, with no inbound
     /// face to resolve an alias on or to keep from an echo. The Put is stamped
-    /// once, as every Put is, and then goes to the client faces that subscribed,
-    /// to the subscribers this node hosts, into every mesh, and to a multicast
-    /// group.
-    fn route_local_push(&self, priority: Priority, express: bool, push: &PushOwned, keyexpr: &str) {
+    /// once, as every Put is, and then goes to the client faces that subscribed
+    /// and into every mesh and a multicast group (when `destination` admits a remote one), and
+    /// to the subscribers this node hosts (when it admits the session's own).
+    #[allow(clippy::too_many_arguments)]
+    fn route_local_push(
+        &self,
+        priority: Priority,
+        express: bool,
+        push: &PushOwned,
+        keyexpr: &str,
+        destination: wz_session_core::locality::Locality,
+        own: &dyn SampleView,
+        own_relative: &dyn SampleView,
+    ) {
         let Some(stamped) = self.node_hlc.stamp_for_every_destination(push) else {
             return;
         };
@@ -9071,21 +9324,34 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             priority,
             express,
         };
-        self.deliver_to_client_subscribers(LOCAL_FACE, Region::Local, egress, push, keyexpr, false);
-        self.dispatch_local_subscribers(reliable, push, keyexpr);
-        self.publish_client_push_into_meshes(Region::Local, egress, push, keyexpr);
-        #[cfg(feature = "router-multicast-faces")]
-        self.broadcast_to_mcast_groups(
-            reliable,
-            priority,
-            push,
-            keyexpr,
-            GroupEgressSource {
-                from_group: false,
-                from_mesh: false,
-                origin: None,
-            },
-        );
+        if destination.allows_remote() {
+            self.deliver_to_client_subscribers(
+                LOCAL_FACE,
+                Region::Local,
+                egress,
+                push,
+                keyexpr,
+                false,
+            );
+        }
+        if destination.allows_local() {
+            self.deliver_to_hosted_subscribers(true, own, Some(own_relative));
+        }
+        if destination.allows_remote() {
+            self.publish_client_push_into_meshes(Region::Local, egress, push, keyexpr);
+            #[cfg(feature = "router-multicast-faces")]
+            self.broadcast_to_mcast_groups(
+                reliable,
+                priority,
+                push,
+                keyexpr,
+                GroupEgressSource {
+                    from_group: false,
+                    from_mesh: false,
+                    origin: None,
+                },
+            );
+        }
     }
 
     /// R2685 — a read-only [`RouterDeclarationsView`] over the live declaration
@@ -9202,6 +9468,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 .iter()
                 .filter(|lq| keyexpr_intersects_target(&lq.keyexpr, &query_chunks))
                 .filter(|lq| !matches!(target, Some(QueryTarget::AllComplete)) || lq.complete)
+                // The query is the node's own session's when it came from the `Local` face.
+                .filter(|lq| {
+                    if inbound == LOCAL_FACE {
+                        lq.origin.allows_local()
+                    } else {
+                        lq.origin.allows_remote()
+                    }
+                })
                 .map(|lq| (lq.namespaced, Arc::clone(&lq.handler)))
                 .collect()
         };
@@ -9327,6 +9601,18 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             );
             self.forward_response_final(LOCAL_FACE, record.reliable, &ended);
         }
+    }
+
+    /// Every established face as the transports and links a program lists: the sessions the node
+    /// holds, in the order they came up (a face whose handshake has not given its identity is no
+    /// transport and is left out).
+    pub fn face_snapshots(&self) -> Vec<FaceSnapshot> {
+        let mut faces: Vec<(&FaceId, &RouterFaceState)> = self.tables.faces.iter().collect();
+        faces.sort_by_key(|(id, _)| **id);
+        faces
+            .into_iter()
+            .filter_map(|(_, state)| FaceSnapshot::of_actions(&state.actions))
+            .collect()
     }
 
     /// Whether anything `plane` counts matches `keyexpr` among the declarations `locality`
@@ -10742,12 +11028,17 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             }
         }
         self.replay_declarations_to_new_face(id, tier);
+        self.queue_face_event(FaceEventKind::Up, actions);
     }
 
     fn deregister(&mut self, id: FaceId)
     where
         T: std::ops::DerefMut,
     {
+        // Read before the face is dropped from the tables, while its links are still known.
+        if let Some(state) = self.tables.faces.get(&id) {
+            self.queue_face_event(FaceEventKind::Down, &state.actions);
+        }
         self.shed_registry.remove(id);
         self.tables.mesh_ids.forget_face(id);
         // OBLIGATION-1: purge ALL FaceId-keyed leaf state BEFORE the linkless
@@ -17369,6 +17660,136 @@ mod tests {
         assert!(
             !forwarded_qabl_info(&sink_c.frame_bytes(0)).complete,
             "carries the folded complete=false"
+        );
+    }
+
+    /// The sessions the node holds are listed as the transports a program reads, and a watcher is
+    /// told, once the router is released, each time one comes up or goes down.
+    #[test]
+    fn the_faces_the_node_holds_are_listed_and_their_coming_and_going_is_told() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let told = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = told.clone();
+        let watch = fwd.watch_faces(Arc::new(move |kind, snapshot| {
+            kept.lock()
+                .unwrap()
+                .push((kind, snapshot.zid[0], snapshot.whatami));
+        }));
+        assert!(fwd.face_snapshots().is_empty());
+
+        let (client, _sink) = face(zid(0xAA), WIRE_CLIENT);
+        let (peer, _sink_peer) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &client);
+        fwd.register(FaceId(1), &peer);
+        let listed: Vec<(u8, u8)> = fwd
+            .face_snapshots()
+            .iter()
+            .map(|face| (face.zid[0], face.whatami))
+            .collect();
+        assert_eq!(listed, [(0xAA, WIRE_CLIENT), (0xBB, WIRE_PEER)]);
+        fwd.deregister(FaceId(0));
+        assert_eq!(
+            *told.lock().unwrap(),
+            [
+                (FaceEventKind::Up, 0xAA, WIRE_CLIENT),
+                (FaceEventKind::Up, 0xBB, WIRE_PEER),
+                (FaceEventKind::Down, 0xAA, WIRE_CLIENT),
+            ]
+        );
+
+        assert!(fwd.unwatch_faces(watch));
+        assert!(!fwd.unwatch_faces(watch), "a watch that is gone says so");
+        fwd.deregister(FaceId(1));
+        assert_eq!(told.lock().unwrap().len(), 3, "an ended watch is not told");
+    }
+
+    /// A publication of the node's own session goes where its destination admits: the session's
+    /// own subscribers, the other faces, or both, and a subscriber admits the origin it names.
+    #[test]
+    fn a_publication_of_the_node_goes_where_its_destination_and_the_origins_admit() {
+        use wz_session_core::locality::Locality;
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, sink) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &client);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_sub("demo/pub"));
+
+        let heard = |origin: Locality| {
+            let heard = Arc::new(std::sync::Mutex::new(0usize));
+            let counted = heard.clone();
+            fwd.host_subscriber_from(
+                "demo/pub",
+                origin,
+                Box::new(move |_: &dyn SampleView| *counted.lock().unwrap() += 1),
+            );
+            heard
+        };
+        let any = heard(Locality::Any);
+        let own = heard(Locality::SessionLocal);
+        let remote = heard(Locality::Remote);
+
+        // Only the other faces: the client is sent it, the subscribers of the session are not.
+        sink.reset();
+        fwd.publish_with(
+            "demo/pub",
+            b"x",
+            &PublishOptions::put().with_locality(Locality::Remote),
+        )
+        .expect("publish");
+        assert_eq!(sink.frame_count(), 1);
+        assert_eq!(
+            (
+                *any.lock().unwrap(),
+                *own.lock().unwrap(),
+                *remote.lock().unwrap()
+            ),
+            (0, 0, 0),
+            "a destination that excludes the session reaches none of its subscribers"
+        );
+
+        // Only the session: no face is sent it, and the subscribers that admit the session's own
+        // origin are handed it.
+        sink.reset();
+        fwd.publish_with(
+            "demo/pub",
+            b"x",
+            &PublishOptions::put().with_locality(Locality::SessionLocal),
+        )
+        .expect("publish");
+        assert_eq!(sink.frame_count(), 0);
+        assert_eq!(
+            (
+                *any.lock().unwrap(),
+                *own.lock().unwrap(),
+                *remote.lock().unwrap()
+            ),
+            (1, 1, 0)
+        );
+
+        // Both.
+        sink.reset();
+        fwd.publish_with("demo/pub", b"x", &PublishOptions::put())
+            .expect("publish");
+        assert_eq!(sink.frame_count(), 1);
+        assert_eq!(
+            (
+                *any.lock().unwrap(),
+                *own.lock().unwrap(),
+                *remote.lock().unwrap()
+            ),
+            (2, 2, 0)
+        );
+
+        // What a face publishes reaches the subscribers that admit a remote origin.
+        let push = wz_session_core::push_build::build_push_literal("demo/pub", b"y").expect("push");
+        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
+        assert_eq!(
+            (
+                *any.lock().unwrap(),
+                *own.lock().unwrap(),
+                *remote.lock().unwrap()
+            ),
+            (3, 2, 1)
         );
     }
 

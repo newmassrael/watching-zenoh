@@ -362,14 +362,6 @@ impl RouterEngine {
             zerror!("the router numbered an entity {id}, more than an id holds").into()
         })
     }
-
-    /// The refusal of an operation the router session does not carry yet, by what it was.
-    fn refuses<T>(what: &str) -> ZResult<T> {
-        Err(
-            zerror!("this session is a router: {what} is not carried by the router session yet")
-                .into(),
-        )
-    }
 }
 
 #[cfg(feature = "engine-tokio")]
@@ -453,22 +445,6 @@ impl Engine {
         Ok((Engine::Tokio(state), zid))
     }
 
-    /// Whether this engine is a router node, which carries no local API yet.
-    #[cfg(feature = "unstable")]
-    fn is_router(&self) -> bool {
-        matches!(self, Engine::Router(_))
-    }
-
-    /// The refusal of `what` when this engine is a router node, which carries none of the local
-    /// API yet, and `Ok` when it is not.
-    #[cfg(feature = "unstable")]
-    fn require_local_api(&self, what: &str) -> ZResult<()> {
-        match self {
-            Engine::Tokio(_) => Ok(()),
-            Engine::Router(_) => RouterEngine::refuses(what),
-        }
-    }
-
     fn is_closed(&self) -> bool {
         match self {
             Engine::Tokio(state) => state.is_closed(),
@@ -512,8 +488,13 @@ impl Engine {
     fn peer_identities(&self) -> Vec<(Vec<u8>, u8)> {
         match self {
             Engine::Tokio(state) => state.shared.as_engine().peer_identities(),
-            // Owed: the router node does not list the sessions it holds yet.
-            Engine::Router(_) => Vec::new(),
+            Engine::Router(router) => router
+                .node
+                .forwarder()
+                .face_snapshots()
+                .into_iter()
+                .map(|face| (face.zid.to_vec(), face.whatami))
+                .collect(),
         }
     }
 
@@ -522,8 +503,13 @@ impl Engine {
     #[cfg(feature = "unstable")]
     fn faces(&self) -> Vec<Face> {
         match self {
-            // Owed: the router node does not list the sessions it holds yet.
-            Engine::Router(_) => Vec::new(),
+            Engine::Router(router) => router
+                .node
+                .forwarder()
+                .face_snapshots()
+                .iter()
+                .filter_map(tokio_engine::face_of)
+                .collect(),
             Engine::Tokio(state) => state
                 .shared
                 .as_engine()
@@ -581,11 +567,10 @@ impl Engine {
     #[cfg(feature = "unstable")]
     fn watch_faces(&self, sink: FaceSink) -> u64 {
         match self {
-            // Refused by name before this is reached (`require_local_api`).
-            Engine::Router(_) => {
-                let _ = sink;
-                0
-            }
+            Engine::Router(router) => router
+                .node
+                .forwarder()
+                .watch_faces(tokio_engine::face_sink(sink)),
             Engine::Tokio(state) => state
                 .shared
                 .as_engine()
@@ -597,8 +582,8 @@ impl Engine {
     #[cfg(feature = "unstable")]
     fn unwatch_faces(&self, id: u64) {
         match self {
-            Engine::Router(_) => {
-                let _ = id;
+            Engine::Router(router) => {
+                router.node.forwarder().unwatch_faces(id);
             }
             Engine::Tokio(state) => {
                 state.shared.as_engine().unwatch_faces(id);
@@ -651,18 +636,17 @@ impl Engine {
                     timestamps,
                     ..
                 } = subscription;
-                // A router node does not tell the samples of its own publications from the
-                // others', so an origin it cannot honour is refused and not ignored.
-                if origin != Locality::Any {
-                    return RouterEngine::refuses("a subscriber restricted by its origin");
-                }
                 let sink = tokio_engine::subscriber_sink(
                     callback,
                     notifier,
                     #[cfg(feature = "unstable")]
                     timestamps,
                 );
-                let id = router.node.forwarder().host_subscriber(key, sink());
+                let id = router.node.forwarder().host_subscriber_from(
+                    key,
+                    tokio_engine::engine_locality(origin),
+                    sink(),
+                );
                 Id::try_from(id).map_err(|_| {
                     zerror!("the router numbered a subscriber {id}, which is more than an id holds")
                         .into()
@@ -781,11 +765,6 @@ impl Engine {
                     timestamps,
                     ..
                 } = queryable;
-                // A router node does not tell the queries of its own session from the others', so
-                // an origin it cannot honour is refused and not ignored.
-                if origin != Locality::Any {
-                    return RouterEngine::refuses("a queryable restricted by its origin");
-                }
                 let sink = tokio_engine::queryable_sink(
                     callback,
                     notifier,
@@ -795,10 +774,12 @@ impl Engine {
                     timestamps,
                 );
                 let handler = sink(router.node.query_holder());
-                Ok(router
-                    .node
-                    .forwarder()
-                    .host_queryable(key, complete, handler))
+                Ok(router.node.forwarder().host_queryable_from(
+                    key,
+                    complete,
+                    tokio_engine::engine_locality(origin),
+                    handler,
+                ))
             }
             Engine::Tokio(state) => {
                 let QueryableDeclaration {
@@ -1645,6 +1626,7 @@ mod tokio_engine {
             .iter()
             .filter(|key| key_state(key) != Some(KeyState::Inert))
             .filter(|key| !acted_on_by_the_session(key))
+            .filter(|key| !inert_in_this_build(key))
             .filter(|key| {
                 let pointer = format!("/{key}");
                 document.pointer(&pointer) != default.pointer(&pointer)
@@ -1662,6 +1644,16 @@ mod tokio_engine {
                 unmapped.join(", ")
             )
         }
+    }
+
+    /// Whether a key does nothing in this build, as it does nothing in upstream's built without
+    /// the same feature: the plugins are loaded by a runtime built with `plugins`
+    /// (`zenoh/Cargo.toml` @ `plugins = []`), and without it `plugins_loading/*` and `plugins/*`
+    /// are read into the configuration and no plugin is loaded or configured. A build with the
+    /// feature is another matter, and a plugin it was asked for is not silently left unloaded.
+    fn inert_in_this_build(key: &str) -> bool {
+        !cfg!(feature = "plugins")
+            && (key.starts_with("plugins/") || key.starts_with("plugins_loading/"))
     }
 
     /// Whether a key the engine does not act on is one this crate acts on itself, so that the
@@ -1941,39 +1933,11 @@ mod tokio_engine {
         forwarder: &wz_runtime_tokio::router_forward::RouterForwarder,
         publication: &Publication<'_>,
     ) -> ZResult<()> {
-        let put = publication.kind == SampleKind::Put;
-        let what = if put { "a put" } else { "a delete" };
-        let refused = if publication.encoding != Encoding::default() {
-            Some(format!("{what} with an encoding"))
-        } else if publication.timestamp.is_some() {
-            Some(format!("{what} with a timestamp"))
-        } else if publication.attachment.is_some() {
-            Some(format!("{what} with an attachment"))
-        } else if publication.destination != Locality::Any {
-            Some(format!("{what} restricted by its destination"))
-        } else if publication.congestion_control != CongestionControl::Drop {
-            Some(format!("{what} that blocks on congestion"))
-        } else {
-            None
-        };
-        if let Some(refused) = refused {
-            return super::RouterEngine::refuses(&refused);
-        }
-        #[cfg(feature = "unstable")]
-        if publication.source_info.is_some() {
-            return super::RouterEngine::refuses(&format!("{what} with a source info"));
-        }
-        let published = if put {
-            let payload = publication.payload.to_bytes();
-            forwarder.publish_qos(
-                publication.key,
-                &payload,
-                EnginePriority::from_wire(publication.priority as u8),
-                publication.is_express,
-            )
-        } else {
-            forwarder.publish_delete(publication.key)
-        };
+        // The metadata of the publication rides the push to the other faces and the sample the
+        // session's own subscribers are handed, as the options of a session describe them.
+        let options = publish_options(publication);
+        let payload = publication.payload.to_bytes();
+        let published = forwarder.publish_with(publication.key, &payload, &options);
         published.map_err(|error| {
             zerror!(
                 "the router could not publish on {}: {error:?}",
@@ -3536,8 +3500,6 @@ impl SessionInner {
         if self.engine.is_closed() {
             return Err(SessionClosedError.into());
         }
-        self.engine
-            .require_local_api("a transport or link events listener")?;
         let watch = self.engine.watch_faces(sink);
         let Ok(id) = Id::try_from(watch) else {
             self.engine.unwatch_faces(watch);
@@ -4189,11 +4151,8 @@ impl Session {
             #[cfg(feature = "unstable")]
             link_listeners: std::sync::Mutex::new(vec![]),
         }));
-        // A router node carries none of the local API yet, and its admin space with it.
         #[cfg(feature = "unstable")]
-        if !session.0.engine.is_router() {
-            crate::api::admin::init(session.downgrade());
-        }
+        crate::api::admin::init(session.downgrade());
         Ok(session)
     }
 }
@@ -4228,6 +4187,15 @@ impl WeakSession {
     /// The id the session stands on.
     pub(crate) fn zid(&self) -> ZenohId {
         self.0.zid
+    }
+
+    /// The configuration the session was opened with, as the session itself reads and writes it,
+    /// which the admin space reads the permissions from and applies the writes to.
+    #[cfg(feature = "unstable")]
+    pub(crate) fn config_notifier(
+        &self,
+    ) -> crate::api::config::Notifier<zenoh_config::ExpandedConfig> {
+        self.0.config.clone()
     }
 
     /// A group for the callback of one entity of the session, which the session's close can wait
@@ -4375,6 +4343,42 @@ impl WeakSession {
     ) -> ZResult<Id> {
         self.0
             .declare_transport_events_listener_inner(callback, history, notifier)
+    }
+
+    /// Take the samples for `key_expr` into `callback` as [`Session::declare_subscriber_inner`]
+    /// does, for an entity of the session that holds it by this reference.
+    #[cfg(feature = "unstable")]
+    pub(crate) fn declare_subscriber_inner(
+        &self,
+        key_expr: &KeyExpr,
+        origin: Locality,
+        callback: Callback<Sample>,
+        notifier: Option<SyncGroupNotifier>,
+    ) -> ZResult<Id> {
+        if self.0.engine.is_closed() {
+            return Err(SessionClosedError.into());
+        }
+        let anchor: SessionAnchor = self.0.clone();
+        let wire = key_expr.to_wire(&anchor);
+        let suffix = (!wire.suffix.is_empty()).then(|| wire.suffix.to_string());
+        let id = self.0.engine.declare_subscriber(Subscription {
+            key: key_expr.as_str(),
+            scope: wire.scope,
+            suffix,
+            origin,
+            callback,
+            notifier,
+            keeps: Arc::new(key_expr.clone().into_owned()),
+            #[cfg(feature = "unstable")]
+            timestamps: self.0.timestamps.clone(),
+        })?;
+        self.0.subscriptions().push(id);
+        // A close that ran between the check and the record has not seen this subscription.
+        if self.0.engine.is_closed() {
+            self.0.release_subscriptions();
+            return Err(SessionClosedError.into());
+        }
+        Ok(id)
     }
 
     /// Answer the queries for `key_expr` into `callback` as [`Session::declare_queryable_inner`]
@@ -11173,33 +11177,179 @@ mod tests {
             );
         }
 
+        /// The configuration of a node is written through its admin space when the configuration
+        /// grants the permission, by a key whose zid and role may be wildcards, and a delete
+        /// removes what a put wrote; a node that grants no write permission is not changed.
+        #[cfg(feature = "unstable")]
         #[test]
-        fn what_a_router_does_not_carry_yet_fails_by_name() {
-            let router = router("a1b2e3", unautoselected_port());
-            fn refused<T>(what: &str, result: ZResult<T>) {
-                let Err(error) = result else {
-                    panic!("{what} was not refused");
-                };
-                let text = error.to_string();
-                assert!(
-                    text.contains("this session is a router") && text.contains(what),
-                    "{what}: {text}"
-                );
-            }
-            refused(
-                "a queryable restricted by its origin",
-                router
-                    .declare_queryable("a/b".to_owned())
-                    .allowed_origin(Locality::Remote)
-                    .wait(),
+        fn the_config_of_a_node_is_written_through_its_admin_space() {
+            use std::time::{Duration, Instant};
+
+            let open_with = |id: &str, write: bool| {
+                open(
+                    Config::from_json5(&format!(
+                        r#"{{ id: "{id}", mode: "router",
+                              listen: {{ endpoints: [] }},
+                              adminspace: {{ enabled: true,
+                                             permissions: {{ read: true, write: {write} }} }},
+                              scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                    ))
+                    .expect("a configuration zenoh reads"),
+                )
+                .wait()
+                .expect("a router opens")
+            };
+            let wait_for = |session: &Session, key: &str, expected: Option<&str>| {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    let value = session.config().get(key);
+                    let matches = match (value.as_deref(), expected) {
+                        (Ok(value), Some(expected)) => value == expected,
+                        (Err(_), None) => true,
+                        _ => false,
+                    };
+                    if matches || Instant::now() > deadline {
+                        return matches;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            };
+
+            let writable = open_with("a1b2f6", true);
+            let zid = writable.zid();
+            writable
+                .put("@/*/router/config/plugins/admin_wildcard/value", "1")
+                .wait()
+                .expect("puts");
+            assert!(wait_for(
+                &writable,
+                "plugins/admin_wildcard/value",
+                Some("1")
+            ));
+            writable
+                .delete(format!("@/{zid}/*/config/plugins/admin_wildcard"))
+                .wait()
+                .expect("deletes");
+            assert!(wait_for(&writable, "plugins/admin_wildcard", None));
+            writable
+                .put("@/*/*/config/plugins/admin_wildcard/value", "2")
+                .wait()
+                .expect("puts");
+            assert!(wait_for(
+                &writable,
+                "plugins/admin_wildcard/value",
+                Some("2")
+            ));
+
+            let read_only = open_with("a1b2f7", false);
+            read_only
+                .put("@/*/router/config/plugins/admin_refused/value", "1")
+                .wait()
+                .expect("puts");
+            assert!(
+                !wait_for(&read_only, "plugins/admin_refused/value", Some("1")),
+                "a node without the write permission is not written"
             );
-            refused(
-                "a subscriber restricted by its origin",
-                router
-                    .declare_subscriber("a/b".to_owned())
-                    .allowed_origin(Locality::Remote)
-                    .callback(|_| {})
-                    .wait(),
+        }
+
+        /// A router tells its own session's publications and queries from the faces': a
+        /// subscriber that admits only remote origins does not hear the router's own put and
+        /// hears a peer's, a queryable that admits only the session's own answers the get of the
+        /// router and not the get of a peer, and a put whose destination is the session alone
+        /// reaches the router's subscribers and no peer.
+        #[test]
+        fn a_router_tells_its_own_publications_and_queries_from_those_of_its_faces() {
+            use std::sync::mpsc;
+            use std::time::Duration;
+
+            let port = unautoselected_port();
+            let router = router("a1b2e3", port);
+            let (remote_tx, remote_heard) = mpsc::channel::<String>();
+            let remote_tx = std::sync::Mutex::new(remote_tx);
+            let _remote_only = router
+                .declare_subscriber("demo/o/**".to_owned())
+                .allowed_origin(Locality::Remote)
+                .callback(move |sample: Sample| {
+                    let _ = remote_tx
+                        .lock()
+                        .unwrap()
+                        .send(sample.key_expr().to_string());
+                })
+                .wait()
+                .expect("a router honours the origin of a subscriber");
+            let (local_tx, local_heard) = mpsc::channel::<String>();
+            let local_tx = std::sync::Mutex::new(local_tx);
+            let _local_only = router
+                .declare_subscriber("demo/o/**".to_owned())
+                .allowed_origin(Locality::SessionLocal)
+                .callback(move |sample: Sample| {
+                    let _ = local_tx.lock().unwrap().send(sample.key_expr().to_string());
+                })
+                .wait()
+                .expect("declares");
+            let _own = router
+                .declare_queryable("demo/o/q".to_owned())
+                .allowed_origin(Locality::SessionLocal)
+                .callback(|query| {
+                    query
+                        .reply(query.key_expr().clone(), "mine")
+                        .wait()
+                        .expect("replies");
+                })
+                .wait()
+                .expect("a router honours the origin of a queryable");
+
+            router.put("demo/o/own", "x").wait().expect("puts");
+            assert_eq!(
+                local_heard.recv_timeout(Duration::from_secs(2)).as_deref(),
+                Ok("demo/o/own"),
+                "the subscriber of the session hears the put of the session"
+            );
+            assert!(
+                remote_heard
+                    .recv_timeout(Duration::from_millis(300))
+                    .is_err(),
+                "a subscriber that admits remote origins only does not hear it"
+            );
+            let answers: Vec<String> = router
+                .get("demo/o/q")
+                .timeout(Duration::from_secs(2))
+                .wait()
+                .expect("asks")
+                .into_iter()
+                .filter_map(|reply| {
+                    reply
+                        .into_result()
+                        .ok()
+                        .map(|sample| sample.payload().try_to_string().unwrap().into_owned())
+                })
+                .collect();
+            assert_eq!(answers, ["mine"], "the router's own get is answered");
+
+            let peer = peer_of("a1b2f5", port);
+            assert_eq!(connected(&peer, 1).0.len(), 1, "the peer is linked");
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let mut heard = None;
+            while heard.is_none() && std::time::Instant::now() < deadline {
+                peer.put("demo/o/up", "y").wait().expect("puts");
+                heard = remote_heard.recv_timeout(Duration::from_millis(200)).ok();
+            }
+            assert_eq!(heard.as_deref(), Some("demo/o/up"));
+            assert_eq!(
+                local_heard.try_recv().ok(),
+                None,
+                "the subscriber of the session does not hear a peer"
+            );
+            let asked = peer
+                .get("demo/o/q")
+                .timeout(Duration::from_secs(2))
+                .wait()
+                .expect("asks")
+                .into_iter()
+                .count();
+            assert_eq!(
+                asked, 0,
+                "a peer's get is not answered by a session-local queryable"
             );
         }
     }

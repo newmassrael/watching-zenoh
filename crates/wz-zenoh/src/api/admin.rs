@@ -42,7 +42,7 @@ use crate::{
         key_expr::KeyExpr,
         publisher::Priority,
         queryable::Query,
-        sample::{Locality, SampleKind},
+        sample::{Locality, Sample, SampleKind},
         session::{SessionClosedError, WeakSession},
     },
 };
@@ -179,7 +179,94 @@ fn publish(session: &WeakSession, key_expr: OwnedKeyExpr, kind: SampleKind, payl
     }
 }
 
+/// Apply a put or a delete under `@/<zid>/<whatami>/config/**` to the configuration of the
+/// session, when the configuration grants the write permission (read at each write, as upstream
+/// reads it, so a permission changed at run time reaches the next write). The zid and the role of
+/// the key may be wildcards: the key is the session's when it intersects its own config space,
+/// and the path it writes is what follows `config/`. A value that is an array item by id is
+/// inserted as one (`zenoh/src/net/runtime/adminspace.rs` @ `try_insert_json5_array_item`).
+fn on_config_write(session: &WeakSession, own_config: &keyexpr, sample: Sample) {
+    let config = session.config_notifier();
+    if !config.lock().adminspace.permissions().write {
+        tracing::error!(
+            "Received PUT on '{}' but adminspace.permissions.write=false in configuration",
+            sample.key_expr()
+        );
+        return;
+    }
+    let key_expr = sample.key_expr();
+    if !own_config.intersects(key_expr) {
+        return;
+    }
+    // `@/<zid>/<whatami>/config/<key>`: the path is what follows the fourth segment.
+    let mut parts = key_expr.as_str().splitn(5, '/');
+    let path = match (parts.next(), parts.nth(2), parts.next()) {
+        (Some("@"), Some("config"), Some(path)) if !path.is_empty() => path,
+        _ => {
+            tracing::error!(
+                "Failed to extract non-empty config key suffix from {}",
+                key_expr
+            );
+            return;
+        }
+    };
+    match sample.kind() {
+        SampleKind::Put => match std::str::from_utf8(&sample.payload().to_bytes()) {
+            Ok(json) => {
+                tracing::trace!("Insert conf value {} : {}", key_expr, json);
+                if let Err(e) = config
+                    .try_insert_json5_array_item(path, json)
+                    .and_then(|applied| {
+                        if applied {
+                            Ok(())
+                        } else {
+                            config.insert_json5(path, json)
+                        }
+                    })
+                {
+                    tracing::error!("Error inserting conf value {} : {} - {}", key_expr, json, e);
+                }
+            }
+            Err(e) => tracing::error!("Received non utf8 conf value on {} : {}", key_expr, e),
+        },
+        SampleKind::Delete => {
+            tracing::trace!("Deleting conf value {}", key_expr);
+            if let Err(e) = config
+                .try_remove_json5_array_item(path)
+                .and_then(|applied| if applied { Ok(()) } else { config.remove(path) })
+            {
+                tracing::error!("Error deleting conf value {} : {}", key_expr, e);
+            }
+        }
+    }
+}
+
 pub(crate) fn init(session: WeakSession) {
+    // The configuration is written through the admin space, when the node serves one.
+    let config = session.config_notifier();
+    let (admin_enabled, whatami) = {
+        let config = config.lock();
+        (*config.adminspace.enabled(), config.mode())
+    };
+    if admin_enabled {
+        let own_zid = session.zid().into_keyexpr();
+        let own_config: OwnedKeyExpr = format!("@/{own_zid}/{whatami}/config/**")
+            .try_into()
+            .expect("the config space of a node is a key");
+        let subscribed = session.declare_subscriber_inner(
+            &KeyExpr::from(own_config.clone()),
+            Locality::Any,
+            Callback::from({
+                let session = session.clone();
+                move |sample: Sample| on_config_write(&session, &own_config, sample)
+            }),
+            None,
+        );
+        if let Err(e) = subscribed {
+            tracing::error!("Unable to serve the config space of the admin space: {}", e);
+        }
+    }
+
     // Normal adminspace queryable
     let own_zid = session.zid().into_keyexpr();
     let prefix = ke_prefix(&own_zid);
