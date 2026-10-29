@@ -4496,9 +4496,9 @@ pub fn open_blocking(
 #[cfg(feature = "router-node")]
 mod router_node;
 #[cfg(feature = "router-node")]
-pub use router_node::RouterState;
-#[cfg(feature = "router-node")]
 pub(crate) use router_node::{open_router_blocking, refused_ask as router_refused_ask};
+#[cfg(feature = "router-node")]
+pub use router_node::{LivelinessHandler, LocalLiveliness, RouterState};
 
 #[cfg(test)]
 mod tests {

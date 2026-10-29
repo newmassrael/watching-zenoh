@@ -345,6 +345,10 @@ struct RouterEngine {
 
 #[cfg(feature = "engine-tokio")]
 impl RouterEngine {
+    /// The mark of the id of a liveliness subscriber among the ids the engine undeclares as
+    /// subscribers: the hosted subscribers of a router count up from one and never reach it.
+    const LIVELINESS_ID: Id = 1 << 31;
+
     /// The refusal of an operation the router session does not carry yet, by what it was.
     fn refuses<T>(what: &str) -> ZResult<T> {
         Err(
@@ -688,7 +692,14 @@ impl Engine {
         match self {
             Engine::Tokio(state) => state.shared.as_engine().undeclare_subscriber(u64::from(id)),
             Engine::Router(router) => {
-                router.node.forwarder().unhost_subscriber(u64::from(id));
+                if id & RouterEngine::LIVELINESS_ID != 0 {
+                    router
+                        .node
+                        .liveliness()
+                        .unsubscribe(u64::from(id & !RouterEngine::LIVELINESS_ID));
+                } else {
+                    router.node.forwarder().unhost_subscriber(u64::from(id));
+                }
             }
         }
     }
@@ -908,7 +919,13 @@ impl Engine {
         suffix: Option<String>,
     ) -> ZResult<Id> {
         match self {
-            Engine::Router(_) => RouterEngine::refuses("a liveliness token"),
+            Engine::Router(router) => {
+                let id = router.node.declare_token(key);
+                Id::try_from(id).map_err(|_| {
+                    zerror!("the router numbered a token {id}, which is more than an id holds")
+                        .into()
+                })
+            }
             Engine::Tokio(state) => {
                 let wire = tokio_engine::wire_key_of(scope, suffix);
                 // The retraction names its token by id alone, as upstream's does.
@@ -931,7 +948,7 @@ impl Engine {
     /// Retract the liveliness token `id`, which tells the peers it is gone.
     fn undeclare_liveliness_token(&self, id: Id) {
         match self {
-            Engine::Router(_) => {}
+            Engine::Router(router) => router.node.undeclare_token(u64::from(id)),
             Engine::Tokio(state) => state
                 .shared
                 .as_engine()
@@ -947,7 +964,30 @@ impl Engine {
         subscription: LivelinessSubscription<'_>,
     ) -> ZResult<Id> {
         match self {
-            Engine::Router(_) => RouterEngine::refuses("a liveliness subscriber"),
+            Engine::Router(router) => {
+                let LivelinessSubscription {
+                    key,
+                    history,
+                    callback,
+                    notifier,
+                    ..
+                } = subscription;
+                let handler = tokio_engine::liveliness_sink(callback, notifier)();
+                let id = router.node.liveliness().subscribe(key, history, handler);
+                // The ids of a router's subscribers and of its liveliness subscribers are
+                // undeclared through the same call, so the second are marked.
+                u32::try_from(id)
+                    .ok()
+                    .filter(|id| id & RouterEngine::LIVELINESS_ID == 0)
+                    .map(|id| id | RouterEngine::LIVELINESS_ID)
+                    .ok_or_else(|| {
+                        zerror!(
+                            "the router numbered a liveliness subscriber {id}, which is more \
+                             than an id holds"
+                        )
+                        .into()
+                    })
+            }
             Engine::Tokio(state) => {
                 let LivelinessSubscription {
                     key,
@@ -983,7 +1023,9 @@ impl Engine {
     /// Ask which liveliness tokens are alive: the query `request` says.
     fn liveliness_query(&self, request: LivelinessRequest<'_>) -> ZResult<()> {
         match self {
-            Engine::Router(_) => RouterEngine::refuses("a liveliness get"),
+            Engine::Router(router) => {
+                tokio_engine::router_liveliness_query(router.node.liveliness(), request)
+            }
             Engine::Tokio(state) => {
                 tokio_engine::ask_liveliness(state.shared.engine_ref(), request)
             }
@@ -1690,6 +1732,29 @@ mod tokio_engine {
             Locality::SessionLocal => EngineLocality::SessionLocal,
             Locality::Remote => EngineLocality::Remote,
         }
+    }
+
+    /// Answer a liveliness get on a router node: the router holds the tokens of every face it
+    /// serves, so each key alive that the query meets is a reply, at once, and the callback is
+    /// let go, which ends the channel of a handler.
+    pub(super) fn router_liveliness_query(
+        face: &wz_capi_core::drive::LocalLiveliness,
+        request: LivelinessRequest<'_>,
+    ) -> ZResult<()> {
+        let LivelinessRequest { key, callback, .. } = request;
+        for keyexpr in face.alive(key) {
+            let sample = liveliness_sample_of(&LivelinessSample {
+                kind: LivelinessSampleKind::Put,
+                keyexpr: &keyexpr,
+                token_id: 0,
+            })?;
+            callback.call(Reply {
+                result: Ok(sample),
+                #[cfg(feature = "unstable")]
+                replier_id: None,
+            });
+        }
+        Ok(())
     }
 
     /// Put `publication` on a router node, which publishes a payload with a priority and the
@@ -10006,6 +10071,76 @@ mod tests {
         }
 
         #[test]
+        fn a_router_hears_the_tokens_of_a_peer_and_a_peer_hears_the_tokens_of_the_router() {
+            use std::sync::mpsc;
+            use std::time::Duration;
+
+            let port = unautoselected_port();
+            let router = router("a1b2e6", port);
+            let (told, heard) = mpsc::channel::<String>();
+            let told = std::sync::Mutex::new(told);
+            let _subscriber = router
+                .liveliness()
+                .declare_subscriber("demo/l/**")
+                .callback(move |sample: Sample| {
+                    let _ = told.lock().unwrap().send(format!(
+                        "{} {:?}",
+                        sample.key_expr(),
+                        sample.kind()
+                    ));
+                })
+                .wait()
+                .expect("a router hosts a liveliness subscriber");
+            let peer = peer_of("a1b2e7", port);
+            assert_eq!(connected(&peer, 1).0.len(), 1, "the peer is linked");
+            let token = peer
+                .liveliness()
+                .declare_token("demo/l/peer")
+                .wait()
+                .expect("declares");
+            assert_eq!(
+                heard.recv_timeout(Duration::from_secs(5)).as_deref(),
+                Ok("demo/l/peer Put")
+            );
+            token.undeclare().wait().expect("undeclares");
+            assert_eq!(
+                heard.recv_timeout(Duration::from_secs(5)).as_deref(),
+                Ok("demo/l/peer Delete")
+            );
+
+            // The router's own token, asked for by a peer's get and heard by its subscriber.
+            let own = router
+                .liveliness()
+                .declare_token("demo/l/router")
+                .wait()
+                .expect("a router declares a token");
+            assert_eq!(
+                heard.recv_timeout(Duration::from_secs(5)).as_deref(),
+                Ok("demo/l/router Put"),
+                "a router's subscriber hears its own token"
+            );
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let mut keys = Vec::new();
+            while keys.is_empty() && std::time::Instant::now() < deadline {
+                keys = peer
+                    .liveliness()
+                    .get("demo/l/**")
+                    .timeout(Duration::from_secs(2))
+                    .wait()
+                    .expect("asks")
+                    .into_iter()
+                    .filter_map(|reply| reply.into_result().ok().map(|s| s.key_expr().to_string()))
+                    .collect();
+            }
+            assert_eq!(keys, vec!["demo/l/router".to_owned()]);
+            own.undeclare().wait().expect("undeclares");
+            assert_eq!(
+                heard.recv_timeout(Duration::from_secs(5)).as_deref(),
+                Ok("demo/l/router Delete")
+            );
+        }
+
+        #[test]
         fn what_a_router_does_not_carry_yet_fails_by_name() {
             let router = router("a1b2e3", unautoselected_port());
             fn refused<T>(what: &str, result: ZResult<T>) {
@@ -10022,10 +10157,6 @@ mod tests {
             refused(
                 "a queryable",
                 router.declare_queryable("a/b".to_owned()).wait(),
-            );
-            refused(
-                "a liveliness token",
-                router.liveliness().declare_token("a/b").wait(),
             );
             refused("a get", router.get("a/b").wait());
         }

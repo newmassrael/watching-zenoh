@@ -2219,6 +2219,59 @@ pub(crate) struct Tables {
     /// reader IS told a token withdrew: the liveliness stale-live residual is CLOSED.
     #[cfg(feature = "routing-token-tables")]
     future_tokens: FutureSubStore,
+    /// The key of each token a face of a mesh region declared, by the id the face numbered it:
+    /// what a retraction that names only the id (a session's own) is resolved by. A linkstate
+    /// flood names the key and does not read this.
+    #[cfg(feature = "routing-token-tables")]
+    mesh_token_ids: HashMap<FaceId, HashMap<u64, String>>,
+    /// Where what the router sends to its own `Local` face goes. The face is no transport: it is
+    /// the session of the program that holds the router, and a message for it is handed to this
+    /// sink, which must not call back into the router with the tables held (the program's
+    /// dispatcher takes it from a queue). `None` until a program attaches one, and a message for
+    /// the face is then dropped, as one for a face that is gone is.
+    local_face_sink: Option<LocalFaceSink>,
+}
+
+/// What the router tells its own `Local` face, as the face's session reads it: a liveliness token
+/// that came alive on a key (under the id the router knows it by), and one that went.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocalFaceEvent {
+    /// A token is alive on `keyexpr`.
+    TokenUp { id: u64, keyexpr: String },
+    /// The token the router numbered `id` is gone.
+    TokenDown { id: u64 },
+}
+
+/// What receives what the router tells its own `Local` face (see
+/// [`RouterForwarder::attach_local_face`]).
+pub type LocalFaceSink = Arc<dyn Fn(LocalFaceEvent) + Send + Sync>;
+
+/// The event a message for the `Local` face is, or `None` for one the face does not act on (a
+/// final of an interest, a declaration of another plane).
+#[cfg(feature = "routing-token-tables")]
+fn local_face_event(msg: &NetworkMessage) -> Option<LocalFaceEvent> {
+    let NetworkMessage::Declare(declare) = msg else {
+        return None;
+    };
+    match &declare.body {
+        DeclareOwnedVariant::CodecZenohDeclToken(token) => {
+            resolve_wireexpr(&token.keyexpr.body, &hashbrown::HashMap::new()).map(|keyexpr| {
+                LocalFaceEvent::TokenUp {
+                    id: token.id,
+                    keyexpr,
+                }
+            })
+        }
+        DeclareOwnedVariant::CodecZenohUndeclToken(token) => {
+            Some(LocalFaceEvent::TokenDown { id: token.id })
+        }
+        _ => None,
+    }
+}
+
+#[cfg(not(feature = "routing-token-tables"))]
+fn local_face_event(_msg: &NetworkMessage) -> Option<LocalFaceEvent> {
+    None
 }
 
 /// A [`FaceForwarder`] that maintains zenoh's DUAL router meshes — `routers_net`
@@ -2947,6 +3000,13 @@ router_entry_points! { on_tables_mut:
     fn host_queryable(&self, keyexpr: &str, complete: bool, handler: HostedQueryHandler) -> u64;
     fn unhost_subscriber(&self, id: u64) -> bool;
     fn unhost_queryable(&self, id: u64) -> bool;
+    fn attach_local_face(&self, sink: LocalFaceSink);
+    #[cfg(feature = "routing-token-tables")]
+    fn ask_local_tokens(&self);
+    #[cfg(feature = "routing-token-tables")]
+    fn host_token(&self, keyexpr: &str) -> u64;
+    #[cfg(feature = "routing-token-tables")]
+    fn unhost_token(&self, id: u64) -> bool;
     fn unregister_local_queryable(&self, keyexpr: &str) -> bool;
     fn unregister_local_subscriber(&self, keyexpr: &str) -> bool;
     fn set_self_locators(&self, locators: Vec<String>);
@@ -3256,6 +3316,9 @@ impl RouterForwarder {
                 future_qabls: FutureQablStore::new(),
                 #[cfg(feature = "routing-token-tables")]
                 future_tokens: FutureSubStore::new(),
+                #[cfg(feature = "routing-token-tables")]
+                mesh_token_ids: HashMap::new(),
+                local_face_sink: None,
             })),
             // R311y450 — this node's §5.18 clock, over the SAME `node_mode`
             // both nets above are seeded with, so the timestamping gate cannot
@@ -5400,6 +5463,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let snapshot = self.snapshot::<TokenPlane>(declared.keyexpr());
         let displaced = displaced.map(|old| self.snapshot::<TokenPlane>(&old));
         let registered = self.register_token(inbound, region, reliable, &declared, decl_id);
+        if let Declared::Sourced(sourced) = &declared {
+            self.tables
+                .mesh_token_ids
+                .entry(inbound)
+                .or_default()
+                .insert(decl_id, sourced.keyexpr.clone());
+        }
         log::debug!(
             "router forward: token declare on face {inbound:?} region {region} -> {}",
             if registered {
@@ -5486,8 +5556,20 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             _ => return,
         };
         let declared = match self.tables.hats.get(&region) {
+            // A retraction that names its key is the flood of a linkstate mesh; one that names
+            // only the id is a peer's own, as a session sends it, and the key is the one the peer
+            // declared under that id (upstream's hat keeps `remote_tokens` for every face).
             Some(Hat::Mesh(_)) => self
                 .resolve_sourced(inbound, region, declare, |t| resolve_ext_keyexpr(exts, t))
+                .or_else(|| {
+                    let keyexpr = self
+                        .tables
+                        .mesh_token_ids
+                        .get(&inbound)
+                        .and_then(|ids| ids.get(&decl_id))
+                        .cloned()?;
+                    self.resolve_sourced(inbound, region, declare, |_| Some(keyexpr))
+                })
                 .map(Declared::Sourced),
             Some(Hat::Broker(hat)) => hat
                 .tokens
@@ -5500,6 +5582,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let Some(declared) = declared else {
             return;
         };
+        if let Some(ids) = self.tables.mesh_token_ids.get_mut(&inbound) {
+            ids.remove(&decl_id);
+            if ids.is_empty() {
+                self.tables.mesh_token_ids.remove(&inbound);
+            }
+        }
         let snapshot = self.snapshot::<TokenPlane>(declared.keyexpr());
         if self.unregister_token(inbound, region, reliable, &declared, decl_id) {
             self.repropagate(snapshot);
@@ -5697,6 +5785,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // the sub/qabl future store). CLIENT-only + literal-target, same gate — the
         // full-net token replay is client-directed (zenoh declare_token_interest:1001).
         #[cfg(feature = "routing-token-tables")]
+        // Only a client is told of the tokens that come alive after its interest: a peer of the
+        // peer hat is replayed the router's tokens when its face comes up and is sent each
+        // withdrawal by the mesh, so a stored interest would tell it a withdrawal twice.
         let store_future_token = interest.f() && body.to() && self.is_client_face(inbound);
         #[cfg(feature = "routing-token-tables")]
         if store_future_token {
@@ -5745,7 +5836,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             // is bare `if mode.current()`). A peer's token Interest(current) gets only the
             // DeclareFinal below — peers learn tokens via the linkstate flood, not replay.
             #[cfg(feature = "routing-token-tables")]
-            if body.to() && self.is_client_face(inbound) {
+            if body.to() && self.asks_for_tokens(inbound) {
                 self.dump_interest_tokens(
                     inbound,
                     target.as_deref(),
@@ -5790,6 +5881,16 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             .faces
             .get(&face)
             .is_some_and(|s| is_leaf(s.tier, self.tables.node_mode))
+    }
+
+    /// Whether a token interest of `face` is answered with the tokens the router knows of at the
+    /// time. A client's is; so is a peer's of the peer hat, which asks as any session does (a
+    /// liveliness get, a subscriber with its history) and which the pin's peer hat answers.
+    #[cfg(feature = "routing-token-tables")]
+    fn asks_for_tokens(&self, face: FaceId) -> bool {
+        self.tables.faces.get(&face).is_some_and(|s| {
+            is_leaf(s.tier, self.tables.node_mode) || is_peer_hat(s.tier, self.tables.node_mode)
+        })
     }
 
     /// The CURRENT-dump SUBSCRIBER leg of [`respond_to_interest`]: reply with the
@@ -5983,13 +6084,19 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // only from a peer that builds the message itself, but wz is a drop-in for the node
         // that ANSWERS.
         let target_chunks: Option<Vec<&str>> = target.map(|t| t.split('/').collect());
+        let inbound_zid = self.tables.faces.get(&inbound).and_then(|s| s.peer_zid);
         let mut per_ke: HashMap<String, ()> = HashMap::new();
         for table in self.mesh_hats().map(|hat| &hat.tokens) {
             let hits = match target {
                 Some(target) => table.matching_entries(target, Some(self_zid)),
                 None => table.unrestricted_entries(Some(self_zid)),
             };
-            for (ke, _zid, ()) in hits {
+            for (ke, zid, ()) in hits {
+                // Never replay a node its own token: a peer of the peer hat is a source in the
+                // table it asks about.
+                if inbound_zid == Some(zid) {
+                    continue;
+                }
                 per_ke.insert(ke.to_string(), ());
             }
         }
@@ -8069,6 +8176,82 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         !withdrawn.is_empty()
     }
 
+    /// Give the router's own `Local` face somewhere to be told things: what the router sends to
+    /// it (a token that came alive, one that went) is handed to `sink`.
+    pub fn attach_local_face(&mut self, sink: LocalFaceSink)
+    where
+        T: std::ops::DerefMut,
+    {
+        self.tables.local_face_sink = Some(sink);
+    }
+
+    /// Ask, as the `Local` face, for the liveliness tokens the router knows of, those already alive
+    /// and each that comes alive or goes after: an interest in every key, current and future, as
+    /// the face of a session sends it. The answers go to the face's sink, as declarations of
+    /// tokens and their retractions. The face's own tokens are not among them.
+    #[cfg(feature = "routing-token-tables")]
+    pub fn ask_local_tokens(&mut self)
+    where
+        T: std::ops::DerefMut,
+    {
+        let self_zid = *self.north_net().self_zid();
+        self.tables
+            .future_tokens
+            .store_interest(LOCAL_FACE, 0, "**".to_owned(), false);
+        self.dump_interest_tokens(LOCAL_FACE, Some("**"), false, &self_zid, 0, true);
+    }
+
+    /// Declare a liveliness token of the router itself, as its `Local` face does: the router
+    /// holds it as a client's, and tells the nodes that asked. The id answered takes it back
+    /// ([`unhost_token`](Self::unhost_token)).
+    #[cfg(feature = "routing-token-tables")]
+    pub fn host_token(&mut self, keyexpr: &str) -> u64
+    where
+        T: std::ops::DerefMut,
+    {
+        let snapshot = self.snapshot::<TokenPlane>(keyexpr);
+        let id = self.tables.next_hosted_id;
+        self.tables.next_hosted_id += 1;
+        self.tables
+            .owner_broker_mut(Region::Local)
+            .tokens
+            .entry(LOCAL_FACE)
+            .or_default()
+            .insert(id, keyexpr.to_owned());
+        self.repropagate(snapshot);
+        self.push_future_token(keyexpr, LOCAL_FACE);
+        id
+    }
+
+    /// Retract the token `id` the router declared. `false` for an id it does not hold.
+    #[cfg(feature = "routing-token-tables")]
+    pub fn unhost_token(&mut self, id: u64) -> bool
+    where
+        T: std::ops::DerefMut,
+    {
+        let Some(keyexpr) = self
+            .tables
+            .owner_broker(Region::Local)
+            .tokens
+            .get(&LOCAL_FACE)
+            .and_then(|ids| ids.get(&id))
+            .cloned()
+        else {
+            return false;
+        };
+        let snapshot = self.snapshot::<TokenPlane>(&keyexpr);
+        let store = &mut self.tables.owner_broker_mut(Region::Local).tokens;
+        if let Some(ids) = store.get_mut(&LOCAL_FACE) {
+            ids.remove(&id);
+            if ids.is_empty() {
+                store.remove(&LOCAL_FACE);
+            }
+        }
+        self.repropagate(snapshot);
+        self.undeclare_push_token(&keyexpr);
+        true
+    }
+
     /// R2393 — deliver a routed Put to any subscriber HOSTED BY THIS ROUTER whose
     /// declared pattern matches the concrete key: the Push-plane twin of
     /// [`dispatch_local_queryables`](Self::dispatch_local_queryables) and the router
@@ -9358,6 +9541,16 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         reliable: bool,
         mut build: impl FnMut() -> NetworkMessage,
     ) -> bool {
+        // The node's own face has no transport: what is sent to it goes to the program's sink.
+        if target == LOCAL_FACE {
+            let Some(sink) = &self.tables.local_face_sink else {
+                return false;
+            };
+            if let Some(event) = local_face_event(&build()) {
+                sink(event);
+            }
+            return true;
+        }
         let faces = &self.tables.faces;
         let Some(state) = faces.get(&target) else {
             return false;
@@ -9720,6 +9913,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         T: std::ops::DerefMut,
     {
         self.shed_registry.remove(id);
+        #[cfg(feature = "routing-token-tables")]
+        self.tables.mesh_token_ids.remove(&id);
         // OBLIGATION-1: purge ALL FaceId-keyed leaf state BEFORE the linkless
         // early-return below (a Client face is `link == None`, so it never reaches
         // the graph teardown). (a) the pending-query return table entries keyed by
@@ -19466,11 +19661,15 @@ mod tests {
 
     #[cfg(feature = "routing-token-tables")]
     #[test]
-    fn token_current_interest_from_a_peer_gets_only_the_final() {
-        // The CLIENT-GATE delta (zenoh declare_token_interest is client-only, UNLIKE
-        // the ungated sub dump): a PEER-tier face's CURRENT token interest gets NO token
-        // dump even when a mesh token matches — only the DeclareFinal. Peers learn tokens
-        // via the linkstate flood, not interest replay.
+    fn token_current_interest_from_a_peer_is_answered_with_the_matching_token_and_the_final() {
+        // A PEER-tier face's CURRENT token interest is answered like a client's: the router
+        // node serves its peers with the pin's PEER hat, whose `send_current_tokens` sends a
+        // `DeclareToken` carrying the interest id for each token that matches
+        // (`zenoh/src/net/routing/hat/peer/interests.rs` @ `fn send_current_tokens(`), where the
+        // router hat's is empty for the faces south of it
+        // (`zenoh/src/net/routing/hat/router/interests.rs` @ `fn send_current_tokens(`). This
+        // test said the opposite ("client-only, peers learn tokens by the flood") and was read
+        // against the router hat; a session's liveliness get or history is a current interest.
         let fwd = RouterForwarder::new(zid(0x01));
         let (src, _ss) = face(zid(0xAA), WIRE_ROUTER); // mesh token source
         let (peer, sink_p) = face(zid(0xBB), WIRE_PEER); // a PEER requester
@@ -19485,9 +19684,35 @@ mod tests {
         );
         assert_eq!(
             sink_p.frame_count(),
-            1,
-            "a peer's token interest gets ONLY the DeclareFinal (the client-gate)"
+            2,
+            "the matching token, then the DeclareFinal"
         );
+        assert!(matches!(
+            forwarded_declare(&sink_p.frame_bytes(0)).body,
+            DeclareOwnedVariant::CodecZenohDeclToken(_)
+        ));
+        assert!(matches!(
+            forwarded_declare(&sink_p.frame_bytes(1)).body,
+            DeclareOwnedVariant::CodecZenohDeclFinal(_)
+        ));
+    }
+
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn a_peer_is_not_replayed_the_token_it_declared_itself() {
+        // The requester is not told of its own token: a peer's own are in the table of its
+        // region, from which the dump is folded.
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (peer, sink_p) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &peer);
+        forward_one(&fwd, FaceId(0), declare_token_msg("live/own"));
+        sink_p.reset();
+        forward_one(
+            &fwd,
+            FaceId(0),
+            token_interest_msg(7, "live/own", true, false, false),
+        );
+        assert_eq!(sink_p.frame_count(), 1, "only the DeclareFinal");
         assert!(matches!(
             forwarded_declare(&sink_p.frame_bytes(0)).body,
             DeclareOwnedVariant::CodecZenohDeclFinal(_)

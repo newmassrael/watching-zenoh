@@ -83,7 +83,9 @@ THIRD_PARTY = (
 )
 
 COMPILE_BOUND_S = 3600
-RUN_BOUND_S = 600
+# A file of dozens of tests that each wait out a sleep runs for minutes: the liveliness file takes
+# about nine once the routers it opens work. A run that needs more says so (`Z8_RUN_BOUND_S`).
+RUN_BOUND_S = int(os.environ.get("Z8_RUN_BOUND_S", "1500"))
 
 
 def workspace_dependencies(text: str) -> dict[str, str]:

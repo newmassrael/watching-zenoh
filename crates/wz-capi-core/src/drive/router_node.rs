@@ -24,12 +24,18 @@ use wz_runtime_tokio::session_open::DialConfig;
 
 use super::*;
 
+mod local_face;
+pub use local_face::{LivelinessHandler, LocalLiveliness};
+
 /// A running router node. Dropping it does not stop it; [`RouterState::close`] does, and joins the
 /// thread the node runs on.
 pub struct RouterState {
     zid: Vec<u8>,
     forwarder: Arc<RouterForwarder>,
     listen_locators: Vec<String>,
+    /// The node's own face, for liveliness: what the program is told of the tokens of the other
+    /// faces, and where its own tokens are counted.
+    liveliness: LocalLiveliness,
     shutdown: Arc<Notify>,
     stop: Arc<AtomicBool>,
     driver: StdMutex<Option<JoinHandle<()>>>,
@@ -47,6 +53,27 @@ impl RouterState {
         &self.forwarder
     }
 
+    /// Declare a liveliness token of the node on `keyexpr`: the nodes that asked are told, and so
+    /// are the subscribers of the node itself. The id answered retracts it
+    /// ([`undeclare_token`](Self::undeclare_token)).
+    pub fn declare_token(&self, keyexpr: &str) -> u64 {
+        let id = self.forwarder.host_token(keyexpr);
+        self.liveliness.own_up(id, keyexpr);
+        id
+    }
+
+    /// Retract the token `id` the node declared. Retracting one that is gone does nothing.
+    pub fn undeclare_token(&self, id: u64) {
+        if self.forwarder.unhost_token(id) {
+            self.liveliness.own_down(id);
+        }
+    }
+
+    /// The node's own face, for liveliness: subscribers, and the keys alive.
+    pub fn liveliness(&self) -> &LocalLiveliness {
+        &self.liveliness
+    }
+
     /// Where the node listens, as the listeners got their addresses.
     pub fn listen_locators(&self) -> &[String] {
         &self.listen_locators
@@ -61,6 +88,7 @@ impl RouterState {
     pub fn close(&self) {
         self.stop.store(true, Ordering::Release);
         self.shutdown.notify_one();
+        self.liveliness.stop();
         let handle = self
             .driver
             .lock()
@@ -143,6 +171,13 @@ pub(crate) fn open_router_blocking(
         timestamping,
     ));
     policy.install_on(&*forwarder);
+    // The node's own face, told of the tokens of the others from the first.
+    let (liveliness, face_sink) = LocalLiveliness::start().map_err(|error| {
+        log_open_failure("the face of the router node", &error);
+        OpenError::DriveFailed
+    })?;
+    forwarder.attach_local_face(face_sink);
+    forwarder.ask_local_tokens();
     let shutdown = Arc::new(Notify::new());
     let stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::channel::<Result<Vec<String>, OpenError>>();
@@ -182,15 +217,24 @@ pub(crate) fn open_router_blocking(
             ));
         })
         .map_err(|_| OpenError::DriveFailed)?;
+    // A router's open is held for `scouting/delay` in full, as the other roles' is (R3125): the
+    // nodes it dials have told it what they hold by the time the program can declare anything,
+    // so that a subscriber declared right after the open is told of what comes alive after it
+    // and not of what was already there.
+    let hold = dial.router_hold;
     match rx.recv() {
-        Ok(Ok(listen_locators)) => Ok(RouterState {
-            zid: wire_zid,
-            forwarder,
-            listen_locators,
-            shutdown,
-            stop,
-            driver: StdMutex::new(Some(handle)),
-        }),
+        Ok(Ok(listen_locators)) => {
+            std::thread::sleep(hold);
+            Ok(RouterState {
+                zid: wire_zid,
+                forwarder,
+                listen_locators,
+                liveliness,
+                shutdown,
+                stop,
+                driver: StdMutex::new(Some(handle)),
+            })
+        }
         Ok(Err(cause)) => {
             let _ = handle.join();
             Err(cause)
