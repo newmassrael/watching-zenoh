@@ -334,38 +334,38 @@ pub mod model {
     /// mDNS's bound, 13 of 36 units; `no`: the members' average.
     pub const UNIT_EXPLAINED: Weight = Weight {
         yes: 965,
-        no: 3_983,
+        no: 3_545,
     };
 
     /// A unit with bytes left over. Zenoh: the bound of 0 in 6075 units;
     /// `yes`: QUIC's 22 of 22; `no`: the members' average.
     pub const UNIT_RESIDUAL: Weight = Weight {
         yes: -10_986,
-        no: -9_618,
+        no: -9_568,
     };
 
     /// A unit that did not decode. Zenoh: as residual; `yes`: SSDP's 26 of
     /// 26; `no`: the members' average.
     pub const UNIT_UNDECODED: Weight = Weight {
         yes: -10_986,
-        no: -10_122,
+        no: -10_098,
     };
 
     /// A stream direction, captured from its start, that framed a unit before
     /// it lost its framing. Zenoh: one less the bound of 0 lost in 300; `yes`:
-    /// the bound of 0 held in 48, PostgreSQL's; `no`: the smoothed shares of
-    /// the four members that lose it (MQTT, HTTP opening with another method,
-    /// Redis, PostgreSQL), averaged.
+    /// the bound of 0 held in 34, SSH's; `no`: the smoothed shares of the six
+    /// members that lose it (MQTT, HTTP opening with another method, Redis,
+    /// PostgreSQL, SSH, SMTP), averaged.
     pub const FRAMING_HELD: Weight = Weight {
-        yes: 4_032,
-        no: 7_043,
+        yes: 2_831,
+        no: 6_446,
     };
 
     /// A stream direction, captured from its start, that lost its framing
     /// before it framed a unit: bytes that are not zenoh's framing.
     pub const FRAMING_LOST: Weight = Weight {
         yes: -6_653,
-        no: -6_642,
+        no: -6_637,
     };
 
     /// The counts of `captures/corpus/` the measured weights are computed
@@ -391,7 +391,7 @@ pub mod model {
         }
 
         /// The null protocols.
-        pub const NULL: [Member; 16] = [
+        pub const NULL: [Member; 18] = [
             Member {
                 file: "lan-dns.pcap",
                 units: [26, 32, 320],
@@ -483,6 +483,19 @@ pub mod model {
                 file: "stack-postgres.pcap",
                 units: [0, 531, 0],
                 framing: [0, 48],
+            },
+            // SSH: its binary packets frame as units after the banner, a third
+            // of them whole, and the framing is lost in all 34 directions.
+            // SMTP frames no unit and loses it in all 20.
+            Member {
+                file: "stack-ssh.pcap",
+                units: [33, 20, 40],
+                framing: [0, 34],
+            },
+            Member {
+                file: "stack-smtp.pcap",
+                units: [0, 0, 0],
+                framing: [0, 20],
             },
         ];
 

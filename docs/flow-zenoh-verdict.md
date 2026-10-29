@@ -237,11 +237,26 @@ unit and loses the framing of all 120 directions. PostgreSQL frames 531 units
 and every one of them has bytes left over (a residual unit), loses 48
 directions, and three of its connections carry enough of them to read `no`.
 The 531 residual units put the null side's unit share of a unit read whole
-lower, which raises that unit's `no` weight to +3983, within 11 millibits of
-a broken SN step's -3994: a flow of units that read whole and repeat an SN
-now weighs almost nothing either way, and the ordered-fold test that builds
-such a flow takes its length from the two weights and fails with a sentence
-when the margin turns positive.
+lower, which raised that unit's `no` weight to within a few millibits of a
+broken SN step's -3994: a flow of units that read whole and repeat an SN
+weighs little either way, and the ordered-fold test that builds such a flow
+takes its length from the two weights and fails with a sentence when the
+margin turns positive.
+
+Two more protocols reach it: SSH (OpenSSH; 17 sessions under three ciphers, a
+pty and 2 MB each way; 1225 packets) and SMTP (aiosmtpd and smtplib; 10
+sessions, three of them upgraded with STARTTLS; 413 packets). Neither reads
+`yes`. SSH reads 2 `no` and 15 `undecided`: of its 93 units 33 read whole, 20
+leave bytes over and 40 do not decode, it loses the framing in all 34
+directions, and 29 of its SN steps break and none follow. SMTP frames no unit,
+loses the framing in all 20 directions and reads 10 `undecided`. SSH's whole
+units raise the null side's share of a unit read whole, so that unit's `no`
+weight fell from +3983 to +3545, and a unit read whole on a broken step now
+sums to -449 on the `no` sum (it was -11): a flow of such frames leans toward
+`no` a little instead of staying level. The `yes` weight of a unit read whole
+is still mDNS's bound. The held framing's `yes` weight fell from +4032 to
++2831, since SSH's 0 held in 34 directions is a looser bound than
+PostgreSQL's 0 in 48. No other capture changed word.
 
 Still to come for step 2: further zenoh versions and links on the zenoh side.
 
@@ -282,11 +297,11 @@ the weights by `model_weights_are_their_stated_probabilities`):
 
 | outcome | `yes` sum | `no` sum | model 1 |
 |---|---|---|---|
-| unit read whole | +965 | +3983 | +2603 |
-| unit residual | -10986 | -9618 | -6745 |
-| unit undecoded | -10986 | -10122 | -7000 |
-| stream framing held | +4032 | +7043 | (none) |
-| stream framing lost | -6653 | -6642 | (none) |
+| unit read whole | +965 | +3545 | +2603 |
+| unit residual | -10986 | -9568 | -6745 |
+| unit undecoded | -10986 | -10098 | -7000 |
+| stream framing held | +2831 | +6446 | (none) |
+| stream framing lost | -6653 | -6637 | (none) |
 | cookie matched (8 bytes) | +63986 | +63986 | +63999 |
 | cookie differing | -6672 | -6672 | -10000 |
 | Inits of opposite kinds | +986 | +986 | +999 |
@@ -347,12 +362,12 @@ minutes (11 packets, no session, not kept in the corpus). The causes were not
 traced packet by packet.
 
 A frame that repeats its SN never counts toward `yes`: a unit read whole
-(+965) and a broken step (-3994) sum to -3029. On the `no` sum the two nearly
-cancel (+3983 and -3994, 11 millibits apart), which is the model saying what
-it should: under the null a unit reads whole one time in sixteen and a step
-breaks nearly always, and a zenoh flow breaks it one time in sixteen, so a
-frame that does both is as likely under one as under the other. A flow of such
-frames therefore stays `undecided` and is never read `yes`.
+(+965) and a broken step (-3994) sum to -3029. On the `no` sum the two largely
+cancel (+3545 and -3994: the null side reads a unit whole about one time in
+twelve and a step breaks nearly always, a zenoh flow breaks a step one time in
+sixteen), a frame that does both being 1.4 times as likely under the null as
+under zenoh. A flow of such frames is never read `yes` and leans, slowly,
+toward `no`.
 
 **`stream_framing`.** A stream direction is judged once, by what happened
 first: a unit framed (held) or a desynchronisation this reader inferred
@@ -374,7 +389,7 @@ crossing rested on the unit weight the real mDNS beats.
 Adding the six captures above (2100 units, 12 handshakes) moved the counts and
 with them the weights, and three null captures moved. A residual or undecoded
 unit now weighs -10986 on the `yes` sum, and on the `no` sum two undecoded
-units weigh -20244, past the threshold: a flow of two units no codec of this
+units weigh -20244 (-20196 once SSH is among the members), past the threshold: a flow of two units no codec of this
 reader decodes, and nothing else weighed, now reads `no`, where it needed three.
 `lan-dns` went from 2 `no` and 185 `undecided` to 159 `no` and 28 `undecided`,
 `stack-coap` from 5 `no` and 20 `undecided` to 25 `no`, `lan-ssdp` from 1 and

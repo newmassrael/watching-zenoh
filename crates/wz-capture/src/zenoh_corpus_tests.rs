@@ -338,6 +338,8 @@ const EXPECTED: &[(&str, Tally, Tally)] = &[
     // flows carry enough residual units to say so.
     ("stack-redis.pcap", (0, 0, 60), (0, 0, 60)),
     ("stack-postgres.pcap", (0, 3, 21), (0, 3, 21)),
+    ("stack-ssh.pcap", (0, 2, 15), (0, 2, 15)),
+    ("stack-smtp.pcap", (0, 0, 10), (0, 0, 10)),
 ];
 
 #[test]
