@@ -60,6 +60,17 @@ pub mod tuning {
     /// that does not start says why. The interop runs of the declared nodes start a session in it.
     /// It is `.bss`, so the cell a node that only publishes does not need costs no flash.
     pub const TASK_BYTES_ACTIVE: usize = 4096;
+    /// Bytes of the arena the loop's own state is built in (the host, the factory and the node of
+    /// the session it dials). The loop checks the number when it is compiled, and a build that
+    /// grows past it stops, so the number is the measured need and not a guess.
+    ///
+    /// Measured on 2026-10-29 by building the node over the secure channel (the largest, which
+    /// holds the channel in the node and the host each carry) with each size: the build stops at
+    /// 2,816 bytes and holds at 3,072. The arena is the next step up with about a sixth to spare.
+    /// The kit's is 1,792 for the same node (`fixed_client.rs`), its pointers being half the size;
+    /// the default of the loop, 1,024, is the answering kit node's. It is `.bss`, so what the nodes
+    /// without the channel do not need costs no flash.
+    pub const RUN: usize = 3584;
     /// Timers the runtime holds: the handshake and lease deadlines of the session.
     pub const TIMERS: usize = 4;
     /// The batch the node advertises: an Ethernet frame less the IPv4 and UDP headers, as the kit's.

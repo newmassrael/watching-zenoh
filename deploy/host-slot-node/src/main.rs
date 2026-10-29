@@ -50,8 +50,8 @@ use host_slot_node_glue::fresh_zid;
 #[cfg(feature = "tls")]
 use host_slot_node_glue::tls;
 use host_slot_node_glue::tuning::{
-    BATCH_SIZE, DOC_MAX, IDLE_SLEEP_US, IDLE_WAIT_MS, RX, SESSIONS, TASKS, TASK_BYTES_ANSWERING,
-    TASK_BYTES_ASKING, TIMERS, TX,
+    BATCH_SIZE, DOC_MAX, IDLE_SLEEP_US, IDLE_WAIT_MS, RUN, RX, SESSIONS, TASKS,
+    TASK_BYTES_ANSWERING, TASK_BYTES_ASKING, TIMERS, TX,
 };
 use host_slot_node_glue::{fresh_signing_key, ConsoleName, HostPort};
 use wz_runtime_coop::session_drive::{IpEndpoint, Locator};
@@ -95,7 +95,8 @@ type Stack = tls::Stack;
 
 /// The node's big tables, in one `static` whose initial value is ALL ZERO BYTES, so the linker
 /// places it in `.bss` and not in `.data` (`wz_session_mcu::slot_node`, shared with the kit).
-type Storage = NodeStorage<Clock, Stack, PosixEntropy, TASKS, TASK_BYTES, TIMERS, SESSIONS, RX, TX>;
+type Storage =
+    NodeStorage<Clock, Stack, PosixEntropy, TASKS, TASK_BYTES, TIMERS, SESSIONS, RX, TX, RUN>;
 
 static NODE: Storage = Storage::new();
 
