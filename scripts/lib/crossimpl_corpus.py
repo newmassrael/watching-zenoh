@@ -197,6 +197,10 @@ WZ_BINARY_ROOTS = {
     # the reason the entry above is: the implementation answering them is wz-capi-pico's, so
     # A4-5 checks the claim against that build's closure and not this crate's dev-dep graph.
     "wz_held_listener_binary": "wz-capi-pico",
+    # The `dial_a_listener` example of `wz-capi-pico`: a program of wz's that DIALS, which upstream's
+    # z_sub, z_pub and z_queryable (run as listeners) answer. Registered for the reason the entry
+    # above is: the implementation under test is wz-capi-pico's.
+    "wz_dialer_binary": "wz-capi-pico",
     # R311y500 — the §5.27 `api-compat-c` artifact, the zenoh-c ABI twin of the
     # entry above and here for the identical reason: a foreign C program linked
     # against WZ's cdylib is external-but-not-foreign, because the implementation

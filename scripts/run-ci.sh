@@ -10944,6 +10944,26 @@ layer_c1co_pico_client_dials_a_listener() {
                 --test client_only_dials_a_listener || return 1
         done
     done
+    # The other direction: a wz session DIALS a node that listens, and the node is upstream's own
+    # CLI run as `-m peer -l` (`z_sub`, `z_pub`, `z_queryable`), so the dial role's handshake is
+    # read by a foreign implementation for each engine
+    # (`crates/wz-integration-tests/tests/wz_pico_abi_dials_a_pico_listener.rs`). The dialer is
+    # the `dial_a_listener` example, built once for each engine and kept under a name of its own,
+    # as the listener is. The cooperative one runs the multi-threaded arm so its read task
+    # advances the session.
+    (cd crates && cargo build -p wz-capi-pico --example dial_a_listener) || return 1
+    cp "$examples/dial_a_listener" "$examples/dial_a_listener-tokio" || return 1
+    (cd crates && cargo build -p wz-capi-pico --no-default-features \
+        --features engine-coop,multi-thread,link-udp,query \
+        --example dial_a_listener) || return 1
+    cp "$examples/dial_a_listener" "$examples/dial_a_listener-coop" || return 1
+    local dialer_engine
+    for dialer_engine in tokio coop; do
+        _runci_guarded_test "C1co a ${dialer_engine} dialer reaches a zenoh-pico listener" 3 \
+            env WZ_PICO_DIALER_BIN="$examples/dial_a_listener-${dialer_engine}" \
+            cargo test -p wz-integration-tests --test wz_pico_abi_dials_a_pico_listener \
+            -- --ignored || return 1
+    done
     # A fifth leg: the cooperative client that scouts. A `z_open` that names no locator looks for
     # one over the engine's own window, and finds nobody on a group nobody answers, which the
     # tokio engine's default build already runs; this is the same test with no tokio engine in
@@ -16956,11 +16976,15 @@ layer_e_ap_demo_round_trip() {
     # it in WZ_PICO_LISTENER_BIN and runs them; this job builds none, so the sweep took them and
     # they panicked on the unset variable (hosted run of round 3809). The helper they call is
     # in `layer_e_oracle_scope_gate.py`, and every fn of that file carries the token.
+    # `wz_dialer`, for the three tests of the other direction: the `dial_a_listener` example
+    # dials upstream's z_sub, z_pub and z_queryable run as listeners. Layer C1co builds that
+    # example for each engine and names it in WZ_PICO_DIALER_BIN; this job builds none.
     (cd crates && cargo test -p wz-integration-tests --quiet -- --ignored \
         --skip wz_e2e_ --skip multicast --skip zenohd --skip wz_router --skip wz_peer \
         --skip wz_storage_host --skip zenoh_ext --skip inert --skip apfull \
         --skip wz_plugin --skip capi_c --skip analyzer --skip zenoh_zget \
-        --skip fs_shared_dir --skip sce_b6 --skip from_a_config_file --skip held_listener)
+        --skip fs_shared_dir --skip sce_b6 --skip from_a_config_file --skip held_listener \
+        --skip wz_dialer)
 }
 
 # ─── Layer E2 — facade-subset behavioural e2e vs zenoh-pico ──────────

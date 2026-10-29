@@ -741,9 +741,15 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
   `pico_dials_a_wz_listener`, three tests, in Layer C1co), so the cooperative acceptor's
   handshake, what it receives and what it publishes and its answer to a query are read by a
   foreign implementation.
+  A foreign pico that LISTENS for a wz session to dial, which this step left open, is held by
+  `wz_pico_abi_dials_a_pico_listener.rs` (Layer C1co): the `dial_a_listener` example of
+  `wz-capi-pico`, built for each engine, dials upstream's `z_sub`, `z_pub` and `z_queryable`
+  run as `-m peer -l`, so the handshake the dial role writes and accepts is read by the real
+  pico. A put reaches the listener's subscriber, the listener's put reaches the dialer's, and a
+  get is answered and ends with the Final; all three pass on both engines (pc2). It dials in
+  client mode; a wz peer that dials a pico peer (`mode=peer` with `connect`) is not held.
   Not done: the drop-in legs of Layer E (upstream's C programs compiled against the cooperative
-  cdylib), which run the tokio build, and a foreign pico that LISTENS for a cooperative peer to
-  dial (the dial role is L1 and L2's, held by C1co against the tokio listener).
+  cdylib), which run the tokio build.
 - **L5. Both roles at once. Done.** A peer that listens and dials holds the dial role's face and
   the accepted ones in one table, and one face for each remote zid, as zenoh's transport manager
   keeps one transport for each and the tokio registry keeps one face (`SharedSession::face_up`).

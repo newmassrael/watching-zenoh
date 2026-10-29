@@ -71,11 +71,16 @@ RUN_CI = pathlib.Path("scripts/run-ci.sh")
 #: `WZ_PICO_LISTENER_BIN`. Layer E's sweep adopted the three tests that drive it
 #: (L4 of docs/capi-pico-on-coop-engine.md) and they panicked on the unset
 #: variable on the hosted run of round 3809, the same class as the families above.
+#:
+#: `wz_dialer_binary` joins: the `dial_a_listener` example of the build under test, which Layer
+#: C1co builds for each engine and names in `WZ_PICO_DIALER_BIN`, for the tests in which it dials
+#: upstream's CLI run as a listener. Its tests carry `wz_dialer` and are skipped by the sweep.
 UNPROVISIONED_HELPERS = (
     "zenoh_core_example_binary",
     "zenoh_ext_example_binary",
     "wz_zenoh_oracle_binary",
     "wz_held_listener_binary",
+    "wz_dialer_binary",
 )
 
 #: The sweep line is found by the crate it runs, so a rename of the lane

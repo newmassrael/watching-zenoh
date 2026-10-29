@@ -461,6 +461,13 @@ required-features = ["peer"]
 name = "hold_a_listener"
 required-features = ["peer", "query", "queryable", "liveliness"]
 
+# The program that dials a node that listens, for a foreign node (upstream's CLI in `peer`
+# mode with a `listen` endpoint) to be the node. The reverse of the example above, and built for
+# each engine the same way; it needs no listener of its own, so `peer` is not required.
+[[example]]
+name = "dial_a_listener"
+required-features = ["query"]
+
 [lints]
 workspace = true
 

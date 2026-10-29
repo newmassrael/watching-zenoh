@@ -1138,7 +1138,12 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # closure lacks the atom and refused the claim (hosted Layer A4, run 40551486881); the helper
 # `wz_held_listener_binary` now maps to `wz-capi-pico`. Measured by Layer A4 (`measured 1078,
 # declared 1075`).
-FOREIGN_ADJUDICATOR_LINKS = 1078
+# L5's open item of docs/capi-pico-on-coop-engine.md -- 1078 -> 1081, RISING by three:
+# `wz_pico_abi_dials_a_pico_listener.rs`, the wz ABI's `dial_a_listener` example dialling upstream's
+# `z_sub`, `z_pub` and `z_queryable` run as `-m peer -l` listeners, each adjudicating
+# `api-compat-pico` in the `wz->pico` direction: 3 tests x 1 atom = 3. The helper
+# `wz_dialer_binary` maps to `wz-capi-pico` as `wz_held_listener_binary` does.
+FOREIGN_ADJUDICATOR_LINKS = 1081
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
