@@ -9228,14 +9228,18 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         priority: Priority,
         express: bool,
     ) -> Result<(), CodecError> {
-        // A default publish carries no quality of service extension.
-        let options = if priority == Priority::DEFAULT && !express {
-            PublishOptions::put()
-        } else {
-            PublishOptions::put()
-                .with_priority(priority)
-                .with_express(express)
-        };
+        // A default publish carries no quality of service extension. The level is set on the
+        // field and not through the builders, which exist only where `pubsub-qos` does: the node
+        // sends the extension whatever the features of the build that holds it.
+        let qos = wz_session_core::sample::QosLevel::from_parts(
+            priority,
+            wz_session_core::qos::CongestionControl::Drop,
+            express,
+        );
+        let mut options = PublishOptions::put();
+        if qos != wz_session_core::sample::QosLevel::DEFAULT {
+            options.qos = Some(qos);
+        }
         self.publish_with(keyexpr, payload, &options)
     }
 
