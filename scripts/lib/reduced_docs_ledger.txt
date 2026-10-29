@@ -585,7 +585,6 @@ wz-session-core	wz-session-core/src/storage_strip_prefix.rs	1	error: unresolved 
 wz-session-core	wz-session-core/src/switchboard.rs	1	error: unresolved link to `SwitchboardRegistry::dispatch`: no item named `SwitchboardRegistry` in scope
 wz-session-core	wz-session-core/src/switchboard.rs	2	error: unresolved link to `SwitchboardRegistry`: no item named `SwitchboardRegistry` in scope
 wz-session-core	wz-session-core/src/wire.rs	1	error: unresolved link to `PushOwned`: no item named `PushOwned` in scope
-wz-session-lwip	wz-session-mcu/src/admin_host.rs	1	error[E0599]: no method named `push_str` found for struct `FixedText<N>` in the current scope
 wz-session-mcu	wz-session-mcu/src/connect_manager.rs	1	error: public documentation for `new` links to private item `Self::in_store`: this item is private
 wz-session-mcu	wz-session-mcu/src/get_mailbox.rs	1	error: unresolved link to `crate::app_layer::SlotDispatch::drain_mailbox`: no item named `SlotDispatch` in module `app_layer`
 wz-session-mcu	wz-session-mcu/src/get_mailbox.rs	1	error: unresolved link to `crate::app_layer::SlotDispatch::get`: no item named `SlotDispatch` in module `app_layer`
