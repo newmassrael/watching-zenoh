@@ -298102,6 +298102,36 @@
         "Open: the receive path of a joined multicast group feeds no meter (it wants a recorder that composes with the stats one at MulticastStatsRecorder::transport_message_received, a meter for each group that the registries add up and keep when a group is left, and a test with multicast sockets); the zenoh-c doors, decided against until a consumer needs them; a counting allocator source for a program that owns its allocator. A nonzero events_dropped has still never been read through a door or a host."
       ]
     },
+    "Round 3907": {
+      "decision_summary": "The decision that the supervisor's deadline comparison stays Rust is corrected after SCE's answer. Two of its reasons were wrong: a total algorithm body already emits a plain type and not a Result, and sce-codegen already emits an algorithm document. The real blockers are SCE's range analysis, which does not relate two values, so a branch around a checked subtraction is not proven total, and the lack of wrapping and saturating primitives; SCE can add them on the unsigned widths, on every backend, with an ADR and one round, and has given no slot. wz owes an emit_algorithm in wz-codegen-build, named by the document's name, written with its first consumer. Until the primitive exists the two functions (the deadline comparison and the sampler's countdown) stay Rust with their wrap test, which becomes a conformance fixture in SCE; then they become sources/algorithms documents. The timer period as a build parameter needs an ADR of its own and stays host-polled.",
+      "changes_bullets": [
+        "`docs/observation-plane.md`, Decided item 2 rewritten: the corrected reasons, what SCE needs (wrapping and saturating primitives, an ADR, one round, no slot), what wz owes (emit_algorithm, with its first consumer), and what replaces the Rust when the primitive exists."
+      ],
+      "verification_bullets": [
+        "A prose change only: the plan was re-read against SCE's written answer, which is the source of the two corrections. No code ran; the pre-push gates are the hook's."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-18-time"
+      ],
+      "carry_forward_bullets": [
+        "Waiting on SCE: the wrapping and saturating primitives (ADR, one round, no slot committed). wz owes emit_algorithm in wz-codegen-build and the two algorithm documents when they exist. Not blocked on it: the receive-count ledger, the node object that owns the instruments, the generated features bits."
+      ],
+      "publishable_decision_summary": "The decision that the supervisor's deadline comparison stays Rust is corrected after SCE's answer. Two of its reasons were wrong: a total algorithm body already emits a plain type and not a Result, and sce-codegen already emits an algorithm document. The real blockers are SCE's range analysis, which does not relate two values, so a branch around a checked subtraction is not proven total, and the lack of wrapping and saturating primitives; SCE can add them on the unsigned widths, on every backend, with an ADR and one round, and has given no slot. wz owes an emit_algorithm in wz-codegen-build, named by the document's name, written with its first consumer. Until the primitive exists the two functions (the deadline comparison and the sampler's countdown) stay Rust with their wrap test, which becomes a conformance fixture in SCE; then they become sources/algorithms documents. The timer period as a build parameter needs an ADR of its own and stays host-polled.",
+      "publishable_changes_bullets": [
+        "`docs/observation-plane.md`, Decided item 2 rewritten: the corrected reasons, what SCE needs (wrapping and saturating primitives, an ADR, one round, no slot), what wz owes (emit_algorithm, with its first consumer), and what replaces the Rust when the primitive exists."
+      ],
+      "publishable_verification_bullets": [
+        "A prose change only: the plan was re-read against SCE's written answer, which is the source of the two corrections. No code ran; the pre-push gates are the hook's."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-18-time"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Waiting on SCE: the wrapping and saturating primitives (ADR, one round, no slot committed). wz owes emit_algorithm in wz-codegen-build and the two algorithm documents when they exist. Not blocked on it: the receive-count ledger, the node object that owns the instruments, the generated features bits."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
