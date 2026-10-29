@@ -96,14 +96,171 @@ impl core::ops::DerefMut for ExtChainBuf {
 
 /// The extension chain a received handshake message (INIT, OPEN, CLOSE,
 /// KEEP_ALIVE) carries, as the decoder hands it over: a growable `Vec` on every
-/// profile but `session-slot`, and under it an array of the decoder's own bound
-/// (`MAX_EXT_CHAIN_DEPTH` entries), so reading a chain allocates nothing for
-/// the chain itself. Both are read as `[ExtEntryOwned]`.
+/// profile but `session-slot`, and under it [`ReceivedExtChain`]. Both are read as
+/// `[ExtEntryOwned]` and judged through [`ChainHeaders`].
 #[cfg(not(feature = "session-slot"))]
 pub type ExtChainOwned = Vec<ExtEntryOwned>;
 /// See the growable form of this alias.
 #[cfg(feature = "session-slot")]
-pub type ExtChainOwned = heapless::Vec<ExtEntryOwned, { crate::parse_error::MAX_EXT_CHAIN_DEPTH }>;
+pub type ExtChainOwned = ReceivedExtChain;
+
+/// The header byte of every entry of a chain, in the chain's order: what the admission rule
+/// judges a message's extensions by ([`crate::ext_admit::judge_ext_chain`]).
+// Named by `InboundFrame::ext_admission`'s `judge`, which the arms of the messages that carry a
+// chain call: the handshake's four, and the heap profile's three more.
+#[cfg(any(
+    feature = "codec-init-body",
+    feature = "codec-open-body",
+    feature = "codec-close",
+    feature = "codec-keep-alive",
+    all(feature = "alloc", feature = "codec-frame"),
+    all(feature = "alloc", feature = "reassembly"),
+    all(feature = "alloc", feature = "codec-join")
+))]
+pub(crate) trait ChainHeaders {
+    /// The headers, the chain's last entry last.
+    fn chain_headers(&self) -> impl Iterator<Item = u8> + '_;
+}
+
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-init-body",
+        feature = "codec-open-body",
+        feature = "codec-close",
+        feature = "codec-keep-alive",
+        feature = "codec-frame",
+        feature = "reassembly",
+        feature = "codec-join"
+    )
+))]
+impl ChainHeaders for [ExtEntryOwned] {
+    fn chain_headers(&self) -> impl Iterator<Item = u8> + '_ {
+        self.iter().map(|entry| entry.header)
+    }
+}
+
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "codec-init-body",
+        feature = "codec-open-body",
+        feature = "codec-close",
+        feature = "codec-keep-alive",
+        feature = "codec-frame",
+        feature = "reassembly",
+        feature = "codec-join"
+    )
+))]
+impl ChainHeaders for Vec<ExtEntryOwned> {
+    fn chain_headers(&self) -> impl Iterator<Item = u8> + '_ {
+        self.as_slice().chain_headers()
+    }
+}
+
+/// How many entries of ONE received handshake message a `session-slot` build keeps: those of
+/// the extensions it reads, which are the patch level, the region name and the remote bound, and
+/// one for each extension a feature of the build reads.
+#[cfg(feature = "session-slot")]
+pub const RECEIVED_EXT_KINDS: usize = 3
+    + cfg!(feature = "transport-qos") as usize
+    + cfg!(feature = "transport-lowlatency") as usize
+    + cfg!(feature = "session-extcompression") as usize
+    + cfg!(feature = "transport-shm") as usize
+    + cfg!(feature = "session-extauth") as usize
+    + cfg!(feature = "transport-multilink") as usize;
+
+/// Whether this build reads the establishment extension `id` off a message a peer sent: the
+/// extensions of the modules it compiles (`extpatch`, `extregion` and `extbound` always, the
+/// others each behind the feature of its module). An entry of any other id is not kept; it is
+/// judged by its header like the rest.
+#[cfg(all(
+    feature = "session-slot",
+    any(
+        feature = "codec-init-body",
+        feature = "codec-open-body",
+        feature = "codec-close",
+        feature = "codec-keep-alive"
+    )
+))]
+const fn reads_received_ext(id: u8) -> bool {
+    use crate::ext_header::establishment_ext_id as known;
+    // `extbound`'s remote bound is the patch level's id (0x7), on the OPEN messages.
+    id == known::PATCH
+        || id == known::REGION_NAME
+        || (cfg!(feature = "transport-qos") && id == known::QOS)
+        || (cfg!(feature = "transport-shm") && id == known::SHM)
+        || (cfg!(feature = "session-extauth") && id == known::AUTH)
+        || (cfg!(feature = "transport-multilink") && id == known::MULTILINK)
+        || (cfg!(feature = "transport-lowlatency") && id == known::LOWLATENCY)
+        || (cfg!(feature = "session-extcompression") && id == known::COMPRESSION)
+}
+
+/// The extension chain of a received handshake message on `session-slot`: the header byte of
+/// every entry, for the admission rule, and the entries of the extensions this build reads
+/// ([`reads_received_ext`]), for the readers, which look an extension up by its id.
+///
+/// An array of the decoder's own bound (`MAX_EXT_CHAIN_DEPTH`) entries of 65 bytes was 520 bytes
+/// in the message the decoder is lent, in each of the four messages that carry a chain, under
+/// every call the receive makes; a chain keeps one entry for each extension a build reads (three
+/// in the smallest) and eight bytes of headers.
+#[cfg(feature = "session-slot")]
+#[derive(Debug, Default)]
+pub struct ReceivedExtChain {
+    entries: heapless::Vec<ExtEntryOwned, RECEIVED_EXT_KINDS>,
+    // Read by `ChainHeaders`, which a build with no message that carries a chain does not have.
+    #[cfg(any(
+        feature = "codec-init-body",
+        feature = "codec-open-body",
+        feature = "codec-close",
+        feature = "codec-keep-alive"
+    ))]
+    headers: heapless::Vec<u8, { crate::parse_error::MAX_EXT_CHAIN_DEPTH }>,
+}
+
+#[cfg(feature = "session-slot")]
+impl ReceivedExtChain {
+    /// A chain with no entry.
+    pub const fn new() -> Self {
+        Self {
+            entries: heapless::Vec::new(),
+            #[cfg(any(
+                feature = "codec-init-body",
+                feature = "codec-open-body",
+                feature = "codec-close",
+                feature = "codec-keep-alive"
+            ))]
+            headers: heapless::Vec::new(),
+        }
+    }
+}
+
+#[cfg(feature = "session-slot")]
+impl core::ops::Deref for ReceivedExtChain {
+    type Target = [ExtEntryOwned];
+
+    fn deref(&self) -> &[ExtEntryOwned] {
+        self.entries.as_slice()
+    }
+}
+
+#[cfg(all(
+    feature = "session-slot",
+    any(
+        feature = "codec-init-body",
+        feature = "codec-open-body",
+        feature = "codec-close",
+        feature = "codec-keep-alive",
+        all(feature = "alloc", feature = "codec-frame"),
+        all(feature = "alloc", feature = "reassembly"),
+        all(feature = "alloc", feature = "codec-join")
+    )
+))]
+impl ChainHeaders for ReceivedExtChain {
+    fn chain_headers(&self) -> impl Iterator<Item = u8> + '_ {
+        self.headers.iter().copied()
+    }
+}
 
 /// [`decode_ext_chain`] into the form a received handshake message holds its
 /// chain in ([`ExtChainOwned`]), read into a chain the caller already holds (empty, as
@@ -140,10 +297,18 @@ pub(crate) fn decode_handshake_ext_chain_into(
         for _ in 0..MAX_EXT_CHAIN_DEPTH {
             let entry = ExtEntry::decode(cursor).map_err(InboundParseError::Codec)?;
             let z = entry.z();
-            let owned = entry.try_into_owned().map_err(InboundParseError::Codec)?;
             // Cannot overflow: the loop's bound is the array's.
-            if entries.push(owned).is_err() {
+            if entries.headers.push(entry.header).is_err() {
                 return Err(InboundParseError::ExtChainOverflow);
+            }
+            // An extension this build does not read is judged by its header and not kept.
+            if reads_received_ext(entry.ext_id()) {
+                let owned = entry.try_into_owned().map_err(InboundParseError::Codec)?;
+                // One entry for each extension a build reads: a peer that repeats one fills
+                // the chain and is refused, as a chain past the bound is.
+                if entries.entries.push(owned).is_err() {
+                    return Err(InboundParseError::ExtChainOverflow);
+                }
             }
             if !z {
                 return Ok(());

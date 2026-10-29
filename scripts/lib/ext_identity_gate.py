@@ -114,6 +114,13 @@ CLASSIFIED: dict[tuple[str, str], tuple[str, str]] = {
         "renders",
         "the field layer reports the id column of a header as a field of its own",
     ),
+    ("crates/wz-session-core/src/ext_chain.rs", "decode_handshake_ext_chain_into"): (
+        "hint",
+        "decides which entries of a received handshake chain a `session-slot` build keeps, by "
+        "the id of the extensions its modules read; a look-alike of the same id is kept too, "
+        "and only takes a place in the chain, because every reader tells its extension by "
+        "identity and the admission rule judges the header of every entry, kept or not",
+    ),
     ("crates/wz-session-core/src/ext_header.rs", "lookalike_headers"): (
         "family",
         "builds every header that shares an id with an identity, the look-alike "

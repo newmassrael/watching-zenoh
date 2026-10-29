@@ -276,6 +276,14 @@ IMAGES = (
     # `decode_unit_in` 320, `parse_unit_into` 56, `parse_init` 432, `decode_handshake_ext_chain_into`
     # 304 and the codec's four, 3 calls through a register. The kit's reading is 3,192, 104 over; the
     # first tick, which dials, reads 3,048.
+    #
+    # `peak` is 3,024 bytes once a received handshake message keeps the entries of the extensions the
+    # build reads and the header of every entry (`ReceivedExtChain`, in place of eight entries of 65
+    # bytes: the inbound frame the decoder is lent is some 330 bytes smaller), and the dial is the
+    # longest chain again, 16 frames: `wz_app_main` 704, `reconcile` 456, `drive` 536, `dial_peer`
+    # 112, `dial_expecting` 256, the session pump's `build_in` 216, the engine's five frames
+    # (`run_main_event_loop` to `enter_entry_set`) 288, `send_open_syn` 304, `emit_on_link` 64 and
+    # the 64-bit division 88, 9 calls through a register. The kit's reading is 3,048, 24 over.
     Image(
         key="zephyr-client-fixed",
         elf=None,
@@ -283,7 +291,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=3088,
+        peak=3024,
     ),
     # The same client with the session coalescing a send window into one datagram
     # (`overlays/t2g_client_batching.conf`). The batch writer and its flush path are two more
@@ -323,7 +331,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=3088,
+        peak=3024,
     ),
     # The fixed client that ASKS (`overlays/t2g_client_get.conf`): the getter of
     # `wz_session_mcu::slot_getter` is the application layer the observer's drain runs inside, and

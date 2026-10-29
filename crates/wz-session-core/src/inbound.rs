@@ -67,14 +67,8 @@ use sce_forge_runtime::codec::CodecError;
     )
 ))]
 use sce_forge_runtime::codec::SceCursor;
-// Named by the heap variants and by `judge`, which the handshake arms call.
-#[cfg(any(
-    feature = "alloc",
-    feature = "codec-init-body",
-    feature = "codec-open-body",
-    feature = "codec-close",
-    feature = "codec-keep-alive"
-))]
+// Named by the heap variants.
+#[cfg(feature = "alloc")]
 use wz_codecs::ext_entry::ExtEntryOwned;
 // The MID and flag constants: named by the heap `Oam` arm (`alloc`), by each
 // handshake arm of `ext_admission`, by `is_init_syn` and by the frame-head readers of the
@@ -390,10 +384,10 @@ impl InboundFrame {
             all(feature = "alloc", feature = "reassembly"),
             all(feature = "alloc", feature = "codec-join")
         ))]
-        fn judge(mid: u8, entries: &[ExtEntryOwned]) -> ExtAdmission {
+        fn judge<C: crate::ext_chain::ChainHeaders + ?Sized>(mid: u8, chain: &C) -> ExtAdmission {
             crate::ext_admit::judge_ext_chain(
                 crate::ext_admit::ExtCarrier::Transport(mid),
-                entries.iter().map(|e| e.header),
+                chain.chain_headers(),
             )
         }
         match self {

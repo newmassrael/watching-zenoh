@@ -190,6 +190,16 @@ carries about 6 KB of C library code wz does not, which is why the difference is
   function of their own (`init_ext_chain`), the slot's `open` is 520 bytes and `init_core` 32.
   The dial's frames under `wz_app_main` fell from 1,068 bytes to about 570 and the first tick's
   reading from 3,208 to 3,048. The kit's reading is 3,192 now and is set by the handshake's parse.
+- TAKEN for the stack, text +104 bytes (160,724 to 160,828 on the fixed image): a received handshake
+  message keeps the header byte of every entry of its extension chain (eight bytes, what the
+  admission rule judges by) and the entries only of the extensions this build reads
+  (`reads_received_ext`: the patch level, the region name, the remote bound, and one for each
+  feature that compiles a reader), where it kept up to eight entries of 65 bytes. The inbound
+  frame the decoder is lent fell by some 330 bytes, and `dispatch_unit_borrowed`, `parse_init` and
+  the chain reader with it; the kit's reading fell from 3,192 to 3,048 bytes. The admission rule
+  sees the same headers in the same order and the readers find an extension by its id, so a
+  message is judged and read as before; an entry of an extension no module of the build reads
+  is no longer owned.
 - NOT TAKEN, measured: the loop's log lines (`port.log(&[...])`, arrays of parts) said by one
   out-of-line function: the frame of `wz_app_main` stayed 704 bytes (the compiler had given the
   arrays one slot) and the text grew 232 bytes.
