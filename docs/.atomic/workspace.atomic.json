@@ -297204,6 +297204,46 @@
         "Owed, from the router session: regression_3 (a subscriber without history is told a retraction of a key that another source still holds, because the subscription counts only what it has been told: it needs the tokens alive when it was declared), and the peer session of this crate, which does not forward between its faces (six clientviapeer tests); the queryable, the get and the matching status of the router (the routed namespace tests, the brokered unicity test, the matching file); a put that carries an encoding, a timestamp or an attachment, and a delete; a namespace and an authentication; the sessions the node holds; the access control, the authentication and the admin host (acl, adminspace, authentication, qos_overwrite). Also owed: the context a callback runs in (session and unicity), the files that run none, a build without unstable serves no admin key of its own, a lane for the harness, the margin of the main job, the pin bump to 1.10.2."
       ]
     },
+    "Round 3884": {
+      "decision_summary": "Two more null protocols are weighed against the zenoh verdict: OpenSSH (17 sessions over three ciphers, a pty, 2 MB each way) and SMTP with STARTTLS (aiosmtpd and smtplib, 10 sessions). Neither reads yes: SSH reads 2 no and 15 undecided, SMTP 10 undecided. SSH reads a third of its units whole (33 of 93) and breaks 29 SN steps without following one. Both join the null members, so the no weight of a unit read whole falls from +3983 to +3545 and the held-framing yes weight from +4032 to +2831; a unit read whole on a broken step now sums to -449 on the no sum, so such a flow leans slowly toward no instead of staying level. The yes sum is unchanged, and no other capture changed word. The static gate array also showed a red from another session's test file: the barrier-needle gate wanted the quoted text the z_sub wait uses, and two declarations the closure waits of that file do not own. Declared as the gate asks.",
+      "changes_bullets": [
+        "`captures/corpus/stack-ssh.pcap`, `stack-smtp.pcap` (anonymised; 53 files are fixed points), with manifest entries and README rows.",
+        "`crates/wz-capture/src/zenoh_evidence.rs`: two null members (SSH units 33/20/40, framing 0/34; SMTP framing 0/20) and the weights from them: unit read whole no +3545, residual no -9568, undecoded no -10098, framing held +2831 / +6446, framing lost no -6637.",
+        "`crates/wz-capture/src/zenoh_corpus_tests.rs`: rows for the two captures; no other row moved.",
+        "Pinned sums moved with the no weights: `session_table_tests.rs`, `wz-capi-dissect/src/tests/session_table.rs`, `wz_dissect.h`, and the C consumer's opening (no sum 10635).",
+        "`docs/flow-zenoh-verdict.md`: the weight table, the SSH and SMTP paragraph, the broken-step paragraph.",
+        "`crates/wz-integration-tests/tests/wz_pico_abi_dials_a_pico_listener.rs`: the declared needle is `'demo/from-dialer'` with its quotes, as the wait prints it, and the declarations for the two closure waits are dropped. Comment lines only."
+      ],
+      "verification_bullets": [
+        "On a build host: wz-capture 1610 pass, clippy clean for wz-capture and wz-capi-dissect, wz-capi-dissect 227 pass and its C consumer built against the release cdylib and read the tree. The weights were computed offline by a port that reproduces the previous weights from the previous counts. The pre-push static gate array ran whole before the barrier fix: 120 of 121 passed and the barrier-needle gate was the red one; after the fix that gate was run alone and passes, and the array was not run again whole. The corpus verifier: 53 files are fixed points. Not run: the hosted layers, and the pico dialer test itself (its change is comments)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "Open: clients other than 1.10.1, links that really lose packets, a reordered TCP session that gets further than one SN step, why the 10% and 20% UDP sessions end. The null side has 18 members; a protocol that frames and decodes like zenoh's own would be the one to look for next. The dialer test of the pico listener is a case the barrier gate cannot grade (closure waits): its text is declared nowhere."
+      ],
+      "publishable_decision_summary": "Two more null protocols are weighed against the zenoh verdict: OpenSSH (17 sessions over three ciphers, a pty, 2 MB each way) and SMTP with STARTTLS (aiosmtpd and smtplib, 10 sessions). Neither reads yes: SSH reads 2 no and 15 undecided, SMTP 10 undecided. SSH reads a third of its units whole (33 of 93) and breaks 29 SN steps without following one. Both join the null members, so the no weight of a unit read whole falls from +3983 to +3545 and the held-framing yes weight from +4032 to +2831; a unit read whole on a broken step now sums to -449 on the no sum, so such a flow leans slowly toward no instead of staying level. The yes sum is unchanged, and no other capture changed word. The static gate array also showed a red from another session's test file: the barrier-needle gate wanted the quoted text the z_sub wait uses, and two declarations the closure waits of that file do not own. Declared as the gate asks.",
+      "publishable_changes_bullets": [
+        "`captures/corpus/stack-ssh.pcap`, `stack-smtp.pcap` (anonymised; 53 files are fixed points), with manifest entries and README rows.",
+        "`crates/wz-capture/src/zenoh_evidence.rs`: two null members (SSH units 33/20/40, framing 0/34; SMTP framing 0/20) and the weights from them: unit read whole no +3545, residual no -9568, undecoded no -10098, framing held +2831 / +6446, framing lost no -6637.",
+        "`crates/wz-capture/src/zenoh_corpus_tests.rs`: rows for the two captures; no other row moved.",
+        "Pinned sums moved with the no weights: `session_table_tests.rs`, `wz-capi-dissect/src/tests/session_table.rs`, `wz_dissect.h`, and the C consumer's opening (no sum 10635).",
+        "`docs/flow-zenoh-verdict.md`: the weight table, the SSH and SMTP paragraph, the broken-step paragraph.",
+        "`crates/wz-integration-tests/tests/wz_pico_abi_dials_a_pico_listener.rs`: the declared needle is `'demo/from-dialer'` with its quotes, as the wait prints it, and the declarations for the two closure waits are dropped. Comment lines only."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: wz-capture 1610 pass, clippy clean for wz-capture and wz-capi-dissect, wz-capi-dissect 227 pass and its C consumer built against the release cdylib and read the tree. The weights were computed offline by a port that reproduces the previous weights from the previous counts. The pre-push static gate array ran whole before the barrier fix: 120 of 121 passed and the barrier-needle gate was the red one; after the fix that gate was run alone and passes, and the array was not run again whole. The corpus verifier: 53 files are fixed points. Not run: the hosted layers, and the pico dialer test itself (its change is comments)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: clients other than 1.10.1, links that really lose packets, a reordered TCP session that gets further than one SN step, why the 10% and 20% UDP sessions end. The null side has 18 members; a protocol that frames and decodes like zenoh's own would be the one to look for next. The dialer test of the pico listener is a case the barrier gate cannot grade (closure waits): its text is declared nowhere."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
