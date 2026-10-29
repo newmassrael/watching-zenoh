@@ -20,10 +20,10 @@
 //! the verdict function what the verdict should be would agree with it by construction.
 //!
 //! An adapter does one thing: serve a request the way its transport carries it,
-//! [`REPEATS`](crate::lifecycle_contract::REPEATS) times,
+//! [`REPEATS`] times,
 //! and hand back each answer it got (`None` for none) and what the node's opener was asked. Then
-//! [`judge_answers`](crate::lifecycle_contract::judge_answers) reads what the transport can be
-//! seen to have said, and [`judge_asking`](crate::lifecycle_contract::judge_asking) reads
+//! [`judge_answers`] reads what the transport can be
+//! seen to have said, and [`judge_asking`] reads
 //! what the node was asked, which only an adapter that holds the opener can see.
 //!
 //! Compiled for tests and for the feature `lifecycle-contract`, which a production build never
