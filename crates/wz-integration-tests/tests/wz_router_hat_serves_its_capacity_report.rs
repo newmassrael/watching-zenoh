@@ -141,13 +141,21 @@ fn wz_router_hat_serves_its_capacity_report_beside_upstreams_admin_space() {
     stop(router);
 
     // 1 and 2: the report is served, to its own key and to a wildcard over the `@` space of `wz`.
-    for n in [1, 2] {
-        assert_eq!(
-            reply_keys(&out, n),
-            vec![key.clone()],
-            "step {n}: one reply, under the report's key\n--- probe ---\n{out}"
-        );
-    }
+    // The wildcard also reaches the node's other report under the same root (the resource
+    // snapshot, which the lane's demo build carries), so step 2 holds the report among the node's
+    // own keys rather than alone, as the snapshot's own test holds it.
+    assert_eq!(
+        reply_keys(&out, 1),
+        vec![key.clone()],
+        "step 1: one reply, under the report's key\n--- probe ---\n{out}"
+    );
+    let own_root = format!("wz/@/{zid}/");
+    let wildcard = reply_keys(&out, 2);
+    assert!(
+        wildcard.contains(&key) && wildcard.iter().all(|k| k.starts_with(&own_root)),
+        "step 2: the report is among the replies, all under the node's own root: {wildcard:?}\n\
+         --- probe ---\n{out}"
+    );
     let body = out
         .lines()
         .find_map(|l| l.split_once("STEP 1 BODY #1 ").map(|(_, rest)| rest))

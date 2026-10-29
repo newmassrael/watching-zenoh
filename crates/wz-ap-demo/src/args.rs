@@ -1966,6 +1966,25 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             exp.record("transport/auth/usrpwd/password", effect);
         }
     }
+    // The mutual-TLS half of the tls block, the link-protocol whitelist and the QoS overwrite
+    // rules: the reader takes them to a C ABI session and a router node, and this binary has no
+    // flag for any of them (its TLS flags are --tls-ca, --tls-cert and --tls-key, and its
+    // interceptor flags carry no QoS), so a file that states one is told, per key, that this
+    // binary runs without it.
+    for key in [
+        "transport/link/tls/connect_certificate",
+        "transport/link/tls/connect_private_key",
+        "transport/link/tls/enable_mtls",
+        "transport/link/tls/verify_name_on_connect",
+        "transport/link/protocols",
+        "qos/network",
+    ] {
+        if named(key) {
+            if let Some(effect) = no_sink(key) {
+                exp.record(key, effect);
+            }
+        }
+    }
     // R2650 — `low_pass_filter`'s decision site, and the shape is the dictionary's
     // for a DIFFERENT reason worth keeping apart. There the plane is absent; here
     // the plane exists and `--max-payload` is a real sink, but it takes one global
@@ -3508,6 +3527,59 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
         "expands to `--tls-key`. A private key is by construction never on \
          any wire; its effect is whether the TLS handshake completes.",
     ),
+    // The mutual-TLS half of the tls block. The demo has no flag for any of the four (its TLS
+    // flags are --tls-ca, --tls-cert and --tls-key), so each is pinned in
+    // `config_keys_the_demo_drops()`; what each would change is the TLS handshake, which no
+    // zenoh frame carries.
+    (
+        "transport/link/tls/connect_certificate",
+        KIND_OFF_WIRE,
+        "expands to NO flag (the TLS flags are --tls-ca, --tls-cert and --tls-key). \
+         A client certificate rides the TLS handshake's Certificate record, under \
+         every zenoh frame; its effect is whether a listener that asks for one \
+         accepts the dial.",
+    ),
+    (
+        "transport/link/tls/connect_private_key",
+        KIND_OFF_WIRE,
+        "expands to NO flag (the TLS flags are --tls-ca, --tls-cert and --tls-key). \
+         A private key is by construction never on any wire; its effect is whether \
+         the dialer can prove the certificate it presents.",
+    ),
+    (
+        "transport/link/tls/enable_mtls",
+        KIND_OFF_WIRE,
+        "expands to NO flag (the TLS flags are --tls-ca, --tls-cert and --tls-key). \
+         Its effect is the TLS CertificateRequest a listener sends, and whether a \
+         dial without a certificate is refused, under every zenoh frame.",
+    ),
+    (
+        "transport/link/tls/verify_name_on_connect",
+        KIND_OFF_WIRE,
+        "expands to NO flag (the TLS flags are --tls-ca, --tls-cert and --tls-key). \
+         Its effect is whether a dialer accepts a server certificate whose name is \
+         not the endpoint's host, decided in the TLS handshake under every zenoh frame.",
+    ),
+    (
+        "transport/link/protocols",
+        KIND_OFF_WIRE,
+        "expands to NO flag: the demo opens every link kind it was built with and \
+         names its endpoints with --listen and --connect. The whitelist decides which \
+         of the given endpoints a node opens, which is visible as the sockets it \
+         binds and dials; no frame carries the list.",
+    ),
+    // A frame DOES carry the effect of `qos/network`: the rule rewrites the QoS extension of the
+    // messages a node forwards, as upstream's interceptor sets each field of it.
+    (
+        "qos/network",
+        KIND_NOT_YET_READ,
+        "a frame DOES carry it: the rule rewrites the QoS extension of a matched message, \
+         `zenoh/src/net/routing/interceptor/qos_overwrite.rs` @ `qos.set_is_express(e);`. \
+         No leg reads a CONFIG-sourced overwrite off a forwarded frame yet, and this \
+         binary expands it to NO flag (--acl-deny, --downsample and --max-payload are \
+         its only interceptor flags), so the key is pinned in \
+         `config_keys_the_demo_drops()`.",
+    ),
     // R2593 — the four per-link-kind socket buffers. A socket option, so no
     // zenoh frame carries any of them; the witness reads the kernel instead.
     (
@@ -3662,6 +3734,19 @@ pub(crate) fn config_keys_the_demo_drops() -> Vec<&'static str> {
         // still names them.
         "transport/auth/usrpwd/user",
         "transport/auth/usrpwd/password",
+        // The first kind, for the usrpwd rows' reason: the reader honours these keys because a
+        // C ABI session and a router node act on them, and this binary has no flag that spells
+        // any of them. Its TLS flags are the three of the server side and the CA
+        // (`--tls-ca`, `--tls-cert`, `--tls-key`), it dials without a client certificate and
+        // opens every link kind it was built with, and none of its interceptor flags rewrites
+        // the QoS of a message. UNCONDITIONAL for the dictionary's reason: no build of this
+        // binary has the sink.
+        "transport/link/tls/connect_certificate",
+        "transport/link/tls/connect_private_key",
+        "transport/link/tls/enable_mtls",
+        "transport/link/tls/verify_name_on_connect",
+        "transport/link/protocols",
+        "qos/network",
         // R2650 — `low_pass_filter`, and a THIRD kind again: the plane is here and
         // the sink exists, but it cannot carry what the document says.
         //
@@ -5224,6 +5309,44 @@ mod stock_config_tests {
                 LISTEN_TLS,
                 r#"{ listen: { endpoints: ["tls/0.0.0.0:7447"] },
                      transport: { link: { tls: { listen_private_key: "/etc/srv.key" } } } }"#,
+            ),
+            // The mutual-TLS four, each against the TLS endpoint of the side it configures, so a
+            // control without a TLS link cannot read a withholding as "reaches nothing".
+            (
+                "transport/link/tls/connect_certificate",
+                CONNECT_TLS,
+                r#"{ connect: { endpoints: ["tls/r:7447"] },
+                     transport: { link: { tls: { connect_certificate: "/etc/cli.pem" } } } }"#,
+            ),
+            (
+                "transport/link/tls/connect_private_key",
+                CONNECT_TLS,
+                r#"{ connect: { endpoints: ["tls/r:7447"] },
+                     transport: { link: { tls: { connect_private_key: "/etc/cli.key" } } } }"#,
+            ),
+            (
+                "transport/link/tls/enable_mtls",
+                LISTEN_TLS,
+                r#"{ listen: { endpoints: ["tls/0.0.0.0:7447"] },
+                     transport: { link: { tls: { enable_mtls: true } } } }"#,
+            ),
+            (
+                "transport/link/tls/verify_name_on_connect",
+                CONNECT_TLS,
+                r#"{ connect: { endpoints: ["tls/r:7447"] },
+                     transport: { link: { tls: { verify_name_on_connect: false } } } }"#,
+            ),
+            (
+                "transport/link/protocols",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { protocols: ["tcp"] } } }"#,
+            ),
+            (
+                "qos/network",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     qos: { network: [ { messages: ["put"], overwrite: { express: true } } ] } }"#,
             ),
             // R2593 — the per-link-kind socket buffers. The control is the same
             // listen without the key, so the delta is the one `--link-config`.
