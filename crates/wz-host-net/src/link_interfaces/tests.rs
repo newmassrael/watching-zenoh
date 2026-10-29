@@ -39,6 +39,21 @@ fn loopback_resolves_to_a_named_interface() {
     );
 }
 
+/// The address an IPv6 socket reports for an IPv4 peer is the IPv4 address: a listener on `[::]`
+/// has `::ffff:127.0.0.1` for every IPv4 link, and the interface is the one that carries
+/// `127.0.0.1` (`commons/zenoh-util/src/net/mod.rs` @ `let addr = addr.to_canonical();`). A rule
+/// narrowed to the loopback interface is written for these links
+/// (`zenoh/tests/acl.rs` @ `test_acl_interface_names`).
+#[test]
+fn a_mapped_address_is_on_the_interfaces_of_the_address_it_maps() {
+    let plain = interface_names_for(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+        .expect("getifaddrs resolves on a unix host");
+    let mapped = interface_names_for(IpAddr::V6(std::net::Ipv4Addr::LOCALHOST.to_ipv6_mapped()))
+        .expect("getifaddrs resolves on a unix host");
+    assert!(!plain.is_empty(), "the loopback address is on an interface");
+    assert_eq!(mapped, plain);
+}
+
 /// An address no local interface carries resolves to an EMPTY set — a
 /// definite negative, NOT an error. This is the distinction zenoh collapses:
 /// upstream returns `vec![]` for this case AND for a failed lookup.

@@ -2079,9 +2079,44 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         // `Mux`.
         #[cfg(feature = "access-acl")]
         if !self.acl_admits_egress(&msg) {
+            self.end_refused_ask(&msg);
             return Ok(());
         }
         Tp::send_network_message(&self.transport, msg, reliable, express)
+    }
+
+    /// A query or a liveliness query that this session's egress chain refuses is ended for whoever
+    /// asked, as upstream's multiplexer ends it, so that the asker does not wait out its timeout:
+    /// the query gets the final of its own id and the liveliness query the final of its interest
+    /// (`zenoh/src/net/primitives/mux.rs` @ `send declare final to avoid timeout on blocked interest`).
+    #[cfg(feature = "access-acl")]
+    fn end_refused_ask(&self, msg: &wz_session_core::network_message::NetworkMessage) {
+        use wz_session_core::network_message::NetworkMessage;
+        match msg {
+            #[cfg(all(feature = "transport-unicast", feature = "query-get"))]
+            NetworkMessage::Request(request) => self.finalize_local_query(request.rid),
+            #[cfg(feature = "liveliness-get")]
+            NetworkMessage::Interest(interest) => {
+                let interest_id = interest.interest_id;
+                match self.local_delivery {
+                    LocalDeliveryDrain::Caller => {
+                        R::with_mutex_mut(&self.observer, |observer| {
+                            observer.liveliness_gets.dispatch_final(interest_id)
+                        });
+                        self.drain_deferred_fires_settled();
+                    }
+                    LocalDeliveryDrain::DriveTask => {
+                        let observer = self.observer.clone();
+                        self.fires.stage(Box::new(move || {
+                            R::with_mutex_mut(&observer, |observer| {
+                                observer.liveliness_gets.dispatch_final(interest_id)
+                            });
+                        }));
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     /// R311y232 (transport-qos ACTIVATION) — the priority-carrying twin of
@@ -2123,6 +2158,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         // denial is distinguishable from a delivery the network dropped.
         #[cfg(feature = "access-acl")]
         if !self.acl_admits_egress(&msg) {
+            self.end_refused_ask(&msg);
             return Ok(());
         }
         Tp::send_network_message_qos(&self.transport, msg, reliable, express, priority)

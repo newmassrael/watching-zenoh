@@ -65,6 +65,11 @@ use std::net::{IpAddr, SocketAddr};
 pub fn interface_names_for(addr: IpAddr) -> Option<Vec<String>> {
     use std::ffi::CStr;
 
+    // An address an IPv6 socket reports for an IPv4 peer (`::ffff:127.0.0.1`, which a listener on
+    // `[::]` has for every IPv4 link) is the IPv4 address, as upstream compares it
+    // (`commons/zenoh-util/src/net/mod.rs` @ `let addr = addr.to_canonical();`): no interface
+    // carries it in its mapped form.
+    let addr = addr.to_canonical();
     let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
     // SAFETY: `getifaddrs` writes a freshly allocated linked-list head through
     // the out-pointer and returns 0 on success. On failure it leaves `head`

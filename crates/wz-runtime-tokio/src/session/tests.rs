@@ -15194,6 +15194,64 @@ fn session_egress_acl_denies_a_governed_keyexpr() {
     );
 }
 
+/// A liveliness query that the session's own egress chain refuses is ended for its asker, as
+/// upstream's multiplexer ends a blocked interest (`zenoh/src/net/primitives/mux.rs` @
+/// `send declare final to avoid timeout on blocked interest`): nothing leaves, the get is no
+/// longer pending, and its final has fired so the stream the asker reads is over.
+#[cfg(all(feature = "access-acl", feature = "liveliness-get"))]
+#[test]
+fn session_egress_acl_ends_a_liveliness_query_it_refuses() {
+    use crate::interceptor::{InterceptorConfig, InterceptorSink};
+    use wz_access_control::{
+        AclConfig, AclFlow, AclMessage, AclPolicy, AclRule, Permission, SubjectSelector,
+    };
+
+    let (session, driver) = build_session();
+    mark_session_established(&session);
+    *session
+        .actions()
+        .remote_peer_zid
+        .lock()
+        .expect("remote_peer_zid poisoned in test fixture") = Some(vec![0x5a; 16]);
+    session.set_interceptors(
+        InterceptorConfig::default().with_acl(AclPolicy::new(AclConfig {
+            default_permission: Permission::Allow,
+            rules: vec![AclRule {
+                subject: SubjectSelector::Any,
+                key_exprs: vec!["**".to_owned()],
+                messages: vec![AclMessage::LivelinessQuery],
+                flow: AclFlow::Egress,
+                permission: Permission::Deny,
+                link_protocols: Vec::new(),
+                interfaces: Vec::new(),
+                usernames: Vec::new(),
+                cert_common_names: Vec::new(),
+            }],
+        })),
+    );
+    let ended = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = ended.clone();
+    session
+        .liveliness_get(
+            "live/**",
+            LivelinessGetOptions::default(),
+            |_| {},
+            move |_| seen.store(true, std::sync::atomic::Ordering::SeqCst),
+        )
+        .expect("a refused get is consumed, not errored");
+    session.drain_deferred_fires();
+    assert_eq!(driver.frame_count(), 0, "the refused interest left nothing");
+    assert_eq!(
+        session.observer().lock().unwrap().liveliness_gets.len(),
+        0,
+        "and the get is no longer pending"
+    );
+    assert!(
+        ended.load(std::sync::atomic::Ordering::SeqCst),
+        "its final fired, so the asker does not wait out its timeout"
+    );
+}
+
 /// An UNCONFIGURED session is byte-identical to one built before the egress
 /// chain existed: the empty chain is access control disabled, and the fast path
 /// returns before a context or a keyexpr resolution is built.
