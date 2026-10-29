@@ -224,10 +224,26 @@ pub struct PeerTokens<P: Storage = Profile> {
     /// Counted with the table's own refusals ([`Self::refusals`]).
     #[cfg(feature = "storage-profile")]
     oversize: u32,
+    /// The tokens the peer declared by their keyexpr and not by an id (the form a node that
+    /// brokers a token to its peers sends it in: id `0` and the keyexpr beside it, which names the
+    /// token and says nothing of which one), by that keyexpr, with the id this table holds each
+    /// under. Every such token is the id `0` on the wire, so keeping them under it would keep the
+    /// first and refuse the rest as a repeat.
+    #[cfg(all(feature = "storage-profile", feature = "alloc"))]
+    sourced: alloc::collections::BTreeMap<alloc::string::String, u64>,
     /// Names the policy where no field above does (a build without the session
     /// machinery). Zero-sized.
     _policy: core::marker::PhantomData<P>,
 }
+
+/// The first id a token declared by its keyexpr is held under: above any id a peer numbers its
+/// tokens with, so that the two never meet in the table.
+#[cfg(all(
+    feature = "codec-declare",
+    feature = "storage-profile",
+    feature = "alloc"
+))]
+const SOURCED_ID_BASE: u64 = 1 << 62;
 
 impl<P: Storage> Default for PeerTokens<P> {
     fn default() -> Self {
@@ -236,6 +252,8 @@ impl<P: Storage> Default for PeerTokens<P> {
             table: DeclaredKeys::<P>::default(),
             #[cfg(feature = "storage-profile")]
             oversize: 0,
+            #[cfg(all(feature = "storage-profile", feature = "alloc"))]
+            sourced: alloc::collections::BTreeMap::new(),
             _policy: core::marker::PhantomData,
         }
     }
@@ -250,6 +268,8 @@ impl PeerTokens<Static> {
             table: FixedIdMap::new(),
             #[cfg(feature = "storage-profile")]
             oversize: 0,
+            #[cfg(all(feature = "storage-profile", feature = "alloc"))]
+            sourced: alloc::collections::BTreeMap::new(),
             _policy: core::marker::PhantomData,
         }
     }
@@ -838,6 +858,23 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         // carries only the id — would then name a keyexpr the token was
         // never declared on. Skipping the arm entirely is what keeps the
         // retraction truthful.
+        //
+        // A token declared by its keyexpr (id `0`) is not one id repeated but a token for each
+        // keyexpr: it is held under an id of its own, found again by the keyexpr.
+        #[cfg(feature = "alloc")]
+        let (id, sourced) = if id == 0 {
+            if peer.sourced.contains_key(resolved) {
+                return;
+            }
+            let next = peer
+                .sourced
+                .values()
+                .max()
+                .map_or(SOURCED_ID_BASE, |held| held + 1);
+            (next, true)
+        } else {
+            (id, false)
+        };
         if peer.table.find(id).is_some() {
             return;
         }
@@ -851,6 +888,11 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         };
         if peer.table.bind(id, text).is_err() {
             return;
+        }
+        #[cfg(feature = "alloc")]
+        if sourced {
+            peer.sourced
+                .insert(alloc::string::String::from(resolved), id);
         }
         self.fan_to_matching_slots(LivelinessSampleKind::Put, resolved, id, historical);
     }
@@ -875,6 +917,22 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         // both arms are read as a `&str` below and neither allocates
         // there.
         let mut composed = KeyexprBuf::new();
+        // A retraction by keyexpr (id `0`) names a token held under the id its declaration was
+        // given: the one the keyexpr was found under.
+        #[cfg(feature = "alloc")]
+        let id = if id == 0 {
+            let mut named = KeyexprBuf::new();
+            match crate::declare_ext_keyexpr::resolve_ext_keyexpr_in(
+                exts,
+                peer_keyexpr_table,
+                &mut named,
+            ) {
+                Ok(Some(text)) => peer.sourced.remove(text).unwrap_or(id),
+                _ => id,
+            }
+        } else {
+            id
+        };
         let removed = peer.table.unbind(id);
         let resolved: &str = match removed.as_ref() {
             Some(s) => s.as_ref(),
@@ -970,6 +1028,8 @@ impl<C: LivelinessSampleSink, P: Storage> LivelinessSubscriberTable<C, P> {
         #[cfg(feature = "storage-profile")]
         {
             let mut flushed = 0usize;
+            #[cfg(feature = "alloc")]
+            peer.sourced.clear();
             while let Some(id) = peer.table.entries().map(|(id, _)| id).min() {
                 let Some(keyexpr) = peer.table.unbind(id) else {
                     break;
@@ -2186,6 +2246,64 @@ mod tests {
         assert_eq!(captured.len(), 2, "two distinct ids are two Puts");
         assert_eq!(captured[1].1, "liveliness/second");
         assert_eq!(reg.peer_token_count(), 2);
+    }
+
+    /// Tokens a node declares by their keyexpr (the id `0` of each) are a token for each
+    /// keyexpr and not one id declared again: every one is told, and a retraction by keyexpr
+    /// retracts its own.
+    #[test]
+    fn tokens_declared_by_keyexpr_are_one_token_for_each_keyexpr() {
+        use crate::declare_build::build_undeclare_token_with_keyexpr;
+
+        let mut reg = LivelinessSubscriberRegistry::new();
+        let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        reg.register(1, "liveliness/**", false, make_subscriber(sink.clone()))
+            .unwrap();
+        for key in ["liveliness/first", "liveliness/second", "liveliness/first"] {
+            reg.dispatch_declare(
+                &DeclareOwnedVariant::CodecZenohDeclToken(decl_token(0, 0, Some(key))),
+                &HashMap::new(),
+            );
+        }
+        {
+            let captured = sink.lock().unwrap();
+            assert_eq!(
+                captured
+                    .iter()
+                    .map(|(kind, key, _)| (*kind, key.as_str()))
+                    .collect::<Vec<_>>(),
+                [
+                    (LivelinessSampleKind::Put, "liveliness/first"),
+                    (LivelinessSampleKind::Put, "liveliness/second"),
+                ],
+                "each keyexpr is told once, the repeat of the first not again"
+            );
+            assert_ne!(
+                captured[0].2, captured[1].2,
+                "each is held under an id of its own"
+            );
+        }
+        assert_eq!(reg.peer_token_count(), 2);
+        sink.lock().unwrap().clear();
+        let retract = |key: &str| {
+            build_undeclare_token_with_keyexpr(key)
+                .expect("build sourced undeclare")
+                .body
+        };
+        reg.dispatch_declare(&retract("liveliness/first"), &HashMap::new());
+        reg.dispatch_declare(&retract("liveliness/second"), &HashMap::new());
+        let captured = sink.lock().unwrap().clone();
+        assert_eq!(
+            captured
+                .iter()
+                .map(|(kind, key, _)| (*kind, key.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (LivelinessSampleKind::Delete, "liveliness/first"),
+                (LivelinessSampleKind::Delete, "liveliness/second"),
+            ]
+        );
+        assert_eq!(reg.peer_token_count(), 0);
     }
 
     /// R311y769 (`liveliness-subscriber`) — an `UndeclToken` for an id this
