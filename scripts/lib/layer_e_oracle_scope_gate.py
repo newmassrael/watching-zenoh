@@ -112,9 +112,20 @@ IGNORE_REASON = re.compile(r'#\[ignore\s*=\s*"((?:[^"\\]|\\.)*)"', re.S)
 MIN_SELECTED = 60
 
 
+def narrowed_to_one_target(invocation: str) -> bool:
+    """An invocation that names `--test <file>` before `--ignored` selects one file, not the
+    sweep. The cooperative engine's drop-in leg runs one file against another library and skips
+    what that library does not have, so its tokens are its own and grade nothing here."""
+    return re.search(r"\s--test\s", invocation.split("--ignored", 1)[0]) is not None
+
+
 def sweep_tokens(root: pathlib.Path) -> list[str]:
     text = (root / RUN_CI).read_text(errors="replace")
-    with_tokens = [m for m in SWEEP.finditer(text) if TOKEN.findall(m.group(0))]
+    with_tokens = [
+        m
+        for m in SWEEP.finditer(text)
+        if TOKEN.findall(m.group(0)) and not narrowed_to_one_target(m.group(0))
+    ]
     if len(with_tokens) != 1:
         raise SystemExit(
             "FAIL: expected exactly ONE `cargo test -p wz-integration-tests -- "
@@ -255,6 +266,24 @@ def selftest() -> int:
             failures += 1
         else:
             print("  selftest ok    the skip list is READ from run-ci.sh, not assumed")
+
+        # An invocation narrowed to ONE file is a leg of its own, not a second sweep: its
+        # tokens are not the sweep's, and it must not make the sweep ambiguous.
+        (tmp / RUN_CI).write_text(
+            SWEEP_LINE.replace(")\n}\n", ") || return 1\n")
+            + "    cargo test -p wz-integration-tests --test one_file -- --ignored \\\n"
+            "        --skip tls --skip other\n}\n",
+            encoding="utf-8")
+        try:
+            tokens = scan(tmp)[2]
+            if tokens != ["wz_e2e_", "zenoh_zget"]:
+                print("  selftest FAIL  a narrowed leg changed the sweep's tokens: %r" % tokens)
+                failures += 1
+            else:
+                print("  selftest ok    a leg narrowed to one --test is not a second sweep")
+        except SystemExit:
+            print("  selftest FAIL  a narrowed leg made the sweep ambiguous")
+            failures += 1
 
         # A sweep this gate cannot find must FAIL, never pass silently.
         (tmp / RUN_CI).write_text("layer_e() { echo nothing; }\n", encoding="utf-8")

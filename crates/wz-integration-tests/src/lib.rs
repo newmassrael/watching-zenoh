@@ -915,11 +915,23 @@ pub mod common {
     /// two implementations separable, and it is also the only shape that
     /// witnesses the real deployment: a C program picks ONE `libzenohpico`-
     /// shaped library at link time.
+    ///
+    /// The ENGINE the artifact runs its sessions on is a second axis of the same ABI
+    /// (`docs/capi-pico-on-coop-engine.md`): the default build is the tokio engine's, and
+    /// `WZ_PICO_ENGINE=coop` names the cooperative engine's, a build of its own in
+    /// [`PICO_COOP_TARGET_DIR`] because each build is `libwz_capi_pico.so` and a shared
+    /// directory would hold whichever ran last. The programs and the header arm are the same;
+    /// only the library they link differs, which is what makes one file the witness of both.
     pub fn wz_capi_pico_cdylib() -> PathBuf {
         let crates_dir = project_root().join("crates");
+        let target = match std::env::var("WZ_PICO_ENGINE").as_deref() {
+            Ok("coop") => PICO_COOP_TARGET_DIR,
+            Ok("tokio") | Err(_) => "target",
+            Ok(other) => panic!("WZ_PICO_ENGINE is `tokio` or `coop`, not `{other}`"),
+        };
         let candidates = [
-            crates_dir.join("target/debug/libwz_capi_pico.so"),
-            crates_dir.join("target/release/libwz_capi_pico.so"),
+            crates_dir.join(target).join("debug/libwz_capi_pico.so"),
+            crates_dir.join(target).join("release/libwz_capi_pico.so"),
         ];
         for c in &candidates {
             if c.is_file() {
@@ -928,10 +940,14 @@ pub mod common {
             }
         }
         panic!(
-            "libwz_capi_pico.so not found in {candidates:?}; \
-             run `cargo build -p wz-capi-pico` first"
+            "libwz_capi_pico.so not found in {candidates:?}; run `cargo build -p wz-capi-pico` \
+             (for `WZ_PICO_ENGINE=coop`, with the features of Layer E's cooperative leg and \
+             `--target-dir {PICO_COOP_TARGET_DIR}`) first"
         );
     }
+
+    /// The target directory, under `crates/`, the cooperative engine's `wz-capi-pico` lands in.
+    pub const PICO_COOP_TARGET_DIR: &str = "target/wz-capi-pico-coop";
 
     /// One of the zenoh-pico header arms `scripts/build-zenoh-pico-cli.sh`
     /// configures, and the wz build a program compiled against it links. The pair

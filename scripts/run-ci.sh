@@ -16997,7 +16997,28 @@ layer_e_ap_demo_round_trip() {
         --skip wz_storage_host --skip zenoh_ext --skip inert --skip apfull \
         --skip wz_plugin --skip capi_c --skip analyzer --skip zenoh_zget \
         --skip fs_shared_dir --skip sce_b6 --skip from_a_config_file --skip held_listener \
-        --skip wz_dialer)
+        --skip wz_dialer) || return 1
+    # The same upstream C programs against the cooperative engine's library
+    # (`docs/capi-pico-on-coop-engine.md`, the open item of step L4): one file, linked to a
+    # build of wz-capi-pico of its own whose features are the reference arm's but for the
+    # engine, so the programs, their headers and the foreign peers are the ones above and only
+    # the library under them changes. `WZ_PICO_ENGINE=coop` names that library.
+    #   * `tls` -- the cooperative engine has no `tls/` link (a link only the tokio engine has
+    #     selects it by its own feature), so the two TLS programs are the tokio engine's.
+    #   * `zenohd` -- the sweep above skips them for the reason it states: this job builds no
+    #     zenohd.
+    #   * `zpubst`, `zsubst`, `upstream_default_arm`, `header_arms` -- the programs of the other
+    #     header arms link those arms' builds, which are the tokio engine's; the cooperative
+    #     engine's own arms are not built, and `header_arms` walks all of them.
+    # The count is exact, so a test that stops being selected is a failure and not a smaller pass.
+    (cd crates && cargo build -p wz-capi-pico --no-default-features \
+        --features engine-coop,link-udp,peer,scout,query,queryable,liveliness,liveliness-get,advanced,multi-thread,unstable-api,connectivity \
+        --target-dir target/wz-capi-pico-coop --quiet) || return 1
+    _runci_guarded_test "E pico drop-in programs on the cooperative engine" 27 \
+        env WZ_PICO_ENGINE=coop \
+        cargo test -p wz-integration-tests --test pico_c_examples_on_wz_capi_dropin -- --ignored \
+        --skip tls --skip zenohd --skip zpubst --skip zsubst --skip upstream_default_arm \
+        --skip header_arms || return 1
 }
 
 # ─── Layer E2 — facade-subset behavioural e2e vs zenoh-pico ──────────
