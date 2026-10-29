@@ -795,6 +795,10 @@ transport-compression = ["wz-session-core/transport-compression"]
 # TransportStats struct live); the AP `OpenedSession::stats()` accessor reads
 # the snapshot. Zero extra deps. Off by default; adminspace consumer is P4.
 transport-stats = ["wz-session-core/transport-stats"]
+# `resource-snapshot` (docs/observation-plane.md M4) — the session spaces the transport messages it
+# receives; `OpenedSession::message_reading()` reads the count. Forwards the wz-session-core
+# feature, where the meter and the seam that feeds it live. Zero extra deps.
+resource-snapshot = ["wz-session-core/resource-snapshot"]
 session-extcompression = ["wz-session-core/session-extcompression"]
 
 # transport-shm — the scoped same-host SHM data path: forwards the session-core

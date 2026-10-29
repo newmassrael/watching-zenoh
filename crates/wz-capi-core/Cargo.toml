@@ -366,6 +366,10 @@ event-ring = ["unstable-api", "wz-runtime-tokio/event-ring"]
 # and its machine are in `wz-session-core`, which the model has either way. A feature here because
 # every capability is one of the core's.
 supervision = ["unstable-api"]
+# The node's resource snapshot (`deploy/wz-config.toml`, off by default: wz's own doors). The
+# snapshot and its sampler are in `wz-session-core`; the feature there adds the session's message
+# meter and the call that feeds it, so the model needs it forwarded.
+resource-snapshot = ["unstable-api", "wz-session-core/resource-snapshot"]
 local-subscriber = []
 local-queryable = []
 

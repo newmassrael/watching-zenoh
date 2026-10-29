@@ -4187,6 +4187,19 @@ impl OpenedSession {
         self.actions.stats_report()
     }
 
+    /// `resource-snapshot` — what this session's receive path has counted: the
+    /// transport messages and the spacing of the ones that made an interval.
+    /// Delegates to
+    /// [`SessionLinkActions::message_reading`](wz_session_core::session_actions::SessionLinkActions::message_reading).
+    #[cfg(feature = "resource-snapshot")]
+    pub fn message_reading(
+        &self,
+    ) -> wz_session_core::resource_snapshot::MessageReading<
+        { wz_session_core::caps::SNAPSHOT_HISTOGRAM_BUCKETS },
+    > {
+        self.actions.message_reading()
+    }
+
     /// R2825 — a copy of this session's stats-registry partition: the
     /// labelled families a node's metrics document is written from. Delegates
     /// to

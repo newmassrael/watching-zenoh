@@ -403,6 +403,11 @@ impl TimeSource for TokioTime {
         self.epoch.elapsed().as_millis() as u64
     }
 
+    fn now_monotonic_us(&self) -> u64 {
+        // The same truncation as the millisecond reading, and the same epoch.
+        self.epoch.elapsed().as_micros() as u64
+    }
+
     fn sleep(&self, ms: u64) -> impl Future<Output = ()> + Send + '_ {
         // `tokio::time::sleep` returns a `'static` Sleep future
         // (no borrow from `self`), so the RPITIT bound `+ '_`
@@ -818,6 +823,24 @@ mod tests {
         assert!(
             t1 >= t0,
             "monotonic clock must not run backwards (t0={t0}, t1={t1})"
+        );
+    }
+
+    #[tokio::test]
+    async fn tokio_time_now_monotonic_us_has_the_epoch_of_the_millisecond_reading() {
+        let clock = TokioTime::new();
+        clock.sleep(5).await;
+        let ms = clock.now_monotonic_ms();
+        let us = clock.now_monotonic_us();
+        // The millisecond reading was taken first, so the microsecond one is at least it; it is
+        // finer, so it is not a multiple of 1000 except by chance, which a bound cannot test.
+        assert!(
+            us >= ms * 1000,
+            "the microsecond reading is on the millisecond epoch (ms={ms}, us={us})"
+        );
+        assert!(
+            us < (ms + 1000) * 1000,
+            "and not a second ahead of it (ms={ms}, us={us})"
         );
     }
 

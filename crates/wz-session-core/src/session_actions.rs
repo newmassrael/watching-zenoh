@@ -1200,6 +1200,15 @@ impl TxLimitsCache {
 /// footprint-identical (the split adds two refcounted allocations per session —
 /// a known MCU zero-cost debt, faithfulness-over-cost).
 pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
+    /// `resource-snapshot` — the spacing of the transport messages this session
+    /// receives (`docs/observation-plane.md` M4). Per session, not per process:
+    /// every reading is taken on this session's own clock, so the readings share
+    /// one epoch, which readings of two sessions' clocks do not. Fed at the
+    /// receive path's one counting seam, [`crate::drive`]'s
+    /// `note_rx_transport_message`, whether or not `transport-stats` is on.
+    #[cfg(feature = "resource-snapshot")]
+    pub rx_intervals:
+        crate::interval_meter::IntervalMeter<{ crate::caps::SNAPSHOT_HISTOGRAM_BUCKETS }>,
     /// R311y9 — per-session wire byte/message counters (`transport-stats`).
     /// Interior-mutable atomics, incremented at the `Self::send_wire` (TX)
     /// and [`crate::drive::dispatch_link_event`] (RX) seams; read via
@@ -3327,6 +3336,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 ),
             }),
             core: Self::hold_core(SessionCore {
+                #[cfg(feature = "resource-snapshot")]
+                rx_intervals: crate::interval_meter::IntervalMeter::new(),
                 #[cfg(feature = "transport-stats")]
                 stats: crate::stats::TransportStats::default(),
                 #[cfg(feature = "transport-stats")]
@@ -3625,6 +3636,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             }
         }
         alloc::vec![render(self.link_driver())]
+    }
+
+    /// `resource-snapshot` — what this session's receive path has counted: the
+    /// messages and the spacing of the ones that made an interval. Cumulative, so
+    /// a reader takes a window by subtracting two readings.
+    #[cfg(feature = "resource-snapshot")]
+    pub fn message_reading(
+        &self,
+    ) -> crate::resource_snapshot::MessageReading<{ crate::caps::SNAPSHOT_HISTOGRAM_BUCKETS }> {
+        self.rx_intervals.reading()
     }
 
     /// R311y9 — public snapshot of this session's transport byte/message

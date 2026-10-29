@@ -539,6 +539,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         query-value,\
         reassembly,\
         reply-source-info,\
+        resource-snapshot,\
         routing-namespace,\
         rx-shared-bytes,\
         scouting-active,\
@@ -1058,6 +1059,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         pubsub-ts-stack,\
         reassembly,\
         reply-source-info,\
+        resource-snapshot,\
         router-connect-reconcile,\
         router-multicast-faces,\
         routing-accept,\

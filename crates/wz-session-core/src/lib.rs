@@ -29,6 +29,18 @@ compile_error!(
      such channel yet."
 );
 
+// `resource-snapshot` spaces the received messages with `interval_meter`, whose counts are 64-bit
+// atomics: a target with none needs the `no_std` feature to bring `portable-atomic`. Refused here,
+// naming the cause, rather than as a missing module in `session_actions`.
+#[cfg(all(
+    feature = "resource-snapshot",
+    not(any(target_has_atomic = "64", feature = "no_std"))
+))]
+compile_error!(
+    "wz-session-core: `resource-snapshot` counts message intervals in 64-bit atomics. This \
+     target has none, so enable `no_std` as well, which brings `portable-atomic`."
+);
+
 // The `alloc` crate is linked by the heap profile (`alloc`) and by nothing else. The
 // per-session slot profile (`session-slot` without `alloc`) compiles the session
 // machinery against fixed storage and links NO allocator: a `Vec`, a `String` or a
@@ -389,7 +401,7 @@ pub mod wrapping_ticks;
 pub mod resource_snapshot;
 
 // The message counter of a receive path that runs on several threads: the same rules as
-// `resource_snapshot::MessageStats`, in atomics. Its latest-message word and its mean are 64 bits,
+// `resource_snapshot::MessageStats`, in atomics. Its counts and its latest-message word are 64 bits,
 // so it exists where the target has a 64-bit atomic or the `no_std` feature brings
 // `portable-atomic` to provide one, as `hlc` does. Documented in its own `//!`.
 #[cfg(any(target_has_atomic = "64", feature = "no_std"))]

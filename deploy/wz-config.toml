@@ -926,6 +926,21 @@ abis = ["core", "pico"]
 implies = ["unstable-api"]
 help = "Supervise checkpoints an application feeds, and run a hook once when one misses its deadline."
 
+# The node's resource snapshot (docs/observation-plane.md M4): a fixed-layout, versioned record of
+# CPU use, memory, tasks and the spacing of the messages the session receives, taken on a period
+# and read as bytes. wz's own doors, with no counterpart in an upstream library, so off in every
+# original and part of the unstable surface. How often is the `SNAPSHOT_PERIOD_MS` limit, and how
+# fine the message-interval histogram is the `SNAPSHOT_HISTOGRAM_BUCKETS` limit.
+[[capability]]
+id = "resource-snapshot"
+kconfig = "WZ_CAP_RESOURCE_SNAPSHOT"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+default = "off"
+abis = ["core", "pico"]
+implies = ["unstable-api"]
+help = "Take a snapshot of the node's resources and the spacing of the messages it receives."
+
 [[capability]]
 id = "group"
 kconfig = "WZ_CAP_GROUP"

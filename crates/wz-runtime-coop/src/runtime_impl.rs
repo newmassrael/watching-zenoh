@@ -784,6 +784,26 @@ mod tests {
     }
 
     #[test]
+    fn time_now_monotonic_us_is_the_clocks_own_resolution_on_the_same_epoch() {
+        let clock = TestClock::new();
+        clock.tick_us(40_000);
+        let rt = CoopRuntime::new(clock.clone());
+        let time = CoopTime::new(&rt);
+        assert_eq!(time.now_monotonic_us(), 0, "the epoch is the construction");
+        clock.tick_us(2_537);
+        assert_eq!(
+            time.now_monotonic_us(),
+            2_537,
+            "not rounded to a millisecond"
+        );
+        assert_eq!(
+            time.now_monotonic_ms(),
+            time.now_monotonic_us() / 1000,
+            "the two readings share one epoch"
+        );
+    }
+
+    #[test]
     fn sleep_completes_when_clock_advances_past_deadline() {
         // R311bc: SleepFuture registers its waker on the timer
         // queue on first Pending poll. The driver task ticks the

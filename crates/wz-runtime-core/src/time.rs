@@ -75,6 +75,21 @@ pub trait TimeSource: Send + Sync + 'static {
     /// different epochs.
     fn now_monotonic_ms(&self) -> u64;
 
+    /// Monotonic time in microseconds, on the same epoch as
+    /// [`now_monotonic_ms`](Self::now_monotonic_ms) and with the same
+    /// monotonicity guarantee.
+    ///
+    /// For the call sites that measure the spacing of events too close for the
+    /// millisecond grid (the message-interval statistic of the resource
+    /// snapshot, `docs/observation-plane.md` M4). The default is the
+    /// millisecond reading scaled, so an implementation with a finer clock
+    /// overrides it and one without gets a correct reading at millisecond
+    /// resolution: a reader of an interval from a default implementation sees
+    /// only whole milliseconds, never a wrong number.
+    fn now_monotonic_us(&self) -> u64 {
+        self.now_monotonic_ms().saturating_mul(1000)
+    }
+
     /// Sleep for `ms` milliseconds asynchronously. The returned
     /// future is owned (`'static`) so it can be moved into a task
     /// spawned via [`crate::Runtime::spawn`]. A `ms = 0` sleep is

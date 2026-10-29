@@ -135,6 +135,11 @@ impl<C: ClockSource> TimeSource for CoopTime<C> {
         self.inner.clock.now_us().saturating_sub(self.epoch_us) / 1000
     }
 
+    fn now_monotonic_us(&self) -> u64 {
+        // The clock's own resolution, on the epoch the millisecond reading uses.
+        self.inner.clock.now_us().saturating_sub(self.epoch_us)
+    }
+
     fn sleep(&self, ms: u64) -> impl Future<Output = ()> + Send + '_ {
         SleepFuture {
             deadline_us: self

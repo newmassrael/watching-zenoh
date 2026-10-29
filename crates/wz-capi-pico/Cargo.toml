@@ -221,6 +221,15 @@ supervision = [
     "wz-session-core/supervision",
     "wz-capi-core?/supervision",
 ]
+# `resource-snapshot`: the node's resource snapshot and the doors that read it
+# (`wz_ext_snapshot_*`). wz's own, which zenoh-pico has not, so off as the reference build is, and
+# part of the unstable surface: it implies `unstable-api`. The record, the sampler and the message
+# meter are `wz-session-core`'s.
+resource-snapshot = [
+    "unstable-api",
+    "wz-session-core/resource-snapshot",
+    "wz-capi-core?/resource-snapshot",
+]
 # `admin-space` (`Z_FEATURE_ADMIN_SPACE`, off as upstream's is): `zp_start_admin_space` /
 # `zp_stop_admin_space`, the queryable that answers pico's `@/<zid>/pico/**` documents, and the
 # `auto_start_admin_space` flag of the open options. Upstream refuses the switch without

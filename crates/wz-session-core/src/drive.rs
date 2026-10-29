@@ -139,14 +139,25 @@ fn count_rx_network_messages<R: SessionRuntime, T: TimeSource>(
 /// the receiving link's registry cell: one per message decoded out of a unit,
 /// as upstream's batch walk counts
 /// (`io/zenoh-transport/src/unicast/universal/rx.rs` @ `stats.inc_transport_message(zenoh_stats::Rx, 1);`).
-#[cfg(feature = "transport-stats")]
-fn count_rx_transport_message<R: SessionRuntime, T: TimeSource>(
-    actions: &SessionLinkActions<R, T>,
-) {
-    actions.stats.inc_rx_transport_message();
-    actions.record_on_link(&actions.link, |metrics, slot| {
-        metrics.inc_transport_message(crate::stats_registry::StatsDirection::Rx, slot, 1)
-    });
+///
+/// `resource-snapshot` — the same message is spaced from the one before it on the
+/// session's own clock (`docs/observation-plane.md` M4), so the two instruments
+/// count the same messages from one seam and cannot disagree about which they are.
+/// Either feature alone puts the seam in the build; with both off it is absent.
+#[cfg(any(feature = "transport-stats", feature = "resource-snapshot"))]
+fn note_rx_transport_message<R: SessionRuntime, T: TimeSource>(actions: &SessionLinkActions<R, T>) {
+    #[cfg(feature = "transport-stats")]
+    {
+        actions.stats.inc_rx_transport_message();
+        actions.record_on_link(&actions.link, |metrics, slot| {
+            metrics.inc_transport_message(crate::stats_registry::StatsDirection::Rx, slot, 1)
+        });
+    }
+    // The low 32 bits of the microsecond clock: the meter reads spans modulo 2^32.
+    #[cfg(feature = "resource-snapshot")]
+    actions
+        .rx_intervals
+        .observe(actions.clock.now_monotonic_us() as u32);
 }
 
 /// The link under a session is gone (`cause` says how): the FSM is told, and
@@ -408,8 +419,8 @@ fn dispatch_lean_unit<R: SessionRuntime, T: TimeSource>(
                 Ok(messages) => {
                     // R2825 — a lean datagram is ONE transport message whatever
                     // it carries, which is how upstream's lowlatency rx counts it.
-                    #[cfg(feature = "transport-stats")]
-                    count_rx_transport_message(actions);
+                    #[cfg(any(feature = "transport-stats", feature = "resource-snapshot"))]
+                    note_rx_transport_message(actions);
                     DriverLoopOutcome::FramePayload {
                         reliable: true,
                         sn: 0,
@@ -466,8 +477,8 @@ fn decode_unit_in<R: SessionRuntime, T: TimeSource>(
     let parsed = actions.handle_inbound_consuming_into(bytes, frame);
     if let Ok(consumed) = &parsed {
         // R2825 — one transport message decoded off the front of the unit.
-        #[cfg(feature = "transport-stats")]
-        count_rx_transport_message(actions);
+        #[cfg(any(feature = "transport-stats", feature = "resource-snapshot"))]
+        note_rx_transport_message(actions);
         if *consumed > 0 && *consumed < bytes.len() {
             #[cfg(feature = "alloc")]
             {
@@ -1738,8 +1749,8 @@ fn account_unit_in_place<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
 ) {
     account_bytes_in_place(unit, actions);
-    #[cfg(feature = "transport-stats")]
-    count_rx_transport_message(actions);
+    #[cfg(any(feature = "transport-stats", feature = "resource-snapshot"))]
+    note_rx_transport_message(actions);
 }
 
 /// The accounting `dispatch_link_event` does for a unit's bytes, the on-the-wire
@@ -1803,9 +1814,9 @@ fn lean_in_place<R: SessionRuntime, T: TimeSource>(
     match walked {
         // R2825 — a lean datagram is ONE transport message whatever it
         // carries, which is how upstream's lowlatency rx counts it.
-        #[cfg(feature = "transport-stats")]
-        Ok(()) => count_rx_transport_message(actions),
-        #[cfg(not(feature = "transport-stats"))]
+        #[cfg(any(feature = "transport-stats", feature = "resource-snapshot"))]
+        Ok(()) => note_rx_transport_message(actions),
+        #[cfg(not(any(feature = "transport-stats", feature = "resource-snapshot")))]
         Ok(()) => {}
         Err(parse_err) => {
             engine.process_event(E::FramingError);

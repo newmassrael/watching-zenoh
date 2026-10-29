@@ -93,6 +93,7 @@
   <sce:feature name="query-value"/>
   <sce:feature name="reassembly" requires="codec-frame"/>
   <sce:feature name="reply-source-info"/>
+  <sce:feature name="resource-snapshot"/>
   <sce:feature name="routing-namespace" requires="alloc keyexpr-prefix"/>
   <sce:feature name="rx-shared-bytes" requires="alloc"/>
   <sce:feature name="scouting-active"/>

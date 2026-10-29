@@ -674,6 +674,12 @@ clock-source = ["clock-quality"]
 # the SCE runtime and nothing else.
 supervision = ["dep:sce-rust-runtime"]
 
+# resource-snapshot (docs/observation-plane.md M4) — the session counts the spacing of the transport
+# messages it receives (`SessionCore::rx_intervals`, `message_reading`), fed at the receive path's
+# one counting seam on the session's microsecond clock. The snapshot, its sampler and the meter are
+# in the crate whatever this says; the feature adds the session's meter and the call that feeds it.
+resource-snapshot = []
+
 # session-close-ingress — a rail message can close a RUNNING session. The
 # ingress (a keyexpr matcher) and the session FSM engine live in two different
 # ownership domains and never meet: the matcher runs under the observer lock on
