@@ -268,6 +268,8 @@ pub(crate) fn open_router_blocking(
         auth,
         #[cfg(feature = "routing-namespace")]
         namespace,
+        #[cfg(feature = "gossip")]
+        gossip,
         ..
     } = stance;
     // The prefix as the forwarder takes it. The plan validated the text, so one that does not
@@ -304,6 +306,12 @@ pub(crate) fn open_router_blocking(
         Some(prefix) => forwarder.with_local_namespace(prefix),
         None => forwarder,
     };
+    // Whether the graphs the router floods carry the nodes past the next hop
+    // (`scouting/gossip/multihop`), so that a peer hears of the peers two links away.
+    #[cfg(feature = "gossip")]
+    if let Some(gossip) = gossip {
+        forwarder.set_gossip_multihop(gossip.multihop);
+    }
     let forwarder = Arc::new(forwarder);
     policy.install_on(&*forwarder);
     // The authentication the config states, asked of the sessions the node accepts and offered to
