@@ -2499,7 +2499,7 @@ fn scan_subscribers<C: SampleSink, P: Storage>(
 /// of it beside its payload: the timestamp and the encoding of the body, its attachment and
 /// source, the QoS of the push, and the timestamp stack the nodes it crossed recorded on it.
 ///
-/// What [`SubscriberTable::dispatch_push`] projects, for a reader that holds no table of
+/// What `SubscriberTable::dispatch_push` projects, for a reader that holds no table of
 /// subscribers and resolves no key: the key is the one the reader names, and the payload is
 /// copied out of the message. A Put whose payload names a segment of shared memory is `None`,
 /// since there is no reader to resolve it. `routed` says whether the message came from a face.
@@ -2536,6 +2536,9 @@ pub fn sample_of_push(
         &wz_codecs::msg_put::MsgPutOwned<crate::wire::WireStorage>,
     ) -> Option<crate::link::RxBytes>,
 ) -> Option<Sample> {
+    // Only a Put has a payload to read; a build with the delete alone never calls it.
+    #[cfg(not(feature = "pubsub-put"))]
+    let _ = payload_of;
     let (mut sample, timestamp, encoding, attachment, source_info) = match &push.body {
         #[cfg(feature = "pubsub-put")]
         PushOwnedVariant::CodecZenohMsgPut(put) => {

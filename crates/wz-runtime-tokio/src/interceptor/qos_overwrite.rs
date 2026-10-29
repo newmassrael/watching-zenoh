@@ -214,7 +214,7 @@ pub struct QosOverwriteRule {
     /// What the rule sets.
     pub overwrite: QosOverwrites,
     /// The flows the rule applies on. The document leaves it out to mean both, and the compile
-    /// ([`super::document`]) writes both here, so this is always explicit.
+    /// (`super::document`, under `zenoh-config`) writes both here, so this is always explicit.
     pub flows: Vec<InterceptorFlow>,
     /// The QoS a message must carry to be selected.
     pub filter: QosFilter,

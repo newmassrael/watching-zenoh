@@ -165,7 +165,6 @@ wz-runtime-tokio	wz-runtime-tokio/src/group.rs	1	error[E0432]: unresolved import
 wz-runtime-tokio	wz-runtime-tokio/src/interceptor/document.rs	1	error: unresolved link to `crate::interceptor::downsampling::DownsamplingRule`: no item named `downsampling` in module `interceptor`
 wz-runtime-tokio	wz-runtime-tokio/src/interceptor/document.rs	1	error: unresolved link to `crate::interceptor::low_pass::LowPassRule`: no item named `low_pass` in module `interceptor`
 wz-runtime-tokio	wz-runtime-tokio/src/interceptor/mod.rs	1	error: unresolved link to `AclFlow`: no item named `AclFlow` in scope
-wz-runtime-tokio	wz-runtime-tokio/src/interceptor/mod.rs	2	error: unresolved link to `Self::with_acl`: the struct `InterceptorConfig` has no field or associated item named `with_acl`
 wz-runtime-tokio	wz-runtime-tokio/src/interceptor/mod.rs	2	error: unresolved link to `access_control`: no item named `access_control` in scope
 wz-runtime-tokio	wz-runtime-tokio/src/interceptor/mod.rs	1	error: unresolved link to `wz_access_control`: no item named `wz_access_control` in scope
 wz-runtime-tokio	wz-runtime-tokio/src/lib.rs	2	error: unresolved link to `admin_write_permit`: no item named `admin_write_permit` in scope

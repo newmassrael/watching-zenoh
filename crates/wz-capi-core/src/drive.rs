@@ -3884,6 +3884,8 @@ async fn serve_group<D, B, Fut>(
             scope_members: true,
             #[cfg(feature = "resource-snapshot")]
             messages: Some(messages.as_ref()),
+            #[cfg(not(feature = "resource-snapshot"))]
+            messages: None,
         },
         bind,
         GroupFaceSeams {

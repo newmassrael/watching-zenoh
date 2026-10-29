@@ -479,7 +479,7 @@ impl QuicDialConfig {
     }
 
     /// [`Self::from_ca_pem`] with the optional mutual-TLS client certificate and the policy for
-    /// the server's name: the QUIC sibling of [`TlsDialConfig::from_pem`], so a `quic/` dial takes
+    /// the server's name: the QUIC sibling of `TlsDialConfig::from_pem`, so a `quic/` dial takes
     /// `connect_certificate`, `connect_private_key` and `verify_name_on_connect` as a `tls/` one
     /// does.
     pub fn from_pem(
@@ -652,7 +652,7 @@ impl QuicAcceptConfig {
 
     /// [`Self::from_cert_key_pem`] that asks the dialer for a certificate when `client_ca_pem` is
     /// given: the acceptor then requires one and verifies it against that bundle
-    /// (`transport/link/tls/enable_mtls`), the QUIC twin of [`TlsAcceptConfig::from_pem`].
+    /// (`transport/link/tls/enable_mtls`), the QUIC twin of `TlsAcceptConfig::from_pem`.
     pub fn from_pem(
         cert_chain_pem: &[u8],
         private_key_pem: &[u8],

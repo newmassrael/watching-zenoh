@@ -9192,6 +9192,18 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         if self.tables.local_subscribers.is_empty() {
             return;
         }
+        // A build that reads neither a Put nor a Del makes no sample of a push
+        // (`wz_session_core::pubsub::sample_of_push`), so its hosted subscribers are handed none.
+        #[cfg(not(any(feature = "pubsub-put", feature = "pubsub-delete")))]
+        let _ = (reliable, push, keyexpr);
+        #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
+        self.deliver_push_to_hosted(reliable, push, keyexpr);
+    }
+
+    /// The delivery half of [`dispatch_local_subscribers`](Self::dispatch_local_subscribers): the
+    /// sample of `push` to each hosted subscriber that matches `keyexpr`.
+    #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
+    fn deliver_push_to_hosted(&self, reliable: bool, push: &PushOwned, keyexpr: &str) {
         // The body a host subscriber sees — Put payload raw, Del as the Del kind
         // with an empty payload, moved with the peer twin in R2646 and for the
         // same reason (`linkstate_forward.rs` @ `R2646 — THE DEL ARM`, which
@@ -9272,6 +9284,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// travel in the message, and when they name a chunk of shared memory the buffer the program
     /// that holds the node reads it as, taken with a reference of its own from the chunk the pass
     /// of this message holds. `None` when the payload names a chunk that nothing here reads.
+    #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
     fn payload_for_session(
         &self,
         put: &wz_codecs::msg_put::MsgPutOwned<wz_session_core::wire::WireStorage>,
@@ -9457,10 +9470,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         payload: &[u8],
         options: &PublishOptions,
     ) -> Result<(), CodecError> {
+        #[cfg(feature = "pubsub-delete")]
         use wz_session_core::push_build::{
-            build_push_del_literal, build_push_del_literal_with_meta, build_push_literal,
-            build_push_literal_with_meta,
+            build_push_del_literal, build_push_del_literal_with_meta,
         };
+        use wz_session_core::push_build::{build_push_literal, build_push_literal_with_meta};
         let wire = self.fwd.wire_key(keyexpr);
         let meta = options.push_metadata();
         let push = match options.kind {

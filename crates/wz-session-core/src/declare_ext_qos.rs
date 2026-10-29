@@ -303,7 +303,7 @@ pub fn set_push_qos(push: &mut crate::wire::PushOwned, qos: QosLevel) {
     set_qos_chain(&mut push.extensions, &mut push.header, qos);
 }
 
-/// Set a `Request`'s `ext_qos` in place, as [`set_push_qos`] does a `Push`'s.
+/// Set a `Request`'s `ext_qos` in place, as `set_push_qos` does a `Push`'s.
 #[cfg(all(feature = "alloc", feature = "codec-request"))]
 pub fn set_request_qos(request: &mut crate::wire::RequestOwned, qos: QosLevel) {
     set_qos_chain(&mut request.extensions, &mut request.header, qos);

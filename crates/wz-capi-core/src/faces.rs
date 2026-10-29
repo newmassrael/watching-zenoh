@@ -304,8 +304,13 @@ trait LegBytes {
     )]
     fn leg_bytes(&self) -> &[u8];
 
-    /// The chunk of shared memory the bytes lie in, if they do.
+    /// The chunk of shared memory the bytes lie in, if they do. Read by the group leg alone, as
+    /// [`LegBytes::leg_bytes`] is.
     #[cfg(feature = "transport-shm")]
+    #[cfg_attr(
+        not(feature = "multicast-transport"),
+        expect(dead_code, reason = "only a group leg sends the chunk of a payload")
+    )]
     fn shm_chunk(&self) -> Option<&dyn wz_runtime_tokio::shm_provider::ShmPublishable> {
         None
     }
@@ -3611,7 +3616,7 @@ impl SharedSession {
     }
 
     /// `resource-snapshot` — what the receive paths of the unicast faces have counted, those that
-    /// are up and those that have gone ([`Inner::receive_ledger`]), as one reading that only
+    /// are up and those that have gone (`Inner::receive_ledger`), as one reading that only
     /// grows. Taken under the registry lock, which is what keeps a face that goes down in the
     /// middle from being counted twice or not at all; the readings themselves are atomic loads.
     /// The groups the session has joined are in it too, each as the one meter of its face, which

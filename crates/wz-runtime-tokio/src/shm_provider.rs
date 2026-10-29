@@ -952,7 +952,7 @@ impl ShmReservation for WireReference<'_> {
 ///
 /// The two things a session publishes this way are the chunk of the engine's own provider
 /// ([`ShmBackedPayload`]) and a buffer some other owner of a segment holds
-/// ([`ShmSendHandle`]), which is how the Rust API publishes a `ZShm`. One set of legs serves both,
+/// (`wz_session_core::extshm::ShmSendHandle`), which is how the Rust API publishes a `ZShm`. One set of legs serves both,
 /// and neither knows how the other counts its references.
 pub trait ShmPublishable {
     /// The shared-memory protocol the chunk belongs to; see [`ShmSendBuffer::protocol`].

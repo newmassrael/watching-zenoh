@@ -1602,8 +1602,6 @@ where
     // R2333 — the stop channel. `false` is the resting value; the loop watches for
     // a CHANGE, so the initial value is never mistaken for a stop.
     let (signal, mut shutdown) = tokio::sync::watch::channel(false);
-    #[cfg(not(feature = "resource-snapshot"))]
-    let NoMessages = messages;
     let task = pool.spawn(async move {
         serve_group_face(
             GroupFaceSpec {
@@ -1614,7 +1612,6 @@ where
                 membership: membership.as_ref(),
                 // A node's group face hands what its members declare on to its router.
                 scope_members: false,
-                #[cfg(feature = "resource-snapshot")]
                 messages: messages.as_deref(),
             },
             || bind(&opts),
@@ -1633,18 +1630,10 @@ where
 }
 
 /// What a host hands a group face for counting the messages it delivers: the host's meter, shared
-/// with the face's task, under `resource-snapshot`; nothing without it, so a call names the
+/// with the face's task, under `resource-snapshot`; `None` without it, so a call names the
 /// argument in every build and one `cfg` stays out of the argument list.
-#[cfg(feature = "resource-snapshot")]
+#[cfg(all(feature = "transport-multicast", feature = "transport-link-udp"))]
 type GroupMessages = Option<std::sync::Arc<wz_session_core::interval_meter::BuildIntervalMeter>>;
-#[cfg(not(feature = "resource-snapshot"))]
-type GroupMessages = NoMessages;
-
-/// What a group face is handed to count with in a build without `resource-snapshot`: nothing, as a
-/// type of its own, so the argument is not a unit value.
-#[cfg(not(feature = "resource-snapshot"))]
-#[derive(Default)]
-struct NoMessages;
 
 /// What a group face is, apart from its link and the seams its loop calls: how it
 /// names itself, the profile its beacon advertises, the cadence of its loop, and
@@ -1672,8 +1661,10 @@ pub struct GroupFaceSpec<'a> {
     /// `resource-snapshot` — the meter that spaces the transport messages the group delivers,
     /// held by the host that holds the face: the same meter across the re-joins of one face,
     /// which the host reads for the node's snapshot and retires when it leaves the group
-    /// ([`wz_session_core::resource_snapshot::ReceiveLedger`]). `None` counts nothing.
-    #[cfg(feature = "resource-snapshot")]
+    /// ([`wz_session_core::resource_snapshot::ReceiveLedger`]). `None` counts nothing, and a build
+    /// without `resource-snapshot` counts nothing whatever it is handed. The field is in every
+    /// build so a crate whose own `resource-snapshot` is off still names it when another crate of
+    /// the graph turned this crate's on.
     pub messages: Option<&'a wz_session_core::interval_meter::BuildIntervalMeter>,
 }
 
@@ -1738,9 +1729,10 @@ where
         node_stats,
         membership,
         scope_members,
-        #[cfg(feature = "resource-snapshot")]
         messages,
     } = spec;
+    #[cfg(not(feature = "resource-snapshot"))]
+    let _ = messages;
     let GroupFaceSeams {
         mut on_event,
         mut on_members,
@@ -2468,7 +2460,7 @@ pub fn spawn_router_mcast_group(
     #[cfg(feature = "resource-snapshot")]
     let messages_for_face: GroupMessages = Some(std::sync::Arc::clone(&messages));
     #[cfg(not(feature = "resource-snapshot"))]
-    let messages_for_face: GroupMessages = NoMessages;
+    let messages_for_face: GroupMessages = None;
     let stop = spawn_group_face(
         WzRuntime::Rx.handle(),
         "router multicast group",

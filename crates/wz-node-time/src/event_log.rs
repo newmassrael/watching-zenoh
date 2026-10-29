@@ -27,7 +27,8 @@ use crate::node_clock::NodeHlc;
 /// What the library itself writes into the log, as opposed to the program.
 ///
 /// A program numbers its own sources and its own levels. The library's events are told apart by a
-/// source from [`LIBRARY_SOURCE_BASE`] up and by [`LIBRARY_LEVEL`], so a program keeps its own
+/// source from [`LIBRARY_SOURCE_BASE`](library::LIBRARY_SOURCE_BASE) up and by
+/// [`LIBRARY_LEVEL`](library::LIBRARY_LEVEL), so a program keeps its own
 /// numbers below the base, and a reader that filters by level keeps level 255 when it wants to
 /// see what the node says about itself. Each source below is a constant of the reader's format:
 /// what its integers mean is written beside it, and a source is assigned once and never reused.

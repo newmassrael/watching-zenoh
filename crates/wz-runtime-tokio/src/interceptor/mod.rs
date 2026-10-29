@@ -759,7 +759,7 @@ impl InterceptorConfig {
     }
 
     /// Set whether the pipeline also governs multicast sessions, returning `self` for chaining.
-    /// See [`with_acl`](Self::with_acl) for why this is a builder.
+    /// See `with_acl` for why this is a builder.
     #[cfg(feature = "access-acl-multicast")]
     #[must_use]
     pub fn with_govern_multicast(mut self, govern: bool) -> Self {
@@ -786,7 +786,7 @@ impl InterceptorConfig {
     }
 
     /// Set the downsampling (rate-limit) rules, returning `self` for chaining.
-    /// See [`with_acl`](Self::with_acl) for why these are builders.
+    /// See `with_acl` for why these are builders.
     #[cfg(feature = "access-downsampling")]
     #[must_use]
     pub fn with_downsampling(mut self, rules: Vec<DownsamplingRule>) -> Self {
@@ -795,7 +795,7 @@ impl InterceptorConfig {
     }
 
     /// Set the low-pass (per-key size cap) rules, returning `self` for chaining.
-    /// See [`with_acl`](Self::with_acl) for why these are builders.
+    /// See `with_acl` for why these are builders.
     #[cfg(feature = "access-quota")]
     #[must_use]
     pub fn with_low_pass(mut self, rules: Vec<LowPassRule>) -> Self {
@@ -804,7 +804,7 @@ impl InterceptorConfig {
     }
 
     /// Set the QoS overwrite rules, returning `self` for chaining.
-    /// See [`with_acl`](Self::with_acl) for why these are builders.
+    /// See `with_acl` for why these are builders.
     #[cfg(feature = "access-qos-overwrite")]
     #[must_use]
     pub fn with_qos_overwrite(mut self, rules: Vec<QosOverwriteRule>) -> Self {

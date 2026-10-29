@@ -5272,6 +5272,9 @@ mod tests {
             fn calls(&self) -> usize {
                 self.sends.borrow().len()
             }
+            // Only the runtime-mutate arm reads the last send: without the
+            // feature the sink is never driven, so there is no last send.
+            #[cfg(feature = "config-mutate-runtime")]
             fn last_len(&self) -> usize {
                 self.sends
                     .borrow()

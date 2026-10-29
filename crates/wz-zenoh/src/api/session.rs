@@ -140,7 +140,11 @@ pub(crate) struct Publication<'a> {
     pub(crate) wire_ts_stack: Option<zenoh_protocol::network::timestamp_stack::TimestampStack>,
     /// What copies a large payload into shared memory for a peer that could read it, when the
     /// configuration asks for the optimisation.
-    #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+    #[cfg(all(
+        feature = "unstable",
+        feature = "shared-memory",
+        feature = "engine-tokio"
+    ))]
     pub(crate) shm_promoter: Option<&'a crate::api::shm::transport::Promoter>,
 }
 
@@ -3582,7 +3586,11 @@ pub(crate) struct SessionInner {
     shm_provider: Option<Arc<crate::api::shm::LazyShmProvider>>,
     /// What copies a large put into the provider for a peer that could read it, when the
     /// configuration asks for the optimisation (`transport_optimization`).
-    #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+    #[cfg(all(
+        feature = "unstable",
+        feature = "shared-memory",
+        feature = "engine-tokio"
+    ))]
     shm_promoter: Option<crate::api::shm::transport::Promoter>,
     /// The clients of shared memory segments the application opened the session with
     /// ([`OpenBuilder::with_shm_clients`](crate::session::OpenBuilder::with_shm_clients)). The
@@ -4258,7 +4266,11 @@ impl SessionInner {
             ts_stack,
             #[cfg(feature = "unstable")]
             wire_ts_stack,
-            #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+            #[cfg(all(
+                feature = "unstable",
+                feature = "shared-memory",
+                feature = "engine-tokio"
+            ))]
             shm_promoter: self.shm_promoter.as_ref(),
         })
     }
@@ -4492,7 +4504,11 @@ impl Session {
                 timestamp_callback,
                 node_clock,
             )),
-            #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+            #[cfg(all(
+                feature = "unstable",
+                feature = "shared-memory",
+                feature = "engine-tokio"
+            ))]
             shm_promoter: crate::api::shm::transport::Promoter::new(
                 &expanded,
                 shm_provider.as_ref(),
@@ -6548,7 +6564,11 @@ mod tests {
             ts_stack: None,
             #[cfg(feature = "unstable")]
             wire_ts_stack: None,
-            #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+            #[cfg(all(
+                feature = "unstable",
+                feature = "shared-memory",
+                feature = "engine-tokio"
+            ))]
             shm_promoter: None,
         }
     }
