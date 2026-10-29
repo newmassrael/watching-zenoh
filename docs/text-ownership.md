@@ -152,6 +152,17 @@ carries about 6 KB of C library code wz does not, which is why the difference is
   bytes (fixed and batching) and 5,104 (get), the direct chain to 4,172, 4,172 and 4,756, the bound
   stays 5,972 (6,768). The worst path is the receive's, under the 1,256 bytes of the main frame:
   `dispatch_unit_borrowed` 756, `decode_unit_in` 312, and `lend_declare` 2,064 under a query's answer.
+- TAKEN: the loop's state in the storage's arena. `ClientNode::run` held the node (448 bytes: the
+  connect manager 352, the timeouts, the pacing), its factory (68) and the session host (36) as
+  locals, and a local of the main function is under every call the loop makes. They are built, out of
+  line, in `NodeStorage::run` (`RunArena`, a bump arena in the all-zero `static` like the peers'
+  store and the observer cell), and the loop holds three references: the main function fell from
+  1,256 to 704 bytes, the direct chain from 4,172 to 3,620, the bound from 5,972 to 5,420 (get 6,768
+  to 6,216), the kit's reading from 4,280 to 3,728 (get 5,104 to 4,552), and the main stacks to
+  7,232, 7,232 and 8,320. The arena is 576 bytes of `.bss` (704 for the getter, 1,536 for the
+  secure channel's stack type); text is +244 bytes. An image states its arena's size and the loop
+  checks it when it is compiled (`run_bytes_needed`): a layer or a stack that grows past it is a
+  build error that names the line, as the TLS image's was the first time it was built.
 - NOT TAKEN, measured: taking `judge_ext_chain`'s two helpers out of line (7 instances) moved the
   text by +16 bytes; the link-time optimizer already shares them.
 - `wz_session_core` is a long tail (525 symbols in a build without LTO, none over 1.6 KB) and the

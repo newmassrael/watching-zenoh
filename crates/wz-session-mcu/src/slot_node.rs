@@ -102,6 +102,7 @@ pub struct NodeStorage<
     const SESSIONS: usize,
     const RX: usize,
     const TX: usize,
+    const RUN: usize = DEFAULT_RUN_BYTES,
 > where
     C: ClockSource + 'static,
     T: SlotStack,
@@ -122,6 +123,10 @@ pub struct NodeStorage<
     /// The machines of the endpoints the node holds, one per endpoint: some 10 KB, which would sit on
     /// the stack of the loop's thread if the node carried them.
     pub peers: PeerStore,
+    /// The room the loop's own state is built in, for as long as it runs: the host, the factory and
+    /// the node, about 550 bytes that would sit in the frame of the loop, under every call it makes,
+    /// if the loop held them as locals.
+    pub run: RunArena<RUN>,
 }
 
 // SAFETY: the profile's rule, stated on the type: the node is driven by one cooperative loop on
@@ -137,7 +142,8 @@ unsafe impl<
         const SESSIONS: usize,
         const RX: usize,
         const TX: usize,
-    > Sync for NodeStorage<C, T, E, TASKS, TASK_BYTES, TIMERS, SESSIONS, RX, TX>
+        const RUN: usize,
+    > Sync for NodeStorage<C, T, E, TASKS, TASK_BYTES, TIMERS, SESSIONS, RX, TX, RUN>
 where
     C: ClockSource + 'static,
     T: SlotStack,
@@ -155,7 +161,8 @@ impl<
         const SESSIONS: usize,
         const RX: usize,
         const TX: usize,
-    > NodeStorage<C, T, E, TASKS, TASK_BYTES, TIMERS, SESSIONS, RX, TX>
+        const RUN: usize,
+    > NodeStorage<C, T, E, TASKS, TASK_BYTES, TIMERS, SESSIONS, RX, TX, RUN>
 where
     C: ClockSource + 'static,
     T: SlotStack,
@@ -171,6 +178,7 @@ where
             rx: ByteCells::new(),
             tx: ByteCells::new(),
             peers: PeerStore::new(),
+            run: RunArena::new(),
         }
     }
 }
@@ -185,7 +193,8 @@ impl<
         const SESSIONS: usize,
         const RX: usize,
         const TX: usize,
-    > Default for NodeStorage<C, T, E, TASKS, TASK_BYTES, TIMERS, SESSIONS, RX, TX>
+        const RUN: usize,
+    > Default for NodeStorage<C, T, E, TASKS, TASK_BYTES, TIMERS, SESSIONS, RX, TX, RUN>
 where
     C: ClockSource + 'static,
     T: SlotStack,
@@ -194,6 +203,101 @@ where
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The bytes of [`RunArena`] a [`NodeStorage`] has unless its image states another: room for the
+/// host, the factory and the node of a node that accepts a few sessions, with some to spare. An image
+/// states its own (the number a build of it needs, in a `const` that the loop checks when it is
+/// compiled) to give the rest back.
+pub const DEFAULT_RUN_BYTES: usize = 1024;
+
+/// Room in a `static` for the parts of the loop that live as long as it runs, built in place and
+/// never moved or dropped: a bump allocator of `BYTES` bytes that is filled once and not reused.
+///
+/// It exists for the frame of the loop. The node, its factory and its host are locals of the
+/// loop's function, about 550 bytes on the Zephyr client, and a local of that function is
+/// under every call the loop makes, so the worst chain of the whole node carries them. Built in
+/// this arena they are in `.bss`, as the peers' machines are, and the loop holds three references.
+/// The same reason made [`PeerStore`] and the observer cell.
+///
+/// Like every table of the profile it is `Sync` by the profile's rule: the one cooperative loop
+/// reaches it.
+#[repr(C, align(8))]
+pub struct RunArena<const BYTES: usize> {
+    // First, so that the arena's own alignment (eight) is the alignment of the bytes.
+    bytes: UnsafeCell<[MaybeUninit<u8>; BYTES]>,
+    used: Cell<usize>,
+}
+
+// SAFETY: the profile's rule, stated on the type: one cooperative loop on one thread reaches the
+// arena, once, at start.
+unsafe impl<const BYTES: usize> Sync for RunArena<BYTES> {}
+
+impl<const BYTES: usize> RunArena<BYTES> {
+    /// An empty arena, for a `static`; all zero bytes.
+    pub const fn new() -> Self {
+        Self {
+            bytes: UnsafeCell::new([MaybeUninit::uninit(); BYTES]),
+            used: Cell::new(0),
+        }
+    }
+
+    /// Whether anything was built in the arena: it is filled once, by one run.
+    pub fn is_used(&self) -> bool {
+        self.used.get() != 0
+    }
+
+    /// Build the value `make` returns in the arena, where it stays, and lend it for as long as the
+    /// arena lives. `None` when it does not fit in what is left.
+    ///
+    /// `make`'s value is the call's own result, written where it is kept. A caller that keeps its
+    /// own frame short does the building in a function of its own (`assemble`).
+    // A shared reference lends a unique one, which is what a bump arena is: `used` only grows, so no
+    // byte is lent twice (the safety argument is in the body).
+    #[allow(clippy::mut_from_ref)]
+    pub fn put<V>(&'static self, make: impl FnOnce() -> V) -> Option<&'static mut V> {
+        const {
+            assert!(
+                core::mem::align_of::<V>() <= 8,
+                "the arena is aligned to eight"
+            )
+        };
+        let align = core::mem::align_of::<V>();
+        let start = self.used.get().checked_add(align - 1)? & !(align - 1);
+        let end = start.checked_add(core::mem::size_of::<V>())?;
+        if end > BYTES {
+            return None;
+        }
+        self.used.set(end);
+        // SAFETY: `[start, end)` is inside the arena, aligned for `V` (the arena is aligned to eight
+        // and `start` to `V`), and was handed to nobody: `used` only grows, so this range is
+        // this call's alone, and the reference lent is the only one to it.
+        unsafe {
+            let at = self.bytes.get().cast::<u8>().add(start).cast::<V>();
+            at.write(make());
+            Some(&mut *at)
+        }
+    }
+}
+
+impl<const BYTES: usize> Default for RunArena<BYTES> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The bytes of a [`RunArena`] that hold `parts` (size and alignment of each, in the order they
+/// are built), for a `const` that holds an image's number to what its loop builds.
+pub const fn run_bytes_needed(parts: &[(usize, usize)]) -> usize {
+    let mut used = 0;
+    let mut at = 0;
+    while at < parts.len() {
+        let (size, align) = parts[at];
+        used = (used + align - 1) & !(align - 1);
+        used += size;
+        at += 1;
+    }
+    used
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -890,6 +994,7 @@ pub struct ClientNode<
     const SESSIONS: usize,
     const RX: usize,
     const TX: usize,
+    const RUN: usize,
     const DOCS: usize,
     const ACCEPTS: usize,
 > where
@@ -901,7 +1006,7 @@ pub struct ClientNode<
     W: Plane<C>,
 {
     /// The tables.
-    pub storage: &'static NodeStorage<C, T, E, TASKS, TASK_BYTES, TIMERS, SESSIONS, RX, TX>,
+    pub storage: &'static NodeStorage<C, T, E, TASKS, TASK_BYTES, TIMERS, SESSIONS, RX, TX, RUN>,
     /// The declarations [`install_documents`] fills, one for each of `documents`.
     pub declared: &'static Declared<DOCS>,
     /// The clock the runtime and the loop read.
@@ -954,15 +1059,35 @@ impl<
         const SESSIONS: usize,
         const RX: usize,
         const TX: usize,
+        const RUN: usize,
         const DOCS: usize,
         const ACCEPTS: usize,
-    > ClientNode<'_, C, T, E, L, X, W, TASKS, TASK_BYTES, TIMERS, SESSIONS, RX, TX, DOCS, ACCEPTS>
+    >
+    ClientNode<
+        '_,
+        C,
+        T,
+        E,
+        L,
+        X,
+        W,
+        TASKS,
+        TASK_BYTES,
+        TIMERS,
+        SESSIONS,
+        RX,
+        TX,
+        RUN,
+        DOCS,
+        ACCEPTS,
+    >
 where
     C: ClockSource + Copy + 'static,
     T: SlotStack + Bind<T::Driver> + Copy,
     E: EntropySource + Send + 'static,
-    L: SessionLayer<C, T::Driver>,
-    X: Accept<T::Driver>,
+    // `'static`: the layer and the acceptor are kept in the storage's arena, which outlives the run.
+    L: SessionLayer<C, T::Driver> + 'static,
+    X: Accept<T::Driver> + 'static,
     W: Plane<C>,
 {
     /// Set the node up and run it. Returns only when it cannot start or when the application ends
@@ -1017,29 +1142,27 @@ where
             }
         };
 
-        let host: SessionHost<C, T, E, SESSIONS, SESSIONS> = SessionHost::new(
+        // The host, the factory and the node are built in the storage's arena, out of line, and
+        // the loop holds the node by reference: as locals they were some 550 bytes of this frame,
+        // under every call the loop makes.
+        let Some(node) = assemble(
+            storage,
             CoopLocalSet::new(&runtime),
-            &storage.sessions,
-            &storage.pumps,
             stack,
-        );
-        let factory = RefCell::new(ClientFactory {
-            identity,
-            batch_size,
-            entropy,
-            observer,
-            layer,
-        });
-        let mut node = SlotClientNode::new(
-            &host,
-            stack,
-            listening,
-            &factory,
-            endpoints,
-            &storage.peers,
-            SessionTimeouts::spec_defaults(),
-            declared.all(),
-        );
+            Assembly {
+                identity,
+                batch_size,
+                entropy,
+                observer,
+                layer,
+                listening,
+                endpoints,
+                declarations: declared.all(),
+            },
+        ) else {
+            port.log(&[Str("wz: FAIL - the node's arena was used before")]);
+            return EXIT_RUNTIME_TWICE;
+        };
         // The peers the build declares are held from the first tick. A node that silently lost
         // one it was built to hold would run and be wrong: stop, and say which.
         if let Err(why) = node.hold_declared(peers, clock.now_us() / 1000) {
@@ -1065,7 +1188,7 @@ where
             let now_ms = clock.now_us() / 1000;
             node.tick(now_ms);
             plane.tick(now_ms);
-            if let ControlFlow::Break(code) = app.after_tick(now_ms, &node) {
+            if let ControlFlow::Break(code) = app.after_tick(now_ms, &*node) {
                 return code;
             }
             let seen = watch.observe(now_ms, node.is_established(), counters());
@@ -1113,6 +1236,146 @@ where
             }
         }
     }
+}
+
+/// What the node is made of beyond the storage and the stack, handed to [`assemble`].
+struct Assembly<'a, E, L, X, const ACCEPTS: usize> {
+    identity: NodeIdentity,
+    batch_size: u16,
+    entropy: fn() -> E,
+    observer: &'static ObserverCell<DocumentSinks>,
+    layer: L,
+    listening: Listening<X, ACCEPTS>,
+    endpoints: &'static dyn EndpointSource,
+    declarations: &'a [Declaration],
+}
+
+/// Build the loop's host, factory and node in the storage's arena, and lend the node.
+///
+/// Out of line, for the stack: the three are built here from small arguments, so what is on this
+/// frame while they are built (the factory's parts, the node before it is written to its place) is
+/// gone when this returns, and the loop that holds the node holds a reference. `None` when the
+/// arena cannot hold them, which the `const` below makes a build error for a size the image stated
+/// and a run error only for an arena that something else filled.
+#[inline(never)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn assemble<
+    C,
+    T,
+    E,
+    L,
+    X,
+    const TASKS: usize,
+    const TASK_BYTES: usize,
+    const TIMERS: usize,
+    const SESSIONS: usize,
+    const RX: usize,
+    const TX: usize,
+    const RUN: usize,
+    const ACCEPTS: usize,
+>(
+    storage: &'static NodeStorage<C, T, E, TASKS, TASK_BYTES, TIMERS, SESSIONS, RX, TX, RUN>,
+    local: CoopLocalSet<C>,
+    stack: T,
+    parts: Assembly<'static, E, L, X, ACCEPTS>,
+) -> Option<
+    &'static mut SlotClientNode<
+        'static,
+        C,
+        T,
+        T,
+        ClientFactory<E, L>,
+        X,
+        SESSIONS,
+        SESSIONS,
+        ACCEPTS,
+    >,
+>
+where
+    C: ClockSource + Copy + 'static,
+    T: SlotStack + Bind<T::Driver> + Copy,
+    E: EntropySource + Send + 'static,
+    L: SessionLayer<C, T::Driver> + 'static,
+    X: Accept<T::Driver> + 'static,
+{
+    type Host<C, T, E, const S: usize> = SessionHost<C, T, E, S, S>;
+    const {
+        assert!(
+            run_bytes_needed(&[
+                (
+                    core::mem::size_of::<Host<C, T, E, SESSIONS>>(),
+                    core::mem::align_of::<Host<C, T, E, SESSIONS>>()
+                ),
+                (
+                    core::mem::size_of::<RefCell<ClientFactory<E, L>>>(),
+                    core::mem::align_of::<RefCell<ClientFactory<E, L>>>()
+                ),
+                (
+                    core::mem::size_of::<
+                        SlotClientNode<
+                            'static,
+                            C,
+                            T,
+                            T,
+                            ClientFactory<E, L>,
+                            X,
+                            SESSIONS,
+                            SESSIONS,
+                            ACCEPTS,
+                        >,
+                    >(),
+                    core::mem::align_of::<
+                        SlotClientNode<
+                            'static,
+                            C,
+                            T,
+                            T,
+                            ClientFactory<E, L>,
+                            X,
+                            SESSIONS,
+                            SESSIONS,
+                            ACCEPTS,
+                        >,
+                    >()
+                ),
+            ]) <= RUN,
+            "the storage's run arena is smaller than the host, factory and node the loop builds in it"
+        );
+    }
+    let Assembly {
+        identity,
+        batch_size,
+        entropy,
+        observer,
+        layer,
+        listening,
+        endpoints,
+        declarations,
+    } = parts;
+    let host: &'static Host<C, T, E, SESSIONS> = storage
+        .run
+        .put(|| SessionHost::new(local, &storage.sessions, &storage.pumps, stack))?;
+    let factory: &'static RefCell<ClientFactory<E, L>> = storage.run.put(|| {
+        RefCell::new(ClientFactory {
+            identity,
+            batch_size,
+            entropy,
+            observer,
+            layer,
+        })
+    })?;
+    storage.run.put(|| {
+        SlotClientNode::new(
+            host,
+            stack,
+            listening,
+            factory,
+            endpoints,
+            &storage.peers,
+            SessionTimeouts::spec_defaults(),
+            declarations,
+        )
+    })
 }
 
 #[cfg(test)]
