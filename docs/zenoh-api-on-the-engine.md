@@ -852,21 +852,23 @@ Each lands whole with its surface lines, tests and faults in one round.
   missed (one that left a variant unused did not compile and was redone twice as a condition that
   never holds). The surface of `zenoh` is whole in all three arms: 709, 965 and 1,025 lines, none
   missing, none extra.
-- **Z7t. The shared-memory transport (carried).** What the three lines do not make: a payload in
-  shared memory that crosses a link without a copy, in both directions, and the implicit promotion
-  of a large payload into the provider of the session. **The process holds two shared-memory
-  systems that share no type**: `zenoh::shm` is `wz-zenoh-shm`, the family crate, and the engine's
-  is its own (`wz_runtime_tokio::shm_*`, with its provider, its clients, its relay and its
-  watchdog), so a `ZShm` cannot be handed to the engine's `publish_shm_all`, and a received
-  shared-memory payload reaches a subscriber as a view that has no descriptor to rebuild a `ZShm`
-  from. Today `put` copies a `ZBytes` that wraps a `ZShm`, the received sample is always plain
-  bytes, the session offers no shared memory in its handshake and the two keys of the
-  optimisation that decide when to promote (`message_size_threshold`, `messages`) are refused by
-  name when they are not the defaults. Each is a recorded difference, not a gap that is hidden.
-  Closing it takes a change of the engine port and not of this crate: a publish that takes a
-  handle (`ShmSendBuffer` of the session core has the seam, which only the relay uses), a receive
-  that carries the descriptor, an adapter from the clients of `zenoh::shm` to the engine's, the
-  handshake offer, and the promotion, each held by a differential over a link to an upstream node.
+- **Z7t. The shared-memory transport (landed in rounds 3921 and 3922; the upstream `shm` file
+  passes 10 of 10).** A payload in shared memory crosses a link, and a multicast group, without a
+  copy in both directions, and a large put is promoted into the provider of the session.
+  **The process holds two shared-memory systems that share no type**: `zenoh::shm` is
+  `wz-zenoh-shm`, the family crate, and the engine's is its own (`wz_runtime_tokio::shm_*`), so a
+  buffer is carried and not converted: the engine publishes any chunk a host owns
+  (`ShmPublishable`: its own chunk, or a `ShmSendHandle`) and reads a received descriptor with a
+  resolver the host supplies (`ShmReader::Host`); this crate wraps the slice of a `ZBytes` as the
+  send buffer, takes the receiver's reference as upstream's codec does, and reads a descriptor
+  with its own reader into the `ZShm` the application receives. A group that is a
+  shared-memory one (`Session::enable_shm`; the stamp is made once, because a group negotiates
+  nothing a reconnect could lower) is sent ONE descriptor for every member
+  (`publish_shm_on_group`). The promotion is made by this crate before the engine, not at the
+  link, and per session and not per peer. **Owed:** a query value and a reply in shared memory
+  (and the `query` and `reply` lists of the optimisation), the extension of a group's Join that
+  announces shared memory, a differential of a `ZShm` over a link and a group to an upstream
+  node, and a unit test of a group's descriptor in the engine (the upstream file is its test).
 - **Z8. The graph.** Upstream's tests and examples and `zenoh-ext` built and run against the
   patched graph, on Linux and on Windows. A test that cannot pass is a recorded difference with its
   reason, never a deleted test.
@@ -937,8 +939,45 @@ Each lands whole with its surface lines, tests and faults in one round.
       code, a hosted callback runs under the read guard of the tables (a declaration made from it
       deadlocks, and `session` and `unicity` already block inside callbacks), and the hosted
       queryable cannot hold a reply or read a payload.
-    - **Open:** the context a callback runs in (above), `routing` (its tests open routers), and
-      the files that run none (`open_time`, whose four tests are ignored, and `regions`).
+    - **A peer that accepts sessions is the router node at node mode Peer (rounds of 2026-10-30).**
+      Upstream's peer routes between the sessions it holds (its peer hat, and a broker hat for the
+      clients south of it), which the registry of faces does not: a client that dials a peer
+      and a token behind the router that peer dials were two faces nobody joined (the six
+      `clientviapeer` tests of `liveliness`). `OpenPlan::peer_fits_node` says when a peer is a
+      node: it listens, joins no multicast group, scouts to dial nothing, and binds its listeners
+      at the open (`listen/exit_on_failure`); any other peer stays on the registry. The node
+      runs `RouterForwarder::peer_with_timestamping`, advertises its locators, and dials the
+      nodes its gossip admits (`enable_autoconnect`). Measured with it, `liveliness` is 45 of
+      46 and runs in 220 s where it took 676 s. What the node had to carry for a peer, found by
+      the upstream files and by this crate's own unit tests: all that a message says is shown to
+      the subscriber and the queryable of the node's session (`sample_of_push`,
+      `RequestQueryView`), where it was handed a key and a payload; the node records its routing
+      on the stack of an instrumented message, query and reply (`timestamp_instrumentation`
+      48 of 48); a subscriber or queryable the node hosts is pushed to the faces that asked for
+      it and withdrawn from them; the node's session reads a descriptor into its own buffer and
+      publishes a chunk of shared memory (`shm` 10 of 10); a get of the node's session has a
+      deadline and ends with the `Timeout` reply; a watch is answered after its first verdict;
+      and the face thread runs inside a current-thread runtime, which is how the callbacks of
+      the top crate know to queue the items they are handed. **A defect the unit tests found in
+      the registry itself:** a peer that received several tokens a node declared by their
+      keyexpr (the id `0` of each) kept the first and refused the rest as a repeat; each keyexpr
+      is now a token of its own. **Owed:** a listener bound after the open, a multicast group
+      and a scouting that dials, on a node for a peer (each keeps the peer on the registry);
+      `regression_3` (the router does not broker the token of one peer to another peer, and
+      the locators that would make them dial each other are not gossiped to peers); a key
+      declared by an id (the node names none, which is only an optimisation of the wire);
+      the unit tests of this crate open the registry unless a test says `with_the_node`.
+    - **`routing` with peers on the node: 6 of 8.** `gossip`, `gossip_regression_3`,
+      `router_linkstate`, `scouting_delay_regression`, `three_node_combination` and
+      `two_node_combination` pass. The open of a node that is a peer returns once an endpoint it
+      connects to is up (within its start window) and at once when it connects to none, where a
+      router node's open is held for `scouting/delay` in full: the held open was the 500 ms
+      `scouting_delay_regression` measures. `gossip_regression_1` and `gossip_regression_2` fail
+      because the linkstate view of a peer node carries a peer two links away although
+      `scouting/gossip/multihop` is off; that is the side of the node's peer net and its admin
+      reply, and it is the next item.
+    - **Open:** `routing` (the two above) and the files that run none (`open_time`, whose four
+      tests are ignored, and `regions`).
     - **Owed:** a lane that runs the harness (a pinned tree and a network on the host), the arm
       with `internal` and the files it asks for a `Runtime` of, and Windows.
 - **Owned slices for the configuration-driven features** named in D6 (acl, authentication, low
