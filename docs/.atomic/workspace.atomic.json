@@ -297994,6 +297994,34 @@
         "Open: a test that asks the router demo for wz/@/<zid>/snapshot over a real link, as nothing asks it today; the peer host of the demo does not host the snapshot, only the router host does; the same doors for the zenoh-c ABI when a consumer needs them (decided against for now); a counting allocator source for a program that owns its allocator. The multicast receive path feeds no meter, so a joined group's members are in no count."
       ]
     },
+    "Round 3904": {
+      "decision_summary": "The AP node's own peers now keep one link to a node by the shared rule, as the cooperative engine's face table and the tokio C-ABI registry do. Two nodes that dial each other are a connection collision, which BGP and Erlang's distribution handshake resolve by comparing identifiers; the face loop keeps the link the lower zid dialled, so both ends keep the same one, where the first up made each end close the link the other kept. The loop parks the winning link, asks the held face to close with MAX_LINKS, and admits the winner only after that face has left the loop, the forwarder and the observers, because the router's graph is keyed on the zid. The state is a pure module with its own tests; the forwarder answers the rule and the close, and a forwarder with neither keeps the first up.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/link_collision.rs: LinkCollisions, Resolution and ten tests, including the two ends over every order of completion. accept_loop.rs: FaceForwarder gains judge_second_link and close_face (defaults keep the first up); Step::Opened resolves a second link by the table and parks the winner, Step::Driven admits a parked link after its face has left; ParkedOpen and admit_parked. router_forward.rs and router_forward/shed.rs: RouterForwarder answers the rule from its own zid and closes by id through the shed registry. crates/wz-session-core/src/session_actions.rs: close_for_replacement beside close_for_capacity over one body. crates/wz-runtime-tokio/tests/router_mutual_dial_e2e.rs: two peer_loops that dial each other, eight rounds. docs/capi-pico-on-coop-engine.md follows."
+      ],
+      "verification_bullets": [
+        "On pc2: router_mutual_dial_e2e passes eight rounds and, with the forwarder's rule shut off, fails in its first round with both nodes having brought a face up and closed it; link_collision passes ten tests; wz-runtime-tokio passes whole under the wide leg's 85 features (104 test targets, none failing); Layer E7b passes (4 tests, 115 s); clippy is clean for wz-runtime-tokio with the router and multilink features and for wz-session-core without codec-close. Not run: Layer Z (the zenohd on pc2 is not at the pin, 1211779c against 1.10.1, and the pin gate stops the lane), the hosted run, the census over this change."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "carry_forward_bullets": [
+        "Layer Z has not run over this change: the pinned zenohd has to be built (ZENOHD_SRC=<a checkout at the pin> bash scripts/build-zenohd.sh) before the lane can start on pc2; the cooperative engine has no tls/ link; the scouting legs in a network namespace run on the tokio library only; whether a redial reached the new node is not observable through the pico ABI."
+      ],
+      "publishable_decision_summary": "The AP node's own peers now keep one link to a node by the shared rule, as the cooperative engine's face table and the tokio C-ABI registry do. Two nodes that dial each other are a connection collision, which BGP and Erlang's distribution handshake resolve by comparing identifiers; the face loop keeps the link the lower zid dialled, so both ends keep the same one, where the first up made each end close the link the other kept. The loop parks the winning link, asks the held face to close with MAX_LINKS, and admits the winner only after that face has left the loop, the forwarder and the observers, because the router's graph is keyed on the zid. The state is a pure module with its own tests; the forwarder answers the rule and the close, and a forwarder with neither keeps the first up.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/link_collision.rs: LinkCollisions, Resolution and ten tests, including the two ends over every order of completion. accept_loop.rs: FaceForwarder gains judge_second_link and close_face (defaults keep the first up); Step::Opened resolves a second link by the table and parks the winner, Step::Driven admits a parked link after its face has left; ParkedOpen and admit_parked. router_forward.rs and router_forward/shed.rs: RouterForwarder answers the rule from its own zid and closes by id through the shed registry. crates/wz-session-core/src/session_actions.rs: close_for_replacement beside close_for_capacity over one body. crates/wz-runtime-tokio/tests/router_mutual_dial_e2e.rs: two peer_loops that dial each other, eight rounds. docs/capi-pico-on-coop-engine.md follows."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2: router_mutual_dial_e2e passes eight rounds and, with the forwarder's rule shut off, fails in its first round with both nodes having brought a face up and closed it; link_collision passes ten tests; wz-runtime-tokio passes whole under the wide leg's 85 features (104 test targets, none failing); Layer E7b passes (4 tests, 115 s); clippy is clean for wz-runtime-tokio with the router and multilink features and for wz-session-core without codec-close. Not run: Layer Z (the zenohd on pc2 is not at the pin, 1211779c against 1.10.1, and the pin gate stops the lane), the hosted run, the census over this change."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Layer Z has not run over this change: the pinned zenohd has to be built (ZENOHD_SRC=<a checkout at the pin> bash scripts/build-zenohd.sh) before the lane can start on pc2; the cooperative engine has no tls/ link; the scouting legs in a network namespace run on the tokio library only; whether a redial reached the new node is not observable through the pico ABI."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
