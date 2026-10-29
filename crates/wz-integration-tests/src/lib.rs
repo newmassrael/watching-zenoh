@@ -924,10 +924,10 @@ pub mod common {
     /// only the library they link differs, which is what makes one file the witness of both.
     pub fn wz_capi_pico_cdylib() -> PathBuf {
         let crates_dir = project_root().join("crates");
-        let target = match std::env::var("WZ_PICO_ENGINE").as_deref() {
-            Ok("coop") => PICO_COOP_TARGET_DIR,
-            Ok("tokio") | Err(_) => "target",
-            Ok(other) => panic!("WZ_PICO_ENGINE is `tokio` or `coop`, not `{other}`"),
+        let target = if pico_engine_is_coop() {
+            PICO_COOP_TARGET_DIR
+        } else {
+            "target"
         };
         let candidates = [
             crates_dir.join(target).join("debug/libwz_capi_pico.so"),
@@ -948,6 +948,16 @@ pub mod common {
 
     /// The target directory, under `crates/`, the cooperative engine's `wz-capi-pico` lands in.
     pub const PICO_COOP_TARGET_DIR: &str = "target/wz-capi-pico-coop";
+
+    /// Whether `WZ_PICO_ENGINE` names the cooperative engine. Unset or `tokio` is the tokio
+    /// engine; any other value is a refusal, not a guess.
+    pub fn pico_engine_is_coop() -> bool {
+        match std::env::var("WZ_PICO_ENGINE").as_deref() {
+            Ok("coop") => true,
+            Ok("tokio") | Err(_) => false,
+            Ok(other) => panic!("WZ_PICO_ENGINE is `tokio` or `coop`, not `{other}`"),
+        }
+    }
 
     /// One of the zenoh-pico header arms `scripts/build-zenoh-pico-cli.sh`
     /// configures, and the wz build a program compiled against it links. The pair
@@ -1001,15 +1011,24 @@ pub mod common {
             }
         }
 
-        /// The target directory, under `crates/`, wz's build of this arm lands in.
-        pub fn wz_target_dir(self) -> &'static str {
-            match self {
+        /// The target directory, under `crates/`, wz's build of this arm lands in: the tokio
+        /// engine's, or with `WZ_PICO_ENGINE=coop` the cooperative engine's, a directory of its
+        /// own because each build is `libwz_capi_pico.so`.
+        pub fn wz_target_dir(self) -> String {
+            let tokio = match self {
                 Self::MultiThreaded => "target",
                 Self::SingleThreaded => "target/wz-capi-pico-st",
                 Self::UpstreamDefault => "target/wz-capi-pico-default",
                 Self::Local => "target/wz-capi-pico-local",
                 Self::McastDeclarations => "target/wz-capi-pico-mcdecl",
                 Self::RawEth => "target/wz-capi-pico-reth",
+            };
+            if !pico_engine_is_coop() {
+                return tokio.to_owned();
+            }
+            match self {
+                Self::MultiThreaded => PICO_COOP_TARGET_DIR.to_owned(),
+                _ => format!("{tokio}-coop"),
             }
         }
 
@@ -1066,9 +1085,14 @@ pub mod common {
             panic!(
                 "wz's {self:?} libwz_capi_pico.so is not in {candidates:?}; from \
                  crates/, run `cargo build -p wz-capi-pico $(python3 \
-                 ../scripts/lib/wz_config.py --features pico \
+                 ../scripts/lib/wz_config.py --features pico{} \
                  ../target/zenoh-pico-build{}/zenohpico/include/zenoh-pico/config.h) \
                  --target-dir {}`",
+                if pico_engine_is_coop() {
+                    " --engine coop"
+                } else {
+                    ""
+                },
                 self.cmake_suffix(),
                 self.wz_target_dir()
             );

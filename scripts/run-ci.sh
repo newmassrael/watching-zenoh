@@ -17007,18 +17007,30 @@ layer_e_ap_demo_round_trip() {
     #     selects it by its own feature), so the two TLS programs are the tokio engine's.
     #   * `zenohd` -- the sweep above skips them for the reason it states: this job builds no
     #     zenohd.
-    #   * `zpubst`, `zsubst`, `upstream_default_arm`, `header_arms` -- the programs of the other
-    #     header arms link those arms' builds, which are the tokio engine's; the cooperative
-    #     engine's own arms are not built, and `header_arms` walks all of them.
+    #   * `header_arms` -- the positive control of the header trees, which no engine changes; it
+    #     runs the two TLS programs too, and the sweep above has held it.
+    # Each header arm is built for the cooperative engine as it is for the tokio one: its
+    # features are read off the arm's own config.h, with the engine changed
+    # (`wz_config.py --engine coop`), into a target directory of its own. The single-threaded
+    # arm is the cooperative engine's native one: its programs step the session with `zp_read`.
     # The count is exact, so a test that stops being selected is a failure and not a smaller pass.
-    (cd crates && cargo build -p wz-capi-pico --no-default-features \
-        --features engine-coop,link-udp,peer,scout,query,queryable,liveliness,liveliness-get,advanced,multi-thread,unstable-api,connectivity \
+    local coop_features
+    coop_features="$(python3 scripts/lib/wz_config.py --features pico --engine coop \
+        target/zenoh-pico-build/zenohpico/include/zenoh-pico/config.h)" || return 1
+    # shellcheck disable=SC2086 # the cargo arguments are words on purpose
+    (cd crates && cargo build -p wz-capi-pico $coop_features \
         --target-dir target/wz-capi-pico-coop --quiet) || return 1
-    _runci_guarded_test "E pico drop-in programs on the cooperative engine" 27 \
+    for arm in st default local; do
+        coop_features="$(python3 scripts/lib/wz_config.py --features pico --engine coop \
+            "target/zenoh-pico-build-$arm/zenohpico/include/zenoh-pico/config.h")" || return 1
+        # shellcheck disable=SC2086 # the cargo arguments are words on purpose
+        (cd crates && cargo build -p wz-capi-pico $coop_features \
+            --target-dir "target/wz-capi-pico-$arm-coop" --quiet) || return 1
+    done
+    _runci_guarded_test "E pico drop-in programs on the cooperative engine" 30 \
         env WZ_PICO_ENGINE=coop \
         cargo test -p wz-integration-tests --test pico_c_examples_on_wz_capi_dropin -- --ignored \
-        --skip tls --skip zenohd --skip zpubst --skip zsubst --skip upstream_default_arm \
-        --skip header_arms || return 1
+        --skip tls --skip zenohd --skip header_arms || return 1
 }
 
 # ─── Layer E2 — facade-subset behavioural e2e vs zenoh-pico ──────────

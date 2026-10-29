@@ -30,6 +30,11 @@ itself (their Kconfig symbol, default and help). This tool is everything that de
                                   features (<dir>/wz_axes.cmake)
     --write                       write every one of them
     --features ABI CONFIG         turn a Kconfig result (or a pico config.h) into the cargo arguments
+    --features pico --engine coop CONFIG
+                                  the same list for the cooperative engine: the features that
+                                  select the tokio engine (its drive threads, the groups, gossip)
+                                  are left out and `engine-coop` is named, so the build is the
+                                  header arm's drop-in with the engine under it changed
     --resolve-features ABI PRESET...
                                   merge presets onto the defaults (kconfiglib) and print the cargo
                                   arguments of ABI
@@ -1410,6 +1415,32 @@ def cargo_args(decl: dict, abi: str, on: set[str]) -> str:
     return "--no-default-features" + (f" --features {','.join(feats)}" if feats else "")
 
 
+def coop_features(feats: list[str], table: dict) -> list[str]:
+    """`feats` (a pico arm's list) for the cooperative engine, `table` the crate's feature table.
+
+    A pico build runs its sessions on the tokio engine whenever that engine is in it, so the
+    cooperative build must name no feature that selects it: one that lists `engine-tokio`, or
+    lists a feature that does (the drive threads, the multicast group, gossip). What is left is
+    what the engines share, which the crate forwards weakly (`wz-capi-core?/...`) and so selects
+    neither, and `engine-coop` is named in the place `engine-tokio` was. The table is READ, not
+    listed here, so a feature that later selects the tokio engine leaves the list by itself.
+    """
+
+    def selects_tokio(name: str, seen: frozenset = frozenset()) -> bool:
+        for edge in table.get(name, []):
+            if edge == "engine-tokio":
+                return True
+            # A forward to a dependency's feature or an optional dependency names no feature
+            # of this crate.
+            if "/" in edge or edge.startswith("dep:"):
+                continue
+            if edge in table and edge not in seen and selects_tokio(edge, seen | {name}):
+                return True
+        return False
+
+    return ["engine-coop"] + [f for f in feats if f != "engine-tokio" and not selects_tokio(f)]
+
+
 def enabled_features(feats: dict, start: list[str]) -> set[str]:
     """The features of one package a build with `start` turns on, as cargo resolves them: each
     feature's entries that name another feature of the same package, transitively. An entry
@@ -2656,6 +2687,21 @@ def cmd_selftest() -> int:
     # The manifest check must be able to fail: a manifest that loses an edge, or gains a feature.
     good = manifest_features(MANIFESTS["pico"])
     expect("the shipped pico manifest passes", check_manifest(decl, "pico", good) == [])
+    # The cooperative list is the arm's with the engine changed: the base's tokio features and a
+    # capability that selects the tokio engine (the multicast group) are out, what the engines
+    # share stays, and the engine is named first.
+    arm = features_for(decl, "pico", {"peer", "query", "multicast-transport"})
+    coop = coop_features(arm, good)
+    expect("the cooperative list names its engine first and not the tokio one",
+           coop[0] == "engine-coop" and "engine-tokio" not in coop)
+    expect("the cooperative list drops what selects the tokio engine",
+           not {"serial-drive-own-thread", "rx-busy-poll", "multicast-transport"} & set(coop))
+    expect("the cooperative list keeps what the engines share",
+           {"link-udp", "scout", "peer", "query"} <= set(coop))
+    tokio_selecting = dict(good)
+    tokio_selecting["query"] = list(good["query"]) + ["engine-tokio"]
+    expect("a capability that later selects the tokio engine leaves the list by itself",
+           "query" not in coop_features(arm, tokio_selecting))
     lost = dict(good)
     lost["peer"] = [x for x in good["peer"] if x != "scout"]
     expect("a manifest that forgets peer -> scout is a finding",
@@ -3354,6 +3400,20 @@ def main(argv: list[str]) -> int:
         if argv[2] in files:
             sys.stdout.write(files[argv[2]][1])
             return 0
+    if (len(argv) == 6 and argv[1:5] == ["--features", "pico", "--engine", "coop"]):
+        decl = load_decl()
+        text = pathlib.Path(argv[5]).read_text(encoding="utf-8")
+        conflicts = pico_header_conflicts(decl, "pico", text)
+        for conflict in conflicts:
+            print(f"  wz-config FAIL: {argv[5]}: {conflict}", file=sys.stderr)
+        if conflicts:
+            return 1
+        feats = coop_features(
+            features_for(decl, "pico", read_config(decl, text)),
+            manifest_features(MANIFESTS["pico"]),
+        )
+        print("--no-default-features --features " + ",".join(feats))
+        return 0
     if len(argv) == 4 and argv[1] == "--features" and argv[2] in ABIS:
         decl = load_decl()
         text = pathlib.Path(argv[3]).read_text(encoding="utf-8")

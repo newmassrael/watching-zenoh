@@ -749,13 +749,18 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
   get is answered and ends with the Final; all three pass on both engines (pc2). It dials in
   client mode; a wz peer that dials a pico peer (`mode=peer` with `connect`) is not held.
   The drop-in legs of Layer E (upstream's C programs compiled against the cooperative cdylib)
-  are held for the reference header arm: `pico_c_examples_on_wz_capi_dropin.rs` links a build of
-  `wz-capi-pico` of its own (`WZ_PICO_ENGINE=coop`, features the reference arm's but for the
-  engine, in `target/wz-capi-pico-coop`), and 27 programs pass against the real zenoh-pico on
-  pc2. What is left out is the engine's, not hidden: the two TLS programs (the cooperative engine
-  has no `tls/` link), the six that need a zenohd (the sweep skips them too), and the programs of
-  the other header arms, whose cooperative builds are not made, the single-threaded arm being the
-  one a cooperative engine is natively. Not done: the cooperative builds of those arms.
+  are held: `pico_c_examples_on_wz_capi_dropin.rs` links a build of `wz-capi-pico` of its own for
+  each header arm (`WZ_PICO_ENGINE=coop`; the arm's features are read off its config.h and the
+  engine is changed by `wz_config.py --engine coop`, which leaves out every feature that selects
+  the tokio engine, into `target/wz-capi-pico-<arm>-coop`), and 30 programs pass against the real
+  zenoh-pico on pc2, the three programs of the single-threaded and the default arm among them
+  (the single-threaded arm is the one a cooperative engine is natively: its programs step the
+  session with `zp_read`). What is left out belongs to the engine and is named: the two TLS
+  programs (a build with `tls/` selects the tokio engine by its own feature, as the engine
+  selection above says), the six that need a zenohd (the sweep skips them too), and
+  `header_arms`, the positive control of the header trees, which no engine changes. The
+  multicast-declarations and raw-Ethernet arms select the tokio engine through their own
+  features, so they have no cooperative build.
 - **L5. Both roles at once. Done.** A peer that listens and dials holds the dial role's face and
   the accepted ones in one table, and one face for each remote zid, as zenoh's transport manager
   keeps one transport for each and the tokio registry keeps one face (`SharedSession::face_up`).
