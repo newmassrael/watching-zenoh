@@ -9728,4 +9728,140 @@ mod tests {
             assert_eq!(session.0.engine.keyexpr_declarations().len(), before - 1);
         }
     }
+
+    /// The matching of a publisher or a querier between two nodes of which one or both hold a
+    /// namespace: what the other node declares is matched under the prefix, and its retraction
+    /// ends the match, as without one.
+    mod namespaced_matching {
+        use std::time::Duration;
+
+        use super::*;
+
+        const SETTLE: Duration = Duration::from_millis(1500);
+
+        /// A listening peer holding `listener_ns` and a client holding `client_ns`.
+        fn pair(
+            ids: (&str, &str),
+            listener_ns: Option<&str>,
+            client_ns: Option<&str>,
+        ) -> (Session, Session) {
+            let port = unautoselected_port();
+            let ns = |namespace: Option<&str>| {
+                namespace.map_or(String::new(), |ns| format!(r#"namespace: "{ns}","#))
+            };
+            let open_one = |text: String| {
+                open(Config::from_json5(&text).expect("a configuration zenoh reads"))
+                    .wait()
+                    .expect("opens")
+            };
+            let listener = open_one(format!(
+                r#"{{ id: "{}", mode: "peer", {}
+                     listen: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                     scouting: {{ multicast: {{ enabled: false }} }} }}"#,
+                ids.0,
+                ns(listener_ns),
+            ));
+            let client = open_one(format!(
+                r#"{{ id: "{}", mode: "client", {}
+                     connect: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                     scouting: {{ multicast: {{ enabled: false }} }} }}"#,
+                ids.1,
+                ns(client_ns),
+            ));
+            assert_eq!(connected(&client, 1).1.len(), 1, "the nodes are linked");
+            (listener, client)
+        }
+
+        fn publisher_follows_subscriber(
+            ids: (&str, &str),
+            namespaces: (Option<&str>, Option<&str>),
+            publishes: &str,
+            subscribes: &str,
+        ) {
+            let (listener, client) = pair(ids, namespaces.0, namespaces.1);
+            let publisher = listener
+                .declare_publisher(publishes.to_owned())
+                .wait()
+                .expect("declares");
+            let subscriber = client
+                .declare_subscriber(subscribes.to_owned())
+                .wait()
+                .expect("declares");
+            std::thread::sleep(SETTLE);
+            assert!(
+                publisher.matching_status().wait().expect("asks").matching(),
+                "a subscriber matches"
+            );
+            subscriber.undeclare().wait().expect("undeclares");
+            std::thread::sleep(SETTLE);
+            assert!(
+                !publisher.matching_status().wait().expect("asks").matching(),
+                "the retraction ends the match"
+            );
+        }
+
+        #[test]
+        fn a_namespace_of_the_publishing_node_ends_the_match_with_the_retraction() {
+            publisher_follows_subscriber(
+                ("a1b2d1", "a1b2d2"),
+                (Some("ns1"), None),
+                "zenoh/pub",
+                "ns1/zenoh/pub",
+            );
+        }
+
+        #[test]
+        fn the_same_namespace_on_both_nodes_ends_the_match_with_the_retraction() {
+            publisher_follows_subscriber(
+                ("a1b2d3", "a1b2d4"),
+                (Some("ns2"), Some("ns2")),
+                "zenoh/pub",
+                "zenoh/pub",
+            );
+        }
+
+        #[test]
+        fn a_namespace_of_the_subscribing_node_ends_the_match_with_the_retraction() {
+            publisher_follows_subscriber(
+                ("a1b2d5", "a1b2d6"),
+                (None, Some("ns3")),
+                "ns3/zenoh/pub",
+                "zenoh/pub",
+            );
+        }
+
+        #[test]
+        fn a_queryable_under_the_same_namespace_matches_a_querier_and_its_retraction_ends_it() {
+            let (listener, client) = pair(("a1b2d9", "a1b2da"), Some("ns5"), Some("ns5"));
+            let querier = listener
+                .declare_querier("zenoh/qry".to_owned())
+                .wait()
+                .expect("declares");
+            let queryable = client
+                .declare_queryable("zenoh/qry".to_owned())
+                .wait()
+                .expect("declares");
+            std::thread::sleep(SETTLE);
+            assert!(
+                querier.matching_status().wait().expect("asks").matching(),
+                "a queryable matches"
+            );
+            queryable.undeclare().wait().expect("undeclares");
+            std::thread::sleep(SETTLE);
+            assert!(
+                !querier.matching_status().wait().expect("asks").matching(),
+                "the retraction ends the match"
+            );
+        }
+
+        #[test]
+        fn no_namespace_ends_the_match_with_the_retraction() {
+            publisher_follows_subscriber(
+                ("a1b2d7", "a1b2d8"),
+                (None, None),
+                "zenoh/pub",
+                "zenoh/pub",
+            );
+        }
+    }
 }

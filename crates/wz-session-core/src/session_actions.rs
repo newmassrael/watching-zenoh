@@ -8025,6 +8025,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     feature = "declare-queryable",
                     feature = "declare-token"
                 )
+            ),
+            all(
+                feature = "alloc",
+                any(feature = "liveliness-token", feature = "declare-subscriber")
             )
         )
     ))]
@@ -12533,6 +12537,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "alloc"
     ))]
     pub fn send_declare(&self, declare: DeclareOwned) {
+        // §5.21 routing-namespace — the answer to an interest is a `Declare` like any other
+        // the node makes, and upstream's decorator gives it the prefix whatever the interest id
+        // (`handle_declare_egress` reads none). This dispatch is below the egress arm, so it is
+        // decorated here: left bare, the peer reads the answer as out of its namespace, parks
+        // the declaration's id as blocked and swallows the retraction that follows, and a
+        // peer that holds another namespace rebinds the id to the bare key.
+        #[cfg(feature = "routing-namespace")]
+        let Ok(declare) = self.namespace_egress_declare(declare) else {
+            return;
+        };
         // F2 — this surface has no error channel; a transport-down
         // reject drops the emit exactly as the dead link would.
         let _ = self.dispatch_declare(declare, /*reliable=*/ true);
