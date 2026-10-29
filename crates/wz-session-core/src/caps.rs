@@ -423,7 +423,7 @@ pub const SNAPSHOT_PERIOD_MS: usize = generated::SNAPSHOT_PERIOD_MS;
 
 /// How many buckets the snapshot's message-interval histogram has
 /// ([`crate::resource_snapshot::IntervalHistogram`]), from `1` to `32`. It sizes the snapshot: 64
-/// bytes and 4 for each bucket.
+/// bytes and 8 for each bucket.
 pub const SNAPSHOT_HISTOGRAM_BUCKETS: usize = generated::SNAPSHOT_HISTOGRAM_BUCKETS;
 
 /// How many checkpoints the node's supervisor watches (`supervisor::Supervisor`). At least `1` and

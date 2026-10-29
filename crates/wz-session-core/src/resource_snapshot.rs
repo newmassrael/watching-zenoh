@@ -12,7 +12,7 @@
 //! # What is measured and what is asked
 //!
 //! The library measures what it can know without the platform: how many messages it was told of and
-//! how they were spaced (an [`IntervalHistogram`] and an exponentially weighted mean). What only the
+//! how they were spaced (an [`IntervalHistogram`] and the sum of the intervals). What only the
 //! platform knows (CPU use, heap in use and its high-water mark, how many tasks there are) it asks
 //! for through a [`ResourceSource`], the way the clock is asked of an `EpochSource`. A source that
 //! cannot answer one of them leaves it out, and the snapshot says it was not measured
@@ -30,14 +30,30 @@
 //!
 //! # The message interval
 //!
-//! A minimum, a maximum and a sum hide the tail of a distribution, and a histogram does not. The
+//! A minimum, a maximum and a mean hide the tail of a distribution, and a histogram does not. The
 //! buckets are on a base-2 scale: bucket 0 holds intervals of 0 and 1 microsecond and bucket `b` of
-//! at least 1 holds `2^b` up to `2^(b+1) - 1`, the last bucket everything above. They are counted
-//! in 32 bits and saturate, because a counter that wrapped would hide the load it exists to show.
-//! The mean is exponentially weighted with a weight of 1/8, in fixed point with four fractional bits
-//! and no division. An interval is the difference of two readings of the 32-bit counter, so one past
-//! 2^32 microseconds (71 minutes) is not representable, and the first message after the sampler is
-//! built has no interval.
+//! at least 1 holds `2^b` up to `2^(b+1) - 1`, the last bucket everything above.
+//!
+//! The counters are cumulative and 64 bits wide, and the snapshot carries the sum of the intervals
+//! beside them, the form a histogram has everywhere: a reader takes two snapshots and the
+//! difference of their sums over the difference of their bucket totals is the exact mean interval
+//! of the time between them, over any window it chooses. A counter that saturated would stop
+//! counting after 71 minutes at a million messages a second in one bucket, and one that wrapped at
+//! 32 bits would need the reader to know it had; 64 bits do neither in the life of a node.
+//!
+//! An interval is the difference of two readings of the 32-bit counter
+//! ([`interval_between`]) from the latest message before it: the first message has none, and a span
+//! of 2^31 microseconds (35 minutes) or more is not counted as an interval, because nothing could
+//! tell it from a counter that went round. Two receivers on two threads can store their readings
+//! out of order, and a reading a little behind the latest ([`is_skew`]) leaves the latest where it
+//! was and is only counted, so that a delayed receiver does not put a span in the histogram that no
+//! gap between messages made.
+//!
+//! # Who counts the messages
+//!
+//! The sampler does not: it is handed what the counter has seen. A host with one thread to count on
+//! uses [`MessageStats`]. The receive path of a node runs on several threads, and counts with the
+//! lock-free `IntervalMeter` (`interval_meter`), which takes the same step and the same rule.
 //!
 //! # The layout
 //!
@@ -108,7 +124,7 @@ pub const fn bucket_of(interval_us: u32, buckets: usize) -> usize {
 /// How message intervals are spread, on a base-2 scale, in `B` buckets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IntervalHistogram<const B: usize> {
-    counts: [u32; B],
+    counts: [u64; B],
 }
 
 impl<const B: usize> IntervalHistogram<B> {
@@ -128,7 +144,7 @@ impl<const B: usize> IntervalHistogram<B> {
     }
 
     /// The count in each bucket.
-    pub const fn counts(&self) -> &[u32; B] {
+    pub const fn counts(&self) -> &[u64; B] {
         &self.counts
     }
 }
@@ -139,34 +155,110 @@ impl<const B: usize> Default for IntervalHistogram<B> {
     }
 }
 
-/// An exponentially weighted mean with a weight of 1/8, in fixed point with four fractional bits.
+/// How far behind the latest reading a message's own reading can be and still be skew: 2^20
+/// microseconds, about a second.
+pub const SKEW_LIMIT_US: u32 = 1 << 20;
+
+/// The span from `previous` to `now`, both microsecond readings of a counter that wraps at 2^32,
+/// or `None` when it is not an interval.
 ///
-/// Each step moves the mean one eighth of the way to the new value, the step truncated, so the mean
-/// is within half a microsecond of the exact recurrence and stalls when it is within 7/16 of a
-/// microsecond of a constant input.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Ewma {
-    mean_q4: u64,
-    seeded: bool,
+/// A span of 2^31 microseconds (35 minutes) or more is not one: the comparison cannot tell it from
+/// a counter that went round. A span that runs backwards is not one either; it is skew
+/// ([`is_skew`]) or it is the same unmeasurable span seen from the other side. The message is
+/// counted whether or not it made an interval.
+pub const fn interval_between(previous: u32, now: u32) -> Option<u32> {
+    let span = now.wrapping_sub(previous);
+    if span > MAX_TIMEOUT_TICKS {
+        None
+    } else {
+        Some(span)
+    }
 }
 
-impl Ewma {
-    /// Take one value in. The first value is the mean.
-    pub fn observe(&mut self, value: u32) {
-        let target = u64::from(value) << 4;
-        if !self.seeded {
-            self.mean_q4 = target;
-            self.seeded = true;
-        } else if target >= self.mean_q4 {
-            self.mean_q4 += (target - self.mean_q4) >> 3;
-        } else {
-            self.mean_q4 -= (self.mean_q4 - target) >> 3;
+/// Whether `now` is a reading taken a little before `previous`, by no more than [`SKEW_LIMIT_US`].
+///
+/// A receiver reads the clock and then stores the reading, and between the two another receiver on
+/// another thread can store a later one. The message of the first is then not the latest, and it
+/// is neither the start nor the end of an interval: counting it would put two spans in the
+/// histogram that no gap between messages produced, one running backwards and the next inflated by
+/// the whole delay. So the latest reading stays the previous one and the skewed message is only
+/// counted.
+///
+/// Only a small step back is skew. A reading far behind is what a counter that went round after a
+/// long silence looks like, and treating it as skew would make the counter ignore every message
+/// until it came round again, so that one starts afresh.
+pub const fn is_skew(previous: u32, now: u32) -> bool {
+    let behind = previous.wrapping_sub(now);
+    behind != 0 && behind <= SKEW_LIMIT_US
+}
+
+/// What was seen of the messages since the counter began: how many, how they were spaced, and the
+/// sum of the intervals. All of it is cumulative.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageReading<const B: usize> {
+    /// How many messages were counted.
+    pub messages: u64,
+    /// The sum of the intervals counted, in microseconds. Over the total of the buckets it is the
+    /// mean interval; the difference of two readings' sums over the difference of their totals is
+    /// the mean over the time between them.
+    pub interval_sum_us: u64,
+    /// How the intervals between messages are spread.
+    pub intervals: [u64; B],
+}
+
+/// The message statistics of a host with one thread to count on: the plain accumulator, with no
+/// atomics. A host whose receivers run on several threads counts with an `IntervalMeter` instead.
+#[derive(Debug, Clone)]
+pub struct MessageStats<const B: usize> {
+    histogram: IntervalHistogram<B>,
+    interval_sum_us: u64,
+    last_us: Option<u32>,
+    messages: u64,
+}
+
+impl<const B: usize> MessageStats<B> {
+    /// No message seen.
+    pub const fn new() -> Self {
+        Self {
+            histogram: IntervalHistogram::new(),
+            interval_sum_us: 0,
+            last_us: None,
+            messages: 0,
         }
     }
 
-    /// The mean times 16, so the fraction survives.
-    pub const fn mean_q4(&self) -> u64 {
-        self.mean_q4
+    /// A message was seen at `now_us`. It is counted, and so is the interval since the latest
+    /// message when that is an [`interval_between`] the two. A reading that is [`is_skew`] leaves
+    /// the latest message where it was.
+    pub fn observe(&mut self, now_us: u32) {
+        self.messages = self.messages.saturating_add(1);
+        let Some(last) = self.last_us else {
+            self.last_us = Some(now_us);
+            return;
+        };
+        if is_skew(last, now_us) {
+            return;
+        }
+        if let Some(interval) = interval_between(last, now_us) {
+            self.histogram.observe(interval);
+            self.interval_sum_us = self.interval_sum_us.saturating_add(u64::from(interval));
+        }
+        self.last_us = Some(now_us);
+    }
+
+    /// What has been counted.
+    pub fn reading(&self) -> MessageReading<B> {
+        MessageReading {
+            messages: self.messages,
+            interval_sum_us: self.interval_sum_us,
+            intervals: *self.histogram.counts(),
+        }
+    }
+}
+
+impl<const B: usize> Default for MessageStats<B> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -190,12 +282,12 @@ pub struct Snapshot<const B: usize> {
     pub heap_high_water: u64,
     /// The capabilities the image has, one bit each, as the host states them.
     pub features: u64,
-    /// How many messages the sampler was told of.
+    /// How many messages the counter was told of, since it began.
     pub messages: u64,
-    /// The exponentially weighted mean message interval, times 16.
-    pub mean_interval_us_q4: u64,
-    /// How the intervals between messages are spread.
-    pub intervals: [u32; B],
+    /// The sum of the message intervals counted, in microseconds, since the counter began.
+    pub interval_sum_us: u64,
+    /// How the intervals between messages are spread, since the counter began.
+    pub intervals: [u64; B],
 }
 
 /// Why a buffer is not a snapshot this reader can take.
@@ -264,7 +356,7 @@ fn u64_at(bytes: &[u8], at: usize) -> u64 {
 
 impl<const B: usize> Snapshot<B> {
     /// Bytes in the layout of [`LAYOUT_VERSION`] for `B` buckets.
-    pub const SIZE: usize = HEADER_SIZE + 4 * B;
+    pub const SIZE: usize = HEADER_SIZE + 8 * B;
 
     /// Write the snapshot into `out`, which must hold [`Self::SIZE`] bytes. Returns how many were
     /// written, or `None` when `out` is too small, and then writes nothing.
@@ -286,9 +378,9 @@ impl<const B: usize> Snapshot<B> {
         put(out, 32, &self.heap_high_water.to_le_bytes());
         put(out, 40, &self.features.to_le_bytes());
         put(out, 48, &self.messages.to_le_bytes());
-        put(out, 56, &self.mean_interval_us_q4.to_le_bytes());
+        put(out, 56, &self.interval_sum_us.to_le_bytes());
         for (index, count) in self.intervals.iter().enumerate() {
-            put(out, HEADER_SIZE + 4 * index, &count.to_le_bytes());
+            put(out, HEADER_SIZE + 8 * index, &count.to_le_bytes());
         }
         Some(Self::SIZE)
     }
@@ -308,9 +400,9 @@ impl<const B: usize> Snapshot<B> {
         if bytes.len() < usize::from(header.size) {
             return Err(Refused::TooShort);
         }
-        let mut intervals = [0u32; B];
+        let mut intervals = [0u64; B];
         for (index, count) in intervals.iter_mut().enumerate() {
-            *count = u32_at(bytes, HEADER_SIZE + 4 * index);
+            *count = u64_at(bytes, HEADER_SIZE + 8 * index);
         }
         Ok(Self {
             sequence: u32_at(bytes, 12),
@@ -322,7 +414,7 @@ impl<const B: usize> Snapshot<B> {
             heap_high_water: u64_at(bytes, 32),
             features: u64_at(bytes, 40),
             messages: u64_at(bytes, 48),
-            mean_interval_us_q4: u64_at(bytes, 56),
+            interval_sum_us: u64_at(bytes, 56),
             intervals,
         })
     }
@@ -335,10 +427,6 @@ pub struct PeriodOutOfRange;
 /// Takes a [`Snapshot`] on a period and keeps the latest.
 #[derive(Debug, Clone)]
 pub struct Sampler<const B: usize> {
-    intervals: IntervalHistogram<B>,
-    mean: Ewma,
-    last_message_us: Option<u32>,
-    messages: u64,
     period_us: u32,
     features: u64,
     last_sample_us: Option<u32>,
@@ -354,10 +442,6 @@ impl<const B: usize> Sampler<B> {
             return Err(PeriodOutOfRange);
         }
         Ok(Self {
-            intervals: IntervalHistogram::new(),
-            mean: Ewma::default(),
-            last_message_us: None,
-            messages: 0,
             period_us,
             features,
             last_sample_us: None,
@@ -366,20 +450,16 @@ impl<const B: usize> Sampler<B> {
         })
     }
 
-    /// A message was seen at `now_us`. Counts it, and counts the interval since the one before.
-    pub fn observe_message(&mut self, now_us: u32) {
-        if let Some(last) = self.last_message_us {
-            let interval = now_us.wrapping_sub(last);
-            self.intervals.observe(interval);
-            self.mean.observe(interval);
-        }
-        self.last_message_us = Some(now_us);
-        self.messages = self.messages.saturating_add(1);
-    }
-
     /// Take a sample if one is due at `now_us`: the first call, and then each time the period has
-    /// passed since the last. Returns whether one was taken. `source` is asked only when it is.
-    pub fn poll(&mut self, now_us: u32, source: &mut impl ResourceSource) -> bool {
+    /// passed since the last. Returns whether one was taken. `messages` is what the message
+    /// counter has seen, a [`MessageStats`] or an `IntervalMeter` read; `source` is asked only
+    /// when a sample is taken.
+    pub fn poll(
+        &mut self,
+        now_us: u32,
+        source: &mut impl ResourceSource,
+        messages: impl FnOnce() -> MessageReading<B>,
+    ) -> bool {
         let due = match self.last_sample_us {
             None => true,
             Some(last) => elapsed(now_us, last, self.period_us),
@@ -402,6 +482,7 @@ impl<const B: usize> Sampler<B> {
             in_use: 0,
             high_water: 0,
         });
+        let messages = messages();
         self.latest = Some(Snapshot {
             sequence: self.sequence,
             taken_at_us: now_us,
@@ -411,9 +492,9 @@ impl<const B: usize> Sampler<B> {
             heap_in_use: heap.in_use,
             heap_high_water: heap.high_water,
             features: self.features,
-            messages: self.messages,
-            mean_interval_us_q4: self.mean.mean_q4(),
-            intervals: *self.intervals.counts(),
+            messages: messages.messages,
+            interval_sum_us: messages.interval_sum_us,
+            intervals: messages.intervals,
         });
         self.sequence = self.sequence.wrapping_add(1);
         self.last_sample_us = Some(now_us);
@@ -527,7 +608,7 @@ mod tests {
         fn run<const B: usize>(seed: u64) {
             let mut rng = Rng(seed | 1);
             let mut histogram = IntervalHistogram::<B>::new();
-            let mut expected = [0u32; B];
+            let mut expected = [0u64; B];
             for _ in 0..5000 {
                 // Intervals spread over many magnitudes, edges of buckets included.
                 let magnitude = (rng.next() % 33) as u32;
@@ -541,7 +622,7 @@ mod tests {
                 expected[reference_bucket(interval, B)] += 1;
             }
             assert_eq!(histogram.counts(), &expected, "B = {B}, seed {seed}");
-            assert_eq!(histogram.counts().iter().sum::<u32>(), 5000);
+            assert_eq!(histogram.counts().iter().sum::<u64>(), 5000);
         }
         for seed in 1..=20 {
             run::<1>(seed);
@@ -554,46 +635,46 @@ mod tests {
     #[test]
     fn a_bucket_saturates_and_does_not_wrap() {
         let mut histogram = IntervalHistogram::<4> {
-            counts: [u32::MAX; 4],
+            counts: [u64::MAX; 4],
         };
         histogram.observe(0);
         histogram.observe(100);
-        assert_eq!(histogram.counts(), &[u32::MAX; 4]);
+        assert_eq!(histogram.counts(), &[u64::MAX; 4]);
     }
 
     #[test]
-    fn the_mean_follows_the_exact_recurrence_to_within_half_a_microsecond() {
-        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
-        let mut mean = Ewma::default();
-        let mut exact = 0f64;
-        for step in 0..20_000 {
-            let value = (rng.next() % 1_000_000) as u32;
-            mean.observe(value);
-            exact = if step == 0 {
-                f64::from(value)
-            } else {
-                exact + (f64::from(value) - exact) / 8.0
-            };
-            let ours = mean.mean_q4() as f64 / 16.0;
-            assert!(
-                (ours - exact).abs() < 0.6,
-                "step {step}: {ours} against {exact}"
-            );
+    fn two_readings_give_the_exact_mean_interval_of_the_time_between_them() {
+        // 1000 messages 10 microseconds apart, then 1000 messages 300 apart.
+        let mut stats = MessageStats::<24>::new();
+        let mut now = 0u32;
+        stats.observe(now);
+        for _ in 0..1000 {
+            now += 10;
+            stats.observe(now);
         }
-    }
+        let first = stats.reading();
+        for _ in 0..1000 {
+            now += 300;
+            stats.observe(now);
+        }
+        let second = stats.reading();
 
-    #[test]
-    fn the_first_value_is_the_mean_and_a_constant_input_settles_near_it() {
-        let mut mean = Ewma::default();
-        mean.observe(1000);
-        assert_eq!(mean.mean_q4(), 1000 * 16);
-        for _ in 0..200 {
-            mean.observe(2000);
-        }
-        let settled = mean.mean_q4() as f64 / 16.0;
-        assert!(
-            (2000.0 - settled).abs() < 7.0 / 16.0 + f64::EPSILON,
-            "{settled}"
+        let total = |reading: &MessageReading<24>| reading.intervals.iter().sum::<u64>();
+        // Over the whole run and over the second half alone, exactly, with no approximation.
+        assert_eq!(
+            second.interval_sum_us / total(&second),
+            (10_000 + 300_000) / 2000
+        );
+        assert_eq!(
+            (second.interval_sum_us - first.interval_sum_us) / (total(&second) - total(&first)),
+            300,
+            "the mean of the window between two readings"
+        );
+        assert_eq!(second.messages, 2001);
+        assert_eq!(
+            total(&second),
+            2000,
+            "every message but the first made an interval"
         );
     }
 
@@ -602,17 +683,17 @@ mod tests {
         let mut sampler = Sampler::<8>::new(100, 0b101).unwrap();
         let mut source = Counting { reads: 0 };
         assert!(sampler.latest().is_none());
-        assert!(sampler.poll(1_000, &mut source));
-        assert!(!sampler.poll(1_099, &mut source));
+        assert!(sampler.poll(1_000, &mut source, no_messages));
+        assert!(!sampler.poll(1_099, &mut source, no_messages));
         assert_eq!(
             source.reads, 1,
             "the source is asked only when a sample is taken"
         );
-        assert!(sampler.poll(1_100, &mut source));
+        assert!(sampler.poll(1_100, &mut source, no_messages));
         // Several periods passed: one sample, and the next period counts from it.
-        assert!(sampler.poll(9_000, &mut source));
-        assert!(!sampler.poll(9_050, &mut source));
-        assert!(sampler.poll(9_100, &mut source));
+        assert!(sampler.poll(9_000, &mut source, no_messages));
+        assert!(!sampler.poll(9_050, &mut source, no_messages));
+        assert!(sampler.poll(9_100, &mut source, no_messages));
         assert_eq!(source.reads, 4);
         let latest = sampler.latest().unwrap();
         assert_eq!(
@@ -626,15 +707,21 @@ mod tests {
         let mut sampler = Sampler::<8>::new(10, 0).unwrap();
         let mut source = Counting { reads: 0 };
         let start = u32::MAX - 5;
-        assert!(sampler.poll(start, &mut source));
-        assert!(!sampler.poll(3, &mut source), "9 ticks have passed");
-        assert!(sampler.poll(4, &mut source), "10 ticks have passed");
+        assert!(sampler.poll(start, &mut source, no_messages));
+        assert!(
+            !sampler.poll(3, &mut source, no_messages),
+            "9 ticks have passed"
+        );
+        assert!(
+            sampler.poll(4, &mut source, no_messages),
+            "10 ticks have passed"
+        );
     }
 
     #[test]
     fn a_field_the_platform_did_not_measure_is_marked_and_zero() {
         let mut sampler = Sampler::<8>::new(10, 0).unwrap();
-        sampler.poll(0, &mut Fixed(ResourceReading::default()));
+        sampler.poll(0, &mut Fixed(ResourceReading::default()), no_messages);
         let snapshot = sampler.latest().unwrap().clone();
         assert_eq!(snapshot.available, 0);
         assert_eq!(
@@ -655,7 +742,7 @@ mod tests {
             }),
             tasks: None,
         };
-        sampler.poll(10, &mut Fixed(measured));
+        sampler.poll(10, &mut Fixed(measured), no_messages);
         let snapshot = sampler.latest().unwrap();
         assert_eq!(snapshot.available, HAS_CPU | HAS_HEAP);
         assert_eq!(
@@ -665,25 +752,125 @@ mod tests {
         assert_eq!(snapshot.cpu_permille, 0, "measured as idle, not unmeasured");
     }
 
+    fn no_messages<const B: usize>() -> MessageReading<B> {
+        MessageStats::<B>::new().reading()
+    }
+
+    #[test]
+    fn the_sampler_takes_the_message_reading_it_is_handed_at_the_sample() {
+        let mut sampler = Sampler::<8>::new(10, 0).unwrap();
+        let mut stats = MessageStats::<8>::new();
+        stats.observe(100);
+        stats.observe(150);
+        sampler.poll(0, &mut Counting { reads: 0 }, || stats.reading());
+        let first = sampler.latest().unwrap();
+        assert_eq!(first.messages, 2);
+        assert_eq!(first.intervals[5], 1, "50 microseconds is bucket 5");
+        assert_eq!(first.interval_sum_us, 50);
+    }
+
+    #[test]
+    fn the_reading_is_asked_for_only_when_a_sample_is_taken() {
+        let mut sampler = Sampler::<8>::new(100, 0).unwrap();
+        let mut asked = 0;
+        sampler.poll(0, &mut Counting { reads: 0 }, || {
+            asked += 1;
+            no_messages()
+        });
+        sampler.poll(50, &mut Counting { reads: 0 }, || {
+            asked += 1;
+            no_messages()
+        });
+        assert_eq!(asked, 1);
+    }
+
     #[test]
     fn message_intervals_are_counted_from_the_second_message_and_across_a_wrap() {
-        let mut sampler = Sampler::<8>::new(10, 0).unwrap();
-        sampler.observe_message(100);
-        sampler.poll(0, &mut Counting { reads: 0 });
-        let first = sampler.latest().unwrap();
+        let mut stats = MessageStats::<8>::new();
+        stats.observe(100);
+        let first = stats.reading();
         assert_eq!(first.messages, 1);
         assert_eq!(first.intervals, [0; 8], "the first message has no interval");
 
-        sampler.observe_message(150);
-        sampler.observe_message(u32::MAX - 1);
-        sampler.observe_message(8);
-        sampler.poll(100, &mut Counting { reads: 0 });
-        let latest = sampler.latest().unwrap();
-        assert_eq!(latest.messages, 4);
-        // Intervals 50 (bucket 5), 4294967145 (last bucket) and 10 (bucket 3).
-        assert_eq!(latest.intervals[5], 1);
-        assert_eq!(latest.intervals[7], 1);
-        assert_eq!(latest.intervals[3], 1);
+        stats.observe(150);
+        assert_eq!(
+            stats.reading().intervals[5],
+            1,
+            "50 microseconds is bucket 5"
+        );
+
+        // Across the wrap of the counter: 10 microseconds, then 16.
+        let mut stats = MessageStats::<8>::new();
+        stats.observe(u32::MAX - 20);
+        stats.observe(u32::MAX - 10);
+        stats.observe(5);
+        let latest = stats.reading();
+        assert_eq!(latest.messages, 3);
+        assert_eq!(latest.intervals[3], 1, "10 microseconds is bucket 3");
+        assert_eq!(latest.intervals[4], 1, "16 microseconds is bucket 4");
+        assert_eq!(latest.intervals.iter().sum::<u64>(), 2);
+    }
+
+    #[test]
+    fn what_is_an_interval_what_is_skew_and_what_is_neither() {
+        assert_eq!(interval_between(100, 150), Some(50));
+        assert_eq!(
+            interval_between(u32::MAX - 4, 5),
+            Some(10),
+            "across the wrap"
+        );
+        assert_eq!(interval_between(7, 7), Some(0));
+        assert_eq!(
+            interval_between(0, MAX_TIMEOUT_TICKS),
+            Some(MAX_TIMEOUT_TICKS)
+        );
+        assert_eq!(interval_between(0, MAX_TIMEOUT_TICKS + 1), None);
+
+        // Skew: a reading a little behind the latest, by at most about a second.
+        assert_eq!(interval_between(200, 150), None, "backwards by 50");
+        assert!(is_skew(200, 150));
+        assert!(is_skew(5, u32::MAX - 4), "behind across the wrap");
+        assert!(is_skew(SKEW_LIMIT_US, 0));
+        assert!(!is_skew(SKEW_LIMIT_US + 1, 0), "further behind is not skew");
+        assert!(!is_skew(7, 7), "the same reading is not behind");
+        assert!(!is_skew(100, 150), "forward is not behind");
+    }
+
+    #[test]
+    fn a_skewed_message_is_counted_and_leaves_the_latest_where_it_was() {
+        let mut stats = MessageStats::<8>::new();
+        stats.observe(1000);
+        // A receiver was delayed: its reading is 50 behind the latest.
+        stats.observe(950);
+        let skewed = stats.reading();
+        assert_eq!(skewed.messages, 2, "the message is counted");
+        assert_eq!(skewed.intervals, [0; 8], "and makes no interval");
+        // The next message is measured from the latest, 1000, and not from the delayed 950, so no
+        // inflated span appears.
+        stats.observe(1060);
+        let after = stats.reading();
+        assert_eq!(after.intervals[5], 1, "60 microseconds is bucket 5");
+        assert_eq!(
+            after.interval_sum_us, 60,
+            "the delayed message added nothing"
+        );
+        assert_eq!(after.intervals.iter().sum::<u64>(), 1);
+    }
+
+    #[test]
+    fn after_a_long_silence_the_counter_starts_afresh_and_does_not_ignore_what_follows() {
+        let mut stats = MessageStats::<8>::new();
+        stats.observe(1000);
+        // 35 minutes and a little: not an interval, and not skew either (it is far behind seen the
+        // other way), so the latest becomes this message.
+        let long_after = 1000u32.wrapping_add(MAX_TIMEOUT_TICKS).wrapping_add(500);
+        stats.observe(long_after);
+        assert_eq!(stats.reading().intervals, [0; 8]);
+        // And the messages that follow are measured from it.
+        stats.observe(long_after.wrapping_add(10));
+        let reading = stats.reading();
+        assert_eq!(reading.intervals[3], 1, "10 microseconds is bucket 3");
+        assert_eq!(reading.messages, 3);
     }
 
     #[test]
@@ -701,9 +888,9 @@ mod tests {
         // A change to a field of the layout must change these, and the version with them.
         assert_eq!(LAYOUT_VERSION, 1);
         assert_eq!(HEADER_SIZE, 64);
-        assert_eq!(Snapshot::<24>::SIZE, 160);
-        assert_eq!(Snapshot::<1>::SIZE, 68);
-        assert_eq!(Snapshot::<32>::SIZE, 192);
+        assert_eq!(Snapshot::<24>::SIZE, 256);
+        assert_eq!(Snapshot::<1>::SIZE, 72);
+        assert_eq!(Snapshot::<32>::SIZE, 320);
     }
 
     fn sample_snapshot() -> Snapshot<4> {
@@ -717,8 +904,8 @@ mod tests {
             heap_high_water: (1 << 40) + 5,
             features: 0xF0F0_0F0F_1234_5678,
             messages: u64::MAX - 3,
-            mean_interval_us_q4: 123_456,
-            intervals: [1, 2, 3, u32::MAX],
+            interval_sum_us: 123_456,
+            intervals: [1, 2, 3, u64::MAX],
         }
     }
 
@@ -729,8 +916,8 @@ mod tests {
         assert_eq!(snapshot.to_bytes(&mut bytes), Some(Snapshot::<4>::SIZE));
         assert_eq!(
             &bytes[..5],
-            &[1, 0, 80, 0, 4],
-            "version 1, 80 bytes, 4 buckets"
+            &[1, 0, 96, 0, 4],
+            "version 1, 96 bytes, 4 buckets"
         );
         assert_eq!(Snapshot::<4>::from_bytes(&bytes), Ok(snapshot));
     }
@@ -797,10 +984,10 @@ mod tests {
     fn the_build_sampler_has_the_builds_buckets_and_period() {
         let mut sampler = BuildSampler::for_build(0);
         let mut source = Counting { reads: 0 };
-        assert!(sampler.poll(0, &mut source));
+        assert!(sampler.poll(0, &mut source, no_messages));
         let period_us = crate::caps::SNAPSHOT_PERIOD_MS as u32 * 1000;
-        assert!(!sampler.poll(period_us - 1, &mut source));
-        assert!(sampler.poll(period_us, &mut source));
+        assert!(!sampler.poll(period_us - 1, &mut source, no_messages));
+        assert!(sampler.poll(period_us, &mut source, no_messages));
         assert_eq!(
             sampler.latest().unwrap().intervals.len(),
             crate::caps::SNAPSHOT_HISTOGRAM_BUCKETS

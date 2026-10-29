@@ -388,6 +388,13 @@ pub mod wrapping_ticks;
 // it. Documented in its own `//!`; see the note at `event_ring`.
 pub mod resource_snapshot;
 
+// The message counter of a receive path that runs on several threads: the same rules as
+// `resource_snapshot::MessageStats`, in atomics. Its latest-message word and its mean are 64 bits,
+// so it exists where the target has a 64-bit atomic or the `no_std` feature brings
+// `portable-atomic` to provide one, as `hlc` does. Documented in its own `//!`.
+#[cfg(any(target_has_atomic = "64", feature = "no_std"))]
+pub mod interval_meter;
+
 /// A1a — modular sequence-number arithmetic (zenoh-pico
 /// `transport/utils.c` mirror): the `seq_num_res` ring masks + the
 /// half-window `precedes` ordering every RX SN gate shares. First

@@ -291,9 +291,23 @@ across a counter wrap. A host test on the cooperative engine with no task presen
 * A snapshot is a versioned, fixed-layout record: CPU use, memory in use and high-water mark,
   tasks, features the image has, and for message intervals a histogram. The layout carries a
   version so a reader of an older image does not misread a newer one.
-* The message-interval statistic is `SNAPSHOT_HISTOGRAM_BUCKETS` buckets on a base-2 scale
-  plus an exponentially weighted mean. A minimum, a maximum and a sum hide the tail; a histogram
-  does not, and costs a fixed few words.
+* The message-interval statistic is `SNAPSHOT_HISTOGRAM_BUCKETS` buckets on a base-2 scale plus
+  the sum of the intervals, the form of a Prometheus histogram. A minimum and a maximum hide the
+  tail; the buckets do not, and the sum gives the exact mean of any window from two snapshots
+  (the difference of the sums over the difference of the counts), which an exponentially weighted
+  mean cannot, and which costs a fetch-add where the weighted mean cost a compare-and-swap loop.
+  Every count is 64 bits and cumulative, so none saturates or wraps in the life of a node and a
+  reader takes windows by subtraction.
+* The counter of a receive path that runs on several threads is `IntervalMeter`, lock-free: one
+  fetch-add for the message, one compare-and-swap on the latest message, and for an interval two
+  fetch-adds. A receiver reads the clock and then stores, so its reading can be a little behind the
+  latest (skew, `SKEW_LIMIT_US`); such a message is counted and makes no interval, because counting
+  it puts two spans in the histogram that no gap made, one backwards and the next inflated by the
+  receiver's delay. A span of half the clock's range or more is no interval and moves the latest.
+  The single-thread `MessageStats` takes the same rule, and a test drives both over the same random
+  traces. Measured on the build machine (release, one free core, so the four-thread figures are
+  time-sliced): one thread 14 ns a message against 5.4 ns for one relaxed fetch-add counter, four
+  threads 58 to 61 ns against 8 ns, of which the shared clock alone is 7 to 11 ns.
 * The sampler's cadence is the limit `SNAPSHOT_PERIOD_MS`, read by the sampler as a number, and
   NOT an SCE `timer` document. This design said the period would be an SCE `timer` generated from
   the limit by a script with a `--check`, and reading the kind (`sce-build/kind-examples/timer.scxml`
@@ -324,7 +338,7 @@ sampler symbol.
 | 2 | Clock registration in the C ABIs (2a done: `wz_node_time::clock_registry` and the `CLOCK_SOURCES` limit, first registered source that can answer wins, none able means no date and no fallback to the system clock; 2b done for the pico ABI: `wz_ext_clock_source_register`, `wz_ext_clock_source_unregister` and `wz_ext_clock_report` in `wz_ext.h`, the `clock-source` capability (off by default, `core` and `pico`, implies `timestamping` and `unstable-api`), `z_timestamp_new` stamping from the registered clock through the session's node clock, one standing shared by every node over the registry; open: the same doors in the `capi-c` ABI, and a wire test that a registered clock and the system clock encode the same bytes) | `capi-c` ABI revision and the pico export pins updated in the same change; the drop-in leg stays green. |
 | 3 | `EventRing` (3a done: the type, the model test and the stress run), the node's event log `wz_node_time::event_log` with `EVENT_RING_SLOTS` and `EVENT_RECORD_ARGS` as limits and `event-ring-full` as a policy (3b done: one ring, producers ordered by a lock, a reader needs none, records stamped by the node clock); 3c done for the pico ABI: the `event-ring` capability (off by default, `core` and `pico`, implies `unstable-api`) and the doors `wz_ext_event_emit`, `wz_ext_event_read` (a cursor the caller holds), `wz_ext_event_release` and `wz_ext_event_dropped`; the ring contract is sent to SCE. Open, and recommended to be dropped: the `log` sink, which could record only that a call happened (level, site, a hash of its constant text) and not its arguments, because the `log` crate formats them before a sink sees them, so the structured `emit` is the event API and a sink would add a second, weaker one | The model test and the concurrency check pass; off build has no symbol; the ring contract is written down and sent to SCE. |
 | 4 | Supervision machine and its checkpoints (4a, 4b, 4c done: the statechart, `Supervisor<N>`, the limit and the policy, the capability and the pico doors; open: the zenoh-c doors, the cooperative-engine host test, the comparison as an SCE `algorithm`) | Conformance over every event order; the cooperative engine hosts it with no task. |
-| 5 | Snapshot and its sampler (5a done: `resource_snapshot` with the versioned layout, the interval histogram and mean, the host-polled `Sampler` and the `ResourceSource` port the platform answers CPU, heap and tasks through, the limits `SNAPSHOT_PERIOD_MS` and `SNAPSHOT_HISTOGRAM_BUCKETS`, and `wrapping_ticks` shared with the supervisor; the generated SCE timer is dropped, see M4; open, 5b: the `resource-snapshot` capability and the pico doors that read the latest snapshot as bytes, a host `ResourceSource`, feeding `observe_message` from the receive path with its cost measured, the `features` word filled from the image, and the admin-space and dissector readers) | Histogram test against the reference; admin-space and dissector read it. |
+| 5 | Snapshot and its sampler (5a done: `resource_snapshot` with the versioned layout, the interval histogram and sum, the skew rule, the lock-free `IntervalMeter`, the host-polled `Sampler` and the `ResourceSource` port the platform answers CPU, heap and tasks through, the limits `SNAPSHOT_PERIOD_MS` and `SNAPSHOT_HISTOGRAM_BUCKETS`, and `wrapping_ticks` shared with the supervisor; the generated SCE timer is dropped, see M4; open, 5b2: the `resource-snapshot` capability and the pico doors that read the latest snapshot as bytes, a host `ResourceSource`, a microsecond `TimeSource` reading, feeding `IntervalMeter::observe` from the receive path, the `features` word filled from the image, and the admin-space and dissector readers) | Histogram test against the reference; admin-space and dissector read it. |
 | 6 | Cross-instrument: events carry M1 time, supervision expiry writes an event, the snapshot reads the ring's loss count | One integration test per link. |
 
 Each step is its own landing: the declaration, the generated files, the code that reads the

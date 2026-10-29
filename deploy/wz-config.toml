@@ -1988,7 +1988,7 @@ id = "SNAPSHOT_HISTOGRAM_BUCKETS"
 kconfig = "WZ_LIMIT_SNAPSHOT_HISTOGRAM_BUCKETS"
 default = 24
 help = '''
-How many buckets the snapshot's message-interval histogram has, each 4 bytes.
+How many buckets the snapshot's message-interval histogram has, each 8 bytes.
 Bucket 0 holds intervals of 0 and 1 microsecond, bucket b the intervals from
 2^b to 2^(b+1) - 1 microseconds, and the last bucket everything above it, so 24
 buckets tell intervals up to about 8 seconds apart and 32 cover the whole range.
