@@ -2943,6 +2943,10 @@ router_entry_points! { on_tables_mut:
     fn update_router_link_weights(&self, link_weights: HashMap<Zid, LinkEdgeWeight>) -> bool;
     fn register_local_queryable(&self, keyexpr: &str, complete: bool, handler: HostedQueryHandler);
     fn register_local_subscriber(&self, keyexpr: &str, handler: HostedSubscriberHandler);
+    fn host_subscriber(&self, keyexpr: &str, handler: HostedSubscriberHandler) -> u64;
+    fn host_queryable(&self, keyexpr: &str, complete: bool, handler: HostedQueryHandler) -> u64;
+    fn unhost_subscriber(&self, id: u64) -> bool;
+    fn unhost_queryable(&self, id: u64) -> bool;
     fn unregister_local_queryable(&self, keyexpr: &str) -> bool;
     fn unregister_local_subscriber(&self, keyexpr: &str) -> bool;
     fn set_self_locators(&self, locators: Vec<String>);
@@ -7862,6 +7866,21 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     ) where
         T: std::ops::DerefMut,
     {
+        self.host_queryable(keyexpr, complete, handler);
+    }
+
+    /// [`register_local_queryable`](Self::register_local_queryable), answering the id the
+    /// queryable holds in the `Local` hat, which [`unhost_queryable`](Self::unhost_queryable)
+    /// takes back.
+    pub fn host_queryable(
+        &mut self,
+        keyexpr: &str,
+        complete: bool,
+        handler: HostedQueryHandler,
+    ) -> u64
+    where
+        T: std::ops::DerefMut,
+    {
         let snapshot = self.snapshot::<QablPlane>(keyexpr);
         let id = self.tables.next_hosted_id;
         self.tables.next_hosted_id += 1;
@@ -7880,6 +7899,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             handler: Hosted::new(handler),
         });
         self.repropagate(snapshot);
+        id
     }
 
     /// R2393 (§5.21) — register a subscriber HOSTED BY THIS ROUTER: the Push-plane
@@ -7908,6 +7928,17 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     where
         T: std::ops::DerefMut,
     {
+        self.host_subscriber(keyexpr, handler);
+    }
+
+    /// [`register_local_subscriber`](Self::register_local_subscriber), answering the id the
+    /// subscriber holds in the `Local` hat, which [`unhost_subscriber`](Self::unhost_subscriber)
+    /// takes back: a program that declares several subscribers on one key and undeclares one of
+    /// them cannot name it by its key.
+    pub fn host_subscriber(&mut self, keyexpr: &str, handler: HostedSubscriberHandler) -> u64
+    where
+        T: std::ops::DerefMut,
+    {
         let snapshot = self.snapshot::<SubPlane>(keyexpr);
         let id = self.tables.next_hosted_id;
         self.tables.next_hosted_id += 1;
@@ -7922,6 +7953,61 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             handler: Hosted::new(handler),
         });
         self.repropagate(snapshot);
+        id
+    }
+
+    /// Withdraw the one hosted subscriber `id`, and no other on its key. `false` for an id the
+    /// router does not hold.
+    pub fn unhost_subscriber(&mut self, id: u64) -> bool
+    where
+        T: std::ops::DerefMut,
+    {
+        let Some(position) = self
+            .tables
+            .local_subscribers
+            .iter()
+            .position(|sub| sub.id == id)
+        else {
+            return false;
+        };
+        let keyexpr = self.tables.local_subscribers[position].keyexpr.clone();
+        let snapshot = self.snapshot::<SubPlane>(&keyexpr);
+        let sub = self.tables.local_subscribers.remove(position);
+        sub.handler.retract();
+        self.tables
+            .owner_broker_mut(Region::Local)
+            .subs
+            .remove_id(LOCAL_FACE, id);
+        self.repropagate(snapshot);
+        true
+    }
+
+    /// Withdraw the one hosted queryable `id`, and no other on its key. `false` for an id the
+    /// router does not hold.
+    pub fn unhost_queryable(&mut self, id: u64) -> bool
+    where
+        T: std::ops::DerefMut,
+    {
+        let Some(position) = self
+            .tables
+            .local_queryables
+            .iter()
+            .position(|qabl| qabl.id == id)
+        else {
+            return false;
+        };
+        let keyexpr = self.tables.local_queryables[position].keyexpr.clone();
+        let snapshot = self.snapshot::<QablPlane>(&keyexpr);
+        self.tables.local_queryables.remove(position);
+        let store = &mut self.tables.owner_broker_mut(Region::Local).qabls;
+        if let Some(by_id) = store.get_mut(&LOCAL_FACE) {
+            by_id.remove(&id);
+            if by_id.is_empty() {
+                store.remove(&LOCAL_FACE);
+            }
+        }
+        self.repropagate(snapshot);
+        true
     }
 
     /// Item 751, step 6 — take back the subscribers this node hosts on `keyexpr`: the inverse of

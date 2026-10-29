@@ -601,7 +601,9 @@ impl Engine {
     /// every peer, as its destination allows.
     fn publish(&self, publication: &Publication<'_>) -> ZResult<()> {
         match self {
-            Engine::Router(_) => RouterEngine::refuses("a put"),
+            Engine::Router(router) => {
+                tokio_engine::router_publish(router.node.forwarder(), publication)
+            }
             Engine::Tokio(state) => {
                 let options = tokio_engine::publish_options(publication);
                 let wire = tokio_engine::wire_key(publication);
@@ -621,7 +623,33 @@ impl Engine {
     /// every peer, as its origin allows.
     fn declare_subscriber(&self, subscription: Subscription<'_>) -> ZResult<Id> {
         match self {
-            Engine::Router(_) => RouterEngine::refuses("a subscriber"),
+            Engine::Router(router) => {
+                let Subscription {
+                    key,
+                    origin,
+                    callback,
+                    notifier,
+                    #[cfg(feature = "unstable")]
+                    timestamps,
+                    ..
+                } = subscription;
+                // A router node does not tell the samples of its own publications from the
+                // others', so an origin it cannot honour is refused and not ignored.
+                if origin != Locality::Any {
+                    return RouterEngine::refuses("a subscriber restricted by its origin");
+                }
+                let sink = tokio_engine::subscriber_sink(
+                    callback,
+                    notifier,
+                    #[cfg(feature = "unstable")]
+                    timestamps,
+                );
+                let id = router.node.forwarder().host_subscriber(key, sink());
+                Id::try_from(id).map_err(|_| {
+                    zerror!("the router numbered a subscriber {id}, which is more than an id holds")
+                        .into()
+                })
+            }
             Engine::Tokio(state) => {
                 let Subscription {
                     key,
@@ -659,7 +687,9 @@ impl Engine {
     fn undeclare_subscriber(&self, id: Id) {
         match self {
             Engine::Tokio(state) => state.shared.as_engine().undeclare_subscriber(u64::from(id)),
-            Engine::Router(_) => {}
+            Engine::Router(router) => {
+                router.node.forwarder().unhost_subscriber(u64::from(id));
+            }
         }
     }
 
@@ -1660,6 +1690,52 @@ mod tokio_engine {
             Locality::SessionLocal => EngineLocality::SessionLocal,
             Locality::Remote => EngineLocality::Remote,
         }
+    }
+
+    /// Put `publication` on a router node, which publishes a payload with a priority and the
+    /// express flag and nothing else yet: each setting it cannot carry refuses the put by name, and
+    /// is not dropped.
+    pub(super) fn router_publish(
+        forwarder: &wz_runtime_tokio::router_forward::RouterForwarder,
+        publication: &Publication<'_>,
+    ) -> ZResult<()> {
+        let refused = if publication.kind != SampleKind::Put {
+            Some("a delete")
+        } else if publication.encoding != Encoding::default() {
+            Some("a put with an encoding")
+        } else if publication.timestamp.is_some() {
+            Some("a put with a timestamp")
+        } else if publication.attachment.is_some() {
+            Some("a put with an attachment")
+        } else if publication.destination != Locality::Any {
+            Some("a put restricted by its destination")
+        } else if publication.congestion_control != CongestionControl::Drop {
+            Some("a put that blocks on congestion")
+        } else {
+            None
+        };
+        if let Some(what) = refused {
+            return super::RouterEngine::refuses(what);
+        }
+        #[cfg(feature = "unstable")]
+        if publication.source_info.is_some() {
+            return super::RouterEngine::refuses("a put with a source info");
+        }
+        let payload = publication.payload.to_bytes();
+        forwarder
+            .publish_qos(
+                publication.key,
+                &payload,
+                EnginePriority::from_wire(publication.priority as u8),
+                publication.is_express,
+            )
+            .map_err(|error| {
+                zerror!(
+                    "the router could not publish on {}: {error:?}",
+                    publication.key
+                )
+                .into()
+            })
     }
 
     /// What the engine hands the samples of a subscription to: the callback, called once for each
@@ -9867,6 +9943,68 @@ mod tests {
             assert!(router.is_closed());
         }
 
+        fn peer_of(id: &str, port: u16) -> Session {
+            open(
+                Config::from_json5(&format!(
+                    r#"{{ id: "{id}", mode: "peer",
+                          connect: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                          scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                ))
+                .expect("a configuration zenoh reads"),
+            )
+            .wait()
+            .expect("opens")
+        }
+
+        #[test]
+        fn a_subscriber_of_a_router_hears_a_peer_and_a_put_of_the_router_reaches_a_peer() {
+            use std::sync::mpsc;
+            use std::time::Duration;
+
+            let port = unautoselected_port();
+            let router = router("a1b2e4", port);
+            let (told, heard) = mpsc::channel::<String>();
+            let told = std::sync::Mutex::new(told);
+            let _subscriber = router
+                .declare_subscriber("demo/r/**".to_owned())
+                .callback(move |sample: Sample| {
+                    let _ = told.lock().unwrap().send(sample.key_expr().to_string());
+                })
+                .wait()
+                .expect("a router hosts a subscriber");
+            let peer = peer_of("a1b2e5", port);
+            assert_eq!(connected(&peer, 1).0.len(), 1, "the peer is linked");
+            // The declaration of the router's subscriber reaches the peer a moment after the
+            // link, so the put is repeated until it is heard.
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let mut got = None;
+            while got.is_none() && std::time::Instant::now() < deadline {
+                peer.put("demo/r/up", "x").wait().expect("puts");
+                got = heard.recv_timeout(Duration::from_millis(200)).ok();
+            }
+            assert_eq!(got.as_deref(), Some("demo/r/up"));
+
+            let (seen, received) = mpsc::channel::<String>();
+            let seen = std::sync::Mutex::new(seen);
+            let _peer_subscriber = peer
+                .declare_subscriber("demo/p/**".to_owned())
+                .callback(move |sample: Sample| {
+                    let _ = seen.lock().unwrap().send(sample.key_expr().to_string());
+                })
+                .wait()
+                .expect("declares");
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let mut got = None;
+            while got.is_none() && std::time::Instant::now() < deadline {
+                router
+                    .put("demo/p/down", "y")
+                    .wait()
+                    .expect("a router puts");
+                got = received.recv_timeout(Duration::from_millis(200)).ok();
+            }
+            assert_eq!(got.as_deref(), Some("demo/p/down"));
+        }
+
         #[test]
         fn what_a_router_does_not_carry_yet_fails_by_name() {
             let router = router("a1b2e3", unautoselected_port());
@@ -9880,15 +10018,16 @@ mod tests {
                     "{what}: {text}"
                 );
             }
-            refused(
-                "a subscriber",
-                router.declare_subscriber("a/b".to_owned()).wait(),
-            );
-            refused("a put", router.put("a/b", "x").wait());
+            refused("a delete", router.delete("a/b").wait());
             refused(
                 "a queryable",
                 router.declare_queryable("a/b".to_owned()).wait(),
             );
+            refused(
+                "a liveliness token",
+                router.liveliness().declare_token("a/b").wait(),
+            );
+            refused("a get", router.get("a/b").wait());
         }
     }
 

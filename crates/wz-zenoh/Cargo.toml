@@ -108,6 +108,7 @@ wz-capi-core = { path = "../wz-capi-core", optional = true, features = ["transpo
 wz-capi-port = { path = "../wz-capi-port", optional = true }
 wz-runtime-tokio = { path = "../wz-runtime-tokio", optional = true, default-features = false, features = [
     "routing-accept",
+    "routing-router-hat",
     "transport-fragmentation",
     "zenoh-config",
     "session-extqos",

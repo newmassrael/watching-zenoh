@@ -28,6 +28,7 @@ use super::*;
 /// thread the node runs on.
 pub struct RouterState {
     zid: Vec<u8>,
+    forwarder: Arc<RouterForwarder>,
     listen_locators: Vec<String>,
     shutdown: Arc<Notify>,
     stop: Arc<AtomicBool>,
@@ -38,6 +39,12 @@ impl RouterState {
     /// The identity the node announces, as its wire form.
     pub fn zid(&self) -> &[u8] {
         &self.zid
+    }
+
+    /// The router data plane the node runs: its entry points take `&self`, so the program that
+    /// holds the node declares and publishes through it while the node's thread serves the faces.
+    pub fn forwarder(&self) -> &RouterForwarder {
+        &self.forwarder
     }
 
     /// Where the node listens, as the listeners got their addresses.
@@ -129,10 +136,18 @@ pub(crate) fn open_router_blocking(
         accept,
     };
     let (_, wire_zid) = session_zids(zid).ok_or(OpenError::DriveFailed)?;
+    // Built here and shared, so that the program holding the node can reach the forwarder's
+    // entry points (they take `&self`) while the node's thread runs the face loop over it.
+    let forwarder = Arc::new(RouterForwarder::with_timestamping(
+        Zid::from_slice(&wire_zid),
+        timestamping,
+    ));
+    policy.install_on(&*forwarder);
     let shutdown = Arc::new(Notify::new());
     let stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::channel::<Result<Vec<String>, OpenError>>();
     let node_zid = wire_zid.clone();
+    let node_forwarder = forwarder.clone();
     let node_shutdown = shutdown.clone();
     let node_stop = stop.clone();
     let handle = std::thread::Builder::new()
@@ -158,8 +173,7 @@ pub(crate) fn open_router_blocking(
                 tls,
                 link_conf,
                 offer,
-                timestamping,
-                policy,
+                node_forwarder,
                 #[cfg(feature = "scout")]
                 scouting,
                 node_shutdown,
@@ -171,6 +185,7 @@ pub(crate) fn open_router_blocking(
     match rx.recv() {
         Ok(Ok(listen_locators)) => Ok(RouterState {
             zid: wire_zid,
+            forwarder,
             listen_locators,
             shutdown,
             stop,
@@ -198,8 +213,7 @@ async fn run_router(
     tls: CapiTlsConfig,
     link_conf: LinkConf,
     offer: SessionOffer,
-    timestamping: TimestampingEnabled,
-    policy: crate::node_policy::NodePolicy,
+    forwarder: Arc<RouterForwarder>,
     #[cfg(feature = "scout")] scouting: Option<ScoutingPlan>,
     shutdown: Arc<Notify>,
     stop: Arc<AtomicBool>,
@@ -282,8 +296,6 @@ async fn run_router(
             return;
         }
     };
-    let forwarder = RouterForwarder::with_timestamping(Zid::from_slice(&zid), timestamping);
-    policy.install_on(&forwarder);
     let sources = FaceSources {
         listeners: legs.into_iter().map(|leg| leg.listening.listener).collect(),
         dial_targets,
@@ -318,7 +330,7 @@ async fn run_router(
         DEFAULT_OPEN_TICK_MS,
         until_stopped,
         |_event| {},
-        &forwarder,
+        &*forwarder,
     )
     .await;
 }
