@@ -298972,6 +298972,40 @@
         "Owed: upstream routing gossip_regression_1 and gossip_regression_2 (the reply of a peer node to the linkstate north query shows a peer two links away; the reply must be the peer's Gossip object, self and direct neighbours when multihop is off), upstream liveliness regression_3 (the router does not broker the token of one peer to another), the peer with a listener that binds after the open, a multicast group or a scouting that dials (each stays on the registry), a key declared by an id on the node, a query value and a reply in shared memory and the Join extension of a group that announces it. The Windows C ABI put-too-big-for-one-frame red is unattributed and not repeated since."
       ]
     },
+    "Round 3930": {
+      "decision_summary": "The key region_name was read by the config and acted on by nobody: SessionLinkActions::set_local_region had no caller outside the demo, so a node opened with a region name was refused as a configuration the engine does not act on. The key now joins the ones the C ABI session honours; the reader checks the name by the rule of the RegionName extension (one to 32 bytes), and the offer of a session carries it inline (OfferedRegion keeps SessionOffer Copy), so every session the node dials or accepts announces it in the Init, as upstream's transport manager does. The harness runs the regions test directory with the feature its cfg asks for (it compiled all 126 tests out), and the roadmap records the measure: 10 of 126 pass, the delivery tests of three scenarios wait for the gateway partition on the nodes of the API and for peers that hold a group, and about 50 tests count the steps of upstream's routing by tracing span, which is not an observable of the API.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/transport_mode.rs: SessionOffer.region and OfferedRegion (the name held inline), SessionOffer::with_region. crates/wz-session-core/src/session_actions.rs: apply_offer sets the local region of the session.",
+        "crates/wz-runtime-tokio/src/zenoh_config.rs: ZenohNodeConfig.region_name, read and checked; the key moves from the unhonoured lists to C_ABI_SESSION_HONOURED_KEYS. crates/wz-runtime-tokio/src/session_glue.rs: a test that the offer names the region of its session.",
+        "crates/wz-capi-core/src/open_plan.rs: session_offer carries region_name into the offer; a test that the key reaches it.",
+        "scripts/lib/z8_upstream_suite.py: FILE_FEATURES gives the regions file the internal feature. docs/zenoh-api-on-the-engine.md: the measure of the regions file and the order of its slices. docs/reason-review-pins.md: two pins of session-close-ingress read again. scripts/lib/capability_cost_gate.py: capic-default budget 9,335,200."
+      ],
+      "verification_bullets": [
+        "Locally: clippy -D warnings of wz-session-core (also without default features), wz-runtime-tokio, wz-capi-core and zenoh; the unit tests of wz-session-core (858), wz-runtime-tokio (1279), wz-capi-core (136) and wz-capi-c (185); the static gates (reason pins, citation anchors and the harness selftest pass after the fixes; the cost gate measured capic-default at 9,331,648 and its budget moved). The regions file measured before and after the key: 6 then 10 of 126 pass. Not run: the hosted lanes."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed: the regions file, in order: the gateway partition (gateway/south, with the region names of the remote's Init) on the router node and the peer node; the peer that holds a multicast group and dials what it scouts as a node; the client that holds a group; the tracing spans of the pubsub and queque kinds. Upstream routing gossip_regression_1 and gossip_regression_2 are with the peer-on-router session. The ledger entry of round 3929 lists liveliness regression_3 as owed: it passed in the run of that round (46 of 46). Query and reply in shared memory, the Join extension of a group, and the pin bump to 1.10.2 stay owed."
+      ],
+      "publishable_decision_summary": "The key region_name was read by the config and acted on by nobody: SessionLinkActions::set_local_region had no caller outside the demo, so a node opened with a region name was refused as a configuration the engine does not act on. The key now joins the ones the C ABI session honours; the reader checks the name by the rule of the RegionName extension (one to 32 bytes), and the offer of a session carries it inline (OfferedRegion keeps SessionOffer Copy), so every session the node dials or accepts announces it in the Init, as upstream's transport manager does. The harness runs the regions test directory with the feature its cfg asks for (it compiled all 126 tests out), and the roadmap records the measure: 10 of 126 pass, the delivery tests of three scenarios wait for the gateway partition on the nodes of the API and for peers that hold a group, and about 50 tests count the steps of upstream's routing by tracing span, which is not an observable of the API.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/transport_mode.rs: SessionOffer.region and OfferedRegion (the name held inline), SessionOffer::with_region. crates/wz-session-core/src/session_actions.rs: apply_offer sets the local region of the session.",
+        "crates/wz-runtime-tokio/src/zenoh_config.rs: ZenohNodeConfig.region_name, read and checked; the key moves from the unhonoured lists to C_ABI_SESSION_HONOURED_KEYS. crates/wz-runtime-tokio/src/session_glue.rs: a test that the offer names the region of its session.",
+        "crates/wz-capi-core/src/open_plan.rs: session_offer carries region_name into the offer; a test that the key reaches it.",
+        "scripts/lib/z8_upstream_suite.py: FILE_FEATURES gives the regions file the internal feature. docs/zenoh-api-on-the-engine.md: the measure of the regions file and the order of its slices. docs/reason-review-pins.md: two pins of session-close-ingress read again. scripts/lib/capability_cost_gate.py: capic-default budget 9,335,200."
+      ],
+      "publishable_verification_bullets": [
+        "Locally: clippy -D warnings of wz-session-core (also without default features), wz-runtime-tokio, wz-capi-core and zenoh; the unit tests of wz-session-core (858), wz-runtime-tokio (1279), wz-capi-core (136) and wz-capi-c (185); the static gates (reason pins, citation anchors and the harness selftest pass after the fixes; the cost gate measured capic-default at 9,331,648 and its budget moved). The regions file measured before and after the key: 6 then 10 of 126 pass. Not run: the hosted lanes."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed: the regions file, in order: the gateway partition (gateway/south, with the region names of the remote's Init) on the router node and the peer node; the peer that holds a multicast group and dials what it scouts as a node; the client that holds a group; the tracing spans of the pubsub and queque kinds. Upstream routing gossip_regression_1 and gossip_regression_2 are with the peer-on-router session. The ledger entry of round 3929 lists liveliness regression_3 as owed: it passed in the run of that round (46 of 46). Query and reply in shared memory, the Join extension of a group, and the pin bump to 1.10.2 stay owed."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
