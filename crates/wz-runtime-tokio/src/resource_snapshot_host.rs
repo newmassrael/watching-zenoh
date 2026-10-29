@@ -23,9 +23,13 @@
 //! A platform without `/proc` answers nothing, and every part of the snapshot says so.
 
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use wz_session_core::caps::{SNAPSHOT_HISTOGRAM_BUCKETS, SNAPSHOT_PERIOD_MS};
+// The runtime's clock and not the standard one, so that the service and the sleep that paces its
+// task read the same time, and a test that pauses the runtime's time pauses both.
+use tokio::time::Instant;
+
+use wz_session_core::caps::SNAPSHOT_HISTOGRAM_BUCKETS;
 use wz_session_core::resource_snapshot::{
     feature_bits, BuildSampler, MessageReading, ResourceReading, ResourceSource,
 };
@@ -151,6 +155,17 @@ impl SnapshotService {
         self.origin.elapsed().as_micros() as u32
     }
 
+    /// How long until a snapshot is due: nothing when one is, the whole period right after one.
+    fn due_in(&self) -> Duration {
+        let now = self.now_us();
+        let until = self
+            .sampler
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .until_due_us(now);
+        Duration::from_micros(u64::from(until))
+    }
+
     /// Take a snapshot if one is due: `source` is asked for the platform's readings, and `messages`
     /// for what the node's receive paths have counted. Returns whether one was taken.
     ///
@@ -223,11 +238,14 @@ impl SnapshotService {
         let service = Arc::clone(self);
         tokio::spawn(async move {
             let mut source = HostResourceSource::new();
-            let mut tick = tokio::time::interval(Duration::from_millis(SNAPSHOT_PERIOD_MS as u64));
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                tick.tick().await;
                 service.poll(&mut source, &messages);
+                // Sleep exactly until the next sample is due, and not a fixed period: a timer of
+                // the period ticks a little less than a period after a sample taken a little
+                // after its tick, finds none due, and waits out another whole period, so the
+                // node would sample every other tick. The pause is never shorter than a
+                // millisecond, so a source that is slow cannot make this loop spin.
+                tokio::time::sleep(service.due_in().max(Duration::from_millis(1))).await;
             }
         })
     }
@@ -236,6 +254,7 @@ impl SnapshotService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wz_session_core::caps::SNAPSHOT_PERIOD_MS;
     use wz_session_core::resource_snapshot::HeapReading;
 
     const STAT: &str = "cpu  100 20 30 700 50 5 5 10 0 0\ncpu0 50 10 15 350 25 2 2 5 0 0\nintr 1\n";
@@ -372,6 +391,28 @@ mod tests {
             .latest_json()
             .expect("the task took the first snapshot");
         assert!(json.contains("\"messages\":42"), "{json}");
+        assert!(json.contains("\"sequence\":0,"), "{json}");
+        // One period on it takes the next, and the one after that a period later still: it
+        // sleeps until a sample is due and does not tick on a fixed period that can fall just
+        // short of the sampler's.
+        for expected in 1..=2 {
+            tokio::time::advance(Duration::from_millis(SNAPSHOT_PERIOD_MS as u64)).await;
+            let wanted = format!("\"sequence\":{expected},");
+            for _ in 0..50 {
+                if service
+                    .latest_json()
+                    .is_some_and(|json| json.contains(&wanted))
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            let json = service.latest_json().unwrap();
+            assert!(
+                json.contains(&wanted),
+                "a period on, snapshot {expected} was taken: {json}"
+            );
+        }
         handle.abort();
     }
 }

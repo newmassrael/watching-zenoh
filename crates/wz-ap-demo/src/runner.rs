@@ -5101,6 +5101,35 @@ async fn run_peer_until(
         };
         forwarder.register_local_queryable(&queryable_key, true, Box::new(handler));
         log::info!("wz-ap-demo peer: adminspace config GET at {config_key}");
+
+        // The resource snapshot, under the wz-owned root beside the router host's, with the same
+        // task and the same permit: served only where the node serves its admin space at all.
+        #[cfg(feature = "resource-snapshot")]
+        {
+            use wz::runtime_tokio::adminspace::snapshot_key;
+            use wz::runtime_tokio::resource_snapshot_host::SnapshotService;
+            // The admin handler above took `zid_hex` by move, so the id is spelled again.
+            let snapshot_zid = zid_to_zenoh_hex(&params.zid);
+            let snapshot_key = snapshot_key(&snapshot_zid);
+            let snapshot_cfg = wz_config.clone();
+            let service = SnapshotService::new();
+            let messages = forwarder.messages_view();
+            // The task runs as long as the node does; its handle is not kept.
+            drop(service.spawn(move || messages.reading()));
+            let snapshot_handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
+                let read =
+                    wz::runtime_tokio::admin_read_permit(&snapshot_cfg.guard().admin_permissions());
+                if service.answer(view, out, &snapshot_zid, read) == AdminAnswerOutcome::DeniedRead
+                {
+                    log::error!(
+                        "{}",
+                        wz::runtime_tokio::adminspace::denied_read_diagnostic(view.keyexpr())
+                    );
+                }
+            };
+            forwarder.register_local_queryable(&snapshot_key, true, Box::new(snapshot_handler));
+            log::info!("wz-ap-demo peer: resource snapshot hosted at {snapshot_key}");
+        }
     }
 
     // `--session-lifecycle`: host the session lifecycle queries -- close a session

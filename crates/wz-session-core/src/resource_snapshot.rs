@@ -610,6 +610,18 @@ impl<const B: usize> Sampler<B> {
         }
     }
 
+    /// How many microseconds until a sample is due at `now_us`: 0 when one is due, the whole
+    /// period right after one was taken. A host that sleeps between polls sleeps this long and
+    /// polls once, and so takes a sample on the period however long its own loop takes, which a
+    /// timer of the same period does not: it ticks a little less than a period after a sample that
+    /// was taken a little after its tick, finds none due, and waits out another whole period.
+    pub fn until_due_us(&self, now_us: u32) -> u32 {
+        match self.last_sample_us {
+            None => 0,
+            Some(last) => self.period_us.saturating_sub(now_us.wrapping_sub(last)),
+        }
+    }
+
     /// Record a sample taken at `now_us` from what the platform and the message counter read,
     /// whether or not one was due: the caller has asked [`Self::is_due`].
     pub fn take(&mut self, now_us: u32, reading: ResourceReading, messages: MessageReading<B>) {
@@ -1113,6 +1125,39 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("\"features\":[]"), "{text}");
+    }
+
+    #[test]
+    fn the_time_until_a_sample_is_due_counts_down_from_the_period_and_survives_a_wrap() {
+        let mut sampler = Sampler::<4>::new(1000, 0).unwrap();
+        assert_eq!(
+            sampler.until_due_us(7),
+            0,
+            "the first sample is due at once"
+        );
+        sampler.take(100, ResourceReading::default(), MessageReading::empty());
+        assert_eq!(
+            sampler.until_due_us(100),
+            1000,
+            "a whole period right after one"
+        );
+        assert_eq!(sampler.until_due_us(400), 700);
+        assert_eq!(sampler.until_due_us(1099), 1);
+        assert_eq!(sampler.until_due_us(1100), 0, "due exactly at the period");
+        assert_eq!(sampler.until_due_us(5000), 0);
+        // Across a wrap of the counter: a sample at 2^32 - 200 is due 1000 on, at 800.
+        let mut wrapped = Sampler::<4>::new(1000, 0).unwrap();
+        wrapped.take(
+            u32::MAX - 199,
+            ResourceReading::default(),
+            MessageReading::empty(),
+        );
+        assert_eq!(
+            wrapped.until_due_us(400),
+            400,
+            "600 of the 1000 have passed"
+        );
+        assert!(wrapped.is_due(800) && wrapped.until_due_us(800) == 0);
     }
 
     #[test]

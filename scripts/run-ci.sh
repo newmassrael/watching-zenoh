@@ -22019,6 +22019,18 @@ layer_e6f_adminspace_metrics() {
     _runci_guarded_test "Layer E6f (the peer's node registry)" 1 \
         cargo test -p wz-integration-tests --test wz_peer_serves_its_node_stats_registry \
         -- --ignored --quiet || return 1
+    # The peer's resource snapshot (`docs/observation-plane.md` M4), at `wz/@/<zid>/snapshot`
+    # beside the router's: served to a session client, denied with the read permit. Its own demo
+    # build, run straight after it is built, since cargo uplifts every feature variant of the one
+    # `--bin` to a single path and a variant is only safe inside the step that built it. With
+    # `adminspace-read`, so that the denial is the flag's value and not a constant. The count is 2
+    # so that a dropped `#[ignore]` or a renamed test reddens.
+    (cd crates \
+        && cargo build -p wz-ap-demo --features routing-peer,adminspace-read,resource-snapshot --quiet \
+        && cargo build -p wz-e2e-admin-probe --quiet) || return 1
+    _runci_guarded_test "Layer E6f (the peer's resource snapshot)" 2 \
+        cargo test -p wz-integration-tests --test wz_peer_serves_its_resource_snapshot \
+        -- --ignored --test-threads=1 --quiet || return 1
 }
 
 # ─── Layer E6g — §5.23 adminspace-read GET-gate E2E (vs zenoh-pico) ─────────────
@@ -22435,7 +22447,8 @@ layer_e7c_router_adminspace_linkstate() {
 # WZ_PICO_REQUIRE escalates the skip.
 layer_e7g_router_adminspace_read_deny() {
     (cd crates && cargo build -p wz-ap-demo \
-        --features router-hat-router,adminspace-router-linkstate,adminspace-read --quiet) || return 1
+        --features router-hat-router,adminspace-router-linkstate,adminspace-read,resource-snapshot \
+        --quiet) || return 1
     if [[ -x target/zenoh-pico-cli/z_get ]]; then
         (cd crates && cargo test -p wz-integration-tests \
             --test wz_router_hat_adminspace_read_deny_to_pico_zget -- --ignored --quiet) || return 1
@@ -22453,6 +22466,14 @@ layer_e7g_router_adminspace_read_deny() {
     _runci_guarded_test "E7g capacity report" 2 \
         cargo test -p wz-integration-tests \
         --test wz_router_hat_serves_its_capacity_report -- --ignored --test-threads=1 --quiet || return 1
+    # The router's resource snapshot (`docs/observation-plane.md` M4), served at
+    # `wz/@/<zid>/snapshot` beside the report above, under the same root and the same permit: served
+    # and the node's own, its count surviving the link that carried it, absent from upstream's
+    # answers, denied with the permit. The demo is the build above, which carries
+    # `resource-snapshot` for this. The count is 2 for the reason the one above is.
+    _runci_guarded_test "E7g resource snapshot" 2 \
+        cargo test -p wz-integration-tests \
+        --test wz_router_hat_serves_its_resource_snapshot -- --ignored --test-threads=1 --quiet || return 1
 }
 
 # ─── Layer E7u — router-hat (TRUE Router) forwarding OVER UNIXPIPE (R311y396) ──
