@@ -36,7 +36,16 @@ use alloc::vec::Vec;
 
 #[cfg(all(feature = "codec-frame", feature = "alloc"))]
 use sce_forge_runtime::codec::CodecError;
-#[cfg(feature = "codec-frame")]
+// The owned walks (`alloc`) and the walks that lend a record where its payload lies.
+#[cfg(all(
+    feature = "codec-frame",
+    any(
+        feature = "alloc",
+        test,
+        feature = "session-unicast",
+        feature = "session-multicast"
+    )
+))]
 use sce_forge_runtime::codec::SceCursor;
 
 // Only the lifetime-free `*Owned` mirrors are imported at module level —
@@ -161,7 +170,20 @@ macro_rules! own_wire {
 /// (`wire_const::N_MID_REQUEST` etc.) below keep their existing
 /// shape; the constants themselves are defined in
 /// [`wz_codecs::wire_const`].
-#[cfg(feature = "codec-frame")]
+#[cfg(all(
+    feature = "codec-frame",
+    any(
+        feature = "alloc",
+        all(
+            feature = "session-slot",
+            any(
+                test,
+                feature = "session-unicast",
+                all(feature = "session-multicast", not(feature = "alloc"))
+            )
+        )
+    )
+))]
 use wz_codecs::wire_const;
 
 /// R74 — one application-layer message inside a `Frame.payload` batch.
@@ -284,11 +306,25 @@ impl NetworkMessage {
 /// [`ExtAdmission::Admissible`](crate::ext_admit::ExtAdmission::Admissible) for a
 /// message that has none.
 // The union of its callers: the owned message (`alloc`), the Declare and Push
-// verdicts, and the views read where a slot profile's frame lies.
+// verdicts, the Response read where its frame lies (`response_view_admission`,
+// whose verdict the owned message shares), and the views read where a slot
+// profile's frame lies. The Request verdict is `alloc`'s alone, so it adds
+// nothing. Each item below is gated on the union of ITS callers, because the
+// workspace builds with warnings denied: an item wider than its callers is dead
+// code in a build that has none, and a caller wider than the item has no callee.
 #[cfg(any(
     feature = "alloc",
     feature = "codec-declare",
     feature = "codec-push",
+    all(
+        feature = "codec-frame",
+        feature = "codec-response",
+        any(
+            test,
+            feature = "session-unicast",
+            all(feature = "session-multicast", not(feature = "alloc"))
+        )
+    ),
     all(
         feature = "codec-frame",
         feature = "session-slot",
@@ -311,10 +347,21 @@ fn judge_chain<E: crate::ext_view::ExtEntryView>(
 
 /// [`judge_chain`] over the header bytes a chain yields, held or walked where its frame lies: the
 /// verdict reads the headers and nothing else of an entry.
+// [`judge_chain`]'s union, which it serves, and the Request read where its frame
+// lies (`request_view_admission`), which walks its chains and calls this alone.
 #[cfg(any(
     feature = "alloc",
     feature = "codec-declare",
     feature = "codec-push",
+    all(
+        feature = "codec-frame",
+        any(feature = "codec-request", feature = "codec-response"),
+        any(
+            test,
+            feature = "session-unicast",
+            all(feature = "session-multicast", not(feature = "alloc"))
+        )
+    ),
     all(
         feature = "codec-frame",
         feature = "session-slot",
@@ -626,7 +673,20 @@ fn judge_request_chains<E: crate::ext_view::ExtEntryView, Q: crate::ext_view::Ex
 
 /// The chains a Response's body carries, for [`judge_response_chains`]: a
 /// Reply's own and its data body's (a Put's or a Del's), or an Err's.
-#[cfg(feature = "codec-response")]
+#[cfg(all(
+    feature = "codec-response",
+    any(
+        feature = "alloc",
+        all(
+            feature = "codec-frame",
+            any(
+                test,
+                feature = "session-unicast",
+                all(feature = "session-multicast", not(feature = "alloc"))
+            )
+        )
+    )
+))]
 enum ResponseBodyChain<'c, E> {
     Reply {
         reply: Option<&'c [E]>,
@@ -639,7 +699,20 @@ enum ResponseBodyChain<'c, E> {
 /// The verdict on a Response: its own chain, then its body's, a Reply's own
 /// before its data's. One rule for the owned message and the Response read
 /// where its frame lies (`response_view_admission`).
-#[cfg(feature = "codec-response")]
+#[cfg(all(
+    feature = "codec-response",
+    any(
+        feature = "alloc",
+        all(
+            feature = "codec-frame",
+            any(
+                test,
+                feature = "session-unicast",
+                all(feature = "session-multicast", not(feature = "alloc"))
+            )
+        )
+    )
+))]
 fn judge_response_chains<E: crate::ext_view::ExtEntryView>(
     outer: Option<&[E]>,
     body: ResponseBodyChain<'_, E>,
