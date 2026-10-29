@@ -136,6 +136,96 @@ impl RetryPolicy {
     }
 }
 
+/// `(delay_ms as f64 * factor) as u64`, in integer arithmetic, for every input.
+///
+/// The expression is upstream's (`connection_retry.rs`: `(self.delay as f64 * factor) as i64`),
+/// and on a target with no double-precision unit it is a call to the compiler's soft-float
+/// multiply, two conversions and two comparisons: 1.2 KB of text in the Zephyr client, whose
+/// growth is the one product of a number of milliseconds by a constant. This returns what the
+/// expression returns, bit for bit, with the two roundings the expression makes and no
+/// floating-point operation: the delay is rounded to the nearest `f64` (it is exact below 2^53),
+/// multiplied by the factor's mantissa as an integer, the product rounded to 53 significant bits
+/// (nearest, ties to even), and the result truncated and saturated as `as u64` does. A negative or
+/// NaN factor, an infinite one and a delay of 0 are the cases the expression resolves by the rules
+/// of IEEE 754 and `as`, resolved here by the same rules. The tests hold it equal to the expression
+/// over a grid of the edges and over a quarter of a million random pairs of bit patterns.
+fn grown_ms(delay_ms: u64, factor: f64) -> u64 {
+    const FRACTION_BITS: u32 = 52;
+    const SIGNIFICANT_BITS: u32 = 53;
+
+    let bits = factor.to_bits();
+    let negative = bits >> 63 != 0;
+    let biased = ((bits >> FRACTION_BITS) & 0x7ff) as i32;
+    let fraction = bits & ((1u64 << FRACTION_BITS) - 1);
+    if biased == 0x7ff {
+        // NaN, or an infinity: `delay * inf` is inf (saturates) unless the delay is 0 (NaN) or the
+        // infinity is negative (-inf), and both of those cast to 0.
+        return if fraction != 0 || negative || delay_ms == 0 {
+            0
+        } else {
+            u64::MAX
+        };
+    }
+    // A negative factor makes a negative or -0.0 product, a zero or subnormal one a product below
+    // 1 (a subnormal is under 2^-1022 and a delay under 2^64), a delay of 0 a product of 0.
+    if negative || biased == 0 || delay_ms == 0 {
+        return 0;
+    }
+    // factor = mantissa * 2^exponent, with 2^52 <= mantissa < 2^53.
+    let mantissa = u128::from(fraction | (1u64 << FRACTION_BITS));
+    let exponent = biased - 1075;
+
+    // The delay as an `f64` holds it: rounded to 53 significant bits when it needs more.
+    let delay = {
+        let length = 64 - delay_ms.leading_zeros();
+        if length <= SIGNIFICANT_BITS {
+            u128::from(delay_ms)
+        } else {
+            u128::from(round_to_significant(
+                u128::from(delay_ms),
+                length - SIGNIFICANT_BITS,
+            )) << (length - SIGNIFICANT_BITS)
+        }
+    };
+
+    // The product, exact: under 2^64 * 2^53.
+    let product = delay * mantissa;
+    let length = 128 - product.leading_zeros();
+    let (kept, dropped) = if length <= SIGNIFICANT_BITS {
+        (product as u64, 0)
+    } else {
+        let dropped = length - SIGNIFICANT_BITS;
+        (round_to_significant(product, dropped), dropped)
+    };
+
+    // value = kept * 2^(dropped + exponent), and `as u64` truncates it and saturates.
+    let shift = dropped as i32 + exponent;
+    if shift >= 0 {
+        if shift >= 64 {
+            return u64::MAX;
+        }
+        let value = u128::from(kept) << shift;
+        u64::try_from(value).unwrap_or(u64::MAX)
+    } else if shift <= -64 {
+        0
+    } else {
+        kept >> -shift
+    }
+}
+
+/// `value >> dropped`, rounded to nearest with ties to even: the 53 significant bits an `f64`
+/// keeps of a number that has `dropped` more.
+fn round_to_significant(value: u128, dropped: u32) -> u64 {
+    let mut kept = value >> dropped;
+    let remainder = value & ((1u128 << dropped) - 1);
+    let half = 1u128 << (dropped - 1);
+    if remainder > half || (remainder == half && kept & 1 == 1) {
+        kept += 1;
+    }
+    // At most 2^53.
+    kept as u64
+}
+
 /// The growing wait for ONE outage — zenoh's `ConnectionRetryPeriod`
 /// (`connection_retry.rs:72-107`). Owns its policy exactly as upstream's state
 /// clones its `conf`, so a caller holding a map of these per peer does not have
@@ -184,7 +274,7 @@ impl RetryPeriod {
         // `as u64` saturates to 0 for a negative or NaN product — the same
         // degenerate answer upstream's `as i64` cast collapses to — so a
         // hostile config file cannot panic or wrap the schedule.
-        let grown = (self.delay_ms as f64 * self.policy.period_increase_factor) as u64;
+        let grown = grown_ms(self.delay_ms, self.policy.period_increase_factor);
         self.delay_ms = if self.policy.period_max_ms > 0 {
             grown.min(self.policy.period_max_ms)
         } else {
@@ -327,5 +417,110 @@ mod tests {
         }
         .period();
         assert_eq!((0..4).map(|_| p.next_ms()).collect::<Vec<_>>(), vec![0; 4]);
+    }
+
+    /// The expression `grown_ms` stands for.
+    fn by_float(delay_ms: u64, factor: f64) -> u64 {
+        (delay_ms as f64 * factor) as u64
+    }
+
+    fn assert_same(delay_ms: u64, factor: f64) {
+        assert_eq!(
+            grown_ms(delay_ms, factor),
+            by_float(delay_ms, factor),
+            "delay {delay_ms} factor {factor:?} (bits {:#018x})",
+            factor.to_bits()
+        );
+    }
+
+    /// The edges: the delays around the 53 bits an `f64` holds and the 64 a `u64` does, and the
+    /// factors that are exact, inexact (1.1 and 1.7 are the two that round the product across
+    /// an integer), tiny, huge, subnormal, infinite, NaN and negative.
+    #[test]
+    fn grown_ms_is_the_float_expression_on_the_edges() {
+        let delays = [
+            0,
+            1,
+            2,
+            3,
+            7,
+            10,
+            999,
+            1000,
+            1001,
+            4000,
+            123_456_789,
+            u64::from(u32::MAX),
+            (1 << 52) - 1,
+            1 << 52,
+            (1 << 53) - 1,
+            1 << 53,
+            (1 << 53) + 1,
+            (1 << 53) + 2,
+            (1 << 53) + 3,
+            (1 << 60) + 12_345,
+            (1 << 63) - 1,
+            1 << 63,
+            u64::MAX - 1,
+            u64::MAX,
+        ];
+        let factors = [
+            0.0,
+            -0.0,
+            0.5,
+            0.9999999999999999,
+            1.0,
+            1.0000000000000002,
+            1.1,
+            1.5,
+            1.7,
+            2.0,
+            2.0000000000000004,
+            3.0,
+            4.0,
+            10.0,
+            1e-300,
+            f64::MIN_POSITIVE,
+            5e-324,
+            1e19,
+            1.8446744073709552e19,
+            1e300,
+            f64::MAX,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            -1.0,
+            -2.0,
+            -1e300,
+        ];
+        for &delay in &delays {
+            for &factor in &factors {
+                assert_same(delay, factor);
+            }
+        }
+    }
+
+    /// Random bit patterns for both: any delay of any length and any `f64`, the NaNs and the
+    /// subnormals among them (xorshift64*, a fixed seed, so a failure repeats).
+    #[test]
+    fn grown_ms_is_the_float_expression_on_random_bit_patterns() {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        };
+        for _ in 0..250_000 {
+            // A delay of random length: the mask keeps the top bits off.
+            let delay = next() >> (next() % 64);
+            let factor = f64::from_bits(next());
+            assert_same(delay, factor);
+            // The factors that matter in a schedule: near 1 and small integers and halves, which
+            // hit the rounding of the product most often.
+            let near = 1.0 + (next() % 4096) as f64 / 1024.0;
+            assert_same(delay, near);
+            assert_same(delay % 100_000, near);
+        }
     }
 }

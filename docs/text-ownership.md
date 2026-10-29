@@ -268,6 +268,20 @@ carries about 6 KB of C library code wz does not, which is why the difference is
   and the get image's getter reported on its queries, as before. An experiment that stopped at taking
   the three arms out of the walk measured 3,560 bytes, less than the 4,920 of the change, because the
   verdict function they share and the sink arms were still linked.
+- TAKEN, text -680 bytes (148,948 to 148,268 on the fixed image; -672 on the batching and the get
+  image): the retry schedule's growth in integer arithmetic. `(delay as f64 * factor) as u64`, the
+  one floating-point expression of the image, is a call to the soft-float multiply, two conversions
+  and two comparisons on a target with no double-precision unit: `__muldf3` 778 bytes, `__aeabi_d2ulz`
+  116, `__aeabi_ul2d` 112, `__aeabi_dcmpge` 114, `__aeabi_dcmpgt` 106 and `__aeabi_dmul` 12, 1,238
+  bytes, all called from the planner's `perform` and nothing else. `retry_period::grown_ms` returns
+  the expression's value for every input, with its two roundings (the delay to the nearest `f64`,
+  the product to 53 significant bits, ties to even), the truncation and the saturation, and no
+  floating-point operation; two tests hold it equal to the expression, over a grid of the edges
+  (delays around 2^53 and 2^64; factors exact, inexact, tiny, huge, subnormal, infinite, NaN and
+  negative) and over 250,000 random pairs of bit patterns. It costs 558 bytes (`round_to_significant`
+  372, the rest inlined at the manager's two calls), which is what the 680 is net of. Taking
+  `grown_ms` out of line, one copy for the two calls, cost 40 bytes more. The schedule is one
+  implementation for every profile, so the host and the board cannot differ in it.
 - NOT TAKEN, measured: `ClientNode::start` out of line (a call from the image's own `start`): the
   text was 161,700 bytes, 920 more than the image before, for the same frames: the node (152
   bytes) was passed by value across the call and the two functions each paid a prologue.
