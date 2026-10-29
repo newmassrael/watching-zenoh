@@ -179,7 +179,7 @@ carries about 6 KB of C library code wz does not, which is why the difference is
   `new_in_place` (the engine of SCE has one), so the planner's `open` no longer holds the machine's
   kilobyte as a temporary, 1,008 bytes of frame to 200. Together: the bound 5,420 to 4,240, the
   main stacks 7,232, 7,232 and 8,320 to 5,696, 5,696 and 6,720, the kit's reading 3,640 to 3,208
-  (fixed), text 161,692 to 160,692, `.bss` 1,024 bytes less (the view of a key, kept in a table).
+  (fixed), text 160,692 bytes on the fixed image, within the gate's tolerance of the committed row.
   The first of these did not move the reading (3,640 to 3,584) and the second did not either: the
   planner's path was above them both, and was not the one the direct chain follows.
 - NOT TAKEN, measured: taking `judge_ext_chain`'s two helpers out of line (7 instances) moved the
