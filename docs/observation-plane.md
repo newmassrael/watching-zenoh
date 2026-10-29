@@ -372,13 +372,21 @@ reads it.
 1. **The `log` sink is dropped.** The `log` crate formats its arguments before any sink sees them,
    so a sink would store text, which the ring does not. A node that wants its `log` lines keeps
    them where they go today; the ring holds the events the node and the program write as numbers.
-2. **The supervisor's deadline stays Rust, not an SCE `algorithm`.** SCE's arithmetic is checked: a
-   subtraction that wraps is an error value, so a comparison over a counter that wraps has to be
-   written around the arithmetic, and a predicate that cannot fail would return a `Result`. And wz
-   has no path that generates an `algorithm` document into a crate (`regen_statecharts_and_pools`
-   emits statecharts and pools only). Where SCE earns its place is protocol logic with state, which
-   the supervision statechart already is; `wrapping_ticks::elapsed` is an arithmetic primitive with
-   a test across a wrap. It is reopened if SCE gains wrapping arithmetic in `algorithm`.
+2. **The deadline comparison and the sampler's countdown stay Rust until SCE has wrapping
+   arithmetic; then they are `algorithm` documents.** SCE's `sub` is checked, so `now - last` is an
+   error exactly when the counter wrapped, and the range analysis does not relate two values, so a
+   branch written around it (`now >= last`) is not proven total and the function would be a
+   `Result`. (An earlier version of this entry said a predicate that cannot fail would return a
+   `Result` and that no path generates an `algorithm`; SCE's answer corrected both: a total body
+   already emits a plain type, and `sce-codegen generate` already emits an `algorithm`.) What is
+   missing is on both sides. SCE: built-in `wrapping_{add,sub,mul}` and `saturating_{add,sub,mul}`
+   on the unsigned widths, total in the analysis, on every backend, which needs an ADR and one
+   round and has no slot yet (asked of the SCE session of 2026-10-29); our wrap test becomes a
+   conformance fixture there. wz: an `emit_algorithm` in `wz-codegen-build` on `run_generate`, which
+   names the output by the document's `name=`, to be written with its first consumer so that it is
+   not infrastructure nothing uses. `const fn` is not emitted, a separate generator request. When
+   the primitive exists, `wrapping_ticks::elapsed` and `Sampler::until_due_us` are written as
+   `sources/algorithms/` documents and the Rust is replaced, with the wrap test as the oracle.
 3. **No dissector reader for the snapshot.** A snapshot is the node's own report, not something a
    capture holds, and the admin-space document is JSON a reader takes as it is. A binary form on
    the wire would need a publishing path nobody has asked for.
