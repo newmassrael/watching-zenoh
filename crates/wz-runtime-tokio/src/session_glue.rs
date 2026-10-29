@@ -2412,6 +2412,29 @@ mod tests {
         }
     }
 
+    /// The region a node names itself reaches each of its sessions through the offer, as the
+    /// other capabilities do, and an offer that names none leaves the session without one.
+    #[test]
+    fn an_offer_names_the_region_of_the_session_it_is_applied_to() {
+        use wz_session_core::extregion::RegionName;
+        use wz_session_core::transport_mode::SessionOffer;
+
+        let north = RegionName::new("north").expect("a valid region name");
+        let params = wz_runtime_tokio_test_support::fixture_session_init_params();
+        let (named, _driver) = crate::test_fixtures::recording_actions_with_params(params);
+        named
+            .apply_offer(&SessionOffer::universal().with_region(&north))
+            .expect("a region is an offer every build carries");
+        assert_eq!(named.local_region(), Some(north));
+
+        let params = wz_runtime_tokio_test_support::fixture_session_init_params();
+        let (silent, _driver) = crate::test_fixtures::recording_actions_with_params(params);
+        silent
+            .apply_offer(&SessionOffer::universal())
+            .expect("the zero offer");
+        assert_eq!(silent.local_region(), None);
+    }
+
     /// R2774 — the peer's region belongs to ONE peer: an Init without the
     /// entry announces "none", and a reopen forgets the last peer's.
     ///

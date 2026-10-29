@@ -8136,6 +8136,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if let Some(qos_link) = offer.qos_link {
             self.set_qos_link_metadata(qos_link);
         }
+        // The region the node names itself, announced by each of its sessions in the Init.
+        if let Some(region) = offer.region {
+            self.set_local_region(region.name());
+        }
 
         Ok(())
     }

@@ -156,6 +156,43 @@ pub struct SessionOffer {
     /// only inside the `is_qos` arm of `State::new`.
     #[cfg(feature = "session-extqos")]
     pub qos_link: Option<crate::extqos::QosLinkState>,
+    /// The region this node names itself (`region_name`), which every session it opens or accepts
+    /// announces in the `RegionName` extension of its Init (upstream's `RegionNameFsm` takes the
+    /// transport manager's name for each handshake). `None` announces no region, and the peer
+    /// assigns one.
+    pub region: Option<OfferedRegion>,
+}
+
+/// A [`RegionName`](crate::extregion::RegionName) held inline, so that the offer, which every
+/// layer of the open passes by value, stays `Copy`. The name is at most
+/// [`MAX_REGION_NAME_LEN`](crate::extregion::MAX_REGION_NAME_LEN) bytes, which is what makes the
+/// array exact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OfferedRegion {
+    len: u8,
+    bytes: [u8; crate::extregion::MAX_REGION_NAME_LEN],
+}
+
+impl OfferedRegion {
+    /// The offer of `name`.
+    #[must_use]
+    pub fn of(name: &crate::extregion::RegionName) -> Self {
+        let text = name.as_str().as_bytes();
+        let mut bytes = [0u8; crate::extregion::MAX_REGION_NAME_LEN];
+        bytes[..text.len()].copy_from_slice(text);
+        // `RegionName` holds at most `MAX_REGION_NAME_LEN` (32) bytes, so the length fits a byte.
+        Self {
+            len: text.len() as u8,
+            bytes,
+        }
+    }
+
+    /// The name offered. `None` only for a value that was not made by [`Self::of`].
+    #[must_use]
+    pub fn name(&self) -> Option<crate::extregion::RegionName> {
+        let text = core::str::from_utf8(&self.bytes[..usize::from(self.len)]).ok()?;
+        crate::extregion::RegionName::new(text).ok()
+    }
 }
 
 impl SessionOffer {
@@ -171,7 +208,15 @@ impl SessionOffer {
             shm_protocols: crate::extshm::ShmProtocolList::POSIX_ONLY,
             #[cfg(feature = "session-extqos")]
             qos_link: None,
+            region: None,
         }
+    }
+
+    /// Announce `name` as the region of every session this offer is applied to.
+    #[must_use]
+    pub fn with_region(mut self, name: &crate::extregion::RegionName) -> Self {
+        self.region = Some(OfferedRegion::of(name));
+        self
     }
 
     /// Select the exclusive transport mode. Replacing rather than accumulating

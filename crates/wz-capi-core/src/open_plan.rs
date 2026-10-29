@@ -318,9 +318,21 @@ fn session_offer(node: &ZenohNodeConfig) -> Result<SessionOffer, OpenRefusal> {
         (false, true) => TransportMode::LowLatency,
         (false, false) => TransportMode::Universal,
     };
-    Ok(SessionOffer::universal()
+    let offer = SessionOffer::universal()
         .with_mode(mode)
-        .with_compression(node.compression))
+        .with_compression(node.compression);
+    // The region the node names itself, announced by each of its sessions. The reader checked
+    // the name, so one that does not convert is a config built by hand, and its document is
+    // unreadable as the reader's would have been.
+    match node
+        .region_name
+        .as_deref()
+        .map(wz_session_core::extregion::RegionName::new)
+    {
+        None => Ok(offer),
+        Some(Ok(name)) => Ok(offer.with_region(&name)),
+        Some(Err(_)) => Err(OpenRefusal::DocumentUnreadable),
+    }
 }
 
 /// The endpoint this session listens on: the one its config states, or, when the config says
@@ -1246,6 +1258,31 @@ mod tests {
             Ok(SessionOffer::universal()
                 .with_mode(TransportMode::Qos)
                 .with_compression(true))
+        );
+    }
+
+    /// `region_name` reaches the offer, so each session of the node announces it; a document that
+    /// states none, or `null`, offers no region.
+    #[test]
+    fn region_name_reaches_the_offer() {
+        use wz_session_core::extregion::RegionName;
+
+        let named = offer_for(r#"{ region_name: "south-1" }"#).expect("a region name is an offer");
+        let expected = RegionName::new("south-1").expect("a valid name");
+        assert_eq!(
+            named.region.and_then(|region| region.name()),
+            Some(expected.clone())
+        );
+        assert_eq!(
+            named,
+            SessionOffer::universal()
+                .with_mode(TransportMode::Qos)
+                .with_region(&expected)
+        );
+        assert_eq!(offer_for("{}").expect("an offer").region, None);
+        assert_eq!(
+            offer_for("{ region_name: null }").expect("an offer").region,
+            None
         );
     }
 

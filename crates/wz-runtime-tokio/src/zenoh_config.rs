@@ -1346,6 +1346,12 @@ pub struct ZenohNodeConfig {
     /// nothing", which is zenoh's `false`. Read by the zenoh-c ABI's session when it opens
     /// ([`C_ABI_SESSION_HONOURED_KEYS`]), which hands it to the gossip plane it holds.
     pub scout_gossip_multihop: Option<bool>,
+    /// `region_name`: the label this node gives its region, one to 32 bytes
+    /// ([`wz_session_core::extregion::RegionName`]'s rule). `None` is "the document said
+    /// nothing" or `null`, and the peers of a session that announces no region assign one. Read by
+    /// the zenoh-c ABI's session when it opens ([`C_ABI_SESSION_HONOURED_KEYS`]), which puts it in
+    /// the offer of every session of the node.
+    pub region_name: Option<String>,
     /// R311y849 — `connect/retry`: how long a refused dial waits before the next
     /// attempt, and how that wait grows
     /// (`period_init_ms` / `period_max_ms` / `period_increase_factor`).
@@ -1587,6 +1593,7 @@ impl Default for ZenohNodeConfig {
             scout_gossip_autoconnect: None,
             scout_gossip_autoconnect_strategy: None,
             scout_gossip_multihop: None,
+            region_name: None,
             // R311y849 — `None` and NOT `RetryPolicy::ZENOH_DEFAULT`, even though
             // that is the schedule an unset key produces. The two are the same
             // BEHAVIOUR and different FACTS: `None` is "the file said nothing",
@@ -2644,10 +2651,8 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // `qos/network` LEFT this list for `HONOURED_CONFIG_KEYS`: the QoS overwrite interceptor is
     // built. Same partition, same total.
     "qos/publication",
-    // R2230 (open-debt item 579) — ARRIVED in 1.10.0, the gateway plane's other
-    // half: a node's own region label, which upstream's subregion filters match
-    // on (`GatewayFiltersConf::region_names`).
-    "region_name",
+    // `region_name` LEFT this list for [`C_ABI_SESSION_HONOURED_KEYS`]: the open hands the name
+    // to every session of the node, which announces it in its Init.
     // R2230 (open-debt item 579/582) — `routing/peer/linkstate/transport_weights`
     // and `routing/router/peers_failover_brokering` LEFT this list, for
     // [`WZ_EXTENSION_CONFIG_KEYS`]. Both are keys the pinned 1.10.0 parses into
@@ -3013,12 +3018,10 @@ pub const UNHONOURED_READER_GAP: &[&str] = &[
     // with it built, none of the seven interceptor keys is a reader gap.
     // R2788 — `plugins` LEFT this list: the reader now carries the section.
     "plugins_loading/enabled",
-    // R2539 — ARRIVED here from [`UNHONOURED_BEYOND_WZ`] the round wz grew the
-    // capability. `SessionLinkActions::set_local_region` gives a session its
-    // region identity and `wz_session_core::extregion` puts it on the Init
-    // wire; what no code does is READ this key and call that setter, which is
-    // this list's exact subject.
-    "region_name",
+    // R2539 — `region_name` ARRIVED here from [`UNHONOURED_BEYOND_WZ`] the round wz grew the
+    // capability (`SessionLinkActions::set_local_region`, `wz_session_core::extregion`), and it
+    // LEFT for [`C_ABI_SESSION_HONOURED_KEYS`] once the reader fed that setter through the offer
+    // of the session.
     // ⚠ R2633 — `routing/router/linkstate/transport_weights` LEFT this list for
     // [`HONOURED_CONFIG_KEYS`], one round after R2632 put it here. That is this
     // list's whole purpose working as designed: R2632 built the capability and
@@ -3386,33 +3389,8 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
     // `unhonoured_kind_evidence_gate.py` forces the deletion, in the same words
     // it used for `connect/timeout_ms`: a verdict about a key no longer in the
     // population is "a verdict about evidence that is gone".
-    // R2437 — the FIRST naming of this key in `crates/`, and it arrived from the
-    // wire side rather than the config side. `zenoh_config.rs` itself used to
-    // record that `region_name` / `regionname` occur nowhere here; the pin's
-    // establishment gained a `RegionName` extension (id `0x8`, on InitSyn and
-    // InitAck), and the round that taught wz the unknown-MANDATORY-extension
-    // rule had to list that id as RECOGNISED so a stock 1.10.0 peer's
-    // announcement is skipped rather than refused.
-    //
-    // ⚠⚠ R2539 — KIND CHANGED, `asserted-ignored` -> `wz-has-it`, and the
-    // change was FORCED by the gate rather than chosen.
-    //
-    // R2437 filed this as `asserted-ignored` with the anchor `IGNORES`, a word
-    // in a test message asserting wz did nothing with the extension. That was
-    // true then. This round built the extension, and the round's FIRST attempt
-    // kept the kind — arguing in a comment right here that the classification
-    // still stood because the CONFIG axis had not moved. `unhonoured_kind_
-    // evidence_gate` refused the push twice over: the anchor word was gone
-    // (the test message it pointed at had been corrected in the same commit),
-    // and, more importantly, the group row claiming wz has no region identity
-    // was false against wz's own code.
-    //
-    // The honest kind is `wz-has-it`: the capability EXISTS
-    // (`wz_session_core::extregion`, reached through
-    // `SessionLinkActions::set_local_region`) and the zenoh-config reader was
-    // never taught to feed it. The key stays UNHONOURED either way — what
-    // moved is WHY, which is the only thing this table records.
-    ("region_name", "wz-has-it", "RegionName"),
+    // The `region_name` / `wz-has-it` row (R2437, kind changed at R2539) left with its key: the
+    // reader feeds `SessionLinkActions::set_local_region` through the offer of the session.
     // R3075 -- the `autoconnect`, `autoconnect_strategy`, `target` and `multihop` rows left with
     // their keys.
     // R2336 (open-debt item 15) — the `transport/auth/pubkey/known_keys_file`
@@ -3754,7 +3732,12 @@ pub const DEEPENABLE_UPSTREAM_KEYS: &[&str] = &[
 /// an inbound link gets to finish its handshake and how many get it at once. The demo's and the
 /// router's loops keep upstream's defaults and do not read the keys yet, so they are the C ABI
 /// session's alone.
+///
+/// And `region_name`, the label a node gives its region, which each of its sessions announces in
+/// the `RegionName` extension of its Init (the offer of the session carries it). The demo takes
+/// no such key, so it is the C ABI session's alone.
 pub const C_ABI_SESSION_HONOURED_KEYS: &[&str] = &[
+    "region_name",
     "scouting/gossip/autoconnect",
     "scouting/gossip/autoconnect_strategy",
     "scouting/gossip/enabled",
@@ -7171,6 +7154,18 @@ impl ZenohNodeConfig {
         if let Some(v) = want_bool(&doc, "scouting/gossip/multihop")? {
             out.scout_gossip_multihop = Some(v);
             named.push("scouting/gossip/multihop");
+        }
+        // The name is checked here, as upstream builds a `RegionName` from the key when it reads
+        // the config, so that a name no session could announce is a refusal of the document.
+        if let Some(name) = want_string(&doc, "region_name", "a region name of 1 to 32 bytes")? {
+            if wz_session_core::extregion::RegionName::new(&name).is_err() {
+                return Err(ConfigIngestError::WrongType {
+                    path: "region_name",
+                    expected: "a region name of 1 to 32 bytes",
+                });
+            }
+            out.region_name = Some(name);
+            named.push("region_name");
         }
         match want_bool_for_mode(&doc, "timestamping/enabled", out.mode)? {
             ModeRead::Value(v) => {
