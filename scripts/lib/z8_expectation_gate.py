@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R3932 (no register item) -- Z8 (docs/zenoh-api-on-the-engine.md, section 6): what the upstream
+"""R3934 (no register item) -- Z8 (docs/zenoh-api-on-the-engine.md, section 6): what the upstream
 test files must still do.
 
 `z8_upstream_suite.py measure` runs the integration tests of upstream's `zenoh` against the patched
