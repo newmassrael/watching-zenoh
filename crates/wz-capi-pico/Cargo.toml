@@ -414,6 +414,11 @@ required-features = ["peer"]
 name = "listen_and_connect"
 required-features = ["peer"]
 
+# Two sessions that each listen and each dial the other: one transport apiece, whichever engine.
+[[test]]
+name = "mutual_dial"
+required-features = ["peer", "connectivity"]
+
 [[test]]
 name = "listener_multipeer"
 required-features = ["peer"]

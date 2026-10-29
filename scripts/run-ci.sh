@@ -10969,6 +10969,14 @@ layer_c1co_pico_client_dials_a_listener() {
             cargo test -p wz-integration-tests --test wz_pico_abi_dials_a_pico_listener \
             -- --ignored || return 1
     done
+    # Two nodes that are each other's dialler end with one transport on each side
+    # (`crates/wz-capi-pico/tests/mutual_dial.rs`, step L5 of `docs/capi-pico-on-coop-engine.md`).
+    # The tokio engine's run is the crate's default test build; this is the cooperative engine's,
+    # whose admission rule it reads: with the rule shut off the test fails on a doubled transport.
+    _runci_guarded_test "C1co engine-coop mutual dial" 1 \
+        cargo test -p wz-capi-pico --no-default-features \
+        --features "engine-coop,peer,multi-thread,link-udp,connectivity" \
+        --test mutual_dial || return 1
     # A fifth leg: the cooperative client that scouts. A `z_open` that names no locator looks for
     # one over the engine's own window, and finds nobody on a group nobody answers, which the
     # tokio engine's default build already runs; this is the same test with no tokio engine in

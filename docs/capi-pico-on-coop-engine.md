@@ -788,9 +788,18 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
   is delivered once after the admission; with the gate shut off the test fails. A test over
   loopback sockets could not make that window (the acceptor decides before its peer's first frame
   can arrive, and a dialler's window depends on the order two threads read), which is why the
-  proof is not there. Not done: a cooperative node against a tokio peer that races it (the two keep
-  different rules, and a race can close both links until the next redial), and a pico ABI test of
-  a session that listens and dials a peer that dials it (the engine's tests are the proof).
+  proof is not there. Through the pico ABI, `mutual_dial.rs` holds the same rule on both engines:
+  a plain listener goes, the session that dialled it redials its port, and a node of a new zid
+  takes the port and dials the session in the same breath, so the two are each other's dialler;
+  each ends with one transport naming the other, and what each puts reaches the other. Two
+  `z_open`s cannot be released at one moment to dial each other (an open that dials a port nothing
+  listens on fails after one attempt, as pico's does), which is why the race is reached by a
+  restart. With the cooperative engine's rule shut off the test fails on a doubled transport; the
+  tokio engine's is not shut off in that way. The ABI cannot show whether the redial reached the new
+  node before the pause ended (a refused link leaves no event), and this ABI mints its zids, so
+  which node has the lower one is the draw of each round. Not done: a cooperative node against a
+  tokio peer that races it (the two keep different rules, and a race can close both links until the
+  next redial).
 
 ### What is decided and what is open
 
