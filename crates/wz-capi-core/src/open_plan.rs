@@ -1065,7 +1065,7 @@ impl OpenArguments {
     /// whoever wrote the configuration; [`Self::run_router`] refuses the same asks.
     #[cfg(feature = "router-node")]
     pub fn router_refusal(&self) -> Option<&'static str> {
-        crate::drive::router_refused_ask(&self.connect, &self.stance)
+        crate::drive::router_refused_ask(&self.stance)
     }
 
     /// Open the node as a router: the router data plane run as a session, which the other roles
@@ -1073,7 +1073,13 @@ impl OpenArguments {
     /// to have asked for; what the node does not carry yet fails the open by name.
     #[cfg(feature = "router-node")]
     pub fn run_router(self) -> Result<crate::drive::RouterState, OpenError> {
-        crate::drive::open_router_blocking(self.connect, self.listen, self.tls, self.stance)
+        crate::drive::open_router_blocking(
+            self.connect,
+            self.listen,
+            self.tls,
+            self.dial,
+            self.stance,
+        )
     }
 }
 

@@ -5373,27 +5373,19 @@ mod tests {
 
     #[test]
     fn a_router_is_refused_for_what_it_does_not_carry_by_what_was_asked() {
-        for (ask, endpoints) in [
-            (
-                "connect endpoints",
-                r#"connect: { endpoints: ["tcp/127.0.0.1:1"] },"#,
-            ),
-            ("a namespace", r#"namespace: "ns","#),
-        ] {
-            let config = Config::from_json5(&format!(
-                r#"{{ mode: "router", listen: {{ endpoints: ["tcp/127.0.0.1:0"] }}, {endpoints}
-                     scouting: {{ multicast: {{ enabled: false }} }} }}"#
-            ))
-            .expect("a configuration zenoh reads");
-            let error = open(config)
-                .wait()
-                .expect_err("a router that asks too much");
-            let text = error.to_string();
-            assert!(
-                text.contains("`mode` = \"router\"") && text.contains(ask),
-                "{ask}: {text}"
-            );
-        }
+        let config = Config::from_json5(
+            r#"{ mode: "router", listen: { endpoints: ["tcp/127.0.0.1:0"] }, namespace: "ns",
+                 scouting: { multicast: { enabled: false } } }"#,
+        )
+        .expect("a configuration zenoh reads");
+        let error = open(config)
+            .wait()
+            .expect_err("a router that asks too much");
+        let text = error.to_string();
+        assert!(
+            text.contains("`mode` = \"router\"") && text.contains("a namespace"),
+            "{text}"
+        );
     }
 
     #[test]

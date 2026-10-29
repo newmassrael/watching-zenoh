@@ -68,10 +68,7 @@ impl RouterState {
 /// What a router node is not opened with, by what the configuration asked for: each is a
 /// capability the node does not carry yet, and a node opened without it would be the silent
 /// fallback the refusals of the open exist against.
-pub(crate) fn refused_ask(connect: &[String], stance: &OpenStance) -> Option<&'static str> {
-    if !connect.is_empty() {
-        return Some("connect endpoints");
-    }
+pub(crate) fn refused_ask(stance: &OpenStance) -> Option<&'static str> {
     if stance.auth.is_some() {
         return Some("an authentication");
     }
@@ -93,9 +90,10 @@ pub(crate) fn open_router_blocking(
     connect: Vec<String>,
     listen: Vec<String>,
     tls: CapiTlsConfig,
+    dial: DialPhase,
     stance: OpenStance,
 ) -> Result<RouterState, OpenError> {
-    if let Some(ask) = refused_ask(&connect, &stance) {
+    if let Some(ask) = refused_ask(&stance) {
         log_open_failure(
             "router node",
             &format_args!("the node does not carry {ask} yet"),
@@ -153,6 +151,8 @@ pub(crate) fn open_router_blocking(
             };
             rt.block_on(run_router(
                 node_zid,
+                connect,
+                dial,
                 listen,
                 listen_phase,
                 tls,
@@ -191,6 +191,8 @@ pub(crate) fn open_router_blocking(
 #[allow(clippy::too_many_arguments)]
 async fn run_router(
     zid: Vec<u8>,
+    connect: Vec<String>,
+    dial: DialPhase,
     listen: Vec<String>,
     listen_phase: ListenPhase,
     tls: CapiTlsConfig,
@@ -246,6 +248,32 @@ async fn run_router(
     // responder after its bind, before it connects to anything).
     #[cfg(feature = "scout")]
     let _findable = responder.map(Responder::start);
+    // The nodes this router dials (router to router federation), resolved here so the loop never
+    // waits on a resolver. A target that is not an address of a node is a refusal of the open by
+    // what it was, not a dial that is silently skipped.
+    let mut dial_targets = Vec::with_capacity(connect.len());
+    for endpoint in &connect {
+        match wz_runtime_tokio::session_open::resolve_mesh_dial_target(endpoint).await {
+            Ok(target) => dial_targets.push(target),
+            Err(error) => {
+                log_open_failure(&format!("connect endpoint {endpoint}"), &error);
+                let _ = tx.send(Err(OpenError::of_endpoint(
+                    endpoint,
+                    &std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a dial target"),
+                )));
+                return;
+            }
+        }
+    }
+    let dial_config = match connect.first().map(|endpoint| dial_config(&tls, endpoint)) {
+        None => DialConfig::default(),
+        Some(Ok(config)) => config,
+        Some(Err(error)) => {
+            log_open_failure("dial configuration of the router node", &error);
+            let _ = tx.send(Err(OpenError::DriveFailed));
+            return;
+        }
+    };
     let params = match init_params(WhatAmI::Router, zid.clone(), link_conf) {
         Ok(params) => params,
         Err(error) => {
@@ -258,8 +286,8 @@ async fn run_router(
     policy.install_on(&forwarder);
     let sources = FaceSources {
         listeners: legs.into_iter().map(|leg| leg.listening.listener).collect(),
-        dial_targets: Vec::new(),
-        dial_config: Arc::new(DialConfig::default()),
+        dial_targets,
+        dial_config: Arc::new(dial_config),
         dial_intents: None,
         mcast_ingress: None,
         mcast_members: None,
@@ -272,7 +300,7 @@ async fn run_router(
         ceiling: None,
         peer_board: None,
         offer,
-        retry: RetryPolicy::ZENOH_DEFAULT,
+        retry: dial.schedule,
         stats: None,
     };
     // The open is over once the node is ready to be dialled: the listeners are bound and
