@@ -297044,6 +297044,34 @@
         "The main thread reads 3,728 bytes against 2,888 for pico's, 840 over, and the frames that hold them are the main function (704: the identity, its hex text, the zid, the plane, the round watch and the console parts), and the receive chain beneath it (`dispatch_unit_borrowed` 756, `decode_unit_in` 312, `dispatch_datagram_unit` 168, `poll_erased` 112); the reservation is set by the bound, 5,420 bytes, whose worst path is the receive's lend of a declaration under a query's answer (`lend_declare` 2,064), where a record per kind in the sink would put the smaller frame of a request. A rule of the call contract that is pinned to a line of a file goes stale when that file changes above the line, and the kit lane is the only thing that reads it: a rule keyed by what the call is, and not by where it stands, would not. The matrix has not been run on this tree; the kit's reading says stack_used falls about 550 bytes and that is not claimed until it is measured."
       ]
     },
+    "Round 3879": {
+      "decision_summary": "The wz pico ABI's dial role had been held against a wz listener and against itself, never against a foreign node that listens. A dialer example of wz-capi-pico, built once for each engine, now dials upstream's z_sub, z_pub and z_queryable run as peers with a listen endpoint: a put reaches the listener, the listener's put reaches the dialer, and a get is answered and ends. The three tests are claims for api-compat-pico in the wz-to-pico direction, so the audit's count of foreign adjudicators rises by three, and the sweep of Layer E skips them as it skips the listener example's.",
+      "changes_bullets": [
+        "crates/wz-capi-pico/examples/dial_a_listener.rs and its example stanza: a client session that dials an endpoint, subscribes, publishes and asks queries. crates/wz-integration-tests/tests/wz_pico_abi_dials_a_pico_listener.rs: three ignored tests against the pico CLI as a listener. scripts/run-ci.sh: Layer C1co builds the dialer for each engine and runs the three tests on each (3 each); Layer E skips them. scripts/lib/crossimpl_audit.py: foreign adjudicators 1078 to 1081. scripts/lib/crossimpl_corpus.py and layer_e_oracle_scope_gate.py: the helper wz_dialer_binary is registered. docs/capi-pico-on-coop-engine.md: the open item is recorded as held."
+      ],
+      "verification_bullets": [
+        "On pc2: Layer C1co passes (133 s), with the three new tests ok under the tokio dialer and again under the cooperative dialer; audit-crossimpl-proof reports links=1081 and OK; layer-e-oracle-scope reports 0 of 202 selected tests needing an unbuilt binary. The dialer is client mode only."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "carry_forward_bullets": [
+        "A wz peer that dials a pico peer (mode peer with connect) is not held by a foreign node, and the pico ABI test of a session that listens and dials a node that dials it is not written; neither was run."
+      ],
+      "publishable_decision_summary": "The wz pico ABI's dial role had been held against a wz listener and against itself, never against a foreign node that listens. A dialer example of wz-capi-pico, built once for each engine, now dials upstream's z_sub, z_pub and z_queryable run as peers with a listen endpoint: a put reaches the listener, the listener's put reaches the dialer, and a get is answered and ends. The three tests are claims for api-compat-pico in the wz-to-pico direction, so the audit's count of foreign adjudicators rises by three, and the sweep of Layer E skips them as it skips the listener example's.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-pico/examples/dial_a_listener.rs and its example stanza: a client session that dials an endpoint, subscribes, publishes and asks queries. crates/wz-integration-tests/tests/wz_pico_abi_dials_a_pico_listener.rs: three ignored tests against the pico CLI as a listener. scripts/run-ci.sh: Layer C1co builds the dialer for each engine and runs the three tests on each (3 each); Layer E skips them. scripts/lib/crossimpl_audit.py: foreign adjudicators 1078 to 1081. scripts/lib/crossimpl_corpus.py and layer_e_oracle_scope_gate.py: the helper wz_dialer_binary is registered. docs/capi-pico-on-coop-engine.md: the open item is recorded as held."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2: Layer C1co passes (133 s), with the three new tests ok under the tokio dialer and again under the cooperative dialer; audit-crossimpl-proof reports links=1081 and OK; layer-e-oracle-scope reports 0 of 202 selected tests needing an unbuilt binary. The dialer is client mode only."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A wz peer that dials a pico peer (mode peer with connect) is not held by a foreign node, and the pico ABI test of a session that listens and dials a node that dials it is not written; neither was run."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
