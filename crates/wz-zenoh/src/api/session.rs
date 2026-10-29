@@ -809,7 +809,7 @@ impl Engine {
     fn query(&self, request: QueryRequest<'_>) -> ZResult<()> {
         match self {
             Engine::Tokio(state) => tokio_engine::ask(state.shared.engine_ref(), request),
-            Engine::Router(_) => RouterEngine::refuses("a get"),
+            Engine::Router(router) => tokio_engine::router_ask(&router.node, request),
         }
     }
 
@@ -2236,6 +2236,70 @@ mod tokio_engine {
     /// callback is dropped with the last of them, once every leg has ended, and that is what ends
     /// the channel of a handler. A query that no leg was issued for ends at once.
     pub(super) fn ask(engine: &dyn SessionEngine, request: QueryRequest<'_>) -> ZResult<()> {
+        let Asked {
+            key,
+            wire,
+            options,
+            callback,
+            fan,
+            consolidation,
+        } = asked_of(request)?;
+        let mut leg = leg_minter(callback, fan.clone(), consolidation);
+        let issued = engine.get_on_wire(key, &wire, &options, fan.as_deref(), &mut leg);
+        // The closure holds the delivery the legs share: what it let go of is the last hold, when
+        // no leg is left.
+        drop(leg);
+        match issued {
+            Some(_) => Ok(()),
+            None => Err(zerror!("this engine asks no queries").into()),
+        }
+    }
+
+    /// Ask the query `request` says as the node's own face of a router node: the router routes
+    /// it to the queryables of the faces that hold one, and each reply is handed to the callback
+    /// on the face's thread. The callback is dropped once the router has told the face the end of
+    /// the replies, which ends the channel of a handler.
+    pub(super) fn router_ask(
+        node: &wz_capi_core::drive::RouterState,
+        request: QueryRequest<'_>,
+    ) -> ZResult<()> {
+        let Asked {
+            key,
+            options,
+            callback,
+            fan,
+            consolidation,
+            ..
+        } = asked_of(request)?;
+        // One leg: the router's. The face holds the callback of the leg for as long as the query
+        // is under way and lets go of it when the router tells it the end, which is what ends the
+        // query for the callback.
+        let mut leg = leg_minter(callback, fan, consolidation);
+        let mut on_reply = leg();
+        drop(leg);
+        node.get(
+            key,
+            &options,
+            Box::new(move |view: &dyn ReplyView| on_reply(view)),
+            Box::new(|| {}),
+        )
+        .map_err(|error| zerror!("{error}").into())
+    }
+
+    /// What a query asks of an engine, in the engine's own types: the key, how the wire names
+    /// it, the options of the query, the callback its replies go to, what stops it, and how
+    /// its replies are consolidated across the legs.
+    struct Asked<'a> {
+        key: &'a str,
+        wire: WireKey,
+        options: QueryOptions,
+        callback: Callback<Reply>,
+        fan: Option<Arc<CancellableFan>>,
+        consolidation: ConsolidationMode,
+    }
+
+    /// Read the query `request` says into what an engine is asked.
+    fn asked_of(request: QueryRequest<'_>) -> ZResult<Asked<'_>> {
         let QueryRequest {
             key,
             scope,
@@ -2329,15 +2393,14 @@ mod tokio_engine {
                     *stack = engine_stack_of(&arrived);
                 }));
         }
-        let mut leg = leg_minter(callback, fan.clone(), consolidation);
-        let issued = engine.get_on_wire(key, &wire, &options, fan.as_deref(), &mut leg);
-        // The closure holds the delivery the legs share: what it let go of is the last hold, when
-        // no leg is left.
-        drop(leg);
-        match issued {
-            Some(_) => Ok(()),
-            None => Err(zerror!("this engine asks no queries").into()),
-        }
+        Ok(Asked {
+            key,
+            wire,
+            options,
+            callback,
+            fan,
+            consolidation,
+        })
     }
 
     /// Ask the liveliness query `request` says of `engine`, handing each token that is alive to
@@ -10451,6 +10514,62 @@ mod tests {
             .expect("opens")
         }
 
+        /// A get of a router is asked as the node's own face: the queryable of a peer linked to
+        /// it answers, the reply is on the key it answered under, and the channel of the handler
+        /// ends with the query. A get that no queryable meets ends at once with no reply.
+        #[test]
+        fn a_get_of_a_router_is_answered_by_the_queryable_of_a_peer_and_then_ends() {
+            use std::time::Duration;
+
+            let port = unautoselected_port();
+            let router = router("a1b2e8", port);
+            let peer = peer_of("a1b2e9", port);
+            assert_eq!(connected(&peer, 1).0.len(), 1, "the peer is linked");
+            let _queryable = peer
+                .declare_queryable("demo/q/**")
+                .callback(|query| {
+                    query
+                        .reply(query.key_expr().clone(), "answer")
+                        .wait()
+                        .expect("replies");
+                })
+                .wait()
+                .expect("declares");
+            // The declaration reaches the router a moment after the link: the get is asked until
+            // a reply comes.
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let answered = loop {
+                let replies = router.get("demo/q/one").wait().expect("a router asks");
+                let mut told = Vec::new();
+                while let Ok(Some(reply)) = replies.recv_timeout(Duration::from_secs(2)) {
+                    told.push(
+                        reply
+                            .result()
+                            .map(|sample| {
+                                (
+                                    sample.key_expr().to_string(),
+                                    sample.payload().try_to_string().unwrap().into_owned(),
+                                )
+                            })
+                            .expect("a reply, not an error"),
+                    );
+                }
+                if !told.is_empty() || std::time::Instant::now() > deadline {
+                    break told;
+                }
+            };
+            assert_eq!(
+                answered,
+                [("demo/q/one".to_owned(), "answer".to_owned())],
+                "the queryable of the peer answered the get of the router, once"
+            );
+            let none = router.get("demo/none").wait().expect("a router asks");
+            assert!(
+                none.recv_timeout(Duration::from_secs(2)).is_err(),
+                "nothing answers a key no queryable meets, and the channel ends"
+            );
+        }
+
         #[test]
         fn a_subscriber_of_a_router_hears_a_peer_and_a_put_of_the_router_reaches_a_peer() {
             use std::sync::mpsc;
@@ -10588,7 +10707,6 @@ mod tests {
                 "a queryable",
                 router.declare_queryable("a/b".to_owned()).wait(),
             );
-            refused("a get", router.get("a/b").wait());
         }
     }
 

@@ -23,10 +23,19 @@ use std::thread::JoinHandle;
 
 use wz_runtime_tokio::declare::{LivelinessSample, LivelinessSampleKind};
 use wz_runtime_tokio::keyexpr_match::keyexpr_intersects_text;
-use wz_runtime_tokio::router_forward::{LocalFaceEvent, LocalFaceSink};
+use wz_runtime_tokio::router_forward::{local_face_aliases, LocalFaceEvent, LocalFaceSink};
+use wz_session_core::reply::ReplyRegistry;
+use wz_session_core::reply_acceptance::{ReplyAcceptance, ReplyKeyExpr};
+use wz_session_core::reply_sink::{BoxedReplySink, ConsolidatingSink, ReplyView};
 
 /// What a liveliness subscriber of the face is called with, on the face's thread.
 pub type LivelinessHandler = Box<dyn for<'a> FnMut(LivelinessSample<'a>) + Send + 'static>;
+
+/// What a query of the face is handed each reply to, on the face's thread.
+pub type ReplyHandler = Box<dyn for<'a> FnMut(&'a dyn ReplyView) + Send + 'static>;
+
+/// What a query of the face is told its end by, on the face's thread: once, after the last reply.
+pub type FinalHandler = Box<dyn FnMut() + Send + 'static>;
 
 /// What the face's thread is asked to do, in the order it is asked.
 enum Command {
@@ -51,6 +60,16 @@ enum Command {
         pattern: String,
         answer: mpsc::Sender<Vec<String>>,
     },
+    /// The program asked a query under the request id `rid`; the router is asked next, so the
+    /// replies it tells the face find the query held.
+    Get {
+        rid: u64,
+        /// The key the query asks, which the replies are held to unless `accept` lifts it.
+        keyexpr: String,
+        accept: ReplyKeyExpr,
+        on_reply: ReplyHandler,
+        on_final: FinalHandler,
+    },
     Stop,
 }
 
@@ -68,7 +87,6 @@ struct Alive {
     holders: usize,
 }
 
-#[derive(Default)]
 struct State {
     /// The tokens of the other faces, by the id the router numbers them.
     remote: HashMap<u64, String>,
@@ -77,11 +95,48 @@ struct State {
     /// The keys alive, each with the id it was told under and how many tokens, of either, hold it.
     alive: HashMap<String, Alive>,
     subscribers: Vec<Subscriber>,
+    /// The queries the program asked that have not ended, by the request id it gave them: a
+    /// reply the router tells the face is handed to the query it answers, and the end of the
+    /// replies ends it. The face has no alias table, so a key it is told is literal.
+    queries: ReplyRegistry<ConsolidatingSink<BoxedReplySink>>,
 }
 
 impl State {
+    fn new() -> Self {
+        Self {
+            remote: HashMap::new(),
+            own: HashMap::new(),
+            alive: HashMap::new(),
+            subscribers: Vec::new(),
+            queries: ReplyRegistry::new(),
+        }
+    }
+
     fn handle(&mut self, command: Command) -> bool {
         match command {
+            Command::Told(LocalFaceEvent::Reply(response)) => {
+                self.queries
+                    .dispatch_response(&response, &local_face_aliases());
+            }
+            Command::Told(LocalFaceEvent::ReplyFinal { request_id }) => {
+                self.queries.deliver_local_final(request_id);
+            }
+            Command::Get {
+                rid,
+                keyexpr,
+                accept,
+                mut on_reply,
+                mut on_final,
+            } => {
+                self.queries.register(
+                    rid,
+                    1,
+                    None,
+                    ReplyAcceptance::for_query(&keyexpr, accept),
+                    move |reply| on_reply(reply),
+                    move |_| on_final(),
+                );
+            }
             Command::Told(LocalFaceEvent::TokenUp { id, keyexpr }) => {
                 // The first announcement of an id wins, as a session's table of remote tokens
                 // does: a repeat neither counts again nor rebinds the id to another key.
@@ -210,7 +265,7 @@ impl LocalLiveliness {
         let thread = std::thread::Builder::new()
             .name("wz-router-local".to_owned())
             .spawn(move || {
-                let mut state = State::default();
+                let mut state = State::new();
                 while let Ok(command) = received.recv() {
                     if !state.handle(command) {
                         break;
@@ -276,6 +331,26 @@ impl LocalLiveliness {
             return Vec::new();
         }
         answered.recv().unwrap_or_default()
+    }
+
+    /// Hold a query under the request id `rid`, to be handed the replies the router tells the
+    /// face for it and told their end. Called before the router is asked, so that no reply finds
+    /// the query missing: the face's thread reads its commands in the order they were sent.
+    pub(super) fn hold_query(
+        &self,
+        rid: u64,
+        keyexpr: &str,
+        accept: ReplyKeyExpr,
+        on_reply: ReplyHandler,
+        on_final: FinalHandler,
+    ) {
+        let _ = self.commands.send(Command::Get {
+            rid,
+            keyexpr: keyexpr.to_owned(),
+            accept,
+            on_reply,
+            on_final,
+        });
     }
 
     /// Stop the face's thread and wait for it.

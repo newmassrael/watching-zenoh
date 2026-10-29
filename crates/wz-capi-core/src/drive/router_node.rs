@@ -20,12 +20,13 @@
 use wz_runtime_tokio::accept_loop::{peer_loop, FaceSources};
 use wz_runtime_tokio::linkstate_forward::Zid;
 use wz_runtime_tokio::router_forward::RouterForwarder;
+use wz_runtime_tokio::session::QueryOptions;
 use wz_runtime_tokio::session_open::DialConfig;
 
 use super::*;
 
 mod local_face;
-pub use local_face::{LivelinessHandler, LocalLiveliness};
+pub use local_face::{FinalHandler, LivelinessHandler, LocalLiveliness, ReplyHandler};
 
 /// A running router node. Dropping it does not stop it; [`RouterState::close`] does, and joins the
 /// thread the node runs on.
@@ -36,6 +37,9 @@ pub struct RouterState {
     /// The node's own face, for liveliness: what the program is told of the tokens of the other
     /// faces, and where its own tokens are counted.
     liveliness: LocalLiveliness,
+    /// The request ids the node's own face gives its queries, so that the replies the router
+    /// tells the face find the query they answer.
+    next_request: AtomicU64,
     shutdown: Arc<Notify>,
     stop: Arc<AtomicBool>,
     driver: StdMutex<Option<JoinHandle<()>>>,
@@ -72,6 +76,41 @@ impl RouterState {
     /// The node's own face, for liveliness: subscribers, and the keys alive.
     pub fn liveliness(&self) -> &LocalLiveliness {
         &self.liveliness
+    }
+
+    /// Ask a query as the node's own face. The router routes it to the queryables of every face
+    /// that holds one on `keyexpr`, and each reply is handed to `on_reply` on the face's thread,
+    /// then `on_final` is called once, whether the queryables ended, the query timed out or none
+    /// was asked. `options` carry what the query asks (its parameters, target, timeout, value and
+    /// attachment), as for a get over a link.
+    pub fn get(
+        &self,
+        keyexpr: &str,
+        options: &QueryOptions,
+        on_reply: ReplyHandler,
+        on_final: FinalHandler,
+    ) -> Result<(), String> {
+        use wz_session_core::request_build::{build_request_query, build_request_query_with_meta};
+
+        let rid = self.next_request.fetch_add(1, Ordering::Relaxed);
+        let meta = options.query_metadata();
+        let request = if meta.is_empty() {
+            build_request_query(rid, 0, Some(keyexpr))
+        } else {
+            build_request_query_with_meta(rid, 0, Some(keyexpr), &meta)
+        }
+        .map_err(|error| format!("the query could not be built: {error:?}"))?;
+        // Held before the router is asked: the face's thread reads its commands in the order they
+        // were sent, and the router tells the face its replies through the same queue.
+        self.liveliness.hold_query(
+            rid,
+            keyexpr,
+            options.effective_accept_replies(),
+            on_reply,
+            on_final,
+        );
+        self.forwarder.local_get(&request);
+        Ok(())
     }
 
     /// Where the node listens, as the listeners got their addresses.
@@ -230,6 +269,7 @@ pub(crate) fn open_router_blocking(
                 forwarder,
                 listen_locators,
                 liveliness,
+                next_request: AtomicU64::new(1),
                 shutdown,
                 stop,
                 driver: StdMutex::new(Some(handle)),

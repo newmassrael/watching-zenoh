@@ -1584,7 +1584,9 @@ enum InboundFace<'a> {
 /// A free function over the borrowed map rather than a `&self` method, so it
 /// drops into the existing scoped-borrow blocks without a second borrow.
 fn classify_inbound(faces: &HashMap<FaceId, RouterFaceState>, inbound: FaceId) -> InboundFace<'_> {
-    if inbound == MCAST_INGRESS_FACE {
+    // The node's own face asks with no routing identity of its own and no alias table, as a group
+    // peer does: its keys are literal.
+    if inbound == MCAST_INGRESS_FACE || inbound == LOCAL_FACE {
         return InboundFace::SourceOnly;
     }
     match faces.get(&inbound) {
@@ -2233,8 +2235,9 @@ pub(crate) struct Tables {
 }
 
 /// What the router tells its own `Local` face, as the face's session reads it: a liveliness token
-/// that came alive on a key (under the id the router knows it by), and one that went.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// that came alive on a key (under the id the router knows it by), and one that went, and the
+/// answers to a query the face asked ([`RouterForwarder::local_get`]).
+#[derive(Debug, Clone, PartialEq)]
 pub enum LocalFaceEvent {
     /// A token is alive on `keyexpr`.
     TokenUp { id: u64, keyexpr: String },
@@ -2242,39 +2245,50 @@ pub enum LocalFaceEvent {
     /// was never told of a token that it is gone, by a retraction that names the key and no id
     /// (upstream's `maybe_unpropagate_token`, its second arm): `keyexpr` is then the key.
     TokenDown { id: u64, keyexpr: Option<String> },
+    /// A reply to a query the face asked, carrying the request id the face gave it.
+    Reply(Box<ResponseOwned>),
+    /// The end of the replies to the query the face asked under `request_id`: every queryable
+    /// has ended, the query timed out, or nothing was left to ask.
+    ReplyFinal { request_id: u64 },
 }
 
 /// What receives what the router tells its own `Local` face (see
 /// [`RouterForwarder::attach_local_face`]).
 pub type LocalFaceSink = Arc<dyn Fn(LocalFaceEvent) + Send + Sync>;
 
-/// The event a message for the `Local` face is, or `None` for one the face does not act on (a
-/// final of an interest, a declaration of another plane).
-#[cfg(feature = "routing-token-tables")]
-fn local_face_event(msg: &NetworkMessage) -> Option<LocalFaceEvent> {
-    let NetworkMessage::Declare(declare) = msg else {
-        return None;
-    };
-    match &declare.body {
-        DeclareOwnedVariant::CodecZenohDeclToken(token) => {
-            resolve_wireexpr(&token.keyexpr.body, &hashbrown::HashMap::new()).map(|keyexpr| {
-                LocalFaceEvent::TokenUp {
-                    id: token.id,
-                    keyexpr,
-                }
-            })
-        }
-        DeclareOwnedVariant::CodecZenohUndeclToken(token) => Some(LocalFaceEvent::TokenDown {
-            id: token.id,
-            keyexpr: resolve_ext_keyexpr(token.extensions.as_ref(), &hashbrown::HashMap::new()),
-        }),
-        _ => None,
-    }
+/// The key aliases the `Local` face has been told: none. The router names a key to the face as
+/// the literal it is, so a program that reads what it is told with the aliases of a session reads
+/// them against this table.
+pub fn local_face_aliases() -> hashbrown::HashMap<u64, String> {
+    hashbrown::HashMap::new()
 }
 
-#[cfg(not(feature = "routing-token-tables"))]
-fn local_face_event(_msg: &NetworkMessage) -> Option<LocalFaceEvent> {
-    None
+/// The event a message for the `Local` face is, or `None` for one the face does not act on (a
+/// final of an interest, a declaration of another plane).
+fn local_face_event(msg: NetworkMessage) -> Option<LocalFaceEvent> {
+    match msg {
+        NetworkMessage::Response(response) => Some(LocalFaceEvent::Reply(response)),
+        NetworkMessage::ResponseFinal(response_final) => Some(LocalFaceEvent::ReplyFinal {
+            request_id: response_final.request_id,
+        }),
+        #[cfg(feature = "routing-token-tables")]
+        NetworkMessage::Declare(declare) => match &declare.body {
+            DeclareOwnedVariant::CodecZenohDeclToken(token) => {
+                resolve_wireexpr(&token.keyexpr.body, &hashbrown::HashMap::new()).map(|keyexpr| {
+                    LocalFaceEvent::TokenUp {
+                        id: token.id,
+                        keyexpr,
+                    }
+                })
+            }
+            DeclareOwnedVariant::CodecZenohUndeclToken(token) => Some(LocalFaceEvent::TokenDown {
+                id: token.id,
+                keyexpr: resolve_ext_keyexpr(token.extensions.as_ref(), &hashbrown::HashMap::new()),
+            }),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// A [`FaceForwarder`] that maintains zenoh's DUAL router meshes — `routers_net`
@@ -3016,6 +3030,7 @@ router_entry_points! { on_tables_mut:
 }
 
 router_entry_points! { on_tables:
+    fn local_get(&self, request: &RequestOwned);
     fn publish(&self, keyexpr: &str, payload: &[u8]) -> Result<(), CodecError>;
     fn publish_qos(
         &self,
@@ -8653,6 +8668,18 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         true
     }
 
+    /// Ask a query as the node's own face: the pin routes a node's own get as a request from a
+    /// face of its own in the `Local` region (`zenoh/src/net/routing/gateway.rs` @
+    /// `Region::Local,`), so it takes the route of a request from a leaf region, and its
+    /// replies come back to the face as to any other: the sink [`attach_local_face`] set is
+    /// told each (a [`LocalFaceEvent::Reply`]) and the end of them ([`LocalFaceEvent::ReplyFinal`])
+    /// under the request id `request` carries.
+    ///
+    /// [`attach_local_face`]: RouterForwarder::attach_local_face
+    pub fn local_get(&self, request: &RequestOwned) {
+        self.route_request(LOCAL_FACE, Region::Local, true, request, None);
+    }
+
     /// Route an inbound `Request` (a Query) through the router's full zenoh
     /// `compute_query_route` (`zenoh/src/net/routing/hat/router/queries.rs`
     /// @ `fn compute_query_route`) + `compute_final_route`
@@ -9590,7 +9617,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             let Some(sink) = &self.tables.local_face_sink else {
                 return false;
             };
-            if let Some(event) = local_face_event(&build()) {
+            if let Some(event) = local_face_event(build()) {
                 sink(event);
             }
             return true;
@@ -22246,6 +22273,72 @@ mod tests {
             Some(NetworkMessage::Response(r)) => *r,
             other => panic!("expected a forwarded Response, got {other:?}"),
         }
+    }
+
+    /// The node's own face asks a query: it reaches the queryable of a client face under an id of
+    /// the router's, and the replies and the final come back to the face under the id the face
+    /// gave, as events of its sink.
+    #[test]
+    fn a_query_of_the_local_face_reaches_a_client_queryable_and_its_replies_come_back() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (queryable, sink_queryable) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &queryable);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true));
+        let heard = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = heard.clone();
+        fwd.attach_local_face(Arc::new(move |event| kept.lock().unwrap().push(event)));
+        sink_queryable.reset();
+
+        let request = wz_session_core::request_build::build_request_query(77, 0, Some("demo/q"))
+            .expect("build request");
+        fwd.local_get(&request);
+
+        assert_eq!(sink_queryable.frame_count(), 1, "the queryable is asked");
+        let qid = forwarded_request(&sink_queryable.frame_bytes(0)).rid;
+        assert!(heard.lock().unwrap().is_empty(), "nothing has answered yet");
+
+        let response =
+            wz_session_core::response_build::build_response_reply_literal(qid, "demo/q", b"hi")
+                .expect("build response");
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Response(Box::new(response)),
+        );
+        let ended = wz_session_core::response_final_build::build_response_final(
+            qid,
+            wz_session_core::sample::QosLevel::DEFAULT,
+        );
+        forward_one(&fwd, FaceId(0), NetworkMessage::ResponseFinal(ended));
+
+        let heard = heard.lock().unwrap();
+        assert_eq!(heard.len(), 2, "a reply and its end: {heard:?}");
+        match &heard[0] {
+            LocalFaceEvent::Reply(response) => {
+                assert_eq!(response.request_id, 77, "under the id the face gave");
+            }
+            other => panic!("expected a reply, got {other:?}"),
+        }
+        assert_eq!(heard[1], LocalFaceEvent::ReplyFinal { request_id: 77 });
+        assert_eq!(fwd.pending.guard().len(), 0, "no branch is held");
+    }
+
+    /// A query of the local face that no queryable can answer ends at once, as any query with an
+    /// empty route does.
+    #[test]
+    fn a_query_of_the_local_face_with_no_queryable_ends_at_once() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let heard = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = heard.clone();
+        fwd.attach_local_face(Arc::new(move |event| kept.lock().unwrap().push(event)));
+        let request = wz_session_core::request_build::build_request_query(5, 0, Some("demo/none"))
+            .expect("build request");
+        fwd.local_get(&request);
+        assert_eq!(
+            *heard.lock().unwrap(),
+            [LocalFaceEvent::ReplyFinal { request_id: 5 }]
+        );
     }
 
     /// A policy that denies `Query` on `flow` for every key.
