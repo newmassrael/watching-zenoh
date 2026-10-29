@@ -936,6 +936,9 @@ pubsub-delete = ["routing-peer", "wz/pubsub-delete"]
 # compiled out = silent NOP) + the facade forward; the atom is active <=> its own
 # cfg site in run_router_hat (mirrors router-connect-reconcile / router-multicast-faces).
 adminspace-router-linkstate = ["router-hat-router", "wz/adminspace-router-linkstate"]
+# The node's resource snapshot, hosted at `wz/@/<zid>/snapshot` beside the capacity report on the
+# router host, which is the host that has the admin space to serve it from.
+resource-snapshot = ["adminspace-router-linkstate", "wz/resource-snapshot"]
 
 [lints]
 workspace = true

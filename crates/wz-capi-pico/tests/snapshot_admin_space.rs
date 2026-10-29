@@ -194,21 +194,26 @@ fn a_peer_reads_the_snapshot_once_the_program_has_taken_one() {
         let listener_zid = zid_of(&listener);
         let everything = CString::new(format!("@/{listener_zid}/pico/**")).unwrap();
         let root = format!("@/{listener_zid}/pico");
-        let key = format!("@/{listener_zid}/pico/wz/snapshot");
+        // Under the wz-owned root, as the hosted admin space serves its own, and not inside pico's
+        // tree at `@/<zid>/pico`.
+        let key = format!("wz/@/{listener_zid}/snapshot");
+        let after_key = CString::new(key.clone()).unwrap();
         assert_eq!(
             zp_start_admin_space(z_session_loan_mut(&mut listener)),
             Z_OK
         );
 
-        // Before a snapshot: the admin space answers, and not with this document.
-        let before = ask_until(&dialer, &everything, &probe, &root);
-        assert!(
-            before.iter().all(|(reply_key, _, _)| *reply_key != key),
-            "a snapshot nobody took is not a document: {before:?}"
-        );
-        // Let the gets still in flight land, so a late reply is not read as one after the poll.
-        std::thread::sleep(Duration::from_millis(600));
+        // Before a snapshot: the admin space answers with pico's documents, and the snapshot's key
+        // answers nothing, since nobody took one.
+        ask_until(&dialer, &everything, &probe, &root);
         probe.replies.lock().unwrap().clear();
+        get_once(&dialer, &after_key, &probe);
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(
+            probe.replies.lock().unwrap().is_empty(),
+            "a snapshot nobody took is not a document: {:?}",
+            probe.replies.lock().unwrap()
+        );
 
         // After: the document is the snapshot, as JSON, with what the source answered.
         assert_eq!(
@@ -216,7 +221,6 @@ fn a_peer_reads_the_snapshot_once_the_program_has_taken_one() {
             Z_OK
         );
         assert_eq!(wz_ext_snapshot_poll(z_session_loan(&listener)), 1);
-        let after_key = CString::new(key.clone()).unwrap();
         let replies = ask_until(&dialer, &after_key, &probe, &key);
         assert!(probe.errors.lock().unwrap().is_empty());
         let (_, document, encoding) = replies
@@ -236,6 +240,18 @@ fn a_peer_reads_the_snapshot_once_the_program_has_taken_one() {
         ] {
             assert!(document.contains(part), "`{part}` is not in {document}");
         }
+
+        // The property the wz root exists for: a query for pico's own documents, asked now that a
+        // snapshot exists, still meets exactly the documents pico has and not this one.
+        std::thread::sleep(Duration::from_millis(600));
+        probe.replies.lock().unwrap().clear();
+        let pico_documents = ask_until(&dialer, &everything, &probe, &root);
+        assert!(
+            pico_documents
+                .iter()
+                .all(|(reply_key, _, _)| reply_key.starts_with(&format!("@/{listener_zid}/pico"))),
+            "pico's tree holds only pico's documents: {pico_documents:?}"
+        );
 
         z_close(z_session_loan_mut(&mut dialer), std::ptr::null());
         z_session_drop(z_session_move(&mut dialer));

@@ -2294,6 +2294,12 @@ pub mod routing_region;
 #[cfg(any(feature = "transport-unicast", feature = "transport-multicast"))]
 pub mod node_stats;
 
+// The hosted platform's half of the resource snapshot (`docs/observation-plane.md` M4): what the
+// operating system answers and the task that takes a snapshot on the period. Documented in its
+// own `//!`.
+#[cfg(feature = "resource-snapshot")]
+pub mod resource_snapshot_host;
+
 // The link-state routing cores the region-hat forwarder is built from (the data and
 // query routes over a `wz_routing_graph` net and its interest tables, the query
 // return synthesis, the graph handle) and the re-exports a deploy names its policy

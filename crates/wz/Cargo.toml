@@ -1307,6 +1307,9 @@ transport-link-quic-datagram = ["transport-link-quic", "wz-runtime-tokio?/transp
 transport-link-unixpipe = ["transport-link-tcp", "wz-runtime-tokio?/transport-link-unixpipe"]
 transport-multilink = ["wz-runtime-tokio?/transport-multilink"]
 transport-stats = ["wz-runtime-tokio?/transport-stats"]
+# The node's resource snapshot (`docs/observation-plane.md` M4): the hosted platform's source, the
+# task that takes a snapshot on the period, and each face's message counter.
+resource-snapshot = ["wz-runtime-tokio?/resource-snapshot"]
 
 # ============================================================
 # Domain aggregates (one per atom namespace, each = union of its atomic set)

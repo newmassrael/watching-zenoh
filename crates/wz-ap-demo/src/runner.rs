@@ -7144,6 +7144,36 @@ async fn run_router_hat_until(
             forwarder.register_local_queryable(&capacity_key, true, Box::new(capacity_handler));
             log::info!("wz-ap-demo router-hat: capacity report hosted at {capacity_key}");
         }
+
+        // The resource snapshot, under the same wz-owned root: a task takes one on the build's
+        // period from the host's own readings and from what every face's receive path has
+        // counted, and a GET for `wz/@/<zid>/snapshot` is answered with the latest, gated by the
+        // same admin read permit.
+        #[cfg(feature = "resource-snapshot")]
+        {
+            use wz::runtime_tokio::adminspace::snapshot_key;
+            use wz::runtime_tokio::resource_snapshot_host::SnapshotService;
+            let snapshot_zid = zid_to_zenoh_hex(&params.zid);
+            let snapshot_key = snapshot_key(&snapshot_zid);
+            let snapshot_cfg = Arc::clone(&host_cfg);
+            let service = SnapshotService::new();
+            let messages = forwarder.messages_view();
+            // The task runs as long as the node does; its handle is not kept.
+            drop(service.spawn(move || messages.reading()));
+            let snapshot_handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
+                let read =
+                    wz::runtime_tokio::admin_read_permit(&snapshot_cfg.guard().admin_permissions());
+                if service.answer(view, out, &snapshot_zid, read) == AdminAnswerOutcome::DeniedRead
+                {
+                    log::error!(
+                        "{}",
+                        wz::runtime_tokio::adminspace::denied_read_diagnostic(view.keyexpr())
+                    );
+                }
+            };
+            forwarder.register_local_queryable(&snapshot_key, true, Box::new(snapshot_handler));
+            log::info!("wz-ap-demo router-hat: resource snapshot hosted at {snapshot_key}");
+        }
     }
 
     // `--session-lifecycle` on the router host: the same two queries the peer

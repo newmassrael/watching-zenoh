@@ -88,7 +88,21 @@ use crate::zid::zid_hex;
 /// `_admin_space_queryable_id`).
 pub(crate) struct AdminSpaceSlot {
     transport_endpoint: Option<String>,
-    running: Mutex<Option<PlainQueryable>>,
+    running: Mutex<Option<Running>>,
+}
+
+/// The queryables a started admin space holds, undeclared together when it stops.
+///
+/// Fields are held for their drop, never read.
+#[allow(dead_code)]
+struct Running {
+    /// pico's own documents, at `@/<zid>/pico/**`.
+    pico: PlainQueryable,
+    /// wz's resource snapshot, at `wz/@/<zid>/snapshot`: under the wz-owned root and not inside
+    /// pico's tree, as the hosted admin space serves its own, so a query for pico's documents
+    /// meets exactly the documents pico has.
+    #[cfg(feature = "resource-snapshot")]
+    snapshot: PlainQueryable,
 }
 
 impl AdminSpaceSlot {
@@ -100,7 +114,7 @@ impl AdminSpaceSlot {
         }
     }
 
-    fn running(&self) -> MutexGuard<'_, Option<PlainQueryable>> {
+    fn running(&self) -> MutexGuard<'_, Option<Running>> {
         self.running.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
@@ -140,6 +154,8 @@ pub unsafe extern "C" fn zp_start_admin_space(zs: *mut z_loaned_session_t) -> ZR
                 .and_then(TransportLink::parse),
         };
         let key = format!("@/{}/pico/**", identity.zid);
+        #[cfg(feature = "resource-snapshot")]
+        let snapshot_zid = identity.zid.clone();
         let answerer = Arc::new(Answerer {
             // Weak, as pico's query context is: the queryable lives in the
             // session, and a strong reference would keep the session alive
@@ -153,14 +169,49 @@ pub unsafe extern "C" fn zp_start_admin_space(zs: *mut z_loaned_session_t) -> ZR
                 answerer.answer(query, out)
             }) as QueryCallback
         });
-        match PlainQueryable::declare(&PicoSession::of(handle), &key, None, false, sink) {
-            Ok(queryable) => {
-                *running = Some(queryable);
-                Z_OK
-            }
-            Err(code) => code,
-        }
+        let pico = match PlainQueryable::declare(&PicoSession::of(handle), &key, None, false, sink)
+        {
+            Ok(queryable) => queryable,
+            Err(code) => return code,
+        };
+        // A refusal of the second declaration leaves the admin space stopped: `pico` drops here
+        // and undeclares itself, so the program is not left with half of one.
+        #[cfg(feature = "resource-snapshot")]
+        let snapshot = match declare_snapshot(handle, &snapshot_zid) {
+            Ok(queryable) => queryable,
+            Err(code) => return code,
+        };
+        *running = Some(Running {
+            pico,
+            #[cfg(feature = "resource-snapshot")]
+            snapshot,
+        });
+        Z_OK
     })
+}
+
+/// Declare the queryable that serves the resource snapshot at `wz/@/<zid>/snapshot`
+/// (`wz_session_core::wz_root::snapshot_key`), answering the latest snapshot the program has
+/// taken (`wz_ext_snapshot_poll`) and nothing before the first. There is no read permission in a
+/// pico node's admin space, so every query that reaches the key is allowed to read it.
+#[cfg(feature = "resource-snapshot")]
+fn declare_snapshot(handle: &PicoSessionHandle, zid: &str) -> Result<PlainQueryable, ZResult> {
+    let key = wz_session_core::wz_root::snapshot_key(zid);
+    let declared = key.clone();
+    let sink: QueryableSink = Arc::new(move |_face: Arc<dyn QueryHolder>| {
+        let key = key.clone();
+        Box::new(move |_query: &dyn QueryView, out: &mut dyn ReplyOut| {
+            // The queryable is declared on this one key, so every query it is handed reaches it.
+            if let Some(body) = crate::snapshot::latest_json() {
+                let _ = out.reply_keyed_encoded(
+                    &key,
+                    body.as_bytes(),
+                    Some(&EncodingHint::APPLICATION_JSON),
+                );
+            }
+        }) as QueryCallback
+    });
+    PlainQueryable::declare(&PicoSession::of(handle), &declared, None, false, sink)
 }
 
 /// Stop the session's admin space (pico `zp_stop_admin_space`): its queryable
@@ -284,16 +335,6 @@ fn replies(identity: &Identity, faces: &[FaceSnapshot], query: &str) -> Vec<(Str
         );
         answer(&mut out, query, key, || peer_doc(face));
     }
-    // wz's own document, with no counterpart in pico's: the latest resource snapshot, once the
-    // program has taken one. Present only in a build with the capability, which no build that is
-    // compared against pico's documents has.
-    #[cfg(feature = "resource-snapshot")]
-    answer(
-        &mut out,
-        query,
-        format!("{base}/wz/snapshot"),
-        crate::snapshot::latest_json,
-    );
     out
 }
 

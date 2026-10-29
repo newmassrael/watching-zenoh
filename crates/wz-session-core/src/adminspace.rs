@@ -2839,20 +2839,10 @@ pub fn answer_router_admin_query(
     answer_router_admin_query_in(&mut key, &mut body, view, out, ctx).outcome
 }
 
-/// The root of the keys wz serves that upstream does not. Outside `@/`, so a query for upstream's
-/// admin space (`@/**`) cannot intersect any key under it and upstream's answers are the bytes
-/// they were before wz added one.
-pub const WZ_EXTENSION_ROOT: &str = "wz";
-
-/// The key the capacity report is served at: `wz/@/<zid>/capacity`.
+// The keys of the documents wz serves that upstream does not are `crate::wz_root`'s, so a host
+// that serves one without the rest of the admin space names the same key.
 #[cfg(feature = "alloc")]
-pub fn capacity_report_key(zid_hex: &str) -> String {
-    let mut key = String::from(WZ_EXTENSION_ROOT);
-    key.push_str("/@/");
-    key.push_str(zid_hex);
-    key.push_str("/capacity");
-    key
-}
+pub use crate::wz_root::{capacity_report_key, snapshot_key, WZ_EXTENSION_ROOT};
 
 /// Answer a GET with the capacity report ([`crate::capacity::CapacityReport`]) as
 /// `application/json` under [`capacity_report_key`], when the GET intersects that key and `read`
@@ -2870,18 +2860,55 @@ pub fn answer_capacity_query(
     report: &crate::capacity::CapacityReport,
 ) -> AdminAnswerOutcome {
     let key = capacity_report_key(zid_hex);
-    if !key_intersects_query(view.keyexpr(), &key) {
+    answer_wz_json(view, out, &key, read, || {
+        let mut body = String::new();
+        // Writing into a `String` cannot fail.
+        let _ = report.write_json(&mut body);
+        Some(body)
+    })
+}
+
+/// Answer a GET with the latest resource snapshot as `application/json` under [`snapshot_key`],
+/// when the GET intersects that key and `read` permits, exactly as [`answer_capacity_query`]
+/// does. `latest` runs only for a GET that reaches the key and is allowed to read it, and answers
+/// `None` before the host has taken its first snapshot, when there is nothing to serve: the GET
+/// is then served no reply and is not a denial. The body is
+/// [`Snapshot::write_json`](crate::resource_snapshot::Snapshot::write_json)'s, written by the
+/// host that holds the sampler.
+#[cfg(feature = "alloc")]
+pub fn answer_snapshot_query(
+    view: &dyn crate::query_sink::QueryView,
+    out: &mut dyn crate::query_sink::ReplyOut,
+    zid_hex: &str,
+    read: bool,
+    latest: impl FnOnce() -> Option<String>,
+) -> AdminAnswerOutcome {
+    answer_wz_json(view, out, &snapshot_key(zid_hex), read, latest)
+}
+
+/// What every document under [`WZ_EXTENSION_ROOT`] shares: reply `body()` as `application/json`
+/// at `key` to a GET that intersects it, answer nothing to one that does not, and answer a denial
+/// to one that does when `read` is false.
+#[cfg(feature = "alloc")]
+fn answer_wz_json(
+    view: &dyn crate::query_sink::QueryView,
+    out: &mut dyn crate::query_sink::ReplyOut,
+    key: &str,
+    read: bool,
+    body: impl FnOnce() -> Option<String>,
+) -> AdminAnswerOutcome {
+    if !key_intersects_query(view.keyexpr(), key) {
         return AdminAnswerOutcome::Served;
     }
     if !read {
         return AdminAnswerOutcome::DeniedRead;
     }
-    let mut body = String::new();
-    // Writing into a `String` cannot fail.
-    let _ = report.write_json(&mut body);
+    let Some(body) = body() else {
+        return AdminAnswerOutcome::Served;
+    };
     let (packed_id, schema) = AdminLegEncoding::Json.parts();
     // A refusal here is the fixed backing's, which a router does not have; the sink counts it.
-    let _ = out.reply_keyed_encoded_parts(&key, body.as_bytes(), packed_id, schema);
+    let _ = out.reply_keyed_encoded_parts(key, body.as_bytes(), packed_id, schema);
     AdminAnswerOutcome::Served
 }
 
@@ -7043,6 +7070,61 @@ mod tests {
         );
         assert_eq!(outcome, AdminAnswerOutcome::DeniedRead);
         assert!(out.replies.is_empty());
+    }
+
+    #[test]
+    fn the_snapshot_is_served_under_the_wz_root_once_there_is_one_and_only_to_a_permitted_get() {
+        let json = "{\"version\":1}".to_string();
+        let mut out = RecordingReply::default();
+        let outcome = answer_snapshot_query(
+            &admin_view("wz/@/a1b2/snapshot"),
+            &mut out,
+            "a1b2",
+            true,
+            || Some(json.clone()),
+        );
+        assert_eq!(outcome, AdminAnswerOutcome::Served);
+        assert_eq!(out.replies.len(), 1);
+        assert_eq!(out.replies[0].0, "wz/@/a1b2/snapshot");
+        assert_eq!(out.replies[0].1, json.as_bytes());
+        // Before the host has taken one there is nothing to serve, and that is not a denial.
+        let mut none = RecordingReply::default();
+        let outcome = answer_snapshot_query(
+            &admin_view("wz/@/a1b2/snapshot"),
+            &mut none,
+            "a1b2",
+            true,
+            || None,
+        );
+        assert_eq!(outcome, AdminAnswerOutcome::Served);
+        assert!(none.replies.is_empty());
+        // A denied read answers nothing, says so, and never runs the document.
+        let mut denied = RecordingReply::default();
+        let outcome = answer_snapshot_query(
+            &admin_view("wz/@/a1b2/snapshot"),
+            &mut denied,
+            "a1b2",
+            false,
+            || panic!("a denied read must not build the document"),
+        );
+        assert_eq!(outcome, AdminAnswerOutcome::DeniedRead);
+        assert!(denied.replies.is_empty());
+        // A GET for upstream's admin space, or another node's, does not meet the key, and the
+        // document costs it nothing: the closure that writes it never runs.
+        for query in [
+            "@/**",
+            "@/a1b2/router/**",
+            "wz/@/other/snapshot",
+            "wz/**",
+            "**",
+        ] {
+            let mut out = RecordingReply::default();
+            let outcome = answer_snapshot_query(&admin_view(query), &mut out, "a1b2", true, || {
+                panic!("{query} does not reach the key")
+            });
+            assert_eq!(outcome, AdminAnswerOutcome::Served, "{query}");
+            assert!(out.replies.is_empty(), "{query}");
+        }
     }
 
     #[cfg(feature = "adminspace-router-linkstate")]

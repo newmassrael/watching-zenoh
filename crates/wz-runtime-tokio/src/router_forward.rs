@@ -1608,6 +1608,33 @@ fn classify_inbound(faces: &HashMap<FaceId, RouterFaceState>, inbound: FaceId) -
 #[cfg(feature = "adminspace-router-linkstate")]
 pub use crate::linkstate_forward::LinkstateNetView;
 
+/// `resource-snapshot` — a read-only handle over the router's face set that answers what the
+/// faces' receive paths have counted, those that are up and those that have gone, as one reading
+/// that only grows ([`RouterForwarder::messages_view`]).
+#[cfg(feature = "resource-snapshot")]
+#[derive(Clone)]
+pub struct RouterMessagesView {
+    tables: Arc<PlainRwLock<Tables>>,
+}
+
+#[cfg(feature = "resource-snapshot")]
+impl RouterMessagesView {
+    /// The count of every face's receive path. Taken under the tables' read lock, which a face's
+    /// removal holds for writing, so a face that goes down in the middle is counted once.
+    pub fn reading(
+        &self,
+    ) -> wz_session_core::resource_snapshot::MessageReading<
+        { wz_session_core::caps::SNAPSHOT_HISTOGRAM_BUCKETS },
+    > {
+        let tables = self.tables.read();
+        let mut total = tables.departed_messages.clone();
+        for face in tables.faces.values() {
+            total.merge(&face.actions.message_reading());
+        }
+        total
+    }
+}
+
 /// R2636 (open-debt item 748) — a read-only handle over a router's live face
 /// set, rendering the admin `sessions[]` transport table.
 ///
@@ -2137,6 +2164,13 @@ pub(crate) struct Tables {
     /// [`LinkstateNetView`] already makes for the two graphs. Use sites are
     /// unchanged — `Rc<RefCell<T>>` derefs to `RefCell<T>`.
     faces: HashMap<FaceId, RouterFaceState>,
+    /// `resource-snapshot` — what the receive paths of the faces that have gone had counted when
+    /// they went, added to in the step that removes the face, so the router's `message_reading`
+    /// never falls when a link does and a reader may take windows by subtraction.
+    #[cfg(feature = "resource-snapshot")]
+    departed_messages: wz_session_core::resource_snapshot::MessageReading<
+        { wz_session_core::caps::SNAPSHOT_HISTOGRAM_BUCKETS },
+    >,
     /// The joined aggregated links of the sessions in [`Self::faces`]: a second or
     /// later physical link of a peer's session is not a face of its own, so the
     /// table above holds only the primary. Two readers: a frame that arrives on a
@@ -3060,6 +3094,8 @@ router_entry_points! { on_tables:
     fn node_locators(&self) -> crate::session_lifecycle_open::NodeLocators;
     #[cfg(feature = "adminspace-core")]
     fn sessions_view(&self) -> RouterSessionsView;
+    #[cfg(feature = "resource-snapshot")]
+    fn messages_view(&self) -> RouterMessagesView;
     fn router_links_info(&self) -> HashMap<Zid, LinkInfo>;
     fn routers_net_node_count(&self) -> usize;
     fn linkstatepeers_net_node_count(&self) -> usize;
@@ -3326,6 +3362,8 @@ impl RouterForwarder {
                 node_mode,
                 partition: SouthPartition::Auto,
                 faces: HashMap::new(),
+                #[cfg(feature = "resource-snapshot")]
+                departed_messages: Default::default(),
                 joined_links: HashMap::new(),
                 local_queryables: Vec::new(),
                 local_subscribers: Vec::new(),
@@ -3690,6 +3728,16 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     #[cfg(feature = "adminspace-core")]
     pub fn sessions_view(&self) -> RouterSessionsView {
         RouterSessionsView {
+            tables: Arc::clone(&self.fwd.tables),
+        }
+    }
+
+    /// `resource-snapshot` — a handle that reads what the receive paths of the router's faces
+    /// have counted ([`RouterMessagesView::reading`]). A handle and not a method, as
+    /// [`sessions_view`](Self::sessions_view) is, so the snapshot service's task can hold it.
+    #[cfg(feature = "resource-snapshot")]
+    pub fn messages_view(&self) -> RouterMessagesView {
+        RouterMessagesView {
             tables: Arc::clone(&self.fwd.tables),
         }
     }
@@ -10182,6 +10230,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let Some(state) = self.tables.faces.remove(&id) else {
             return;
         };
+        // What its receive path counted stays in the router's total, in the same step that
+        // removes it, so a reader sees the face's count in one place and never in two or none.
+        #[cfg(feature = "resource-snapshot")]
+        self.tables
+            .departed_messages
+            .merge(&state.actions.message_reading());
         // What it held for its link goes with it, and no face waits on it or for it.
         self.forget_egress_of(id, &state);
         let tier = state.tier;

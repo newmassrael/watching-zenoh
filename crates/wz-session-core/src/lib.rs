@@ -901,6 +901,11 @@ pub mod connect_endpoints;
 #[cfg(feature = "adminspace-write")]
 pub mod admin_connect;
 
+// The keys of the documents wz serves that upstream does not, under the one root outside `@/`.
+// Documented in its own `//!`; a plain comment here for the reason noted at `event_ring`.
+#[cfg(feature = "alloc")]
+pub mod wz_root;
+
 /// §5.23 — admin space `local_data` view: the `@/<zid>/<whatami>/**` built-in
 /// queryable keyexpr helpers + the `local_data` JSON body, the wz mirror of
 /// zenoh `net/runtime/adminspace.rs`. Pure data-view (the queryable wiring lives

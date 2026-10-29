@@ -535,9 +535,10 @@ DEFERRED: dict[str, dict[str, str]] = {
                 # `module::name` for a probe to import.
                 "access-acl-multicast",
                 "liveliness-get",
-                # `resource-snapshot` gates `OpenedSession::message_reading`, one method of an
-                # `impl` block, and forwards the feature to `wz-session-core`.
-                "resource-snapshot",
+                # `resource-snapshot` LEFT this list when `pub mod resource_snapshot_host` and
+                # `pub struct RouterMessagesView` gave it module-level sites under a simple cfg,
+                # which the axis probes; it had been here for the one method `OpenedSession::
+                # message_reading`, which is still a method and is now one of its sites.
                 "router-multicast-faces",
                 "routing-interceptor-hotreload",
                 "routing-token-tables",
