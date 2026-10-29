@@ -96,8 +96,8 @@ impl core::ops::DerefMut for ExtChainBuf {
 
 /// The extension chain a received handshake message (INIT, OPEN, CLOSE,
 /// KEEP_ALIVE) carries, as the decoder hands it over: a growable `Vec` on every
-/// profile but `session-slot`, and under it [`ReceivedExtChain`]. Both are read as
-/// `[ExtEntryOwned]` and judged through [`ChainHeaders`].
+/// profile but `session-slot`, and under it `ReceivedExtChain`. Both are read as
+/// `[ExtEntryOwned]` and judged through the crate's `ChainHeaders`.
 #[cfg(not(feature = "session-slot"))]
 pub type ExtChainOwned = Vec<ExtEntryOwned>;
 /// See the growable form of this alias.
@@ -163,17 +163,30 @@ impl ChainHeaders for Vec<ExtEntryOwned> {
 /// one for each extension a feature of the build reads.
 #[cfg(feature = "session-slot")]
 pub const RECEIVED_EXT_KINDS: usize = 3
-    + cfg!(feature = "transport-qos") as usize
-    + cfg!(feature = "transport-lowlatency") as usize
-    + cfg!(feature = "session-extcompression") as usize
-    + cfg!(feature = "transport-shm") as usize
-    + cfg!(feature = "session-extauth") as usize
-    + cfg!(feature = "transport-multilink") as usize;
+    + (cfg!(feature = "transport-qos") || PASSIVE_READS_EVERY_OFFER) as usize
+    + (cfg!(feature = "transport-lowlatency") || PASSIVE_READS_EVERY_OFFER) as usize
+    + (cfg!(feature = "session-extcompression") || PASSIVE_READS_EVERY_OFFER) as usize
+    + (cfg!(feature = "transport-shm") || PASSIVE_READS_EVERY_OFFER) as usize
+    + (cfg!(feature = "session-extauth") || PASSIVE_READS_EVERY_OFFER) as usize
+    + (cfg!(feature = "transport-multilink") || PASSIVE_READS_EVERY_OFFER) as usize;
+
+/// Whether the build carries the passive tracker (`crate::passive`), which folds BOTH sides'
+/// offers of every capability (qos, shm, auth, multilink, lowlatency, compression) whatever the
+/// build negotiates itself, so it reads each of those extensions off a received chain. Its gate
+/// is the module's.
+#[cfg(feature = "session-slot")]
+const PASSIVE_READS_EVERY_OFFER: bool = cfg!(all(
+    feature = "alloc",
+    feature = "codec-init-body",
+    feature = "codec-open-body",
+    feature = "codec-close",
+    feature = "codec-frame"
+));
 
 /// Whether this build reads the establishment extension `id` off a message a peer sent: the
 /// extensions of the modules it compiles (`extpatch`, `extregion` and `extbound` always, the
-/// others each behind the feature of its module). An entry of any other id is not kept; it is
-/// judged by its header like the rest.
+/// others each behind the feature of its module, and all of them where the passive tracker is
+/// built). An entry of any other id is not kept; it is judged by its header like the rest.
 #[cfg(all(
     feature = "session-slot",
     any(
@@ -188,12 +201,15 @@ const fn reads_received_ext(id: u8) -> bool {
     // `extbound`'s remote bound is the patch level's id (0x7), on the OPEN messages.
     id == known::PATCH
         || id == known::REGION_NAME
-        || (cfg!(feature = "transport-qos") && id == known::QOS)
-        || (cfg!(feature = "transport-shm") && id == known::SHM)
-        || (cfg!(feature = "session-extauth") && id == known::AUTH)
-        || (cfg!(feature = "transport-multilink") && id == known::MULTILINK)
-        || (cfg!(feature = "transport-lowlatency") && id == known::LOWLATENCY)
-        || (cfg!(feature = "session-extcompression") && id == known::COMPRESSION)
+        || ((cfg!(feature = "transport-qos") || PASSIVE_READS_EVERY_OFFER) && id == known::QOS)
+        || ((cfg!(feature = "transport-shm") || PASSIVE_READS_EVERY_OFFER) && id == known::SHM)
+        || ((cfg!(feature = "session-extauth") || PASSIVE_READS_EVERY_OFFER) && id == known::AUTH)
+        || ((cfg!(feature = "transport-multilink") || PASSIVE_READS_EVERY_OFFER)
+            && id == known::MULTILINK)
+        || ((cfg!(feature = "transport-lowlatency") || PASSIVE_READS_EVERY_OFFER)
+            && id == known::LOWLATENCY)
+        || ((cfg!(feature = "session-extcompression") || PASSIVE_READS_EVERY_OFFER)
+            && id == known::COMPRESSION)
 }
 
 /// The extension chain of a received handshake message on `session-slot`: the header byte of
@@ -244,16 +260,15 @@ impl core::ops::Deref for ReceivedExtChain {
     }
 }
 
+// Only a handshake message holds its chain in this form (the heap profile's three keep a `Vec`),
+// so the headers are kept, and read, where a handshake decoder is built.
 #[cfg(all(
     feature = "session-slot",
     any(
         feature = "codec-init-body",
         feature = "codec-open-body",
         feature = "codec-close",
-        feature = "codec-keep-alive",
-        all(feature = "alloc", feature = "codec-frame"),
-        all(feature = "alloc", feature = "reassembly"),
-        all(feature = "alloc", feature = "codec-join")
+        feature = "codec-keep-alive"
     )
 ))]
 impl ChainHeaders for ReceivedExtChain {
