@@ -374,8 +374,6 @@ pub(crate) fn open_router_blocking(
         shm_clients,
         #[cfg(feature = "routing-namespace")]
         namespace,
-        #[cfg(feature = "gossip")]
-        gossip,
         groups,
         ..
     } = stance;
@@ -469,6 +467,7 @@ pub(crate) fn open_router_blocking(
     let node_forwarder = forwarder.clone();
     let node_shutdown = shutdown.clone();
     let node_stop = stop.clone();
+    let dials_any = !connect.is_empty();
     let handle = std::thread::Builder::new()
         .name("wz-capi-router".to_owned())
         .stack_size(DRIVE_THREAD_STACK_BYTES)
@@ -508,10 +507,26 @@ pub(crate) fn open_router_blocking(
     // nodes it dials have told it what they hold by the time the program can declare anything,
     // so that a subscriber declared right after the open is told of what comes alive after it
     // and not of what was already there.
+    //
+    // A peer's open is not held for the delay but for the endpoints it connects to, up to the
+    // window the configuration gives it: it returns once one is connected (upstream's start
+    // conditions), and at once when it connects to none.
     let hold = dial.router_hold;
+    let window = dial.start_window.unwrap_or_default();
     match rx.recv() {
         Ok(Ok(listen_locators)) => {
-            std::thread::sleep(hold);
+            match role {
+                NodeRole::Router => std::thread::sleep(hold),
+                NodeRole::Peer if dials_any => {
+                    let deadline = std::time::Instant::now() + window;
+                    while forwarder.face_snapshots().is_empty()
+                        && std::time::Instant::now() < deadline
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                }
+                NodeRole::Peer => {}
+            }
             Ok(RouterState {
                 zid: wire_zid,
                 forwarder,
