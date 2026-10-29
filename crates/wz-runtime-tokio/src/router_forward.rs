@@ -2238,8 +2238,10 @@ pub(crate) struct Tables {
 pub enum LocalFaceEvent {
     /// A token is alive on `keyexpr`.
     TokenUp { id: u64, keyexpr: String },
-    /// The token the router numbered `id` is gone.
-    TokenDown { id: u64 },
+    /// The token the router numbered `id` is gone. The router also tells a face that asked and
+    /// was never told of a token that it is gone, by a retraction that names the key and no id
+    /// (upstream's `maybe_unpropagate_token`, its second arm): `keyexpr` is then the key.
+    TokenDown { id: u64, keyexpr: Option<String> },
 }
 
 /// What receives what the router tells its own `Local` face (see
@@ -2262,9 +2264,10 @@ fn local_face_event(msg: &NetworkMessage) -> Option<LocalFaceEvent> {
                 }
             })
         }
-        DeclareOwnedVariant::CodecZenohUndeclToken(token) => {
-            Some(LocalFaceEvent::TokenDown { id: token.id })
-        }
+        DeclareOwnedVariant::CodecZenohUndeclToken(token) => Some(LocalFaceEvent::TokenDown {
+            id: token.id,
+            keyexpr: resolve_ext_keyexpr(token.extensions.as_ref(), &hashbrown::HashMap::new()),
+        }),
         _ => None,
     }
 }

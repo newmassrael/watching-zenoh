@@ -60,14 +60,22 @@ struct Subscriber {
     handler: LivelinessHandler,
 }
 
+/// A key with tokens alive on it.
+struct Alive {
+    /// The id of the token that brought the key alive: what every subscriber was told it under,
+    /// and what its history and its retraction carry.
+    told: u64,
+    holders: usize,
+}
+
 #[derive(Default)]
 struct State {
     /// The tokens of the other faces, by the id the router numbers them.
     remote: HashMap<u64, String>,
     /// The tokens the program declared, by the id the router holds them under.
     own: HashMap<u64, String>,
-    /// How many tokens, of either, are alive on each key.
-    alive: HashMap<String, usize>,
+    /// The keys alive, each with the id it was told under and how many tokens, of either, hold it.
+    alive: HashMap<String, Alive>,
     subscribers: Vec<Subscriber>,
 }
 
@@ -82,9 +90,22 @@ impl State {
                     self.up(&keyexpr, id);
                 }
             }
-            Command::Told(LocalFaceEvent::TokenDown { id }) => {
-                if let Some(keyexpr) = self.remote.remove(&id) {
-                    self.down(&keyexpr, id);
+            Command::Told(LocalFaceEvent::TokenDown { id, keyexpr }) => {
+                if let Some(held) = self.remote.remove(&id) {
+                    self.down(&held);
+                } else if let Some(keyexpr) = keyexpr {
+                    // The router says nothing of the other faces backs the key any more, to a
+                    // face it never numbered the token for: every token of theirs on it is gone.
+                    let gone: Vec<u64> = self
+                        .remote
+                        .iter()
+                        .filter(|(_, held)| **held == keyexpr)
+                        .map(|(id, _)| *id)
+                        .collect();
+                    for id in gone {
+                        self.remote.remove(&id);
+                        self.down(&keyexpr);
+                    }
                 }
             }
             Command::OwnUp { id, keyexpr } => {
@@ -93,7 +114,7 @@ impl State {
             }
             Command::OwnDown(id) => {
                 if let Some(keyexpr) = self.own.remove(&id) {
-                    self.down(&keyexpr, id);
+                    self.down(&keyexpr);
                 }
             }
             Command::Subscribe {
@@ -103,15 +124,15 @@ impl State {
                 mut handler,
             } => {
                 if history {
-                    for keyexpr in self
+                    for (keyexpr, key) in self
                         .alive
-                        .keys()
-                        .filter(|key| keyexpr_intersects_text(&pattern, key))
+                        .iter()
+                        .filter(|(key, _)| keyexpr_intersects_text(&pattern, key))
                     {
                         handler(LivelinessSample {
                             kind: LivelinessSampleKind::Put,
                             keyexpr,
-                            token_id: 0,
+                            token_id: key.told,
                         });
                     }
                 }
@@ -137,21 +158,28 @@ impl State {
     }
 
     fn up(&mut self, keyexpr: &str, token_id: u64) {
-        let count = self.alive.entry(keyexpr.to_owned()).or_insert(0);
-        *count += 1;
-        if *count == 1 {
+        let key = self.alive.entry(keyexpr.to_owned()).or_insert(Alive {
+            told: token_id,
+            holders: 0,
+        });
+        key.holders += 1;
+        if key.holders == 1 {
             self.tell(LivelinessSampleKind::Put, keyexpr, token_id);
         }
     }
 
-    fn down(&mut self, keyexpr: &str, token_id: u64) {
-        let Some(count) = self.alive.get_mut(keyexpr) else {
+    /// One token of `keyexpr` is gone. The key is retracted under the id it was told under, which
+    /// is not that of the token that was the last to go: a subscriber counts the key alive by that
+    /// id, and a retraction under another would leave it alive.
+    fn down(&mut self, keyexpr: &str) {
+        let Some(key) = self.alive.get_mut(keyexpr) else {
             return;
         };
-        *count -= 1;
-        if *count == 0 {
+        key.holders -= 1;
+        if key.holders == 0 {
+            let told = key.told;
             self.alive.remove(keyexpr);
-            self.tell(LivelinessSampleKind::Delete, keyexpr, token_id);
+            self.tell(LivelinessSampleKind::Delete, keyexpr, told);
         }
     }
 
@@ -284,6 +312,53 @@ mod tests {
         )
     }
 
+    #[test]
+    fn a_key_is_retracted_under_the_id_it_was_told_under_whichever_token_goes_last() {
+        let (face, sink) = LocalLiveliness::start().expect("a thread");
+        let told = Arc::new(StdMutex::new(Vec::new()));
+        let written = told.clone();
+        let handler: LivelinessHandler = Box::new(move |sample: LivelinessSample<'_>| {
+            written.lock().unwrap().push(format!(
+                "{:?} {} {}",
+                sample.kind, sample.keyexpr, sample.token_id
+            ));
+        });
+        up(&face, &sink, 5, "k");
+        up(&face, &sink, 6, "k");
+        // The history carries the id the key came alive under, and so does the retraction, though
+        // the token that goes last is the other one.
+        face.subscribe("k", true, handler);
+        sink(down(5));
+        sink(down(6));
+        assert!(face.alive("k").is_empty());
+        assert_eq!(*told.lock().unwrap(), ["Put k 5", "Delete k 5"]);
+        face.stop();
+    }
+
+    /// The router tells the face that the token it numbered `id` is gone.
+    fn down(id: u64) -> LocalFaceEvent {
+        LocalFaceEvent::TokenDown { id, keyexpr: None }
+    }
+
+    #[test]
+    fn a_retraction_that_names_only_the_key_ends_every_token_of_the_others_on_it() {
+        let (face, sink) = LocalLiveliness::start().expect("a thread");
+        let (handler, seen) = recorder();
+        face.subscribe("**", false, handler);
+        up(&face, &sink, 1, "k");
+        face.own_up(100, "k");
+        // The router's one-shot form: id 0 and the key. The program's own token still holds it.
+        sink(LocalFaceEvent::TokenDown {
+            id: 0,
+            keyexpr: Some("k".to_owned()),
+        });
+        assert_eq!(face.alive("**"), vec!["k".to_owned()]);
+        face.own_down(100);
+        assert!(face.alive("**").is_empty());
+        assert_eq!(*seen.lock().unwrap(), ["Put k", "Delete k"]);
+        face.stop();
+    }
+
     /// The router tells the face that a token came alive. The face is passed to name whose sink
     /// it is.
     fn up(_face: &LocalLiveliness, sink: &LocalFaceSink, id: u64, keyexpr: &str) {
@@ -300,10 +375,10 @@ mod tests {
         face.subscribe("a/**", false, handler);
         up(&face, &sink, 1, "a/b");
         up(&face, &sink, 2, "a/b");
-        sink(LocalFaceEvent::TokenDown { id: 1 });
+        sink(down(1));
         // Not told: another token holds the key.
         assert_eq!(face.alive("a/**"), vec!["a/b".to_owned()]);
-        sink(LocalFaceEvent::TokenDown { id: 2 });
+        sink(down(2));
         assert!(face.alive("a/**").is_empty());
         assert_eq!(*seen.lock().unwrap(), ["Put a/b", "Delete a/b"]);
         face.stop();
@@ -332,8 +407,8 @@ mod tests {
         face.subscribe("**", false, handler);
         up(&face, &sink, 1, "x");
         up(&face, &sink, 1, "x");
-        sink(LocalFaceEvent::TokenDown { id: 99 });
-        sink(LocalFaceEvent::TokenDown { id: 1 });
+        sink(down(99));
+        sink(down(1));
         assert!(face.alive("**").is_empty());
         assert_eq!(*seen.lock().unwrap(), ["Put x", "Delete x"]);
         face.stop();
