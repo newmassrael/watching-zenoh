@@ -618,6 +618,21 @@ pub struct OpenPlan {
 }
 
 impl OpenPlan {
+    /// Whether a peer opened with this plan can run as a forwarding node
+    /// ([`OpenArguments::run_node`] with [`NodeRole::Peer`](crate::drive::NodeRole::Peer)): it
+    /// accepts sessions, which is what makes it a node others route through, and asks nothing
+    /// of the node that it does not carry (a multicast group, a scouting that dials what it
+    /// finds). A peer that fits no node is the registry of faces the other roles are, which does
+    /// not forward between its faces.
+    #[cfg(feature = "router-node")]
+    pub fn peer_fits_node(&self) -> bool {
+        #[cfg(feature = "scout")]
+        let scouts = self.scouting.as_ref().is_some_and(|plan| plan.scouts());
+        #[cfg(not(feature = "scout"))]
+        let scouts = false;
+        !self.listen.is_empty() && self.groups.is_empty() && !scouts
+    }
+
     /// Read the document for the role `role` (see [`dial_role`]) and the endpoints the caller
     /// stated, and refuse what the open cannot carry out.
     ///
@@ -1099,7 +1114,18 @@ impl OpenArguments {
     /// to have asked for; what the node does not carry yet fails the open by name.
     #[cfg(feature = "router-node")]
     pub fn run_router(self) -> Result<crate::drive::RouterState, OpenError> {
+        self.run_node(crate::drive::NodeRole::Router)
+    }
+
+    /// [`Self::run_router`] for a node of the given role: a peer that forwards between the
+    /// sessions it accepts and dials is the same data plane at node mode Peer.
+    #[cfg(feature = "router-node")]
+    pub fn run_node(
+        self,
+        role: crate::drive::NodeRole,
+    ) -> Result<crate::drive::RouterState, OpenError> {
         crate::drive::open_router_blocking(
+            role,
             self.connect,
             self.listen,
             self.tls,

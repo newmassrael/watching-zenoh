@@ -417,7 +417,7 @@ use crate::linkstate_forward::{
     peer_zid_routing, query_candidates, re_advertise_interest_into, resolve_governed_keyexpr,
     resolve_source_in, resolve_source_zid_in, select_best_matching, synthesize_drained_fan_finals,
     synthesize_expired_query_returns, Cached, ClientQablStore, ClientQueryRoutes, ClientQueryable,
-    ClientRoutes, ClientSubStore, DataRoutes, LocalQueryView, QueryCandidate, QueryRoutes,
+    ClientRoutes, ClientSubStore, DataRoutes, QueryCandidate, QueryRoutes,
 };
 #[cfg(feature = "router-multicast-faces")]
 use crate::routing_region::is_primary_gateway;
@@ -431,7 +431,6 @@ use wz_session_core::sink::SampleView;
 // plane's `dispatch_local_subscribers` builds from.
 use wz_session_core::sample::Sample;
 use wz_session_core::sample_kind::SampleKind;
-use wz_session_core::sink::BorrowedSample;
 
 use crate::linkstate_interest::LinkstatepeerInterest;
 use crate::linkstate_pending::{PendingQueries, QueryFan};
@@ -444,7 +443,9 @@ use wz_session_core::request_build::set_request_keyexpr_literal;
 use wz_session_core::request_routing_context::{
     read_request_source, read_request_target, read_request_timeout_ms, set_request_source,
 };
-use wz_session_core::wire::{PushOwned, PushOwnedVariant, RequestOwned, ResponseOwned};
+#[cfg(test)]
+use wz_session_core::wire::PushOwnedVariant;
+use wz_session_core::wire::{PushOwned, RequestOwned, ResponseOwned};
 
 #[cfg(feature = "routing-interest-pending-gc")]
 mod brokered_interest;
@@ -9123,42 +9124,48 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // used to read "a host subscriber sees Puts", which described the twin
         // accurately and was a statement of the LIMIT, not of a policy —
         // upstream's admin subscriber is handed the whole body.
-        let (payload, kind): (&[u8], SampleKind) = match &push.body {
-            PushOwnedVariant::CodecZenohMsgPut(put) => {
-                match wz_session_core::put_payload::inline_bytes(put) {
-                    Some(bytes) => (bytes, SampleKind::Put),
-                    // A sliced Put names a shared-memory buffer and this seam holds
-                    // no resolver: nothing is delivered, rather than the descriptor
-                    // handed to a host subscriber in place of its data.
-                    None => return,
-                }
-            }
-            #[cfg(feature = "pubsub-delete")]
-            PushOwnedVariant::CodecZenohMsgDel(_) => (&[], SampleKind::Del),
-            _ => return,
-        };
         let reliability = if reliable {
             crate::Reliability::Reliable
         } else {
             crate::Reliability::BestEffort
         };
-        let sample = BorrowedSample {
-            keyexpr,
-            payload,
-            kind,
-            reliability,
+        // The session of the node is a face the message is handed to like any other: the
+        // routing is recorded on the stack of an instrumented message before the session reads
+        // it (upstream's dispatcher records it for each face, the session's included), and the
+        // sample says it was not routed since the node already did.
+        #[cfg(feature = "pubsub-ts-stack")]
+        let recorded;
+        #[cfg(feature = "pubsub-ts-stack")]
+        let push = if wz_session_core::ts_stack::read_ts_stack(
+            push.extensions.as_deref().unwrap_or(&[]).iter(),
+        )
+        .is_some()
+        {
+            let mut routed = push.clone();
+            wz_session_core::ts_stack::record_interception(
+                &mut routed.extensions,
+                wz_session_core::ts_stack::point::ROUTE,
+                || self.node_hlc.interception_timestamp(),
+            );
+            recorded = routed;
+            &recorded
+        } else {
+            push
+        };
+        // The sample a host subscriber sees, with all that the message says of it: a Put or a
+        // Del of the body (upstream's admin subscriber is handed the whole body). A sliced Put
+        // names a shared-memory buffer and this seam holds no resolver: nothing is delivered,
+        // rather than the descriptor handed to a host subscriber in place of its data.
+        let Some(sample) =
+            wz_session_core::pubsub::sample_of_inline_push(push, keyexpr, reliability, false)
+        else {
+            return;
         };
         // What the subscribers of the node's own session are handed: the key without the
         // namespace of the session, and nothing for a key outside it.
-        let relative = self
-            .fwd
-            .relative_key(keyexpr)
-            .map(|keyexpr| BorrowedSample {
-                keyexpr,
-                payload,
-                kind,
-                reliability,
-            });
+        let relative = self.fwd.relative_key(keyexpr).and_then(|relative| {
+            wz_session_core::pubsub::sample_of_inline_push(push, relative, reliability, false)
+        });
         // A publication of a face reaches the subscribers that admit a remote origin.
         self.deliver_to_hosted_subscribers(
             false,
@@ -9541,27 +9548,42 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 .map(|lq| (lq.namespaced, Arc::clone(&lq.handler)))
                 .collect()
         };
-        let view = LocalQueryView {
-            keyexpr,
-            parameters: wz_session_core::query::request_query_parameters(request),
-            rid: request.rid,
-            qos: wz_session_core::declare_ext_qos::read_request_qos(request),
+        // The session of the node is a face the query is handed to like any other: the routing
+        // is recorded on the stack of an instrumented query before the session reads it.
+        #[cfg(feature = "pubsub-ts-stack")]
+        let recorded;
+        #[cfg(feature = "pubsub-ts-stack")]
+        let request = if wz_session_core::ts_stack::read_ts_stack(
+            request.extensions.as_deref().unwrap_or(&[]).iter(),
+        )
+        .is_some()
+        {
+            let mut routed = request.clone();
+            wz_session_core::ts_stack::record_interception(
+                &mut routed.extensions,
+                wz_session_core::ts_stack::point::ROUTE,
+                || self.node_hlc.interception_timestamp(),
+            );
+            recorded = routed;
+            &recorded
+        } else {
+            request
+        };
+        // What a queryable is shown of the query: all that the Request says of it.
+        let Some(view) = wz_session_core::query::RequestQueryView::of_request(request, keyexpr)
+        else {
+            return 0;
         };
         // What the queryables of the node's own session are handed: the key without the
         // namespace of the session. A query whose key is not under it is not theirs.
         let relative_view = self
             .fwd
             .relative_key(keyexpr)
-            .map(|keyexpr| LocalQueryView {
-                keyexpr,
-                parameters: view.parameters,
-                rid: view.rid,
-                qos: view.qos,
-            });
+            .map(|relative| view.under(relative));
         // R311y834 — the acceptance is read off the query's own selector parameters, as the
         // requester's gate reads them; a query with none keeps the guarantee.
         let accept = view
-            .parameters
+            .parameters()
             .and_then(|bytes| std::str::from_utf8(bytes).ok())
             .map_or(
                 wz_session_core::reply_acceptance::ReplyKeyExpr::MatchingQuery,
@@ -9581,7 +9603,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             let qid = self.pending.guard().allocate(LOCAL_FACE, fan, deadline);
             let record = Arc::new(HeldRecord {
                 qid,
-                keyexpr: view.keyexpr.to_owned(),
+                keyexpr: view.keyexpr().to_owned(),
                 namespaced: *namespaced,
                 accept,
                 reliable,
@@ -9592,9 +9614,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             {
                 let mut responder = QueryResponder::new(
                     request.rid,
-                    view.keyexpr.to_string(),
+                    view.keyexpr().to_string(),
                     accept,
-                    view.qos,
+                    view.qos(),
                     &mut replies,
                 );
                 let previous = HOSTED_QUERY.with(|current| current.replace(Some(record.clone())));
@@ -10686,6 +10708,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             if !self.fwd.strip_namespace(&mut msg) {
                 return true;
             }
+            // A face the message is handed to like any other: the routing is recorded on the
+            // stack of an instrumented one (a reply of an instrumented query).
+            #[cfg(feature = "pubsub-ts-stack")]
+            self.record_route(&mut msg);
             if let Some(event) = local_face_event(msg) {
                 sink(event);
             }

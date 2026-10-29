@@ -289,6 +289,22 @@ impl ReplyArrival {
     fn record(&self, stack: &mut crate::ts_stack::TsStack, routed: bool) {
         (self.0)(stack, routed);
     }
+
+    /// Hand `deliver` the reply as it is once its arrival is recorded: a reply that carries a
+    /// timestamp stack, with the stack completed, and any other as it is.
+    pub fn arrive(&self, reply: &dyn ReplyView, deliver: &mut dyn FnMut(&dyn ReplyView)) {
+        match reply.ts_stack() {
+            Some(stack) => {
+                let mut stack = stack.clone();
+                self.record(&mut stack, reply.routed());
+                deliver(&ArrivedReply {
+                    inner: reply,
+                    ts_stack: stack,
+                });
+            }
+            None => deliver(reply),
+        }
+    }
 }
 
 #[cfg(feature = "pubsub-ts-stack")]
@@ -653,15 +669,8 @@ impl<S: ReplySink> ReplySink for ConsolidatingSink<S> {
         // a `Latest` cache defers to the final.
         #[cfg(feature = "pubsub-ts-stack")]
         if let Some(arrival) = self.arrival.clone() {
-            if let Some(stack) = reply.ts_stack() {
-                let mut stack = stack.clone();
-                arrival.record(&mut stack, reply.routed());
-                self.consolidate(&ArrivedReply {
-                    inner: reply,
-                    ts_stack: stack,
-                });
-                return;
-            }
+            arrival.arrive(reply, &mut |arrived| self.consolidate(arrived));
+            return;
         }
         self.consolidate(reply);
     }

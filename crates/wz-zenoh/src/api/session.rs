@@ -428,6 +428,18 @@ impl Engine {
         // faces a peer or a client is: announcing the role over that registry would be the
         // silent fallback the other refusals of this function exist against.
         let router = expanded.mode() == zenoh_protocol::core::WhatAmI::Router;
+        // A peer that accepts sessions is the same data plane at node mode Peer: others route
+        // through it, as they do through upstream's. A peer that fits no node (it joins a
+        // multicast group, or scouts to dial what it finds) is the registry of faces, which
+        // does not forward between the sessions it holds.
+        let node_role = if router {
+            Some(tokio_engine::NodeRole::Router)
+        } else if expanded.mode() == zenoh_protocol::core::WhatAmI::Peer && plan.peer_fits_node() {
+            Some(tokio_engine::NodeRole::Peer)
+        } else {
+            None
+        };
+        let node = node_role.is_some();
         // Decision D6: a key the configuration states with a value other than its default, that
         // upstream acts on and this engine does not, is refused by its name, and not left to do
         // nothing.
@@ -465,7 +477,7 @@ impl Engine {
             // descriptor with this crate's reader and offers shared memory as its configuration
             // says (`transport/shared_memory/enabled`).
             #[cfg(feature = "shared-memory")]
-            shm_clients: if router {
+            shm_clients: if node {
                 tokio_engine::no_shm_clients()
             } else {
                 Some(wz_capi_core::faces::ShmReader::Host(
@@ -474,17 +486,17 @@ impl Engine {
             },
             #[cfg(not(feature = "shared-memory"))]
             shm_clients: tokio_engine::no_shm_clients(),
-            offer_shm: cfg!(feature = "shared-memory") && !router,
+            offer_shm: cfg!(feature = "shared-memory") && !node,
             // The multicast groups of a session that holds a shared-memory context are
             // shared-memory ones, and what a member of one sends it reads through that reader.
-            groups_report_shm: cfg!(feature = "shared-memory") && !router,
+            groups_report_shm: cfg!(feature = "shared-memory") && !node,
         });
-        if router {
+        if let Some(role) = node_role {
             if let Some(ask) = arguments.router_refusal() {
                 bail!("`mode` = \"router\": the router session does not carry {ask} yet");
             }
             let node = arguments
-                .run_router()
+                .run_node(role)
                 .map_err(|error| tokio_engine::open_error(error, scope))?;
             let engine = Engine::Router(RouterEngine {
                 node,
@@ -1482,11 +1494,14 @@ mod tokio_engine {
     pub(super) use wz_capi_core::runtime::session::LocalDeliveryDrain;
     #[cfg(feature = "unstable")]
     use wz_capi_core::runtime::Reliability as EngineReliability;
-    pub(super) use wz_capi_core::{drive::FaceDrive, faces::no_shm_clients};
     use wz_capi_core::{
         drive::OpenError,
         open_plan::{key_state, KeyState, OpenRefusal},
         runtime::session_glue::WhatAmI as EngineWhatAmI,
+    };
+    pub(super) use wz_capi_core::{
+        drive::{FaceDrive, NodeRole},
+        faces::no_shm_clients,
     };
     use wz_capi_core::{
         faces::{FanoutError, SubscriberSink, WireKey},
@@ -2162,6 +2177,15 @@ mod tokio_engine {
         // The metadata of the publication rides the push to the other faces and the sample the
         // session's own subscribers are handed, as the options of a session describe them.
         let options = publish_options(publication);
+        // The node records its own routing on the stack of each face it hands the message to,
+        // as upstream's dispatcher does, so the stack that leaves is the one the send started and
+        // not the one this crate adds its routing to for an engine that records none.
+        #[cfg(feature = "unstable")]
+        let options = if publication.ts_stack.is_some() {
+            options.with_ts_stack(publication.ts_stack.as_ref().map(engine_stack_of), None)
+        } else {
+            options
+        };
         let payload = publication.payload.to_bytes();
         let published = forwarder.publish_with(publication.key, &payload, &options);
         published.map_err(|error| {
@@ -2545,16 +2569,35 @@ mod tokio_engine {
             consolidation,
             ..
         } = asked_of(request)?;
+        // The node records its own routing on the stack of each face it hands the query to, as
+        // upstream's dispatcher does, so the stack that leaves is the one the send started.
+        #[cfg(feature = "unstable")]
+        let options = {
+            let mut options = options;
+            options.wire_ts_stack = None;
+            options
+        };
         // One leg: the router's. The face holds the callback of the leg for as long as the query
         // is under way and lets go of it when the router tells it the end, which is what ends the
         // query for the callback.
         let mut leg = leg_minter(callback, fan, consolidation);
         let mut on_reply = leg();
         drop(leg);
+        // A reply of an instrumented query is completed as it reaches this crate, ahead of the
+        // consolidation, as the engine of the registry of faces does at its own sink.
+        #[cfg(feature = "unstable")]
+        let arrival = options.reply_arrival().cloned();
         node.get(
             key,
             &options,
-            Box::new(move |view: &dyn ReplyView| on_reply(view)),
+            Box::new(move |view: &dyn ReplyView| {
+                #[cfg(feature = "unstable")]
+                if let Some(arrival) = &arrival {
+                    arrival.arrive(view, &mut |arrived| on_reply(arrived));
+                    return;
+                }
+                on_reply(view)
+            }),
             Box::new(|| {}),
         )
         .map_err(|error| zerror!("{error}").into())

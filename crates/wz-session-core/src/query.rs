@@ -280,6 +280,101 @@ pub fn request_query_parameters(request: &RequestOwned) -> Option<&[u8]> {
     }
 }
 
+/// A query as a Request says it, held by value: what a queryable of a node that holds no table of
+/// queryables is shown of it. The key is the one the reader names; every other piece is what the
+/// Request carries, under the feature gate that decides whether a queryable may see it, so that
+/// the view is the one the table of queryables hands its own, for a reader that routes by itself.
+#[cfg(all(
+    feature = "codec-request",
+    feature = "storage-profile",
+    feature = "alloc"
+))]
+#[derive(Debug, Clone)]
+pub struct RequestQueryView {
+    keyexpr: String,
+    rid: u64,
+    qos: crate::sample::QosLevel,
+    parameters: Option<Vec<u8>>,
+    attachment: Option<Vec<u8>>,
+    source_info: Option<crate::sample::SourceInfo>,
+    value: Option<(crate::sample::EncodingHint, Vec<u8>)>,
+    #[cfg(feature = "pubsub-ts-stack")]
+    ts_stack: Option<crate::ts_stack::TsStack>,
+}
+
+#[cfg(all(
+    feature = "codec-request",
+    feature = "storage-profile",
+    feature = "alloc"
+))]
+impl RequestQueryView {
+    /// The view of a routed Request that is a Query, under the key `keyexpr`; `None` for a body
+    /// that is not a Query.
+    pub fn of_request(request: &RequestOwned, keyexpr: &str) -> Option<Self> {
+        let RequestOwnedVariant::CodecZenohQuery(query) = &request.body else {
+            return None;
+        };
+        Some(Self {
+            keyexpr: alloc::string::String::from(keyexpr),
+            rid: request.rid,
+            qos: crate::declare_ext_qos::read_request_qos(request),
+            parameters: query_parameters(query).map(<[u8]>::to_vec),
+            attachment: extract_query_attachment(query).map(<[u8]>::to_vec),
+            source_info: extract_query_source_info(query),
+            value: extract_query_value(query).map(|(encoding, bytes)| (encoding, bytes.to_vec())),
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: crate::ts_stack::read_ts_stack(
+                request.extensions.as_deref().unwrap_or(&[]).iter(),
+            ),
+        })
+    }
+
+    /// The same query under another key, which is how the queryables of a node's own session
+    /// are shown it when the session has a namespace.
+    pub fn under(&self, keyexpr: &str) -> Self {
+        Self {
+            keyexpr: alloc::string::String::from(keyexpr),
+            ..self.clone()
+        }
+    }
+}
+
+#[cfg(all(
+    feature = "codec-request",
+    feature = "storage-profile",
+    feature = "alloc"
+))]
+impl crate::query_sink::QueryView for RequestQueryView {
+    fn keyexpr(&self) -> &str {
+        &self.keyexpr
+    }
+    fn parameters(&self) -> Option<&[u8]> {
+        self.parameters.as_deref()
+    }
+    fn attachment(&self) -> Option<&[u8]> {
+        self.attachment.as_deref()
+    }
+    fn source_info(&self) -> Option<&crate::sample::SourceInfo> {
+        self.source_info.as_ref()
+    }
+    fn payload(&self) -> Option<&[u8]> {
+        self.value.as_ref().map(|(_, bytes)| bytes.as_slice())
+    }
+    fn encoding(&self) -> Option<&crate::sample::EncodingHint> {
+        self.value.as_ref().map(|(encoding, _)| encoding)
+    }
+    fn rid(&self) -> u64 {
+        self.rid
+    }
+    #[cfg(feature = "pubsub-ts-stack")]
+    fn ts_stack(&self) -> Option<&crate::ts_stack::TsStack> {
+        self.ts_stack.as_ref()
+    }
+    fn qos(&self) -> crate::sample::QosLevel {
+        self.qos
+    }
+}
+
 // R311 — project the querier's source-info ext into a typed
 // `SourceInfo`. The Query body source-info ext is `ENC_ZBUF | 0x01`
 // (zenoh-pico message.c:438-444 `_z_query_encode`) — the SAME ext id +

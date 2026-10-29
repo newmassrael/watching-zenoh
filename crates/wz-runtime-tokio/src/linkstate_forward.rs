@@ -37,7 +37,6 @@ use wz_session_core::push_build::set_push_keyexpr_literal;
 use wz_session_core::push_routing_context::{
     read_push_hoplimit, read_push_source, set_push_hoplimit, set_push_source,
 };
-use wz_session_core::query_sink::QueryView;
 use wz_session_core::queryable_info::QueryableInfo;
 use wz_session_core::wire::PushOwned;
 use wz_session_core::wireexpr_resolve::wireexpr_names_a_declaration;
@@ -257,44 +256,6 @@ impl<N: NetHandle> LinkstateNetView<N> {
                 })
                 .collect()
         })
-    }
-}
-
-/// A minimal [`QueryView`] over a routed Request's resolved fields, for
-/// dispatching to a local queryable handler. The attachment is not threaded;
-/// `is_local` / `source_info` fall through to the trait defaults (wire origin,
-/// no source info).
-pub(crate) struct LocalQueryView<'a> {
-    pub(crate) keyexpr: &'a str,
-    /// R2844 — the Query's selector parameters, through the SAME projection a
-    /// Session queryable sees (`wz_session_core::query::query_parameters`).
-    /// Until R2844 this view answered `None` on the premise that "the §5.23
-    /// admin handler reads only the keyexpr"; it had read `descriptors` since
-    /// R2494 and reads the four stats partitions since R2843, so every
-    /// forwarder-hosted admin leg answered those as if no parameter was given.
-    pub(crate) parameters: Option<&'a [u8]>,
-    pub(crate) rid: u64,
-    /// R2594 — the routed Request's `ext_qos`. Unlike parameters and
-    /// attachment this one IS threaded, because it is not read by the handler
-    /// alone: every reply the router's own queryable stages inherits it.
-    pub(crate) qos: wz_session_core::sample::QosLevel,
-}
-
-impl QueryView for LocalQueryView<'_> {
-    fn keyexpr(&self) -> &str {
-        self.keyexpr
-    }
-    fn parameters(&self) -> Option<&[u8]> {
-        self.parameters
-    }
-    fn attachment(&self) -> Option<&[u8]> {
-        None
-    }
-    fn rid(&self) -> u64 {
-        self.rid
-    }
-    fn qos(&self) -> wz_session_core::sample::QosLevel {
-        self.qos
     }
 }
 

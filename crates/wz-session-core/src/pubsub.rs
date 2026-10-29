@@ -2495,6 +2495,119 @@ fn scan_subscribers<C: SampleSink, P: Storage>(
     Some(fired)
 }
 
+/// The sample a Put or a Del the wire carried inline is, with everything the message says
+/// of it beside its payload: the timestamp and the encoding of the body, its attachment and
+/// source, the QoS of the push, and the timestamp stack the nodes it crossed recorded on it.
+///
+/// What [`SubscriberTable::dispatch_push`] projects, for a reader that holds no table of
+/// subscribers and resolves no key: the key is the one the reader names, and the payload is
+/// copied out of the message. A Put whose payload names a segment of shared memory is `None`,
+/// since there is no reader to resolve it. `routed` says whether the message came from a face.
+#[cfg(all(
+    feature = "alloc",
+    any(feature = "pubsub-put", feature = "pubsub-delete")
+))]
+pub fn sample_of_inline_push(
+    push: &PushOwned,
+    keyexpr: &str,
+    reliability: Reliability,
+    routed: bool,
+) -> Option<Sample> {
+    let (mut sample, timestamp, encoding, attachment, source_info) = match &push.body {
+        #[cfg(feature = "pubsub-put")]
+        PushOwnedVariant::CodecZenohMsgPut(put) => {
+            let exts: &[crate::wire::parts::ExtEntryOwned] =
+                put.extensions.as_deref().unwrap_or(&[]);
+            let payload =
+                crate::link::RxBytes::from(crate::put_payload::inline_bytes(put)?.to_vec());
+            #[cfg(feature = "pubsub-timestamp")]
+            let timestamp = put.timestamp.as_ref().map(TimestampHint::from_codec);
+            #[cfg(not(feature = "pubsub-timestamp"))]
+            let timestamp: Option<TimestampHint> = None;
+            #[cfg(feature = "pubsub-encoding")]
+            let encoding = put.encoding.as_ref().map(EncodingHint::from_codec);
+            #[cfg(not(feature = "pubsub-encoding"))]
+            let encoding: Option<EncodingHint> = None;
+            #[cfg(feature = "pubsub-attachment")]
+            let attachment = decode_attachment_ext_shared(exts, ATTACHMENT_EXT_ID_PUSH);
+            #[cfg(not(feature = "pubsub-attachment"))]
+            let attachment: Option<crate::link::RxBytes> = None;
+            #[cfg(feature = "pubsub-source-info")]
+            let source_info = extract_source_info(exts);
+            #[cfg(not(feature = "pubsub-source-info"))]
+            let source_info: Option<crate::sample::SourceInfo> = None;
+            #[cfg(not(any(feature = "pubsub-attachment", feature = "pubsub-source-info")))]
+            let _ = exts;
+            (
+                Sample::new_put_shared(keyexpr, payload),
+                timestamp,
+                encoding,
+                attachment,
+                source_info,
+            )
+        }
+        #[cfg(feature = "pubsub-delete")]
+        PushOwnedVariant::CodecZenohMsgDel(del) => {
+            let exts: &[crate::wire::parts::ExtEntryOwned] =
+                del.extensions.as_deref().unwrap_or(&[]);
+            #[cfg(feature = "pubsub-timestamp")]
+            let timestamp = del.timestamp.as_ref().map(TimestampHint::from_codec);
+            #[cfg(not(feature = "pubsub-timestamp"))]
+            let timestamp: Option<TimestampHint> = None;
+            #[cfg(feature = "pubsub-attachment")]
+            let attachment =
+                decode_attachment_ext_shared(exts, crate::attachment::ATTACHMENT_EXT_ID_DEL);
+            #[cfg(not(feature = "pubsub-attachment"))]
+            let attachment: Option<crate::link::RxBytes> = None;
+            #[cfg(feature = "pubsub-source-info")]
+            let source_info = extract_source_info(exts);
+            #[cfg(not(feature = "pubsub-source-info"))]
+            let source_info: Option<crate::sample::SourceInfo> = None;
+            #[cfg(not(any(feature = "pubsub-attachment", feature = "pubsub-source-info")))]
+            let _ = exts;
+            (
+                Sample::new_del(keyexpr),
+                timestamp,
+                None,
+                attachment,
+                source_info,
+            )
+        }
+        _ => return None,
+    };
+    let outer: &[crate::wire::parts::ExtEntryOwned] = push.extensions.as_deref().unwrap_or(&[]);
+    if let Some(timestamp) = timestamp {
+        sample = sample.with_timestamp(timestamp);
+    }
+    if let Some(encoding) = encoding {
+        sample = sample.with_encoding(encoding);
+    }
+    #[cfg(feature = "pubsub-qos")]
+    if let Some(qos) = extract_qos(outer) {
+        sample = sample.with_qos(qos);
+    }
+    #[cfg(feature = "pubsub-ts-stack")]
+    if let Some(stack) = crate::ts_stack::read_ts_stack(outer.iter()) {
+        sample = sample.with_ts_stack(stack);
+    }
+    #[cfg(not(any(feature = "pubsub-qos", feature = "pubsub-ts-stack")))]
+    let _ = outer;
+    if let Some(attachment) = attachment {
+        sample = sample.with_attachment_shared(attachment);
+    }
+    if let Some(source_info) = source_info {
+        sample = sample.with_source_info(source_info);
+    }
+    sample = sample.with_reliability(reliability);
+    #[cfg(feature = "pubsub-ts-stack")]
+    {
+        sample = sample.with_routed(routed);
+    }
+    #[cfg(not(feature = "pubsub-ts-stack"))]
+    let _ = routed;
+    Some(sample)
+}
+
 // How many times `scan_subscribers` ran on this thread: a message answered from the receive
 // match cache is not scanned, one that is not answered from it is. A test reads the difference.
 #[cfg(test)]

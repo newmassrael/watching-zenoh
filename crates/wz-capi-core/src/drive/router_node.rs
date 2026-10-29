@@ -32,6 +32,28 @@ pub use local_face::{
 use wz_runtime_tokio::router_forward::MatchPlane;
 use wz_session_core::locality::Locality;
 
+/// What a forwarding node announces itself as, and which hats it builds: the pin builds a peer hat
+/// in the north and a broker hat for the clients south of it for a peer, and a router hat in the
+/// north with a peer hat and a broker hat south of it for a router
+/// (`zenoh/src/net/routing/gateway.rs` @ `GatewaySouthConf::Preset(GatewayPresetConf::Auto) => match mode {`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NodeRole {
+    /// A router.
+    Router,
+    /// A peer that forwards between the sessions it accepts and dials.
+    Peer,
+}
+
+impl NodeRole {
+    /// The role as the handshake and the scouting answer name it.
+    pub(crate) fn whatami(self) -> WhatAmI {
+        match self {
+            Self::Router => WhatAmI::Router,
+            Self::Peer => WhatAmI::Peer,
+        }
+    }
+}
+
 /// A running router node. Dropping it does not stop it; [`RouterState::close`] does, and joins the
 /// thread the node runs on.
 pub struct RouterState {
@@ -295,6 +317,7 @@ async fn join_group(
 /// `stance` is the rest of the open, as [`open_blocking`] takes it. A node that is asked for what
 /// it does not carry (see [`refused_ask`]) is not opened.
 pub(crate) fn open_router_blocking(
+    role: NodeRole,
     connect: Vec<String>,
     listen: Vec<String>,
     tls: CapiTlsConfig,
@@ -324,6 +347,7 @@ pub(crate) fn open_router_blocking(
         listen_phase,
         policy,
         auth,
+        gossip,
         #[cfg(feature = "routing-namespace")]
         namespace,
         #[cfg(feature = "gossip")]
@@ -359,7 +383,11 @@ pub(crate) fn open_router_blocking(
     let (_, wire_zid) = session_zids(zid).ok_or(OpenError::DriveFailed)?;
     // Built here and shared, so that the program holding the node can reach the forwarder's
     // entry points (they take `&self`) while the node's thread runs the face loop over it.
-    let forwarder = RouterForwarder::with_timestamping(Zid::from_slice(&wire_zid), timestamping);
+    let own_zid = Zid::from_slice(&wire_zid);
+    let forwarder = match role {
+        NodeRole::Router => RouterForwarder::with_timestamping(own_zid, timestamping),
+        NodeRole::Peer => RouterForwarder::peer_with_timestamping(own_zid, timestamping),
+    };
     #[cfg(feature = "routing-namespace")]
     let forwarder = match namespace {
         Some(prefix) => forwarder.with_local_namespace(prefix),
@@ -373,6 +401,21 @@ pub(crate) fn open_router_blocking(
     }
     let forwarder = Arc::new(forwarder);
     policy.install_on(&*forwarder);
+    // A peer dials the nodes its neighbours tell it of, as the policy of its gossip admits
+    // (upstream's autoconnect): the forwarder emits an intent for each node it learns of from
+    // the topology it is flooded, and the face loop dials it. Without it, a peer reaches only
+    // the nodes it was told to connect to, and a node that is not directly linked to another
+    // one reaches it only through the node between them.
+    let dial_intents = match (role, gossip) {
+        (NodeRole::Peer, Some(policy)) => Some(forwarder.enable_autoconnect(
+            wz_runtime_tokio::linkstate_forward::AutoConnect::with_strategies(
+                own_zid,
+                policy.autoconnect,
+                policy.strategies,
+            ),
+        )),
+        _ => None,
+    };
     // The authentication the config states, asked of the sessions the node accepts and offered to
     // the ones it dials, installed before the node is served (the accept loop reads it once).
     #[cfg(any(feature = "access-extauth-usrpwd", feature = "access-extauth-pubkey"))]
@@ -411,6 +454,7 @@ pub(crate) fn open_router_blocking(
                 }
             };
             rt.block_on(run_router(
+                role,
                 node_zid,
                 connect,
                 dial,
@@ -421,6 +465,7 @@ pub(crate) fn open_router_blocking(
                 offer,
                 node_forwarder,
                 groups,
+                dial_intents,
                 #[cfg(feature = "scout")]
                 scouting,
                 node_shutdown,
@@ -462,6 +507,7 @@ pub(crate) fn open_router_blocking(
 /// The node's own task: bind, answer scouts, serve faces until told to stop.
 #[allow(clippy::too_many_arguments)]
 async fn run_router(
+    role: NodeRole,
     zid: Vec<u8>,
     connect: Vec<String>,
     dial: DialPhase,
@@ -472,6 +518,7 @@ async fn run_router(
     offer: SessionOffer,
     forwarder: Arc<RouterForwarder>,
     groups: Vec<GroupJoin>,
+    dial_intents: Option<wz_runtime_tokio::accept_loop::DialIntentReceiver>,
     #[cfg(feature = "scout")] scouting: Option<ScoutingPlan>,
     shutdown: Arc<Notify>,
     stop: Arc<AtomicBool>,
@@ -500,6 +547,10 @@ async fn run_router(
     let listeners: Vec<&BoundListener> = legs.iter().map(|leg| &leg.listening.listener).collect();
     let advertised = Advertised::of_all(&listeners);
     let mut locators = advertised.remote.clone();
+    // What a neighbour is told to dial this node by, in its link-state, before the first face
+    // registers so that the first flood already carries it. The unicast locators only: a group
+    // is not an address a neighbour dials.
+    forwarder.set_self_locators(locators.clone());
     // The group the node joins, bound before the open answers, as a listener is: a group that
     // cannot be joined fails the open. Its locator is among the node's own, as the manager of
     // upstream lists its multicast listener beside the unicast ones.
@@ -519,7 +570,7 @@ async fn run_router(
     #[cfg(feature = "scout")]
     let responder = match bound_responder(
         scouting.as_ref(),
-        WhatAmI::Router,
+        role.whatami(),
         &zid,
         &listeners,
         late.locators(),
@@ -562,7 +613,7 @@ async fn run_router(
             return;
         }
     };
-    let params = match init_params(WhatAmI::Router, zid.clone(), link_conf) {
+    let params = match init_params(role.whatami(), zid.clone(), link_conf) {
         Ok(params) => params,
         Err(error) => {
             log_open_failure("session parameters of the router node", &error);
@@ -588,7 +639,7 @@ async fn run_router(
         listeners: legs.into_iter().map(|leg| leg.listening.listener).collect(),
         dial_targets,
         dial_config: Arc::new(dial_config),
-        dial_intents: None,
+        dial_intents,
         mcast_ingress,
         mcast_members,
         mcast_group_subs,
