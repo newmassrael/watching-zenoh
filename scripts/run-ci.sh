@@ -13782,7 +13782,7 @@ layer_c1bz_docs_resolve() {
     # links to `Heap`, `Static`, `Profile`, `Storage`, `CapacityFull`, `ENFORCES_CAPACITY` and
     # `BoundedVec::push` resolve against the crate root once lib.rs merges the module docs, so
     # they are full paths now; four redundant explicit targets where the name is in scope; one
-    # link from a public type to the private `STACK_KEY_CHUNKS`, a code span now) and one into
+    # link from a public type to a private constant of the stack key, a code span now) and one into
     # wz-runtime-tokio (`QueryReply`, which lost its `use` when the reply stage moved: a full
     # path). All were fixed, DIFFED against the last green tree (`e08a10799`), and the lane
     # then reads four BELOW the old budget, which is why it is lowered here. wz moves 2 -> 4 for
