@@ -358,8 +358,27 @@ breaks 18%, does. What gives out first on a lossy link is the session, not
 the verdict: the 10% capture holds two sessions that carried 2 steps between
 them in two minutes, the 20% capture ten flows of which two read `undecided`,
 and at 40% the handshake never got past the first Init and InitAck in two
-minutes (11 packets, no session, not kept in the corpus). The causes were not
-traced packet by packet.
+minutes (11 packets, no session, not kept in the corpus).
+
+Why was read from the logs of eight more runs, four at 10% and four at 20%
+(150 s, the router and both clients at debug level, not kept in the corpus).
+Of the 16 clients, 9 never opened a session: 8 waited out the 10 s open
+deadline (`Unable to connect ... deadline has elapsed`) and one received a
+KeepAlive where it expected the OpenAck and gave up at once (`Received an
+invalid message in response to an OpenSyn`); the examples unwrap the open and
+exit. The handshake is four datagrams that UDP does not resend, so it survives
+a link dropping 10% each way with chance 0.9^4 = 66% and one dropping 20% with
+0.8^4 = 41%; 4 of 8 and 3 of 8 opened. A session that is open ends when one
+side hears nothing for the 10 s lease (`RX task failed ... expired after 10000
+milliseconds`): in two of the four runs at 20%, in run 1 at 96 s on the
+router and in run 2 at 48 s on the publisher, which reconnected and lost its
+session again at 136 s, and in none of the four runs at 10%. Four of the 7 sessions that
+opened also lost a message that zenoh sends as reliable and UDP does not
+resend: an interest never answered with its DeclareFinal timed out after
+10 s. A reconnect after a lease expiry meets the same handshake. The 10%
+capture of the corpus ended in a new handshake after 110 s, three router
+KeepAlives in a row missing before it, which fits the lease; the packets of
+that capture alone do not say it.
 
 A frame that repeats its SN never counts toward `yes`: a unit read whole
 (+965) and a broken step (-3994) sum to -3029. On the `no` sum the two largely
