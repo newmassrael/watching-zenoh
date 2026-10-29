@@ -296840,6 +296840,38 @@
         "Owed, from the open list of slice Z8a: the context a callback runs in (session and unicity), liveliness, routing, the matching status after an undeclare with a namespace, the files that run none, and the router refusals; a build without unstable serves no admin key of its own, where upstream's answers a query for the transports; the words of the listener failure for the protocols not read yet (UDP, TLS, WebSocket, Unix sockets); a lane for the harness; the margin of the main job; the pin bump to 1.10.2."
       ]
     },
+    "Round 3873": {
+      "decision_summary": "Two defects that kept upstream tests of slice Z8 from passing are repaired where they were. A liveliness subscriber is told of a key and not of each token: it hears of it when the first token comes alive on it, whichever session or face holds it, and of its going when the last is retracted. Upstream's routing tables give a session one declaration per key, while the session here is told by each face directly, so the subscription keeps which tokens are alive by key across its legs (the two tests of the liveliness file that failed on a repeated token pass). The answer to an interest is a declaration like any other: the declaration sender now gives it the node's namespace, as upstream's decorator does whatever the interest id. Left bare, the peer read it as out of its namespace, parked its id as blocked and swallowed the retraction, or rebound the id to the bare key. Eight of the twelve tests of the namespace file pass; the rest are routers.",
+      "changes_bullets": [
+        "crates/wz-zenoh/src/api/session.rs: the liveliness sink of the engine keeps the tokens alive by key (Presence, one leg per face or for the session itself, which lets go of its tokens when it is dropped), four tests of it; five tests of the matching of a publisher or a querier between nodes with and without a namespace.",
+        "crates/wz-session-core/src/session_actions.rs: send_declare, through which the answers to an interest of subscribers, queryables and tokens go, applies the namespace egress, and the egress function is compiled where that sender is.",
+        "docs/reason-review-pins.md: the row of the atom session-close-ingress for crates/wz-session-core/src/session_actions.rs, read against the file (its clauses cite the out-of-band slot and the loop wake, which this change does not touch)."
+      ],
+      "verification_bullets": [
+        "Locally: the library tests of the top crate pass with unstable (174), the nine new ones among them, which failed before for the two defects; the upstream liveliness file runs 46 with the two failures of a repeated token gone (39 more stop at the router refusal) and the namespace file passes 8 of 12 (4 routers); clippy of the session core passes with the default features and with all of them, and clippy of the top crate with both of its builds; the 35 static gates and the format check pass. Not run: the other tests of the family against this change, the legs gate and the hosted run."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed, from the open list of slice Z8a: the router session (the engine refuses mode router; 15 upstream files wait on it, among them 39 tests of the liveliness file and 4 of the namespace file, with a step order in the seam note), the context a callback runs in (session and unicity), the files that run none; a build without unstable serves no admin key of its own; the words of the listener failure for the protocols not read yet; a lane for the harness; the margin of the main job; the pin bump to 1.10.2."
+      ],
+      "publishable_decision_summary": "Two defects that kept upstream tests of slice Z8 from passing are repaired where they were. A liveliness subscriber is told of a key and not of each token: it hears of it when the first token comes alive on it, whichever session or face holds it, and of its going when the last is retracted. Upstream's routing tables give a session one declaration per key, while the session here is told by each face directly, so the subscription keeps which tokens are alive by key across its legs (the two tests of the liveliness file that failed on a repeated token pass). The answer to an interest is a declaration like any other: the declaration sender now gives it the node's namespace, as upstream's decorator does whatever the interest id. Left bare, the peer read it as out of its namespace, parked its id as blocked and swallowed the retraction, or rebound the id to the bare key. Eight of the twelve tests of the namespace file pass; the rest are routers.",
+      "publishable_changes_bullets": [
+        "crates/wz-zenoh/src/api/session.rs: the liveliness sink of the engine keeps the tokens alive by key (Presence, one leg per face or for the session itself, which lets go of its tokens when it is dropped), four tests of it; five tests of the matching of a publisher or a querier between nodes with and without a namespace.",
+        "crates/wz-session-core/src/session_actions.rs: send_declare, through which the answers to an interest of subscribers, queryables and tokens go, applies the namespace egress, and the egress function is compiled where that sender is.",
+        "docs/reason-review-pins.md: the row of the atom session-close-ingress for crates/wz-session-core/src/session_actions.rs, read against the file (its clauses cite the out-of-band slot and the loop wake, which this change does not touch)."
+      ],
+      "publishable_verification_bullets": [
+        "Locally: the library tests of the top crate pass with unstable (174), the nine new ones among them, which failed before for the two defects; the upstream liveliness file runs 46 with the two failures of a repeated token gone (39 more stop at the router refusal) and the namespace file passes 8 of 12 (4 routers); clippy of the session core passes with the default features and with all of them, and clippy of the top crate with both of its builds; the 35 static gates and the format check pass. Not run: the other tests of the family against this change, the legs gate and the hosted run."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed, from the open list of slice Z8a: the router session (the engine refuses mode router; 15 upstream files wait on it, among them 39 tests of the liveliness file and 4 of the namespace file, with a step order in the seam note), the context a callback runs in (session and unicity), the files that run none; a build without unstable serves no admin key of its own; the words of the listener failure for the protocols not read yet; a lane for the harness; the margin of the main job; the pin bump to 1.10.2."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
