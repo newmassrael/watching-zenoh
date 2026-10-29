@@ -425,7 +425,7 @@ CASES: tuple[Case, ...] = (
               "3,790,610 without it"),
     Case("capic-client", "wz-capi-c", "libwz_capi_c.so", "", 3_000_000,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST)),
-    Case("capic-client-small", "wz-capi-c", "libwz_capi_c.so", "", 1_962_900,
+    Case("capic-client-small", "wz-capi-c", "libwz_capi_c.so", "", 1_969_000,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
          profile="capi-small",
          note="the capic-client build with panics aborting: 1,797,992 measured against "
@@ -454,7 +454,12 @@ CASES: tuple[Case, ...] = (
               "rewrite the session applies): +11,880 over the 1,942,169 the parent measured. "
               "The budget is that reading and 3,500, rounded up to the hundred. 1,959,369 "
               "with the mutual-TLS and server-name keys of the tls link read and the quic "
-              "link taking them (+5,320): 1,962,900 with the margin."),
+              "link taking them (+5,320): 1,962,900 with the margin. 1,965,443 measured "
+              "locally on 2026-10-30 (+6,074 since, 2,543 of it past that margin): the "
+              "`region_name` key a client reads and announces in its Init, and the partition "
+              "of `gateway/south` the plan now carries to the stance, which the node "
+              "applies and a client only holds. The budget is that reading and 3,500, "
+              "rounded up to the hundred: 1,969,000."),
     Case("capic-scout", "wz-capi-c", "libwz_capi_c.so", "scout", 3_275_000,
          forbid=(ACCEPT, RESPONDER, GOSSIP, CLOCK, ADVANCED, MULTICAST),
          require=(SCOUTING, UDP)),

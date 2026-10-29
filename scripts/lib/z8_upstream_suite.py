@@ -326,10 +326,34 @@ def generate(src: pathlib.Path, out: pathlib.Path) -> list[str]:
     return names
 
 
+#: The open files a test process may hold. The soft limit of a shell is 1024, which a test that
+#: opens a dozen sessions in one process passes (each session of this engine holds runtimes of its
+#: own and a link to every peer it meets): the first thing to fail is the build of a runtime, long
+#: before the test says anything about routing. A CI runner starts with 65,536.
+NOFILE = 1 << 16
+
+
+def raise_open_files_limit() -> None:
+    """Raise the soft limit of open files to [`NOFILE`], or to the hard limit when that is lower."""
+    import resource
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    wanted = NOFILE if hard == resource.RLIM_INFINITY else min(NOFILE, hard)
+    if soft != resource.RLIM_INFINITY and soft < wanted:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (wanted, hard))
+
+
 def run(cmd: list[str], cwd: pathlib.Path, log: pathlib.Path, bound: int) -> int | None:
     with log.open("w", encoding="utf-8") as fh:
         try:
-            return subprocess.run(cmd, cwd=cwd, stdout=fh, stderr=subprocess.STDOUT, timeout=bound).returncode
+            return subprocess.run(
+                cmd,
+                cwd=cwd,
+                stdout=fh,
+                stderr=subprocess.STDOUT,
+                timeout=bound,
+                preexec_fn=raise_open_files_limit,
+            ).returncode
         except subprocess.TimeoutExpired:
             return None
 
