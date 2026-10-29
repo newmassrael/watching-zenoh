@@ -48,7 +48,7 @@ use wz_session_mcu::slot_client::Listening;
 use wz_session_mcu::slot_node::Answering;
 use wz_session_mcu::slot_node::NoPlane;
 use wz_session_mcu::slot_node::{
-    ClientNode, Declared, Document, Entities, NodeIdentity, NodePort, NodeStorage,
+    ClientNode, Declared, Document, Entities, NodeIdentity, NodeLoop, NodePort, NodeStorage,
     SIGNING_KEY_BYTES,
 };
 use LogPart::{Str, U64};
@@ -269,17 +269,37 @@ impl NodePort for ZephyrPort {
 
 /// Assemble the node and run it. Returns only when it cannot start; the value is the reason, as a
 /// nonzero code the C `main()` prints. The heap client's `run_client`, over the statics above.
+///
+/// The set-up is [`start`], out of line: this function is the bottom of the main thread's stack
+/// for the node's whole life, so what it holds is under every call the node makes. It holds the
+/// console and the node as `start` hands it back, a few words; the identity, the stack, the key
+/// and the node's parts (some 700 bytes of this frame while they were built here) are in `start`'s
+/// frame, which is gone before the first round.
 pub fn run() -> i32 {
+    let mut port = ZephyrPort {
+        stack_watch: StackWatch::new(),
+        next_stack_check_ms: 0,
+    };
+    match start(&mut port) {
+        Ok(mut running) => running.drive(&mut port),
+        Err(code) => code,
+    }
+}
+
+/// Everything [`run`] does before the node's first round: the key, the address, the identity, the
+/// stack and the node, set up. `Err` is the exit code of a node that could not start.
+#[inline(never)]
+fn start(port: &mut ZephyrPort) -> Result<impl NodeLoop<ZephyrPort>, i32> {
     // The cookie-signing key is a secret, so it comes from the board's entropy source and a board
     // that cannot supply it stops the node: a predictable key is worse than no node.
     let mut key = [0u8; SIGNING_KEY_BYTES];
     if ZephyrEntropy.try_fill_bytes(&mut key).is_err() {
         log(c"wz: FAIL - the board's entropy source could not fill the signing key");
-        return 2;
+        return Err(2);
     }
     let Some(address) = await_board_ipv4(ADDRESS_WAIT_MS) else {
         log(c"wz: FAIL - the board's interface never got an IPv4 address");
-        return 1;
+        return Err(1);
     };
     // Over the secure channel the node's zid is the one its key names (decision D1), and its
     // certificate is printed for the router's operator to pin; otherwise the board derives it.
@@ -288,7 +308,7 @@ pub fn run() -> i32 {
         Ok(channel) => channel,
         Err(why) => {
             log(why);
-            return 2;
+            return Err(2);
         }
     };
     #[cfg(feature = "tls")]
@@ -300,7 +320,7 @@ pub fn run() -> i32 {
     let identity = board_zid_fixed().and_then(|(zid, len)| NodeIdentity::new(&zid[..len], key));
     let Some(identity) = identity else {
         log(c"wz: FAIL - the board gave no identity to derive a zenoh id from");
-        return 1;
+        return Err(1);
     };
 
     #[cfg(not(feature = "tls"))]
@@ -314,9 +334,9 @@ pub fn run() -> i32 {
     };
     // A node that asks has its getter's layer and application; one that only answers has neither.
     #[cfg(not(feature = "get"))]
-    let (layer, mut app) = (Answering, ());
+    let (layer, app) = (Answering, ());
     #[cfg(feature = "get")]
-    let (layer, mut app) = {
+    let (layer, app) = {
         crate::fixed_get::PLAN.set(&crate::fixed_get::ASK);
         (crate::fixed_get::layer(), crate::fixed_get::app())
     };
@@ -338,13 +358,9 @@ pub fn run() -> i32 {
         idle_sleep_us: IDLE_SLEEP,
         report_every_ms: LOOP_REPORT_MS,
     };
-    let mut port = ZephyrPort {
-        stack_watch: StackWatch::new(),
-        next_stack_check_ms: 0,
-    };
     // The line a lane (or a person at the console) waits for: who the node claims to be and the
     // router it dials.
-    node.run(&mut port, &mut app, |_, zid_hex| {
+    node.start(port, app, |_, zid_hex| {
         log_parts(&[
             Str("ZEPHYR-WZ-CLIENT READY "),
             Str(NODE_ID),

@@ -217,9 +217,31 @@ carries about 6 KB of C library code wz does not, which is why the difference is
   3,816 bytes (the longest path under the observer is a query's reply through the network
   stack's send now) and the main stack, which follows it, from 5,696 to 5,120: 576 bytes of
   `stack_reserved` on the fixed image; 5,376 and 6,336 on the batching and get images.
+- TAKEN for the stack, text -424 bytes (160,780 to 160,356 on the fixed image; -472 on the batching
+  image and -664 on the get image): the node's set-up and its loop are two functions. The main
+  function (`wz_app_main`, with `fixed_client::run`, `ClientNode::run` and what they inlined) was
+  one frame of 704 bytes for the life of the node, because the set-up's values (the 152-byte
+  node, the identity, the key, the stack, the zid in two forms) and the loop's were one function's
+  slots; the set-up is `ClientNode::start`, inlined into the image's own `start` (out of line, its
+  frame gone before the first round), and the loop is `RunningNode::drive` over what `start`
+  hands back (the tasks' pool, the node by reference, the plane, the application, the clock, the
+  watch: a few words). `ClientNode::run`, which the host node calls, is both in sequence. The main
+  function is 176 bytes of frame and the loop 400. The chain 2,784 to 2,616 bytes, the bound 3,816
+  to 3,352 (the dial is the longest path again), the main stack 5,120 to 4,480, the kit's reading
+  2,888 to 2,696 (the single-thread zenoh-pico image's main thread reads 2,888). The text fell
+  with it, and the symbol table says where: `check_outbound_keyexpr_pico_safe`,
+  `TimerQueue::pop_expired` and `run_until_idle` (946 bytes) stood on their own and are inlined
+  into the loop now, which calls each from one site. Why the compiler inlines them into the loop
+  and did not into the old main function was not looked at. The text-owner rows moved with it: the 3,594
+  bytes of the main function were `c:wz_` (the owner of a symbol is read off its name, and the
+  main function's is a C name), and are `wz_session_mcu` and `wz_zephyr_admin_node` now.
+- NOT TAKEN, measured: `ClientNode::start` out of line (a call from the image's own `start`): the
+  text was 161,700 bytes, 920 more than the image before, for the same frames: the node (152
+  bytes) was passed by value across the call and the two functions each paid a prologue.
 - NOT TAKEN, measured: the loop's log lines (`port.log(&[...])`, arrays of parts) said by one
-  out-of-line function: the frame of `wz_app_main` stayed 704 bytes (the compiler had given the
-  arrays one slot) and the text grew 232 bytes.
+  out-of-line function, in the loop (after the set-up was out of the main function, so the loop was a
+  frame of its own): the loop stayed 392 bytes (its slots are the tick's, inlined) and the text grew
+  136 bytes. Before that split, in the main function: it stayed 704 and the text grew 232.
 - NOT TAKEN, measured: the four chains as an empty constant (`EMPTY_EXT_CHAIN`) given the patch
   entry after the bundle is placed: each `new_mutex(CONST)` was still a 204-byte slot, and the
   slot's `open` grew from 856 to 1,080 bytes.

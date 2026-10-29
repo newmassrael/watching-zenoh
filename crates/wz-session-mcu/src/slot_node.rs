@@ -1101,6 +1101,32 @@ where
         app: &mut A,
         ready: impl FnOnce(&mut P, &str),
     ) -> i32 {
+        match self.start(port, app, ready) {
+            Ok(mut running) => running.drive(port),
+            Err(code) => code,
+        }
+    }
+
+    /// Set the node up, and hand back what the loop needs: everything [`Self::run`] does before
+    /// its first round. `Err` is the exit code of a node that could not start.
+    ///
+    /// For the stack: the set-up holds the whole node (the identity, the stack, the factory's
+    /// parts, the zid in two forms) as values, and a function that held them while it went round
+    /// would carry them under every call the loop makes. The loop is [`NodeLoop::drive`] on what
+    /// this returns, and the caller of this function is the one that must not be the loop's: it
+    /// returns before the first round, and its frame with it. Inlined into that caller and not a
+    /// call of its own, which passed the node (152 bytes) by value across the call and cost 920
+    /// bytes of text (`docs/text-ownership.md`).
+    // The return type is the node's whole configuration, the platform's types and numbers as the
+    // `ClientNode` is made of them, and an alias would name the same nine parameters.
+    #[allow(clippy::type_complexity)]
+    #[inline(always)]
+    pub fn start<P: NodePort, A: NodeApp>(
+        self,
+        port: &mut P,
+        app: A,
+        ready: impl FnOnce(&mut P, &str),
+    ) -> Result<RunningNode<C, T, E, L, X, W::Running, A, SESSIONS, ACCEPTS>, i32> {
         let Self {
             storage,
             declared,
@@ -1122,7 +1148,7 @@ where
 
         let Some(runtime) = storage.runtime.start(clock) else {
             port.log(&[Str("wz: FAIL - the runtime was started twice")]);
-            return EXIT_RUNTIME_TWICE;
+            return Err(EXIT_RUNTIME_TWICE);
         };
         let local = CoopLocalSet::new(&runtime);
         let zid_text = identity.zid_hex();
@@ -1138,7 +1164,7 @@ where
             Ok(observer) => observer,
             Err(why) => {
                 port.log(&[Str(why.message())]);
-                return EXIT_OBSERVER;
+                return Err(EXIT_OBSERVER);
             }
         };
 
@@ -1161,7 +1187,7 @@ where
             },
         ) else {
             port.log(&[Str("wz: FAIL - the node's arena was used before")]);
-            return EXIT_RUNTIME_TWICE;
+            return Err(EXIT_RUNTIME_TWICE);
         };
         // The peers the build declares are held from the first tick. A node that silently lost
         // one it was built to hold would run and be wrong: stop, and say which.
@@ -1172,26 +1198,97 @@ where
                 Str(", "),
                 Str(why.reason()),
             ]);
-            return EXIT_DECLARED_PEER;
+            return Err(EXIT_DECLARED_PEER);
         }
-        let mut plane = plane.start(PlaneContext {
+        let plane = plane.start(PlaneContext {
             runtime: runtime.clone(),
             observer,
             zid: &zid[..zid_len],
         });
         ready(port, zid_text.prefix());
 
-        let counters = || (runtime.task_refusals(), runtime.timer_refusals());
-        let mut watch = RoundWatch::new(counters(), report_every_ms);
+        let watch = RoundWatch::new(
+            (runtime.task_refusals(), runtime.timer_refusals()),
+            report_every_ms,
+        );
+        Ok(RunningNode {
+            local,
+            node,
+            plane,
+            app,
+            clock,
+            watch,
+            idle_sleep_us,
+        })
+    }
+}
+
+/// A node that is set up and has not yet gone round: what [`ClientNode::start`] hands the loop.
+///
+/// Small on purpose. It is held by the function that runs the loop, under every call the loop
+/// makes, so it keeps only what a round reads: the tasks' pool, the node by reference (it lives
+/// in the storage's arena), the plane, the application, the clock and the watch.
+pub struct RunningNode<C, T, E, L, X, R, A, const SESSIONS: usize, const ACCEPTS: usize>
+where
+    C: ClockSource + Copy + 'static,
+    T: SlotStack + Bind<T::Driver> + Copy,
+    E: EntropySource + Send + 'static,
+    L: SessionLayer<C, T::Driver> + 'static,
+    X: Accept<T::Driver> + 'static,
+{
+    local: CoopLocalSet<C>,
+    node: &'static mut SlotClientNode<
+        'static,
+        C,
+        T,
+        T,
+        ClientFactory<E, L>,
+        X,
+        SESSIONS,
+        SESSIONS,
+        ACCEPTS,
+    >,
+    plane: R,
+    app: A,
+    clock: C,
+    watch: RoundWatch<(wz_runtime_coop::executor::Refusals, u32)>,
+    idle_sleep_us: u32,
+}
+
+/// The loop of a node that has been set up: [`RunningNode`]'s one operation, as a trait so that
+/// a platform's function can return the node as `impl NodeLoop<Port>` without naming the
+/// seventeen types it is made of.
+pub trait NodeLoop<P: NodePort> {
+    /// Go round until the application ends the run; the value is the process's exit code.
+    fn drive(&mut self, port: &mut P) -> i32;
+}
+
+impl<C, T, E, L, X, R, A, P, const SESSIONS: usize, const ACCEPTS: usize> NodeLoop<P>
+    for RunningNode<C, T, E, L, X, R, A, SESSIONS, ACCEPTS>
+where
+    C: ClockSource + Copy + 'static,
+    T: SlotStack + Bind<T::Driver> + Copy,
+    E: EntropySource + Send + 'static,
+    L: SessionLayer<C, T::Driver> + 'static,
+    X: Accept<T::Driver> + 'static,
+    R: PlaneRunning,
+    A: NodeApp,
+    P: NodePort,
+{
+    fn drive(&mut self, port: &mut P) -> i32 {
         loop {
-            local.run_until_idle();
-            let now_ms = clock.now_us() / 1000;
-            node.tick(now_ms);
-            plane.tick(now_ms);
-            if let ControlFlow::Break(code) = app.after_tick(now_ms, &*node) {
+            self.local.run_until_idle();
+            let now_ms = self.clock.now_us() / 1000;
+            self.node.tick(now_ms);
+            self.plane.tick(now_ms);
+            if let ControlFlow::Break(code) = self.app.after_tick(now_ms, &*self.node) {
                 return code;
             }
-            let seen = watch.observe(now_ms, node.is_established(), counters());
+            let runtime = self.local.runtime();
+            let counters = (runtime.task_refusals(), runtime.timer_refusals());
+            let seen = self
+                .watch
+                .observe(now_ms, self.node.is_established(), counters);
             if let Some(report) = seen.loop_report {
                 port.log(&[
                     Str(P::NAME),
@@ -1219,7 +1316,7 @@ where
                 Some(true) => port.log(&[
                     Str(P::NAME),
                     Str(": session established, peer "),
-                    Str(if node.peer_verified() {
+                    Str(if self.node.peer_verified() {
                         "verified"
                     } else {
                         "not verified"
@@ -1231,10 +1328,18 @@ where
             // The stack's own wait on a socket is what gives the CPU away while a session is
             // held (its read waits for a datagram). Between two dials of a router that is not up
             // the node holds no socket: it sleeps the tick itself then.
-            if !node.holds_session() {
-                port.idle(idle_sleep_us);
+            if !self.node.holds_session() {
+                port.idle(self.idle_sleep_us);
             }
         }
+    }
+}
+
+/// An application held by reference is the application: what lets [`ClientNode::run`] lend its
+/// `app` to [`ClientNode::start`], which takes it by value.
+impl<A: NodeApp + ?Sized> NodeApp for &mut A {
+    fn after_tick(&mut self, now_ms: u64, node: &dyn NodeHandle) -> ControlFlow<i32> {
+        (**self).after_tick(now_ms, node)
     }
 }
 

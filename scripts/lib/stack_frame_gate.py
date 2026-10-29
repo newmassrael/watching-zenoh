@@ -299,6 +299,15 @@ IMAGES = (
     # a second copy of the view, 256 bytes): the longest chain is the same path, 13 frames, and the
     # bound (3,816, 4,016 and 4,744 on the three images) is a query's reply through the network
     # stack's send. The kit's reading is unchanged, 2,888.
+    #
+    # `peak` is 2,616 bytes once the node's set-up and its loop are two functions (`start` in the
+    # image's own `fixed_client.rs`, over `ClientNode::start`, whose frame is gone before the first
+    # round, and `RunningNode::drive`, the loop): the main function is 176 bytes where it held the
+    # whole set-up as values (704), the loop under it is 400, and the dial is the longest chain
+    # again, 17 frames: `wz_app_main` 176, `drive` 400, `reconcile` 448, the manager's `drive` 264,
+    # `dial_peer` 112, `dial_expecting` 256, the pump's `build_in` 216, the engine's five frames
+    # 288, `send_open_syn` 304, `emit_on_link` 64 and the 64-bit division 88, 12 calls through a
+    # register. The kit's reading is 2,696, 80 over.
     Image(
         key="zephyr-client-fixed",
         elf=None,
@@ -306,7 +315,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=2784,
+        peak=2616,
     ),
     # The same client with the session coalescing a send window into one datagram
     # (`overlays/t2g_client_batching.conf`). The batch writer and its flush path are two more
@@ -346,7 +355,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=2784,
+        peak=2616,
     ),
     # The fixed client that ASKS (`overlays/t2g_client_get.conf`): the getter of
     # `wz_session_mcu::slot_getter` is the application layer the observer's drain runs inside, and
@@ -394,6 +403,9 @@ IMAGES = (
     #
     # 4,204 bytes with the loop's node, factory and host built in the storage's arena (see the
     # fixed client's row): the main frame 816 bytes, from 1,368. The kit's reading is 4,552.
+    #
+    # 3,388 bytes with the node's set-up and its loop as two functions (see the fixed client's row):
+    # the main frame is 176 bytes, the loop under it. The kit's reading is 4,328.
     Image(
         key="zephyr-client-fixed-get",
         elf=None,
@@ -401,7 +413,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=4008,
+        peak=3388,
     ),
     # The fixed client over the secure channel (`overlays/t2g_client_tls.conf`, decision D9):
     # the dial completes a TLS 1.3 handshake in Mbed TLS before the session sees a byte, and every
