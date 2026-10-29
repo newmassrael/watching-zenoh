@@ -19689,6 +19689,15 @@ layer_z_zenohd_interop() {
     # shellcheck disable=SC2086 # the cargo arguments are words on purpose
     (cd crates && cargo build -p wz-capi-pico $local_features \
         --target-dir target/wz-capi-pico-local --quiet) || return 1
+    # And the reference arm's build for the cooperative engine, which Layer E builds too: the
+    # drop-in legs below that need a router run against it as well
+    # (`docs/capi-pico-on-coop-engine.md`, step L4).
+    local coop_features
+    coop_features="$(python3 scripts/lib/wz_config.py --features pico --engine coop \
+        target/zenoh-pico-build/zenohpico/include/zenoh-pico/config.h)" || return 1
+    # shellcheck disable=SC2086 # the cargo arguments are words on purpose
+    (cd crates && cargo build -p wz-capi-pico $coop_features \
+        --target-dir target/wz-capi-pico-coop --quiet) || return 1
     # §5.21 token cross-impl leg — the router-hat token lifecycle leg spawns the
     # pico z_sub_liveliness (the liveliness SUBSCRIBER that prints "New alive
     # token" on the future push + "Dropped token" on the undeclare; z_get_liveliness
@@ -20550,6 +20559,20 @@ layer_z_zenohd_interop() {
         --test pico_c_examples_on_wz_capi_dropin \
         pico_zgetliveliness_source_on_wz_capi_sees_a_real_pico_token_through_zenohd \
         -- --ignored --quiet --test-threads=1 || return 1
+    # The same five legs (the two `z_info` ones, the two `z_scout` ones and the liveliness
+    # snapshot) with the library the cooperative engine builds: Layer E's cooperative leg
+    # skips every name that carries `zenohd` for the reason its sweep does, so the legs that
+    # need a router run here. The namespace legs have their own probe above and stay the
+    # tokio engine's. The count is exact: a leg that stops being selected is a failure.
+    _runci_guarded_test Z 5 env WZ_ZENOHD_BIN="$zenohd" WZ_PICO_ENGINE=coop \
+        cargo test -p wz-integration-tests --test pico_c_examples_on_wz_capi_dropin \
+        -- --ignored --quiet --test-threads=1 \
+        pico_zinfo_source_on_wz_capi_reports_a_real_zenohd_as_a_router \
+        pico_zinfo_source_on_wz_capi_pads_a_short_zenohd_zid_to_32 \
+        pico_zscout_source_on_wz_capi_matches_the_real_pico_against_a_zenohd \
+        pico_zscout_source_on_wz_capi_reports_every_zenohd_on_the_group \
+        pico_zgetliveliness_source_on_wz_capi_sees_a_real_pico_token_through_zenohd \
+        || return 1
     # R311y442 — wz<->zenoh-ext ADVANCED-PUBSUB cross-impl, the FIRST foreign
     # witness the `@adv` plane has ever had. Every advanced-pubsub test before
     # this was wz<->wz, which cannot see a selector-dialect divergence: the same

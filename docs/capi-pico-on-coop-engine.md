@@ -758,9 +758,12 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
   session with `zp_read`). What is left out belongs to the engine and is named: the two TLS
   programs (a build with `tls/` selects the tokio engine by its own feature, as the engine
   selection above says), the six that need a zenohd (the sweep skips them too), and
-  `header_arms`, the positive control of the header trees, which no engine changes. The
-  multicast-declarations and raw-Ethernet arms select the tokio engine through their own
-  features, so they have no cooperative build.
+  `header_arms`, the positive control of the header trees, which no engine changes. Five of the
+  six that need a zenohd run in Layer Z against the cooperative library (they pass on pc2); the
+  sixth, the scouting legs in a network namespace, has its own probe and runs against the tokio
+  library only, because the machine this was developed on cannot build a namespace to read it
+  on. The multicast-declarations and raw-Ethernet arms select the tokio engine through their
+  own features, so they have no cooperative build.
 - **L5. Both roles at once. Done.** A peer that listens and dials holds the dial role's face and
   the accepted ones in one table, and one face for each remote zid, as zenoh's transport manager
   keeps one transport for each and the tokio registry keeps one face (`SharedSession::face_up`).
