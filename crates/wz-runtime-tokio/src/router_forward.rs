@@ -9274,7 +9274,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 // The reader owns the reference now and gives it back with the buffer.
                 reservation.commit();
             }
-            return read;
+            read
         }
         #[cfg(not(feature = "transport-shm"))]
         None

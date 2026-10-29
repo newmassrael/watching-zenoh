@@ -73,6 +73,8 @@ enum Command {
         /// The key the query asks, which the replies are held to unless `accept` lifts it.
         keyexpr: String,
         accept: ReplyKeyExpr,
+        /// How long the query waits for its answer, in milliseconds; `0` is no deadline.
+        timeout_ms: u32,
         on_reply: ReplyHandler,
         on_final: FinalHandler,
     },
@@ -84,6 +86,8 @@ enum Command {
         key: String,
         origin: Locality,
         handler: MatchHandler,
+        /// Told once the verdict that holds at the start has been given to the handler.
+        begun: mpsc::Sender<()>,
     },
     Unwatch(u64),
     Stop,
@@ -104,6 +108,8 @@ struct Alive {
 }
 
 struct State {
+    /// When the face started: the clock the deadlines of its queries are on.
+    started: std::time::Instant,
     /// The tokens of the other faces, by the id the router numbers them.
     remote: HashMap<u64, String>,
     /// The tokens the program declared, by the id the router holds them under.
@@ -135,8 +141,14 @@ struct Watch {
 }
 
 impl State {
+    /// Milliseconds since the face started.
+    fn now_ms(&self) -> u64 {
+        u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
     fn new(router: Weak<RouterForwarder>) -> Self {
         Self {
+            started: std::time::Instant::now(),
             remote: HashMap::new(),
             own: HashMap::new(),
             alive: HashMap::new(),
@@ -172,6 +184,7 @@ impl State {
                 key,
                 origin,
                 mut handler,
+                begun,
             } => {
                 // The watch was counted by the router before the face first looks, so a write
                 // after this question is told. A verdict that holds when the watch begins is
@@ -191,6 +204,7 @@ impl State {
                     last: now,
                     handler,
                 });
+                let _ = begun.send(());
             }
             Command::Unwatch(id) => self.watches.retain(|watch| watch.id != id),
             Command::Told(LocalFaceEvent::Reply(response)) => {
@@ -204,13 +218,17 @@ impl State {
                 rid,
                 keyexpr,
                 accept,
+                timeout_ms,
                 mut on_reply,
                 mut on_final,
             } => {
+                // A query that is not answered by its deadline ends with the reply that says
+                // so, then its end, as a query of a session does.
+                let deadline = (timeout_ms != 0).then(|| self.now_ms() + u64::from(timeout_ms));
                 self.queries.register(
                     rid,
                     1,
-                    None,
+                    deadline,
                     ReplyAcceptance::for_query(&keyexpr, accept),
                     move |reply| on_reply(reply),
                     move |_| on_final(),
@@ -347,10 +365,40 @@ impl LocalLiveliness {
         let thread = std::thread::Builder::new()
             .name("wz-router-local".to_owned())
             .spawn(move || {
+                // The thread of a face, as the thread of any other: it runs inside a
+                // single-threaded runtime, which is how a program that is handed an item here
+                // knows it must not wait on this thread for anything and queues the item for a
+                // worker of its own (see the callback context of the top crate).
+                let runtime = tokio::runtime::Builder::new_current_thread().build().ok();
+                let _inside = runtime.as_ref().map(tokio::runtime::Runtime::enter);
                 let mut state = State::new(router);
-                while let Ok(command) = received.recv() {
-                    if !state.handle(command) {
-                        break;
+                loop {
+                    // The next command, or the moment the first query that waits for an answer
+                    // runs out of time, whichever comes first.
+                    let command = match state.queries.next_deadline_ms() {
+                        Some(deadline) => {
+                            let wait = deadline.saturating_sub(state.now_ms());
+                            match received.recv_timeout(std::time::Duration::from_millis(wait)) {
+                                Ok(command) => Some(command),
+                                Err(mpsc::RecvTimeoutError::Timeout) => None,
+                                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                            }
+                        }
+                        None => match received.recv() {
+                            Ok(command) => Some(command),
+                            Err(_) => break,
+                        },
+                    };
+                    match command {
+                        Some(command) => {
+                            if !state.handle(command) {
+                                break;
+                            }
+                        }
+                        None => {
+                            let now = state.now_ms();
+                            state.queries.sweep_timed_out(now);
+                        }
                     }
                 }
             })?;
@@ -428,13 +476,18 @@ impl LocalLiveliness {
         handler: MatchHandler,
     ) -> u64 {
         let id = self.next_subscriber.fetch_add(1, Ordering::Relaxed);
+        let (begun, started) = mpsc::channel();
         let _ = self.commands.send(Command::Watch {
             id,
             plane,
             key: key.to_owned(),
             origin,
             handler,
+            begun,
         });
+        // A watch that begins on what already matches has told its handler so by the time it
+        // is answered, as the declaration of a listener does for a session.
+        let _ = started.recv();
         id
     }
 
@@ -451,6 +504,7 @@ impl LocalLiveliness {
         rid: u64,
         keyexpr: &str,
         accept: ReplyKeyExpr,
+        timeout_ms: u32,
         on_reply: ReplyHandler,
         on_final: FinalHandler,
     ) {
@@ -458,6 +512,7 @@ impl LocalLiveliness {
             rid,
             keyexpr: keyexpr.to_owned(),
             accept,
+            timeout_ms,
             on_reply,
             on_final,
         });

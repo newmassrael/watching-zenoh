@@ -622,15 +622,20 @@ impl OpenPlan {
     /// ([`OpenArguments::run_node`] with [`NodeRole::Peer`](crate::drive::NodeRole::Peer)): it
     /// accepts sessions, which is what makes it a node others route through, and asks nothing
     /// of the node that it does not carry (a multicast group, a scouting that dials what it
-    /// finds). A peer that fits no node is the registry of faces the other roles are, which does
-    /// not forward between its faces.
+    /// finds, a listener that is bound after the open). A peer that fits no node is the registry
+    /// of faces the other roles are, which does not forward between its faces.
     #[cfg(feature = "router-node")]
     pub fn peer_fits_node(&self) -> bool {
         #[cfg(feature = "scout")]
         let scouts = self.scouting.as_ref().is_some_and(|plan| plan.scouts());
         #[cfg(not(feature = "scout"))]
         let scouts = false;
-        !self.listen.is_empty() && self.groups.is_empty() && !scouts
+        // A listener that cannot be bound is a failed open here; one that is bound later, when
+        // `listen/exit_on_failure` is off, is the registry's to serve.
+        !self.listen.is_empty()
+            && self.groups.is_empty()
+            && !scouts
+            && self.listen_phase.policy.exit_on_failure
     }
 
     /// Read the document for the role `role` (see [`dial_role`]) and the endpoints the caller

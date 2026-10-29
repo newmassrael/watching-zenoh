@@ -398,6 +398,33 @@ impl RouterEngine {
     }
 }
 
+/// Whether a peer that fits the node may be opened as one: always, outside the tests of this
+/// crate, which were written for the registry of faces (they read the engine of a session
+/// directly) and open a node only where they say so ([`with_the_node`]).
+#[cfg(all(feature = "engine-tokio", not(test)))]
+fn node_engine_allowed() -> bool {
+    true
+}
+
+#[cfg(all(feature = "engine-tokio", test))]
+thread_local! {
+    static NODE_WANTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(all(feature = "engine-tokio", test))]
+fn node_engine_allowed() -> bool {
+    NODE_WANTED.with(std::cell::Cell::get)
+}
+
+/// Run `open` with a peer that fits the node opened as one.
+#[cfg(all(feature = "engine-tokio", test))]
+fn with_the_node<T>(open: impl FnOnce() -> T) -> T {
+    NODE_WANTED.with(|wanted| wanted.set(true));
+    let opened = open();
+    NODE_WANTED.with(|wanted| wanted.set(false));
+    opened
+}
+
 #[cfg(feature = "engine-tokio")]
 impl Engine {
     /// Open a session on this engine, from the document the configuration is, and the id the
@@ -434,7 +461,10 @@ impl Engine {
         // does not forward between the sessions it holds.
         let node_role = if router {
             Some(tokio_engine::NodeRole::Router)
-        } else if expanded.mode() == zenoh_protocol::core::WhatAmI::Peer && plan.peer_fits_node() {
+        } else if expanded.mode() == zenoh_protocol::core::WhatAmI::Peer
+            && plan.peer_fits_node()
+            && node_engine_allowed()
+        {
             Some(tokio_engine::NodeRole::Peer)
         } else {
             None
@@ -7452,6 +7482,32 @@ mod tests {
             assert_eq!(held.lock().unwrap().len(), 1);
         }
 
+        /// The same on a peer that accepts sessions, which is the router node at node mode Peer:
+        /// the get of its own session runs out of time like any other.
+        #[test]
+        fn a_get_of_a_node_that_is_not_answered_in_time_ends_with_a_timeout_reply() {
+            let session = with_the_node(|| open(peer("a1b2d9")).wait().expect("opens"));
+            let held = Arc::new(std::sync::Mutex::new(vec![]));
+            let keep = Arc::clone(&held);
+            let _queryable = session
+                .declare_queryable("demo/slow")
+                .callback(move |query| keep.lock().unwrap().push(query))
+                .wait()
+                .expect("declares");
+            let replies = session
+                .get("demo/slow")
+                .timeout(Duration::from_millis(200))
+                .wait()
+                .expect("asks");
+            let timeout = replies
+                .recv_timeout(WAIT)
+                .expect("the get is open")
+                .expect("the get timed out with a reply");
+            assert_eq!(describe(&timeout), "Err Timeout zenoh/string");
+            assert!(answers(&replies).is_empty());
+            assert_eq!(held.lock().unwrap().len(), 1);
+        }
+
         /// The same, with the queryable on another node: it is the face to that node that waits
         /// for the answer, and expires it.
         #[test]
@@ -8066,6 +8122,28 @@ mod tests {
                 !status_of(&remote),
                 "a subscriber of the session is not a remote one"
             );
+        }
+
+        /// A listener declared on a peer that accepts sessions, which is the router node at node
+        /// mode Peer, is told what already matches before its declaration returns.
+        #[test]
+        fn a_listener_of_a_node_is_told_what_already_matches_at_its_declaration() {
+            let session = with_the_node(|| open(peer("a1b2f9")).wait().expect("opens"));
+            let _subscriber = session
+                .declare_subscriber("demo/m/n")
+                .wait()
+                .expect("declares");
+            let publisher = session
+                .declare_publisher("demo/m/n")
+                .wait()
+                .expect("declares");
+            let (callback, told) = statuses();
+            let _listener = publisher
+                .matching_listener()
+                .callback(callback)
+                .wait()
+                .expect("declares");
+            assert_eq!(told.try_recv(), Ok(true));
         }
 
         #[test]
@@ -9712,7 +9790,8 @@ mod tests {
 
         /// Two connected nodes, the second of which takes samples.
         fn pair(ids: (&str, &str)) -> (Session, Session, mpsc::Receiver<Sample>) {
-            let (first, endpoint) = listening(ids.0);
+            // The one that listens is the node that others route through.
+            let (first, endpoint) = with_the_node(|| listening(ids.0));
             let second = dialling(ids.1, &endpoint);
             assert_eq!(connected(&first, 1).1.len(), 1, "the nodes are linked");
             let received = taking(&second);
@@ -10227,18 +10306,22 @@ mod tests {
             before_dial: impl FnOnce(&Session) -> T,
         ) -> (Session, Session, T) {
             let port = unautoselected_port();
+            // The node that listens is the router node at node mode Peer, as a peer that accepts
+            // sessions is; the one that dials is the registry of faces.
             let on = |id: &str, listen: &str, connect: &str| {
-                open(
-                    Config::from_json5(&format!(
-                        r#"{{ id: "{id}", mode: "peer",
-                              listen: {{ endpoints: [{listen}] }},
-                              connect: {{ endpoints: [{connect}] }},
-                              scouting: {{ multicast: {{ enabled: false }} }} }}"#
-                    ))
-                    .expect("a configuration zenoh reads"),
-                )
-                .wait()
-                .expect("opens")
+                with_the_node(|| {
+                    open(
+                        Config::from_json5(&format!(
+                            r#"{{ id: "{id}", mode: "peer",
+                                  listen: {{ endpoints: [{listen}] }},
+                                  connect: {{ endpoints: [{connect}] }},
+                                  scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                        ))
+                        .expect("a configuration zenoh reads"),
+                    )
+                    .wait()
+                    .expect("opens")
+                })
             };
             let writer = on(ids.0, &format!(r#""tcp/127.0.0.1:{port}""#), "");
             let kept = before_dial(&writer);

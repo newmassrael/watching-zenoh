@@ -171,6 +171,7 @@ impl RouterState {
             rid,
             keyexpr,
             options.effective_accept_replies(),
+            options.effective_timeout_ms(),
             on_reply,
             on_final,
         );
