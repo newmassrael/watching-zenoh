@@ -667,6 +667,13 @@ clock-quality = ["dep:sce-rust-runtime"]
 # machine itself (`sce:requires`), so a build without this feature holds the two-state machine.
 clock-source = ["clock-quality"]
 
+# supervision (docs/observation-plane.md M3) — the supervision statechart
+# (`sources/session/supervision.scxml`): one deadline an application feeds, and what happens when
+# it is missed (Disarmed / Armed / Expiring / Expired), and the supervisor that holds one machine
+# per checkpoint. Engine-free and allocation-free like the other generated machines, so it pulls
+# the SCE runtime and nothing else.
+supervision = ["dep:sce-rust-runtime"]
+
 # session-close-ingress — a rail message can close a RUNNING session. The
 # ingress (a keyexpr matcher) and the session FSM engine live in two different
 # ownership domains and never meet: the matcher runs under the observer lock on

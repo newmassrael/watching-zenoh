@@ -415,6 +415,10 @@ pub const TX_NO_PROGRESS_WINDOW_US: usize = generated::TX_NO_PROGRESS_WINDOW_US;
 /// size: it sizes no memory.
 pub const TX_EXPIRY_CLOSE_AFTER: usize = generated::TX_EXPIRY_CLOSE_AFTER;
 
+/// How many checkpoints the node's supervisor watches (`supervisor::Supervisor`). At least `1` and
+/// at most `64`: a check names the checkpoints that expired in one 64-bit word.
+pub const SUPERVISION_CHECKPOINTS: usize = generated::SUPERVISION_CHECKPOINTS;
+
 /// How many event records the node's event ring holds (`event_ring::EventRing`). A count of
 /// records of a fixed size, so it sizes the ring's memory. At least `1`.
 pub const EVENT_RING_SLOTS: usize = generated::EVENT_RING_SLOTS;

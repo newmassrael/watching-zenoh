@@ -244,19 +244,32 @@ and operation traces are what a differential run between the two would be fed.
 
 **Design.**
 
-* `sources/session/supervision.scxml`, a statechart: `Disarmed`, `Armed`, `Expired`, with `Expired`
-  holding `Latched` or, with `supervision-after-expiry = rearm`, going back to `Armed` on the
-  next feed. Events: `supervision.start`, `supervision.feed`, `supervision.stop` and the host's
-  `deadline.expired`. Duties: `arm_deadline`, `run_expiry_hook`. The expiry hook runs once per
-  expiry and the machine will not stop while it runs, which is the rule a watchdog needs and which
-  the statechart states in a transition and not in a comment.
+* `sources/session/supervision.scxml`, a statechart (landed, step 4a): `Disarmed`, `Armed`,
+  `Expiring` and `Expired`. Events: `supervision.start`, `supervision.feed`, `supervision.stop`,
+  the host's `deadline.expired` and `hook.done`, and `supervision.rearm`. Duties: `arm_deadline`,
+  `cancel_deadline`, `run_expiry_hook`. `Expiring` has no transition on `supervision.stop`, so the
+  expiry hook runs once per expiry and the machine will not stop while it runs, which is the rule
+  a watchdog needs and which the statechart states in a transition and not in a comment.
+  `supervision-after-expiry` is a policy, a value, and a machine cannot read a value, so the host
+  raises `supervision.rearm` on a feed that arrives in `Expired` when the policy is `rearm`; with
+  `latch` it raises nothing, and a feed there is ignored so that a late feed does not hide a
+  missed deadline.
 * A supervisor watches `SUPERVISION_CHECKPOINTS` points. Each has its own deadline and the
   supervisor is healthy only while every one is. A node that feeds a hardware watchdog feeds it
   from the supervisor's healthy state and from nowhere else, so a hung checkpoint stops the
   feed.
 * The deadline is a pure comparison of `now`, `last_feed` and `timeout` over the monotonic
-  `TimeSource`, written once as an SCE `algorithm` so a wrap of a 32-bit tick counter is a case
-  the contract handles and not one a reviewer has to remember.
+  `TimeSource`, `now - last_feed >= timeout` taken modulo 2^32 (`supervisor::elapsed`), so a wrap
+  of a 32-bit tick counter is the ordinary case; a timeout past `2^31 - 1` ticks is refused where
+  it is set. It is written in Rust with a test across a wrap and NOT yet as an SCE `algorithm`
+  document: that generation is open, and is the part of this item that waits on the choice of
+  whether an `algorithm` kind is worth a generator for one comparison.
+* Landed (step 4b): `wz_session_core::supervisor::Supervisor<N>`, `N` machines, healthy only while
+  at least one checkpoint is supervised and every supervised one is armed (a supervisor watching
+  nothing is not healthy, so a watchdog is not fed on the strength of nothing), with the limit
+  `SUPERVISION_CHECKPOINTS` and the policy `supervision-after-expiry` declared. A model test runs
+  every order of five operations up to length 6 under both policies. Not yet: the `supervision`
+  capability and its `wz_ext_*` doors, and the hosting test on the cooperative engine.
 * Who calls `check` is the `exec` axis and not a new switch: the cooperative engine calls it
   every turn of its loop; a build with tasks gives it one. The supervisor itself has no task.
 
@@ -293,7 +306,7 @@ sampler symbol.
 | 1 | `HlcCore` over `EpochSource` tested against `uhlc` (done), `NodeHlc` on the core (done), `ClockQuality` machine (done: `clock_standing`, features `clock-quality` and `clock-source`), `clock-quality-stamping` and `CLOCK_MAX_FORWARD_STEP_MS` (done); `clock-source` capability and `CLOCK_SOURCES` move to step 2 | The stamp and wire tests pass on the tokio host and on the cooperative engine; slot bytes unchanged off; the `algorithm` for the comparison is generated and used by Rust. |
 | 2 | Clock registration in the C ABIs (2a done: `wz_node_time::clock_registry` and the `CLOCK_SOURCES` limit, first registered source that can answer wins, none able means no date and no fallback to the system clock; 2b done for the pico ABI: `wz_ext_clock_source_register`, `wz_ext_clock_source_unregister` and `wz_ext_clock_report` in `wz_ext.h`, the `clock-source` capability (off by default, `core` and `pico`, implies `timestamping` and `unstable-api`), `z_timestamp_new` stamping from the registered clock through the session's node clock, one standing shared by every node over the registry; open: the same doors in the `capi-c` ABI, and a wire test that a registered clock and the system clock encode the same bytes) | `capi-c` ABI revision and the pico export pins updated in the same change; the drop-in leg stays green. |
 | 3 | `EventRing` (3a done: the type, the model test and the stress run), the node's event log `wz_node_time::event_log` with `EVENT_RING_SLOTS` and `EVENT_RECORD_ARGS` as limits and `event-ring-full` as a policy (3b done: one ring, producers ordered by a lock, a reader needs none, records stamped by the node clock); 3c done for the pico ABI: the `event-ring` capability (off by default, `core` and `pico`, implies `unstable-api`) and the doors `wz_ext_event_emit`, `wz_ext_event_read` (a cursor the caller holds), `wz_ext_event_release` and `wz_ext_event_dropped`; the ring contract is sent to SCE. Open, and recommended to be dropped: the `log` sink, which could record only that a call happened (level, site, a hash of its constant text) and not its arguments, because the `log` crate formats them before a sink sees them, so the structured `emit` is the event API and a sink would add a second, weaker one | The model test and the concurrency check pass; off build has no symbol; the ring contract is written down and sent to SCE. |
-| 4 | Supervision machine and its checkpoints | Conformance over every event order; the cooperative engine hosts it with no task. |
+| 4 | Supervision machine and its checkpoints (4a, 4b done: the statechart, `Supervisor<N>`, the limit and the policy; open: the capability and doors, the cooperative-engine host test, the comparison as an SCE `algorithm`) | Conformance over every event order; the cooperative engine hosts it with no task. |
 | 5 | Snapshot and its generated timer | Histogram test against the reference; admin-space and dissector read it. |
 | 6 | Cross-instrument: events carry M1 time, supervision expiry writes an event, the snapshot reads the ring's loss count | One integration test per link. |
 

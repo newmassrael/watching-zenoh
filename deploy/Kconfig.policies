@@ -177,6 +177,28 @@ config WZ_POLICY_SN_RESOLUTION_BITS_64
 
 endchoice
 
+choice WZ_POLICY_SUPERVISION_AFTER_EXPIRY
+	prompt "supervision-after-expiry"
+	default WZ_POLICY_SUPERVISION_AFTER_EXPIRY_LATCH
+	help
+	  What a checkpoint does when it is fed after its deadline was missed. `latch`
+	  leaves it expired: the missed deadline stays visible, the node stays unhealthy,
+	  and the checkpoint is supervised again only when it is stopped and started,
+	  which is what a watchdog does. `rearm` supervises it again on that feed, so a
+	  checkpoint that recovers makes the node healthy again. The expiry hook runs once
+	  per expiry either way.
+	  Upstream: Supervises nothing: an application that stops making progress is not
+	  noticed by the library, so there is no expiry and nothing for a later feed to
+	  do.
+
+config WZ_POLICY_SUPERVISION_AFTER_EXPIRY_LATCH
+	bool "latch"
+
+config WZ_POLICY_SUPERVISION_AFTER_EXPIRY_REARM
+	bool "rearm"
+
+endchoice
+
 choice WZ_POLICY_EVENT_RING_FULL
 	prompt "event-ring-full"
 	default WZ_POLICY_EVENT_RING_FULL_OVERWRITE_OLDEST

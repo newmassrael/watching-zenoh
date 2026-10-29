@@ -225,7 +225,7 @@ fn regen_codecs(root: &Path) {
 /// directory per consuming crate, mirroring each build.rs's emits:
 ///   wz-session-core  : reassembly_slot, scouting, session_fsm_unicast,
 ///                      session_fsm_multicast, multicast_peer,
-///                      peer_connection, clock_quality (statecharts)
+///                      peer_connection, clock_quality, supervision (statecharts)
 ///   wz-runtime-tokio : reassembly_pool_ap, session_rx_pool_ap,
 ///                      session_rx_pool_ap_small, session_tx_pool_ap,
 ///                      session_tx_pool_ap_small (buffer-pools)
@@ -259,6 +259,8 @@ fn regen_statecharts_and_pools(root: &Path) {
         "peer_connection",
         // docs/observation-plane.md M1 — how far the node's clock may be trusted.
         "clock_quality",
+        // docs/observation-plane.md M3 — a deadline the application feeds.
+        "supervision",
     ] {
         codegen.emit_statechart(stem, &session, &sc_out);
     }
@@ -303,7 +305,7 @@ fn regen_statecharts_and_pools(root: &Path) {
     }
 
     println!(
-        "xtask: regenerated 7 statecharts + {} buffer-pools into out/{{wz-session-core,wz-runtime-tokio,wz-runtime-coop,wz-link-lwip}}",
+        "xtask: regenerated 8 statecharts + {} buffer-pools into out/{{wz-session-core,wz-runtime-tokio,wz-runtime-coop,wz-link-lwip}}",
         pools.len()
     );
 }

@@ -292,6 +292,14 @@ config WZ_LIMIT_TX_EXPIRY_CLOSE_AFTER
 	  closes the session, which is the policy as it was before this limit. At most
 	  65535: a larger value counts as 65535. It is read only when that policy is on.
 
+config WZ_LIMIT_SUPERVISION_CHECKPOINTS
+	int "SUPERVISION_CHECKPOINTS"
+	default 4
+	help
+	  How many checkpoints the node's supervisor watches. Each is a deadline an
+	  application feeds, and the node is healthy only while every checkpoint that is
+	  supervised has been fed in time. At least 1 and at most 64.
+
 config WZ_LIMIT_EVENT_RING_SLOTS
 	int "EVENT_RING_SLOTS"
 	default 64

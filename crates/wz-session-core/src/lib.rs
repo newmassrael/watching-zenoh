@@ -247,7 +247,8 @@ pub mod registry_error;
     feature = "scouting-active",
     feature = "session-unicast",
     feature = "session-multicast",
-    feature = "clock-quality"
+    feature = "clock-quality",
+    feature = "supervision"
 ))]
 pub mod constant_session_id;
 
@@ -2133,7 +2134,8 @@ pub mod peer_connection {
 #[cfg(any(
     feature = "session-unicast",
     feature = "session-multicast",
-    feature = "clock-quality"
+    feature = "clock-quality",
+    feature = "supervision"
 ))]
 pub mod duty_outbox;
 
@@ -2168,6 +2170,37 @@ pub mod clock_quality {
 // Gated as the machine is. Documented in its own `//!`; see the note at `event_ring`.
 #[cfg(feature = "clock-quality")]
 pub mod clock_standing;
+
+/// SCE-generated supervision statechart (`docs/observation-plane.md` M3), from
+/// `sources/session/supervision.scxml`, COMMITTED at `out/wz-session-core/supervision_sm.rs` and
+/// `include!`-ed from there. Exposes `SupervisionState` / `SupervisionEvent`, the
+/// `SupervisionActions` host trait and the `SupervisionPolicy<A>` policy, one machine per
+/// checkpoint, driven by the supervisor. Engine-free and allocation-free; gated on `supervision`,
+/// which brings the SCE runtime in. The lint allows are restored as outer attributes, as for the
+/// other generated machines.
+#[cfg(feature = "supervision")]
+#[allow(non_snake_case)]
+#[allow(unused_imports)]
+#[allow(dead_code)]
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+#[allow(unused_labels)]
+#[allow(unreachable_patterns)]
+#[allow(unreachable_code)]
+#[allow(clippy::all)]
+pub mod supervision {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-session-core",
+        "/supervision_sm.rs"
+    ));
+}
+
+// The supervisor: the checkpoints a node watches, each a `supervision` machine, and whether every
+// one is healthy. Gated as the machine is. Documented in its own `//!`; see the note at
+// `event_ring`.
+#[cfg(feature = "supervision")]
+pub mod supervisor;
 
 /// The peers a node is told to hold, each with its [`peer_connection`]
 /// machine, in a table of fixed capacity (decision D5). Gated as the machine

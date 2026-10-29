@@ -1957,6 +1957,16 @@ closes the session, which is the policy as it was before this limit. At most
 '''
 
 [[limit]]
+id = "SUPERVISION_CHECKPOINTS"
+kconfig = "WZ_LIMIT_SUPERVISION_CHECKPOINTS"
+default = 4
+help = '''
+How many checkpoints the node's supervisor watches. Each is a deadline an
+application feeds, and the node is healthy only while every checkpoint that is
+supervised has been fed in time. At least 1 and at most 64.
+'''
+
+[[limit]]
 id = "EVENT_RING_SLOTS"
 kconfig = "WZ_LIMIT_EVENT_RING_SLOTS"
 default = 64
@@ -2280,6 +2290,23 @@ with a sequence-number width of its own. A session that negotiates a width
 below its peer's runs the narrower ring of the two; a ring of 8 bits wraps
 after 128 frames in flight, so a narrow width asks a deployment to know its
 traffic. The request-id resolution is not part of this policy.
+'''
+
+[[policy]]
+id = "supervision-after-expiry"
+kind = "choice"
+kconfig = "WZ_POLICY_SUPERVISION_AFTER_EXPIRY"
+choices = ["latch", "rearm"]
+default = "latch"
+upstream = "Supervises nothing: an application that stops making progress is not noticed by the library, so there is no expiry and nothing for a later feed to do."
+since = 2
+help = '''
+What a checkpoint does when it is fed after its deadline was missed. `latch`
+leaves it expired: the missed deadline stays visible, the node stays unhealthy,
+and the checkpoint is supervised again only when it is stopped and started,
+which is what a watchdog does. `rearm` supervises it again on that feed, so a
+checkpoint that recovers makes the node healthy again. The expiry hook runs once
+per expiry either way.
 '''
 
 [[policy]]

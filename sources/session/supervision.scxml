@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Supervision - one deadline an application feeds, and what happens when it is missed.
+
+  An application that must keep making progress (a control loop, a task that polls a bus) feeds a
+  checkpoint on every pass. If a feed does not come in time, the checkpoint expires, a hook runs
+  once, and the node can say that something it supervises has stopped. A node that feeds a
+  hardware watchdog feeds it only while every checkpoint is armed, so a hung one stops the feed.
+  The design is `docs/observation-plane.md` M3.
+
+  Division of labour with the host (the machine owns the states, the host owns the clock):
+    - Whether a deadline has passed is a comparison of three numbers over the monotonic time
+      source (now, the last feed, the timeout), and it is the host's: the machine never reads a
+      clock and holds no timer. The host checks on its own cadence and raises `deadline.expired`.
+    - What the expiry hook does is the application's. The machine says WHEN it runs (once per
+      expiry) and that nothing stops it while it runs.
+    - Whether a checkpoint that expired comes back on its own is the build's policy
+      `supervision-after-expiry`. A policy is a value and a machine cannot read one, so the host
+      raises `supervision.rearm` when the policy is `rearm` and a feed arrives in `Expired`; with
+      `latch` it does not, and the checkpoint stays expired until it is stopped and started.
+
+  The states:
+    Disarmed - not supervised. No deadline is running.
+    Armed    - supervised. Every feed starts the deadline again.
+    Expiring - the deadline passed and the expiry hook is running. A stop request is not taken
+               while it runs: the hook finishes, then the checkpoint is Expired.
+    Expired  - the hook has run. A feed is ignored here, so a late feed does not hide a missed
+               deadline.
+
+  Engine-free: every effect is a no-arg `<sce:action>` host-trait call, so the generated
+  `SupervisionPolicy<A>` carries no `IScriptEngine` and compiles `no_std`.
+
+  Host actions (the generated `SupervisionActions` trait):
+    arm_deadline      - entered Armed: start the deadline from the current feed.
+    cancel_deadline   - entered Disarmed: stop checking.
+    run_expiry_hook   - entered Expiring: run the application's hook, then raise `hook.done`.
+
+  Events fed by the host:
+    supervision.start    - begin supervising.
+    supervision.feed     - the application made progress.
+    supervision.stop     - stop supervising.
+    deadline.expired     - the host found the deadline passed.
+    hook.done            - the expiry hook returned.
+    supervision.rearm    - a checkpoint that expired is to be supervised again.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="statechart"
+       name="supervision"
+       version="1.0"
+       initial="Disarmed">
+
+  <state id="Disarmed">
+    <onentry>
+      <sce:action name="cancel_deadline" effect="duty"/>
+    </onentry>
+    <transition event="supervision.start" target="Armed"/>
+  </state>
+
+  <state id="Armed">
+    <onentry>
+      <sce:action name="arm_deadline" effect="duty"/>
+    </onentry>
+    <!-- An external self-transition: leaving and entering Armed again runs arm_deadline, which
+         is how a feed starts the deadline over. -->
+    <transition event="supervision.feed" target="Armed"/>
+    <transition event="deadline.expired" target="Expiring"/>
+    <transition event="supervision.stop" target="Disarmed"/>
+  </state>
+
+  <!-- No transition on supervision.stop: a checkpoint does not stop while its expiry hook runs. -->
+  <state id="Expiring">
+    <onentry>
+      <sce:action name="run_expiry_hook" effect="duty"/>
+    </onentry>
+    <transition event="hook.done" target="Expired"/>
+  </state>
+
+  <state id="Expired">
+    <transition event="supervision.rearm" target="Armed"/>
+    <transition event="supervision.stop" target="Disarmed"/>
+  </state>
+
+</scxml>

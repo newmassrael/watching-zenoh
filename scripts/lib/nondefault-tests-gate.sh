@@ -559,6 +559,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         storage-mgr-strip-prefix,\
         storage-mgr-wildcard-updates,\
         storage-replication,\
+        supervision,\
         switchboard,\
         transport-batching,\
         transport-compose,\

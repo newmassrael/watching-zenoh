@@ -198,6 +198,47 @@ impl Default for SnResolution {
     }
 }
 
+/// `supervision-after-expiry`: What a checkpoint does when it is fed after its deadline was
+/// missed. `latch` leaves it expired: the missed deadline stays visible, the node stays
+/// unhealthy, and the checkpoint is supervised again only when it is stopped and started,
+/// which is what a watchdog does. `rearm` supervises it again on that feed, so a checkpoint
+/// that recovers makes the node healthy again. The expiry hook runs once per expiry either
+/// way.
+/// Upstream: Supervises nothing: an application that stops making progress is not noticed
+/// by the library, so there is no expiry and nothing for a later feed to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SupervisionAfterExpiry {
+    /// `latch`.
+    Latch,
+    /// `rearm`.
+    Rearm,
+}
+
+impl SupervisionAfterExpiry {
+    /// The value as the declaration, the Kconfig and the environment spell it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Latch => "latch",
+            Self::Rearm => "rearm",
+        }
+    }
+
+    const CHOICES: [&str; 2] = ["latch", "rearm"];
+    const ALL: [Self; 2] = [Self::Latch, Self::Rearm];
+
+    const fn stated() -> Self {
+        let stated = option_env!("WZ_POLICY_SUPERVISION_AFTER_EXPIRY");
+        let index = policy_choice(stated, &Self::CHOICES, 0);
+        Self::ALL[index]
+    }
+}
+
+impl Default for SupervisionAfterExpiry {
+    fn default() -> Self {
+        Self::stated()
+    }
+}
+
 /// `event-ring-full`: Which event a full event ring gives up. `overwrite-oldest` writes the
 /// new event over the oldest, so the ring always holds the latest: it is what a post-mortem
 /// wants, and needs no reader at all. `drop-newest` refuses the new event and counts the
@@ -314,6 +355,10 @@ pub struct SessionPolicy {
     /// InitSyn and in the Join of a group, and has no setting for another: zenoh's
     /// `Resolution` default and zenoh-pico's `Z_SN_RESOLUTION 0x02`.
     pub sn_resolution: SnResolution,
+    /// `supervision-after-expiry`. Upstream: Supervises nothing: an application that stops
+    /// making progress is not noticed by the library, so there is no expiry and nothing for
+    /// a later feed to do.
+    pub supervision_after_expiry: SupervisionAfterExpiry,
     /// `event-ring-full`. Upstream: Keeps no record of the events a node has: a log call
     /// with no logger installed is dropped, so neither the oldest nor the newest of them
     /// survives.
@@ -334,6 +379,7 @@ impl SessionPolicy {
         let subscriber_overload = SubscriberOverload::stated();
         let key_set = KeySet::stated();
         let sn_resolution = SnResolution::stated();
+        let supervision_after_expiry = SupervisionAfterExpiry::stated();
         let event_ring_full = EventRingFull::stated();
         let clock_quality_stamping = ClockQualityStamping::stated();
         Self {
@@ -345,6 +391,7 @@ impl SessionPolicy {
             subscriber_overload,
             key_set,
             sn_resolution,
+            supervision_after_expiry,
             event_ring_full,
             clock_quality_stamping,
         }

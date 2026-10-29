@@ -119,6 +119,7 @@
   <sce:feature name="storage-mgr-wildcard-updates" requires="keyexpr-wildcard-double keyexpr-wildcard-single storage-backend"/>
   <sce:feature name="storage-profile"/>
   <sce:feature name="storage-replication" requires="storage-backend"/>
+  <sce:feature name="supervision"/>
   <sce:feature name="switchboard" requires="codec-push"/>
   <sce:feature name="transport-batching"/>
   <sce:feature name="transport-compose" requires="alloc codec-close codec-fragment codec-frame codec-init-body codec-keep-alive codec-open-body reassembly transport-qos"/>

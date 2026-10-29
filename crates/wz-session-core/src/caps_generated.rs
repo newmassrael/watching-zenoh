@@ -61,6 +61,8 @@ pub(super) const TX_NO_PROGRESS_WINDOW_US: usize =
     limit(option_env!("WZ_LIMIT_TX_NO_PROGRESS_WINDOW_US"), 1000000);
 pub(super) const TX_EXPIRY_CLOSE_AFTER: usize =
     limit(option_env!("WZ_LIMIT_TX_EXPIRY_CLOSE_AFTER"), 0);
+pub(super) const SUPERVISION_CHECKPOINTS: usize =
+    limit(option_env!("WZ_LIMIT_SUPERVISION_CHECKPOINTS"), 4);
 pub(super) const EVENT_RING_SLOTS: usize = limit(option_env!("WZ_LIMIT_EVENT_RING_SLOTS"), 64);
 pub(super) const EVENT_RECORD_ARGS: usize = limit(option_env!("WZ_LIMIT_EVENT_RECORD_ARGS"), 4);
 pub(super) const CLOCK_SOURCES: usize = limit(option_env!("WZ_LIMIT_CLOCK_SOURCES"), 1);
