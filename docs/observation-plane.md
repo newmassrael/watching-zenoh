@@ -404,6 +404,20 @@ reads it.
    the standard library keeps no count of it. A counting allocator is a choice for the program that
    owns the allocator, and a node that has one passes it as its own `ResourceSource`.
 
+7. **The bits of the snapshot's `features` word are the capability declaration's.** A capability
+   that is an instrument states `observation_bit` in `deploy/wz-config.toml`, `wz_config.py`
+   generates `feature_bits_generated.rs` from it, and `resource_snapshot::feature_bits` binds the
+   names, so the layout's promise and the capability it names are one fact, and `--check` fails a
+   stale one. What stays by hand is which of them a crate can say it was built with: `cfg!` takes a
+   literal feature name, and a crate has only some of the features, so the pico doors and the
+   hosted service each list the ones they have, with the bit from the generated table.
+8. **The instruments are instances; the process defaults live at the C boundary.** The registry,
+   the event log, the supervisor and the sampler are types a host can have several of; the C doors
+   carry no handle, so they act on the process's default instance, as zenoh-pico's own globals do.
+   The one place an instance used the default behind the caller's back, an event log reading the
+   global clock, is gone: `EventLog::emit_from` takes the clock, and `process_clock()` is where the
+   doors choose it. A node object that bundled them would be one more type with one instance.
+
 ## Not part of this
 
 * A log text format, a console, or a transport for events. The ring is read by a consumer that

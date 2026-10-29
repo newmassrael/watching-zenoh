@@ -22,6 +22,7 @@ itself (their Kconfig symbol, default and help). This tool is everything that de
     --emit kconfig-policies       print deploy/Kconfig.policies (written only while the declaration
                                   has a policy)
     --emit rust-policies          print crates/wz-session-core/src/policy_generated.rs
+    --emit rust-feature-bits      print crates/wz-session-core/src/feature_bits_generated.rs
     --emit defconfig:ORIGINAL     print configs/<ORIGINAL>_defconfig, an upstream original's own
                                   default build in wz's switches (zenoh, zenoh-c, zenoh-pico)
     --emit image-kconfig:IMAGE    print the axes of a declared image as Kconfig choices
@@ -111,7 +112,7 @@ limit and binds the name the code uses to the generated value.
 Usage:
     wz_config.py --check | --selftest | --write | --check-presets
     wz_config.py --emit kconfig-root | kconfig-capabilities | kconfig-limits | rust-limits
-                         | kconfig-policies | rust-policies
+                         | kconfig-policies | rust-policies | rust-feature-bits
     wz_config.py --resolve-features pico|c|core PRESET...
     wz_config.py --resolve-env PRESET...
     wz_config.py --features pico|c|core CONFIG
@@ -150,6 +151,7 @@ KCONFIG_LIMITS = ROOT / "deploy" / "Kconfig.limits"
 RUST_LIMITS = ROOT / "crates" / "wz-session-core" / "src" / "caps_generated.rs"
 KCONFIG_POLICIES = ROOT / "deploy" / "Kconfig.policies"
 RUST_POLICIES = ROOT / "crates" / "wz-session-core" / "src" / "policy_generated.rs"
+RUST_FEATURE_BITS = ROOT / "crates" / "wz-session-core" / "src" / "feature_bits_generated.rs"
 CAPS_RS =ROOT / "crates" / "wz-session-core" / "src" / "caps.rs"
 # The configuration-aware derivation's own spelling of the vocabulary and of `[os] always`
 # (docs/target-build-contract.md T9), held to this declaration by `--check`.
@@ -418,6 +420,10 @@ def validate_caps(data: dict) -> list[str]:
     ids = [c["id"] for c in data["capability"]]
     if len(ids) != len(set(ids)):
         out.append("a capability id is declared twice")
+    bits = [c["observation_bit"] for c in data["capability"] if "observation_bit" in c]
+    if len(bits) != len(set(bits)):
+        out.append("two capabilities have the same observation_bit; a bit of the snapshot's features "
+                   "word names one capability")
     for c in data["capability"]:
         for dep in c["implies"]:
             if dep not in caps:
@@ -431,6 +437,10 @@ def validate_caps(data: dict) -> list[str]:
             out.append(f"{c['id']}: Kconfig symbol `{c['kconfig']}` is not WZ_CAP_*")
         if c.get("default", "on") not in ("on", "off"):
             out.append(f"{c['id']}: default is `{c['default']}`, which is neither on nor off")
+        if "observation_bit" in c:
+            bit = c["observation_bit"]
+            if isinstance(bit, bool) or not isinstance(bit, int) or not 0 <= bit <= 63:
+                out.append(f"{c['id']}: observation_bit is `{bit}`, which is not a bit of a 64-bit word")
         if "pico_flag" in c:
             out.append(f"{c['id']} names a pico_flag; a capability's pico switches are the "
                        "zenoh-pico `maps` rows to it under the upstream switches")
@@ -1591,6 +1601,28 @@ def emit_rust_limits(decl: dict) -> str:
     return "\n".join(out) + "\n"
 
 
+def emit_rust_feature_bits(decl: dict) -> str:
+    """The `features` word of a resource snapshot: one bit for each capability that declares an
+    `observation_bit`, in bit order. The names the code uses are bound to these in
+    `resource_snapshot::feature_bits`, beside the documentation of each."""
+    named = sorted(
+        ((cap["observation_bit"], cid) for cid, cap in decl["caps"].items() if "observation_bit" in cap)
+    )
+    out = generated_header("//", "rust-feature-bits") + [
+        "",
+        "//! The bit each capability has in the `features` word of a resource snapshot, as the",
+        "//! declaration assigns it (`observation_bit`). A bit is assigned once and never moved or reused.",
+        "",
+    ]
+    names = [(cid.upper().replace("-", "_"), cid, bit) for bit, cid in named]
+    for const, _cid, bit in names:
+        out.append(f"pub(super) const {const}: u64 = 1 << {bit};")
+    out += ["", f"pub(super) const NAMES: [(u64, &str); {len(names)}] = ["]
+    out += [f'    ({const}, "{cid}"),' for const, cid, _bit in names]
+    out.append("];")
+    return "\n".join(out) + "\n"
+
+
 def emit_kconfig_policies(decl: dict) -> str:
     """A bool policy is a `bool` symbol that defaults to `n`; a choice is a Kconfig `choice` with
     one option per value, the default being upstream's. Each help ends with what upstream does."""
@@ -1824,6 +1856,7 @@ GENERATED = {
     "kconfig-limits": (KCONFIG_LIMITS, emit_kconfig_limits),
     "rust-limits": (RUST_LIMITS, emit_rust_limits),
     "rust-policies": (RUST_POLICIES, emit_rust_policies),
+    "rust-feature-bits": (RUST_FEATURE_BITS, emit_rust_feature_bits),
 }
 
 
@@ -2861,6 +2894,18 @@ def cmd_selftest() -> int:
     expect("a capability stating an original its ABIs do not reach is refused",
            caps_refused('upstream_on = ["zenoh-pico"]', 'upstream_on = ["zenoh-pico", "zenoh-c"]',
                         "judged against"))
+    # The bit a capability has in a snapshot's features word.
+    expect("an observation_bit past the 64 bits of the word is refused",
+           caps_refused('os_needs = ["sockets-udp"]\n', 'os_needs = ["sockets-udp"]\nobservation_bit = 64\n',
+                        "not a bit of a 64-bit word"))
+    expect("an observation_bit that is not a number is refused",
+           caps_refused('os_needs = ["sockets-udp"]\n', 'os_needs = ["sockets-udp"]\nobservation_bit = "zero"\n',
+                        "not a bit of a 64-bit word"))
+    feature_bits = emit_rust_feature_bits(load_decl())
+    expect("the features word is the capabilities' observation_bits, in bit order",
+           "CLOCK_SOURCE: u64 = 1 << 0;" in feature_bits and "RESOURCE_SNAPSHOT: u64 = 1 << 3;" in feature_bits
+           and feature_bits.index("(CLOCK_SOURCE,") < feature_bits.index("(EVENT_RING,")
+           < feature_bits.index("(SUPERVISION,") < feature_bits.index("(RESOURCE_SNAPSHOT,"))
     # The operating-system facilities and the platforms (docs/target-build-contract.md T3, T9).
     expect("a capability that was never assessed for facilities is refused",
            caps_refused('os_needs = ["sockets-udp"]\n', "", "has no os_needs"))

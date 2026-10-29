@@ -138,14 +138,31 @@ fn build_features() -> u64 {
 pub struct SnapshotService {
     sampler: Mutex<BuildSampler>,
     origin: Instant,
+    /// The log whose loss the snapshot states, which the service is told of and does not look up:
+    /// a node with its own log hands it in ([`Self::with_event_log`]), and `new` takes the
+    /// process's.
+    #[cfg(feature = "event-ring")]
+    events: &'static wz_node_time::event_log::EventLog,
 }
 
 impl SnapshotService {
-    /// A service that has taken no snapshot.
+    /// A service that has taken no snapshot, stating the loss of the process's event log.
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             sampler: Mutex::new(BuildSampler::for_build(build_features())),
             origin: Instant::now(),
+            #[cfg(feature = "event-ring")]
+            events: wz_node_time::event_log::global(),
+        })
+    }
+
+    /// A service that states the loss of `events`, a log of the node's own.
+    #[cfg(feature = "event-ring")]
+    pub fn with_event_log(events: &'static wz_node_time::event_log::EventLog) -> Arc<Self> {
+        Arc::new(Self {
+            sampler: Mutex::new(BuildSampler::for_build(build_features())),
+            origin: Instant::now(),
+            events,
         })
     }
 
@@ -189,7 +206,7 @@ impl SnapshotService {
         // The event ring's loss is the library's to state, not the platform's, as the C doors do.
         #[cfg(feature = "event-ring")]
         {
-            reading.events_dropped = Some(wz_node_time::event_log::global().dropped());
+            reading.events_dropped = Some(self.events.dropped());
         }
         let messages = messages();
         self.sampler
@@ -335,6 +352,40 @@ mod tests {
     impl ResourceSource for Fixed {
         fn read(&mut self) -> ResourceReading {
             self.0
+        }
+    }
+
+    /// A nonzero loss, which no door or host had ever read: a log that refuses events under
+    /// `drop-newest` says how many in the snapshot of the service that was handed it, and a
+    /// service handed another log says that one's, so the count is the log's it is told of and not
+    /// a process's.
+    #[cfg(feature = "event-ring")]
+    #[test]
+    fn the_snapshot_states_the_loss_of_the_event_log_the_service_is_handed() {
+        use wz_node_time::event_log::EventLog;
+        use wz_session_core::caps::EVENT_RING_SLOTS;
+        use wz_session_core::event_ring::FullPolicy;
+
+        let full: &'static EventLog = Box::leak(Box::new(EventLog::new(FullPolicy::DropNewest)));
+        for _ in 0..EVENT_RING_SLOTS + 3 {
+            full.emit_at(0, 1, 0, &[]);
+        }
+        assert_eq!(
+            full.dropped(),
+            3,
+            "the ring refused the three that did not fit"
+        );
+        let quiet: &'static EventLog = Box::leak(Box::new(EventLog::new(FullPolicy::DropNewest)));
+
+        let mut source = Fixed(ResourceReading::default());
+        for (log, dropped) in [(full, 3), (quiet, 0)] {
+            let service = SnapshotService::with_event_log(log);
+            assert!(service.poll(&mut source, NodeMessageReading::empty));
+            let json = service.latest_json().expect("a snapshot was taken");
+            assert!(
+                json.contains(&format!("\"events_dropped\":{dropped},")),
+                "{json}"
+            );
         }
     }
 

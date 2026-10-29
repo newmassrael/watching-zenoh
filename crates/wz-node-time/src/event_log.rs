@@ -95,14 +95,23 @@ impl EventLog {
         self.emit_at(level, source, timestamp, args)
     }
 
-    /// Record an event stamped with the time now, for a caller that has no node clock to hand
-    /// (a C program): the clocks the application registered when `clock-source` is on, the system
-    /// clock otherwise. A clock that does not know the date records time `0`.
+    /// Record an event stamped with the time `clock` reads now, for a caller that has no node
+    /// clock to hand (a C program, whose doors pass [`process_clock`]). A clock that does not know
+    /// the date records time `0`, and the event is not lost.
     ///
     /// This is a plain reading and not a stamp of the hybrid logical clock: events are ordered by
-    /// their sequence number within a ring, and the time is for the reader's eye.
-    pub fn emit_now(&self, level: u8, source: u16, args: &[u64]) -> Pushed {
-        self.emit_at(level, source, now_ntp64(), args)
+    /// their sequence number within a ring, and the time is for the reader's eye. The log holds no
+    /// clock of its own and names no global one: the caller says which time the event carries, so
+    /// two logs in one process can carry two clocks' times, and a test hands in a clock it moves.
+    pub fn emit_from(
+        &self,
+        clock: &impl wz_session_core::epoch::EpochSource,
+        level: u8,
+        source: u16,
+        args: &[u64],
+    ) -> Pushed {
+        let timestamp = clock.try_now_ntp64().map_or(0, |ntp| ntp.as_word());
+        self.emit_at(level, source, timestamp, args)
     }
 
     /// A handle to read the log through and to count with.
@@ -144,14 +153,18 @@ impl EventLog {
     }
 }
 
-/// The time now as an NTP64 word, `0` when the clock does not know the date.
-fn now_ntp64() -> u64 {
-    use wz_session_core::epoch::EpochSource;
+/// The clock a process's C doors stamp their events with: the clocks the application registered
+/// when `clock-source` is on, the system clock otherwise. The one place the doors' time is chosen,
+/// so the log type needs no clock and a door and the stamp of `z_timestamp_new` read the same one.
+pub fn process_clock() -> impl wz_session_core::epoch::EpochSource + Copy {
     #[cfg(feature = "clock-source")]
-    let source = crate::clock_registry::RegisteredOrSystem(&crate::clock_registry::GLOBAL);
+    {
+        crate::clock_registry::RegisteredOrSystem(&crate::clock_registry::GLOBAL)
+    }
     #[cfg(not(feature = "clock-source"))]
-    let source = crate::timestamp_source::SystemEpoch;
-    source.try_now_ntp64().map_or(0, |ntp| ntp.as_word())
+    {
+        crate::timestamp_source::SystemEpoch
+    }
 }
 
 /// The log of this process, built with the build's policy.
@@ -228,9 +241,49 @@ mod tests {
     }
 
     #[test]
-    fn an_event_recorded_with_the_time_now_carries_a_real_time() {
+    fn an_event_carries_the_time_of_the_clock_it_is_handed_and_zero_when_that_clock_cannot_say() {
+        use wz_session_core::epoch::{EpochSource, EpochUnavailable, SinceEpoch};
+
+        struct At(Option<u64>);
+        impl EpochSource for At {
+            fn try_since_epoch(&self) -> Result<SinceEpoch, EpochUnavailable> {
+                self.0
+                    .map(|secs| SinceEpoch { secs, nanos: 0 })
+                    .ok_or(EpochUnavailable)
+            }
+        }
+
+        // Two logs in one process carry two clocks' times: the log names no global clock.
+        let first = log(FullPolicy::OverwriteOldest);
+        let second = log(FullPolicy::OverwriteOldest);
+        first.emit_from(&At(Some(1_000)), 1, 5, &[3]);
+        second.emit_from(&At(Some(2_000)), 1, 5, &[3]);
+        second.emit_from(&At(None), 1, 6, &[]);
+        let stamped = |log: &EventLog, index: usize| {
+            let mut reader = log.observer().reader();
+            let mut found = None;
+            for _ in 0..=index {
+                found = Some(reader.poll());
+            }
+            match found {
+                Some(Read::Record(record)) => record.timestamp,
+                other => panic!("event {index} was recorded: {other:?}"),
+            }
+        };
+        assert_eq!(stamped(&first, 0) >> 32, 1_000);
+        assert_eq!(stamped(&second, 0) >> 32, 2_000);
+        assert_eq!(
+            stamped(&second, 1),
+            0,
+            "a clock that cannot say records time 0"
+        );
+    }
+
+    #[test]
+    fn the_process_clock_is_a_real_time() {
+        use wz_session_core::epoch::EpochSource;
         let log = log(FullPolicy::OverwriteOldest);
-        log.emit_now(1, 5, &[3]);
+        log.emit_from(&process_clock(), 1, 5, &[3]);
         let Read::Record(record) = log.observer().reader().poll() else {
             panic!("an event was recorded");
         };
@@ -239,6 +292,7 @@ mod tests {
             "{}",
             record.timestamp >> 32
         );
+        let _ = process_clock().try_now_ntp64();
     }
 
     #[test]

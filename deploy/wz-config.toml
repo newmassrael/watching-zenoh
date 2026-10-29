@@ -887,6 +887,10 @@ help = "The advanced publisher and subscriber (cache, history, miss detection)."
 # surface, as `wz_ext_config_device_requires` is.
 [[capability]]
 id = "clock-source"
+# The bit this capability has in the `features` word of a resource snapshot
+# (`docs/observation-plane.md` M4). Assigned once and never moved or reused: a reader of an older or
+# newer image reads the bits it knows, so a bit is a name the snapshot's layout has promised.
+observation_bit = 0
 kconfig = "WZ_CAP_CLOCK_SOURCE"
 os_needs = []
 upstream_off = ["zenoh-pico"]
@@ -902,6 +906,7 @@ help = "Register a clock source the node reads instead of the system clock, and 
 # ring gives up is the `event-ring-full` policy.
 [[capability]]
 id = "event-ring"
+observation_bit = 1
 kconfig = "WZ_CAP_EVENT_RING"
 os_needs = []
 upstream_off = ["zenoh-pico"]
@@ -918,6 +923,7 @@ help = "Write events into the node's event ring and read them back, with no text
 # `supervision-after-expiry` policy.
 [[capability]]
 id = "supervision"
+observation_bit = 2
 kconfig = "WZ_CAP_SUPERVISION"
 os_needs = []
 upstream_off = ["zenoh-pico"]
@@ -933,6 +939,7 @@ help = "Supervise checkpoints an application feeds, and run a hook once when one
 # fine the message-interval histogram is the `SNAPSHOT_HISTOGRAM_BUCKETS` limit.
 [[capability]]
 id = "resource-snapshot"
+observation_bit = 3
 kconfig = "WZ_CAP_RESOURCE_SNAPSHOT"
 os_needs = []
 upstream_off = ["zenoh-pico"]

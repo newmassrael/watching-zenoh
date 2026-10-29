@@ -88,23 +88,25 @@ pub const HAS_EVENTS: u8 = 1 << 3;
 /// can have (`docs/observation-plane.md`). A bit is assigned once and never moved or reused, and a
 /// reader ignores the bits it does not know, which is how an image with a later instrument is read
 /// by an older reader. The host sets the bits of the instruments it was built with.
+///
+/// The bits are the declaration's (`observation_bit` of each capability in `deploy/wz-config.toml`),
+/// generated into `feature_bits_generated.rs` and bound to names here, so the layout's promise and
+/// the capability it names are one fact in one place and `wz_config.py --check` fails a bit that
+/// was changed in one and not the other.
 pub mod feature_bits {
+    use crate::feature_bits_generated as generated;
+
     /// The clock the program registers (`clock-source`).
-    pub const CLOCK_SOURCE: u64 = 1 << 0;
+    pub const CLOCK_SOURCE: u64 = generated::CLOCK_SOURCE;
     /// The event ring (`event-ring`).
-    pub const EVENT_RING: u64 = 1 << 1;
+    pub const EVENT_RING: u64 = generated::EVENT_RING;
     /// The supervisor (`supervision`).
-    pub const SUPERVISION: u64 = 1 << 2;
+    pub const SUPERVISION: u64 = generated::SUPERVISION;
     /// This snapshot (`resource-snapshot`).
-    pub const RESOURCE_SNAPSHOT: u64 = 1 << 3;
+    pub const RESOURCE_SNAPSHOT: u64 = generated::RESOURCE_SNAPSHOT;
 
     /// Each bit and the capability it names, in bit order.
-    pub const NAMES: [(u64, &str); 4] = [
-        (CLOCK_SOURCE, "clock-source"),
-        (EVENT_RING, "event-ring"),
-        (SUPERVISION, "supervision"),
-        (RESOURCE_SNAPSHOT, "resource-snapshot"),
-    ];
+    pub const NAMES: [(u64, &str); generated::NAMES.len()] = generated::NAMES;
 }
 
 /// What the platform could say about the node now. A field left `None` was not measured.

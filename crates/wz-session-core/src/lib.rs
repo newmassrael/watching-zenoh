@@ -400,6 +400,10 @@ pub mod wrapping_ticks;
 // it. Documented in its own `//!`; see the note at `event_ring`.
 pub mod resource_snapshot;
 
+// The bit each capability has in a snapshot's `features` word, generated from the declaration
+// (`deploy/wz-config.toml`, `observation_bit`); named in `resource_snapshot::feature_bits`.
+mod feature_bits_generated;
+
 // The message counter of a receive path that runs on several threads: the same rules as
 // `resource_snapshot::MessageStats`, in atomics. Its counts and its latest-message word are 64 bits,
 // so it exists where the target has a 64-bit atomic or the `no_std` feature brings

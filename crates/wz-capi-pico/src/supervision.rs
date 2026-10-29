@@ -167,8 +167,9 @@ pub extern "C" fn wz_ext_supervision_check() -> ZResult {
             // expiry to exactly one check. A build without the log writes nothing.
             #[cfg(feature = "event-ring")]
             {
-                use wz_node_time::event_log::{global, library};
-                global().emit_now(
+                use wz_node_time::event_log::{global, library, process_clock};
+                global().emit_from(
+                    &process_clock(),
                     library::LIBRARY_LEVEL,
                     library::SUPERVISION_EXPIRED,
                     &[index as u64],

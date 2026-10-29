@@ -20,7 +20,7 @@
 //! (`wz_ext_event_release`), and that is what makes room.
 
 use crate::result::{ZResult, Z_ERR_NULL, Z_ERR_OVERFLOW, Z_OK};
-use wz_node_time::event_log::{global, LogRead};
+use wz_node_time::event_log::{global, process_clock, LogRead};
 
 /// What a read found: an event.
 pub const WZ_EXT_EVENT_RECORD: u8 = 0;
@@ -84,7 +84,7 @@ pub unsafe extern "C" fn wz_ext_event_emit(
         } else {
             std::slice::from_raw_parts(args, arg_count)
         };
-        match global().emit_now(level, source, args) {
+        match global().emit_from(&process_clock(), level, source, args) {
             wz_session_core::event_ring::Pushed::Stored(_) => Z_OK,
             wz_session_core::event_ring::Pushed::Dropped => Z_ERR_OVERFLOW,
         }

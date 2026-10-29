@@ -326,9 +326,6 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             # and gates nothing in this package: the registry is `wz-node-time`'s, which this
             # package re-exports module by module at the paths it has always had.
             "clock-source",
-            # `event-ring` is forwarded to `wz-node-time`, whose event log it turns on, and
-            # gates nothing in this package.
-            "event-ring",
             # R2684 — `adminspace-router-linkstate` LEAVES this list, by the same
             # route R2571 records above and R2454 before it: the claim was true
             # when written and THIS round falsified it. Serving `linkstate/peers`
@@ -546,6 +543,10 @@ DEFERRED: dict[str, dict[str, str]] = {
                 # all inside `impl` blocks, none at module level, so there is no
                 # `module::name` for a probe to import.
                 "access-acl-multicast",
+                # `event-ring` is forwarded to `wz-node-time`, whose event log it turns on, and
+                # gates one method of this package, `SnapshotService::with_event_log`, which
+                # takes the log whose loss a snapshot states.
+                "event-ring",
                 "liveliness-get",
                 # `resource-snapshot` LEFT this list when `pub mod resource_snapshot_host` and
                 # `pub struct RouterMessagesView` gave it module-level sites under a simple cfg,
