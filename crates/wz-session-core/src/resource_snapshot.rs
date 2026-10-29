@@ -206,6 +206,36 @@ pub struct MessageReading<const B: usize> {
     pub intervals: [u64; B],
 }
 
+impl<const B: usize> MessageReading<B> {
+    /// A reading of a counter that has seen nothing, and the identity of [`Self::merge`].
+    pub const fn empty() -> Self {
+        Self {
+            messages: 0,
+            interval_sum_us: 0,
+            intervals: [0; B],
+        }
+    }
+
+    /// Add another counter's reading to this one: a node that receives on several links holds a
+    /// counter for each and reports the total. Each field is a sum of counts, so the sum of the
+    /// readings is what one counter over all the links would have read, except at the first
+    /// message of each link, which has no interval in either. The counts saturate and never
+    /// wrap, though a 64-bit count does not reach the top in the life of a node.
+    pub fn merge(&mut self, other: &Self) {
+        self.messages = self.messages.saturating_add(other.messages);
+        self.interval_sum_us = self.interval_sum_us.saturating_add(other.interval_sum_us);
+        for (mine, theirs) in self.intervals.iter_mut().zip(&other.intervals) {
+            *mine = mine.saturating_add(*theirs);
+        }
+    }
+}
+
+impl<const B: usize> Default for MessageReading<B> {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
 /// The message statistics of a host with one thread to count on: the plain accumulator, with no
 /// atomics. A host whose receivers run on several threads counts with an `IntervalMeter` instead.
 #[derive(Debug, Clone)]
@@ -460,14 +490,27 @@ impl<const B: usize> Sampler<B> {
         source: &mut impl ResourceSource,
         messages: impl FnOnce() -> MessageReading<B>,
     ) -> bool {
-        let due = match self.last_sample_us {
-            None => true,
-            Some(last) => elapsed(now_us, last, self.period_us),
-        };
-        if !due {
+        if !self.is_due(now_us) {
             return false;
         }
         let reading = source.read();
+        self.take(now_us, reading, messages());
+        true
+    }
+
+    /// Whether a sample is due at `now_us`: the first time asked, and then each time the period
+    /// has passed since the last one taken. A host that asks its platform for a reading outside
+    /// its own lock asks this first, then [`Self::take`]s what the platform answered.
+    pub fn is_due(&self, now_us: u32) -> bool {
+        match self.last_sample_us {
+            None => true,
+            Some(last) => elapsed(now_us, last, self.period_us),
+        }
+    }
+
+    /// Record a sample taken at `now_us` from what the platform and the message counter read,
+    /// whether or not one was due: the caller has asked [`Self::is_due`].
+    pub fn take(&mut self, now_us: u32, reading: ResourceReading, messages: MessageReading<B>) {
         let mut available = 0;
         if reading.cpu_permille.is_some() {
             available |= HAS_CPU;
@@ -482,7 +525,6 @@ impl<const B: usize> Sampler<B> {
             in_use: 0,
             high_water: 0,
         });
-        let messages = messages();
         self.latest = Some(Snapshot {
             sequence: self.sequence,
             taken_at_us: now_us,
@@ -498,7 +540,6 @@ impl<const B: usize> Sampler<B> {
         });
         self.sequence = self.sequence.wrapping_add(1);
         self.last_sample_us = Some(now_us);
-        true
     }
 
     /// The latest sample, or `None` before the first.
@@ -640,6 +681,36 @@ mod tests {
         histogram.observe(0);
         histogram.observe(100);
         assert_eq!(histogram.counts(), &[u64::MAX; 4]);
+    }
+
+    #[test]
+    fn merged_readings_are_the_sum_of_two_links_and_the_empty_reading_is_the_identity() {
+        let mut a = MessageStats::<8>::new();
+        let mut b = MessageStats::<8>::new();
+        for now in [0u32, 100, 200, 5_000] {
+            a.observe(now);
+        }
+        for now in [7u32, 1_007] {
+            b.observe(now);
+        }
+        let mut total = MessageReading::<8>::empty();
+        total.merge(&a.reading());
+        total.merge(&b.reading());
+        assert_eq!(total.messages, 6);
+        assert_eq!(total.interval_sum_us, 100 + 100 + 4_800 + 1_000);
+        // Four intervals, one fewer than the messages of each link: 3 and 1.
+        assert_eq!(total.intervals.iter().sum::<u64>(), 4);
+        let mut same = a.reading();
+        same.merge(&MessageReading::empty());
+        assert_eq!(same, a.reading());
+        let mut full = MessageReading::<8>::empty();
+        full.messages = u64::MAX;
+        full.merge(&b.reading());
+        assert_eq!(
+            full.messages,
+            u64::MAX,
+            "a count saturates and does not wrap"
+        );
     }
 
     #[test]

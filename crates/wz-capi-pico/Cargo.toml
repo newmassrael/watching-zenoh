@@ -352,6 +352,10 @@ name = "supervision_doors"
 required-features = ["supervision"]
 
 [[test]]
+name = "snapshot_doors"
+required-features = ["resource-snapshot", "peer"]
+
+[[test]]
 name = "clock_source_stamps"
 required-features = ["engine-tokio", "peer", "clock-source"]
 

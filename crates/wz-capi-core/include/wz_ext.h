@@ -194,4 +194,65 @@ uint8_t wz_ext_supervision_healthy(void);
 /* The state of a checkpoint, one of the values above. */
 uint8_t wz_ext_supervision_state(uint8_t checkpoint);
 
+/* The node's resource snapshot: a fixed-layout, versioned record of the CPU
+ * use, the heap and the tasks the platform reports, and of how the messages the
+ * session received were spaced. Part of the unstable surface, and present only
+ * in a build with the resource-snapshot capability.
+ *
+ * The platform is the program's: it sets a source that answers what it can, and
+ * a part it cannot answer is marked unavailable in the record, not read as zero.
+ * The library holds no thread and no timer: the program calls
+ * wz_ext_snapshot_poll on its own cadence, which takes a snapshot when the
+ * build's period (SNAPSHOT_PERIOD_MS) has passed since the last, and
+ * wz_ext_snapshot_read copies the latest out as bytes. */
+
+/* What the source writes: the readings it has, and which of them it has. A
+ * field whose bit in available is clear is not read, whatever the source left in
+ * it. */
+#define WZ_EXT_SNAPSHOT_HAS_CPU 1
+#define WZ_EXT_SNAPSHOT_HAS_HEAP 2
+#define WZ_EXT_SNAPSHOT_HAS_TASKS 4
+
+typedef struct wz_ext_resource_reading_t {
+  uint8_t available;     /* the WZ_EXT_SNAPSHOT_HAS_* bits */
+  uint8_t reserved;
+  uint16_t cpu_permille; /* busy share since the last reading, in thousandths */
+  uint16_t tasks;        /* how many tasks the node runs */
+  uint16_t reserved2;
+  uint64_t heap_in_use;     /* bytes on the heap in use now */
+  uint64_t heap_high_water; /* the most bytes there have been in use */
+} wz_ext_resource_reading_t;
+
+/* The program's source: fills out and returns 0, or returns anything else when
+ * it cannot answer at all, which takes the snapshot with no part available. It
+ * runs on the thread that called wz_ext_snapshot_poll, with no lock of the
+ * library held, so it may call any of these functions. */
+typedef int8_t wz_ext_snapshot_source_fn(void *context,
+                                         wz_ext_resource_reading_t *out);
+
+/* Set the source, or clear it with NULL. With none set, a snapshot is still
+ * taken, with the message counts and no part of the platform's. The source must
+ * be safe to call from the thread that calls wz_ext_snapshot_poll, and context
+ * must stay valid, for as long as it is set. Z_OK. */
+z_result_t wz_ext_snapshot_set_source(wz_ext_snapshot_source_fn *read,
+                                      void *context);
+
+/* Take a snapshot if the build's period has passed since the last, of the
+ * session's received messages and whatever the source answers. 1 when one was
+ * taken, 0 when none was due, Z_ERR_NULL for a null or spent session. The first
+ * call takes one. */
+z_result_t wz_ext_snapshot_poll(const z_loaned_session_t *session);
+
+/* How many bytes wz_ext_snapshot_read writes: the size of this build's record,
+ * which grows with SNAPSHOT_HISTOGRAM_BUCKETS. */
+size_t wz_ext_snapshot_size(void);
+
+/* Copy the latest snapshot into out, which has room for capacity bytes, and
+ * write its length to length. The record is little-endian and starts with its
+ * own layout version and size, so a reader of an older build can tell a newer
+ * one. Z_OK; Z_ERR_GENERIC before the first snapshot; Z_ERR_OVERFLOW when
+ * capacity is less than wz_ext_snapshot_size; Z_ERR_NULL for a null out or
+ * length. */
+z_result_t wz_ext_snapshot_read(uint8_t *out, size_t capacity, size_t *length);
+
 #endif /* WZ_EXT_H */

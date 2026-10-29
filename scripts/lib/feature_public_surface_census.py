@@ -388,8 +388,10 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "`router-node` gates the router node (`drive::RouterState` and "
         "`OpenArguments::run_router`), turned on by the top crate `zenoh` alone, whose "
         "router tests (`api::session::tests::router_session`) and upstream's scouting, "
-        "timestamp instrumentation and liveliness files run against it",
-        frozenset({"router-node", "routing-namespace", "transport-shm"}),
+        "timestamp instrumentation and liveliness files run against it; `resource-snapshot` "
+        "gates the accessor `SharedSession::message_reading`, the node's received-message "
+        "count, which the pico crate's `snapshot_doors` test reads through the doors",
+        frozenset({"resource-snapshot", "router-node", "routing-namespace", "transport-shm"}),
     ),
     "wz-capi-coop": (
         "the cooperative engine behind a wz C ABI: a workspace-internal rlib the C ABI crate "
@@ -425,7 +427,18 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `supervision` gates `pub mod supervision`, whose public items are wz's own doors
         # `wz_ext_supervision_set_hook`, `_start`, `_feed`, `_stop`, `_check`, `_healthy` and
         # `_state`, declared in `wz_ext.h`, off by default as `event-ring` is.
-        frozenset({"admin-space", "clock-source", "event-ring", "supervision"}),
+        # `resource-snapshot` gates `pub mod snapshot`, whose public items are wz's own doors
+        # `wz_ext_snapshot_set_source`, `_poll`, `_size` and `_read`, and the types they take,
+        # declared in `wz_ext.h`, off by default as `supervision` is.
+        frozenset(
+            {
+                "admin-space",
+                "clock-source",
+                "event-ring",
+                "resource-snapshot",
+                "supervision",
+            }
+        ),
     ),
     "wz-codecs-test-support": (
         "a test-support crate: `publish = false`, and NO workspace library "

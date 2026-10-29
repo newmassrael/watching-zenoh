@@ -101,6 +101,21 @@ pub trait SessionEngine: Send + Sync + 'static {
         None
     }
 
+    /// What the session's receive path has counted: the transport messages and how they were
+    /// spaced, over every link under it (`docs/observation-plane.md` M4). `None` from an engine
+    /// built without the `resource-snapshot` feature, which is the provided answer, and from one
+    /// with no counter; a reader asks again for each snapshot and takes windows by subtraction,
+    /// since every count is cumulative.
+    fn message_reading(
+        &self,
+    ) -> Option<
+        wz_session_core::resource_snapshot::MessageReading<
+            { wz_session_core::caps::SNAPSHOT_HISTOGRAM_BUCKETS },
+        >,
+    > {
+        None
+    }
+
     /// Whether any connected peer is a ROUTER — zenoh-pico's `_z_session_has_router_peer`, the
     /// condition under which a peer-mode session sends Interests at all.
     fn has_router_peer(&self) -> bool;

@@ -157,6 +157,17 @@ impl SessionEngine for SharedSession {
         SharedSession::has_router_peer(self)
     }
 
+    #[cfg(feature = "resource-snapshot")]
+    fn message_reading(
+        &self,
+    ) -> Option<
+        wz_session_core::resource_snapshot::MessageReading<
+            { wz_session_core::caps::SNAPSHOT_HISTOGRAM_BUCKETS },
+        >,
+    > {
+        Some(SharedSession::message_reading(self))
+    }
+
     fn face_snapshots(&self) -> Vec<wz_session_core::face::FaceSnapshot> {
         // Each unicast face, then each member of each group the session joined, which pico lists
         // as a multicast transport of its own.

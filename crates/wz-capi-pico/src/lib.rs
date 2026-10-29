@@ -140,6 +140,8 @@ pub mod scout;
 pub mod serde;
 pub mod session;
 mod session_ext;
+#[cfg(feature = "resource-snapshot")]
+pub mod snapshot;
 pub mod string_array;
 #[cfg(feature = "supervision")]
 pub mod supervision;

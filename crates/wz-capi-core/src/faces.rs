@@ -1143,6 +1143,15 @@ struct Inner {
     face_epochs: Arc<Vec<FaceEpochs>>,
     /// How many times [`Self::face_set`], or the set of groups, has been rebuilt.
     face_set_generation: u64,
+    /// `resource-snapshot` — what the receive paths of the faces that have gone had counted when
+    /// they went, added to by [`SharedSession::face_down`] in the step that removes the face.
+    /// The node's reading is this plus the faces' own, so it never falls when a link does: a
+    /// reader takes windows by subtracting two readings, and a count that dropped would make one
+    /// negative.
+    #[cfg(feature = "resource-snapshot")]
+    departed_messages: wz_session_core::resource_snapshot::MessageReading<
+        { wz_session_core::caps::SNAPSHOT_HISTOGRAM_BUCKETS },
+    >,
     /// R2259 (open-debt item 593) — the face-lifecycle observers the C
     /// link/transport event planes register, keyed by the id
     /// [`SharedSession::watch_faces`] hands back.
@@ -2295,6 +2304,14 @@ impl SharedSession {
         let removed = {
             let mut guard = self.lock();
             let removed = guard.faces.remove(&id);
+            // In the same step as the removal, so a reader (which holds this lock) sees the
+            // face's count in one place and never in two or in none.
+            #[cfg(feature = "resource-snapshot")]
+            if let Some(entry) = &removed {
+                guard
+                    .departed_messages
+                    .merge(&entry.session.actions().message_reading());
+            }
             guard.refresh_face_set();
             removed
         };
@@ -3330,6 +3347,26 @@ impl SharedSession {
             .values()
             .map(|face| face.session.clone())
             .collect()
+    }
+
+    /// `resource-snapshot` — what the receive paths of the unicast faces have counted, those that
+    /// are up and those that have gone ([`Inner::departed_messages`]), as one reading that only
+    /// grows. Taken under the registry lock, which is what keeps a face that goes down in the
+    /// middle from being counted twice or not at all; the readings themselves are atomic loads.
+    /// A joined group's members are not in it: their receive path is the multicast one, which does
+    /// not feed a meter yet.
+    #[cfg(feature = "resource-snapshot")]
+    pub fn message_reading(
+        &self,
+    ) -> wz_session_core::resource_snapshot::MessageReading<
+        { wz_session_core::caps::SNAPSHOT_HISTOGRAM_BUCKETS },
+    > {
+        let guard = self.lock();
+        let mut total = guard.departed_messages.clone();
+        for face in guard.faces.values() {
+            total.merge(&face.session.actions().message_reading());
+        }
+        total
     }
 
     /// R2579 — every session a DECLARATION made through this registry reaches:

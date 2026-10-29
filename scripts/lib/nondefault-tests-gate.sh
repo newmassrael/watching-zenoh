@@ -320,6 +320,10 @@ transport-link-unixpipe,transport-link-ws|"
     # checkpoint, feeds it, lets a deadline pass and checks that the hook runs once
     # (`supervision_doors`, which `Cargo.toml` requires the feature for).
     "wz-capi-pico|hook|supervision|"
+    # The node's resource snapshot taken and read from C (`wz_ext_snapshot_*`): the target that
+    # handshakes two sessions, takes a snapshot of the one that listened and reads it back as
+    # bytes (`snapshot_doors`, which `Cargo.toml` requires the feature, and the peer mode, for).
+    "wz-capi-pico|hook|resource-snapshot,peer|"
     # The two node-config features the zenoh-c ABI turns on: the usrpwd
     # credential machinery and the interceptor chain (`access_control`,
     # `low_pass_filter`, `downsampling`). Both are off here by default, so the
