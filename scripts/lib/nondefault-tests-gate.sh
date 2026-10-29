@@ -336,6 +336,11 @@ transport-link-unixpipe,transport-link-ws|"
     # `reth/` locator of its MAC. `raweth-transport` is off by default, so that test was
     # compiled by no leg. The filter is the module path, so a test added there is covered.
     "wz-capi-core|hook|raweth-transport|faces::multicast::"
+    # The router node's own face (`drive::router_node::local_face`): what a program is told of the
+    # liveliness tokens of the faces a router node holds, and where its own are counted. The module
+    # is built only with `router-node`, which no leg named, so its six tests were compiled by
+    # none. The filter is the module path, so a test added there is covered.
+    "wz-capi-core|hook|router-node|drive::router_node::"
     # The cooperative engine's two ends of a query, against a router stand-in on its own thread:
     # the queryable answers outside the session's lock and a kept query holds its Final; a get's
     # leg ends with its Final, its deadline, its cancelled token or its lost link. Their tests
