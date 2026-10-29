@@ -10446,15 +10446,15 @@ fn liveliness_options_default_is_constructible() {
 
 #[cfg(feature = "liveliness-token")]
 #[test]
-fn declare_token_returns_handle_with_keyexpr_and_id_zero() {
+fn declare_token_returns_handle_with_keyexpr_and_id_one() {
     let (session, _driver) = build_session();
     let token = session
         .declare_token("liveliness/devA", LivelinessOptions::default())
         .expect("hardcoded canonical literal keyexpr");
     assert_eq!(
         token.id(),
-        0,
-        "first allocation returns id=0 per zenoh-pico convention"
+        1,
+        "first allocation returns id=1 as zenoh-pico's and upstream's counters do: 0 is a router's"
     );
     assert_eq!(token.keyexpr(), "liveliness/devA");
     // Options accessor — empty struct just confirms the borrow shape.
@@ -10492,7 +10492,8 @@ fn declare_token_wire_frame_contains_decl_token_bytes() {
         .declare_token("liveliness/devA", LivelinessOptions::default())
         .expect("hardcoded canonical literal keyexpr");
 
-    let expected = build_declare_token(0, /*mapping_id=*/ 0, Some("liveliness/devA"))
+    // The session's first token id is 1 (0 is a router's).
+    let expected = build_declare_token(1, /*mapping_id=*/ 0, Some("liveliness/devA"))
         .unwrap()
         .try_as_borrowed()
         .expect("test: <=N exts by construction")
@@ -10554,9 +10555,9 @@ fn liveliness_token_drop_wire_frame_contains_undecl_token_bytes() {
         let _token = session
             .declare_token("liveliness/devA", LivelinessOptions::default())
             .expect("hardcoded canonical literal keyexpr");
-        // Token id 0 was just allocated; drop will retract it.
+        // Token id 1 was just allocated; drop will retract it.
     }
-    let expected = build_undeclare_token(0)
+    let expected = build_undeclare_token(1)
         .try_as_borrowed()
         .expect("test: <=N exts by construction")
         .encode_to_vec();

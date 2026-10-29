@@ -288,13 +288,13 @@ fn wz_remote_declare_round_trip_against_wz_initiator() {
          --- initiator stderr ---\n{final_text}"
     );
 
-    // Acceptor-side token trace: the demo logs "DECLARED TOKEN id=0" when
+    // Acceptor-side token trace: the demo logs "DECLARED TOKEN id=1" when
     // `Session::declare_token` fires. (The subscriber / queryable outbound-emit
     // gate is the parse-or-panic above.) Both sides land iff the round-trip
     // completed: the initiator REMOTE * DECLARED lines prove the INBOUND dispatch.
     assert!(
-        acceptor_captured.contains("DECLARED TOKEN id=0"),
-        "acceptor stderr lacks 'DECLARED TOKEN id=0' — \
+        acceptor_captured.contains("DECLARED TOKEN id=1"),
+        "acceptor stderr lacks 'DECLARED TOKEN id=1' — \
          Session::declare_token did not fire.\n\
          --- acceptor stderr ---\n{acceptor_captured}"
     );

@@ -30,7 +30,8 @@
 //!      `on_final` (logged `LIVELINESS GET FINAL ...`) on the DeclFinal.
 //!
 //! Assertions gate every step:
-//!   * Acceptor logs the outbound `DECLARED TOKEN id=0` line.
+//!   * Acceptor logs the outbound `DECLARED TOKEN id=1` line (a session's
+//!     first token id, as pico's and upstream's: 0 is a router's).
 //!   * Initiator logs `LIVELINESS GET REPLY` with the resolved
 //!     `keyexpr='demo/token'`, then `LIVELINESS GET FINAL`, in order.
 //!
@@ -164,8 +165,8 @@ fn wz_liveliness_get_round_trip_against_wz_acceptor() {
     // Acceptor-side trace: declare_task logs DECLARED TOKEN once the
     // token is held (the source of the matching get reply).
     assert!(
-        acceptor_captured.contains("DECLARED TOKEN id=0"),
-        "acceptor stderr lacks 'DECLARED TOKEN id=0' — Session::declare_token \
+        acceptor_captured.contains("DECLARED TOKEN id=1"),
+        "acceptor stderr lacks 'DECLARED TOKEN id=1' — Session::declare_token \
          did not fire on the acceptor side.\n--- acceptor stderr ---\n{acceptor_captured}"
     );
 

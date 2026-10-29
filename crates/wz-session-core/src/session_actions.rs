@@ -1905,7 +1905,9 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// later matches it on the `Declare(UndeclToken)` retraction emit
     /// triggered by `Drop` / `undeclare`.
     ///
-    /// Starts at `0` matching the queryside convention. The wire
+    /// Starts at `1`, as pico's and upstream's counters do: the id `0`
+    /// is the one a router propagates a token under
+    /// (`Self::alloc_next_token_id`). The wire
     /// carries token ids as the `id` field of the inner
     /// `decl_token` / `undecl_token` codec, keyed independently from
     /// `subscriber_id`, `queryable_id`, and `request_id` on the peer
@@ -1913,8 +1915,8 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// `zenoh-pico/src/net/liveliness.c:69` —
     /// `_local_tokens` vs `_remote_tokens` are distinct from
     /// `_remote_subscriptions` etc.), so a wz session that allocates
-    /// `token_id = 0` while also having previously allocated
-    /// `subscriber_id = 0` does not collide on the wire. `Relaxed`
+    /// `token_id = 1` while also having previously allocated
+    /// `subscriber_id = 1` does not collide on the wire. `Relaxed`
     /// ordering matches the request-id rationale.
     pub next_outbound_token_id: AtomicU64,
 
@@ -3588,7 +3590,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 plain_put_lane: core::sync::atomic::AtomicBool::new(false),
                 next_outbound_request_id: AtomicU64::new(0),
                 app_wake_deadline_ms: AtomicU64::new(u64::MAX),
-                next_outbound_token_id: AtomicU64::new(0),
+                // From 1: the id 0 is a router's (`alloc_next_token_id`).
+                next_outbound_token_id: AtomicU64::new(1),
                 next_outbound_interest_id: AtomicU64::new(0),
                 next_outbound_entity_id: AtomicU32::new(0),
                 // R311y205 (IMPL-2b-iii) — the aggregation link set starts
@@ -11700,9 +11703,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// threading it manually.
     ///
     /// Mirrors zenoh-pico's `_z_get_entity_id` consumed by
-    /// `_z_declare_liveliness_token`
-    /// (`vendor/zenoh-pico/src/net/liveliness.c:58`); first call
-    /// returns `0` matching the post-increment-from-zero convention.
+    /// `_z_declare_liveliness_token`; the first call returns `1`, as
+    /// pico's counter starts there (`vendor/zenoh-pico/src/session/utils.c`
+    /// @ `zn->_entity_id = 1;`) and upstream's does
+    /// (`zenoh/src/net/runtime/mod.rs` @
+    /// `next_id: AtomicU32::new(1), // 0 is reserved for routing core`).
+    /// The id `0` is the one a router propagates a token under, with its
+    /// keyexpr beside it, and a receiver reads a token of id `0` as that
+    /// form (`declare::liveliness_subscriber`); a session that numbered its
+    /// first token `0` was read as a router's.
     /// `Relaxed` ordering — uniqueness is the only invariant.
     pub fn alloc_next_token_id(&self) -> u64 {
         self.next_outbound_token_id.fetch_add(1, Ordering::Relaxed)

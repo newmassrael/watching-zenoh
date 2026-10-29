@@ -30,22 +30,24 @@
 //!      `SessionLinkActions::send_interest_liveliness_subscriber`).
 //!   3. The acceptor's `Declare(DeclToken)` arrives at the initiator.
 //!      `parse_frame_payload` decodes the envelope into
-//!      `NetworkMessage::Declare(DeclToken{id=0, keyexpr=demo/token})`.
+//!      `NetworkMessage::Declare(DeclToken{id=1, keyexpr=demo/token})`
+//!      (a session numbers its tokens from 1, as pico and upstream do: 0
+//!      is the id a router propagates a token under).
 //!      [`ApplicationLayerObserver::dispatch_event`] fans the event
 //!      into `liveliness_subscribers`, which matches `demo/token`
 //!      against the `demo/**` pattern (`**` matches one chunk) and
 //!      fires the wz-ap-demo PUT callback, logging
 //!      `LIVELINESS SAMPLE PUT filter='demo/**' keyexpr='demo/token'
-//!      token_id=0`.
+//!      token_id=1`.
 //!   4. SIGTERM the acceptor (R278 graceful shutdown). The held
-//!      `LivelinessToken` drops, emitting `Declare(UndeclToken{id=0})`
+//!      `LivelinessToken` drops, emitting `Declare(UndeclToken{id=1})`
 //!      on the wire. The initiator's
 //!      [`LivelinessSubscriberRegistry::dispatch_declare`] looks up
-//!      `peer_token_table[0] = "demo/token"`, fans a
+//!      `peer_token_table[1] = "demo/token"`, fans a
 //!      `LivelinessSampleKind::Delete` sample to every matching
 //!      subscriber slot, and the callback logs
 //!      `LIVELINESS SAMPLE DELETE filter='demo/**' keyexpr='demo/token'
-//!      token_id=0`.
+//!      token_id=1`.
 //!
 //! Assertions gate every step:
 //!   * Acceptor logs the outbound `DECLARED TOKEN` line.
@@ -165,9 +167,9 @@ fn wz_liveliness_subscriber_round_trip_against_wz_acceptor() {
     );
 
     // Trigger graceful shutdown on the acceptor — the held
-    // LivelinessToken's Drop emits Declare(UndeclToken{id=0}). The
+    // LivelinessToken's Drop emits Declare(UndeclToken{id=1}). The
     // initiator's LivelinessSubscriberRegistry::dispatch_declare
-    // looks up `peer_token_table[0]` and fans the DELETE sample.
+    // looks up `peer_token_table[1]` and fans the DELETE sample.
     graceful_terminate(acceptor_child.child_mut(), Duration::from_secs(2));
 
     let delete_substr = "LIVELINESS SAMPLE DELETE";
@@ -207,7 +209,7 @@ fn wz_liveliness_subscriber_round_trip_against_wz_acceptor() {
 
     // PUT line shape: filter + keyexpr + token_id all present.
     let expected_put = format!(
-        "LIVELINESS SAMPLE PUT filter='{subscribe_pattern}' keyexpr='{token_keyexpr}' token_id=0"
+        "LIVELINESS SAMPLE PUT filter='{subscribe_pattern}' keyexpr='{token_keyexpr}' token_id=1"
     );
     assert!(
         put_text.contains(&expected_put),
@@ -219,8 +221,8 @@ fn wz_liveliness_subscriber_round_trip_against_wz_acceptor() {
     // send_declare_token fires (the source of the matching PUT on
     // the initiator side).
     assert!(
-        acceptor_captured.contains("DECLARED TOKEN id=0"),
-        "acceptor stderr lacks 'DECLARED TOKEN id=0' — \
+        acceptor_captured.contains("DECLARED TOKEN id=1"),
+        "acceptor stderr lacks 'DECLARED TOKEN id=1' — \
          Session::declare_token did not fire on the acceptor side.\n\
          --- acceptor stderr ---\n{acceptor_captured}"
     );
@@ -246,7 +248,7 @@ fn wz_liveliness_subscriber_round_trip_against_wz_acceptor() {
         ),
     };
     let expected_delete = format!(
-        "LIVELINESS SAMPLE DELETE filter='{subscribe_pattern}' keyexpr='{token_keyexpr}' token_id=0"
+        "LIVELINESS SAMPLE DELETE filter='{subscribe_pattern}' keyexpr='{token_keyexpr}' token_id=1"
     );
     assert!(
         delete_text.contains(&expected_delete),
