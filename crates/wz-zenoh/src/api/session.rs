@@ -352,6 +352,15 @@ impl RouterEngine {
     /// subscribers: the hosted subscribers of a router count up from one and never reach it.
     const LIVELINESS_ID: Id = 1 << 31;
 
+    /// A number for a declaration that holds nothing in the router: a publisher or a querier,
+    /// whose matching is read from the tables the router holds.
+    fn entity_id(&self) -> ZResult<Id> {
+        let id = self.ids.fetch_add(1, Ordering::Relaxed) + 1;
+        Id::try_from(id).map_err(|_| {
+            zerror!("the router numbered an entity {id}, more than an id holds").into()
+        })
+    }
+
     /// The refusal of an operation the router session does not carry yet, by what it was.
     fn refuses<T>(what: &str) -> ZResult<T> {
         Err(
@@ -713,7 +722,9 @@ impl Engine {
     /// [`Engine::undeclare_publisher`].
     fn declare_publisher(&self, publisher: PublisherDeclaration<'_>) -> ZResult<Id> {
         match self {
-            Engine::Router(_) => RouterEngine::refuses("a publisher"),
+            // A router holds the declarations of every face it serves, so a publisher has no
+            // interest to send for: its matching is worked out from the tables the router holds.
+            Engine::Router(router) => router.entity_id(),
             Engine::Tokio(state) => {
                 let PublisherDeclaration {
                     key,
@@ -858,7 +869,7 @@ impl Engine {
     /// querier asks the session itself. The id is released by [`Engine::undeclare_querier`].
     fn declare_querier(&self, querier: QuerierDeclaration<'_>) -> ZResult<Id> {
         match self {
-            Engine::Router(_) => RouterEngine::refuses("a querier"),
+            Engine::Router(router) => router.entity_id(),
             Engine::Tokio(state) => {
                 let QuerierDeclaration {
                     key,
@@ -912,7 +923,19 @@ impl Engine {
         notifier: Option<SyncGroupNotifier>,
     ) -> ZResult<Id> {
         match self {
-            Engine::Router(_) => RouterEngine::refuses("a matching listener"),
+            Engine::Router(router) => {
+                let sink = tokio_engine::matching_sink(callback, notifier);
+                let id = router.node.watch_matching(
+                    tokio_engine::router_plane_of(kind),
+                    key,
+                    tokio_engine::engine_locality(destination),
+                    Box::new(move |matching| sink(matching)),
+                );
+                Id::try_from(id).map_err(|_| {
+                    zerror!("the router numbered a matching listener {id}, more than an id holds")
+                        .into()
+                })
+            }
             Engine::Tokio(state) => {
                 let id = state
                     .shared
@@ -938,7 +961,7 @@ impl Engine {
     /// Stop the matching listener `id` and let go of its callback.
     fn undeclare_matching_listener(&self, id: Id) {
         match self {
-            Engine::Router(_) => {}
+            Engine::Router(router) => router.node.unwatch_matching(u64::from(id)),
             Engine::Tokio(state) => state
                 .shared
                 .as_engine()
@@ -1076,7 +1099,11 @@ impl Engine {
         destination: Locality,
     ) -> ZResult<bool> {
         match self {
-            Engine::Router(_) => RouterEngine::refuses("a matching status"),
+            Engine::Router(router) => Ok(router.node.matching_status(
+                tokio_engine::router_plane_of(kind),
+                key,
+                tokio_engine::engine_locality(destination),
+            )),
             Engine::Tokio(state) => state
                 .shared
                 .as_engine()
@@ -2987,6 +3014,19 @@ mod tokio_engine {
             MatchingStatusType::Subscribers => wz_capi_core::faces::FilterPlane::Subscribers,
             MatchingStatusType::Queryables(complete_required) => {
                 wz_capi_core::faces::FilterPlane::Queryables { complete_required }
+            }
+        }
+    }
+
+    /// What the plane of a router's tables a matching status of `kind` counts.
+    pub(super) fn router_plane_of(
+        kind: MatchingStatusType,
+    ) -> wz_runtime_tokio::router_forward::MatchPlane {
+        use wz_runtime_tokio::router_forward::MatchPlane;
+        match kind {
+            MatchingStatusType::Subscribers => MatchPlane::Subscribers,
+            MatchingStatusType::Queryables(complete_required) => {
+                MatchPlane::Queryables { complete_required }
             }
         }
     }
@@ -10694,6 +10734,195 @@ mod tests {
             assert_eq!(asked.join().expect("the get ends"), ["later"]);
         }
 
+        #[cfg(feature = "unstable")]
+        fn client_of(id: &str, port: u16) -> Session {
+            open(
+                Config::from_json5(&format!(
+                    r#"{{ id: "{id}", mode: "client",
+                          connect: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                          scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                ))
+                .expect("a configuration zenoh reads"),
+            )
+            .wait()
+            .expect("opens")
+        }
+
+        /// A querier that asks for complete queryables, on a client of a router, follows the
+        /// completeness of a queryable of another client: it matches when a complete queryable
+        /// covers its key, and stops when that one goes although an incomplete one stays.
+        #[cfg(feature = "unstable")]
+        #[test]
+        fn a_querier_behind_a_router_follows_the_completeness_of_a_queryable() {
+            use std::{sync::mpsc, time::Duration};
+
+            let wait = Duration::from_secs(5);
+            let port = unautoselected_port();
+            let _router = router("a1b2ee", port);
+            let asking = client_of("a1b2ef", port);
+            let hosting = client_of("a1b2f0", port);
+            let querier = asking
+                .declare_querier("demo/cm/*")
+                .target(crate::api::query::QueryTarget::AllComplete)
+                .wait()
+                .expect("declares");
+            let (told_tx, told) = mpsc::channel();
+            let told_tx = std::sync::Mutex::new(told_tx);
+            let _listener = querier
+                .matching_listener()
+                .callback(move |status: MatchingStatus| {
+                    let _ = told_tx.lock().unwrap().send(status.matching());
+                })
+                .wait()
+                .expect("declares");
+            // A second querier, on the key itself, that takes the best match: the queryables
+            // below are declared as the upstream matching test declares them.
+            let best = asking
+                .declare_querier("demo/cm/value")
+                .target(crate::api::query::QueryTarget::BestMatching)
+                .wait()
+                .expect("declares");
+            let (best_tx, best_told) = mpsc::channel();
+            let best_tx = std::sync::Mutex::new(best_tx);
+            let _best_listener = best
+                .matching_listener()
+                .callback(move |status: MatchingStatus| {
+                    let _ = best_tx.lock().unwrap().send(status.matching());
+                })
+                .wait()
+                .expect("declares");
+            let declare = |key: &str, complete: bool| {
+                hosting
+                    .declare_queryable(key.to_owned())
+                    .complete(complete)
+                    .callback(|_| {})
+                    .wait()
+                    .expect("declares")
+            };
+            let value = declare("demo/cm/value", false);
+            let wildcard = declare("demo/cm/*", false);
+            let _other = declare("demo/cm/value3", true);
+            assert_eq!(best_told.recv_timeout(wait), Ok(true));
+            assert_eq!(
+                told.recv_timeout(Duration::from_millis(500)),
+                Err(mpsc::RecvTimeoutError::Timeout),
+                "an incomplete queryable, and a complete one of another key, do not meet a \
+                 querier that wants complete ones that cover its key"
+            );
+            let complete = declare("demo/cm/*", true);
+            assert_eq!(told.recv_timeout(wait), Ok(true));
+            complete.undeclare().wait().expect("undeclares");
+            assert_eq!(
+                told.recv_timeout(wait),
+                Ok(false),
+                "the complete queryable went and the incomplete one stayed"
+            );
+            assert_eq!(
+                best_told.recv_timeout(Duration::from_millis(500)),
+                Err(mpsc::RecvTimeoutError::Timeout),
+                "the best-match querier is still matched"
+            );
+            // The wildcard goes and the queryable on the key stays: still matched. When that one
+            // goes too, nothing meets the key, although a complete queryable of `value3` stays,
+            // and the querier is told so.
+            wildcard.undeclare().wait().expect("undeclares");
+            assert_eq!(
+                best_told.recv_timeout(Duration::from_millis(500)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            );
+            value.undeclare().wait().expect("undeclares");
+            assert_eq!(best_told.recv_timeout(wait), Ok(false));
+        }
+
+        /// A publisher and a querier of a router match what its links declare: a listener is told
+        /// when a peer's subscriber or queryable appears and when it goes, the status is read the
+        /// same way, and the locality of a querier tells a queryable of the router itself from a
+        /// peer's.
+        #[cfg(feature = "unstable")]
+        #[test]
+        fn a_publisher_and_a_querier_of_a_router_match_what_its_links_declare() {
+            use std::{sync::mpsc, time::Duration};
+
+            let wait = Duration::from_secs(5);
+            let port = unautoselected_port();
+            let router = router("a1b2ec", port);
+            let publisher = router
+                .declare_publisher("demo/rm/p")
+                .wait()
+                .expect("declares");
+            let querier = router
+                .declare_querier("demo/rm/q")
+                .wait()
+                .expect("declares");
+            assert!(!publisher.matching_status().wait().unwrap().matching());
+            assert!(!querier.matching_status().wait().unwrap().matching());
+
+            let (told_tx, told) = mpsc::channel();
+            let told_tx = std::sync::Mutex::new(told_tx);
+            let _listener = publisher
+                .matching_listener()
+                .callback(move |status: MatchingStatus| {
+                    let _ = told_tx.lock().unwrap().send(status.matching());
+                })
+                .wait()
+                .expect("a router's publisher listens for matching");
+            let (queried_tx, queried) = mpsc::channel();
+            let queried_tx = std::sync::Mutex::new(queried_tx);
+            let _querier_listener = querier
+                .matching_listener()
+                .callback(move |status: MatchingStatus| {
+                    let _ = queried_tx.lock().unwrap().send(status.matching());
+                })
+                .wait()
+                .expect("a router's querier listens for matching");
+
+            let peer = peer_of("a1b2ed", port);
+            assert_eq!(connected(&peer, 1).0.len(), 1, "the peer is linked");
+            let subscriber = peer
+                .declare_subscriber("demo/rm/*")
+                .callback(|_| {})
+                .wait()
+                .expect("declares");
+            assert_eq!(told.recv_timeout(wait), Ok(true), "a subscriber of a peer");
+            assert!(publisher.matching_status().wait().unwrap().matching());
+            subscriber.undeclare().wait().expect("undeclares");
+            assert_eq!(told.recv_timeout(wait), Ok(false), "and the end of it");
+
+            let queryable = peer
+                .declare_queryable("demo/rm/q")
+                .callback(|_| {})
+                .wait()
+                .expect("declares");
+            assert_eq!(
+                queried.recv_timeout(wait),
+                Ok(true),
+                "a queryable of a peer"
+            );
+            assert!(querier.matching_status().wait().unwrap().matching());
+            queryable.undeclare().wait().expect("undeclares");
+            assert_eq!(queried.recv_timeout(wait), Ok(false));
+
+            // The queryables of the router itself are the session's own: a querier that admits
+            // only the session's counts them, and one that admits only remote ones does not.
+            let _own = router
+                .declare_queryable("demo/rm/own")
+                .callback(|_| {})
+                .wait()
+                .expect("declares");
+            let local = router
+                .declare_querier("demo/rm/own")
+                .allowed_destination(Locality::SessionLocal)
+                .wait()
+                .expect("declares");
+            let remote = router
+                .declare_querier("demo/rm/own")
+                .allowed_destination(Locality::Remote)
+                .wait()
+                .expect("declares");
+            assert!(local.matching_status().wait().unwrap().matching());
+            assert!(!remote.matching_status().wait().unwrap().matching());
+        }
+
         #[test]
         fn a_subscriber_of_a_router_hears_a_peer_and_a_put_of_the_router_reaches_a_peer() {
             use std::sync::mpsc;
@@ -10847,7 +11076,14 @@ mod tests {
                     .allowed_origin(Locality::Remote)
                     .wait(),
             );
-            refused("a querier", router.declare_querier("a/b".to_owned()).wait());
+            refused(
+                "a subscriber restricted by its origin",
+                router
+                    .declare_subscriber("a/b".to_owned())
+                    .allowed_origin(Locality::Remote)
+                    .callback(|_| {})
+                    .wait(),
+            );
         }
     }
 

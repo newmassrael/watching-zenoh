@@ -711,11 +711,20 @@ fn face_qabl_info(
 ///
 /// A function of the hats and not of the whole of [`Tables`], so that the store of FUTURE
 /// queryable interests, a field of the same tables, can be written while it is computed.
+///
+/// `aggregate` says the key is the target of an aggregate interest, whose one reply stands for
+/// everything the target meets and is folded over all of it. A key that is not (a resource a
+/// non-aggregate interest is told of) is folded over the queryables declared on that very key, as
+/// zenoh's `local_qabl_info` folds a resource's own, and as the current dump
+/// (`OnTables::dump_interest_qabls`) folds each key it replies with: a complete queryable of
+/// another key that merely intersects it is not a reason to declare this one complete, and a
+/// querier that asks for complete queryables would read it as one.
 fn merged_qabl_info_in(
     hats: &RegionMap<Hat>,
     ke: &str,
     self_zid: &Zid,
     exclude_face: FaceId,
+    aggregate: bool,
 ) -> QueryableInfo {
     let mut merged: Option<QueryableInfo> = None;
     let mut fold = |info: QueryableInfo| {
@@ -724,9 +733,12 @@ fn merged_qabl_info_in(
             None => info,
         });
     };
+    let admitted = |declared: &str| aggregate || declared == ke;
     for hat in hats.values().filter_map(Hat::mesh) {
-        for (_ke, _zid, info) in hat.qabls.matching_entries(ke, Some(self_zid)) {
-            fold(*info);
+        for (declared, _zid, info) in hat.qabls.matching_entries(ke, Some(self_zid)) {
+            if admitted(declared) {
+                fold(*info);
+            }
         }
     }
     let ke_chunks: Vec<&str> = ke.split('/').collect();
@@ -736,7 +748,7 @@ fn merged_qabl_info_in(
                 continue; // don't fold the destination querier's own queryable
             }
             for (k, info) in m.values() {
-                if keyexpr_intersects_target(k, &ke_chunks) {
+                if keyexpr_intersects_target(k, &ke_chunks) && admitted(k) {
                     fold(*info);
                 }
             }
@@ -752,20 +764,29 @@ fn merged_qabl_info_in(
 /// current dump's "backed" is `matching_entries` non-empty or an intersecting
 /// client sub, so a per-destination exclusion here would spuriously undeclare a
 /// reply ke still backed by a co-hosted or self sub.
-fn any_sub_matches_in(hats: &RegionMap<Hat>, ke: &str) -> bool {
-    if hats
-        .values()
-        .filter_map(Hat::mesh)
-        .any(|hat| !hat.subs.matching_entries(ke, None).is_empty())
-    {
+///
+/// `aggregate` is whether `ke` is the target of an aggregate interest, whose reply stands for
+/// everything the target meets; a reply for a resource is backed only by a subscription declared
+/// on that very key (zenoh unpropagates a resource when nothing is declared on it).
+fn any_sub_matches_in(hats: &RegionMap<Hat>, ke: &str, aggregate: bool) -> bool {
+    if hats.values().filter_map(Hat::mesh).any(|hat| {
+        hat.subs
+            .matching_entries(ke, None)
+            .iter()
+            .any(|(declared, ..)| aggregate || *declared == ke)
+    }) {
         return true;
     }
     let chunks: Vec<&str> = ke.split('/').collect();
     hats.values().filter_map(Hat::broker).any(|hat| {
         hat.subs.values().any(|by_id| {
-            by_id
-                .values()
-                .any(|k| keyexpr_intersects_target(k, &chunks))
+            by_id.values().any(|k| {
+                if aggregate {
+                    keyexpr_intersects_target(k, &chunks)
+                } else {
+                    k == ke
+                }
+            })
         })
     })
 }
@@ -773,39 +794,51 @@ fn any_sub_matches_in(hats: &RegionMap<Hat>, ke: &str) -> bool {
 /// The liveliness-token twin of [`any_sub_matches_in`] (see `OnTables::any_token_matches`): the
 /// post-withdrawal "still backed" existence check `undeclare_push_token` consults.
 #[cfg(feature = "routing-token-tables")]
-fn any_token_matches_in(hats: &RegionMap<Hat>, ke: &str) -> bool {
-    if hats
-        .values()
-        .filter_map(Hat::mesh)
-        .any(|hat| !hat.tokens.matching_entries(ke, None).is_empty())
-    {
+fn any_token_matches_in(hats: &RegionMap<Hat>, ke: &str, aggregate: bool) -> bool {
+    if hats.values().filter_map(Hat::mesh).any(|hat| {
+        hat.tokens
+            .matching_entries(ke, None)
+            .iter()
+            .any(|(declared, ..)| aggregate || *declared == ke)
+    }) {
         return true;
     }
     let chunks: Vec<&str> = ke.split('/').collect();
     hats.values().filter_map(Hat::broker).any(|hat| {
-        hat.tokens
-            .values()
-            .any(|ids| ids.values().any(|k| keyexpr_intersects_target(k, &chunks)))
+        hat.tokens.values().any(|ids| {
+            ids.values().any(|k| {
+                if aggregate {
+                    keyexpr_intersects_target(k, &chunks)
+                } else {
+                    k == ke
+                }
+            })
+        })
     })
 }
 
 /// The queryable twin of [`any_sub_matches_in`]. An EXISTENCE check, NOT
 /// [`merged_qabl_info_in`] (which folds to `QueryableInfo::DEFAULT` on zero matches — a value
 /// read would report "backed" even when no queryable exists and suppress every undeclare).
-fn any_qabl_matches_in(hats: &RegionMap<Hat>, ke: &str) -> bool {
-    if hats
-        .values()
-        .filter_map(Hat::mesh)
-        .any(|hat| !hat.qabls.matching_entries(ke, None).is_empty())
-    {
+fn any_qabl_matches_in(hats: &RegionMap<Hat>, ke: &str, aggregate: bool) -> bool {
+    if hats.values().filter_map(Hat::mesh).any(|hat| {
+        hat.qabls
+            .matching_entries(ke, None)
+            .iter()
+            .any(|(declared, ..)| aggregate || *declared == ke)
+    }) {
         return true;
     }
     let chunks: Vec<&str> = ke.split('/').collect();
     hats.values().filter_map(Hat::broker).any(|hat| {
         hat.qabls.values().any(|by_id| {
-            by_id
-                .values()
-                .any(|(k, _)| keyexpr_intersects_target(k, &chunks))
+            by_id.values().any(|(k, _)| {
+                if aggregate {
+                    keyexpr_intersects_target(k, &chunks)
+                } else {
+                    k == ke
+                }
+            })
         })
     })
 }
@@ -1054,6 +1087,76 @@ struct Sourced {
     /// graph holds no node to number the source by: a single-hop gossip
     /// `Network`, which is a peer-hat region, where nothing is re-flooded.
     out_node_id: Option<u16>,
+}
+
+/// What a declaration of a mesh region's face is about, as the plane of the tables it lands in.
+#[derive(Clone, Copy)]
+enum DeclKind {
+    Subscriber,
+    Queryable,
+    #[cfg(feature = "routing-token-tables")]
+    Token,
+}
+
+/// The key of each declaration a face of a mesh region made, by the id the face numbered it:
+/// what a retraction that names only the id (a session's own, as the pin's clients and peers send
+/// it, `zenoh/src/net/routing/hat/peer/pubsub.rs` @ `ext_wire_expr: WireExprType::null(),`) is
+/// resolved by, upstream's hat keeping `remote_subs`, `remote_qabls` and `remote_tokens` for every
+/// face. A linkstate flood names its key and does not read this.
+#[derive(Default)]
+struct MeshDeclaredIds {
+    subscribers: HashMap<FaceId, HashMap<u64, String>>,
+    queryables: HashMap<FaceId, HashMap<u64, String>>,
+    #[cfg(feature = "routing-token-tables")]
+    tokens: HashMap<FaceId, HashMap<u64, String>>,
+}
+
+impl MeshDeclaredIds {
+    fn of(&self, plane: DeclKind) -> &HashMap<FaceId, HashMap<u64, String>> {
+        match plane {
+            DeclKind::Subscriber => &self.subscribers,
+            DeclKind::Queryable => &self.queryables,
+            #[cfg(feature = "routing-token-tables")]
+            DeclKind::Token => &self.tokens,
+        }
+    }
+
+    fn of_mut(&mut self, plane: DeclKind) -> &mut HashMap<FaceId, HashMap<u64, String>> {
+        match plane {
+            DeclKind::Subscriber => &mut self.subscribers,
+            DeclKind::Queryable => &mut self.queryables,
+            #[cfg(feature = "routing-token-tables")]
+            DeclKind::Token => &mut self.tokens,
+        }
+    }
+
+    fn remember(&mut self, plane: DeclKind, face: FaceId, id: u64, keyexpr: &str) {
+        self.of_mut(plane)
+            .entry(face)
+            .or_default()
+            .insert(id, keyexpr.to_owned());
+    }
+
+    fn recall(&self, plane: DeclKind, face: FaceId, id: u64) -> Option<String> {
+        self.of(plane).get(&face)?.get(&id).cloned()
+    }
+
+    fn forget(&mut self, plane: DeclKind, face: FaceId, id: u64) {
+        let by_face = self.of_mut(plane);
+        if let Some(ids) = by_face.get_mut(&face) {
+            ids.remove(&id);
+            if ids.is_empty() {
+                by_face.remove(&face);
+            }
+        }
+    }
+
+    fn forget_face(&mut self, face: FaceId) {
+        self.subscribers.remove(&face);
+        self.queryables.remove(&face);
+        #[cfg(feature = "routing-token-tables")]
+        self.tokens.remove(&face);
+    }
 }
 
 /// R2876 (step 3e) — a declaration resolved against the hat that owns its
@@ -2255,11 +2358,9 @@ pub(crate) struct Tables {
     /// reader IS told a token withdrew: the liveliness stale-live residual is CLOSED.
     #[cfg(feature = "routing-token-tables")]
     future_tokens: FutureSubStore,
-    /// The key of each token a face of a mesh region declared, by the id the face numbered it:
-    /// what a retraction that names only the id (a session's own) is resolved by. A linkstate
-    /// flood names the key and does not read this.
-    #[cfg(feature = "routing-token-tables")]
-    mesh_token_ids: HashMap<FaceId, HashMap<u64, String>>,
+    /// The key of each subscriber, queryable and token a face of a mesh region declared, by the
+    /// id the face numbered it ([`MeshDeclaredIds`]).
+    mesh_ids: MeshDeclaredIds,
     /// Where what the router sends to its own `Local` face goes. The face is no transport: it is
     /// the session of the program that holds the router, and a message for it is handed to this
     /// sink, which must not call back into the router with the tables held (the program's
@@ -2284,6 +2385,20 @@ pub enum LocalFaceEvent {
     /// The end of the replies to the query the face asked under `request_id`: every queryable
     /// has ended, the query timed out, or nothing was left to ask.
     ReplyFinal { request_id: u64 },
+    /// The router's tables were written, so what the face watches ([`MatchPlane`]) may have
+    /// changed. Sent once until the face has looked ([`RouterForwarder::tables_looked_at`]), and
+    /// only while the face watches anything ([`RouterForwarder::watch_matching`]): it carries no
+    /// answer, as the face asks the question itself outside every lock.
+    Changed,
+}
+
+/// Which declarations a watch of the node's own face counts: the subscribers that intersect a
+/// key (a publisher), or the queryables that do (a querier), those that include the key when the
+/// querier asks for completeness (a target of `AllComplete`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchPlane {
+    Subscribers,
+    Queryables { complete_required: bool },
 }
 
 /// What receives what the router tells its own `Local` face (see
@@ -2583,6 +2698,11 @@ pub struct RouterForwarder {
     /// reads costs one `Cell` bump per reconfigure, whereas cfg-ing it would
     /// fork `set_interceptors` into two bodies for no behavioural difference.
     interceptor_version: PlainCell<u64>,
+    /// How many things the node's own face watches in the tables ([`MatchPlane`]): while there
+    /// are none, a write of the tables tells the face nothing.
+    watchers: std::sync::atomic::AtomicUsize,
+    /// Whether the face has been told the tables were written since it last looked.
+    change_told: std::sync::atomic::AtomicBool,
     /// R2348 — the per-(face, keyexpr) INGRESS verdict cache. zenoh's
     /// `SessionContext::in_interceptor_cache`
     /// (`zenoh/src/net/routing/dispatcher/resource.rs`
@@ -3069,10 +3189,75 @@ impl RouterForwarder {
     /// The forwarder with its tables held for writing: alone, until the result is dropped. A
     /// thread that holds them for writing must not take them again for any use, which is why
     /// the methods that write take `&mut self` and call the readers through it.
-    fn on_tables_mut(&self) -> OnTables<'_, crate::sync::PlainWriteGuard<'_, Tables>> {
+    fn on_tables_mut(&self) -> OnTables<'_, WrittenTables<'_>> {
         OnTables {
             fwd: self,
-            tables: self.tables.write(),
+            tables: WrittenTables {
+                guard: Some(self.tables.write()),
+                fwd: self,
+            },
+        }
+    }
+
+    /// Watch what the node's own face counts ([`MatchPlane`]): from now until
+    /// [`unwatch_matching`](Self::unwatch_matching), the face is told ([`LocalFaceEvent::Changed`])
+    /// each time the tables are written. Called before the face first looks, so that no change is
+    /// missed between its look and its watch.
+    pub fn watch_matching(&self) {
+        self.watchers
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    /// End one [`watch_matching`](Self::watch_matching).
+    pub fn unwatch_matching(&self) {
+        self.watchers
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    /// The face has looked at the tables: the next write is told to it again.
+    pub fn tables_looked_at(&self) {
+        self.change_told
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// The tables held for writing. When they are let go the node's own face is told that they may
+/// have changed, if it watches anything and has not been told since it last looked: the
+/// verdicts it owes (a matching listener's) are worked out by the face, outside every lock,
+/// and not by a writer that holds the tables.
+pub(crate) struct WrittenTables<'a> {
+    guard: Option<crate::sync::PlainWriteGuard<'a, Tables>>,
+    fwd: &'a RouterForwarder,
+}
+
+impl std::ops::Deref for WrittenTables<'_> {
+    type Target = Tables;
+
+    fn deref(&self) -> &Tables {
+        self.guard.as_ref().expect("held until dropped")
+    }
+}
+
+impl std::ops::DerefMut for WrittenTables<'_> {
+    fn deref_mut(&mut self) -> &mut Tables {
+        self.guard.as_mut().expect("held until dropped")
+    }
+}
+
+impl Drop for WrittenTables<'_> {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        let Some(guard) = self.guard.take() else {
+            return;
+        };
+        let sink = (self.fwd.watchers.load(Ordering::Acquire) > 0)
+            .then(|| guard.local_face_sink.clone())
+            .flatten();
+        drop(guard);
+        if let Some(sink) = sink {
+            if !self.fwd.change_told.swap(true, Ordering::AcqRel) {
+                sink(LocalFaceEvent::Changed);
+            }
         }
     }
 }
@@ -3120,6 +3305,12 @@ router_entry_points! { on_tables_mut:
 
 router_entry_points! { on_tables:
     fn local_get(&self, request: &RequestOwned);
+    fn matching(
+        &self,
+        plane: MatchPlane,
+        keyexpr: &str,
+        locality: wz_session_core::locality::Locality,
+    ) -> bool;
     fn reply_held(&self, record: &HeldRecord, answer: &mut dyn FnMut(&mut dyn ReplyOut));
     fn release_held(&self, record: &HeldRecord);
     fn publish(&self, keyexpr: &str, payload: &[u8]) -> Result<(), CodecError>;
@@ -3429,8 +3620,7 @@ impl RouterForwarder {
                 future_qabls: FutureQablStore::new(),
                 #[cfg(feature = "routing-token-tables")]
                 future_tokens: FutureSubStore::new(),
-                #[cfg(feature = "routing-token-tables")]
-                mesh_token_ids: HashMap::new(),
+                mesh_ids: MeshDeclaredIds::default(),
                 local_face_sink: None,
             })),
             // R311y450 — this node's §5.18 clock, over the SAME `node_mode`
@@ -3494,6 +3684,8 @@ impl RouterForwarder {
             ingress_interceptors: PlainRwLock::new(InterceptorChain::new()),
             egress_interceptors: PlainRwLock::new(InterceptorChain::new()),
             interceptor_version: PlainCell::new(0),
+            watchers: std::sync::atomic::AtomicUsize::new(0),
+            change_told: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "routing-interceptor-hotreload")]
             ingress_keyexpr_cache: PlainMutex::new(hashbrown::HashMap::new()),
             #[cfg(feature = "routing-interceptor-hotreload")]
@@ -5140,25 +5332,56 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         }
     }
 
-    /// R2906 — resolve a WITHDRAWAL (`UndeclareSubscriber` / `UndeclareQueryable`)
-    /// the way each hat names it, as [`undeclare_token`](Self::undeclare_token)
-    /// already did for its plane: a mesh source's form is SOURCED and carries
-    /// its keyexpr on `ext_wire_expr`; a client's form is ID-KEYED and carries
-    /// nothing else, so it resolves against the face's own entry for `decl_id`
-    /// (`stored`). The pin's broker hat never reads the extension on this path
-    /// (`zenoh/src/net/routing/hat/broker/pubsub.rs` @
+    /// Keep the key a face of the peer region declared under `decl_id`, for the retraction that
+    /// names only the id ([`resolve_withdrawn`](Self::resolve_withdrawn)). Only the peer hat's
+    /// faces number their declarations, as the pin's face-based hat takes them
+    /// (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `remote_subs`); a router link's declaration
+    /// is a flood, whose id is no name, and a retraction of it names its key.
+    fn remember_declared(
+        &mut self,
+        kind: DeclKind,
+        inbound: FaceId,
+        region: Region,
+        decl_id: u64,
+        declared: &Declared,
+    ) where
+        T: std::ops::DerefMut,
+    {
+        if let Declared::Sourced(sourced) = declared {
+            if is_peer_hat(region, self.tables.node_mode) {
+                self.tables
+                    .mesh_ids
+                    .remember(kind, inbound, decl_id, &sourced.keyexpr);
+            }
+        }
+    }
+
+    /// R2906 — resolve a WITHDRAWAL (`UndeclareSubscriber` / `UndeclareQueryable` /
+    /// `UndeclareToken`) the way each hat names it: a mesh source's form is SOURCED and carries
+    /// its keyexpr on `ext_wire_expr`, and one that names only the id is a peer's own, as a
+    /// session sends it, resolved by the key the face declared under `decl_id`
+    /// ([`MeshDeclaredIds`]); a client's form is ID-KEYED and carries nothing else, so it
+    /// resolves against the face's own entry for `decl_id` (`stored`). The pin's broker hat never
+    /// reads the extension on this path (`zenoh/src/net/routing/hat/broker/pubsub.rs` @
     /// `.remote_subs.remove(&id)`).
+    #[allow(clippy::too_many_arguments)]
     fn resolve_withdrawn(
         &self,
         inbound: FaceId,
         region: Region,
         declare: &DeclareOwned,
         exts: Option<&Vec<wz_codecs::ext_entry::ExtEntryOwned>>,
+        plane: DeclKind,
+        decl_id: u64,
         stored: impl FnOnce(&BrokerHat) -> Option<String>,
     ) -> Option<Declared> {
         match self.tables.hats.get(&region)? {
             Hat::Mesh(_) => self
                 .resolve_sourced(inbound, region, declare, |t| resolve_ext_keyexpr(exts, t))
+                .or_else(|| {
+                    let keyexpr = self.tables.mesh_ids.recall(plane, inbound, decl_id)?;
+                    self.resolve_sourced(inbound, region, declare, |_| Some(keyexpr))
+                })
                 .map(Declared::Sourced),
             Hat::Broker(hat) => stored(hat).map(Declared::Face),
         }
@@ -5360,6 +5583,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         };
         let snapshot = self.snapshot::<SubPlane>(declared.keyexpr());
         let registered = self.register_subscriber(inbound, region, reliable, &declared, decl_id);
+        self.remember_declared(DeclKind::Subscriber, inbound, region, decl_id, &declared);
         log::debug!(
             "router forward: sub declare on face {inbound:?} region {region} -> {}",
             if registered {
@@ -5428,14 +5652,25 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => (u.id, u.extensions.as_ref()),
             _ => return,
         };
-        let Some(declared) = self.resolve_withdrawn(inbound, region, declare, exts, |hat| {
-            hat.subs
-                .get(&inbound)
-                .and_then(|by_id| by_id.get(&decl_id))
-                .cloned()
-        }) else {
+        let Some(declared) = self.resolve_withdrawn(
+            inbound,
+            region,
+            declare,
+            exts,
+            DeclKind::Subscriber,
+            decl_id,
+            |hat| {
+                hat.subs
+                    .get(&inbound)
+                    .and_then(|by_id| by_id.get(&decl_id))
+                    .cloned()
+            },
+        ) else {
             return;
         };
+        self.tables
+            .mesh_ids
+            .forget(DeclKind::Subscriber, inbound, decl_id);
         let snapshot = self.snapshot::<SubPlane>(declared.keyexpr());
         if self.unregister_subscriber(inbound, region, reliable, &declared, decl_id) {
             self.repropagate(snapshot);
@@ -5510,7 +5745,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             return;
         };
         let snapshot = self.snapshot::<QablPlane>(declared.keyexpr());
-        if self.register_queryable(inbound, region, reliable, &declared, decl_id, info) {
+        let registered =
+            self.register_queryable(inbound, region, reliable, &declared, decl_id, info);
+        self.remember_declared(DeclKind::Queryable, inbound, region, decl_id, &declared);
+        if registered {
             self.repropagate(snapshot);
             self.push_future_queryable(declared.keyexpr(), inbound);
         }
@@ -5573,14 +5811,25 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => (u.id, u.extensions.as_ref()),
             _ => return,
         };
-        let Some(declared) = self.resolve_withdrawn(inbound, region, declare, exts, |hat| {
-            hat.qabls
-                .get(&inbound)
-                .and_then(|by_id| by_id.get(&decl_id))
-                .map(|(keyexpr, _)| keyexpr.clone())
-        }) else {
+        let Some(declared) = self.resolve_withdrawn(
+            inbound,
+            region,
+            declare,
+            exts,
+            DeclKind::Queryable,
+            decl_id,
+            |hat| {
+                hat.qabls
+                    .get(&inbound)
+                    .and_then(|by_id| by_id.get(&decl_id))
+                    .map(|(keyexpr, _)| keyexpr.clone())
+            },
+        ) else {
             return;
         };
+        self.tables
+            .mesh_ids
+            .forget(DeclKind::Queryable, inbound, decl_id);
         let snapshot = self.snapshot::<QablPlane>(declared.keyexpr());
         if self.unregister_queryable(inbound, region, reliable, &declared, decl_id) {
             self.repropagate(snapshot);
@@ -5670,13 +5919,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let snapshot = self.snapshot::<TokenPlane>(declared.keyexpr());
         let displaced = displaced.map(|old| self.snapshot::<TokenPlane>(&old));
         let registered = self.register_token(inbound, region, reliable, &declared, decl_id);
-        if let Declared::Sourced(sourced) = &declared {
-            self.tables
-                .mesh_token_ids
-                .entry(inbound)
-                .or_default()
-                .insert(decl_id, sourced.keyexpr.clone());
-        }
+        self.remember_declared(DeclKind::Token, inbound, region, decl_id, &declared);
         log::debug!(
             "router forward: token declare on face {inbound:?} region {region} -> {}",
             if registered {
@@ -5762,39 +6005,25 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             DeclareOwnedVariant::CodecZenohUndeclToken(u) => (u.id, u.extensions.as_ref()),
             _ => return,
         };
-        let declared = match self.tables.hats.get(&region) {
-            // A retraction that names its key is the flood of a linkstate mesh; one that names
-            // only the id is a peer's own, as a session sends it, and the key is the one the peer
-            // declared under that id (upstream's hat keeps `remote_tokens` for every face).
-            Some(Hat::Mesh(_)) => self
-                .resolve_sourced(inbound, region, declare, |t| resolve_ext_keyexpr(exts, t))
-                .or_else(|| {
-                    let keyexpr = self
-                        .tables
-                        .mesh_token_ids
-                        .get(&inbound)
-                        .and_then(|ids| ids.get(&decl_id))
-                        .cloned()?;
-                    self.resolve_sourced(inbound, region, declare, |_| Some(keyexpr))
-                })
-                .map(Declared::Sourced),
-            Some(Hat::Broker(hat)) => hat
-                .tokens
-                .get(&inbound)
-                .and_then(|ids| ids.get(&decl_id))
-                .cloned()
-                .map(Declared::Face),
-            None => None,
-        };
-        let Some(declared) = declared else {
+        let Some(declared) = self.resolve_withdrawn(
+            inbound,
+            region,
+            declare,
+            exts,
+            DeclKind::Token,
+            decl_id,
+            |hat| {
+                hat.tokens
+                    .get(&inbound)
+                    .and_then(|ids| ids.get(&decl_id))
+                    .cloned()
+            },
+        ) else {
             return;
         };
-        if let Some(ids) = self.tables.mesh_token_ids.get_mut(&inbound) {
-            ids.remove(&decl_id);
-            if ids.is_empty() {
-                self.tables.mesh_token_ids.remove(&inbound);
-            }
-        }
+        self.tables
+            .mesh_ids
+            .forget(DeclKind::Token, inbound, decl_id);
         let snapshot = self.snapshot::<TokenPlane>(declared.keyexpr());
         if self.unregister_token(inbound, region, reliable, &declared, decl_id) {
             self.repropagate(snapshot);
@@ -7373,7 +7602,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let pushes = self
             .tables
             .future_subs
-            .pushes_for_new(new_ke, Some(origin), |_, _| ());
+            .pushes_for_new(new_ke, Some(origin), |_, _, _| ());
         for (face, reply_ke, id, ()) in pushes {
             match build_declare_subscriber(id, 0, Some(&reply_ke)) {
                 Ok(decl) => {
@@ -7408,7 +7637,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let pushes = self
             .tables
             .future_tokens
-            .pushes_for_new(new_ke, Some(origin), |_, _| ());
+            .pushes_for_new(new_ke, Some(origin), |_, _, _| ());
         for (face, reply_ke, id, ()) in pushes {
             match build_declare_token(id, 0, Some(&reply_ke)) {
                 Ok(decl) => {
@@ -7437,11 +7666,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let self_zid = *self.north_net().self_zid();
         let tables: &mut Tables = &mut self.tables;
         let hats = &tables.hats;
-        let pushes = tables
-            .future_qabls
-            .pushes_for_new(new_ke, Some(origin), |reply_ke, dest| {
-                merged_qabl_info_in(hats, reply_ke, &self_zid, dest)
-            });
+        let pushes = tables.future_qabls.pushes_for_new(
+            new_ke,
+            Some(origin),
+            |reply_ke, dest, aggregate| {
+                merged_qabl_info_in(hats, reply_ke, &self_zid, dest, aggregate)
+            },
+        );
         for (face, reply_ke, id, info) in pushes {
             match build_declare_queryable_with_id_info(id, &reply_ke, info) {
                 Ok(decl) => {
@@ -7470,7 +7701,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let hats = &tables.hats;
         let forgets = tables
             .future_subs
-            .forgets_for_withdrawn(withdrawn_ke, |rk| any_sub_matches_in(hats, rk));
+            .forgets_for_withdrawn(withdrawn_ke, |rk, aggregate| {
+                any_sub_matches_in(hats, rk, aggregate)
+            });
         for (face, reply_ke, id) in forgets {
             self.send_one_to_face_about(
                 face,
@@ -7510,10 +7743,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             let tables: &mut Tables = &mut self.tables;
             let hats = &tables.hats;
             let store = &mut tables.future_qabls;
-            let forgets =
-                store.forgets_for_withdrawn(withdrawn_ke, |rk| any_qabl_matches_in(hats, rk));
-            let re_pushes = store.re_pushes_for_withdrawn(withdrawn_ke, |rk, dest| {
-                merged_qabl_info_in(hats, rk, &self_zid, dest)
+            let forgets = store.forgets_for_withdrawn(withdrawn_ke, |rk, aggregate| {
+                any_qabl_matches_in(hats, rk, aggregate)
+            });
+            let re_pushes = store.re_pushes_for_withdrawn(withdrawn_ke, |rk, dest, aggregate| {
+                merged_qabl_info_in(hats, rk, &self_zid, dest, aggregate)
             });
             (forgets, re_pushes)
         };
@@ -7932,7 +8166,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// never in the mesh tables, so `None` (no self-zid filter) is correct.
     #[cfg(feature = "routing-token-tables")]
     fn any_token_matches(&self, ke: &str) -> bool {
-        any_token_matches_in(&self.tables.hats, ke)
+        any_token_matches_in(&self.tables.hats, ke, true)
     }
 
     /// Emit the withdraw->reader UNDECLARE pushes a withdrawn TOKEN `withdrawn_ke`
@@ -7962,7 +8196,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let hats = &tables.hats;
         let forgets = tables
             .future_tokens
-            .forgets_for_withdrawn(withdrawn_ke, |rk| any_token_matches_in(hats, rk));
+            .forgets_for_withdrawn(withdrawn_ke, |rk, aggregate| {
+                any_token_matches_in(hats, rk, aggregate)
+            });
         let announced: Vec<FaceId> = forgets.iter().map(|(face, _, _)| *face).collect();
         for (face, reply_ke, id) in forgets {
             self.send_one_to_face_about(
@@ -8886,6 +9122,59 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             );
             self.forward_response_final(LOCAL_FACE, record.reliable, &ended);
         }
+    }
+
+    /// Whether anything `plane` counts matches `keyexpr` among the declarations `locality`
+    /// admits: those of the node's own face (the `Local` region's hat) are the session's own, and
+    /// those of every other region are remote ones, as upstream's matching status counts them
+    /// (`zenoh/src/api/session.rs` @ `matching_status_local`, `matching_status_remote`). A key
+    /// the plane counts by inclusion (a querier that asks for complete queryables) is met by a
+    /// complete queryable whose key includes it and by no other.
+    pub fn matching(
+        &self,
+        plane: MatchPlane,
+        keyexpr: &str,
+        locality: wz_session_core::locality::Locality,
+    ) -> bool {
+        use wz_session_core::keyexpr_match::keyexpr_includes_target;
+        let chunks: Vec<&str> = keyexpr.split('/').collect();
+        self.tables.hats.iter().any(|(region, hat)| {
+            let admitted = if region == Region::Local {
+                locality.allows_local()
+            } else {
+                locality.allows_remote()
+            };
+            admitted
+                && match (hat, plane) {
+                    (Hat::Mesh(hat), MatchPlane::Subscribers) => {
+                        !hat.subs.matching_entries(keyexpr, None).is_empty()
+                    }
+                    (Hat::Mesh(hat), MatchPlane::Queryables { complete_required }) => {
+                        hat.qabls.matching_entries(keyexpr, None).iter().any(
+                            |(declared, _, info)| {
+                                !complete_required
+                                    || (info.complete && keyexpr_includes_target(declared, &chunks))
+                            },
+                        )
+                    }
+                    (Hat::Broker(hat), MatchPlane::Subscribers) => hat.subs.values().any(|by_id| {
+                        by_id
+                            .values()
+                            .any(|declared| keyexpr_intersects_target(declared, &chunks))
+                    }),
+                    (Hat::Broker(hat), MatchPlane::Queryables { complete_required }) => {
+                        hat.qabls.values().any(|by_id| {
+                            by_id.values().any(|(declared, info)| {
+                                if complete_required {
+                                    info.complete && keyexpr_includes_target(declared, &chunks)
+                                } else {
+                                    keyexpr_intersects_target(declared, &chunks)
+                                }
+                            })
+                        })
+                    }
+                }
+        })
     }
 
     /// Ask a query as the node's own face: the pin routes a node's own get as a request from a
@@ -10237,8 +10526,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         T: std::ops::DerefMut,
     {
         self.shed_registry.remove(id);
-        #[cfg(feature = "routing-token-tables")]
-        self.tables.mesh_token_ids.remove(&id);
+        self.tables.mesh_ids.forget_face(id);
         // OBLIGATION-1: purge ALL FaceId-keyed leaf state BEFORE the linkless
         // early-return below (a Client face is `link == None`, so it never reaches
         // the graph teardown). (a) the pending-query return table entries keyed by
@@ -16837,6 +17125,102 @@ mod tests {
         );
     }
 
+    /// A client holds a complete and an incomplete queryable on one key, and a second client waits
+    /// on the queryables of it: when the client undeclares the complete one by its id, the key is
+    /// still backed (by the incomplete one), so the waiting client is told the downgrade, the same
+    /// declaration with `complete` off, and not left holding a completeness that is gone.
+    #[test]
+    fn a_clients_second_queryable_on_a_key_is_downgraded_when_the_complete_one_goes() {
+        use wz_session_core::declare_build::{
+            build_declare_queryable_with_id_info, build_undeclare_queryable,
+        };
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (waiting, sink_waiting) = face(zid(0xCC), WIRE_CLIENT);
+        let (hosting, _sink_hosting) = face(zid(0xDD), WIRE_CLIENT);
+        fwd.register(FaceId(0), &waiting);
+        fwd.register(FaceId(1), &hosting);
+        // Two queriers wait, one on the key and one on the key's wildcard, as two interests.
+        forward_one(
+            &fwd,
+            FaceId(0),
+            interest_with_mode(7, "demo/q/value", true, true, false, true, false),
+        );
+        forward_one(
+            &fwd,
+            FaceId(0),
+            interest_with_mode(8, "demo/q/*", true, true, false, true, false),
+        );
+        let declare = |id: u64, key: &str, complete: bool| {
+            NetworkMessage::Declare(Box::new(
+                build_declare_queryable_with_id_info(
+                    id,
+                    key,
+                    QueryableInfo {
+                        complete,
+                        distance: 0,
+                    },
+                )
+                .expect("build"),
+            ))
+        };
+        forward_one(&fwd, FaceId(1), declare(1, "demo/q/value", false));
+        forward_one(&fwd, FaceId(1), declare(2, "demo/q/*", false));
+        forward_one(&fwd, FaceId(1), declare(3, "demo/q/value3", true));
+        forward_one(&fwd, FaceId(1), declare(4, "demo/q/*", true));
+        forward_one(
+            &fwd,
+            FaceId(1),
+            NetworkMessage::Declare(Box::new(build_undeclare_queryable(4))),
+        );
+        // What the waiting client holds, built as the client builds it from what it was sent: a
+        // declaration binds its id to its completeness, in place, and an undeclaration drops it.
+        let mut held = std::collections::BTreeMap::new();
+        for index in 0..sink_waiting.frame_count() {
+            let bytes = sink_waiting.frame_bytes(index);
+            match forwarded_declare(&bytes).body {
+                DeclareOwnedVariant::CodecZenohDeclQueryable(d) => {
+                    held.insert(d.id, forwarded_qabl_info(&bytes).complete);
+                }
+                DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => {
+                    held.remove(&u.id);
+                }
+                _ => {}
+            }
+        }
+        // `demo/q/value3` is the one complete queryable that stays; the wildcard's completeness
+        // went with the queryable that had it.
+        assert_eq!(
+            held.values().filter(|complete| **complete).count(),
+            1,
+            "the client holds {held:?}"
+        );
+
+        // The wildcard queryable and then the queryable on the key go: nothing is declared on
+        // either key any more, although `demo/q/value3` still intersects the wildcard, so the
+        // client is told both are gone and holds `demo/q/value3` alone.
+        for id in [2, 1] {
+            forward_one(
+                &fwd,
+                FaceId(1),
+                NetworkMessage::Declare(Box::new(build_undeclare_queryable(id))),
+            );
+        }
+        let mut held = std::collections::BTreeMap::new();
+        for index in 0..sink_waiting.frame_count() {
+            let bytes = sink_waiting.frame_bytes(index);
+            match forwarded_declare(&bytes).body {
+                DeclareOwnedVariant::CodecZenohDeclQueryable(d) => {
+                    held.insert(d.id, forwarded_qabl_info(&bytes).complete);
+                }
+                DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => {
+                    held.remove(&u.id);
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(held.len(), 1, "the client holds {held:?}");
+    }
+
     #[test]
     fn downgrade_re_push_excludes_the_queriers_own_co_hosted_queryable() {
         // gap (c) Q1 exclusion edge (the CRUX the DESIGN panel split on, arbitrated by
@@ -22671,6 +23055,122 @@ mod tests {
             *heard.lock().unwrap(),
             [LocalFaceEvent::ReplyFinal { request_id: 5 }]
         );
+    }
+
+    /// What the router's tables hold for a key is counted by the locality that admits it: a
+    /// declaration of a face is a remote one, a queryable the node hosts is the session's own,
+    /// and a key the plane counts by inclusion is met only by a complete queryable that covers it.
+    #[test]
+    fn matching_counts_the_declarations_the_locality_admits() {
+        use wz_session_core::locality::Locality;
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (client, _sink) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &client);
+        fwd.tick();
+        let queryables = MatchPlane::Queryables {
+            complete_required: false,
+        };
+        let complete = MatchPlane::Queryables {
+            complete_required: true,
+        };
+        assert!(!fwd.matching(MatchPlane::Subscribers, "demo/s", Locality::Any));
+        assert!(!fwd.matching(queryables, "demo/q", Locality::Any));
+
+        forward_one(&fwd, FaceId(0), declare_sub("demo/**"));
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/q/*", false));
+        assert!(fwd.matching(MatchPlane::Subscribers, "demo/s", Locality::Any));
+        assert!(fwd.matching(MatchPlane::Subscribers, "demo/s", Locality::Remote));
+        assert!(!fwd.matching(MatchPlane::Subscribers, "demo/s", Locality::SessionLocal));
+        assert!(fwd.matching(queryables, "demo/q/one", Locality::Remote));
+        assert!(
+            !fwd.matching(complete, "demo/q/one", Locality::Any),
+            "an incomplete queryable does not meet a querier that wants a complete one"
+        );
+
+        forward_one(&fwd, FaceId(0), declare_qabl("demo/q/**", true));
+        assert!(fwd.matching(complete, "demo/q/one", Locality::Any));
+        assert!(
+            !fwd.matching(complete, "demo/**", Locality::Any),
+            "a complete queryable covers only the keys its own key includes"
+        );
+
+        fwd.host_queryable(
+            "demo/h",
+            true,
+            Box::new(|_view: &dyn QueryView, _out: &mut dyn ReplyOut| {}),
+        );
+        assert!(fwd.matching(queryables, "demo/h", Locality::SessionLocal));
+        assert!(!fwd.matching(queryables, "demo/h", Locality::Remote));
+        forward_one(&fwd, FaceId(0), undeclare_qabl("demo/q/*"));
+        forward_one(&fwd, FaceId(0), undeclare_qabl("demo/q/**"));
+        assert!(!fwd.matching(queryables, "demo/q/one", Locality::Any));
+
+        // A peer's subscriber is counted as a client's is, and its retraction ends the match.
+        let (peer, _peer_sink) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(1), &peer);
+        fwd.tick();
+        forward_one(&fwd, FaceId(0), undeclare_sub("demo/**"));
+        assert!(!fwd.matching(MatchPlane::Subscribers, "demo/p", Locality::Any));
+        forward_one(&fwd, FaceId(1), declare_sub("demo/p/*"));
+        assert!(fwd.matching(MatchPlane::Subscribers, "demo/p/x", Locality::Remote));
+        forward_one(&fwd, FaceId(1), undeclare_sub("demo/p/*"));
+        assert!(!fwd.matching(MatchPlane::Subscribers, "demo/p/x", Locality::Any));
+    }
+
+    /// A peer of a router retracts a subscriber and a queryable as a session does, by the id it
+    /// numbered them with and no key: the router resolves the key it declared under that id, and
+    /// the declaration is gone from the tables.
+    #[test]
+    fn a_peer_retracts_a_subscriber_and_a_queryable_by_id_alone() {
+        use wz_session_core::declare_build::{
+            build_declare_queryable_with_id_info, build_declare_subscriber,
+            build_undeclare_queryable, build_undeclare_subscriber,
+        };
+        use wz_session_core::locality::Locality;
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (peer, _sink) = face(zid(0xBB), WIRE_PEER);
+        fwd.register(FaceId(0), &peer);
+        fwd.tick();
+        let queryables = MatchPlane::Queryables {
+            complete_required: false,
+        };
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(
+                build_declare_subscriber(7, 0, Some("demo/s/*")).expect("build"),
+            )),
+        );
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(
+                build_declare_queryable_with_id_info(
+                    9,
+                    "demo/q",
+                    QueryableInfo {
+                        complete: true,
+                        distance: 0,
+                    },
+                )
+                .expect("build"),
+            )),
+        );
+        assert!(fwd.matching(MatchPlane::Subscribers, "demo/s/x", Locality::Any));
+        assert!(fwd.matching(queryables, "demo/q", Locality::Any));
+
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(build_undeclare_subscriber(7))),
+        );
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(build_undeclare_queryable(9))),
+        );
+        assert!(!fwd.matching(MatchPlane::Subscribers, "demo/s/x", Locality::Any));
+        assert!(!fwd.matching(queryables, "demo/q", Locality::Any));
     }
 
     /// A policy that denies `Query` on `flow` for every key.

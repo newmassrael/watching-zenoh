@@ -4518,7 +4518,7 @@ mod router_node;
 pub(crate) use router_node::{open_router_blocking, refused_ask as router_refused_ask};
 #[cfg(feature = "router-node")]
 pub use router_node::{
-    FinalHandler, LivelinessHandler, LocalLiveliness, ReplyHandler, RouterState,
+    FinalHandler, LivelinessHandler, LocalLiveliness, MatchHandler, ReplyHandler, RouterState,
 };
 
 #[cfg(test)]

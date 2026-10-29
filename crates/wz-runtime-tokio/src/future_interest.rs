@@ -312,8 +312,8 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
     /// `local_qabl_info(res, dst_face)` is per-destination, and the wz current dump
     /// likewise excludes the requesting face) — so the CURRENT-dump seed and this
     /// later push are like-for-like and a querier that co-hosts a matching queryable
-    /// gets no spurious re-push. The subscriber plane ignores both args (`|_, _| ()`).
-    pub fn pushes_for_new<F: Fn(&str, FaceId) -> V>(
+    /// gets no spurious re-push. The subscriber plane ignores both args (`|_, _, _| ()`).
+    pub fn pushes_for_new<F: Fn(&str, FaceId, bool) -> V>(
         &mut self,
         new_ke: &str,
         origin: Option<FaceId>,
@@ -325,20 +325,26 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
                 continue; // never echo a declaration back to the face that sourced it
             }
             // Gather the reply kes this face's interests want BEFORE interning: the
-            // read borrow of `interests` and the mutable `intern` cannot overlap.
-            let mut reply_kes: Vec<String> = Vec::new();
+            // read borrow of `interests` and the mutable `intern` cannot overlap. Each is
+            // tagged with whether it aggregates; a key that one interest aggregates and
+            // another asks for as a resource is the aggregate, so that it is folded once.
+            let mut reply_kes: Vec<(String, bool)> = Vec::new();
             for interest in state.interests.values() {
                 let target_chunks: Vec<&str> = interest.target.split('/').collect();
                 if keyexpr_intersects_target(new_ke, &target_chunks) {
-                    reply_kes.push(if interest.aggregate {
-                        interest.target.clone()
+                    let reply_ke = if interest.aggregate {
+                        interest.target.as_str()
                     } else {
-                        new_ke.to_owned()
-                    });
+                        new_ke
+                    };
+                    match reply_kes.iter_mut().find(|(ke, _)| ke == reply_ke) {
+                        Some((_, aggregate)) => *aggregate |= interest.aggregate,
+                        None => reply_kes.push((reply_ke.to_owned(), interest.aggregate)),
+                    }
                 }
             }
-            for reply_ke in reply_kes {
-                let value = value_of(&reply_ke, *face);
+            for (reply_ke, aggregate) in reply_kes {
+                let value = value_of(&reply_ke, *face, aggregate);
                 let (id, should_push) = state.intern(&reply_ke, value);
                 if should_push {
                     out.push((*face, reply_ke, id, value));
@@ -402,7 +408,12 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
     /// PARTIAL withdrawal, where the reply ke stays backed, is a separate unit —
     /// [`re_pushes_for_withdrawn`](Self::re_pushes_for_withdrawn), R311y153 — NOT
     /// touched here, since this method is value-agnostic).
-    pub fn forgets_for_withdrawn<B: Fn(&str) -> bool>(
+    ///
+    /// `still_backed(reply_ke, aggregate)` is told whether the reply ke is the target of an
+    /// aggregate interest of the face: only such a reply stands for everything its target
+    /// meets, so it alone stays backed by a declaration that merely intersects it. A reply
+    /// for a resource is backed while something is declared on that very key.
+    pub fn forgets_for_withdrawn<B: Fn(&str, bool) -> bool>(
         &mut self,
         withdrawn_ke: &str,
         still_backed: B,
@@ -417,7 +428,12 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
                 .keys()
                 .filter(|reply_ke| {
                     let chunks: Vec<&str> = reply_ke.split('/').collect();
-                    keyexpr_intersects_target(withdrawn_ke, &chunks) && !still_backed(reply_ke)
+                    let aggregate = state
+                        .interests
+                        .values()
+                        .any(|interest| interest.aggregate && interest.target == **reply_ke);
+                    keyexpr_intersects_target(withdrawn_ke, &chunks)
+                        && !still_backed(reply_ke, aggregate)
                 })
                 .cloned()
                 .collect();
@@ -491,7 +507,7 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
     /// the same id `current.map(|c| c.0)` at :274-276), which fires on a partial
     /// node-removal via the `register_router_queryable(local_router_qabl_info)` call at
     /// queries.rs:930-940.
-    pub fn re_pushes_for_withdrawn<F: Fn(&str, FaceId) -> V>(
+    pub fn re_pushes_for_withdrawn<F: Fn(&str, FaceId, bool) -> V>(
         &mut self,
         withdrawn_ke: &str,
         value_of: F,
@@ -511,7 +527,11 @@ impl<V: Copy + PartialEq> FutureInterestStore<V> {
                 .cloned()
                 .collect();
             for reply_ke in candidates {
-                let value = value_of(&reply_ke, *face);
+                let aggregate = state
+                    .interests
+                    .values()
+                    .any(|interest| interest.aggregate && interest.target == reply_ke);
+                let value = value_of(&reply_ke, *face, aggregate);
                 let (id, changed) = state.intern(&reply_ke, value);
                 if changed {
                     out.push((*face, reply_ke, id, value));
@@ -608,7 +628,7 @@ mod tests {
         // push, id >= 1.
         let mut s = FutureSubStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
-        let pushes = s.pushes_for_new("demo/data", Some(face(9)), |_, _| ());
+        let pushes = s.pushes_for_new("demo/data", Some(face(9)), |_, _, _| ());
         assert_eq!(pushes.len(), 1, "one push to the interest holder");
         let (f, reply_ke, id, ()) = &pushes[0];
         assert_eq!(*f, face(1));
@@ -626,7 +646,7 @@ mod tests {
     fn non_aggregate_reply_is_keyed_on_the_concrete_sub_ke() {
         let mut s = FutureSubStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), false);
-        let pushes = s.pushes_for_new("demo/data", Some(face(9)), |_, _| ());
+        let pushes = s.pushes_for_new("demo/data", Some(face(9)), |_, _, _| ());
         assert_eq!(pushes.len(), 1);
         assert_eq!(
             pushes[0].1, "demo/data",
@@ -638,9 +658,9 @@ mod tests {
     fn a_second_sub_for_an_aggregate_interest_dedups() {
         let mut s = FutureSubStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
-        let first = s.pushes_for_new("demo/a", Some(face(9)), |_, _| ());
+        let first = s.pushes_for_new("demo/a", Some(face(9)), |_, _, _| ());
         assert_eq!(first.len(), 1);
-        let second = s.pushes_for_new("demo/b", Some(face(9)), |_, _| ());
+        let second = s.pushes_for_new("demo/b", Some(face(9)), |_, _, _| ());
         assert!(
             second.is_empty(),
             "a second sub under the same aggregate ke needs no new declare (filter already off)",
@@ -652,7 +672,7 @@ mod tests {
         let mut s = FutureSubStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
         assert!(
-            s.pushes_for_new("other/key", Some(face(9)), |_, _| ())
+            s.pushes_for_new("other/key", Some(face(9)), |_, _, _| ())
                 .is_empty(),
             "a sub outside the interest target is not pushed",
         );
@@ -663,7 +683,7 @@ mod tests {
         let mut s = FutureSubStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
         assert!(
-            s.pushes_for_new("demo/data", Some(face(1)), |_, _| ())
+            s.pushes_for_new("demo/data", Some(face(1)), |_, _, _| ())
                 .is_empty(),
             "never push a declaration back to the face that sourced it",
         );
@@ -679,7 +699,7 @@ mod tests {
         let seeded_id = s.intern_current_reply(face(1), "demo/**", ());
         assert!(seeded_id >= 1);
         assert!(
-            s.pushes_for_new("demo/late", Some(face(9)), |_, _| ())
+            s.pushes_for_new("demo/late", Some(face(9)), |_, _, _| ())
                 .is_empty(),
             "the aggregate reply ke was already seeded by the current dump",
         );
@@ -692,7 +712,7 @@ mod tests {
         let mut s = FutureSubStore::new();
         s.store_interest(face(1), 7, "demo/x".to_owned(), true);
         s.store_interest(face(1), 8, "demo/x".to_owned(), true);
-        let pushes = s.pushes_for_new("demo/x", Some(face(9)), |_, _| ());
+        let pushes = s.pushes_for_new("demo/x", Some(face(9)), |_, _, _| ());
         assert_eq!(
             pushes.len(),
             1,
@@ -705,7 +725,7 @@ mod tests {
         let mut s = FutureSubStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
         s.store_interest(face(2), 3, "demo/**".to_owned(), true);
-        let mut pushes = s.pushes_for_new("demo/data", Some(face(9)), |_, _| ());
+        let mut pushes = s.pushes_for_new("demo/data", Some(face(9)), |_, _, _| ());
         pushes.sort_by_key(|(f, _, _, _)| f.0);
         assert_eq!(pushes.len(), 2);
         assert_eq!(pushes[0].0, face(1));
@@ -721,7 +741,7 @@ mod tests {
             "the stored interest is removed"
         );
         assert!(
-            s.pushes_for_new("demo/data", Some(face(9)), |_, _| ())
+            s.pushes_for_new("demo/data", Some(face(9)), |_, _, _| ())
                 .is_empty(),
             "a removed interest attracts no further pushes",
         );
@@ -735,7 +755,7 @@ mod tests {
         // push to a FUTURE publisher on the same face.
         let mut s = FutureSubStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
-        let _ = s.pushes_for_new("demo/data", Some(face(9)), |_, _| ());
+        let _ = s.pushes_for_new("demo/data", Some(face(9)), |_, _, _| ());
         assert_eq!(s.pushed_count(face(1)), 1);
         assert!(s.remove_interest(face(1), 7));
         assert_eq!(
@@ -746,7 +766,7 @@ mod tests {
         // A FRESH publisher on the same face + same aggregate ke, pub-before-sub,
         // is NOT suppressed by the pruned registry.
         s.store_interest(face(1), 9, "demo/**".to_owned(), true);
-        let pushes = s.pushes_for_new("demo/late", Some(face(9)), |_, _| ());
+        let pushes = s.pushes_for_new("demo/late", Some(face(9)), |_, _, _| ());
         assert_eq!(
             pushes.len(),
             1,
@@ -761,7 +781,7 @@ mod tests {
         let mut s = FutureSubStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
         s.store_interest(face(1), 8, "other/**".to_owned(), true);
-        let _ = s.pushes_for_new("demo/data", Some(face(9)), |_, _| ());
+        let _ = s.pushes_for_new("demo/data", Some(face(9)), |_, _, _| ());
         assert_eq!(s.pushed_count(face(1)), 1);
         assert!(s.remove_interest(face(1), 7));
         assert_eq!(s.interest_count(face(1)), 1, "interest 8 remains");
@@ -782,7 +802,7 @@ mod tests {
         assert!(s.purge_face(face(1)));
         assert_eq!(s.face_count(), 1, "only face 2 remains");
         assert!(
-            s.pushes_for_new("demo/data", Some(face(9)), |_, _| ())
+            s.pushes_for_new("demo/data", Some(face(9)), |_, _, _| ())
                 .is_empty(),
             "the purged face attracts no push",
         );
@@ -797,8 +817,8 @@ mod tests {
         // fresh entry — the old publisher is gone, so no live id can collide.)
         let mut s = FutureSubStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), false);
-        let a = s.pushes_for_new("demo/a", Some(face(9)), |_, _| ());
-        let b = s.pushes_for_new("demo/b", Some(face(9)), |_, _| ());
+        let a = s.pushes_for_new("demo/a", Some(face(9)), |_, _, _| ());
+        let b = s.pushes_for_new("demo/b", Some(face(9)), |_, _, _| ());
         assert_eq!(a[0].2, 1, "first alloc is 1 (0 is reserved)");
         assert_eq!(b[0].2, 2, "second distinct ke gets a fresh id");
     }
@@ -819,7 +839,7 @@ mod tests {
         // solicits with no matching queryable, then one is learned later -> one push.
         let mut s = FutureQablStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
-        let pushes = s.pushes_for_new("demo/svc", Some(face(9)), |_, _| info(false));
+        let pushes = s.pushes_for_new("demo/svc", Some(face(9)), |_, _, _| info(false));
         assert_eq!(pushes.len(), 1, "one push to the interest holder");
         let (f, reply_ke, id, v) = &pushes[0];
         assert_eq!(*f, face(1));
@@ -841,7 +861,7 @@ mod tests {
         let seeded_id = s.intern_current_reply(face(1), "demo/**", info(false));
         assert!(seeded_id >= 1);
         // Fold now complete=true (a complete queryable learned/merged in).
-        let pushes = s.pushes_for_new("demo/svc", Some(face(9)), |_, _| info(true));
+        let pushes = s.pushes_for_new("demo/svc", Some(face(9)), |_, _, _| info(true));
         assert_eq!(pushes.len(), 1, "the completeness flip re-pushes");
         assert_eq!(pushes[0].2, seeded_id, "re-push reuses the SAME decl id");
         assert_eq!(
@@ -859,7 +879,7 @@ mod tests {
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
         let _ = s.intern_current_reply(face(1), "demo/**", info(true));
         assert!(
-            s.pushes_for_new("demo/svc", Some(face(9)), |_, _| info(true))
+            s.pushes_for_new("demo/svc", Some(face(9)), |_, _, _| info(true))
                 .is_empty(),
             "no value change -> no re-push (presence dedup on the value)",
         );
@@ -877,7 +897,7 @@ mod tests {
         let mut s = FutureQablStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
         let id0 = s.intern_current_reply(face(1), "demo/**", info(true));
-        let pushes = s.pushes_for_new("demo/svc", Some(face(9)), |_, _| info(false));
+        let pushes = s.pushes_for_new("demo/svc", Some(face(9)), |_, _, _| info(false));
         assert_eq!(pushes.len(), 1, "a value change re-pushes");
         assert_eq!(pushes[0].2, id0, "same id");
         assert_eq!(pushes[0].3, info(false), "carries the changed value");
@@ -887,14 +907,14 @@ mod tests {
     fn qabl_interest_final_and_purge_mirror_the_sub_plane() {
         let mut s = FutureQablStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
-        let _ = s.pushes_for_new("demo/svc", Some(face(9)), |_, _| info(false));
+        let _ = s.pushes_for_new("demo/svc", Some(face(9)), |_, _, _| info(false));
         assert_eq!(s.pushed_count(face(1)), 1);
         assert!(s.remove_interest(face(1), 7));
         assert_eq!(s.face_count(), 0, "last interest gone -> face pruned");
         // A fresh querier on the same face is not suppressed by the pruned registry.
         s.store_interest(face(1), 9, "demo/**".to_owned(), true);
         assert_eq!(
-            s.pushes_for_new("demo/late", Some(face(9)), |_, _| info(false))
+            s.pushes_for_new("demo/late", Some(face(9)), |_, _, _| info(false))
                 .len(),
             1,
         );
@@ -909,10 +929,10 @@ mod tests {
         // the stale `pushed` entry (so the pico write-filter re-arms).
         let mut s = FutureSubStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
-        let pushed = s.pushes_for_new("demo/data", Some(face(9)), |_, _| ());
+        let pushed = s.pushes_for_new("demo/data", Some(face(9)), |_, _, _| ());
         assert_eq!(pushed.len(), 1);
         let pushed_id = pushed[0].2;
-        let forgets = s.forgets_for_withdrawn("demo/data", |_| false);
+        let forgets = s.forgets_for_withdrawn("demo/data", |_, _| false);
         assert_eq!(forgets.len(), 1, "the unbacked reply ke is undeclared");
         assert_eq!(forgets[0].0, face(1));
         assert_eq!(
@@ -936,9 +956,9 @@ mod tests {
         // undeclare (still_backed=true), the pushed entry is kept.
         let mut s = FutureSubStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
-        let _ = s.pushes_for_new("demo/a", Some(face(9)), |_, _| ());
+        let _ = s.pushes_for_new("demo/a", Some(face(9)), |_, _, _| ());
         assert!(
-            s.forgets_for_withdrawn("demo/a", |_| true).is_empty(),
+            s.forgets_for_withdrawn("demo/a", |_, _| true).is_empty(),
             "a reply ke still backed by another sub is not undeclared",
         );
         assert_eq!(s.pushed_count(face(1)), 1, "the pushed entry is retained");
@@ -951,10 +971,10 @@ mod tests {
         // dedup-suppressed it).
         let mut s = FutureSubStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
-        let _ = s.pushes_for_new("demo/data", Some(face(9)), |_, _| ());
-        assert_eq!(s.forgets_for_withdrawn("demo/data", |_| false).len(), 1);
+        let _ = s.pushes_for_new("demo/data", Some(face(9)), |_, _, _| ());
+        assert_eq!(s.forgets_for_withdrawn("demo/data", |_, _| false).len(), 1);
         // The sub reappears -> re-push (not suppressed by a stale pushed entry).
-        let re = s.pushes_for_new("demo/data", Some(face(9)), |_, _| ());
+        let re = s.pushes_for_new("demo/data", Some(face(9)), |_, _, _| ());
         assert_eq!(
             re.len(),
             1,
@@ -966,9 +986,10 @@ mod tests {
     fn a_non_intersecting_withdrawal_is_a_no_op() {
         let mut s = FutureSubStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
-        let _ = s.pushes_for_new("demo/data", Some(face(9)), |_, _| ());
+        let _ = s.pushes_for_new("demo/data", Some(face(9)), |_, _, _| ());
         assert!(
-            s.forgets_for_withdrawn("other/key", |_| false).is_empty(),
+            s.forgets_for_withdrawn("other/key", |_, _| false)
+                .is_empty(),
             "a withdrawal outside the pushed reply ke does not undeclare",
         );
         assert_eq!(s.pushed_count(face(1)), 1);
@@ -980,9 +1001,9 @@ mod tests {
         // the stored completeness value.
         let mut s = FutureQablStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
-        let pushed = s.pushes_for_new("demo/svc", Some(face(9)), |_, _| info(true));
+        let pushed = s.pushes_for_new("demo/svc", Some(face(9)), |_, _, _| info(true));
         assert_eq!(pushed.len(), 1);
-        let forgets = s.forgets_for_withdrawn("demo/svc", |_| false);
+        let forgets = s.forgets_for_withdrawn("demo/svc", |_, _| false);
         assert_eq!(forgets.len(), 1);
         assert_eq!(
             forgets[0].2, pushed[0].2,
@@ -1002,7 +1023,7 @@ mod tests {
         let mut s = FutureQablStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
         let id0 = s.intern_current_reply(face(1), "demo/**", info(true));
-        let re = s.re_pushes_for_withdrawn("demo/svc", |_rk, _dest| info(false));
+        let re = s.re_pushes_for_withdrawn("demo/svc", |_rk, _dest, _aggregate| info(false));
         assert_eq!(re.len(), 1, "the downgrade re-pushes");
         let (f, reply_ke, id, v) = &re[0];
         assert_eq!(*f, face(1));
@@ -1019,7 +1040,7 @@ mod tests {
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
         let _ = s.intern_current_reply(face(1), "demo/**", info(true));
         assert!(
-            s.re_pushes_for_withdrawn("demo/svc", |_rk, _dest| info(true))
+            s.re_pushes_for_withdrawn("demo/svc", |_rk, _dest, _aggregate| info(true))
                 .is_empty(),
             "an unchanged fold does not re-push",
         );
@@ -1033,7 +1054,7 @@ mod tests {
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
         let _ = s.intern_current_reply(face(1), "demo/**", ());
         assert!(
-            s.re_pushes_for_withdrawn("demo/svc", |_rk, _dest| ())
+            s.re_pushes_for_withdrawn("demo/svc", |_rk, _dest, _aggregate| ())
                 .is_empty(),
             "a () value never differs -> the subscriber plane never re-pushes",
         );
@@ -1045,7 +1066,7 @@ mod tests {
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
         let _ = s.intern_current_reply(face(1), "demo/**", info(true));
         assert!(
-            s.re_pushes_for_withdrawn("other/key", |_rk, _dest| info(false))
+            s.re_pushes_for_withdrawn("other/key", |_rk, _dest, _aggregate| info(false))
                 .is_empty(),
             "a withdrawal outside the pushed reply ke does not re-fold it",
         );
@@ -1059,7 +1080,7 @@ mod tests {
         let mut s = FutureQablStore::new();
         s.store_interest(face(1), 7, "demo/**".to_owned(), true);
         assert!(
-            s.re_pushes_for_withdrawn("demo/svc", |_rk, _dest| info(false))
+            s.re_pushes_for_withdrawn("demo/svc", |_rk, _dest, _aggregate| info(false))
                 .is_empty(),
             "no pushed reply ke -> nothing to downgrade",
         );

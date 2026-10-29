@@ -26,7 +26,11 @@ use wz_runtime_tokio::session_open::DialConfig;
 use super::*;
 
 mod local_face;
-pub use local_face::{FinalHandler, LivelinessHandler, LocalLiveliness, ReplyHandler};
+pub use local_face::{
+    FinalHandler, LivelinessHandler, LocalLiveliness, MatchHandler, ReplyHandler,
+};
+use wz_runtime_tokio::router_forward::MatchPlane;
+use wz_session_core::locality::Locality;
 
 /// A running router node. Dropping it does not stop it; [`RouterState::close`] does, and joins the
 /// thread the node runs on.
@@ -71,6 +75,35 @@ impl RouterState {
         if self.forwarder.unhost_token(id) {
             self.liveliness.own_down(id);
         }
+    }
+
+    /// Whether anything of `plane` matches `key` among the declarations `origin` admits: the
+    /// session's own (the hosted ones) and the remote ones (every other face's).
+    pub fn matching_status(&self, plane: MatchPlane, key: &str, origin: Locality) -> bool {
+        self.forwarder.matching(plane, key, origin)
+    }
+
+    /// Be told whether anything of `plane` matches `key` among the declarations `origin` admits:
+    /// `handler` is called with `true` at once if it does, and with the verdict each time it
+    /// moves, on the face's thread and outside every lock. The id answered ends the watch
+    /// ([`Self::unwatch_matching`]).
+    pub fn watch_matching(
+        &self,
+        plane: MatchPlane,
+        key: &str,
+        origin: Locality,
+        handler: MatchHandler,
+    ) -> u64 {
+        // Counted before the face first looks, so that no write is missed between its look and
+        // the first one it is told of.
+        self.forwarder.watch_matching();
+        self.liveliness.watch(plane, key, origin, handler)
+    }
+
+    /// End the watch `id`.
+    pub fn unwatch_matching(&self, id: u64) {
+        self.liveliness.unwatch(id);
+        self.forwarder.unwatch_matching();
     }
 
     /// What the queries of a queryable the node hosts are kept through: a handler asks it to keep
@@ -257,10 +290,11 @@ pub(crate) fn open_router_blocking(
     ));
     policy.install_on(&*forwarder);
     // The node's own face, told of the tokens of the others from the first.
-    let (liveliness, face_sink) = LocalLiveliness::start().map_err(|error| {
-        log_open_failure("the face of the router node", &error);
-        OpenError::DriveFailed
-    })?;
+    let (liveliness, face_sink) =
+        LocalLiveliness::start(Arc::downgrade(&forwarder)).map_err(|error| {
+            log_open_failure("the face of the router node", &error);
+            OpenError::DriveFailed
+        })?;
     forwarder.attach_local_face(face_sink);
     forwarder.ask_local_tokens();
     let shutdown = Arc::new(Notify::new());

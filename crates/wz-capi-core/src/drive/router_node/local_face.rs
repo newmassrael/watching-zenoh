@@ -18,12 +18,15 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Mutex};
+use std::sync::{mpsc, Mutex, Weak};
 use std::thread::JoinHandle;
 
 use wz_runtime_tokio::declare::{LivelinessSample, LivelinessSampleKind};
 use wz_runtime_tokio::keyexpr_match::keyexpr_intersects_text;
-use wz_runtime_tokio::router_forward::{local_face_aliases, LocalFaceEvent, LocalFaceSink};
+use wz_runtime_tokio::router_forward::{
+    local_face_aliases, LocalFaceEvent, LocalFaceSink, MatchPlane, RouterForwarder,
+};
+use wz_session_core::locality::Locality;
 use wz_session_core::reply::ReplyRegistry;
 use wz_session_core::reply_acceptance::{ReplyAcceptance, ReplyKeyExpr};
 use wz_session_core::reply_sink::{BoxedReplySink, ConsolidatingSink, ReplyView};
@@ -36,6 +39,9 @@ pub type ReplyHandler = Box<dyn for<'a> FnMut(&'a dyn ReplyView) + Send + 'stati
 
 /// What a query of the face is told its end by, on the face's thread: once, after the last reply.
 pub type FinalHandler = Box<dyn FnMut() + Send + 'static>;
+
+/// What a watch of the face is called with when its verdict moves, on the face's thread.
+pub type MatchHandler = Box<dyn FnMut(bool) + Send + 'static>;
 
 /// What the face's thread is asked to do, in the order it is asked.
 enum Command {
@@ -70,6 +76,16 @@ enum Command {
         on_reply: ReplyHandler,
         on_final: FinalHandler,
     },
+    /// The program watches whether anything of `plane` matches `key` among the declarations
+    /// `origin` admits.
+    Watch {
+        id: u64,
+        plane: MatchPlane,
+        key: String,
+        origin: Locality,
+        handler: MatchHandler,
+    },
+    Unwatch(u64),
     Stop,
 }
 
@@ -99,21 +115,84 @@ struct State {
     /// reply the router tells the face is handed to the query it answers, and the end of the
     /// replies ends it. The face has no alias table, so a key it is told is literal.
     queries: ReplyRegistry<ConsolidatingSink<BoxedReplySink>>,
+    /// What the face watches in the router's tables, each with the verdict it last gave. The
+    /// face asks the router outside every lock whenever the tables were written, and its
+    /// handler is called when the verdict moves.
+    watches: Vec<Watch>,
+    /// The router the watches are asked of; gone when the node is.
+    router: Weak<RouterForwarder>,
+}
+
+/// A thing the face watches in the router's tables: whether anything of `plane` matches `key`
+/// among the declarations `origin` admits.
+struct Watch {
+    id: u64,
+    plane: MatchPlane,
+    key: String,
+    origin: Locality,
+    last: bool,
+    handler: MatchHandler,
 }
 
 impl State {
-    fn new() -> Self {
+    fn new(router: Weak<RouterForwarder>) -> Self {
         Self {
             remote: HashMap::new(),
             own: HashMap::new(),
             alive: HashMap::new(),
             subscribers: Vec::new(),
             queries: ReplyRegistry::new(),
+            watches: Vec::new(),
+            router,
+        }
+    }
+
+    /// Ask the router what each watch counts, and call the handler of each whose verdict moved.
+    fn look(&mut self) {
+        let Some(router) = self.router.upgrade() else {
+            return;
+        };
+        // Before the questions, so that a write that comes in while they are asked is told again.
+        router.tables_looked_at();
+        for watch in &mut self.watches {
+            let now = router.matching(watch.plane, &watch.key, watch.origin);
+            if now != watch.last {
+                watch.last = now;
+                (watch.handler)(now);
+            }
         }
     }
 
     fn handle(&mut self, command: Command) -> bool {
         match command {
+            Command::Told(LocalFaceEvent::Changed) => self.look(),
+            Command::Watch {
+                id,
+                plane,
+                key,
+                origin,
+                mut handler,
+            } => {
+                // The watch was counted by the router before the face first looks, so a write
+                // after this question is told. A verdict that holds when the watch begins is
+                // given at once: the listener is told what is, and then what changes.
+                let now = self
+                    .router
+                    .upgrade()
+                    .is_some_and(|router| router.matching(plane, &key, origin));
+                if now {
+                    handler(true);
+                }
+                self.watches.push(Watch {
+                    id,
+                    plane,
+                    key,
+                    origin,
+                    last: now,
+                    handler,
+                });
+            }
+            Command::Unwatch(id) => self.watches.retain(|watch| watch.id != id),
             Command::Told(LocalFaceEvent::Reply(response)) => {
                 self.queries
                     .dispatch_response(&response, &local_face_aliases());
@@ -260,12 +339,15 @@ pub struct LocalLiveliness {
 
 impl LocalLiveliness {
     /// Start the face's thread, and answer the sink the router is to tell the face through.
-    pub(super) fn start() -> std::io::Result<(Self, LocalFaceSink)> {
+    ///
+    /// `router` is the node's router, which the face asks what it watches in the tables
+    /// ([`Self::watch`]); a face started over none watches nothing.
+    pub(super) fn start(router: Weak<RouterForwarder>) -> std::io::Result<(Self, LocalFaceSink)> {
         let (commands, received) = mpsc::channel::<Command>();
         let thread = std::thread::Builder::new()
             .name("wz-router-local".to_owned())
             .spawn(move || {
-                let mut state = State::new();
+                let mut state = State::new(router);
                 while let Ok(command) = received.recv() {
                     if !state.handle(command) {
                         break;
@@ -333,6 +415,34 @@ impl LocalLiveliness {
         answered.recv().unwrap_or_default()
     }
 
+    /// Watch whether anything of `plane` matches `key` among the declarations `origin` admits:
+    /// `handler` is called with `true` at once if it does, and with the new verdict each time it
+    /// moves, on the face's thread. The router must have been told to tell the face of its
+    /// writes ([`RouterForwarder::watch_matching`]) before this is called. The id answered ends
+    /// the watch ([`Self::unwatch`]).
+    pub(super) fn watch(
+        &self,
+        plane: MatchPlane,
+        key: &str,
+        origin: Locality,
+        handler: MatchHandler,
+    ) -> u64 {
+        let id = self.next_subscriber.fetch_add(1, Ordering::Relaxed);
+        let _ = self.commands.send(Command::Watch {
+            id,
+            plane,
+            key: key.to_owned(),
+            origin,
+            handler,
+        });
+        id
+    }
+
+    /// End the watch `id`.
+    pub(super) fn unwatch(&self, id: u64) {
+        let _ = self.commands.send(Command::Unwatch(id));
+    }
+
     /// Hold a query under the request id `rid`, to be handed the replies the router tells the
     /// face for it and told their end. Called before the router is asked, so that no reply finds
     /// the query missing: the face's thread reads its commands in the order they were sent.
@@ -389,7 +499,7 @@ mod tests {
 
     #[test]
     fn a_key_is_retracted_under_the_id_it_was_told_under_whichever_token_goes_last() {
-        let (face, sink) = LocalLiveliness::start().expect("a thread");
+        let (face, sink) = LocalLiveliness::start(Weak::new()).expect("a thread");
         let told = Arc::new(StdMutex::new(Vec::new()));
         let written = told.clone();
         let handler: LivelinessHandler = Box::new(move |sample: LivelinessSample<'_>| {
@@ -417,7 +527,7 @@ mod tests {
 
     #[test]
     fn a_retraction_that_names_only_the_key_ends_every_token_of_the_others_on_it() {
-        let (face, sink) = LocalLiveliness::start().expect("a thread");
+        let (face, sink) = LocalLiveliness::start(Weak::new()).expect("a thread");
         let (handler, seen) = recorder();
         face.subscribe("**", false, handler);
         up(&face, &sink, 1, "k");
@@ -445,7 +555,7 @@ mod tests {
 
     #[test]
     fn a_key_is_told_when_its_first_token_comes_alive_and_its_last_goes() {
-        let (face, sink) = LocalLiveliness::start().expect("a thread");
+        let (face, sink) = LocalLiveliness::start(Weak::new()).expect("a thread");
         let (handler, seen) = recorder();
         face.subscribe("a/**", false, handler);
         up(&face, &sink, 1, "a/b");
@@ -461,7 +571,7 @@ mod tests {
 
     #[test]
     fn the_tokens_of_the_program_count_with_the_others_and_history_lists_them() {
-        let (face, sink) = LocalLiveliness::start().expect("a thread");
+        let (face, sink) = LocalLiveliness::start(Weak::new()).expect("a thread");
         up(&face, &sink, 7, "k/remote");
         face.own_up(100, "k/own");
         let (handler, seen) = recorder();
@@ -477,7 +587,7 @@ mod tests {
 
     #[test]
     fn a_repeated_announcement_of_an_id_counts_once_and_a_retraction_of_a_stranger_does_nothing() {
-        let (face, sink) = LocalLiveliness::start().expect("a thread");
+        let (face, sink) = LocalLiveliness::start(Weak::new()).expect("a thread");
         let (handler, seen) = recorder();
         face.subscribe("**", false, handler);
         up(&face, &sink, 1, "x");
@@ -491,7 +601,7 @@ mod tests {
 
     #[test]
     fn an_unsubscribed_handler_is_not_called_again() {
-        let (face, sink) = LocalLiveliness::start().expect("a thread");
+        let (face, sink) = LocalLiveliness::start(Weak::new()).expect("a thread");
         let (handler, seen) = recorder();
         let id = face.subscribe("**", false, handler);
         up(&face, &sink, 1, "x");
