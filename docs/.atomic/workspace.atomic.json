@@ -297494,6 +297494,42 @@
         "Step 5b2b is open: the pico doors that read the latest snapshot as bytes and take the resource-source callback, and a host ResourceSource; then 5b2c, the features word filled from the image and the admin-space and dissector readers. A node with several sessions has one meter each: the snapshot of a node must say which session it reads or sum them, and the pico node has one session. The receive-path cost of the clock read and the meter is not measured on the path itself, only the meter alone (14 ns)."
       ]
     },
+    "Round 3892": {
+      "decision_summary": "A session that listens on a multicast group named with port 0 lists the group among its locators, as upstream does, so a second session can join it by that locator. The multicast link had bound the group at port 0 and addressed it there: it now reads the port of its bound socket (upstream's multicast link does the same) and sends to the group at that port, and a bind again after the link is lost keeps the port. The session lists the group beside its listeners, apart from them because a listener's list is replaced when another listener binds, and takes it off the list with the group's face. The upstream session file passes (5 of 5), where its multicast test found no udp locator. The shm file still fails: the shared-memory transport is not acted on yet. The prose-name gate was red on a note of the CI script that spelled a constant the tree dropped: described.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/lib.rs: bind_multicast_link takes the port of its bound socket for a group named with port 0, and addresses the group by it; a test.",
+        "crates/wz-capi-core/src/drive.rs: the group's arm keeps the bound port across a bind again and lists the group's locator.",
+        "crates/wz-capi-core/src/faces.rs and crates/wz-capi-core/src/faces/multicast.rs: group_locators, listed beside the listeners' locators and taken off with the group's face.",
+        "scripts/run-ci.sh: the note of the doc link budget describes the private constant it named.",
+        "crates/wz-zenoh/src/api/session.rs: a test that two peers on one group hear each other."
+      ],
+      "verification_bullets": [
+        "Locally: the new test of the top crate and the new test of the runtime pass, with the multicast tests of the session core (4); clippy with warnings denied passes for the runtime with transport-multicast, the session core, and the top crate with the default features and with unstable; a build of the session core without the multicast transport checks; the upstream session file passes (5), where it failed; the static gates are run before the push. Not run: the other upstream files after this change, the legs gate and the hosted run."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed, from the router session: regression_3, and the peer session of this crate, which does not forward between its faces (six clientviapeer tests); the queryable, the get and the matching status of the router (the routed namespace tests, the brokered unicity test, the matching file); a put that carries an encoding, a timestamp or an attachment, and a delete; a namespace and an authentication; the sessions the node holds; the access control (query and liveliness enforcement), the authentication and the admin host (acl, adminspace, authentication, qos_overwrite). Also owed: the shared-memory transport the top crate does not act on yet (the shm file, ten tests), the files that run none, a build without unstable serves no admin key of its own, a lane for the harness, the margin of the main job, the pin bump to 1.10.2. The locator of a group omits the socket keys of its metadata."
+      ],
+      "publishable_decision_summary": "A session that listens on a multicast group named with port 0 lists the group among its locators, as upstream does, so a second session can join it by that locator. The multicast link had bound the group at port 0 and addressed it there: it now reads the port of its bound socket (upstream's multicast link does the same) and sends to the group at that port, and a bind again after the link is lost keeps the port. The session lists the group beside its listeners, apart from them because a listener's list is replaced when another listener binds, and takes it off the list with the group's face. The upstream session file passes (5 of 5), where its multicast test found no udp locator. The shm file still fails: the shared-memory transport is not acted on yet. The prose-name gate was red on a note of the CI script that spelled a constant the tree dropped: described.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/lib.rs: bind_multicast_link takes the port of its bound socket for a group named with port 0, and addresses the group by it; a test.",
+        "crates/wz-capi-core/src/drive.rs: the group's arm keeps the bound port across a bind again and lists the group's locator.",
+        "crates/wz-capi-core/src/faces.rs and crates/wz-capi-core/src/faces/multicast.rs: group_locators, listed beside the listeners' locators and taken off with the group's face.",
+        "scripts/run-ci.sh: the note of the doc link budget describes the private constant it named.",
+        "crates/wz-zenoh/src/api/session.rs: a test that two peers on one group hear each other."
+      ],
+      "publishable_verification_bullets": [
+        "Locally: the new test of the top crate and the new test of the runtime pass, with the multicast tests of the session core (4); clippy with warnings denied passes for the runtime with transport-multicast, the session core, and the top crate with the default features and with unstable; a build of the session core without the multicast transport checks; the upstream session file passes (5), where it failed; the static gates are run before the push. Not run: the other upstream files after this change, the legs gate and the hosted run."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed, from the router session: regression_3, and the peer session of this crate, which does not forward between its faces (six clientviapeer tests); the queryable, the get and the matching status of the router (the routed namespace tests, the brokered unicity test, the matching file); a put that carries an encoding, a timestamp or an attachment, and a delete; a namespace and an authentication; the sessions the node holds; the access control (query and liveliness enforcement), the authentication and the admin host (acl, adminspace, authentication, qos_overwrite). Also owed: the shared-memory transport the top crate does not act on yet (the shm file, ten tests), the files that run none, a build without unstable serves no admin key of its own, a lane for the harness, the margin of the main job, the pin bump to 1.10.2. The locator of a group omits the socket keys of its metadata."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
