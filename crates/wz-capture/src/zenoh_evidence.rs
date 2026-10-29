@@ -143,7 +143,8 @@ impl Check {
     /// step breaks is a property of the LINK (what it loses and reorders), not
     /// of zenoh, so the assumed rate is the loss the test is built to tolerate,
     /// and the `zenoh-udp-loss*` captures, links dropping 1% to 20% each way,
-    /// hold it to reading `yes` there.
+    /// the `-reorder-` and `-dup-` captures and the TCP ones hold it to
+    /// reading `yes` there.
     pub const fn eps_basis(self) -> Basis {
         match self {
             Check::SnFollows => Basis::Assumed,
@@ -294,20 +295,20 @@ pub mod model {
 
     /// `log2(1 - e)`, the zenoh side of a cookie match: a zenoh OpenSyn fails
     /// to echo its InitAck's cookie with chance `e`, the bound of 0 failures
-    /// in the corpus's 292 echoes ([`measured::ZENOH_COOKIE`]).
-    pub const COOKIE_ECHO_FIDELITY: i64 = -15;
+    /// in the corpus's 304 echoes ([`measured::ZENOH_COOKIE`]).
+    pub const COOKIE_ECHO_FIDELITY: i64 = -14;
 
     /// `log2(e / 1)`: a cookie that differs. An arbitrary pair of byte strings
     /// differs with chance close to one.
-    pub const COOKIE_ECHO_VIOLATED: Weight = Weight::both(-6_614);
+    pub const COOKIE_ECHO_VIOLATED: Weight = Weight::both(-6_672);
 
     /// `log2((1 - e) / (1/2))`: two Inits of opposite kinds, which two
     /// arbitrary Inits are with chance one half; `e` the bound of 0 pairs of
-    /// one kind in 294 ([`measured::ZENOH_ROLES`]).
-    pub const INIT_ROLES_CONFIRMED: Weight = Weight::both(985);
+    /// one kind in 306 ([`measured::ZENOH_ROLES`]).
+    pub const INIT_ROLES_CONFIRMED: Weight = Weight::both(986);
 
     /// `log2(e / (1/2))`: two Inits of the same kind.
-    pub const INIT_ROLES_VIOLATED: Weight = Weight::both(-5_624);
+    pub const INIT_ROLES_VIOLATED: Weight = Weight::both(-5_682);
 
     /// `log2((1 - 2^-4) / 2^-8)`: a frame one step after the last. A varint
     /// equals a given value with chance at most `2^-8`, and a zenoh frame
@@ -321,37 +322,37 @@ pub mod model {
     /// `log2((1 - e) / 2^-8)`: the version byte of a message that names one
     /// is this reader's. A byte equals it by chance `2^-8`, and a zenoh flow
     /// of this version names another with chance `e`, the bound of 0 in the
-    /// corpus's 588 version headers ([`measured::ZENOH_VERSIONS`]).
+    /// corpus's 612 version headers ([`measured::ZENOH_VERSIONS`]).
     pub const VERSION_HEADER: Weight = Weight::both(7_993);
 
     /// `log2(e / (1 - 2^-8))`: it names another version. Model 1 weighed
     /// only the match, which bounds neither sum: an observation that can only
     /// confirm raises the `yes` sum's expectation under the null.
-    pub const VERSION_FOREIGN: Weight = Weight::both(-7_615);
+    pub const VERSION_FOREIGN: Weight = Weight::both(-7_672);
 
     /// A unit read whole. Zenoh: one less the two failures' bounds. `yes`:
     /// mDNS's bound, 13 of 36 units; `no`: the members' average.
     pub const UNIT_EXPLAINED: Weight = Weight {
         yes: 965,
-        no: 3_982,
+        no: 3_983,
     };
 
-    /// A unit with bytes left over. Zenoh: the bound of 0 in 4246 units;
+    /// A unit with bytes left over. Zenoh: the bound of 0 in 6075 units;
     /// `yes`: QUIC's 22 of 22; `no`: the members' average.
     pub const UNIT_RESIDUAL: Weight = Weight {
-        yes: -10_469,
-        no: -9_101,
+        yes: -10_986,
+        no: -9_618,
     };
 
     /// A unit that did not decode. Zenoh: as residual; `yes`: SSDP's 26 of
     /// 26; `no`: the members' average.
     pub const UNIT_UNDECODED: Weight = Weight {
-        yes: -10_469,
-        no: -9_606,
+        yes: -10_986,
+        no: -10_122,
     };
 
     /// A stream direction, captured from its start, that framed a unit before
-    /// it lost its framing. Zenoh: one less the bound of 0 lost in 284; `yes`:
+    /// it lost its framing. Zenoh: one less the bound of 0 lost in 300; `yes`:
     /// the bound of 0 held in 48, PostgreSQL's; `no`: the smoothed shares of
     /// the four members that lose it (MQTT, HTTP opening with another method,
     /// Redis, PostgreSQL), averaged.
@@ -363,8 +364,8 @@ pub mod model {
     /// A stream direction, captured from its start, that lost its framing
     /// before it framed a unit: bytes that are not zenoh's framing.
     pub const FRAMING_LOST: Weight = Weight {
-        yes: -6_574,
-        no: -6_564,
+        yes: -6_653,
+        no: -6_642,
     };
 
     /// The counts of `captures/corpus/` the measured weights are computed
@@ -486,20 +487,20 @@ pub mod model {
         ];
 
         /// The zenoh files' framing units: read whole, residual, undecoded.
-        pub const ZENOH_UNITS: [u64; 3] = [4_246, 0, 0];
+        pub const ZENOH_UNITS: [u64; 3] = [6_075, 0, 0];
 
         /// The zenoh files' stream directions captured from their start:
         /// framing held, framing lost.
-        pub const ZENOH_FRAMING: [u64; 2] = [284, 0];
+        pub const ZENOH_FRAMING: [u64; 2] = [300, 0];
 
         /// The zenoh files' cookie echoes: matched, differing.
-        pub const ZENOH_COOKIE: [u64; 2] = [292, 0];
+        pub const ZENOH_COOKIE: [u64; 2] = [304, 0];
 
         /// The zenoh files' Init pairs: of opposite kinds, of one kind.
-        pub const ZENOH_ROLES: [u64; 2] = [294, 0];
+        pub const ZENOH_ROLES: [u64; 2] = [306, 0];
 
         /// The zenoh files' version headers: this reader's, another.
-        pub const ZENOH_VERSIONS: [u64; 2] = [588, 0];
+        pub const ZENOH_VERSIONS: [u64; 2] = [612, 0];
     }
 }
 
@@ -807,9 +808,9 @@ mod tests {
     /// fidelity, the same in both sums.
     #[test]
     fn a_cookie_match_weighs_its_bytes_up_to_the_cap() {
-        assert_eq!(cookie_echo_weight(1), Weight::both(7_985));
-        assert_eq!(cookie_echo_weight(8), Weight::both(63_985));
-        assert_eq!(cookie_echo_weight(40), Weight::both(63_985));
+        assert_eq!(cookie_echo_weight(1), Weight::both(7_986));
+        assert_eq!(cookie_echo_weight(8), Weight::both(63_986));
+        assert_eq!(cookie_echo_weight(40), Weight::both(63_986));
     }
 
     /// Evidence sums per check and over checks, in each sum, and two bodies of

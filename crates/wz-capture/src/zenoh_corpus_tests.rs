@@ -283,6 +283,12 @@ const EXPECTED: &[(&str, Tally, Tally)] = &[
     ("zenoh-udp-loss-1.pcap", (2, 0, 0), (2, 0, 0)),
     ("zenoh-udp-loss-10.pcap", (2, 0, 0), (2, 0, 0)),
     ("zenoh-udp-loss-20.pcap", (8, 0, 2), (8, 0, 2)),
+    ("zenoh-tcp-loss-1.pcap", (2, 0, 0), (2, 0, 0)),
+    ("zenoh-tcp-loss-5.pcap", (2, 0, 0), (2, 0, 0)),
+    ("zenoh-tcp-reorder-25.pcap", (2, 0, 0), (2, 0, 0)),
+    ("zenoh-tcp-dup-5.pcap", (2, 0, 0), (2, 0, 0)),
+    ("zenoh-udp-reorder-25.pcap", (2, 0, 0), (2, 0, 0)),
+    ("zenoh-udp-dup-5.pcap", (2, 0, 0), (2, 0, 0)),
     // A real link between two machines (an office Wi-Fi, 2026-10-27): the same
     // 1.10.1 router and clients, and zenoh-pico clients, off the loopback.
     ("link-tcp-full.pcap", (2, 0, 0), (2, 0, 0)),
@@ -290,9 +296,9 @@ const EXPECTED: &[(&str, Tally, Tally)] = &[
     ("link-tcp-midsession.pcap", (2, 0, 0), (2, 0, 0)),
     ("link-udp-full.pcap", (2, 0, 0), (2, 0, 0)),
     ("link-pico-tcp.pcap", (2, 0, 0), (2, 0, 0)),
-    ("lan-dns.pcap", (0, 2, 185), (0, 2, 185)),
+    ("lan-dns.pcap", (0, 159, 28), (0, 159, 28)),
     ("lan-mdns.pcap", (0, 1, 18), (0, 1, 18)),
-    ("lan-ssdp.pcap", (0, 1, 1), (0, 1, 1)),
+    ("lan-ssdp.pcap", (0, 2, 0), (0, 2, 0)),
     // The real implementations of three protocols that run beside zenoh, in
     // containers (2026-10-26). The forty MQTT connections that publish once and
     // leave lose their framing in both directions, from their SYN, and frame
@@ -301,7 +307,7 @@ const EXPECTED: &[(&str, Tally, Tally)] = &[
     // `no` at 2^-20.
     ("stack-mqtt.pcap", (0, 4, 40), (0, 4, 40)),
     ("stack-rtps.pcap", (0, 9, 3), (0, 9, 3)),
-    ("stack-coap.pcap", (0, 5, 20), (0, 5, 20)),
+    ("stack-coap.pcap", (0, 25, 0), (0, 25, 0)),
     // Upstream vsomeip between two containers: service discovery, a method
     // over UDP and TCP, and a field's notifications.
     ("stack-someip.pcap", (0, 5, 2), (0, 5, 2)),

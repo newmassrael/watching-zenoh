@@ -237,7 +237,7 @@ unit and loses the framing of all 120 directions. PostgreSQL frames 531 units
 and every one of them has bytes left over (a residual unit), loses 48
 directions, and three of its connections carry enough of them to read `no`.
 The 531 residual units put the null side's unit share of a unit read whole
-lower, which raises that unit's `no` weight to +3982, within 12 millibits of
+lower, which raises that unit's `no` weight to +3983, within 11 millibits of
 a broken SN step's -3994: a flow of units that read whole and repeat an SN
 now weighs almost nothing either way, and the ordered-fold test that builds
 such a flow takes its length from the two weights and fails with a sentence
@@ -264,13 +264,14 @@ the weights by `model_weights_are_their_stated_probabilities`):
 
 - zenoh's chance of each failure is the one-sided 95% Clopper-Pearson upper
   bound on its count, and the confirming outcome takes the rest: 0 residual
-  and 0 undecoded in 4246 units; 0 framings lost in 284 directions held from
-  their start; 0 differing cookies in 292 echoes; 0 Init pairs of one kind in
-  294; 0 other versions in 588 version headers. The zenoh files are 1.10.1
+  and 0 undecoded in 6075 units; 0 framings lost in 300 directions held from
+  their start; 0 differing cookies in 304 echoes; 0 Init pairs of one kind in
+  306; 0 other versions in 612 version headers. The zenoh files are 1.10.1
   routers and clients, upstream 1.5.0, 1.7.2, 1.8.0, 1.9.0 and 1.10.0 routers
   with 1.10.1 clients (the eclipse/zenoh images), zenoh-pico 1.10.1 clients,
   240 short sessions captured for their handshakes, links that drop 1%, 5%,
-  10% and 20% of the packets each way, and a real
+  10% and 20% of the packets each way (UDP; TCP at 1% and 5%), that reorder
+  a quarter of them or duplicate 5% (TCP and UDP), and a real
   link between two machines (an office Wi-Fi: TCP with small and 3000-byte
   samples, joined mid-session, UDP, and zenoh-pico);
 - the `yes` sum's null chance of an outcome is the largest such upper bound
@@ -281,24 +282,24 @@ the weights by `model_weights_are_their_stated_probabilities`):
 
 | outcome | `yes` sum | `no` sum | model 1 |
 |---|---|---|---|
-| unit read whole | +965 | +3982 | +2603 |
-| unit residual | -10469 | -9101 | -6745 |
-| unit undecoded | -10469 | -9606 | -7000 |
+| unit read whole | +965 | +3983 | +2603 |
+| unit residual | -10986 | -9618 | -6745 |
+| unit undecoded | -10986 | -10122 | -7000 |
 | stream framing held | +4032 | +7043 | (none) |
-| stream framing lost | -6574 | -6564 | (none) |
-| cookie matched (8 bytes) | +63985 | +63985 | +63999 |
-| cookie differing | -6614 | -6614 | -10000 |
-| Inits of opposite kinds | +985 | +985 | +999 |
-| Inits of one kind | -5624 | -5624 | -9000 |
+| stream framing lost | -6653 | -6642 | (none) |
+| cookie matched (8 bytes) | +63986 | +63986 | +63999 |
+| cookie differing | -6672 | -6672 | -10000 |
+| Inits of opposite kinds | +986 | +986 | +999 |
+| Inits of one kind | -5682 | -5682 | -9000 |
 | version of this reader | +7993 | +7993 | +8000 |
-| another version | -7615 | -7615 | (none) |
+| another version | -7672 | -7672 | (none) |
 
 The unit weight fell because the corpus's real mDNS reads a unit whole 36% of
 the time where the generated mDNS model 1 was priced on did 16%: model 1's
 weight claimed more than the bytes give, against a protocol the corpus holds.
 The handshake violations weigh less than model 1's assumed `2^-10` gave them:
-290 clean handshakes bound a failure only to about 1.0%, and a weight may not
-claim more than the corpus shows.
+about 300 clean handshakes bound a failure only to about 1.0%, and a weight may
+not claim more than the corpus shows.
 
 **The SN steps stay assumed, as a tolerance.** How often a step breaks is a
 property of the link, what it loses and reorders, and not of zenoh: the
@@ -311,6 +312,27 @@ drops a share of the packets each way breaks about that share of its steps:
 | 5% | 6 of 110 (5.5%) | 2 / 0 / 0 |
 | 10% | 0 of 2 | 2 / 0 / 0 |
 | 20% | 17 of 94 (18%) | 8 / 0 / 2 |
+
+The same was done to UDP and TCP with a link that duplicates 5% of the packets
+or lets a quarter of them overtake the rest (netem, with a delay of 1.5 s: with
+10 ms, which the first reordering captures used, a publisher that sends once a
+second never has two packets close enough to overtake, and those captures broke
+0 of 236 steps; they are not kept), and to TCP at 1% and 5% loss:
+
+| link | steps broken | flows (yes / no / undecided) |
+|---|---|---|
+| UDP, 5% duplicated | 13 of 251 (5.2%) | 2 / 0 / 0 |
+| UDP, 25% reordered | 28 of 211 (13%) | 2 / 0 / 0 |
+| TCP, 1% lost | 0 of 238 | 2 / 0 / 0 |
+| TCP, 5% lost | 0 of 239 | 2 / 0 / 0 |
+| TCP, 5% duplicated | 0 of 239 | 2 / 0 / 0 |
+| TCP, 25% reordered | 0 of 1 | 2 / 0 / 0 |
+
+A duplicated datagram repeats an SN and breaks the step at about the rate it is
+duplicated, and a reordered one breaks the step it arrives out of; TCP hands
+the stream to zenoh in order whatever the link does, so its steps never break.
+The reordered TCP session carried one step in two minutes (99 units); with a
+delay of 1.5 s each way it got little done, and why was not traced.
 
 A rate measured on any of them would describe that capture's link. The assumed
 `2^-4` is the loss the test is built to tolerate, and it is not where the
@@ -326,7 +348,7 @@ traced packet by packet.
 
 A frame that repeats its SN never counts toward `yes`: a unit read whole
 (+965) and a broken step (-3994) sum to -3029. On the `no` sum the two nearly
-cancel (+3982 and -3994, 12 millibits apart), which is the model saying what
+cancel (+3983 and -3994, 11 millibits apart), which is the model saying what
 it should: under the null a unit reads whole one time in sixteen and a step
 breaks nearly always, and a zenoh flow breaks it one time in sixteen, so a
 frame that does both is as likely under one as under the other. A flow of such
@@ -339,7 +361,7 @@ first: a unit framed (held) or a desynchronisation this reader inferred
 capture holds from its SYN: a tap that joins a zenoh stream later lands inside
 a unit nearly always and loses the framing too, so there the observation says
 how the capture began and not what the bytes are. Held from the start, zenoh
-never lost it (0 in 284). The forty short MQTT connections lose it in both
+never lost it (0 in 300). The forty short MQTT connections lose it in both
 directions and read `undecided` still: twenty-odd bytes a direction are too
 few to say `no` at 2^-20, and that is the honest word.
 
@@ -349,7 +371,17 @@ raweth capture moved from `yes` to `undecided`: a version header, seven units
 read whole and one SN break come to about ten and a half bits, and model 1's
 crossing rested on the unit weight the real mDNS beats.
 
+Adding the six captures above (2100 units, 12 handshakes) moved the counts and
+with them the weights, and three null captures moved. A residual or undecoded
+unit now weighs -10986 on the `yes` sum, and on the `no` sum two undecoded
+units weigh -20244, past the threshold: a flow of two units no codec of this
+reader decodes, and nothing else weighed, now reads `no`, where it needed three.
+`lan-dns` went from 2 `no` and 185 `undecided` to 159 `no` and 28 `undecided`,
+`stack-coap` from 5 `no` and 20 `undecided` to 25 `no`, `lan-ssdp` from 1 and
+1 to 2 `no`. No flow of another protocol read `yes`, and no zenoh flow read
+`no`, before or after.
+
 Still open after model 2: zenoh versions other than 1.10.1, 1.10.0, 1.9.0,
 1.8.0, 1.7.2 and 1.5.0 (and routers only: the clients are all 1.10.1), links
-other than loopback, one emulated lossy link and one Wi-Fi link, and the
-null side only on the protocols the corpus holds.
+other than loopback, emulated links that lose, reorder or duplicate, and one
+Wi-Fi link, and the null side only on the protocols the corpus holds.

@@ -54,6 +54,9 @@ The original captures are not kept anywhere.
 | `zenoh-handshakes.pcap` | zenoh | TCP and UDP | 240 short sessions, the handshake checks' population |
 | `zenoh-udp-lossy.pcap` | zenoh | UDP unicast | a link that drops 5% each way |
 | `zenoh-udp-loss-1.pcap`, `zenoh-udp-loss-10.pcap`, `zenoh-udp-loss-20.pcap` | zenoh | UDP unicast | the same at 1%, 10% and 20%, an eclipse/zenoh 1.10.0 router and 1.10.1 clients |
+| `zenoh-tcp-loss-1.pcap`, `zenoh-tcp-loss-5.pcap` | zenoh | TCP | the same setup over TCP, 1% and 5% dropped each way |
+| `zenoh-tcp-reorder-25.pcap`, `zenoh-udp-reorder-25.pcap` | zenoh | TCP, UDP | the same, a quarter of the packets overtaking the rest after a delay of 1.5 s |
+| `zenoh-tcp-dup-5.pcap`, `zenoh-udp-dup-5.pcap` | zenoh | TCP, UDP | the same, 5% of the packets duplicated |
 | `link-tcp-full.pcap` | zenoh | TCP | a router and clients on two machines over an office Wi-Fi, from before the first Init |
 | `link-tcp-large.pcap` | zenoh | TCP | the same with 3000-byte samples, so a sample spans segments |
 | `link-tcp-midsession.pcap` | zenoh | TCP | the same, joined seven seconds in |
@@ -80,8 +83,8 @@ The original captures are not kept anywhere.
 
 On the zenoh side versions other than
 1.10.1, 1.10.0, 1.9.0, 1.8.0, 1.7.2 and 1.5.0 (all with 1.10.1 clients) and
-links other than loopback, emulated lossy ones (1% to 20%, UDP) and one office
-Wi-Fi link.
+links other than loopback, emulated ones that lose (1% to 20%), reorder or
+duplicate packets, and one office Wi-Fi link.
 Each is added the same way: captured from the real
 implementation, a parser in the anonymiser where a payload of other devices can
 carry an identity, and the measured tally pinned beside the others. QUIC needed
