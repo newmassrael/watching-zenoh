@@ -2262,6 +2262,10 @@ pub mod storage_gc_service;
 // (nor pays for `futures-util`).
 #[cfg(feature = "routing-accept")]
 pub mod accept_loop;
+/// Collision resolution for the accept loop's one face per remote zid: which of two links to one
+/// node is kept, and when the winner is admitted. A pure state machine, tested without a runtime.
+#[cfg(feature = "routing-accept")]
+mod link_collision;
 
 /// What an accepting node gives an inbound link before its handshake is complete (upstream's
 /// `accept_timeout` and `accept_pending`): plain configuration data that the C interfaces carry

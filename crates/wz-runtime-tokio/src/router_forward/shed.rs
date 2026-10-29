@@ -68,6 +68,22 @@ impl ShedRegistry {
         self.lock().remove(&id);
     }
 
+    /// Ask the session `id` to close because a second link to its node has come up and is the
+    /// one to keep ([`SessionLinkActions::close_for_replacement`]). `true` when the router
+    /// holds the session and it was asked; the session leaves when its drive loop gets to the
+    /// close. The handle is taken under the lock and used outside it, so the close, which writes,
+    /// never holds the registry.
+    pub(crate) fn close_replaced(&self, id: FaceId) -> bool {
+        let actions = self.lock().get(&id).map(|held| Arc::clone(&held.actions));
+        match actions {
+            Some(actions) => {
+                actions.close_for_replacement();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// The sessions held that have not been ordered closed: the ones the router is keeping.
     pub fn live(&self) -> usize {
         self.lock().values().filter(|held| !held.shedding).count()

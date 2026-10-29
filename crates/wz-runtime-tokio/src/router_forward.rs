@@ -10740,6 +10740,31 @@ impl FaceForwarder for RouterForwarder {
         true
     }
 
+    /// Of two links to one node, the one the node with the lower zid dialled
+    /// ([`wz_session_core::link_admission`]). Two routers or peers that dial each other make two
+    /// links between them, and the first up is decided differently at the two ends; this rule
+    /// reads the two zids, which both ends read alike.
+    fn judge_second_link(
+        &self,
+        held_dialled: bool,
+        new_dialled: bool,
+        remote_zid: &[u8],
+    ) -> Option<wz_session_core::link_admission::SecondLink> {
+        let tables = self.tables.read();
+        Some(wz_session_core::link_admission::judge_second_link(
+            held_dialled,
+            new_dialled,
+            tables.north_net().self_zid().as_slice(),
+            remote_zid,
+        ))
+    }
+
+    /// The held face is asked to close through the registry that holds the handle of every
+    /// session of this router, which a thread other than the loop's can use.
+    fn close_face(&self, id: FaceId) -> bool {
+        self.shed_registry.close_replaced(id)
+    }
+
     fn register_joined(
         &self,
         joined_id: FaceId,

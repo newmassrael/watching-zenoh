@@ -802,10 +802,29 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
     `refuses_inbound_from`, so an inbound link the lower zid dialled is not dropped before the
     registry can decide it. The two ABIs' engines therefore keep one link alike when two nodes
     dial each other, and the zenoh-c differential against the real library (two peers that dial
-    each other keep one link, wz with wz and either way with libzenohc) still passes. Not through
-    this: the linkstate peer of the AP node (`wz-runtime-tokio`'s `router_forward`, whose
-    forwarders key the graph on the zid), which keeps the first up and is not part of the C ABIs'
-    path.
+    each other keep one link, wz with wz and either way with libzenohc) still passes.
+  - The AP node's own peers (the face loop of `wz-runtime-tokio` with a `RouterForwarder`, whose
+    graph is keyed on the zid) keep one link by the same rule, resolved in the loop as a
+    COLLISION and not as a refusal, which is what BGP (RFC 4271 section 6.8) and Erlang's
+    distribution handshake do: compare the identifiers both ends read alike and keep the
+    connection the lower one opened. Two things the loop had to get right that a comparison does
+    not say. The held face is asked to close with `MAX_LINKS` (`close_for_replacement`, the three
+    steps `close_for_capacity` takes) and the winner is PARKED, not admitted, until that face has
+    left the loop, the forwarder and the observers, because the graph keys a link on the zid and
+    a face still leaving would remove the link of the one that replaced it; the winner is then
+    admitted through the door a new link comes in by, so it meets the bounds, the region rules and
+    the peers' machines at that moment. And a third link to the node while a replacement is under
+    way is refused, since the node is held by no face that stays. The state is
+    `wz_runtime_tokio::link_collision` (two small tables, no sockets, tested over every order two
+    ends complete their links in); the forwarder answers the rule
+    (`FaceForwarder::judge_second_link`) and closes by id (`close_face`, through the registry that
+    holds every session's close handle), and a forwarder with neither keeps the first up, so the
+    other forwarders are unchanged. One link of an aggregated session is not replaced. The proof
+    is `router_mutual_dial_e2e.rs`: two `peer_loop`s with a router's forwarder, each bound before
+    either dials, both dials started in one poll, eight rounds alternating which node has the
+    lower zid; each ends with one face, the two ends keep the same link, and it is the lower zid's.
+    With the rule shut off the same test fails in its first round, both nodes having brought up a
+    face and closed it, none left.
     A cooperative listener refuses the second of two clients of one zid, as zenoh does; the
     routers of a test are given zids of their own for it (`tests::face_table`).
 

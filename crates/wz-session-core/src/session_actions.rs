@@ -9223,6 +9223,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// 3. The close is requested of the machine ([`Self::request_congestion_close`]), which takes
     ///    the session down when its drive loop runs.
     pub fn close_for_capacity(&self) {
+        self.close_and_take_down(CloseReason::Unresponsive);
+    }
+
+    /// Close this session because a second link to the same node replaces it: the link the
+    /// node with the lower zid dialled is the one kept, so that both ends keep the same one
+    /// ([`crate::link_admission`]). The three steps of [`Self::close_for_capacity`], with the
+    /// reason zenoh gives a link refused for the node it already holds (`MAX_LINKS`), so the
+    /// peer knows its link was not lost but superseded.
+    pub fn close_for_replacement(&self) {
+        self.close_and_take_down(CloseReason::MaxLinks);
+    }
+
+    /// The close both of the above make: the keepalives stop now, the peer is told why on the
+    /// urgent write, and the machine is asked to take the session down when its drive loop runs.
+    fn close_and_take_down(&self, reason: CloseReason) {
         self.stop_keepalives();
         #[cfg(all(
             feature = "codec-close",
@@ -9233,12 +9248,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             #[cfg(feature = "transport-batching")]
             self.flush_open_batch();
             R::with_mutex_mut(&self.trace, |t| t.send_close_frame_with_reason += 1);
-            let bytes = encode_close(
-                CloseReason::Unresponsive as u8,
-                self.close_scope_is_session(),
-            );
+            let bytes = encode_close(reason as u8, self.close_scope_is_session());
             self.send_wire_urgent_this_link(&bytes, Reliability::Reliable);
         }
+        #[cfg(not(all(
+            feature = "codec-close",
+            feature = "transport-keepalive",
+            not(feature = "tx-lend-only")
+        )))]
+        let _ = reason;
         self.request_congestion_close();
     }
 

@@ -93,6 +93,7 @@ use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
 use wz_runtime_core::TimeSource;
 
+use crate::link_collision::{LinkCollisions, Resolution};
 #[cfg(any(feature = "router-connect-reconcile", feature = "transport-multilink"))]
 use crate::retry_period::RetryPeriod;
 use crate::retry_period::RetryPolicy;
@@ -1008,6 +1009,39 @@ pub trait FaceForwarder {
         false
     }
 
+    /// Which of two links to one node this forwarder keeps, when the loop holds a face to the
+    /// node already and a second link to it has completed its handshake. `held_dialled` and
+    /// `new_dialled` say whether this node dialled each link. The loop asks it only of a
+    /// forwarder that [`dedups_faces_by_zid`](Self::dedups_faces_by_zid).
+    ///
+    /// `Some(SecondLink::Refuse)` keeps the held face and closes the new link, which is what
+    /// the first up has always done; `Some(SecondLink::Replace)` keeps the NEW link: the held
+    /// face is closed ([`close_face`](Self::close_face)), and the new link is admitted once the
+    /// loop has processed that face's departure, because the routing state is keyed on the zid
+    /// and a face that is still leaving would remove the link of the face that replaced it.
+    ///
+    /// Two nodes that dialled each other make two links between them, and "the first up" is
+    /// decided differently at the two ends (each keeps the link that completed first on its side
+    /// and closes the one the other kept), which leaves none. A forwarder that answers with
+    /// [`wz_session_core::link_admission::judge_second_link`] keeps, at both ends, the link the
+    /// node with the lower zid dialled. Default `None`: the loop keeps the first up.
+    fn judge_second_link(
+        &self,
+        _held_dialled: bool,
+        _new_dialled: bool,
+        _remote_zid: &[u8],
+    ) -> Option<wz_session_core::link_admission::SecondLink> {
+        None
+    }
+
+    /// Ask the face `id` to close, because a link that replaces it has come up
+    /// ([`judge_second_link`](Self::judge_second_link)). `true` when the face was asked and its
+    /// departure will reach the loop as the end of its drive; `false` when the forwarder has no
+    /// such face to ask, and the loop then keeps the first up. Default `false`.
+    fn close_face(&self, _id: FaceId) -> bool {
+        false
+    }
+
     /// R311y219b (transport-multilink) — a SECOND+ physical link aggregated onto a
     /// peer's logical session (`join_link`) is NOT `register`ed as its own face (it
     /// shares the primary's), so its inbound events reach [`forward`](Self::forward)
@@ -1130,6 +1164,36 @@ type OpenResult = (FaceId, AcceptedPeer, Result<OpenedSession, OpenError>);
 /// one heap alloc per open is negligible beside the handshake it wraps. No
 /// `Send` bound — the whole loop is single-task `!Send` (see the module doc).
 type OpenFuture = Pin<Box<dyn Future<Output = OpenResult>>>;
+
+/// A link that completed its handshake to a node the loop holds a face to, is the link to keep
+/// ([`FaceForwarder::judge_second_link`]), and waits for that face to leave
+/// ([`crate::link_collision`]): the open as it arrived, and whether this loop accepted it, which
+/// the loop forgets when it makes the face and must be told again when the open is admitted.
+struct ParkedOpen {
+    id: FaceId,
+    peer: AcceptedPeer,
+    opened: OpenedSession,
+    accepted: bool,
+}
+
+/// Admit a parked link now that the face it replaces has left, through the door a new link comes
+/// in by: it is the same open, completed, and meets the checks of any other (the bounds, the
+/// region rules, the peer's machine) at the moment it is admitted and not at the moment it was
+/// parked.
+fn admit_parked(
+    parked: ParkedOpen,
+    opening: &mut FuturesUnordered<OpenFuture>,
+    accepted_ids: &mut std::collections::BTreeSet<FaceId>,
+) {
+    if parked.accepted {
+        accepted_ids.insert(parked.id);
+    }
+    opening.push(Box::pin(std::future::ready((
+        parked.id,
+        parked.peer,
+        Ok(parked.opened),
+    ))));
+}
 
 /// R311y205 (transport-multilink) — the `driving` set's boxed element type in an
 /// aggregating build. [`drive_face`], [`drive_joined_face`] and
@@ -2824,6 +2888,10 @@ where
     // now that the dedups read it). `peak_concurrent` and the held-count read its
     // cardinality.
     let mut faces: BTreeMap<FaceId, Option<Vec<u8>>> = BTreeMap::new();
+    // The directions of the faces held, and the links waiting behind a face that is closing
+    // because a link that replaces it came up ([`crate::link_collision`]). Both are read at the
+    // face-establishment dedup and written where a face is held and where one leaves.
+    let mut collisions: LinkCollisions<ParkedOpen> = LinkCollisions::default();
     // R2951 — the ids of opens the loop ACCEPTED, from the accept push until the
     // open resolves either way. What is not in it is a dial, which is how
     // `Face::dialed` is answered in every build, the loop's peers or not.
@@ -3295,9 +3363,74 @@ where
                         // deduped, so it is held. zenoh's transport manager
                         // (`init_transport_unicast`) keeps one transport per zid for
                         // EVERY node; wz scopes it to the forwarders that need it.
+                        //
+                        // A second link to a held node is a COLLISION and is resolved, not
+                        // merely refused ([`crate::link_collision`]): of two links that went
+                        // opposite ways the forwarder's rule keeps the one the lower zid
+                        // dialled, which both ends read alike, so a forwarder that has the rule
+                        // may keep the NEW link. The held face is then asked to close and the new
+                        // link waits, parked, for the face to leave, because the graph is keyed
+                        // on the zid (see above) and a face still leaving would remove the link
+                        // of the one that replaced it.
                         if forwarder.dedups_faces_by_zid() {
                             if let Some(z) = &face.peer_zid {
-                                if holds_zid(&faces, z) || forwarder.holds_peer(z) {
+                                // A face the forwarder holds and this loop cannot see keeps the
+                                // first up, as it always has.
+                                let resolution = if forwarder.holds_peer(z) {
+                                    Resolution::Refuse
+                                } else if holds_zid(&faces, z) {
+                                    // One link of an aggregated session is not a face of its
+                                    // own and cannot be closed alone.
+                                    #[cfg(feature = "transport-multilink")]
+                                    let can_replace = |held: FaceId| !ml_faces.contains_key(&held);
+                                    #[cfg(not(feature = "transport-multilink"))]
+                                    let can_replace = |_: FaceId| true;
+                                    collisions.resolve(
+                                        &faces,
+                                        z,
+                                        face.dialed,
+                                        |held_dialled, new_dialled| {
+                                            forwarder.judge_second_link(
+                                                held_dialled,
+                                                new_dialled,
+                                                z,
+                                            )
+                                        },
+                                        can_replace,
+                                    )
+                                } else {
+                                    Resolution::Admit
+                                };
+                                let refused = match resolution {
+                                    Resolution::Admit => false,
+                                    Resolution::Refuse => true,
+                                    Resolution::Replace { held } => {
+                                        if forwarder.close_face(held) {
+                                            log::debug!(
+                                                "face {} to the node of held face {} is the link \
+                                                 to keep: face {} is closing and face {} waits",
+                                                id.0,
+                                                held.0,
+                                                held.0,
+                                                id.0
+                                            );
+                                            collisions.park(
+                                                held,
+                                                ParkedOpen {
+                                                    id,
+                                                    peer: face.peer.clone(),
+                                                    opened,
+                                                    accepted: !face.dialed,
+                                                },
+                                            );
+                                            continue;
+                                        }
+                                        // The forwarder holds no such face to ask: the held one
+                                        // stays, as it did before there was a rule.
+                                        true
+                                    }
+                                };
+                                if refused {
                                     log::debug!(
                                         "dropping redundant face {} to an already-held peer",
                                         id.0
@@ -3431,6 +3564,7 @@ where
                             peer_sessions.insert(id, opened.actions.clone());
                         }
                         faces.insert(id, face.peer_zid.clone());
+                        collisions.admitted(id, face.dialed);
                         summary.established += 1;
                         summary.peak_concurrent = summary.peak_concurrent.max(faces.len());
                         // Register the face's send seam BEFORE moving `opened`
@@ -3557,6 +3691,12 @@ where
                                 ml_sessions.remove(&peer_zid)
                             {
                                 faces.remove(&primary_id);
+                                // An aggregated session is never replaced (`can_replace`), so
+                                // nothing waits behind it; a link that did would be admitted as
+                                // any other is, and its direction is forgotten all the same.
+                                if let Some(parked) = collisions.departed(primary_id) {
+                                    admit_parked(parked, &mut opening, &mut accepted_ids);
+                                }
                                 // Decision D5 — the session is gone: the peers its
                                 // primary face held back off and dial again.
                                 #[cfg(feature = "router-connect-reconcile")]
@@ -3621,6 +3761,7 @@ where
                 #[cfg(feature = "transport-multilink")]
                 ml_dial_endpoints.remove(&face.id);
                 faces.remove(&face.id);
+                let departed = face.id;
                 // Decision D5 — the face a peer was held by died: each peer's
                 // machine backs off and asks for the retry. This is the peer
                 // auto-reconnect, upstream's re-dial of a configured endpoint
@@ -3637,6 +3778,12 @@ where
                     stats.transport_closed(face.id.0);
                 }
                 on_event(&AcceptEvent::FaceDown(face, outcome));
+                // The face has left the loop, the forwarder and the observers, which is what a
+                // link parked behind it waited for: the node is held by no face now, and the
+                // link that replaces it is admitted as any other.
+                if let Some(parked) = collisions.departed(departed) {
+                    admit_parked(parked, &mut opening, &mut accepted_ids);
+                }
             }
 
             Step::Dial(intent) => {
