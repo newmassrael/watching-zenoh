@@ -1340,6 +1340,12 @@ pub struct ZenohNodeConfig {
     /// R3075 -- `scouting/gossip/autoconnect_strategy`: the tie-break applied to a node gossip
     /// names, per its role. The twin of [`Self::scout_multicast_autoconnect_strategy`].
     pub scout_gossip_autoconnect_strategy: Option<AutoConnectStrategies>,
+    /// `scouting/gossip/multihop`: whether the gossip graph floods the nodes it learns of past
+    /// the next hop, so that a node hears of the peers two links away and not only of its
+    /// neighbours. A plain bool in upstream, not a mode table. `None` is "the document said
+    /// nothing", which is zenoh's `false`. Read by the zenoh-c ABI's session when it opens
+    /// ([`C_ABI_SESSION_HONOURED_KEYS`]), which hands it to the gossip plane it holds.
+    pub scout_gossip_multihop: Option<bool>,
     /// R311y849 — `connect/retry`: how long a refused dial waits before the next
     /// attempt, and how that wait grows
     /// (`period_init_ms` / `period_max_ms` / `period_increase_factor`).
@@ -1580,6 +1586,7 @@ impl Default for ZenohNodeConfig {
             scout_gossip_target: None,
             scout_gossip_autoconnect: None,
             scout_gossip_autoconnect_strategy: None,
+            scout_gossip_multihop: None,
             // R311y849 — `None` and NOT `RetryPolicy::ZENOH_DEFAULT`, even though
             // that is the schedule an unset key produces. The two are the same
             // BEHAVIOUR and different FACTS: `None` is "the file said nothing",
@@ -2655,9 +2662,8 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // `open/return_conditions/connect_scouted` above.
     // R3075 -- `enabled`, `target`, `autoconnect` and `autoconnect_strategy` LEFT this list: the
     // zenoh-c session reads them when it opens ([`C_ABI_SESSION_HONOURED_KEYS`]), the way it
-    // reads the two shared-memory keys. `multihop` stays: a multi-hop gossip graph floods more
-    // than one hop, which the plane the session holds does not build.
-    "scouting/gossip/multihop",
+    // reads the two shared-memory keys. `multihop` left with them once the plane the session
+    // holds built a graph that floods more than one hop.
     // R2141 (open-debt item 223) — `scouting/multicast/autoconnect` and
     // `_strategy` MOVED OUT of here, into `HONOURED_CONFIG_KEYS`. Their gossip
     // twins two lines up stay: the gossip plane's policy is installed from the
@@ -2960,11 +2966,9 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
 /// is what makes this classification a reading rather than a guess — wz asserts
 /// the mapping and the reader contradicts it:
 ///
-/// * `scouting/gossip/multihop` — `wz_routing_graph::LinkstateNetwork` carries a
-///   `gossip_multihop` field with a `set_gossip_multihop` setter, and its doc
-///   cites `scouting.gossip.multihop` by name.
-/// * (R3075 -- `scouting/gossip/target`, `autoconnect` and `autoconnect_strategy`
-///   LEFT this list: the zenoh-c session reads them, [`C_ABI_SESSION_HONOURED_KEYS`].)
+/// * (R3075 -- `scouting/gossip/target`, `autoconnect`, `autoconnect_strategy` and
+///   `multihop` LEFT this list: the zenoh-c session reads them,
+///   [`C_ABI_SESSION_HONOURED_KEYS`].)
 /// * `downsampling` — `DownsamplingRule` on the composable `InterceptorChain`,
 ///   driven today by `--downsample` / `--downsample-freq` (upstream's Hertz
 ///   unit) / `--downsample-link-protocol` / `--downsample-interface`.
@@ -3022,10 +3026,8 @@ pub const UNHONOURED_READER_GAP: &[&str] = &[
     // unhonoured at all. A row here is a statement about what is missing, so it
     // is expected to be short-lived when the missing thing is a reader.
     // R3075 -- `autoconnect`, `autoconnect_strategy` and `target` LEFT this list: the zenoh-c
-    // session reads them ([`C_ABI_SESSION_HONOURED_KEYS`]). The reader gap that remains is
-    // `multihop`, whose capability (a graph that floods more than one hop) the session's plane
-    // does not use.
-    "scouting/gossip/multihop",
+    // session reads them ([`C_ABI_SESSION_HONOURED_KEYS`]), and `multihop` left after them: the
+    // session's gossip plane builds the graph that floods more than one hop.
     // `transport/link/tls/{connect_certificate,connect_private_key,enable_mtls,
     // verify_name_on_connect}` LEFT this list for `HONOURED_CONFIG_KEYS`: the reader reads them
     // and the open hands them to the tls links.
@@ -3411,12 +3413,8 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
     // never taught to feed it. The key stays UNHONOURED either way — what
     // moved is WHY, which is the only thing this table records.
     ("region_name", "wz-has-it", "RegionName"),
-    // R3075 -- the `autoconnect`, `autoconnect_strategy` and `target` rows left with their keys.
-    (
-        "scouting/gossip/multihop",
-        "wz-has-it",
-        "set_gossip_multihop",
-    ),
+    // R3075 -- the `autoconnect`, `autoconnect_strategy`, `target` and `multihop` rows left with
+    // their keys.
     // R2336 (open-debt item 15) — the `transport/auth/pubkey/known_keys_file`
     // row left with the key. This ledger's population is the UNHONOURED
     // SURFACE, and the key is [`UPSTREAM_INERT_CONFIG_KEYS`] now; wz's source
@@ -3735,14 +3733,13 @@ pub const DEEPENABLE_UPSTREAM_KEYS: &[&str] = &[
 /// of that list existing: R2957 gave it to the predicate and to nothing that
 /// counts the surface.
 ///
-/// R3075 -- and four more, the gossip plane's: `scouting/gossip/enabled` (whether the session
+/// R3075 -- and five more, the gossip plane's: `scouting/gossip/enabled` (whether the session
 /// holds a gossip plane at all), `target` (which roles it sends topology to), `autoconnect`
-/// (which roles it dials when gossip names them) and `autoconnect_strategy` (the tie-break
-/// per role), the last three mode-dependent like their multicast twins. The demo takes the same
-/// policy from its command line, so these are no node capability, only the C ABI session's:
-/// the same reason the two keys above are here. `multihop` is not: it asks for a graph that
-/// floods more than one hop, which the plane this session holds does not build, and it stays
-/// among the keys wz does not honour.
+/// (which roles it dials when gossip names them), `autoconnect_strategy` (the tie-break
+/// per role), the three before it mode-dependent like their multicast twins, and `multihop`
+/// (whether the graph floods the nodes it learns of past the next hop, a plain bool). The demo
+/// takes the same policy from its command line, so these are no node capability, only the C
+/// ABI session's: the same reason the two keys above are here.
 ///
 /// Open-debt item 913 -- and `transport/multicast/join_interval`, how often each group the
 /// zenoh-c session joins sends its JOIN. The demo's groups take their interval from its command
@@ -3761,6 +3758,7 @@ pub const C_ABI_SESSION_HONOURED_KEYS: &[&str] = &[
     "scouting/gossip/autoconnect",
     "scouting/gossip/autoconnect_strategy",
     "scouting/gossip/enabled",
+    "scouting/gossip/multihop",
     "scouting/gossip/target",
     "transport/link/tx/keep_alive",
     "transport/multicast/join_interval",
@@ -7169,6 +7167,10 @@ impl ZenohNodeConfig {
             }
             ModeRead::ForOtherModes => other_modes.push("scouting/gossip/autoconnect_strategy"),
             ModeRead::Absent => {}
+        }
+        if let Some(v) = want_bool(&doc, "scouting/gossip/multihop")? {
+            out.scout_gossip_multihop = Some(v);
+            named.push("scouting/gossip/multihop");
         }
         match want_bool_for_mode(&doc, "timestamping/enabled", out.mode)? {
             ModeRead::Value(v) => {

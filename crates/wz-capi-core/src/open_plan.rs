@@ -1647,7 +1647,8 @@ mod tests {
         let gossip = |autoconnect: u8| {
             format!(
                 "Some(GossipPolicy {{ target: WhatAmIMatcher(3), \
-                 autoconnect: WhatAmIMatcher({autoconnect}), strategies: Unique(Always) }})"
+                 autoconnect: WhatAmIMatcher({autoconnect}), strategies: Unique(Always), \
+                 multihop: false }})"
             )
         };
         // A client makes one attempt and does not gossip; it scouts for a router or a peer.

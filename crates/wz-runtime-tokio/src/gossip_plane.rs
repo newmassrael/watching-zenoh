@@ -86,6 +86,10 @@ pub struct GossipPolicy {
     pub autoconnect: WhatAmIMatcher,
     /// The tie-break per role dialled.
     pub strategies: AutoConnectStrategies,
+    /// Whether the graph floods the nodes it learns of past the next hop (`scouting/gossip/
+    /// multihop`): a node then hears of the peers two links away, with the locators to dial them,
+    /// and not only of its neighbours.
+    pub multihop: bool,
 }
 
 /// A config's gossip target names `client`, which upstream refuses when the node opens
@@ -106,6 +110,7 @@ impl GossipPolicy {
             target: default_target(whatami),
             autoconnect: default_autoconnect(whatami),
             strategies: AutoConnectStrategies::default(),
+            multihop: false,
         }
     }
 
@@ -129,6 +134,7 @@ impl GossipPolicy {
             strategies: config
                 .scout_gossip_autoconnect_strategy
                 .unwrap_or(shipped.strategies),
+            multihop: config.scout_gossip_multihop.unwrap_or(shipped.multihop),
         };
         if policy.target.matches(WhatAmI::Client) {
             return Err(GossipTargetNamesClient);
@@ -228,6 +234,7 @@ impl GossipCore {
         // zenoh's peer mode is gossip (`routing.peer.mode` = "peer_to_peer"): the graph's own
         // default is the linkstate mode this crate's sessions do not run.
         net.set_full_linkstate(false);
+        net.set_gossip_multihop(policy.multihop);
         Some(Self {
             net,
             target: policy.target,
@@ -241,6 +248,36 @@ impl GossipCore {
     /// up and a neighbour has them from its first list.
     pub fn set_self_locators(&mut self, locators: Vec<String>) {
         self.net.set_self_locators(locators);
+    }
+
+    /// The graph this node holds, as the text its admin space answers a `linkstate` query with:
+    /// one vertex for each node it knows, labelled with the node's zid in hex
+    /// (`zenoh/src/net/runtime/adminspace.rs` @ `fn linkstate_data`, which answers each region's
+    /// hat with its `info`).
+    ///
+    /// Under multihop the graph is the whole of what the node learnt. Without it the graph is
+    /// the node and the nodes it holds a face to: upstream's single-hop `Gossip` object records
+    /// a node when that node sends its own entry, and a node it only hears of is used to dial
+    /// and not kept (`zenoh/src/net/protocol/gossip.rs` @ `if zid == src {`).
+    pub fn graph_text(&self) -> String {
+        let label = |zid: &Zid| wz_session_core::zid_hex::zid_to_zenoh_hex(zid.as_slice());
+        if self.net.gossip_multihop() {
+            return self.net.dot_with(label);
+        }
+        let mut nodes = vec![*self.net.self_zid()];
+        for held in self.faces.values() {
+            if let Some(zid) = held.zid {
+                if !nodes.contains(&zid) {
+                    nodes.push(zid);
+                }
+            }
+        }
+        let mut text = String::from("graph {\n");
+        for (index, zid) in nodes.iter().enumerate() {
+            text.push_str(&format!("    {index} [ label = \"{}\" ]\n", label(zid)));
+        }
+        text.push_str("}\n");
+        text
     }
 
     /// Whether a face of role `whatami` is sent topology.
@@ -441,6 +478,11 @@ impl GossipPlane {
     /// See [`GossipCore::set_self_locators`].
     pub fn set_self_locators(&self, locators: Vec<String>) {
         self.core().set_self_locators(locators);
+    }
+
+    /// See [`GossipCore::graph_text`].
+    pub fn graph_text(&self) -> String {
+        self.core().graph_text()
     }
 
     /// A face came up. The messages to send are returned; the dials are posted.
