@@ -297920,6 +297920,42 @@
         "Open: the same doors and links for the zenoh-c ABI, which has none of the clock, event, supervision or snapshot doors; the host ResourceSource, to be written with its first reader on the hosted engine; a dissector reader and a decision on where a snapshot comes from in a capture; the log sink, still recommended dropped and undecided; the SCE algorithm for the supervisor's deadline comparison. A nonzero events_dropped has never been read through the doors."
       ]
     },
+    "Round 3902": {
+      "decision_summary": "A router session can ask a query, as the node's own face. Upstream routes a node's own get as a request from a face of its own in the Local region, and so does the forwarder now: it takes the route of a request from a leaf region, to the queryables of every face that holds one on the key, and tells the face each reply and the end of them under the request id the face gave. The face holds the query by that id in the registry a session holds its gets in, and hands each reply to the callback of the get, which is dropped at the end, ending the channel of a handler. A get that no queryable meets ends at once. The upstream unicity file passes (2 of 2), where its brokered test failed on the router's refusal of a get. What the router session still refuses: a delete, a queryable, a querier, a namespace.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward.rs: local_get routes a request of the Local face; LocalFaceEvent carries the replies (Reply, ReplyFinal) and no longer derives Eq; local_face_event maps a Response and a ResponseFinal; the Local face is a source-only inbound; local_face_aliases; two tests.",
+        "crates/wz-capi-core/src/drive/router_node/local_face.rs: the face holds its queries in a reply registry and hands the replies and the end to the caller (hold_query).",
+        "crates/wz-capi-core/src/drive/router_node.rs and crates/wz-capi-core/src/drive.rs: RouterState::get builds the request from the options of a query and asks it; the router-node feature carries query in crates/wz-capi-core/Cargo.toml.",
+        "crates/wz-zenoh/src/api/session.rs: ask is split into asked_of and the issue, and router_ask asks a router's get; a test, and the refusal test no longer names a get.",
+        "scripts/lib/capability_cost_gate.py: the text budget of pico-client-small moves from 1,517,000 to 1,520,800 with its measurements stated (1,517,026 on the head of round 3901, 1,517,268 with the router get, no router symbol linked)."
+      ],
+      "verification_bullets": [
+        "Locally: the library tests of the top crate pass with unstable, the router tests of the runtime pass with the routing, token and access control features, including the two of this round and the new router session test; clippy with warnings denied passes for the runtime with all features, the session core, and the top crate with the default features and with unstable; the upstream unicity file passes (2 of 2). The static gates are run before the push. Not run: the other upstream files after this change, the legs gate and the hosted run."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed, from the router session: regression_3, and the peer session of this crate, which does not forward between its faces (six clientviapeer tests); the queryable and the querier of the router and its matching status (six matching tests), a delete, a put that carries an encoding, a timestamp or an attachment; a namespace (four routed namespace tests) and an authentication; the sessions the node holds; the admin host of the router and the REST plugin (adminspace), the authentication, the interceptor that rewrites the quality of service of a message (qos_overwrite) and the linkstate admin keys of a peer with the multihop gossip key (routing). Also owed: the shared-memory transport the top crate does not act on yet (the shm file), the files that run none, a build without unstable serves no admin key of its own, a lane for the harness, the margin of the main job, the pin bump to 1.10.2."
+      ],
+      "publishable_decision_summary": "A router session can ask a query, as the node's own face. Upstream routes a node's own get as a request from a face of its own in the Local region, and so does the forwarder now: it takes the route of a request from a leaf region, to the queryables of every face that holds one on the key, and tells the face each reply and the end of them under the request id the face gave. The face holds the query by that id in the registry a session holds its gets in, and hands each reply to the callback of the get, which is dropped at the end, ending the channel of a handler. A get that no queryable meets ends at once. The upstream unicity file passes (2 of 2), where its brokered test failed on the router's refusal of a get. What the router session still refuses: a delete, a queryable, a querier, a namespace.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward.rs: local_get routes a request of the Local face; LocalFaceEvent carries the replies (Reply, ReplyFinal) and no longer derives Eq; local_face_event maps a Response and a ResponseFinal; the Local face is a source-only inbound; local_face_aliases; two tests.",
+        "crates/wz-capi-core/src/drive/router_node/local_face.rs: the face holds its queries in a reply registry and hands the replies and the end to the caller (hold_query).",
+        "crates/wz-capi-core/src/drive/router_node.rs and crates/wz-capi-core/src/drive.rs: RouterState::get builds the request from the options of a query and asks it; the router-node feature carries query in crates/wz-capi-core/Cargo.toml.",
+        "crates/wz-zenoh/src/api/session.rs: ask is split into asked_of and the issue, and router_ask asks a router's get; a test, and the refusal test no longer names a get.",
+        "scripts/lib/capability_cost_gate.py: the text budget of pico-client-small moves from 1,517,000 to 1,520,800 with its measurements stated (1,517,026 on the head of round 3901, 1,517,268 with the router get, no router symbol linked)."
+      ],
+      "publishable_verification_bullets": [
+        "Locally: the library tests of the top crate pass with unstable, the router tests of the runtime pass with the routing, token and access control features, including the two of this round and the new router session test; clippy with warnings denied passes for the runtime with all features, the session core, and the top crate with the default features and with unstable; the upstream unicity file passes (2 of 2). The static gates are run before the push. Not run: the other upstream files after this change, the legs gate and the hosted run."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed, from the router session: regression_3, and the peer session of this crate, which does not forward between its faces (six clientviapeer tests); the queryable and the querier of the router and its matching status (six matching tests), a delete, a put that carries an encoding, a timestamp or an attachment; a namespace (four routed namespace tests) and an authentication; the sessions the node holds; the admin host of the router and the REST plugin (adminspace), the authentication, the interceptor that rewrites the quality of service of a message (qos_overwrite) and the linkstate admin keys of a peer with the multihop gossip key (routing). Also owed: the shared-memory transport the top crate does not act on yet (the shm file), the files that run none, a build without unstable serves no admin key of its own, a lane for the harness, the margin of the main job, the pin bump to 1.10.2."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
