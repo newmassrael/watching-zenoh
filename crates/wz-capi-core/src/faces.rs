@@ -293,10 +293,22 @@ impl<'a> PutKey<'a> {
 }
 
 /// What a group leg sends of a publish's payload: its bytes, whatever form the faces are
-/// sent it in. A group negotiates no shared memory, so a chunk reaches it as the bytes
-/// read back out of the chunk, as it reaches a face that did not negotiate it.
+/// sent it in, and the chunk of shared memory they lie in when they lie in one. A group that
+/// is a shared-memory one is sent the chunk's descriptor; any other group reaches it as the
+/// bytes read back out of the chunk, as a face that did not negotiate shared memory does.
 trait LegBytes {
+    /// Read by the group leg alone, which a build without the multicast transport lacks.
+    #[cfg_attr(
+        not(feature = "multicast-transport"),
+        expect(dead_code, reason = "only a group leg sends the bytes of a payload")
+    )]
     fn leg_bytes(&self) -> &[u8];
+
+    /// The chunk of shared memory the bytes lie in, if they do.
+    #[cfg(feature = "transport-shm")]
+    fn shm_chunk(&self) -> Option<&dyn wz_runtime_tokio::shm_provider::ShmPublishable> {
+        None
+    }
 }
 
 impl LegBytes for &[u8] {
@@ -310,12 +322,20 @@ impl LegBytes for Arc<wz_runtime_tokio::shm_provider::ShmBackedPayload> {
     fn leg_bytes(&self) -> &[u8] {
         self.bytes()
     }
+
+    fn shm_chunk(&self) -> Option<&dyn wz_runtime_tokio::shm_provider::ShmPublishable> {
+        Some(self)
+    }
 }
 
 #[cfg(feature = "transport-shm")]
 impl LegBytes for wz_session_core::extshm::ShmSendHandle {
     fn leg_bytes(&self) -> &[u8] {
         self.bytes()
+    }
+
+    fn shm_chunk(&self) -> Option<&dyn wz_runtime_tokio::shm_provider::ShmPublishable> {
+        Some(self)
     }
 }
 
@@ -1674,14 +1694,23 @@ impl Default for SessionResources {
 /// session keeps the default POSIX reader every session is built with.
 #[cfg(feature = "transport-shm")]
 fn install_shm_reader(session: &TokioSession, clients: &OpenShmClients) {
+    if let Some(resolver) = shm_resolver_of(clients) {
+        session.set_shm_resolver(resolver);
+    }
+}
+
+/// The reader a node was opened over, made anew for one session to hold; `None` for a node
+/// that keeps the default POSIX reader every session is built with.
+#[cfg(feature = "transport-shm")]
+fn shm_resolver_of(
+    clients: &OpenShmClients,
+) -> Option<Box<dyn wz_session_core::extshm::ShmResolver + Send + Sync>> {
     match clients {
-        Some(ShmReader::Clients(clients)) => {
-            session.set_shm_resolver(Box::new(
-                wz_runtime_tokio::shm_clients::ShmClientResolver::new(Arc::clone(clients)),
-            ));
-        }
-        Some(ShmReader::Host(make)) => session.set_shm_resolver(make()),
-        None => {}
+        Some(ShmReader::Clients(clients)) => Some(Box::new(
+            wz_runtime_tokio::shm_clients::ShmClientResolver::new(Arc::clone(clients)),
+        )),
+        Some(ShmReader::Host(make)) => Some(make()),
+        None => None,
     }
 }
 
@@ -2877,7 +2906,7 @@ impl SharedSession {
                     Leg::Refused => return Err(FanoutError::ExceedsCapacity),
                 }
             }
-            delivered += self.group_fan(&targets, &remote, key, payload.leg_bytes())?;
+            delivered += self.group_fan(&targets, &remote, key, &payload)?;
         }
         if opts.allowed_destination.allows_local() {
             let local = opts.clone().with_locality(Locality::SessionLocal);
@@ -2923,7 +2952,7 @@ impl SharedSession {
         targets: &FanTargets,
         remote: &PublishOptions,
         key: PutKey<'_>,
-        payload: &[u8],
+        payload: &dyn LegBytes,
     ) -> Result<usize, FanoutError> {
         if targets.groups.is_empty() {
             return Ok(0);
@@ -2952,11 +2981,33 @@ impl SharedSession {
         };
         let mut delivered = 0usize;
         for group in targets.groups.iter() {
-            let sent = match declared {
-                Some(name) if group.declarations.declares_keyexprs() => group
+            let name = declared.filter(|_| group.declarations.declares_keyexprs());
+            // A chunk of shared memory goes to a group that is a shared-memory one as its
+            // descriptor, the one send that reaches every member; any other group, and a
+            // payload in no chunk, is sent the bytes.
+            #[cfg(feature = "transport-shm")]
+            if let (true, Some(chunk)) = (group.shm, payload.shm_chunk()) {
+                // The wire leg fires no subscriber of this session: the count is the bytes
+                // leg's, which is zero for a send that carries no loopback.
+                let sent = group
                     .session
-                    .publish_named_on_group(&literal, name, payload, remote.clone()),
-                _ => group.session.publish(&literal, payload, remote.clone()),
+                    .publish_shm_on_group(&literal, name, chunk, remote.clone())
+                    .map(|()| 0);
+                match Leg::of_publish(sent) {
+                    Leg::Delivered(n) => delivered += n,
+                    Leg::Skipped => {}
+                    Leg::Refused => return Err(FanoutError::ExceedsCapacity),
+                }
+                continue;
+            }
+            let bytes = payload.leg_bytes();
+            let sent = match name {
+                Some(name) => {
+                    group
+                        .session
+                        .publish_named_on_group(&literal, name, bytes, remote.clone())
+                }
+                None => group.session.publish(&literal, bytes, remote.clone()),
             };
             match Leg::of_publish(sent) {
                 Leg::Delivered(n) => delivered += n,
@@ -2974,18 +3025,24 @@ impl SharedSession {
         _targets: &FanTargets,
         _remote: &PublishOptions,
         _key: PutKey<'_>,
-        _payload: &[u8],
+        _payload: &dyn LegBytes,
     ) -> Result<usize, FanoutError> {
         Ok(0)
     }
 
     /// Whether some peer of this session negotiated shared memory and reads the default (POSIX)
-    /// protocol: whether a payload put into shared memory would be sent to anyone as a descriptor.
-    /// A host that promotes large payloads into shared memory asks first, so that it copies
-    /// nothing for a session none of whose peers could read it.
+    /// protocol, or some group of it is a shared-memory one: whether a payload put into shared
+    /// memory would be sent to anyone as a descriptor. A host that promotes large payloads into
+    /// shared memory asks first, so that it copies nothing for a session none of whose peers
+    /// could read it.
     #[cfg(feature = "transport-shm")]
     pub fn has_shm_peer(&self) -> bool {
-        self.fan_targets()
+        let targets = self.fan_targets();
+        #[cfg(feature = "multicast-transport")]
+        if targets.groups.iter().any(|group| group.shm) {
+            return true;
+        }
+        targets
             .faces
             .iter()
             .any(|session| session.actions().shm_admits(0))

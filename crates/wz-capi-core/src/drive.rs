@@ -3854,7 +3854,7 @@ async fn serve_group<D, B, Fut>(
             shared.group_members_moved(id, members);
         }
     }));
-    let session = shared.new_mcast_face_session(producer.clone(), &membership);
+    let session = shared.new_mcast_face_session(producer.clone(), &membership, label.is_shm);
     let revised = Arc::new(Notify::new());
     // The meter of what the group delivers: the loop feeds it across re-joins, the registry
     // reads it for the session's snapshot and retires it when the face leaves.

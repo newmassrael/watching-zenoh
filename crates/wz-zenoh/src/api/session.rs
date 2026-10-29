@@ -445,7 +445,9 @@ impl Engine {
             #[cfg(not(feature = "shared-memory"))]
             shm_clients: tokio_engine::no_shm_clients(),
             offer_shm: cfg!(feature = "shared-memory") && !router,
-            groups_report_shm: false,
+            // The multicast groups of a session that holds a shared-memory context are
+            // shared-memory ones, and what a member of one sends it reads through that reader.
+            groups_report_shm: cfg!(feature = "shared-memory") && !router,
         });
         if router {
             if let Some(ask) = arguments.router_refusal() {

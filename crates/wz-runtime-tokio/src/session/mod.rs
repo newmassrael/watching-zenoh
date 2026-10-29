@@ -2201,6 +2201,49 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         }
     }
 
+    /// transport-shm -- put one Push that carries `payload`'s DESCRIPTOR on the wire, built by
+    /// `build` from the descriptor and the options' metadata. The remote leg of every SHM
+    /// publish, whatever its key and whichever transport carries it: a link, or a group.
+    #[cfg(all(feature = "transport-shm", feature = "codec-push"))]
+    fn send_shm_descriptor<B, E>(
+        &self,
+        payload: &dyn crate::shm_provider::ShmPublishable,
+        opts: &PublishOptions,
+        build: B,
+    ) -> Result<(), PublishError>
+    where
+        B: FnOnce(
+            &wz_session_core::extshm::ShmDescriptor,
+            &wz_session_core::metadata::PushMetadata,
+        ) -> Result<wz_session_core::wire::PushOwned, E>,
+        E: Into<wz_session_core::send_wire_error::SendWireError>,
+    {
+        let meta = opts.push_metadata();
+        // R3038 -- SERIALIZING THE DESCRIPTOR TAKES A REFERENCE FOR THE
+        // RECEIVER, as it does upstream, and the receiver's resolver gives it
+        // back. The guard returns it if the frame does not build or the send
+        // refuses, so the count is only left raised for a frame that left.
+        let wire = payload.reserve();
+        let push = build(&wire.descriptor(), &meta)
+            .map_err(Into::<wz_session_core::send_wire_error::SendWireError>::into)?;
+        // R311y-item3 — route the SHM descriptor leg through the QoS send
+        // seam with the band derived from the SINGLE `opts.qos` source, so a
+        // prioritized zero-copy publish rides the matching per-priority
+        // conduit like `Self::publish` (was `send_network_message` = hard
+        // DEFAULT conduit — the last split literal-publish surface, which
+        // already carried the observable qos ext + `express` but pinned the
+        // conduit to DEFAULT). The `_qos` seam is present under this
+        // `codec-push` leg (same gate `publish` uses).
+        self.send_network_message_qos(
+            wz_session_core::network_message::NetworkMessage::Push(Box::new(push)),
+            opts.reliable_bool(),
+            meta.is_express(),
+            opts.priority_band(),
+        )?;
+        wire.commit();
+        Ok(())
+    }
+
     /// Whether a Put on this session may be sent from borrowed bytes without being judged: the
     /// question a caller of `publish_plain_declared` asks before it takes that road.
     pub fn plain_put_lane_open(&self) -> bool {
@@ -3314,6 +3357,55 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
         self.publish_named(keyexpr, key, payload, opts, band)
     }
 
+    /// transport-shm -- make this group's transports shared-memory ones: what the group
+    /// delivers is read as shared memory where it names a segment, as upstream reads every
+    /// message of a multicast transport that holds a shared-memory context
+    /// (`io/zenoh-transport/src/multicast/rx.rs` @ `if let Some(shm_context) = &self.shm_context`).
+    ///
+    /// Stamped once, when the group's session is made, and not per iteration as a link's is: a
+    /// group negotiates nothing with its members, so there is no capability a reconnect could
+    /// lower. The reader is [`Self::set_shm_resolver`]'s. No handoff is installed, because
+    /// the group is unreliable and upstream does not hand off on it either
+    /// (`RxHandoffChannel::Disabled`, "Multicast transport is unreliable").
+    #[cfg(feature = "transport-shm")]
+    pub fn enable_shm(&self) {
+        R::with_mutex_mut(&self.observer, |obs| {
+            obs.subscribers.set_shm_negotiated(true);
+            obs.replies.set_shm_negotiated(true);
+            obs.queryables.set_shm_negotiated(true);
+        });
+    }
+
+    /// transport-shm -- the remote leg of an SHM publish on a group that [`Self::enable_shm`]
+    /// made a shared-memory one: ONE descriptor reaches every member, as one send reaches
+    /// every member with bytes. The key is named as [`Self::publish_named_on_group`] names it
+    /// when `key` is given and is the literal `keyexpr` otherwise. The local leg is the
+    /// caller's, as it is for bytes, and a member that cannot read the segment drops the
+    /// message, as upstream's does: a group has no negotiation to ask first.
+    #[cfg(all(feature = "transport-shm", feature = "codec-push"))]
+    pub fn publish_shm_on_group(
+        &self,
+        keyexpr: &str,
+        key: Option<GroupKey<'_>>,
+        payload: &dyn crate::shm_provider::ShmPublishable,
+        mut opts: PublishOptions,
+    ) -> Result<(), PublishError> {
+        self.resolve_publish_timestamp(&mut opts);
+        match key {
+            None => self.send_shm_descriptor(payload, &opts, |descriptor, meta| {
+                wz_session_core::push_build::build_push_shm_literal(keyexpr, descriptor, meta)
+            }),
+            Some(key) => self.send_shm_descriptor(payload, &opts, |descriptor, meta| {
+                wz_session_core::push_build::build_push_shm_aliased(
+                    key.mapping_id,
+                    key.suffix,
+                    descriptor,
+                    meta,
+                )
+            }),
+        }
+    }
+
     /// Open-debt item 913 — ask the group's members for their declarations of `kinds`, on `key`
     /// or, with `None`, on every key: an `Interest` with id `interest_id`, `current` and `future`
     /// as given, whose kinds are exactly `kinds`
@@ -4154,49 +4246,6 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             loopback_keyexpr.push_str(suffix);
         }
         Ok(self.publish_shm_aliased(mapping_id, inline_suffix, &loopback_keyexpr, payload, opts)?)
-    }
-
-    /// transport-shm -- put one Push that carries `payload`'s DESCRIPTOR on the wire, built by
-    /// `build` from the descriptor and the options' metadata. The remote leg of every SHM
-    /// publish, whatever its key.
-    #[cfg(all(feature = "transport-shm", feature = "codec-push"))]
-    fn send_shm_descriptor<B, E>(
-        &self,
-        payload: &dyn crate::shm_provider::ShmPublishable,
-        opts: &PublishOptions,
-        build: B,
-    ) -> Result<(), PublishError>
-    where
-        B: FnOnce(
-            &wz_session_core::extshm::ShmDescriptor,
-            &wz_session_core::metadata::PushMetadata,
-        ) -> Result<wz_session_core::wire::PushOwned, E>,
-        E: Into<wz_session_core::send_wire_error::SendWireError>,
-    {
-        let meta = opts.push_metadata();
-        // R3038 -- SERIALIZING THE DESCRIPTOR TAKES A REFERENCE FOR THE
-        // RECEIVER, as it does upstream, and the receiver's resolver gives it
-        // back. The guard returns it if the frame does not build or the send
-        // refuses, so the count is only left raised for a frame that left.
-        let wire = payload.reserve();
-        let push = build(&wire.descriptor(), &meta)
-            .map_err(Into::<wz_session_core::send_wire_error::SendWireError>::into)?;
-        // R311y-item3 — route the SHM descriptor leg through the QoS send
-        // seam with the band derived from the SINGLE `opts.qos` source, so a
-        // prioritized zero-copy publish rides the matching per-priority
-        // conduit like `Self::publish` (was `send_network_message` = hard
-        // DEFAULT conduit — the last split literal-publish surface, which
-        // already carried the observable qos ext + `express` but pinned the
-        // conduit to DEFAULT). The `_qos` seam is present under this
-        // `transport-unicast` + `codec-push` leg (same gate `publish` uses).
-        self.send_network_message_qos(
-            wz_session_core::network_message::NetworkMessage::Push(Box::new(push)),
-            opts.reliable_bool(),
-            meta.is_express(),
-            opts.priority_band(),
-        )?;
-        wire.commit();
-        Ok(())
     }
 
     /// transport-shm -- the LOCAL leg of an SHM publish: any subscriber of this session that

@@ -208,6 +208,10 @@ pub(super) struct McastLeg {
     /// ([`GroupDeclarations::asks_for_filters`]), and whether a put names its key by a
     /// declaration the group holds ([`GroupDeclarations::declares_keyexprs`]).
     pub(super) declarations: GroupDeclarations,
+    /// Whether the group's transports are shared-memory ones: a chunk of shared memory put on
+    /// it goes as its descriptor, one send for every member.
+    #[cfg(feature = "transport-shm")]
+    pub(super) shm: bool,
 }
 
 impl Inner {
@@ -223,6 +227,8 @@ impl Inner {
                     session: face.session.clone(),
                     revised: face.revised.clone(),
                     declarations: face.declarations,
+                    #[cfg(feature = "transport-shm")]
+                    shm: face.is_shm,
                 })
                 .collect(),
         );
@@ -412,11 +418,23 @@ impl SharedSession {
         &self,
         producer: MulticastTxProducer,
         membership: &McastGroupMembership,
+        is_shm: bool,
     ) -> TokioMulticastSession {
         let observer = Arc::new(WzMutex::new(ApplicationLayerObserver::new()));
         let session =
             TokioMulticastSession::new_multicast(observer, Arc::new(self.clock), producer)
                 .with_local_delivery_drain(LocalDeliveryDrain::DriveTask);
+        // A group that is a shared-memory one reads what its members send through the node's
+        // own reader, as a face does, and reads a descriptor where it finds one.
+        #[cfg(feature = "transport-shm")]
+        if is_shm {
+            if let Some(resolver) = super::shm_resolver_of(&self.shm_clients) {
+                session.set_shm_resolver(resolver);
+            }
+            session.enable_shm();
+        }
+        #[cfg(not(feature = "transport-shm"))]
+        let _ = is_shm;
         // A fresh session holds no membership, so the attach cannot be refused. Without the
         // query plane nothing counts the members.
         #[cfg(feature = "query")]
