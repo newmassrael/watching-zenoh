@@ -130,6 +130,14 @@ config WZ_CAP_EVENT_RING
 	  Write events into the node's event ring and read them back, with no text stored.
 	  Exported by: pico.
 
+config WZ_CAP_SUPERVISION
+	bool "supervision"
+	default n
+	select WZ_CAP_UNSTABLE_API
+	help
+	  Supervise checkpoints an application feeds, and run a hook once when one misses its deadline.
+	  Exported by: pico.
+
 config WZ_CAP_GROUP
 	bool "group"
 	default y

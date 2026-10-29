@@ -316,6 +316,10 @@ transport-link-unixpipe,transport-link-ws|"
     # the unit tests of the module's types and the target that writes, reads, wraps and releases
     # through the doors (`event_log_doors`, which `Cargo.toml` requires the feature for).
     "wz-capi-pico|hook|event-ring|"
+    # The node's supervisor driven from C (`wz_ext_supervision_*`): the target that starts a
+    # checkpoint, feeds it, lets a deadline pass and checks that the hook runs once
+    # (`supervision_doors`, which `Cargo.toml` requires the feature for).
+    "wz-capi-pico|hook|supervision|"
     # The two node-config features the zenoh-c ABI turns on: the usrpwd
     # credential machinery and the interceptor chain (`access_control`,
     # `low_pass_filter`, `downsampling`). Both are off here by default, so the

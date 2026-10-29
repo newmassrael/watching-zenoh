@@ -910,6 +910,22 @@ abis = ["core", "pico"]
 implies = ["unstable-api"]
 help = "Write events into the node's event ring and read them back, with no text stored."
 
+# The node's supervisor (docs/observation-plane.md M3): checkpoints an application feeds, each with
+# a deadline, an expiry hook that runs once, and a verdict on whether every one is healthy that a
+# node can feed a hardware watchdog from. wz's own doors, with no counterpart in an upstream
+# library, so off in every original and part of the unstable surface. How many checkpoints is the
+# `SUPERVISION_CHECKPOINTS` limit, and what an expired one does on the next feed is the
+# `supervision-after-expiry` policy.
+[[capability]]
+id = "supervision"
+kconfig = "WZ_CAP_SUPERVISION"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+default = "off"
+abis = ["core", "pico"]
+implies = ["unstable-api"]
+help = "Supervise checkpoints an application feeds, and run a hook once when one misses its deadline."
+
 [[capability]]
 id = "group"
 kconfig = "WZ_CAP_GROUP"

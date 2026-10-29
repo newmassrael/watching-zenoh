@@ -133,4 +133,65 @@ z_result_t wz_ext_event_release(uint64_t upto);
 /* How many events a full log refused under drop-newest. */
 uint32_t wz_ext_event_dropped(void);
 
+/* The node's supervisor: checkpoints a program feeds, each with a deadline, and
+ * a hook that runs once for a checkpoint that missed its deadline. Part of the
+ * unstable surface, and present only in a build with the supervision
+ * capability. How many checkpoints there are is a build limit
+ * (SUPERVISION_CHECKPOINTS), numbered from 0.
+ *
+ * A program that must keep making progress starts a checkpoint with a timeout
+ * and feeds it on every pass, and calls wz_ext_supervision_check on its own
+ * cadence: the library holds no thread and no timer. The supervisor is healthy
+ * only while every checkpoint that is supervised has been fed in time, so a
+ * node that feeds a hardware watchdog feeds it when wz_ext_supervision_healthy
+ * is 1, and from nowhere else. Time is milliseconds on the monotonic clock. */
+
+/* The program's expiry hook. It runs on the thread that called
+ * wz_ext_supervision_check, with no lock of the library held, so it may call
+ * any of these functions. */
+typedef void wz_ext_supervision_hook_fn(void *context, uint8_t checkpoint);
+
+/* The state of a checkpoint. */
+#define WZ_EXT_SUPERVISION_DISARMED 0 /* not supervised */
+#define WZ_EXT_SUPERVISION_ARMED 1    /* supervised, and fed in time */
+#define WZ_EXT_SUPERVISION_EXPIRING 2 /* its hook is running */
+#define WZ_EXT_SUPERVISION_EXPIRED 3  /* its hook has run */
+#define WZ_EXT_SUPERVISION_NO_SUCH_CHECKPOINT 255
+
+/* Set the hook, or clear it with NULL. With none set, an expired checkpoint is
+ * still marked expired and makes the supervisor unhealthy. The hook must be safe
+ * to call from the thread that calls wz_ext_supervision_check, and context must
+ * stay valid, for as long as it is set. Z_OK. */
+z_result_t wz_ext_supervision_set_hook(wz_ext_supervision_hook_fn *hook,
+                                       void *context);
+
+/* Begin supervising a checkpoint, with a deadline timeout_ms after now and
+ * after each feed. A checkpoint already supervised is left as it is. Z_OK;
+ * Z_ERR_INVALID for a checkpoint the build does not have, or a timeout of 0 or
+ * past 2147483647. */
+z_result_t wz_ext_supervision_start(uint8_t checkpoint, uint32_t timeout_ms);
+
+/* The program made progress: start the checkpoint's deadline again. A
+ * checkpoint that is not armed ignores it, so a feed after an expiry does not
+ * hide it (the build's supervision-after-expiry policy can have such a feed
+ * supervise the checkpoint again). Z_OK; Z_ERR_INVALID for a checkpoint the
+ * build does not have. */
+z_result_t wz_ext_supervision_feed(uint8_t checkpoint);
+
+/* Stop supervising a checkpoint. Z_OK; Z_ERR_GENERIC when its hook is running:
+ * it does not stop until the hook returns; Z_ERR_INVALID for a checkpoint the
+ * build does not have. */
+z_result_t wz_ext_supervision_stop(uint8_t checkpoint);
+
+/* Look at every supervised checkpoint now and run the hook once for each whose
+ * deadline has passed. Z_OK. */
+z_result_t wz_ext_supervision_check(void);
+
+/* 1 when at least one checkpoint is supervised and every supervised one is
+ * armed, 0 otherwise. Nothing under watch is not healthy. */
+uint8_t wz_ext_supervision_healthy(void);
+
+/* The state of a checkpoint, one of the values above. */
+uint8_t wz_ext_supervision_state(uint8_t checkpoint);
+
 #endif /* WZ_EXT_H */

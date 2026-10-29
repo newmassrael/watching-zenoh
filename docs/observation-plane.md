@@ -268,8 +268,14 @@ and operation traces are what a differential run between the two would be fed.
   at least one checkpoint is supervised and every supervised one is armed (a supervisor watching
   nothing is not healthy, so a watchdog is not fed on the strength of nothing), with the limit
   `SUPERVISION_CHECKPOINTS` and the policy `supervision-after-expiry` declared. A model test runs
-  every order of five operations up to length 6 under both policies. Not yet: the `supervision`
-  capability and its `wz_ext_*` doors, and the hosting test on the cooperative engine.
+  every order of five operations up to length 6 under both policies. Landed (step 4c, pico ABI):
+  the `supervision` capability (off by default, `core` and `pico`, implies `unstable-api`) and
+  the doors `wz_ext_supervision_set_hook`, `_start`, `_feed`, `_stop`, `_check`, `_healthy` and
+  `_state`. The library holds no thread and no timer: the program calls `_check` on its own
+  cadence, the hook runs on that thread with no lock of the library held (so it may call any door,
+  and a stop of its own checkpoint is refused until it returns), and time is milliseconds on the
+  monotonic clock in 32 wrapping bits. Not yet: the same doors for the zenoh-c ABI, and the
+  hosting test on the cooperative engine.
 * Who calls `check` is the `exec` axis and not a new switch: the cooperative engine calls it
   every turn of its loop; a build with tasks gives it one. The supervisor itself has no task.
 
@@ -306,7 +312,7 @@ sampler symbol.
 | 1 | `HlcCore` over `EpochSource` tested against `uhlc` (done), `NodeHlc` on the core (done), `ClockQuality` machine (done: `clock_standing`, features `clock-quality` and `clock-source`), `clock-quality-stamping` and `CLOCK_MAX_FORWARD_STEP_MS` (done); `clock-source` capability and `CLOCK_SOURCES` move to step 2 | The stamp and wire tests pass on the tokio host and on the cooperative engine; slot bytes unchanged off; the `algorithm` for the comparison is generated and used by Rust. |
 | 2 | Clock registration in the C ABIs (2a done: `wz_node_time::clock_registry` and the `CLOCK_SOURCES` limit, first registered source that can answer wins, none able means no date and no fallback to the system clock; 2b done for the pico ABI: `wz_ext_clock_source_register`, `wz_ext_clock_source_unregister` and `wz_ext_clock_report` in `wz_ext.h`, the `clock-source` capability (off by default, `core` and `pico`, implies `timestamping` and `unstable-api`), `z_timestamp_new` stamping from the registered clock through the session's node clock, one standing shared by every node over the registry; open: the same doors in the `capi-c` ABI, and a wire test that a registered clock and the system clock encode the same bytes) | `capi-c` ABI revision and the pico export pins updated in the same change; the drop-in leg stays green. |
 | 3 | `EventRing` (3a done: the type, the model test and the stress run), the node's event log `wz_node_time::event_log` with `EVENT_RING_SLOTS` and `EVENT_RECORD_ARGS` as limits and `event-ring-full` as a policy (3b done: one ring, producers ordered by a lock, a reader needs none, records stamped by the node clock); 3c done for the pico ABI: the `event-ring` capability (off by default, `core` and `pico`, implies `unstable-api`) and the doors `wz_ext_event_emit`, `wz_ext_event_read` (a cursor the caller holds), `wz_ext_event_release` and `wz_ext_event_dropped`; the ring contract is sent to SCE. Open, and recommended to be dropped: the `log` sink, which could record only that a call happened (level, site, a hash of its constant text) and not its arguments, because the `log` crate formats them before a sink sees them, so the structured `emit` is the event API and a sink would add a second, weaker one | The model test and the concurrency check pass; off build has no symbol; the ring contract is written down and sent to SCE. |
-| 4 | Supervision machine and its checkpoints (4a, 4b done: the statechart, `Supervisor<N>`, the limit and the policy; open: the capability and doors, the cooperative-engine host test, the comparison as an SCE `algorithm`) | Conformance over every event order; the cooperative engine hosts it with no task. |
+| 4 | Supervision machine and its checkpoints (4a, 4b, 4c done: the statechart, `Supervisor<N>`, the limit and the policy, the capability and the pico doors; open: the zenoh-c doors, the cooperative-engine host test, the comparison as an SCE `algorithm`) | Conformance over every event order; the cooperative engine hosts it with no task. |
 | 5 | Snapshot and its generated timer | Histogram test against the reference; admin-space and dissector read it. |
 | 6 | Cross-instrument: events carry M1 time, supervision expiry writes an event, the snapshot reads the ring's loss count | One integration test per link. |
 

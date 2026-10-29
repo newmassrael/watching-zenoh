@@ -110,6 +110,8 @@ pub mod encoding;
 pub mod entity;
 #[cfg(feature = "event-ring")]
 pub mod event_log;
+// The node's supervisor, driven from C: wz doors (`wz_ext.h`) of the unstable surface
+// (docs/observation-plane.md M3).
 mod ffi;
 #[cfg(feature = "query")]
 pub mod get;
@@ -139,6 +141,8 @@ pub mod serde;
 pub mod session;
 mod session_ext;
 pub mod string_array;
+#[cfg(feature = "supervision")]
+pub mod supervision;
 // pico's multi-threaded arm's host surface: mutex, condvar and task.
 #[cfg(feature = "multi-thread")]
 pub mod sync;

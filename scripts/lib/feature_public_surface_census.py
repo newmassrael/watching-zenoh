@@ -422,7 +422,10 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `event-ring` gates `pub mod event_log`, whose public items are wz's own doors
         # `wz_ext_event_emit`, `wz_ext_event_read`, `wz_ext_event_release` and
         # `wz_ext_event_dropped`, declared in `wz_ext.h`, off by default as `clock-source` is.
-        frozenset({"admin-space", "clock-source", "event-ring"}),
+        # `supervision` gates `pub mod supervision`, whose public items are wz's own doors
+        # `wz_ext_supervision_set_hook`, `_start`, `_feed`, `_stop`, `_check`, `_healthy` and
+        # `_state`, declared in `wz_ext.h`, off by default as `event-ring` is.
+        frozenset({"admin-space", "clock-source", "event-ring", "supervision"}),
     ),
     "wz-codecs-test-support": (
         "a test-support crate: `publish = false`, and NO workspace library "

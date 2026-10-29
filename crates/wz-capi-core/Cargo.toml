@@ -362,6 +362,10 @@ clock-source = ["timestamping", "unstable-api", "wz-runtime-tokio/clock-source"]
 # The node's event log (`deploy/wz-config.toml`, off by default: wz's own doors). The ring is in
 # `wz-node-time`, so the model has it under both ABIs once the runtime does.
 event-ring = ["unstable-api", "wz-runtime-tokio/event-ring"]
+# The node's supervisor (`deploy/wz-config.toml`, off by default: wz's own doors). The supervisor
+# and its machine are in `wz-session-core`, which the model has either way. A feature here because
+# every capability is one of the core's.
+supervision = ["unstable-api"]
 local-subscriber = []
 local-queryable = []
 
