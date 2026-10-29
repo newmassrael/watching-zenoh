@@ -61,8 +61,6 @@ use wz_runtime_coop::session_drive::{
 use wz_runtime_coop::session_drive::{LinkListener, LinkOpenError};
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
 use wz_session_core::close_reason::CloseReason;
-#[cfg(feature = "listen")]
-use wz_session_core::credential_identity::zid_from_wire;
 use wz_session_core::declare::matching::BoxedMatchingSink;
 use wz_session_core::declare::queryable::QuerierCriterion;
 use wz_session_core::declare::subscriber::PublisherCriterion;
@@ -70,6 +68,8 @@ use wz_session_core::declare_form::{InterestForm, RetractionKey};
 use wz_session_core::driver_loop::DriverOutcome;
 use wz_session_core::entropy::{EntropySource, EntropyUnavailable};
 use wz_session_core::interest_build::InterestKinds;
+#[cfg(feature = "listen")]
+use wz_session_core::link_admission::{judge_second_link, SecondLink};
 use wz_session_core::locality::Locality;
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::policy::SnResolution;
@@ -470,13 +470,6 @@ enum Admission {
     Admit { displace: Option<FaceId> },
     /// The node is held by a face that stays: this link is closed.
     Refuse,
-}
-
-/// A zid as the number it is, so that two nodes read the same order of two zids. An id that
-/// spells no zid reads as 0.
-#[cfg(feature = "listen")]
-fn zid_value(zid: &[u8]) -> u128 {
-    zid_from_wire(zid).map_or(0, u128::from_le_bytes)
 }
 
 /// One link's half of the session: the actions that send over it, the task that runs it, the
@@ -1043,16 +1036,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             if !same_zid(&held, node) {
                 continue;
             }
-            if other.dialled == mine.dialled {
-                return Admission::Refuse;
-            }
-            let dialled_wins = zid_value(&self.wire_zid) < zid_value(node);
-            return if mine.dialled == dialled_wins {
-                Admission::Admit {
+            // The rule is `wz-session-core`'s, written once for both ends of a link.
+            return match judge_second_link(other.dialled, mine.dialled, &self.wire_zid, node) {
+                SecondLink::Replace => Admission::Admit {
                     displace: Some(other.id),
-                }
-            } else {
-                Admission::Refuse
+                },
+                SecondLink::Refuse => Admission::Refuse,
             };
         }
         Admission::Admit { displace: None }

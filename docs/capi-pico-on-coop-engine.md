@@ -779,8 +779,19 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
     (`Link::Held`) and not dialled: it would be refused at every redial, the handshake paid each
     time. It is dialled again, at once, when the face that held the node is lost. An open of a
     session that listens and dials is released by the dial's link or by its being held.
-  - The tokio engine's acceptor keeps no such rule for a pure acceptor (two clients that share a
-    fixture zid are both held there: Layer E3, E5) and its linkstate peer keeps it by "first up".
+  - The rule is one pure function, `wz_session_core::link_admission::judge_second_link` (the
+    directions of the held and the new link and the two zids, answering refuse or replace), and
+    the face table calls it. It is there and not in the engine so that a second engine deciding
+    the question decides it alike: the question is asked at both ends of a link, and the two
+    answers must name one link. Its tests run both ends over every order the links can complete
+    in and require the same link kept.
+  - The tokio engine's registry does not call it. Its `face_up` keeps the first up for every case
+    (two clients that share a fixture zid are both held there: Layer E3, E5, where the acceptor
+    keeps no such rule), and its linkstate peer keeps it by "first up" too. Putting the tokio
+    registry on `judge_second_link` is open: the face record would gain the direction it was
+    opened in, a replaced face's link would be closed by the registry's caller, and the fixtures
+    that share a zid would be given zids of their own. It changes what the tokio engine does, so
+    it waits for the one who owns that registry.
     A cooperative listener refuses the second of two clients of one zid, as zenoh does; the
     routers of a test are given zids of their own for it (`tests::face_table`).
 
