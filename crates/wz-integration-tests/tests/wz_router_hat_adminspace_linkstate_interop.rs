@@ -500,10 +500,12 @@ fn wz_router_hat_reports_declaration_sources_per_tier_across_two_routers() {
     });
     assert_eq!(
         at_r2,
-        format!("{{\"routers\":[],\"peers\":[],\"clients\":[\"{CLIENT_ZID}\"]}}"),
+        format!("{{\"routers\":[\"{r2_zid}\"],\"peers\":[],\"clients\":[\"{CLIENT_ZID}\"]}}"),
         "a client's declaration belongs in the `clients` bucket, named by the \
          face's zid — a Client joins no link-state graph, so a body that read the \
-         source's role off the graph would have nothing to put here"
+         source's role off the graph would have nothing to put here — and, being \
+         sourced by a south-bound hat, it names the node itself in the north \
+         bucket, as the pin's merge does (`routers` on a router, R2={r2_zid})"
     );
 
     // The ROUTERS bucket: R1's zid, learned across the mesh.
