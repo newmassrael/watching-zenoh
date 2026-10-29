@@ -3271,11 +3271,24 @@ impl UdpDriver {
     ) -> io::Result<Self> {
         let group: std::net::IpAddr = group.into();
         let read = Self::bind_multicast(group, port, cfg).await?;
+        // A group named with port 0 is given its port by the system, by the bind of the joined
+        // half: the other half sends to it and the group is addressed by it, as upstream's
+        // multicast link reads the port of its bound socket
+        // (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @
+        // `We may have bind to port 0, so we need to retrieve the actual port`).
+        let port = match (port, read.socket.as_ref()) {
+            (0, Some(socket)) => socket.local_addr()?.port(),
+            _ => port,
+        };
         let write = Self::bind_multicast_tx_at(group, port, cfg, true).await?;
+        let mut peer = read.peer;
+        if let Some(peer) = peer.as_mut() {
+            peer.set_port(port);
+        }
         Ok(Self {
             socket: read.socket,
             send_socket: write.socket,
-            peer: read.peer,
+            peer,
             write_latch: Default::default(),
         })
     }
@@ -4404,6 +4417,25 @@ mod udp_multicast_config_tests {
             })
             .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
         assert_eq!(egress, expected);
+    }
+
+    /// A link named with port 0 is given its port by the system, and the group is addressed by it:
+    /// the driver writes to `group:port` of its bound socket, as the locator it lists says.
+    #[tokio::test]
+    async fn a_link_named_with_port_zero_is_addressed_by_the_port_it_was_given() {
+        let link = UdpDriver::bind_multicast_link(GROUP, 0, McastSocketConfig::default())
+            .await
+            .expect("bind the link");
+        let bound = link
+            .socket
+            .as_ref()
+            .expect("a link has a joined half")
+            .local_addr()
+            .expect("a bound socket");
+        let peer = link.peer_addr().expect("a link has a destination");
+        assert_ne!(bound.port(), 0);
+        assert_eq!(peer.port(), bound.port());
+        assert_eq!(peer.ip(), std::net::IpAddr::from(GROUP));
     }
 
     /// The same for the other half of a LINK: its send socket (upstream's

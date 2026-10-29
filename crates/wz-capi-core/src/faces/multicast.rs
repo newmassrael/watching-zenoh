@@ -593,6 +593,7 @@ impl SharedSession {
         let removed = {
             let mut guard = self.lock();
             let removed = guard.mcast_faces.remove(&id);
+            guard.group_locators.remove(&id);
             guard.refresh_mcast_set();
             removed
         };

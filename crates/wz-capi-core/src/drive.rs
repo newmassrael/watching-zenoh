@@ -3703,17 +3703,36 @@ async fn serve_beside_groups(setup: GroupSetup, role: impl Future<Output = ()>) 
                         };
                         match link {
                             GroupLinkSpec::Udp { group, port, opts } => {
+                                // A group named with port 0 is given its port when it is first
+                                // bound, and a bind again after the link was lost keeps it: the
+                                // locator the session lists is the group's for as long as it is
+                                // joined.
+                                let bound_port = std::rc::Rc::new(std::cell::Cell::new(port));
+                                let listing = shared.clone();
                                 serve_group(
                                     shared,
                                     index as u64,
                                     label,
                                     &params,
                                     || {
-                                        wz_runtime_tokio::UdpDriver::bind_multicast_link(
+                                        let bound = wz_runtime_tokio::UdpDriver::bind_multicast_link(
                                             group,
-                                            port,
+                                            bound_port.get(),
                                             opts.as_socket_config(),
-                                        )
+                                        );
+                                        let (bound_port, listing) =
+                                            (bound_port.clone(), listing.clone());
+                                        async move {
+                                            let driver = bound.await?;
+                                            if let Some(addr) = driver.peer_addr() {
+                                                bound_port.set(addr.port());
+                                                listing.set_group_locator(
+                                                    index as u64,
+                                                    format!("udp/{addr}"),
+                                                );
+                                            }
+                                            Ok(driver)
+                                        }
                                     },
                                     stop,
                                     up,

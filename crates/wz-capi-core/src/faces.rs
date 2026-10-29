@@ -1162,6 +1162,11 @@ struct Inner {
     /// neighbour can dial this node. Set as listeners bind, whether or not the session gossips
     /// ([`SharedSession::set_listen_locators`]).
     listen_locators: Vec<String>,
+    /// The locators of the multicast groups the session joined, by group face: a group named with
+    /// port 0 is given its port by the system when it is bound, and the locator holds that port.
+    /// Apart from [`Self::listen_locators`] because a listener's `set_listen_locators` replaces
+    /// that list, and because no neighbour dials a group.
+    group_locators: BTreeMap<u64, String>,
     /// The local plane's own handles for the SSOT declarations, keyed by the
     /// same C-level ids the per-face maps use.
     ///
@@ -1847,7 +1852,17 @@ impl SharedSession {
     /// The locators [`Self::set_listen_locators`] was given: none for a node that listens on
     /// nothing, or whose listeners have not bound yet.
     pub fn listen_locators(&self) -> Vec<String> {
-        self.lock().listen_locators.clone()
+        let guard = self.lock();
+        let mut locators = guard.listen_locators.clone();
+        locators.extend(guard.group_locators.values().cloned());
+        locators
+    }
+
+    /// Record the locator group face `id` is bound to, which lists beside the listeners'.
+    /// Ended with the face ([`Self::mcast_face_down`]).
+    #[cfg(feature = "multicast-transport")]
+    pub fn set_group_locator(&self, id: u64, locator: String) {
+        self.lock().group_locators.insert(id, locator);
     }
 
     /// Where this node can be reached, for the entries gossip sends about it: the locators of

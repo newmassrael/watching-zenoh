@@ -8466,6 +8466,51 @@ mod tests {
             drop((first, second));
         }
 
+        /// Two peers that listen on one multicast group are linked by it
+        /// (`zenoh-test` @ `open_pairs_multicast`): the first is given the port by the system and
+        /// lists the group's locator with it, the second listens on that locator, and what one
+        /// publishes the other hears.
+        #[test]
+        fn peers_that_listen_on_one_multicast_group_hear_each_other() {
+            let group = |id: &str, endpoint: &str| on(id, &format!(r#""{endpoint}""#), "");
+            let first = group("a1b2e1", "udp/224.0.0.1:0");
+            let locator = first
+                .info()
+                .locators()
+                .wait()
+                .into_iter()
+                .find(|locator| locator.protocol().as_str() == "udp")
+                .expect("the group is listed among the locators of the node")
+                .to_string();
+            let second = group("a1b2e2", &locator);
+            let (sender, heard) = mpsc::channel();
+            let sender = std::sync::Mutex::new(sender);
+            let _subscriber = second
+                .declare_subscriber("demo/multicast")
+                .callback(move |sample| {
+                    let _ = sender.lock().unwrap().send(
+                        sample
+                            .payload()
+                            .try_to_string()
+                            .expect("a text")
+                            .into_owned(),
+                    );
+                })
+                .wait()
+                .expect("declares");
+            // The members learn of each other by their beacons, and a publication before that
+            // reaches nobody: it is made until one is heard.
+            let deadline = std::time::Instant::now() + WAIT * 2;
+            let told = loop {
+                first.put("demo/multicast", "hello").wait().expect("puts");
+                if let Ok(told) = heard.recv_timeout(Duration::from_millis(200)) {
+                    break told;
+                }
+                assert!(std::time::Instant::now() < deadline, "the group is heard");
+            };
+            assert_eq!(told, "hello");
+        }
+
         #[test]
         fn a_transport_listener_is_told_a_peer_opening_and_closing() {
             let (writer, endpoint) = listening("a1b2d6");
