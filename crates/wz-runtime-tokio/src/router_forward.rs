@@ -8762,6 +8762,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             handler: Hosted::new(handler),
         });
         self.repropagate(snapshot);
+        // The faces that asked to be told of queryables like this one are told, as for a
+        // queryable a client declared.
+        self.push_future_queryable(keyexpr, LOCAL_FACE);
         id
     }
 
@@ -8898,6 +8901,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             handler: Hosted::new(handler),
         });
         self.repropagate(snapshot);
+        // The faces that asked to be told of subscribers like this one are told, as for a
+        // subscriber a client declared.
+        self.push_future_subscription(keyexpr, LOCAL_FACE);
         id
     }
 
@@ -8924,6 +8930,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             .subs
             .remove_id(LOCAL_FACE, id);
         self.repropagate(snapshot);
+        // And the faces that were told of it are told it is gone, unless another holds the key.
+        self.undeclare_push_subs(&keyexpr);
         true
     }
 
@@ -8952,6 +8960,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             }
         }
         self.repropagate(snapshot);
+        // And the faces that were told of it are told it is gone, unless another holds the key.
+        self.undeclare_push_qabls(&keyexpr);
         true
     }
 
@@ -8980,6 +8990,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             hat.subs.remove_id(LOCAL_FACE, *id);
         }
         self.repropagate(snapshot);
+        self.undeclare_push_subs(keyexpr);
         !withdrawn.is_empty()
     }
 
@@ -9011,6 +9022,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             }
         }
         self.repropagate(snapshot);
+        self.undeclare_push_qabls(keyexpr);
         !withdrawn.is_empty()
     }
 
