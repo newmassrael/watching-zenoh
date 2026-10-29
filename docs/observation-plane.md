@@ -68,8 +68,8 @@ Two honest limits, so that nothing is built on a feature SCE does not have:
   A supervision deadline is given by the application at start. So the supervision machine takes
   its deadline as a duty (`arm_deadline`) and the host raises `deadline.expired`, exactly as the
   session machines take theirs. The timer kind is right for the sampler, whose cadence is a
-  build-time number: that file is generated from the limit by a script with a `--check`, like the
-  feature model, so Kconfig still states the period.
+  build-time number. (Step 5 found that this does not hold: see M4, where the period is the limit
+  read as a number and the timer kind is not used.)
 * **The queue kind has no full policy, and no attribute would give the ring.** The ring overwrites
   the oldest record where a queue refuses the newest. SCE was asked and answered that no document,
   schema or code states a full policy (a push returns `Full`, and that is all), that nothing is
@@ -101,8 +101,8 @@ policy, `A` axis (existing).
 | Supervision | `SUPERVISION_CHECKPOINTS` | L | 1 | Points one supervisor watches. |
 | Supervision | `supervision-after-expiry` | P (`latch`, `rearm`) | `latch` | Whether a missed deadline stays missed or starts again. |
 | Resources | `resource-snapshot` | C | off | A sampled view of a running node. |
-| Resources | `SNAPSHOT_PERIOD_MS` | L | | The sampler's period (generates the SCE timer). |
-| Resources | `SNAPSHOT_HISTOGRAM_BUCKETS` | L | | Buckets of the message-interval histogram. |
+| Resources | `SNAPSHOT_PERIOD_MS` | L | 1000 | The sampler's period, read by the host-polled sampler. |
+| Resources | `SNAPSHOT_HISTOGRAM_BUCKETS` | L | 24 | Buckets of the message-interval histogram. |
 | All | `exec` | A (existing) | | Who calls the supervisor's check and the sampler: the loop (`coop-single`) or a task (`split-tasks`). No new switch says it. |
 
 ## M1 Time: a clock with a quality
@@ -294,10 +294,21 @@ across a counter wrap. A host test on the cooperative engine with no task presen
 * The message-interval statistic is `SNAPSHOT_HISTOGRAM_BUCKETS` buckets on a base-2 scale
   plus an exponentially weighted mean. A minimum, a maximum and a sum hide the tail; a histogram
   does not, and costs a fixed few words.
-* The sampler's cadence is an SCE `timer` whose period is `SNAPSHOT_PERIOD_MS`: the SCXML is
-  generated from the limit by a script with a `--check`, so Kconfig states the period and the
-  generator and the check make the file follow it. Where there is no task (`exec = coop-single`)
-  the sample is taken on the loop's tick; the sampler has no task of its own anywhere.
+* The sampler's cadence is the limit `SNAPSHOT_PERIOD_MS`, read by the sampler as a number, and
+  NOT an SCE `timer` document. This design said the period would be an SCE `timer` generated from
+  the limit by a script with a `--check`, and reading the kind (`sce-build/kind-examples/timer.scxml`
+  and the Rust it generates, `tests/forge/expected/timer_diag_scheduler.rs`) shows two reasons it
+  cannot be so. First, the period is text in a committed SCXML and the generated file holds one
+  constant, while a limit is a compile-time environment value of each image
+  (`CONFIG_WZ_LIMIT_...`): the two agree only for the default, and an image that states another
+  period would carry a generated constant that disagrees with its own Kconfig, unless every image
+  build ran `sce-codegen`, which no hosted or Zephyr build does. Second, what the kind generates is
+  a scheduler over a platform `Timer` (`start_periodic(ms, extern "C" callback, ctx)`, raw
+  pointers, a callback from an OS timer or an interrupt), which is a timer the platform owns, where
+  this sampler is meant to have no task and no timer anywhere. So the sampler is polled by the host
+  (`Sampler::poll`, on the loop's tick under `exec = coop-single`, from a task of its own where
+  there is one) and asks the comparison the supervisor's deadlines ask, `wrapping_ticks::elapsed`.
+  This can be reopened if an image-build regeneration path for `out/**` appears.
 * Presentation is a consumer. The snapshot is exposed through the admin space
   (`WZ_CAP_ADMIN_SPACE`) and to the dissector (`wz-capi-dissect`), so the node prints nothing.
 
@@ -313,7 +324,7 @@ sampler symbol.
 | 2 | Clock registration in the C ABIs (2a done: `wz_node_time::clock_registry` and the `CLOCK_SOURCES` limit, first registered source that can answer wins, none able means no date and no fallback to the system clock; 2b done for the pico ABI: `wz_ext_clock_source_register`, `wz_ext_clock_source_unregister` and `wz_ext_clock_report` in `wz_ext.h`, the `clock-source` capability (off by default, `core` and `pico`, implies `timestamping` and `unstable-api`), `z_timestamp_new` stamping from the registered clock through the session's node clock, one standing shared by every node over the registry; open: the same doors in the `capi-c` ABI, and a wire test that a registered clock and the system clock encode the same bytes) | `capi-c` ABI revision and the pico export pins updated in the same change; the drop-in leg stays green. |
 | 3 | `EventRing` (3a done: the type, the model test and the stress run), the node's event log `wz_node_time::event_log` with `EVENT_RING_SLOTS` and `EVENT_RECORD_ARGS` as limits and `event-ring-full` as a policy (3b done: one ring, producers ordered by a lock, a reader needs none, records stamped by the node clock); 3c done for the pico ABI: the `event-ring` capability (off by default, `core` and `pico`, implies `unstable-api`) and the doors `wz_ext_event_emit`, `wz_ext_event_read` (a cursor the caller holds), `wz_ext_event_release` and `wz_ext_event_dropped`; the ring contract is sent to SCE. Open, and recommended to be dropped: the `log` sink, which could record only that a call happened (level, site, a hash of its constant text) and not its arguments, because the `log` crate formats them before a sink sees them, so the structured `emit` is the event API and a sink would add a second, weaker one | The model test and the concurrency check pass; off build has no symbol; the ring contract is written down and sent to SCE. |
 | 4 | Supervision machine and its checkpoints (4a, 4b, 4c done: the statechart, `Supervisor<N>`, the limit and the policy, the capability and the pico doors; open: the zenoh-c doors, the cooperative-engine host test, the comparison as an SCE `algorithm`) | Conformance over every event order; the cooperative engine hosts it with no task. |
-| 5 | Snapshot and its generated timer | Histogram test against the reference; admin-space and dissector read it. |
+| 5 | Snapshot and its sampler (5a done: `resource_snapshot` with the versioned layout, the interval histogram and mean, the host-polled `Sampler` and the `ResourceSource` port the platform answers CPU, heap and tasks through, the limits `SNAPSHOT_PERIOD_MS` and `SNAPSHOT_HISTOGRAM_BUCKETS`, and `wrapping_ticks` shared with the supervisor; the generated SCE timer is dropped, see M4; open, 5b: the `resource-snapshot` capability and the pico doors that read the latest snapshot as bytes, a host `ResourceSource`, feeding `observe_message` from the receive path with its cost measured, the `features` word filled from the image, and the admin-space and dissector readers) | Histogram test against the reference; admin-space and dissector read it. |
 | 6 | Cross-instrument: events carry M1 time, supervision expiry writes an event, the snapshot reads the ring's loss count | One integration test per link. |
 
 Each step is its own landing: the declaration, the generated files, the code that reads the

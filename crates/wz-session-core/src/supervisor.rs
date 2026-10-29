@@ -45,15 +45,9 @@ use crate::supervision::{
 /// id). A constant, so the generated constructor never refuses it.
 const SUPERVISION_SESSION_ID: &str = "wz-supervision";
 
-/// The longest timeout a deadline can have: the difference of two readings is compared modulo
-/// 2^32, so a timeout past half the range cannot be told from a counter that went round.
-pub const MAX_TIMEOUT_TICKS: u32 = i32::MAX as u32;
-
-/// Whether `timeout` ticks have passed from `last_feed` to `now`, both readings of a counter that
-/// wraps at 2^32.
-pub const fn elapsed(now: u32, last_feed: u32, timeout: u32) -> bool {
-    now.wrapping_sub(last_feed) >= timeout
-}
+// The deadline comparison is the one the resource sampler also asks, so it lives in
+// `wrapping_ticks`; these are the names it has always had here.
+pub use crate::wrapping_ticks::{elapsed, MAX_TIMEOUT_TICKS};
 
 /// What a checkpoint that expired does when the next feed comes: the `supervision-after-expiry`
 /// policy itself. `Latch` leaves it expired until it is stopped and started again, `Rearm` starts
@@ -293,16 +287,6 @@ mod tests {
 
     use super::*;
     use std::vec::Vec;
-
-    #[test]
-    fn a_deadline_is_a_difference_taken_modulo_the_counter() {
-        assert!(!elapsed(100, 100, 5));
-        assert!(!elapsed(104, 100, 5));
-        assert!(elapsed(105, 100, 5));
-        // The counter went round between the feed and the check: 10 ticks passed.
-        assert!(elapsed(5, u32::MAX - 4, 10));
-        assert!(!elapsed(4, u32::MAX - 4, 10));
-    }
 
     #[test]
     fn the_build_supervisor_has_the_builds_checkpoints_and_none_supervised() {

@@ -415,6 +415,17 @@ pub const TX_NO_PROGRESS_WINDOW_US: usize = generated::TX_NO_PROGRESS_WINDOW_US;
 /// size: it sizes no memory.
 pub const TX_EXPIRY_CLOSE_AFTER: usize = generated::TX_EXPIRY_CLOSE_AFTER;
 
+/// How often, in milliseconds, the resource sampler takes a snapshot
+/// ([`crate::resource_snapshot::Sampler`]). At least `1` and at most `2147483`: the period is kept
+/// in microseconds on a counter that wraps at 2^32, and a span longer than half of it cannot be
+/// told from one that went round. A time and not a table size: it sizes no memory.
+pub const SNAPSHOT_PERIOD_MS: usize = generated::SNAPSHOT_PERIOD_MS;
+
+/// How many buckets the snapshot's message-interval histogram has
+/// ([`crate::resource_snapshot::IntervalHistogram`]), from `1` to `32`. It sizes the snapshot: 64
+/// bytes and 4 for each bucket.
+pub const SNAPSHOT_HISTOGRAM_BUCKETS: usize = generated::SNAPSHOT_HISTOGRAM_BUCKETS;
+
 /// How many checkpoints the node's supervisor watches (`supervisor::Supervisor`). At least `1` and
 /// at most `64`: a check names the checkpoints that expired in one 64-bit word.
 pub const SUPERVISION_CHECKPOINTS: usize = generated::SUPERVISION_CHECKPOINTS;

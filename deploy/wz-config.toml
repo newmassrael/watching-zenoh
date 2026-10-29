@@ -1973,6 +1973,30 @@ closes the session, which is the policy as it was before this limit. At most
 '''
 
 [[limit]]
+id = "SNAPSHOT_PERIOD_MS"
+kconfig = "WZ_LIMIT_SNAPSHOT_PERIOD_MS"
+default = 1000
+help = '''
+How often, in milliseconds, the node takes a snapshot of itself: what it spends
+and how its messages are spaced. The node holds no timer for it: the program
+asks for a sample on its own cadence, and one is taken when this much time has
+passed since the last. At least 1 and at most 2147483 (about 35 minutes).
+'''
+
+[[limit]]
+id = "SNAPSHOT_HISTOGRAM_BUCKETS"
+kconfig = "WZ_LIMIT_SNAPSHOT_HISTOGRAM_BUCKETS"
+default = 24
+help = '''
+How many buckets the snapshot's message-interval histogram has, each 4 bytes.
+Bucket 0 holds intervals of 0 and 1 microsecond, bucket b the intervals from
+2^b to 2^(b+1) - 1 microseconds, and the last bucket everything above it, so 24
+buckets tell intervals up to about 8 seconds apart and 32 cover the whole range.
+More buckets spread the tail of the distribution further out and make the
+snapshot longer. At least 1 and at most 32.
+'''
+
+[[limit]]
 id = "SUPERVISION_CHECKPOINTS"
 kconfig = "WZ_LIMIT_SUPERVISION_CHECKPOINTS"
 default = 4

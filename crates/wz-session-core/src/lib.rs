@@ -378,6 +378,16 @@ pub mod event_ring;
 #[cfg(any(target_has_atomic = "64", feature = "no_std"))]
 pub mod hlc;
 
+// Whether a span of ticks has passed over a counter that wraps at 2^32: the comparison a
+// supervision deadline and the resource sampler's period both ask. Pure and unconditional.
+pub mod wrapping_ticks;
+
+// A sampled view of a running node (`docs/observation-plane.md` M4): a fixed-layout, versioned
+// snapshot, a message-interval histogram, and the sampler that takes one on a period. Pure and
+// unconditional, in the way of `event_ring`: a build that instantiates no sampler carries no code of
+// it. Documented in its own `//!`; see the note at `event_ring`.
+pub mod resource_snapshot;
+
 /// A1a — modular sequence-number arithmetic (zenoh-pico
 /// `transport/utils.c` mirror): the `seq_num_res` ring masks + the
 /// half-window `precedes` ordering every RX SN gate shares. First

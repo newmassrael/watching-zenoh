@@ -61,6 +61,10 @@ pub(super) const TX_NO_PROGRESS_WINDOW_US: usize =
     limit(option_env!("WZ_LIMIT_TX_NO_PROGRESS_WINDOW_US"), 1000000);
 pub(super) const TX_EXPIRY_CLOSE_AFTER: usize =
     limit(option_env!("WZ_LIMIT_TX_EXPIRY_CLOSE_AFTER"), 0);
+pub(super) const SNAPSHOT_PERIOD_MS: usize =
+    limit(option_env!("WZ_LIMIT_SNAPSHOT_PERIOD_MS"), 1000);
+pub(super) const SNAPSHOT_HISTOGRAM_BUCKETS: usize =
+    limit(option_env!("WZ_LIMIT_SNAPSHOT_HISTOGRAM_BUCKETS"), 24);
 pub(super) const SUPERVISION_CHECKPOINTS: usize =
     limit(option_env!("WZ_LIMIT_SUPERVISION_CHECKPOINTS"), 4);
 pub(super) const EVENT_RING_SLOTS: usize = limit(option_env!("WZ_LIMIT_EVENT_RING_SLOTS"), 64);
