@@ -12096,13 +12096,15 @@ mod tests {
         }
 
         /// The Queryable and Get recipes of upstream's three node test, all six start orders at
-        /// once as four of its recipes run: each asker is answered fifty times in ten seconds.
-        /// It fails in about one run in four, in the orders where the asker joins last: the ask
-        /// that is made as the direct link of the two peers forms is received by the queryable
-        /// and never answered. Run it with `--ignored` to see it; each run prints the first asks
-        /// of every order and the links each peer holds at the end.
+        /// once as four of its recipes run: each asker is answered fifty times in ten seconds,
+        /// asking again at once whenever an ask finds nothing, as upstream's test does.
+        ///
+        /// Two peers of one router dial one another as soon as they learn of each other, and the
+        /// link that is one too many is closed on both ends. A query asked in that instant has a
+        /// leg on the link that is closed; the leg is ended with the link, or the get waits for it
+        /// for ever, and with it the asker, which never asks again. Asking without a pause is what
+        /// makes the instant likely (it failed in about half the runs).
         #[cfg(feature = "unstable")]
-        #[ignore = "a query made as the direct link of two peers forms is lost, about one run in four"]
         #[tokio::test(flavor = "multi_thread", worker_threads = 9)]
         async fn peers_of_a_router_are_answered_fifty_times_in_every_start_order() {
             use std::time::{Duration, Instant};
@@ -12202,9 +12204,6 @@ mod tests {
                                     asker.info().peers_zid().await.collect::<Vec<_>>(),
                                     asker.info().routers_zid().await.collect::<Vec<_>>(),
                                 );
-                            }
-                            if answered == before {
-                                tokio::time::sleep(Duration::from_millis(1)).await;
                             }
                         }
                     })

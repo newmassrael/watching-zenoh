@@ -734,6 +734,20 @@ pub trait FaceForwarder {
     /// transport send seam; a forwarder that routes clones it (an `Arc`) so it
     /// can forward TO this face later.
     fn register(&self, id: FaceId, actions: &Arc<SessionLinkActions>);
+    /// [`register`](Self::register) for a forwarder that can refuse the face at the moment it is
+    /// held: `true` when the face is held, `false` when the forwarder holds a face that stays to
+    /// the same node and the link is to be closed unheld.
+    ///
+    /// [`holds_peer`](Self::holds_peer) is asked earlier and is only an answer for the moment it
+    /// is given: a node that listens and dials has more than one loop, each registering into the
+    /// one table the forwarder keeps, and the other's face can come up between that question and
+    /// this call. This call is the decision, made under the table's own lock, and the loop tells
+    /// nothing of the face (not its dial machine, not its set of faces) before it is made.
+    /// Default: the face is registered and held.
+    fn admit(&self, id: FaceId, actions: &Arc<SessionLinkActions>) -> bool {
+        self.register(id, actions);
+        true
+    }
     /// A held face left the live set (peer Close / link loss). It can no
     /// longer be a forward destination.
     fn deregister(&self, id: FaceId);
@@ -3545,6 +3559,29 @@ where
                             });
                             continue;
                         }
+                        // Register the face's send seam BEFORE moving `opened`
+                        // into the drive future, so a forwarder can route TO
+                        // this face from the moment it is held. The registration is the
+                        // forwarder's admission ([`FaceForwarder::admit`]) and it comes before
+                        // anything is told of the face: a link it refuses is dropped as a
+                        // redundant one is, and the dial machine below is told the dial failed,
+                        // not that the peer is held by a face that does not exist.
+                        if !forwarder.admit(id, &opened.actions) {
+                            log::debug!(
+                                "dropping face {} to a peer the forwarder holds by another face",
+                                id.0
+                            );
+                            #[cfg(feature = "router-connect-reconcile")]
+                            if peer_dial {
+                                peer_dial_ended!(id, crate::loop_peers::DialEnd::Failed);
+                            }
+                            on_event(&AcceptEvent::FaceRefused {
+                                id,
+                                peer_zid: face.peer_zid.clone(),
+                                held: faces.len(),
+                            });
+                            continue;
+                        }
                         // Decision D5 — a peer's dial that came up: its machine
                         // holds the peer by this face, unless the peer stopped
                         // wanting it while it ran, when the session is dropped here
@@ -3558,6 +3595,7 @@ where
                                     .and_then(wz_session_core::credential_identity::zid_from_wire),
                             };
                             if !peer_dial_ended!(id, end) {
+                                forwarder.deregister(id);
                                 continue;
                             }
                             #[cfg(feature = "session-close-ingress")]
@@ -3567,10 +3605,6 @@ where
                         collisions.admitted(id, face.dialed);
                         summary.established += 1;
                         summary.peak_concurrent = summary.peak_concurrent.max(faces.len());
-                        // Register the face's send seam BEFORE moving `opened`
-                        // into the drive future, so a forwarder can route TO
-                        // this face from the moment it is held.
-                        forwarder.register(id, &opened.actions);
                         if let Some(stats) = &stats {
                             stats.transport_opened(id.0, &opened.actions);
                         }
@@ -5792,6 +5826,84 @@ mod tests {
             summary.refused_over_max_sessions, 1,
             "the second peer was refused BY THE BOUND, not by a handshake failure"
         );
+    }
+
+    /// A forwarder that holds no face to any node when the loop asks (`holds_peer` says no) and
+    /// refuses the link when it registers it, as a registry does whose other role's face to the
+    /// node came up in between: the loop then holds no face, tells nobody it is up, and the
+    /// forwarder is asked once.
+    #[tokio::test]
+    async fn a_face_the_forwarder_refuses_at_its_admission_is_not_held() {
+        struct RefusesAtAdmission(AtomicUsize);
+        impl FaceForwarder for RefusesAtAdmission {
+            fn register(&self, _id: FaceId, _actions: &Arc<SessionLinkActions>) {}
+            fn admit(&self, _id: FaceId, _actions: &Arc<SessionLinkActions>) -> bool {
+                self.0.fetch_add(1, SeqCst);
+                false
+            }
+            fn deregister(&self, _id: FaceId) {}
+            fn forward(&self, _id: FaceId, _event: IterationEvent<'_>) {}
+        }
+
+        let (listener, addr) = bind_loopback().await;
+        let (go_tx, go_rx) = watch::channel(false);
+        let up = Arc::new(AtomicUsize::new(0));
+        let refused = Arc::new(AtomicUsize::new(0));
+        let on_event = {
+            let up = up.clone();
+            let refused = refused.clone();
+            let go_tx = go_tx.clone();
+            move |event: &AcceptEvent| match event {
+                AcceptEvent::FaceUp(_) => {
+                    up.fetch_add(1, SeqCst);
+                }
+                AcceptEvent::FaceRefused { .. } => {
+                    refused.fetch_add(1, SeqCst);
+                    let _ = go_tx.send(true);
+                }
+                _ => {}
+            }
+        };
+        let forwarder = RefusesAtAdmission(AtomicUsize::new(0));
+
+        let node = peer_loop(
+            FaceSources {
+                listeners: vec![listener],
+                dial_targets: vec![],
+                dial_config: Arc::new(DialConfig::default()),
+                dial_intents: None,
+                mcast_ingress: None,
+                mcast_members: None,
+                mcast_group_subs: None,
+                reconcile: None,
+                #[cfg(feature = "transport-multilink")]
+                max_links: 1,
+                max_sessions: crate::config::DEFAULT_MAX_SESSIONS,
+                accept: AcceptBounds::default(),
+                ceiling: None,
+                peer_board: None,
+                offer: SessionOffer::universal(),
+                retry: RetryPolicy::ZENOH_DEFAULT,
+                stats: None,
+            },
+            acceptor_params(),
+            TokioTime::new(),
+            DEFAULT_OPEN_TICK_MS,
+            shutdown_on(go_rx.clone()),
+            on_event,
+            &forwarder,
+        );
+        let summary = tokio::time::timeout(Duration::from_secs(20), async {
+            let (summary, _) = tokio::join!(node, idle_initiator(addr, 1, go_rx.clone()));
+            summary
+        })
+        .await
+        .expect("the node completes within 20s");
+
+        assert_eq!(forwarder.0.load(SeqCst), 1, "the forwarder is asked once");
+        assert_eq!(up.load(SeqCst), 0, "a refused face is never reported up");
+        assert_eq!(refused.load(SeqCst), 1, "it is reported refused");
+        assert_eq!(summary.established, 0, "and the loop holds none");
     }
 
     /// Runs an accept-only loop with `bounds` over `peers` silent TCP connections, which send

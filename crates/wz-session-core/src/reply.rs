@@ -1493,6 +1493,25 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
         self.fire_final_for(rid);
     }
 
+    /// The link these entries were asked over is gone: end every pending entry as a final that
+    /// came over the wire would, whatever its deadline, and return how many it ended.
+    ///
+    /// Nothing else ends them. The remote cannot send the final over a link that is down, and
+    /// the deadline sweep belongs to the drive loop of the link, which has stopped; an entry
+    /// left in the table keeps the callback of its get, and that callback is what the asker waits
+    /// for the drop of, so the get would wait for ever. Upstream ends them when it closes the
+    /// face (`zenoh/src/net/routing/dispatcher/face.rs` @ `finalize_pending_queries(&self.tables, &mut state);`),
+    /// and the replies the get already had stand.
+    pub fn finish_all(&mut self) -> usize {
+        let fired = self.pending.drain_partition(|_| true);
+        let ended = fired.len();
+        for mut entry in fired {
+            let rid = entry.rid;
+            entry.sink.on_final(rid);
+        }
+        ended
+    }
+
     /// R261 — fire [`crate::reply_sink::ReplySink::on_timeout`] + drop every
     /// pending entry whose caller-supplied `deadline_ms` is at or before
     /// `now_ms`. Returns the number of pending entries swept (zero if no entry
@@ -4295,6 +4314,40 @@ mod tests {
             "only the never-expiring entry remains, so nothing arms a wake"
         );
         assert!(!reg.is_empty(), "...but it is still pending");
+    }
+
+    /// The link the entries were asked over is gone: every pending entry ends with its final,
+    /// whatever its deadline (a far one, none), the replies it had stand, and a final that
+    /// comes late finds nothing.
+    #[test]
+    fn finish_all_ends_every_pending_entry_with_its_final() {
+        let mut reg = ReplyRegistry::new();
+        let ended = Arc::new(Mutex::new(Vec::<u64>::new()));
+        for (rid, deadline) in [(21u64, Some(u64::MAX)), (22, None), (23, Some(1))] {
+            let ended = ended.clone();
+            reg.register(
+                rid,
+                1,
+                deadline,
+                crate::reply_acceptance::ReplyAcceptance::Any,
+                |_| {},
+                move |rid| ended.lock().unwrap().push(rid),
+            );
+        }
+
+        assert_eq!(reg.finish_all(), 3, "all three entries are ended");
+        let mut got = ended.lock().unwrap().clone();
+        got.sort_unstable();
+        assert_eq!(got, [21, 22, 23], "each gets the final of its own id");
+        assert!(reg.is_empty(), "and none is left pending");
+
+        reg.deliver_local_final(21);
+        assert_eq!(
+            ended.lock().unwrap().len(),
+            3,
+            "a late final ends nothing again"
+        );
+        assert_eq!(reg.finish_all(), 0, "an empty table has nothing to end");
     }
 
     // ── R261 sweep_timed_out unit tests ──

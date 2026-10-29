@@ -2506,6 +2506,9 @@ impl SharedSession {
                 // Runs the C callbacks, with the observer lock released.
                 entry.session.drain_deferred_fires();
             }
+            // The queries pending on the face end with it: the final that would have ended them
+            // cannot come over a link that is gone, and the get that asked waits for them.
+            entry.session.end_pending_queries();
         }
         // Purge the departed face from every matching aggregate. Same reasoning
         // as the liveliness flush above and the same failure mode: this face's
@@ -5165,18 +5168,26 @@ impl CApiForwarder {
 #[cfg(feature = "peer")]
 impl FaceForwarder for CApiForwarder {
     fn register(&self, id: FaceId, actions: &Arc<SessionLinkActions>) {
-        // Admitted in the usual case: the loop asked `holds_peer` before it got here, and it is a
-        // single task, so nothing came up in ITS OWN loop between the question and this call. A
-        // link another task of the node brought up in the meantime is not in its view: a node
-        // that dials the peers it scouts while it listens meets the same peer on a dialled link
-        // and on an accepted one at the same moment. The registry then refuses the face that
-        // came second, and that link is the one to close, with the reason zenoh gives a link
-        // refused for the node it already holds
-        // (`io/zenoh-transport/src/unicast/manager.rs` @ `init_existing_transport_unicast`);
-        // the loop sees the session end and lets the face go.
-        if !self.shared.face_up(id.0 + self.base, actions, false) {
+        let _ = self.admit(id, actions);
+    }
+
+    /// The registry's decision about the link, made under its own lock. The loop asked
+    /// `holds_peer` before it got here, but a node that listens and dials runs more than one
+    /// loop into the one registry, and a link another task of the node brought up in the
+    /// meantime is not in its view: a node that dials the peers it scouts while it listens meets
+    /// the same peer on a dialled link and on an accepted one at the same moment. The registry
+    /// keeps one of the two ([`SharedSession::face_up`] states the rule, which both ends of the
+    /// link read alike), and the face it refuses is the one to close, with the reason zenoh
+    /// gives a link refused for the node it already holds
+    /// (`io/zenoh-transport/src/unicast/manager.rs` @ `init_existing_transport_unicast`). The
+    /// loop is told, and holds nothing of the face: a face the loop held and the registry did
+    /// not would route nothing, and the queries made over it would go unanswered.
+    fn admit(&self, id: FaceId, actions: &Arc<SessionLinkActions>) -> bool {
+        let admitted = self.shared.face_up(id.0 + self.base, actions, false);
+        if !admitted {
             actions.send_close_with_reason(wz_session_core::close_reason::CloseReason::MaxLinks);
         }
+        admitted
     }
 
     /// One face per remote node, across BOTH roles: see [`SharedSession::face_up`].

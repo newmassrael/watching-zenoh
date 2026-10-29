@@ -2652,6 +2652,23 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         R::with_mutex_mut(&self.observer, |observer| observer.replies.unregister(rid))
     }
 
+    /// The link of this session is gone: end every query still pending on it as a final from the
+    /// wire would, and run the callbacks that this stages (outside the observer lock), returning
+    /// how many it ended.
+    ///
+    /// A query pending on a link that is down has nobody to end it. The remote cannot send its
+    /// final, and the deadline sweep belongs to the drive loop of the link, which has stopped; the
+    /// entry keeps the callback of the get, and the handle that cancels the leg keeps this
+    /// session, so the two hold one another and the get waits for ever for a drop that cannot
+    /// come ([`wz_session_core::reply::ReplyRegistry::finish_all`]).
+    pub fn end_pending_queries(&self) -> usize {
+        let ended = R::with_mutex_mut(&self.observer, |observer| observer.replies.finish_all());
+        if ended > 0 {
+            self.drain_deferred_fires();
+        }
+        ended
+    }
+
     /// The liveliness twin of [`Self::cancel_pending_query`] — drop a pending
     /// liveliness snapshot get by the interest id [`Self::liveliness_get`]
     /// returned.
