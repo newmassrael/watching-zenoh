@@ -460,7 +460,7 @@ CASES: tuple[Case, ...] = (
          require=(SCOUTING, UDP)),
     Case("capic-peer", "wz-capi-c", "libwz_capi_c.so", "peer", 4_065_000,
          forbid=(GOSSIP, CLOCK, ADVANCED, MULTICAST), require=(ACCEPT, RESPONDER, SCOUTING, UDP)),
-    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 9_309_700,
+    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 9_320_000,
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
          exports=836,
          note="zenoh-c's default links and pubkey auth (rustls on ring, quinn, tungstenite, "
@@ -473,8 +473,12 @@ CASES: tuple[Case, ...] = (
               "server-name keys of the tls link (+59,927, nearly all of it in the peer and "
               "router roles: the client builds moved by about 5,300). The accept loop is "
               "instantiated for the router forwarder, which handed it no authentication "
-              "before and so had none of that code to carry. The budget is that reading and "
-              "3,500, rounded up to the hundred"),
+              "before and so had none of that code to carry. 9,316,459 measured locally on "
+              "2026-10-30 (+10,270 since): the band and class a link negotiated, and the "
+              "multihop gossip key, which the graph's ingest, reflood and link-added delta "
+              "read, the gossip core renders as text, and the engine port lists for a node's "
+              "admin space. The growth is the features', chosen. The budget is that reading "
+              "and 3,500, rounded up to the hundred"),
 )
 
 
