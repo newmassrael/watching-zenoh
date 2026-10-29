@@ -165,13 +165,16 @@ CASES: tuple[Case, ...] = (
               "hosted CI on 2026-10-26 with the key set's gate and the engine port's advanced "
               "plane, which pico-client's note above attributes. 1,510,582 on hosted CI on "
               "2026-10-27 (head `f4bdeaee5`, +12,024), the growth pico-client's note states"),
-    Case("pico-client-udp", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",link-udp", 1_919_000,
+    Case("pico-client-udp", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",link-udp", 1_922_900,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST),
          require=(UDP, SINGLE_THREADED),
          note="1,894,361 on hosted CI on 2026-10-26, 1,889,713 before the key set's gate: the "
               "same growth as pico-client's, whose note attributes it. 1,910,913 on hosted CI on "
-              "2026-10-27 (head `f4bdeaee5`, +16,552), the growth pico-client's note states"),
+              "2026-10-27 (head `f4bdeaee5`, +16,552), the growth pico-client's note states. "
+              "1,919,305 on hosted CI on 2026-10-29 (head `1ab111232`, 305 over the 1,919,000 "
+              "it held): the one of the cases that read the day's clock growth that the budgets "
+              "above did not move; the budget moves to that reading plus 3,500, to the hundred"),
     # The same client on the cooperative engine: the program steps its session, and no runtime
     # thread or tokio is linked. Its links dial UDP in every build, so it is compared with the
     # pico that pico-client-udp is (`link-udp` names that here; it adds nothing to this build).
