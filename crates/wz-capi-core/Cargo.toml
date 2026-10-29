@@ -97,7 +97,7 @@ peer = [
 # runtime (`RouterForwarder`) run by the face loop, with the listeners, the scouting responder and
 # the handshake of the roles above. `routing-token-tables` is the liveliness-token plane a router
 # forwards (upstream's router does; a router without it would drop what its peers declare).
-router-node = ["peer", "query", "routing-namespace", "wz-runtime-tokio/routing-router-hat", "wz-runtime-tokio/routing-token-tables", "wz-runtime-tokio/router-connect-reconcile"]
+router-node = ["peer", "query", "routing-namespace", "multicast-transport", "wz-runtime-tokio/routing-router-hat", "wz-runtime-tokio/routing-token-tables", "wz-runtime-tokio/router-connect-reconcile", "wz-runtime-tokio/router-multicast-faces"]
 # Scouting: the one-shot survey of the group that `z_scout` makes, and a session's own looking
 # for the nodes it should connect to (a client with nothing to dial scouts for its router): the
 # scout, its fan-out over the interfaces, the reading of the answers, the plan the config

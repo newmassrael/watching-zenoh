@@ -6290,7 +6290,8 @@ mod tests {
     fn a_router_is_refused_for_what_it_does_not_carry_by_what_was_asked() {
         let config = Config::from_json5(
             r#"{ mode: "router",
-                 listen: { endpoints: ["tcp/127.0.0.1:0", "udp/224.0.0.224:17447"] },
+                 listen: { endpoints: ["tcp/127.0.0.1:0", "udp/224.0.0.224:17447",
+                                       "udp/224.0.0.225:17448"] },
                  scouting: { multicast: { enabled: false } } }"#,
         )
         .expect("a configuration zenoh reads");
@@ -6299,7 +6300,7 @@ mod tests {
             .expect_err("a router that asks too much");
         let text = error.to_string();
         assert!(
-            text.contains("`mode` = \"router\"") && text.contains("a multicast group"),
+            text.contains("`mode` = \"router\"") && text.contains("more than one multicast group"),
             "{text}"
         );
     }
@@ -12204,6 +12205,62 @@ mod tests {
             );
             assert!(keys("@/**").len() > 1, "nothing under @/**");
             drop(second);
+        }
+
+        /// A router node that listens on a multicast group joins it at the open, and says the
+        /// locator of the group with the port the system gave it where the endpoint named port 0:
+        /// a peer that listens on that locator joins the same group, and what the router says is
+        /// the group it forwards into.
+        #[cfg(feature = "unstable")]
+        #[test]
+        fn a_router_node_listens_on_a_multicast_group() {
+            let router = open(
+                Config::from_json5(
+                    r#"{ id: "a1b2f1", mode: "router",
+                         listen: { endpoints: ["tcp/127.0.0.1:0", "udp/224.0.0.224:0#iface=lo"] },
+                         scouting: { multicast: { enabled: false } } }"#,
+                )
+                .expect("a configuration zenoh reads"),
+            )
+            .wait()
+            .expect("a router joins a group");
+            let locators: Vec<String> = router
+                .info()
+                .locators()
+                .wait()
+                .iter()
+                .map(|locator| locator.to_string())
+                .collect();
+            assert!(
+                locators
+                    .iter()
+                    .any(|text| text.starts_with("tcp/127.0.0.1:")),
+                "{locators:?}"
+            );
+            let group = locators
+                .iter()
+                .find(|text| text.starts_with("udp/224.0.0.224:"))
+                .unwrap_or_else(|| panic!("no group among {locators:?}"));
+            let port = group["udp/224.0.0.224:".len()..]
+                .split('#')
+                .next()
+                .and_then(|text| text.parse::<u16>().ok())
+                .unwrap_or_else(|| panic!("no port in {group}"));
+            assert_ne!(
+                port, 0,
+                "the group says the port the system gave it: {group}"
+            );
+            let peer = open(
+                Config::from_json5(&format!(
+                    r#"{{ id: "a1b2f2", mode: "peer",
+                          listen: {{ endpoints: ["{group}"] }},
+                          scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                ))
+                .expect("a configuration zenoh reads"),
+            )
+            .wait()
+            .expect("a peer joins the group of the router");
+            drop(peer);
         }
 
         /// A router that dials a router which is not listening yet keeps dialing, and once the

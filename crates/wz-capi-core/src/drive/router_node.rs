@@ -225,10 +225,68 @@ pub(crate) fn refused_ask(stance: &OpenStance) -> Option<&'static str> {
     // A namespace is the node's own session's: its face carries it (see
     // `RouterForwarder::with_local_namespace`). A build without the decorator never gets one: the
     // plan refuses the document that states it.
-    if !stance.groups.is_empty() {
-        return Some("a multicast group");
+    // The node joins one group: its forwarder holds one multicast face to forward into, as the
+    // router host of the demo does.
+    if stance.groups.len() > 1 {
+        return Some("more than one multicast group");
     }
     None
+}
+
+/// The group a router node joined: the locator it reports for it and the face that serves it.
+struct JoinedGroup {
+    /// `udp/<group>:<port>` with the socket keys of the endpoint, the port being the one the
+    /// group is on, which an endpoint that named port 0 did not state.
+    locator: String,
+    face: wz_runtime_tokio::multicast_glue::RouterMcastGroup,
+}
+
+/// Join the group `join` names, as a router joins its group locator: either family, with the
+/// socket keys of its metadata, on one socket the node's forwarder sends into and reads the
+/// members from. The port is settled before the face binds (a group named with port 0 is given
+/// one by the system), so that the locator the node reports is the group every join of the face
+/// is on.
+async fn join_group(
+    join: &GroupJoin,
+    zid: &[u8],
+    link_conf: LinkConf,
+) -> Result<JoinedGroup, OpenError> {
+    let Some(ResolvedGroup {
+        link: GroupLinkSpec::Udp { group, port, opts },
+        ..
+    }) = ResolvedGroup::resolve(join, zid, WhatAmI::Router, link_conf.tx.queue, link_conf.rx)
+    else {
+        log_open_failure(
+            &format!("group {}", join.endpoint),
+            &"a router node joins a udp multicast group",
+        );
+        return Err(OpenError::DriveFailed);
+    };
+    let port =
+        wz_runtime_tokio::UdpDriver::multicast_link_port(group, port, opts.as_socket_config())
+            .await
+            .map_err(|error| {
+                log_open_failure(&format!("group {}", join.endpoint), &error);
+                OpenError::DriveFailed
+            })?;
+    let tail = join
+        .endpoint
+        .find('#')
+        .map_or("", |at| &join.endpoint[at..]);
+    let locator = format!("udp/{}{tail}", std::net::SocketAddr::new(group, port));
+    let face = wz_runtime_tokio::multicast_glue::spawn_router_mcast_group(
+        group,
+        port,
+        wz_runtime_tokio::multicast_glue::RouterGroupProfile {
+            zid: zid.to_vec(),
+            qos: join.profile.is_qos,
+            tx_queue: link_conf.tx.queue,
+            link_rx: link_conf.rx,
+        },
+        opts,
+        None,
+    );
+    Ok(JoinedGroup { locator, face })
 }
 
 /// Open a router node on `listen`: bind the endpoints, answer the scouts that name it and serve
@@ -270,6 +328,7 @@ pub(crate) fn open_router_blocking(
         namespace,
         #[cfg(feature = "gossip")]
         gossip,
+        groups,
         ..
     } = stance;
     // The prefix as the forwarder takes it. The plan validated the text, so one that does not
@@ -361,6 +420,7 @@ pub(crate) fn open_router_blocking(
                 link_conf,
                 offer,
                 node_forwarder,
+                groups,
                 #[cfg(feature = "scout")]
                 scouting,
                 node_shutdown,
@@ -411,6 +471,7 @@ async fn run_router(
     link_conf: LinkConf,
     offer: SessionOffer,
     forwarder: Arc<RouterForwarder>,
+    groups: Vec<GroupJoin>,
     #[cfg(feature = "scout")] scouting: Option<ScoutingPlan>,
     shutdown: Arc<Notify>,
     stop: Arc<AtomicBool>,
@@ -438,7 +499,23 @@ async fn run_router(
     }
     let listeners: Vec<&BoundListener> = legs.iter().map(|leg| &leg.listening.listener).collect();
     let advertised = Advertised::of_all(&listeners);
-    let locators = advertised.remote.clone();
+    let mut locators = advertised.remote.clone();
+    // The group the node joins, bound before the open answers, as a listener is: a group that
+    // cannot be joined fails the open. Its locator is among the node's own, as the manager of
+    // upstream lists its multicast listener beside the unicast ones.
+    let group = match groups.first() {
+        Some(join) => match join_group(join, &zid, link_conf).await {
+            Ok(group) => Some(group),
+            Err(cause) => {
+                let _ = tx.send(Err(cause));
+                return;
+            }
+        },
+        None => None,
+    };
+    if let Some(group) = &group {
+        locators.push(group.locator.clone());
+    }
     #[cfg(feature = "scout")]
     let responder = match bound_responder(
         scouting.as_ref(),
@@ -493,14 +570,28 @@ async fn run_router(
             return;
         }
     };
+    // What the group's members send the router rides the face loop; what the router forwards
+    // into the group goes out through the forwarder, which holds the group's producer.
+    let (mcast_ingress, mcast_members, mcast_group_subs, group_stop) = match group {
+        Some(JoinedGroup { face, .. }) => {
+            forwarder.attach_mcast_group(face.outbound);
+            (
+                Some(face.ingress),
+                Some(face.members),
+                Some(face.group_subs),
+                Some(face.stop),
+            )
+        }
+        None => (None, None, None, None),
+    };
     let sources = FaceSources {
         listeners: legs.into_iter().map(|leg| leg.listening.listener).collect(),
         dial_targets,
         dial_config: Arc::new(dial_config),
         dial_intents: None,
-        mcast_ingress: None,
-        mcast_members: None,
-        mcast_group_subs: None,
+        mcast_ingress,
+        mcast_members,
+        mcast_group_subs,
         reconcile: None,
         #[cfg(feature = "transport-multilink")]
         max_links: 1,
@@ -530,4 +621,10 @@ async fn run_router(
         &*forwarder,
     )
     .await;
+    // The node leaves its group as it ends, which announces the departure to the members, where
+    // a face dropped with the node would leave it silently and they would hold the router until
+    // its lease ran out.
+    if let Some(group_stop) = group_stop {
+        let _ = group_stop.stop().await;
+    }
 }

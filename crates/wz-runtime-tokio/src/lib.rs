@@ -3303,6 +3303,31 @@ impl UdpDriver {
         })
     }
 
+    /// The port a multicast link on `group` takes: `port`, or, for port 0, the one the system gives
+    /// the joined half, which is what [`Self::bind_multicast_link`] addresses the group by. A node
+    /// that reports the locator of its group asks this first and binds the link at the port it
+    /// got, so the locator it reports is the one every later join (a face re-joins on link loss)
+    /// uses, and a member that dials it reaches the group (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @
+    /// `We may have bind to port 0, so we need to retrieve the actual port`).
+    #[cfg(feature = "transport-multicast")]
+    pub async fn multicast_link_port(
+        group: impl Into<std::net::IpAddr>,
+        port: u16,
+        cfg: McastSocketConfig<'_>,
+    ) -> io::Result<u16> {
+        if port != 0 {
+            return Ok(port);
+        }
+        let read = Self::bind_multicast(group, 0, cfg).await?;
+        match read.socket.as_ref() {
+            Some(socket) => Ok(socket.local_addr()?.port()),
+            None => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "the multicast link has no socket to read the port of",
+            )),
+        }
+    }
+
     /// R311es — bind an ephemeral local UDP socket and target `peer`
     /// for unicast `send()` (Initiator side). This is the UDP dial half
     /// of the scouting locator seam: a
