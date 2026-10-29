@@ -200,6 +200,16 @@ carries about 6 KB of C library code wz does not, which is why the difference is
   sees the same headers in the same order and the readers find an extension by its id, so a
   message is judged and read as before; an entry of an extension no module of the build reads
   is no longer owned.
+- TAKEN for the stack, text +64 bytes (160,828 to 160,892 on the fixed image), `.bss` +256 bytes
+  (106,770 to 107,026): the connect manager's actions (248 bytes) are a field of the manager,
+  which lives in the node's storage (the run arena `RUN` 576 to 832 bytes; the loop checks it at
+  compile time and refused the first build), where they were a local of `drive`, on the stack of
+  the thread that ticks the manager; and a new row is built in the table's row
+  (`BoundedVec::push_with`) where `reconcile` held the 152-byte row twice. The dial is off the
+  longest chain, and the kit's reading fell from 3,048 to 2,888 bytes. The main stack's size
+  follows the bound (4,240, set by the key matching under a query's answer) and does not move;
+  the stack used falls by 160 bytes and the RAM image grows by 256, which the matrix grades as
+  two rows (`stack_used` and `ram`).
 - NOT TAKEN, measured: the loop's log lines (`port.log(&[...])`, arrays of parts) said by one
   out-of-line function: the frame of `wz_app_main` stayed 704 bytes (the compiler had given the
   arrays one slot) and the text grew 232 bytes.

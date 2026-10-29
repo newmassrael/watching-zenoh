@@ -219,6 +219,12 @@ pub trait SeqBacking<T>: Sized + IntoIterator<Item = T> {
     /// Append `value`, or hand it back when the policy's capacity is full.
     fn push(&mut self, value: T) -> Result<(), CapacityFull<T>>;
 
+    /// Append the value `make` returns, built where it is kept, or `false` when the policy's
+    /// capacity is full (and `make` is not called). A fixed sequence writes the value into its
+    /// slot, so a large element is not a value of its own in the frame of the caller as it is
+    /// when passed to [`Self::push`].
+    fn push_with<F: FnOnce() -> T>(&mut self, make: F) -> bool;
+
     /// Remove and return the last element, if any.
     fn pop(&mut self) -> Option<T>;
 
@@ -345,6 +351,11 @@ impl<T> SeqBacking<T> for Vec<T> {
         Ok(())
     }
 
+    fn push_with<F: FnOnce() -> T>(&mut self, make: F) -> bool {
+        Vec::push(self, make());
+        true
+    }
+
     fn pop(&mut self) -> Option<T> {
         Vec::pop(self)
     }
@@ -402,6 +413,20 @@ impl<T, const N: usize> SeqBacking<T> for heapless::Vec<T, N> {
 
     fn push(&mut self, value: T) -> Result<(), CapacityFull<T>> {
         heapless::Vec::push(self, value).map_err(CapacityFull)
+    }
+
+    fn push_with<F: FnOnce() -> T>(&mut self, make: F) -> bool {
+        let len = self.len();
+        if len == N {
+            return false;
+        }
+        // SAFETY: `len < N`, so the slot at `len` is inside the buffer and holds no value; it is
+        // written whole before the length covers it, and `make` panicking leaves both as they were.
+        unsafe {
+            self.as_mut_ptr().add(len).write(make());
+            self.set_len(len + 1);
+        }
+        true
     }
 
     fn pop(&mut self) -> Option<T> {
@@ -559,6 +584,13 @@ impl<T, const N: usize, P: Storage> BoundedVec<T, N, P> {
     /// it returns `Err(CapacityFull(value))` once `N` entries are present.
     pub fn push(&mut self, value: T) -> Result<(), CapacityFull<T>> {
         self.inner.push(value)
+    }
+
+    /// Append the value `make` returns, built where the table keeps it, and say whether there
+    /// was room (`make` is not called when there is none). For an element that is large: handed
+    /// to [`Self::push`] it is a value in the caller's frame and then a second one in `push`'s.
+    pub fn push_with<F: FnOnce() -> T>(&mut self, make: F) -> bool {
+        self.inner.push_with(make)
     }
 
     /// Remove and return the last entry, if any.

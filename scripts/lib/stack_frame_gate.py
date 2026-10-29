@@ -283,7 +283,16 @@ IMAGES = (
     # longest chain again, 16 frames: `wz_app_main` 704, `reconcile` 456, `drive` 536, `dial_peer`
     # 112, `dial_expecting` 256, the session pump's `build_in` 216, the engine's five frames
     # (`run_main_event_loop` to `enter_entry_set`) 288, `send_open_syn` 304, `emit_on_link` 64 and
-    # the 64-bit division 88, 9 calls through a register. The kit's reading is 3,048, 24 over.
+    # the 64-bit division 88, 9 calls through a register. The kit's reading was 3,048, 24 over.
+    #
+    # `peak` is 2,812 bytes once the connect manager's actions are a field of the manager (they
+    # were 248 bytes of `drive`'s frame; the manager is in the node's storage) and a new row is
+    # built in the table's row (`push_with`; `reconcile` held the 152-byte row twice): the dial is
+    # off the longest chain, which is the key matching under a query's answer now, 12 frames:
+    # `wz_app_main` 704, the executor's poll 112, `dispatch_datagram_unit` 168, `dispatch_copied`
+    # 80, the session events 28, `dispatch_event_among` 576, `keyexpr_intersects_text` 552,
+    # `keyexpr_intersects_target` 560 and three small ones, 4 calls through a register. The kit's
+    # reading is 2,888, 76 over.
     Image(
         key="zephyr-client-fixed",
         elf=None,
@@ -291,7 +300,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=3024,
+        peak=2812,
     ),
     # The same client with the session coalescing a send window into one datagram
     # (`overlays/t2g_client_batching.conf`). The batch writer and its flush path are two more
@@ -331,7 +340,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=3024,
+        peak=2812,
     ),
     # The fixed client that ASKS (`overlays/t2g_client_get.conf`): the getter of
     # `wz_session_mcu::slot_getter` is the application layer the observer's drain runs inside, and

@@ -1133,6 +1133,11 @@ pub struct ConnectManager<D: Dialer> {
     store: StoreRef,
     /// The counter the planner mints the face of a dial from.
     next_id: u64,
+    /// What the planner asked for in the call being run: filled by `ask`, read by `take`. A
+    /// field and not a local of `drive` (some 250 bytes), because the manager lives in the
+    /// node's storage and `drive` is on the stack of the thread that ticks it, under `reconcile`.
+    /// Empty between two calls of `drive`, which is not its own callee.
+    actions: Actions,
 }
 
 impl<D: Dialer> ConnectManager<D> {
@@ -1185,6 +1190,7 @@ impl<D: Dialer> ConnectManager<D> {
             periods: BoundedVec::new(),
             store,
             next_id: 0,
+            actions: Actions::new(),
         }
     }
 
@@ -1556,30 +1562,27 @@ impl<D: Dialer> ConnectManager<D> {
     /// back by value, the six of them (about 300 bytes) were a copy in `ask`, one in this frame
     /// and one more for `take`, on the stack of the thread that ticks the manager.
     fn drive(&mut self, now_ms: u64, call: &mut PlannerCall<'_, D>) {
-        let mut actions = Actions::new();
         let mut failed: FixedVec<u64, 6> = FixedVec::new();
-        self.ask(now_ms, call, &mut actions);
+        self.actions.clear();
+        self.ask(now_ms, call);
         loop {
-            self.take(&actions, now_ms, &mut failed);
+            self.take(now_ms, &mut failed);
             let Some(id) = failed.pop() else {
                 return;
             };
             // The turn after a failed dial asks for no dial, so the list only shrinks.
-            actions.clear();
-            self.ask(
-                now_ms,
-                &mut |planner, ports, next_id, emit| {
-                    planner.dial_ended(id, DialEnd::Failed, ports, next_id, emit);
-                },
-                &mut actions,
-            );
+            self.actions.clear();
+            self.ask(now_ms, &mut |planner, ports, next_id, emit| {
+                planner.dial_ended(id, DialEnd::Failed, ports, next_id, emit);
+            });
         }
     }
 
     /// One call of the planner against this profile's ports, and what it asked for, pushed to
-    /// `actions`.
-    fn ask(&mut self, now_ms: u64, call: &mut PlannerCall<'_, D>, actions: &mut Actions) {
+    /// `self.actions`.
+    fn ask(&mut self, now_ms: u64, call: &mut PlannerCall<'_, D>) {
         let next_id = &mut self.next_id;
+        let actions = &mut self.actions;
         self.store.get().with(|tables| {
             let mut ports = Ports {
                 dialer: core::marker::PhantomData,
@@ -1598,9 +1601,11 @@ impl<D: Dialer> ConnectManager<D> {
 
     /// Take the actions of one call: start the dials, arm the waits, hang up the sessions.
     /// The faces of the dials that did not start go to `failed`.
-    fn take(&mut self, actions: &Actions, now_ms: u64, failed: &mut FixedVec<u64, 6>) {
-        for action in actions {
-            match *action {
+    fn take(&mut self, now_ms: u64, failed: &mut FixedVec<u64, 6>) {
+        // By index, one action at a time: the actions are a field of `self`, which the arms
+        // below borrow whole.
+        for at in 0..self.actions.len() {
+            match self.actions[at] {
                 PeerAction::Dial { id, key, .. } => match self.dial_peer(&key, now_ms) {
                     Ok(session) => {
                         if let Some(row) = self.row_mut(&key) {
@@ -1853,8 +1858,12 @@ impl<D: Dialer> ConnectManager<D> {
                         continue;
                     };
                     let key = Key::Endpoint(slot);
-                    let row = Row::new(key, Some(entry.endpoint.clone()), multi_link);
-                    if self.rows.push(row).is_err() {
+                    // Built in the table's row: a row is 152 bytes, and as a value it was one
+                    // in this frame and one more in `push`'s.
+                    if !self
+                        .rows
+                        .push_with(|| Row::new(key, Some(entry.endpoint.clone()), multi_link))
+                    {
                         continue;
                     }
                     key

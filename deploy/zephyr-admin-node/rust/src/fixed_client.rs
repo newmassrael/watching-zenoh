@@ -85,16 +85,18 @@ const RX: usize = BATCH_SIZE as usize + RX_SLACK;
 const TX: usize = BATCH_SIZE as usize;
 /// The bytes of the arena the loop's own state is built in (the host, the factory and the node of
 /// the session it dials): 552 for the client that only answers, from the sizes of those three on
-/// the kit; the loop checks the number when it is compiled, and a build that grows past it stops.
-/// A node that asks keeps its pending queries in the layer the factory holds, so it is given more.
-/// The client over the secure channel holds the channel in its stack, which the node and the host
-/// each carry; it is a verify image with no budget row, and is given room.
+/// the kit, and the 248 bytes of what the connect manager's planner asked for in the call it runs
+/// (`ConnectManager::actions`, a field since it was a local of a frame on the stack of the thread
+/// that ticks it); the loop checks the number when it is compiled, and a build that grows past it
+/// stops. A node that asks keeps its pending queries in the layer the factory holds, so it is
+/// given more. The client over the secure channel holds the channel in its stack, which the node
+/// and the host each carry; it is a verify image with no budget row, and is given room.
 #[cfg(not(any(feature = "get", feature = "tls")))]
-const RUN: usize = 576;
+const RUN: usize = 832;
 #[cfg(all(feature = "get", not(feature = "tls")))]
-const RUN: usize = 704;
+const RUN: usize = 960;
 #[cfg(feature = "tls")]
-const RUN: usize = 1536;
+const RUN: usize = 1792;
 /// The queryables the node declares: its status and its config.
 const DOCS: usize = 2;
 /// How long the node waits for the board to have an address: a DHCP lease on a slow link takes
