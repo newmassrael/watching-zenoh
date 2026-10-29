@@ -460,7 +460,7 @@ CASES: tuple[Case, ...] = (
          require=(SCOUTING, UDP)),
     Case("capic-peer", "wz-capi-c", "libwz_capi_c.so", "peer", 4_065_000,
          forbid=(GOSSIP, CLOCK, ADVANCED, MULTICAST), require=(ACCEPT, RESPONDER, SCOUTING, UDP)),
-    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 9_320_000,
+    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 9_331_100,
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
          exports=836,
          note="zenoh-c's default links and pubkey auth (rustls on ring, quinn, tungstenite, "
@@ -477,7 +477,11 @@ CASES: tuple[Case, ...] = (
               "2026-10-30 (+10,270 since): the band and class a link negotiated, and the "
               "multihop gossip key, which the graph's ingest, reflood and link-added delta "
               "read, the gossip core renders as text, and the engine port lists for a node's "
-              "admin space. The growth is the features', chosen. The budget is that reading "
+              "admin space. 9,327,578 measured locally on 2026-10-30 (+11,119 since): the "
+              "router node's multicast group and the peer as a node, which carries the "
+              "peer hat, the autoconnect intents, the whole sample and query a hosted "
+              "subscriber or queryable is shown, and the shared memory of the node's "
+              "session. The growth is the features', chosen. The budget is that reading "
               "and 3,500, rounded up to the hundred"),
 )
 
