@@ -192,7 +192,7 @@ fn a_wz_dialer_publishes_to_a_zenoh_pico_listener() {
     // the subscriber's interest costs a sample and not the test.
     // The key is the one the dialer fixture of this test publishes (`dial_a_listener`, an example
     // and so not a producer the gate reads), and the test names it to z_sub as well.
-    // barrier-origin: test-payload "demo/from-dialer"
+    // barrier-origin: test-payload "'demo/from-dialer'"
     listener.printed(
         "'demo/from-dialer'",
         "z_sub never received what the wz dialer published",
@@ -207,7 +207,6 @@ fn a_wz_dialer_hears_a_zenoh_pico_listener() {
     let listener = ForeignListener::start("z_pub", &["-k", "demo/foreign/pub", "-v", "from-pico"]);
     let dialer = Dialer::start(&listener.endpoint);
     // z_pub puts once a second.
-    // barrier-origin: test-payload "heard demo/foreign/pub"
     dialer.wait_for(|line| line == "heard demo/foreign/pub");
     // The listener's own view: it did not stop at the handshake.
     let mut output = listener.output.try_clone().expect("dup the CLI's output");
@@ -229,7 +228,6 @@ fn a_wz_dialer_get_is_answered_by_a_zenoh_pico_listener() {
     );
     let mut dialer = Dialer::start(&listener.endpoint);
     dialer.ask("demo/foreign/queryable");
-    // barrier-origin: test-payload "reply answered"
     dialer.wait_for(|line| line == "reply answered");
     dialer.wait_for(|line| line == "done demo/foreign/queryable");
     listener.printed(
