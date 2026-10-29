@@ -5955,7 +5955,8 @@ mod tests {
     #[test]
     fn a_router_is_refused_for_what_it_does_not_carry_by_what_was_asked() {
         let config = Config::from_json5(
-            r#"{ mode: "router", listen: { endpoints: ["tcp/127.0.0.1:0"] }, namespace: "ns",
+            r#"{ mode: "router",
+                 listen: { endpoints: ["tcp/127.0.0.1:0", "udp/224.0.0.224:17447"] },
                  scouting: { multicast: { enabled: false } } }"#,
         )
         .expect("a configuration zenoh reads");
@@ -5964,7 +5965,7 @@ mod tests {
             .expect_err("a router that asks too much");
         let text = error.to_string();
         assert!(
-            text.contains("`mode` = \"router\"") && text.contains("a namespace"),
+            text.contains("`mode` = \"router\"") && text.contains("a multicast group"),
             "{text}"
         );
     }
@@ -10732,6 +10733,75 @@ mod tests {
                 .expect("replies after the callback returned");
             drop(query);
             assert_eq!(asked.join().expect("the get ends"), ["later"]);
+        }
+
+        /// A router whose own session has a namespace names its keys relative to it: a peer
+        /// that names them in full is heard under it, and hears what the router puts under it.
+        #[test]
+        fn the_session_of_a_router_with_a_namespace_names_its_keys_relative_to_it() {
+            use std::sync::mpsc;
+            use std::time::Duration;
+
+            let port = unautoselected_port();
+            let router = open(
+                Config::from_json5(&format!(
+                    r#"{{ id: "a1b2f1", mode: "router", namespace: "ext/ns",
+                          listen: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                          scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                ))
+                .expect("a configuration zenoh reads"),
+            )
+            .wait()
+            .expect("a router with a namespace opens");
+            let (heard_tx, heard) = mpsc::channel::<String>();
+            let heard_tx = std::sync::Mutex::new(heard_tx);
+            let _subscriber = router
+                .declare_subscriber("demo/**".to_owned())
+                .callback(move |sample: Sample| {
+                    let _ = heard_tx.lock().unwrap().send(sample.key_expr().to_string());
+                })
+                .wait()
+                .expect("declares");
+            let peer = peer_of("a1b2f2", port);
+            assert_eq!(connected(&peer, 1).0.len(), 1, "the peer is linked");
+            let (peer_tx, peer_heard) = mpsc::channel::<String>();
+            let peer_tx = std::sync::Mutex::new(peer_tx);
+            let _peer_subscriber = peer
+                .declare_subscriber("ext/ns/demo/**".to_owned())
+                .callback(move |sample: Sample| {
+                    let _ = peer_tx.lock().unwrap().send(sample.key_expr().to_string());
+                })
+                .wait()
+                .expect("declares");
+            // The declarations reach each node a moment after the link: the puts are repeated
+            // until they are heard.
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let (mut by_router, mut by_peer) = (Vec::new(), Vec::new());
+            while !(by_router.contains(&"demo/up".to_owned())
+                && by_peer.contains(&"ext/ns/demo/down".to_owned()))
+                && std::time::Instant::now() < deadline
+            {
+                peer.put("ext/ns/demo/up", "x").wait().expect("puts");
+                peer.put("other/demo/up", "x").wait().expect("puts");
+                router.put("demo/down", "y").wait().expect("puts");
+                std::thread::sleep(Duration::from_millis(100));
+                by_router.extend(heard.try_iter());
+                by_peer.extend(peer_heard.try_iter());
+            }
+            // The router hears the peer without the namespace, and its own puts as it named
+            // them; a put of the peer outside the namespace is not its.
+            assert!(by_router.contains(&"demo/up".to_owned()), "{by_router:?}");
+            assert!(
+                by_router
+                    .iter()
+                    .all(|key| key == "demo/up" || key == "demo/down"),
+                "{by_router:?}"
+            );
+            // The peer hears the router's put under the namespace.
+            assert!(
+                by_peer.contains(&"ext/ns/demo/down".to_owned()),
+                "{by_peer:?}"
+            );
         }
 
         #[cfg(feature = "unstable")]

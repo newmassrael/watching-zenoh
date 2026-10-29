@@ -2769,6 +2769,23 @@ pub struct RouterForwarder {
     /// That makes the forward stamp FOREIGN-OBSERVABLE here: a pico subscriber
     /// prints `with timestamp:` for a Put that entered this router bare.
     node_hlc: crate::node_clock::NodeHlc,
+    /// The namespace of the node's own session, which its face puts on what the session sends
+    /// and takes off what it is told ([`RouterForwarder::with_local_namespace`]).
+    #[cfg(feature = "routing-namespace")]
+    local_namespace: Option<LocalNamespace>,
+}
+
+/// The namespace of the node's own session: upstream installs its decorator pair on the face of
+/// the session (`zenoh/src/api/session.rs` @ `Namespace::new`), and for a node that is the
+/// `Local` face. The key of every declaration, publication and query of the session is put under
+/// the prefix on its way into the router, and what the router tells the session is stripped of it
+/// (a message about a key outside it is dropped), so the session names its keys relative to it.
+#[cfg(feature = "routing-namespace")]
+struct LocalNamespace {
+    prefix: wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr,
+    /// The ingress half is stateful (it remembers the ids of the declarations it dropped, so that
+    /// their id-only retraction is dropped as well).
+    ingress: std::sync::Mutex<wz_session_core::namespace::NamespaceIngress>,
 }
 
 /// The handler of a queryable a host registered on the router: the shape the session's own
@@ -2808,7 +2825,10 @@ thread_local! {
 /// the replies the handler wrote have gone out.
 pub struct HeldRecord {
     qid: u64,
+    /// The key of the query as the queryable was handed it (see [`HostedQueryable::namespaced`]).
     keyexpr: String,
+    /// Whether the replies are put under the namespace of the node's own session.
+    namespaced: bool,
     accept: wz_session_core::reply_acceptance::ReplyKeyExpr,
     reliable: bool,
     holds: std::sync::atomic::AtomicUsize,
@@ -2944,6 +2964,11 @@ struct HostedQueryable {
     id: u64,
     keyexpr: String,
     complete: bool,
+    /// Whether the queryable is the node's own session's, whose keys are relative to the
+    /// namespace of the session ([`RouterForwarder::with_local_namespace`]): the queries it is
+    /// handed carry the key without it and its replies are put under it. A queryable the router
+    /// hosts for itself (the admin space) names its keys in full.
+    namespaced: bool,
     handler: Arc<Hosted<HostedQueryHandler>>,
 }
 
@@ -2952,6 +2977,9 @@ struct HostedQueryable {
 struct HostedSubscriber {
     id: u64,
     keyexpr: String,
+    /// Whether the subscriber is the node's own session's (see [`HostedQueryable::namespaced`]):
+    /// the samples it is handed carry the key without the namespace.
+    namespaced: bool,
     handler: Arc<Hosted<HostedSubscriberHandler>>,
 }
 
@@ -3475,6 +3503,74 @@ impl RouterForwarder {
         self
     }
 
+    /// The forwarder for a node whose own session has a namespace: the keys of what the program
+    /// declares, publishes and asks through it are put under `prefix`, and the samples, queries,
+    /// replies and tokens it is handed are stripped of it. Call it before the program does
+    /// anything; what the router hosts for itself (its admin space) is not under it.
+    #[cfg(feature = "routing-namespace")]
+    pub fn with_local_namespace(
+        mut self,
+        prefix: wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr,
+    ) -> Self {
+        self.local_namespace = Some(LocalNamespace {
+            ingress: std::sync::Mutex::new(wz_session_core::namespace::NamespaceIngress::new(
+                prefix.clone(),
+            )),
+            prefix,
+        });
+        self
+    }
+
+    /// The key as the router names it, for a key the node's own session names: under the
+    /// namespace of the session, if it has one.
+    fn wire_key<'a>(&self, key: &'a str) -> std::borrow::Cow<'a, str> {
+        #[cfg(feature = "routing-namespace")]
+        if let Some(local) = &self.local_namespace {
+            return std::borrow::Cow::Owned(local.prefix.prepend(key));
+        }
+        std::borrow::Cow::Borrowed(key)
+    }
+
+    /// The key as the node's own session names it, for a key the router names: without the
+    /// namespace of the session, and `None` for a key that is not under it.
+    fn relative_key<'a>(&self, key: &'a str) -> Option<&'a str> {
+        #[cfg(feature = "routing-namespace")]
+        if let Some(local) = &self.local_namespace {
+            return wz_session_core::keyexpr_prefix::strip_nonwild_prefix(
+                key,
+                local.prefix.as_nonwild(),
+            );
+        }
+        Some(key)
+    }
+
+    /// Put a reply of the node's own session under its namespace.
+    fn put_under_namespace(&self, response: &mut ResponseOwned) {
+        #[cfg(feature = "routing-namespace")]
+        if let Some(local) = &self.local_namespace {
+            // Prefixing a literal key cannot fail on a response the session built.
+            let _ = wz_session_core::namespace::apply_egress_response(&local.prefix, response);
+        }
+        #[cfg(not(feature = "routing-namespace"))]
+        let _ = response;
+    }
+
+    /// Strip a message for the node's own session of its namespace; `false` when the message is
+    /// not the session's (it is about a key outside it) and is dropped.
+    fn strip_namespace(&self, msg: &mut NetworkMessage) -> bool {
+        #[cfg(feature = "routing-namespace")]
+        if let Some(local) = &self.local_namespace {
+            return local
+                .ingress
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .apply(msg);
+        }
+        #[cfg(not(feature = "routing-namespace"))]
+        let _ = msg;
+        true
+    }
+
     /// Partition this router's south into subregions by rule (`gateway/south` as a
     /// list), where a router left alone is on the `auto` preset.
     ///
@@ -3698,6 +3794,8 @@ impl RouterForwarder {
             interceptor_version: PlainCell::new(0),
             watchers: std::sync::atomic::AtomicUsize::new(0),
             change_told: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "routing-namespace")]
+            local_namespace: None,
             #[cfg(feature = "routing-interceptor-hotreload")]
             ingress_keyexpr_cache: PlainMutex::new(hashbrown::HashMap::new()),
             #[cfg(feature = "routing-interceptor-hotreload")]
@@ -8431,17 +8529,32 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     ) where
         T: std::ops::DerefMut,
     {
-        self.host_queryable(keyexpr, complete, handler);
+        self.host_queryable_in(keyexpr, complete, handler, false);
     }
 
-    /// [`register_local_queryable`](Self::register_local_queryable), answering the id the
-    /// queryable holds in the `Local` hat, which [`unhost_queryable`](Self::unhost_queryable)
-    /// takes back.
+    /// [`register_local_queryable`](Self::register_local_queryable) for the node's own session,
+    /// answering the id the queryable holds in the `Local` hat, which
+    /// [`unhost_queryable`](Self::unhost_queryable) takes back. `keyexpr` is the session's: under
+    /// its namespace, if it has one ([`RouterForwarder::with_local_namespace`]).
     pub fn host_queryable(
         &mut self,
         keyexpr: &str,
         complete: bool,
         handler: HostedQueryHandler,
+    ) -> u64
+    where
+        T: std::ops::DerefMut,
+    {
+        let keyexpr = self.fwd.wire_key(keyexpr);
+        self.host_queryable_in(&keyexpr, complete, handler, true)
+    }
+
+    fn host_queryable_in(
+        &mut self,
+        keyexpr: &str,
+        complete: bool,
+        handler: HostedQueryHandler,
+        namespaced: bool,
     ) -> u64
     where
         T: std::ops::DerefMut,
@@ -8461,6 +8574,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             id,
             keyexpr: keyexpr.to_string(),
             complete,
+            namespaced,
             handler: Hosted::new(handler),
         });
         self.repropagate(snapshot);
@@ -8493,14 +8607,28 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     where
         T: std::ops::DerefMut,
     {
-        self.host_subscriber(keyexpr, handler);
+        self.host_subscriber_in(keyexpr, handler, false);
     }
 
-    /// [`register_local_subscriber`](Self::register_local_subscriber), answering the id the
-    /// subscriber holds in the `Local` hat, which [`unhost_subscriber`](Self::unhost_subscriber)
-    /// takes back: a program that declares several subscribers on one key and undeclares one of
-    /// them cannot name it by its key.
+    /// [`register_local_subscriber`](Self::register_local_subscriber) for the node's own session,
+    /// answering the id the subscriber holds in the `Local` hat, which
+    /// [`unhost_subscriber`](Self::unhost_subscriber) takes back: a program that declares several
+    /// subscribers on one key and undeclares one of them cannot name it by its key. `keyexpr` is
+    /// the session's: under its namespace, if it has one ([`RouterForwarder::with_local_namespace`]).
     pub fn host_subscriber(&mut self, keyexpr: &str, handler: HostedSubscriberHandler) -> u64
+    where
+        T: std::ops::DerefMut,
+    {
+        let keyexpr = self.fwd.wire_key(keyexpr);
+        self.host_subscriber_in(&keyexpr, handler, true)
+    }
+
+    fn host_subscriber_in(
+        &mut self,
+        keyexpr: &str,
+        handler: HostedSubscriberHandler,
+        namespaced: bool,
+    ) -> u64
     where
         T: std::ops::DerefMut,
     {
@@ -8515,6 +8643,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         self.tables.local_subscribers.push(HostedSubscriber {
             id,
             keyexpr: keyexpr.to_string(),
+            namespaced,
             handler: Hosted::new(handler),
         });
         self.repropagate(snapshot);
@@ -8667,6 +8796,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     where
         T: std::ops::DerefMut,
     {
+        let wire = self.fwd.wire_key(keyexpr);
+        let keyexpr = &*wire;
         let snapshot = self.snapshot::<TokenPlane>(keyexpr);
         let id = self.tables.next_hosted_id;
         self.tables.next_hosted_id += 1;
@@ -8756,29 +8887,49 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             PushOwnedVariant::CodecZenohMsgDel(_) => (&[], SampleKind::Del),
             _ => return,
         };
+        let reliability = if reliable {
+            crate::Reliability::Reliable
+        } else {
+            crate::Reliability::BestEffort
+        };
         let sample = BorrowedSample {
             keyexpr,
             payload,
             kind,
-            reliability: if reliable {
-                crate::Reliability::Reliable
-            } else {
-                crate::Reliability::BestEffort
-            },
+            reliability,
         };
-        let matched: Vec<Arc<Hosted<HostedSubscriberHandler>>> = {
+        // What the subscribers of the node's own session are handed: the key without the
+        // namespace of the session, and nothing for a key outside it.
+        let relative = self
+            .fwd
+            .relative_key(keyexpr)
+            .map(|keyexpr| BorrowedSample {
+                keyexpr,
+                payload,
+                kind,
+                reliability,
+            });
+        let matched: Vec<(bool, Arc<Hosted<HostedSubscriberHandler>>)> = {
             let locals = &self.tables.local_subscribers;
             let target_chunks: Vec<&str> = keyexpr.split('/').collect();
             locals
                 .iter()
                 .filter(|sub| keyexpr_intersects_target(&sub.keyexpr, &target_chunks))
-                .map(|sub| Arc::clone(&sub.handler))
+                .map(|sub| (sub.namespaced, Arc::clone(&sub.handler)))
                 .collect()
         };
         let inside = HostedDispatch::enter();
-        for handler in &matched {
-            if handler.call(|h| h(&sample)).is_none() {
-                Self::enqueue_self_echo(handler, &sample);
+        for (namespaced, handler) in &matched {
+            let view = if *namespaced {
+                match &relative {
+                    Some(relative) => relative,
+                    None => continue,
+                }
+            } else {
+                &sample
+            };
+            if handler.call(|h| h(view)).is_none() {
+                Self::enqueue_self_echo(handler, view);
             }
         }
         if inside.is_outermost() {
@@ -8856,6 +9007,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         priority: Priority,
         express: bool,
     ) -> Result<(), CodecError> {
+        let wire = self.fwd.wire_key(keyexpr);
+        let keyexpr = &*wire;
         let qos = wz_session_core::sample::QosLevel::from_parts(
             priority,
             wz_session_core::qos::CongestionControl::Drop,
@@ -8882,6 +9035,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// `MsgDel` carries neither, and QoS belongs to the publisher).
     #[cfg(feature = "pubsub-delete")]
     pub fn publish_delete(&self, keyexpr: &str) -> Result<(), CodecError> {
+        let wire = self.fwd.wire_key(keyexpr);
+        let keyexpr = &*wire;
         let push = wz_session_core::push_build::build_push_del_literal(keyexpr)?;
         self.route_local_push(Priority::DEFAULT, false, &push, keyexpr);
         Ok(())
@@ -9031,13 +9186,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     ) -> usize {
         let query_chunks: Vec<&str> = keyexpr.split('/').collect();
         let target = read_request_target(request);
-        let matched: Vec<Arc<Hosted<HostedQueryHandler>>> = {
+        let matched: Vec<(bool, Arc<Hosted<HostedQueryHandler>>)> = {
             let locals = &self.tables.local_queryables;
             locals
                 .iter()
                 .filter(|lq| keyexpr_intersects_target(&lq.keyexpr, &query_chunks))
                 .filter(|lq| !matches!(target, Some(QueryTarget::AllComplete)) || lq.complete)
-                .map(|lq| Arc::clone(&lq.handler))
+                .map(|lq| (lq.namespaced, Arc::clone(&lq.handler)))
                 .collect()
         };
         let view = LocalQueryView {
@@ -9046,6 +9201,17 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             rid: request.rid,
             qos: wz_session_core::declare_ext_qos::read_request_qos(request),
         };
+        // What the queryables of the node's own session are handed: the key without the
+        // namespace of the session. A query whose key is not under it is not theirs.
+        let relative_view = self
+            .fwd
+            .relative_key(keyexpr)
+            .map(|keyexpr| LocalQueryView {
+                keyexpr,
+                parameters: view.parameters,
+                rid: view.rid,
+                qos: view.qos,
+            });
         // R311y834 — the acceptance is read off the query's own selector parameters, as the
         // requester's gate reads them; a query with none keeps the guarantee.
         let accept = view
@@ -9055,11 +9221,22 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 wz_session_core::reply_acceptance::ReplyKeyExpr::MatchingQuery,
                 wz_session_core::reply_acceptance::ReplyKeyExpr::from_parameters,
             );
-        for handler in &matched {
+        let mut dispatched = 0;
+        for (namespaced, handler) in &matched {
+            let view = if *namespaced {
+                match &relative_view {
+                    Some(relative) => relative,
+                    None => continue,
+                }
+            } else {
+                &view
+            };
+            dispatched += 1;
             let qid = self.pending.guard().allocate(LOCAL_FACE, fan, deadline);
             let record = Arc::new(HeldRecord {
                 qid,
-                keyexpr: keyexpr.to_owned(),
+                keyexpr: view.keyexpr.to_owned(),
+                namespaced: *namespaced,
                 accept,
                 reliable,
                 // The handler's own call.
@@ -9069,7 +9246,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             {
                 let mut responder = QueryResponder::new(
                     request.rid,
-                    keyexpr.to_string(),
+                    view.keyexpr.to_string(),
                     accept,
                     view.qos,
                     &mut replies,
@@ -9077,11 +9254,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 let previous = HOSTED_QUERY.with(|current| current.replace(Some(record.clone())));
                 // A handler that is already running on this thread (it asks a query its own
                 // pattern answers) is not called again: it would wait for itself.
-                let _ = handler.call(|h| h(&view, &mut responder));
+                let _ = handler.call(|h| h(view, &mut responder));
                 HOSTED_QUERY.with(|current| *current.borrow_mut() = previous);
             }
             for reply in replies {
-                if let Ok(resp) = reply.into_response() {
+                if let Ok(mut resp) = reply.into_response() {
+                    if *namespaced {
+                        self.fwd.put_under_namespace(&mut resp);
+                    }
                     self.send_to_face(inbound, reliable, || {
                         NetworkMessage::Response(Box::new(resp.clone()))
                     });
@@ -9090,7 +9270,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             // The handler has returned: its hold is let go, and the branch ends with the last.
             self.release_held(&record);
         }
-        matched.len()
+        dispatched
     }
 
     /// Answer a held query now (see [`HeldRouterQuery::reply`]): the replies `answer` writes go
@@ -9112,7 +9292,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             answer(&mut responder);
         }
         for reply in replies {
-            if let Ok(resp) = reply.into_response() {
+            if let Ok(mut resp) = reply.into_response() {
+                if record.namespaced {
+                    self.fwd.put_under_namespace(&mut resp);
+                }
                 self.send_to_face(to.face, record.reliable, || {
                     NetworkMessage::Response(Box::new(resp.clone()))
                 });
@@ -9149,6 +9332,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         locality: wz_session_core::locality::Locality,
     ) -> bool {
         use wz_session_core::keyexpr_match::keyexpr_includes_target;
+        let wire = self.fwd.wire_key(keyexpr);
+        let keyexpr = &*wire;
         let chunks: Vec<&str> = keyexpr.split('/').collect();
         self.tables.hats.iter().any(|(region, hat)| {
             let admitted = if region == Region::Local {
@@ -9198,6 +9383,16 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     ///
     /// [`attach_local_face`]: RouterForwarder::attach_local_face
     pub fn local_get(&self, request: &RequestOwned) {
+        // The key of the query is the session's, under its namespace if it has one.
+        #[cfg(feature = "routing-namespace")]
+        if let Some(local) = &self.fwd.local_namespace {
+            let mut request = request.clone();
+            if wz_session_core::namespace::apply_egress_request(&local.prefix, &mut request).is_ok()
+            {
+                self.route_request(LOCAL_FACE, Region::Local, true, &request, None);
+            }
+            return;
+        }
         self.route_request(LOCAL_FACE, Region::Local, true, request, None);
     }
 
@@ -10127,7 +10322,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             let Some(sink) = &self.tables.local_face_sink else {
                 return false;
             };
-            if let Some(event) = local_face_event(build()) {
+            let mut msg = build();
+            // What the session is told is relative to its namespace: a message about a key
+            // outside it is not the session's (upstream's ingress decorator of the face).
+            if !self.fwd.strip_namespace(&mut msg) {
+                return true;
+            }
+            if let Some(event) = local_face_event(msg) {
                 sink(event);
             }
             return true;
@@ -17139,6 +17340,168 @@ mod tests {
         assert!(
             !forwarded_qabl_info(&sink_c.frame_bytes(0)).complete,
             "carries the folded complete=false"
+        );
+    }
+
+    /// The key a wire expression names when it is literal.
+    #[cfg(feature = "routing-namespace")]
+    fn literal_key<S: sce_forge_runtime::codec::CodecStorage>(
+        wireexpr: &wz_codecs::wireexpr::WireexprOwned<S>,
+    ) -> String {
+        resolve_wireexpr(&wireexpr.body, &hashbrown::HashMap::new()).expect("a literal key")
+    }
+
+    /// A node whose own session has a namespace: the session names its keys relative to it. What
+    /// it declares, publishes and asks is put under it on the way in, and a sample, a query, a
+    /// reply it is handed is stripped of it, a message about a key outside it is not the
+    /// session's, and what the router hosts for itself is not under it at all.
+    #[cfg(feature = "routing-namespace")]
+    #[test]
+    fn the_nodes_own_session_names_its_keys_relative_to_its_namespace() {
+        let fwd = RouterForwarder::new(zid(0x01)).with_local_namespace(
+            wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr::new("ext/ns").expect("a prefix"),
+        );
+        let (client, sink) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &client);
+        fwd.tick();
+
+        // A subscriber of the session is handed the key without the namespace, and a Put outside
+        // the namespace is not its.
+        let heard = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = heard.clone();
+        fwd.host_subscriber(
+            "zenoh/**",
+            Box::new(move |view: &dyn SampleView| {
+                kept.lock().unwrap().push(view.keyexpr().to_owned());
+            }),
+        );
+        for key in ["ext/ns/zenoh/pub", "other/zenoh/pub"] {
+            let push = wz_session_core::push_build::build_push_literal(key, b"x").expect("push");
+            forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
+        }
+        assert_eq!(*heard.lock().unwrap(), ["zenoh/pub"]);
+
+        // The subscription was declared under the namespace, and a Put of the session goes out
+        // under it.
+        forward_one(&fwd, FaceId(0), declare_sub("ext/ns/zenoh/out"));
+        sink.reset();
+        fwd.publish("zenoh/out", b"x").expect("publish");
+        assert_eq!(sink.frame_count(), 1);
+        assert_eq!(
+            literal_key(&forwarded_push(&sink.frame_bytes(0)).keyexpr),
+            "ext/ns/zenoh/out"
+        );
+
+        // A queryable of the session is handed the key without the namespace and answers under
+        // it; a query outside the namespace is not its.
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = asked.clone();
+        fwd.host_queryable(
+            "zenoh/q",
+            true,
+            Box::new(move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
+                kept.lock().unwrap().push(view.keyexpr().to_owned());
+                out.reply(b"answer");
+            }),
+        );
+        sink.reset();
+        forward_one(&fwd, FaceId(0), request_best(5, "ext/ns/zenoh/q"));
+        assert_eq!(*asked.lock().unwrap(), ["zenoh/q"]);
+        assert_eq!(
+            literal_key(&forwarded_response(&sink.frame_bytes(0)).keyexpr),
+            "ext/ns/zenoh/q"
+        );
+        sink.reset();
+        forward_one(&fwd, FaceId(0), request_best(6, "other/zenoh/q"));
+        assert_eq!(asked.lock().unwrap().len(), 1, "a query outside is not its");
+
+        // A query of the session reaches the queryables of the others under the namespace, and
+        // the replies come back without it.
+        let (hosting, sink_hosting) = face(zid(0xBB), WIRE_CLIENT);
+        fwd.register(FaceId(1), &hosting);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_qabl("ext/ns/zenoh/g", true));
+        let told = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = told.clone();
+        fwd.attach_local_face(Arc::new(move |event| kept.lock().unwrap().push(event)));
+        sink_hosting.reset();
+        let request = wz_session_core::request_build::build_request_query(77, 0, Some("zenoh/g"))
+            .expect("request");
+        fwd.local_get(&request);
+        assert_eq!(sink_hosting.frame_count(), 1);
+        let forwarded = forwarded_request(&sink_hosting.frame_bytes(0));
+        assert_eq!(literal_key(&forwarded.keyexpr), "ext/ns/zenoh/g");
+        let reply = wz_session_core::response_build::build_response_reply_literal(
+            forwarded.rid,
+            "ext/ns/zenoh/g",
+            b"hi",
+        )
+        .expect("response");
+        forward_one(&fwd, FaceId(1), NetworkMessage::Response(Box::new(reply)));
+        match told.lock().unwrap().first() {
+            Some(LocalFaceEvent::Reply(response)) => {
+                assert_eq!(literal_key(&response.keyexpr), "zenoh/g");
+            }
+            other => panic!("expected a reply, got {other:?}"),
+        }
+
+        // The router's own hosted queryable (the admin space is one) is in full.
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = asked.clone();
+        fwd.register_local_queryable(
+            "ext/ns/admin/**",
+            true,
+            Box::new(move |view: &dyn QueryView, _out: &mut dyn ReplyOut| {
+                kept.lock().unwrap().push(view.keyexpr().to_owned());
+            }),
+        );
+        forward_one(&fwd, FaceId(0), request_best(8, "ext/ns/admin/x"));
+        assert_eq!(*asked.lock().unwrap(), ["ext/ns/admin/x"]);
+    }
+
+    /// A token of another face is told to the session without the namespace, and one outside the
+    /// namespace is not told, nor is its retraction.
+    #[cfg(all(feature = "routing-namespace", feature = "routing-token-tables"))]
+    #[test]
+    fn the_nodes_own_session_is_told_the_tokens_under_its_namespace() {
+        let fwd = RouterForwarder::new(zid(0x01)).with_local_namespace(
+            wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr::new("ext/ns").expect("a prefix"),
+        );
+        let (client, _sink) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &client);
+        fwd.tick();
+        let told = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = told.clone();
+        fwd.attach_local_face(Arc::new(move |event| kept.lock().unwrap().push(event)));
+        fwd.ask_local_tokens();
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(
+                build_declare_token(3, 0, Some("ext/ns/zenoh/t")).expect("token"),
+            )),
+        );
+        forward_one(
+            &fwd,
+            FaceId(0),
+            NetworkMessage::Declare(Box::new(
+                build_declare_token(4, 0, Some("other/zenoh/t")).expect("token"),
+            )),
+        );
+        let told = told.lock().unwrap();
+        assert!(
+            told.iter().any(|event| matches!(
+                event,
+                LocalFaceEvent::TokenUp { keyexpr, .. } if keyexpr == "zenoh/t"
+            )),
+            "the token under the namespace is told without it: {told:?}"
+        );
+        assert!(
+            !told.iter().any(|event| matches!(
+                event,
+                LocalFaceEvent::TokenUp { keyexpr, .. } if keyexpr.contains("other")
+            )),
+            "a token outside is not the session's: {told:?}"
         );
     }
 

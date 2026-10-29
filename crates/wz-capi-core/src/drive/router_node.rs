@@ -222,9 +222,9 @@ impl wz_capi_port::HeldQuery for RouterHeld {
 /// capability the node does not carry yet, and a node opened without it would be the silent
 /// fallback the refusals of the open exist against.
 pub(crate) fn refused_ask(stance: &OpenStance) -> Option<&'static str> {
-    if stance.namespace.is_some() {
-        return Some("a namespace");
-    }
+    // A namespace is the node's own session's: its face carries it (see
+    // `RouterForwarder::with_local_namespace`). A build without the decorator never gets one: the
+    // plan refuses the document that states it.
     if !stance.groups.is_empty() {
         return Some("a multicast group");
     }
@@ -266,8 +266,24 @@ pub(crate) fn open_router_blocking(
         listen_phase,
         policy,
         auth,
+        #[cfg(feature = "routing-namespace")]
+        namespace,
         ..
     } = stance;
+    // The prefix as the forwarder takes it. The plan validated the text, so one that does not
+    // convert came from a caller that built its stance by hand, and the open fails with it.
+    #[cfg(feature = "routing-namespace")]
+    let namespace = match namespace
+        .as_deref()
+        .map(wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr::new)
+    {
+        None => None,
+        Some(Ok(prefix)) => Some(prefix),
+        Some(Err(error)) => {
+            log_open_failure("namespace", &error);
+            return Err(OpenError::DriveFailed);
+        }
+    };
     let link_conf = LinkConf {
         tx: LinkTx {
             queue: tx_queue,
@@ -282,10 +298,13 @@ pub(crate) fn open_router_blocking(
     let (_, wire_zid) = session_zids(zid).ok_or(OpenError::DriveFailed)?;
     // Built here and shared, so that the program holding the node can reach the forwarder's
     // entry points (they take `&self`) while the node's thread runs the face loop over it.
-    let forwarder = Arc::new(RouterForwarder::with_timestamping(
-        Zid::from_slice(&wire_zid),
-        timestamping,
-    ));
+    let forwarder = RouterForwarder::with_timestamping(Zid::from_slice(&wire_zid), timestamping);
+    #[cfg(feature = "routing-namespace")]
+    let forwarder = match namespace {
+        Some(prefix) => forwarder.with_local_namespace(prefix),
+        None => forwarder,
+    };
+    let forwarder = Arc::new(forwarder);
     policy.install_on(&*forwarder);
     // The authentication the config states, asked of the sessions the node accepts and offered to
     // the ones it dials, installed before the node is served (the accept loop reads it once).
