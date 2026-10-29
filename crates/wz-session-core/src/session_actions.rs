@@ -8715,6 +8715,36 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         parsed
     }
 
+    /// [`Self::handle_inbound_consuming`] that writes the frame into `out` and returns how many
+    /// bytes it occupied: the session's receive keeps the frame (712 bytes on the fixed profile)
+    /// in one slot of its own frame, and each step that reads it is lent that slot. Returned by
+    /// value instead, the frame is a copy in every frame it passes through, and the handshake's
+    /// parse is the deepest path of the fixed-memory client's stack.
+    ///
+    /// `out` is whatever it was when this returns `Err`; the handler records nothing then.
+    pub fn handle_inbound_consuming_into(
+        &self,
+        bytes: &[u8],
+        out: &mut InboundFrame,
+    ) -> Result<usize, InboundParseError> {
+        let used = crate::inbound::parse_inbound_consuming_into(bytes, out)?;
+        self.observe_inbound(out);
+        Ok(used)
+    }
+
+    /// [`Self::handle_inbound_consuming_into`] over a unit that can be shared (see
+    /// [`Self::handle_inbound_consuming_in`]).
+    #[cfg(feature = "alloc")]
+    pub fn handle_inbound_consuming_in_into(
+        &self,
+        unit: &crate::link::RxBytes,
+        out: &mut InboundFrame,
+    ) -> Result<usize, InboundParseError> {
+        let used = crate::inbound::parse_inbound_consuming_in_into(unit, out)?;
+        self.observe_inbound(out);
+        Ok(used)
+    }
+
     /// [`Self::handle_inbound_consuming`] over a unit that can be shared: the
     /// frame it returns holds a range of `unit` where the other one holds a
     /// copy (see [`crate::inbound::parse_inbound_consuming_in`]). Everything

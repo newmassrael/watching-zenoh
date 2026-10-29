@@ -245,6 +245,13 @@ IMAGES = (
     # (`NodeStorage::run`, 576 bytes of `.bss`) and not held as locals of the main function, which
     # is 704 bytes of frame and was 1,256: they were under every call the loop makes. The same
     # receive chain, 13 frames; the kit's reading is 3,728, 108 over.
+    #
+    # `peak` is 3,564 bytes once the receive decodes a transport message into a slot its caller
+    # lends and no frame between the parser and the judgement holds a copy of it: `parse_init`
+    # (1,008 bytes, a local frame of 712 beside the caller's) is no longer the deepest path, and
+    # the dial is: `wz_app_main` 704, `reconcile` 456, `drive` 536, `dial_peer` 112,
+    # `dial_expecting` 688, the slot's `open` 856, `ext_chain_of` 212, 7 frames and 7 calls through
+    # a register. The kit's reading is 3,640, 76 over.
     Image(
         key="zephyr-client-fixed",
         elf=None,
@@ -252,7 +259,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=3620,
+        peak=3564,
     ),
     # The same client with the session coalescing a send window into one datagram
     # (`overlays/t2g_client_batching.conf`). The batch writer and its flush path are two more
@@ -292,7 +299,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=3620,
+        peak=3588,
     ),
     # The fixed client that ASKS (`overlays/t2g_client_get.conf`): the getter of
     # `wz_session_mcu::slot_getter` is the application layer the observer's drain runs inside, and

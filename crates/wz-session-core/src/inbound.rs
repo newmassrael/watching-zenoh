@@ -773,6 +773,33 @@ pub fn parse_inbound_consuming_in(
     parse_unit(unit.as_slice(), Some(unit))
 }
 
+/// [`parse_inbound_consuming`] that writes the message into `out` and returns where it ended:
+/// the session's receive, which keeps the message in one slot of its own frame and lends it to
+/// each step that reads it (see [`parse_unit_into`]).
+pub fn parse_inbound_consuming_into(
+    bytes: &[u8],
+    out: &mut InboundFrame,
+) -> Result<usize, InboundParseError> {
+    #[cfg(feature = "alloc")]
+    {
+        parse_unit_into(bytes, None, out)
+    }
+    #[cfg(not(feature = "alloc"))]
+    {
+        parse_unit_into(bytes, out)
+    }
+}
+
+/// [`parse_inbound_consuming_into`] over a unit that can be shared (see
+/// [`parse_inbound_consuming_in`]).
+#[cfg(feature = "alloc")]
+pub fn parse_inbound_consuming_in_into(
+    unit: &RxBytes,
+    out: &mut InboundFrame,
+) -> Result<usize, InboundParseError> {
+    parse_unit_into(unit.as_slice(), Some(unit), out)
+}
+
 /// What a `Frame` says about itself before its payload: the fields of
 /// [`InboundFrame::Frame`] that are not the payload, with its own extension
 /// chain as `C`: the owned entries the decoded `Frame` reports, or the
@@ -1009,11 +1036,19 @@ pub(crate) fn parse_fragment_in_place(
 /// those slots stay live while the session machine runs on the frame the parse returned, so
 /// they add to the deepest point of the stack; as a function of its own they are gone when it
 /// returns, and only the 720 bytes of its result stay.
+///
+/// The message is written into `out`, where the caller keeps it, and what is returned is where
+/// it ended: a message of 720 bytes handed back by value is a copy of it in every frame it passes
+/// through (the arm that builds it, this function, the one that decodes the unit, the one that
+/// judges it), and the handshake's parse is the deepest path of the fixed-memory client's stack.
+/// `out` is left as it was when the unit does not decode and as far decoded as it got when a
+/// chain does not.
 #[inline(never)]
-fn parse_unit(
+fn parse_unit_into(
     bytes: &[u8],
     #[cfg(feature = "alloc")] origin: Option<&RxBytes>,
-) -> Result<(InboundFrame, usize), InboundParseError> {
+    out: &mut InboundFrame,
+) -> Result<usize, InboundParseError> {
     #[cfg(feature = "alloc")]
     debug_assert!(
         origin.map_or(true, |o| core::ptr::eq(o.as_slice(), bytes)),
@@ -1058,11 +1093,11 @@ fn parse_unit(
     let mut cursor = SceCursor::new(&bytes[1..]);
     match mid {
         #[cfg(feature = "codec-init-body")]
-        wire_const::T_MID_INIT => parse_init(bytes, flags, has_ext, &mut cursor),
+        wire_const::T_MID_INIT => parse_init(bytes, flags, has_ext, &mut cursor, out),
         #[cfg(feature = "codec-open-body")]
-        wire_const::T_MID_OPEN => parse_open(bytes, flags, has_ext, &mut cursor),
+        wire_const::T_MID_OPEN => parse_open(bytes, flags, has_ext, &mut cursor, out),
         #[cfg(feature = "codec-close")]
-        wire_const::T_MID_CLOSE => parse_close(bytes, flags, has_ext, &mut cursor),
+        wire_const::T_MID_CLOSE => parse_close(bytes, flags, has_ext, &mut cursor, out),
         #[cfg(all(feature = "alloc", feature = "codec-frame"))]
         wire_const::T_MID_FRAME => {
             let head =
@@ -1091,17 +1126,16 @@ fn parse_unit(
                 chain: extensions,
             } = head;
             let priority = ext_qos_priority(&extensions);
-            Ok((
-                InboundFrame::Frame {
-                    reliable,
-                    sn,
-                    payload,
-                    has_ext,
-                    extensions,
-                    priority,
-                },
-                bytes.len() - cursor.remaining(),
-            ))
+            let used = bytes.len() - cursor.remaining();
+            *out = InboundFrame::Frame {
+                reliable,
+                sn,
+                payload,
+                has_ext,
+                extensions,
+                priority,
+            };
+            Ok(used)
         }
         #[cfg(all(feature = "alloc", feature = "reassembly"))]
         wire_const::T_MID_FRAGMENT => {
@@ -1131,22 +1165,21 @@ fn parse_unit(
             // matches on extension identity, so the z64 `ext_qos` at 0x1
             // above is never mistaken for one.
             let markers = crate::extfragment::project_markers(&extensions);
-            Ok((
-                InboundFrame::Fragment {
-                    reliable,
-                    sn,
-                    more,
-                    payload,
-                    has_ext,
-                    extensions,
-                    priority,
-                    markers,
-                },
-                bytes.len() - cursor.remaining(),
-            ))
+            let used = bytes.len() - cursor.remaining();
+            *out = InboundFrame::Fragment {
+                reliable,
+                sn,
+                more,
+                payload,
+                has_ext,
+                extensions,
+                priority,
+                markers,
+            };
+            Ok(used)
         }
         #[cfg(feature = "codec-keep-alive")]
-        wire_const::T_MID_KEEP_ALIVE => decode_keep_alive(has_ext, bytes),
+        wire_const::T_MID_KEEP_ALIVE => decode_keep_alive(has_ext, bytes, out),
         // R311y605 — the MULTICAST peer announcement. Self-contained rather
         // than riding the shared `cursor`: the generated `Join` codec has no
         // ext awareness, so the chain starts wherever the base body stopped
@@ -1170,22 +1203,45 @@ fn parse_unit(
             } else {
                 Vec::new()
             };
-            Ok((
-                InboundFrame::Join {
-                    has_ext: join_has_ext,
-                    body,
-                    extensions,
-                },
-                bytes.len() - ext_cursor.remaining(),
-            ))
+            let used = bytes.len() - ext_cursor.remaining();
+            *out = InboundFrame::Join {
+                has_ext: join_has_ext,
+                body,
+                extensions,
+            };
+            Ok(used)
         }
         // Transport OAM, DELEGATED like the JOIN arm above rather than spelled
-        // out here — see [`decode_oam`] for the second, measured reason.
+        // out here — see [`decode_oam`] for the second, measured reason. A heap
+        // profile's message, so it is handed back by value and written to `out`.
         #[cfg(feature = "alloc")]
-        wire_const::T_MID_OAM => decode_oam(header, bytes),
+        wire_const::T_MID_OAM => {
+            let (frame, used) = decode_oam(header, bytes)?;
+            *out = frame;
+            Ok(used)
+        }
         // Zero: see the `# What `0` means` section on this function.
-        other => Ok((InboundFrame::Unknown { mid: other }, 0)),
+        other => {
+            *out = InboundFrame::Unknown { mid: other };
+            Ok(0)
+        }
     }
+}
+
+/// [`parse_unit_into`] for a caller that wants the message as a value: the public decoders
+/// ([`parse_inbound_consuming`] and its shared-unit twin), whose callers are tests and the
+/// profiles with a heap, and whose own frame holds the message.
+#[inline(never)]
+fn parse_unit(
+    bytes: &[u8],
+    #[cfg(feature = "alloc")] origin: Option<&RxBytes>,
+) -> Result<(InboundFrame, usize), InboundParseError> {
+    let mut frame = InboundFrame::Unknown { mid: 0 };
+    #[cfg(feature = "alloc")]
+    let used = parse_unit_into(bytes, origin, &mut frame)?;
+    #[cfg(not(feature = "alloc"))]
+    let used = parse_unit_into(bytes, &mut frame)?;
+    Ok((frame, used))
 }
 
 /// The `Init` arm of [`parse_unit`], a function of its own for the reason `parse_unit` is one:
@@ -1198,7 +1254,8 @@ fn parse_init(
     flags: u8,
     has_ext: bool,
     cursor: &mut SceCursor<'_>,
-) -> Result<(InboundFrame, usize), InboundParseError> {
+    out: &mut InboundFrame,
+) -> Result<usize, InboundParseError> {
     let body = InitBody::decode(cursor, (flags >> 6) & 1, (flags >> 5) & 1)?
         .try_into_owned_in::<HandshakeStorage>()?;
     // The M (mandatory) bit is judged at the participant seam like every
@@ -1209,20 +1266,21 @@ fn parse_init(
     // id with the mandatory bit set (`0x58`, the region name as a
     // mandatory ZBuf) through and refused an unknown one at the decode.
     //
-    // The frame is built first and its chain is read where it lies: a chain read as a value
-    // and moved in is 520 bytes (and the `Result` it comes back in 528) beside the frame's 712.
-    let mut frame = InboundFrame::Init {
+    // The frame is built in `out` and its chain is read where it lies: a chain read as a value
+    // and moved in is 520 bytes beside the frame's 712, and a frame built in a local of this
+    // function and handed back was a second one (the caller's slot for it being the first).
+    *out = InboundFrame::Init {
         is_ack: (flags & wire_const::FLAG_T_INIT_A) != 0,
         has_ext,
         body,
         extensions: ExtChainOwned::new(),
     };
     if has_ext {
-        if let InboundFrame::Init { extensions, .. } = &mut frame {
+        if let InboundFrame::Init { extensions, .. } = out {
             decode_handshake_ext_chain_into(cursor, extensions)?;
         }
     }
-    Ok((frame, bytes.len() - cursor.remaining()))
+    Ok(bytes.len() - cursor.remaining())
 }
 
 /// The `Open` arm of [`parse_unit`], out of line (see [`parse_init`]).
@@ -1233,7 +1291,8 @@ fn parse_open(
     flags: u8,
     has_ext: bool,
     cursor: &mut SceCursor<'_>,
-) -> Result<(InboundFrame, usize), InboundParseError> {
+    out: &mut InboundFrame,
+) -> Result<usize, InboundParseError> {
     let mut body =
         OpenBody::decode(cursor, (flags >> 5) & 1)?.try_into_owned_in::<HandshakeStorage>()?;
     // R311ku — the `_Z_FLAG_T_OPEN_T` seconds form is projected
@@ -1243,18 +1302,18 @@ fn parse_open(
     // unit — the same boundary rule as `multicast_join::decode_join`.
     body.lease =
         crate::lease::lease_from_wire((flags & wire_const::FLAG_T_OPEN_T) != 0, body.lease);
-    let mut frame = InboundFrame::Open {
+    *out = InboundFrame::Open {
         is_ack: (flags & wire_const::FLAG_T_OPEN_A) != 0,
         has_ext,
         body,
         extensions: ExtChainOwned::new(),
     };
     if has_ext {
-        if let InboundFrame::Open { extensions, .. } = &mut frame {
+        if let InboundFrame::Open { extensions, .. } = out {
             decode_handshake_ext_chain_into(cursor, extensions)?;
         }
     }
-    Ok((frame, bytes.len() - cursor.remaining()))
+    Ok(bytes.len() - cursor.remaining())
 }
 
 /// The `Close` arm of [`parse_unit`], out of line (see [`parse_init`]).
@@ -1265,9 +1324,10 @@ fn parse_close(
     flags: u8,
     has_ext: bool,
     cursor: &mut SceCursor<'_>,
-) -> Result<(InboundFrame, usize), InboundParseError> {
+    out: &mut InboundFrame,
+) -> Result<usize, InboundParseError> {
     let body = Close::decode(cursor)?;
-    let mut frame = InboundFrame::Close {
+    *out = InboundFrame::Close {
         reason: body.reason,
         // R311y839 — the scope bit, read off the parent header exactly
         // as the Open arm reads `FLAG_T_OPEN_A` and the Frame arm reads
@@ -1277,11 +1337,11 @@ fn parse_close(
         extensions: ExtChainOwned::new(),
     };
     if has_ext {
-        if let InboundFrame::Close { extensions, .. } = &mut frame {
+        if let InboundFrame::Close { extensions, .. } = out {
             decode_handshake_ext_chain_into(cursor, extensions)?;
         }
     }
-    Ok((frame, bytes.len() - cursor.remaining()))
+    Ok(bytes.len() - cursor.remaining())
 }
 
 /// R69b — map a parsed inbound transport frame to the matching
@@ -1405,20 +1465,21 @@ pub fn inbound_to_fsm_event(
 fn decode_keep_alive(
     has_ext: bool,
     bytes: &[u8],
-) -> Result<(InboundFrame, usize), InboundParseError> {
+    out: &mut InboundFrame,
+) -> Result<usize, InboundParseError> {
     let mut cursor = SceCursor::new(&bytes[1..]);
     let _body = KeepAlive::decode(&mut cursor)?;
-    // The frame first, its chain read where it lies (see `parse_init`).
-    let mut frame = InboundFrame::KeepAlive {
+    // The frame first, in `out`, its chain read where it lies (see `parse_init`).
+    *out = InboundFrame::KeepAlive {
         has_ext,
         extensions: ExtChainOwned::new(),
     };
     if has_ext {
-        if let InboundFrame::KeepAlive { extensions, .. } = &mut frame {
+        if let InboundFrame::KeepAlive { extensions, .. } = out {
             decode_handshake_ext_chain_into(&mut cursor, extensions)?;
         }
     }
-    Ok((frame, bytes.len() - cursor.remaining()))
+    Ok(bytes.len() - cursor.remaining())
 }
 
 /// The transport-OAM body (`T_MID_OAM`, 0x00), decoded off its own cursor.

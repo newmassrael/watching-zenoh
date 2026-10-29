@@ -343,20 +343,25 @@ fn dispatch_unit_in<R: SessionRuntime, T: TimeSource>(
     if let Some(outcome) = dispatch_lean_unit(bytes, shared, actions, engine) {
         return outcome;
     }
+    // The one slot the decoded message lives in: the decode writes it, the judgement reads it,
+    // and neither is handed a copy. Handed on by value, the 720 bytes were a slot in each frame
+    // between the parser and here, and the handshake's parse is the deepest path of the stack.
+    let mut frame = InboundFrame::Unknown { mid: 0 };
     #[cfg(feature = "alloc")]
-    let parsed = decode_unit_in(bytes, shared, actions);
+    let parsed = decode_unit_in(bytes, shared, actions, &mut frame);
     #[cfg(not(feature = "alloc"))]
-    let parsed = decode_unit_in(bytes, consumed_out, actions);
+    let parsed = decode_unit_in(bytes, consumed_out, actions, &mut frame);
     let mut admitted = None;
-    let outcome = decide_unit_in(parsed, &mut admitted, actions, engine);
+    let outcome = decide_unit_in(parsed, &mut frame, &mut admitted, actions, engine);
     if let Some(event) = admitted {
         engine.process_event(event);
     }
     outcome
 }
 
-/// One transport message decoded off the front of a unit, and where it ended.
-type DecodedUnit = Result<(InboundFrame, usize), crate::parse_error::InboundParseError>;
+/// One transport message decoded off the front of a unit: where it ended (the message itself is
+/// in the slot the decode was lent).
+type DecodedUnit = Result<usize, crate::parse_error::InboundParseError>;
 
 /// transport-lowlatency — the unit of an established lowlatency session that is
 /// a bare network message batch, dispatched as one; `None` for every other unit,
@@ -443,6 +448,7 @@ fn decode_unit_in<R: SessionRuntime, T: TimeSource>(
     #[cfg(feature = "alloc")] shared: Option<&crate::link::RxBytes>,
     #[cfg(not(feature = "alloc"))] consumed_out: &mut usize,
     actions: &SessionLinkActions<R, T>,
+    frame: &mut InboundFrame,
 ) -> DecodedUnit {
     // R311y632 (§17) — THE UNIT IS A BATCH. Take the message at the front and
     // park whatever follows it, so the next drive-loop turn dispatches that
@@ -453,12 +459,12 @@ fn decode_unit_in<R: SessionRuntime, T: TimeSource>(
     // do with a batch they cannot finish reading.
     #[cfg(feature = "alloc")]
     let parsed = match shared {
-        Some(unit) => actions.handle_inbound_consuming_in(unit),
-        None => actions.handle_inbound_consuming(bytes),
+        Some(unit) => actions.handle_inbound_consuming_in_into(unit, frame),
+        None => actions.handle_inbound_consuming_into(bytes, frame),
     };
     #[cfg(not(feature = "alloc"))]
-    let parsed = actions.handle_inbound_consuming(bytes);
-    if let Ok((_, consumed)) = &parsed {
+    let parsed = actions.handle_inbound_consuming_into(bytes, frame);
+    if let Ok(consumed) = &parsed {
         // R2825 — one transport message decoded off the front of the unit.
         #[cfg(feature = "transport-stats")]
         count_rx_transport_message(actions);
@@ -488,6 +494,21 @@ fn decode_unit_in<R: SessionRuntime, T: TimeSource>(
     parsed
 }
 
+/// The decoded message as [`decide_unit_in`]'s last step reads it. A heap profile's `Frame` and
+/// `Fragment` hand their payload and chain on to the outcome, so it takes the message out of the
+/// slot (leaving an `Unknown`); a profile with no heap has no variant that owns anything to move,
+/// and is lent the slot itself, so no second copy of the message is made.
+#[cfg(feature = "alloc")]
+fn take_decoded(frame: &mut InboundFrame) -> InboundFrame {
+    core::mem::replace(frame, InboundFrame::Unknown { mid: 0 })
+}
+
+/// See the heap form.
+#[cfg(not(feature = "alloc"))]
+fn take_decoded(frame: &mut InboundFrame) -> &mut InboundFrame {
+    frame
+}
+
 /// [`dispatch_unit_in`]'s judgement of one decoded transport message: every check
 /// a handshake message must pass, and the dispatch of whatever is not a handshake
 /// event. A message the checks admit is handed back in `admitted` with
@@ -496,15 +517,16 @@ fn decode_unit_in<R: SessionRuntime, T: TimeSource>(
 #[inline(never)]
 fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
     parsed: DecodedUnit,
+    frame: &mut InboundFrame,
     admitted: &mut Option<crate::session_fsm_unicast::SessionFsmUnicastEvent>,
     actions: &SessionLinkActions<R, T>,
     engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
 ) -> DriverLoopOutcome {
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
-    // Destructured where it lies: `Result::map` would take the 720-byte result by value
-    // and hand the frame on through a closure, a slot of the frame each time.
+    // The message is read in the slot the caller decoded it into: taking it by value, or a
+    // result that held it, would be a slot of this frame the size of the message.
     match parsed {
-        Ok((frame, _)) => match inbound_to_fsm_event(&frame) {
+        Ok(_) => match inbound_to_fsm_event(frame) {
             Some(event) => {
                 // R311kc — initiator InitAck params validation (zenoh-pico
                 // unicast/transport.c:123-140): an InitAck whose size
@@ -984,7 +1006,7 @@ fn decide_unit_in<R: SessionRuntime, T: TimeSource>(
                 *admitted = Some(event);
                 DriverLoopOutcome::AdvancedFsm
             }
-            None => match frame {
+            None => match take_decoded(frame) {
                 #[cfg(all(feature = "alloc", feature = "codec-frame"))]
                 InboundFrame::Frame {
                     reliable,
