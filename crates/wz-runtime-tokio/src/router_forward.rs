@@ -628,8 +628,18 @@ impl MeshHat {
         // node is a gateway. It is how two gateways of one subregion learn of
         // each other through the routers below them, which the inter-region
         // filter needs to pick exactly one of them.
-        let mut net =
-            LinkstateNetwork::new_in_region(self_zid, node_mode, region.bound().is_south());
+        //
+        // And the peer hat NORTH of a peer node is the pin's `Gossip` object, not a `Network`:
+        // with gossip on and not multihop, the north-bound hat builds a `Gossip`
+        // (`zenoh/src/net/routing/hat/peer/mod.rs` @ `Bound::North => {`), whose new-link send
+        // carries every node, self included with its locators, where a `Network` of this mode
+        // sends the direct neighbours by zid alone and so never tells the router the peer's
+        // locators (`zenoh/src/net/protocol/gossip.rs` @ `// Send all nodes linkstate on new link`).
+        let mut net = if is_peer_hat(region, node_mode) && region.bound().is_north() {
+            LinkstateNetwork::new(self_zid, node_mode)
+        } else {
+            LinkstateNetwork::new_in_region(self_zid, node_mode, region.bound().is_south())
+        };
         net.set_full_linkstate(!is_peer_hat(region, node_mode));
         Self {
             net,
@@ -12136,6 +12146,25 @@ mod tests {
         assert!(
             !on.north_net().full_linkstate(),
             "the peer hat runs gossip unless link-state mode is asked for"
+        );
+    }
+
+    /// What a peer tells the router it dials: its own entry, with the locators it listens on, so
+    /// that the router can hand them to the other peers it holds
+    /// (`zenoh/src/net/protocol/gossip.rs` @ `// Send all nodes linkstate on new link`). A foreign
+    /// peer cannot dial a node whose entry never reached it.
+    #[test]
+    fn a_peer_tells_the_router_it_dials_its_own_entry_with_its_locators() {
+        let fwd = RouterForwarder::peer(zid(0x01));
+        fwd.set_self_locators(vec!["tcp/127.0.0.1:7447".to_owned()]);
+        let (router, sink) = face(zid(0xA1), WIRE_ROUTER);
+        fwd.register(FaceId(0), &router);
+        fwd.tick();
+        let sent = received_link_states(&sink);
+        let own = sent.iter().find(|e| e.psid == 0);
+        assert!(
+            own.is_some_and(|e| e.locators.is_some()),
+            "the router was sent no entry of the peer's own with its locators: {sent:?}"
         );
     }
 

@@ -483,10 +483,10 @@ fn wz_peer_without_autoconnect_discovers_the_same_peer_and_dials_nothing() {
     let (port_res, peer_port) = PortReservation::pick_pair();
     let router_port = port_res.port();
 
-    let (mut router, _router_log) = spawn_router(router_port);
+    let (mut router, mut router_log) = spawn_router(router_port);
     // may_dial = true: with wz declining to initiate, P's OWN zenoh autoconnect is
     // the only thing that can form the wz<->P link — which is the point.
-    let (mut peer, _peer_log) = spawn_third_party(peer_port, PEER_ID, router_port, true);
+    let (mut peer, mut peer_log) = spawn_third_party(peer_port, PEER_ID, router_port, true);
 
     let (mut wz_guard, mut wz_reader) = spawn_wz_peer(&demo, router_port, WZ_ZID, Autoconnect::Off);
     drop(port_res);
@@ -508,12 +508,18 @@ fn wz_peer_without_autoconnect_discovers_the_same_peer_and_dials_nothing() {
     let _ = router.child_mut().wait();
     eprintln!("--- wz peer stderr ---\n{captured}");
 
+    // The FOREIGN side is the half that says whether its dial was ever tried, which the wz
+    // log cannot: a leg that is the absence of a dial reads the other end's log to say so.
     ingested.unwrap_or_else(|c| {
+        let router_captured = read_captured(&mut router_log);
+        let peer_captured = read_captured(&mut peer_log);
         panic!(
             "wz peer never brought up a face to the third-party peer within 20s — the \
              foreign peer's own autoconnect dial never landed, so `accepted 1` below \
              would be a teardown artefact rather than a fact.\n\
-             --- wz peer stderr at deadline ---\n{c}"
+             --- wz peer stderr at deadline ---\n{c}\n\
+             --- zenohd router log ---\n{router_captured}\n\
+             --- zenohd third-party peer log ---\n{peer_captured}"
         )
     });
 

@@ -2044,13 +2044,14 @@ fn in_gossip_mode_the_scenes_exercise_what_they_claim() {
     assert_the_admin_legs_are_exercised(Mode::Gossip);
 }
 
-/// What the pin's gossip peer tells a new link (`zenoh/src/net/protocol/network.rs`
-/// @ `// Send all nodes linkstate on new link`): the entries of the nodes its
-/// graph holds that are linked neighbours, by zid, and never its own. The
-/// first link finds the graph empty of neighbours, so it is told nothing; a
-/// neighbour whose own entry has arrived is named to the next link.
+/// What the pin's gossip peer tells a new link (`zenoh/src/net/protocol/gossip.rs`
+/// @ `// Send all nodes linkstate on new link`): every node its graph holds, itself
+/// first (it is how the far end learns where to dial it), then the nodes it has a
+/// link to, the one that just came up among them. The peer hat north of a peer is
+/// that `Gossip` object (`zenoh/src/net/routing/hat/peer/mod.rs` @ `Bound::North => {`),
+/// not the `Network` whose bootstrap names the direct neighbours alone.
 #[test]
-fn a_gossip_peer_tells_a_new_link_the_neighbours_it_knows_and_not_itself() {
+fn a_gossip_peer_tells_a_new_link_every_node_it_holds_itself_included() {
     let scene = [
         Step::Up(0, 0xAA, Wire::Peer),
         Step::LinkBack(0, 0xAA, 5),
@@ -2064,15 +2065,18 @@ fn a_gossip_peer_tells_a_new_link_the_neighbours_it_knows_and_not_itself() {
             other => panic!("one link-state list for face {face}, got {other:?}"),
         }
     };
+    let own = zid(0x01).as_slice().to_vec();
+    let first = zid(0xAA).as_slice().to_vec();
+    let second = zid(0xBB).as_slice().to_vec();
     assert_eq!(
         nodes_told(&told[0], 0),
-        Vec::<Vec<u8>>::new(),
-        "the first link: no neighbour is in the graph yet, and self is never named"
+        vec![own.clone(), first.clone()],
+        "the first link is told self and the neighbour that came up on it"
     );
     assert_eq!(
         nodes_told(&told[2], 1),
-        vec![zid(0xAA).as_slice().to_vec()],
-        "the second link is told the neighbour whose entry arrived, and only it"
+        vec![own, first, second],
+        "the second link is told every node the graph holds, self first"
     );
 }
 
