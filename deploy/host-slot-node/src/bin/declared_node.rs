@@ -28,7 +28,7 @@ use host_slot_node_glue::group::{HostGroupTransport, PosixGroupBind};
 #[cfg(feature = "tls")]
 use host_slot_node_glue::tls;
 use host_slot_node_glue::tuning::{
-    BATCH_SIZE, DOC_MAX, IDLE_SLEEP_US, IDLE_WAIT_MS, RX, TASK_BYTES_ACTIVE, TIMERS, TX,
+    BATCH_SIZE, DOC_MAX, IDLE_SLEEP_US, IDLE_WAIT_MS, RUN_ACTIVE, RX, TASK_BYTES_ACTIVE, TIMERS, TX,
 };
 use host_slot_node_glue::{fresh_signing_key, ConsoleName, HostPort};
 use wz_runtime_posix::glue::{log, log_args};
@@ -320,8 +320,18 @@ type Stack = tls::Stack;
 
 /// The node's big tables, in one `static` whose initial value is ALL ZERO BYTES, so the linker
 /// places it in `.bss` and not in `.data`.
-type Storage =
-    NodeStorage<Clock, Stack, PosixEntropy, TASKS, TASK_BYTES_ACTIVE, TIMERS, SESSIONS, RX, TX>;
+type Storage = NodeStorage<
+    Clock,
+    Stack,
+    PosixEntropy,
+    TASKS,
+    TASK_BYTES_ACTIVE,
+    TIMERS,
+    SESSIONS,
+    RX,
+    TX,
+    RUN_ACTIVE,
+>;
 
 static NODE: Storage = Storage::new();
 

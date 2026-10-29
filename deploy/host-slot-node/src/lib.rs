@@ -71,6 +71,11 @@ pub mod tuning {
     /// the default of the loop, 1,024, is the answering kit node's. It is `.bss`, so what the nodes
     /// without the channel do not need costs no flash.
     pub const RUN: usize = 3584;
+    /// The same arena of a node that publishes and asks on its own (a declared node), whose node
+    /// holds the schedules and the publications of its publishers and queriers. Measured the same
+    /// day the same way, in the debug build the lanes make of it: the build stops at 2,560 bytes
+    /// and holds at 3,072, so it is given the next step up, as the arena above is.
+    pub const RUN_ACTIVE: usize = 3584;
     /// Timers the runtime holds: the handshake and lease deadlines of the session.
     pub const TIMERS: usize = 4;
     /// The batch the node advertises: an Ethernet frame less the IPv4 and UDP headers, as the kit's.
