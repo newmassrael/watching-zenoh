@@ -182,6 +182,20 @@ carries about 6 KB of C library code wz does not, which is why the difference is
   (fixed), text 160,692 bytes on the fixed image, within the gate's tolerance of the committed row.
   The first of these did not move the reading (3,640 to 3,584) and the second did not either: the
   planner's path was above them both, and was not the one the direct chain follows.
+- TAKEN for the stack, text +32 bytes (160,692 to 160,724 on the fixed image): the session's bundle
+  is written in its slot field by field (`SessionLinkActions::build_in`, over `write_fields!`, whose
+  field list is destructured without `..` so a field left out does not compile). The four
+  handshake ext chains (200 bytes each) were four slots of the frame of the function that built
+  the bundle, and the bundle was a value of that function; the chains are each written by a
+  function of their own (`init_ext_chain`), the slot's `open` is 520 bytes and `init_core` 32.
+  The dial's frames under `wz_app_main` fell from 1,068 bytes to about 570 and the first tick's
+  reading from 3,208 to 3,048. The kit's reading is 3,192 now and is set by the handshake's parse.
+- NOT TAKEN, measured: the loop's log lines (`port.log(&[...])`, arrays of parts) said by one
+  out-of-line function: the frame of `wz_app_main` stayed 704 bytes (the compiler had given the
+  arrays one slot) and the text grew 232 bytes.
+- NOT TAKEN, measured: the four chains as an empty constant (`EMPTY_EXT_CHAIN`) given the patch
+  entry after the bundle is placed: each `new_mutex(CONST)` was still a 204-byte slot, and the
+  slot's `open` grew from 856 to 1,080 bytes.
 - NOT TAKEN, measured: taking `judge_ext_chain`'s two helpers out of line (7 instances) moved the
   text by +16 bytes; the link-time optimizer already shares them.
 - `wz_session_core` is a long tail (525 symbols in a build without LTO, none over 1.6 KB) and the

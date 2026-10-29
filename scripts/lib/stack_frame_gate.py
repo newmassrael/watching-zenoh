@@ -265,7 +265,17 @@ IMAGES = (
     # key matcher's view of a key is one array on this profile: the dial is the longest direct
     # chain, 7 frames: `wz_app_main` 704, `reconcile` 456, `drive` 536, `dial_peer` 112,
     # `dial_expecting` 256, the slot's `open` 856, `ext_chain_of` 212, and 9 calls through a
-    # register on the path. The kit's reading is 3,208, 76 over.
+    # register on the path. The kit's reading was 3,208, 76 over.
+    #
+    # `peak` is 3,088 bytes once the session's bundle is written in its slot field by field
+    # (`SessionLinkActions::build_in`, the four handshake ext chains each written by a function of
+    # its own): the slot's `open`, `init_core` and the chain writer are about 570 bytes where
+    # `open` and `ext_chain_of` were 1,068, and the longest direct chain is the handshake's parse
+    # now, 13 frames: `wz_app_main` 704, the executor's poll 112, `dispatch_datagram_unit` 168,
+    # `dispatch_copied` 80, `dispatch_unit_borrowed` 768 (it holds the 720-byte inbound frame),
+    # `decode_unit_in` 320, `parse_unit_into` 56, `parse_init` 432, `decode_handshake_ext_chain_into`
+    # 304 and the codec's four, 3 calls through a register. The kit's reading is 3,192, 104 over; the
+    # first tick, which dials, reads 3,048.
     Image(
         key="zephyr-client-fixed",
         elf=None,
@@ -273,7 +283,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=3132,
+        peak=3088,
     ),
     # The same client with the session coalescing a send window into one datagram
     # (`overlays/t2g_client_batching.conf`). The batch writer and its flush path are two more
@@ -313,7 +323,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=3156,
+        peak=3088,
     ),
     # The fixed client that ASKS (`overlays/t2g_client_get.conf`): the getter of
     # `wz_session_mcu::slot_getter` is the application layer the observer's drain runs inside, and

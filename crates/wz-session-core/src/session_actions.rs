@@ -81,7 +81,7 @@ use wz_codecs::ext_entry::ExtEntryOwned;
 
 use crate::action_trace::ActionTrace;
 use crate::close_reason::CloseReason;
-use crate::ext_chain::{ext_chain_of, ExtChainBuf};
+use crate::ext_chain::ExtChainBuf;
 use crate::ext_chain_role::ExtChainRole;
 use crate::link::{BoxedLinkDriver, SessionRuntime};
 use crate::peer_init_caps::PeerInitCaps;
@@ -3245,6 +3245,84 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessGetPrune for SessionLinkActions
     }
 }
 
+/// Writes the fields of a struct into the memory at a raw pointer, one statement for each, from
+/// the `name: expr` list a struct literal takes (attributes included).
+///
+/// A struct literal of this size is built as a value and then moved to where it is kept, and the
+/// value is a copy in the frame of whoever builds it; the fields made here are made one after the
+/// other, each in a block of its own, so no two of them are alive together and the compiler can
+/// give them one stack slot. The list is also destructured, without `..`, in a closure that is
+/// never called: a field left out of the list does not compile, as it would not in a literal.
+///
+/// A field whose value is itself large goes in the `in_place` list: it is given the address of
+/// its field and writes it there, in a function of its own (`name => |field| write(field)`), so
+/// that what it holds while it does is released before the next field is made. Two values made
+/// in one function were two slots of its frame, however the statements were cut.
+macro_rules! write_fields {
+    (
+        $at:expr, $ty:ident {
+            $( $(#[$m:meta])* $f:ident : $e:expr ),* $(,)?
+        } in_place {
+            $( $(#[$pm:meta])* $g:ident => $init:expr ),* $(,)?
+        }
+    ) => {{
+        let at = $at;
+        $(
+            $(#[$m])*
+            {
+                let value = $e;
+                // SAFETY: `at` is valid for writes of the whole struct and holds no live value
+                // (the caller's contract); each field is written once, and none is read.
+                unsafe { core::ptr::addr_of_mut!((*at).$f).write(value) };
+            }
+        )*
+        $(
+            $(#[$pm])*
+            {
+                // SAFETY: as above; the function is given the address of the field to write.
+                let field = unsafe { core::ptr::addr_of_mut!((*at).$g) };
+                ($init)(field);
+            }
+        )*
+        let _every_field_is_listed = || {
+            // SAFETY: never called; the pattern is only type-checked.
+            let $ty { $( $(#[$m])* $f: _, )* $( $(#[$pm])* $g: _, )* } = unsafe { &*at };
+        };
+    }};
+}
+
+/// What opening a link in the session's stats partition leaves for the two halves of the bundle:
+/// the partition's metrics for the kernel and the link's slot in them for the link. Empty
+/// without `transport-stats`.
+struct LinkSeed {
+    #[cfg(feature = "transport-stats")]
+    metrics: crate::stats_registry::TransportMetrics,
+    #[cfg(feature = "transport-stats")]
+    slot: Option<crate::stats_registry::LinkSlot>,
+}
+
+impl LinkSeed {
+    /// R2825 (`transport-stats`) — open this link in the session's stats
+    /// partition, labelled with the locator pair its driver resolved at open.
+    /// A driver with no endpoints gets no slot: its link-scoped families are
+    /// not recorded, rather than recorded under invented labels.
+    fn open<R: SessionRuntime>(driver: &R::LinkSink) -> Self {
+        #[cfg(feature = "transport-stats")]
+        {
+            let mut metrics = crate::stats_registry::TransportMetrics::default();
+            let slot = R::link_driver(driver).link_endpoints().map(|ends| {
+                metrics.open_link(crate::stats_registry::LinkLabels::new(&ends.src, &ends.dst))
+            });
+            Self { metrics, slot }
+        }
+        #[cfg(not(feature = "transport-stats"))]
+        {
+            let _ = driver;
+            Self {}
+        }
+    }
+}
+
 /// Generic-`R` constructor (Stage 2c) — the runtime-agnostic body behind the
 /// concrete `new_session_actions` AP wrapper (in `wz-runtime-tokio`). Every
 /// mutex slot is staged via `R::new_mutex` so the lwIP MCU profile composes
@@ -3275,41 +3353,77 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// The bundle itself, built from its parts: what [`Self::new_generic`] wraps
-    /// in the runtime's handle and what a slot places in its own storage.
+    /// in the runtime's handle.
+    ///
+    /// R311ja — `new_generic` wraps this through the per-profile
+    /// `wrap_actions` seam (tokio `Arc`, lwIP `Rc`) so one constructor serves
+    /// both the multi-thread AP handle and the single-task MCU handle without
+    /// naming a concrete pointer. `alloc::sync::Arc` here would wall the
+    /// bundle off ARMv6-M (no `target_has_atomic = "ptr"`).
+    ///
+    /// R311y205 (IMPL-2a) — the 5 per-link fields are grouped into
+    /// `LinkState`, the rest into the shared `SessionCore`. IMPL-2b-i —
+    /// each half is wrapped in the per-profile `R::Shared` pointer (tokio
+    /// `Arc`, lwIP `Rc`) so N links can share ONE core; at N=1 both are
+    /// refcount-1 pointers, behavior-identical to the pre-split struct.
+    #[cfg(not(feature = "session-slot"))]
     pub(crate) fn build(driver: R::LinkSink, params: SessionInitParams, clock: T) -> Self {
-        // R121e — seed the outbound Frame SN with `params.initial_sn`
-        // so the first emitted Frame matches the value announced in
-        // the OpenSyn/OpenAck body. The peer enforces this start
-        // value via its reliable-channel window tracking
-        // (zenoh-pico unicast/transport.c:182-194).
-        let initial_frame_sn = params.initial_sn;
-        // R2825 (`transport-stats`) — open this link in the session's stats
-        // partition, labelled with the locator pair its driver resolved at open.
-        // A driver with no endpoints gets no slot: its link-scoped families are
-        // not recorded, rather than recorded under invented labels.
-        #[cfg(feature = "transport-stats")]
-        let (stats_metrics, stats_slot) = {
-            let mut metrics = crate::stats_registry::TransportMetrics::default();
-            let slot = R::link_driver(&driver).link_endpoints().map(|ends| {
-                metrics.open_link(crate::stats_registry::LinkLabels::new(&ends.src, &ends.dst))
-            });
-            (metrics, slot)
+        let seed = LinkSeed::open::<R>(&driver);
+        let mut link = core::mem::MaybeUninit::<LinkState<R>>::uninit();
+        let mut core = core::mem::MaybeUninit::<SessionCore<R, T>>::uninit();
+        // SAFETY: both are uninitialised locals, and each function writes every field of what
+        // it is given (the field list is checked to be whole), so both are whole after.
+        let (link, core) = unsafe {
+            Self::init_link(link.as_mut_ptr(), driver, &seed);
+            Self::init_core(core.as_mut_ptr(), params, clock, seed);
+            (link.assume_init(), core.assume_init())
         };
-        // R311ja — `new_generic` wraps this through the per-profile
-        // `wrap_actions` seam (tokio `Arc`, lwIP `Rc`) so one constructor serves
-        // both the multi-thread AP handle and the single-task MCU handle without
-        // naming a concrete pointer. `alloc::sync::Arc` here would wall the
-        // bundle off ARMv6-M (no `target_has_atomic = "ptr"`).
         Self {
-            // R311y205 (IMPL-2a) — the 5 per-link fields are grouped into
-            // `LinkState`, the rest into the shared `SessionCore`. IMPL-2b-i —
-            // each half is wrapped in the per-profile `R::Shared` pointer (tokio
-            // `Arc`, lwIP `Rc`) so N links can share ONE core; at N=1 both are
-            // refcount-1 pointers, behavior-identical to the pre-split struct.
-            // Under `session-slot` they are the bundle's own fields (`hold_*`).
-            // Every field initializer expression is verbatim.
-            link: Self::hold_link(LinkState {
-                driver,
+            link: Self::hold_link(link),
+            core: Self::hold_core(core),
+            // R2952 — installed by the runtime's `wrap_actions` when it has one.
+            #[cfg(feature = "alloc")]
+            block_first_handoff: R::new_mutex(None),
+        }
+    }
+
+    /// The bundle built where it is kept, a slot's storage (`SlotClaim::open`): the link half and
+    /// the kernel half are each written field by field into `at`, so no half is a value in the
+    /// frame of the function that builds the bundle, which is on the dial's path.
+    ///
+    /// # Safety
+    ///
+    /// `at` is valid for writes of a `Self` and holds no live value, which is not dropped here.
+    #[cfg(feature = "session-slot")]
+    pub(crate) unsafe fn build_in(
+        at: *mut Self,
+        driver: R::LinkSink,
+        params: SessionInitParams,
+        clock: T,
+    ) {
+        let seed = LinkSeed::open::<R>(&driver);
+        // SAFETY: the caller's contract; the halves are the bundle's own fields.
+        unsafe {
+            Self::init_link(core::ptr::addr_of_mut!((*at).link), driver, &seed);
+            Self::init_core(core::ptr::addr_of_mut!((*at).core), params, clock, seed);
+            // R2952 — installed by the runtime's `wrap_actions` when it has one.
+            #[cfg(feature = "alloc")]
+            core::ptr::addr_of_mut!((*at).block_first_handoff).write(R::new_mutex(None));
+        }
+    }
+
+    /// The per-link half, written into `at`.
+    ///
+    /// # Safety
+    ///
+    /// `at` is valid for writes of a `LinkState` and holds no live value.
+    unsafe fn init_link(at: *mut LinkState<R>, driver: R::LinkSink, seed: &LinkSeed) {
+        #[cfg(not(feature = "transport-stats"))]
+        let _ = seed;
+        write_fields!(
+            at,
+            LinkState {
+                driver: driver,
                 last_inbound_at: R::new_mutex(None::<u64>),
                 #[cfg(feature = "alloc")]
                 pending_batch: R::new_mutex(None::<crate::link::RxBytes>),
@@ -3325,7 +3439,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 #[cfg(all(feature = "transport-multilink", feature = "transport-qos"))]
                 priority_range: R::new_mutex(None),
                 #[cfg(feature = "transport-stats")]
-                stats_slot: R::new_mutex(stats_slot),
+                stats_slot: R::new_mutex(seed.slot),
                 #[cfg(feature = "session-extshm")]
                 shm_tx: R::new_mutex(None),
                 #[cfg(feature = "session-extshm")]
@@ -3334,8 +3448,39 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 batch_slots: R::new_mutex(
                     [const { None::<crate::tx_lease::HeldSlot> }; TX_CONDUITS],
                 ),
-            }),
-            core: Self::hold_core(SessionCore {
+            } in_place {}
+        );
+    }
+
+    /// The kernel half, written into `at`.
+    ///
+    /// Never inlined, for the stack: the fields are made one at a time here, and a caller that
+    /// inlined it would keep the largest of them (an extension chain, 204 bytes on
+    /// `session-slot`) in its own frame.
+    ///
+    /// # Safety
+    ///
+    /// `at` is valid for writes of a `SessionCore` and holds no live value.
+    #[inline(never)]
+    unsafe fn init_core(
+        at: *mut SessionCore<R, T>,
+        params: SessionInitParams,
+        clock: T,
+        seed: LinkSeed,
+    ) {
+        // R121e — seed the outbound Frame SN with `params.initial_sn`
+        // so the first emitted Frame matches the value announced in
+        // the OpenSyn/OpenAck body. The peer enforces this start
+        // value via its reliable-channel window tracking
+        // (zenoh-pico unicast/transport.c:182-194).
+        let initial_frame_sn = params.initial_sn;
+        #[cfg(feature = "transport-stats")]
+        let stats_metrics = seed.metrics;
+        #[cfg(not(feature = "transport-stats"))]
+        let _ = seed;
+        write_fields!(
+            at,
+            SessionCore {
                 #[cfg(feature = "resource-snapshot")]
                 rx_intervals: crate::interval_meter::IntervalMeter::new(),
                 #[cfg(feature = "transport-stats")]
@@ -3349,7 +3494,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // which is why `Default` is this kernel's only interaction
                 // with the value.
                 iteration_work: R::IterationWork::default(),
-                params,
+                params: params,
                 // "No cap" until a host declares one — a profile that never
                 // configures its reassembly bound keeps the prior behavior.
                 #[cfg(feature = "transport-fragmentation")]
@@ -3364,7 +3509,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 inbound_cookie: R::new_mutex(None::<SessionBytes<COOKIE_MAX>>),
                 peer_open_lease_ms: R::new_mutex(None::<u64>),
                 awaiting_open_ack: R::new_mutex(false),
-                clock,
+                clock: clock,
                 inbound_peer_zid: R::new_mutex(None::<SessionBytes<ZID_MAX>>),
                 remote_peer_zid: R::new_mutex(None::<SessionBytes<ZID_MAX>>),
                 expected_peer_zid: R::new_mutex(None),
@@ -3376,16 +3521,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // R2763 — no source until a profile's construction seam
                 // installs one; the core names no entropy source (§2.5).
                 cookie_entropy: R::new_mutex(None::<CookieEntropy>),
-                // R121f1 — default ext chains seed both Init roles with the
-                // patch-extension entry that zenoh-pico's accept-side
-                // size-negotiation requires. See
-                // [`default_init_patch_ext_entry`] for the wire-spec
-                // citation and the foreign-interop failure mode this
-                // closes.
-                init_syn_ext: R::new_mutex(ext_chain_of(default_init_patch_ext_entry())),
-                init_ack_ext: R::new_mutex(ext_chain_of(default_init_patch_ext_entry())),
-                open_syn_ext: R::new_mutex(ExtChainBuf::default()),
-                open_ack_ext: R::new_mutex(ExtChainBuf::default()),
                 // R3b — empty dispatch (no auth ext, admits all = zenoh
                 // `Auth::default()`); the AP layer installs the configured one.
                 #[cfg(feature = "session-extauth")]
@@ -3468,37 +3603,55 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 multilink: R::new_mutex(None),
                 #[cfg(feature = "transport-multilink")]
                 multilink_pubkey: R::new_mutex(None),
-            }),
-            // R2952 — installed by the runtime's `wrap_actions` when it has one.
-            #[cfg(feature = "alloc")]
-            block_first_handoff: R::new_mutex(None),
+            } in_place {
+                // R121f1 — default ext chains seed both Init roles with the
+                // patch-extension entry that zenoh-pico's accept-side
+                // size-negotiation requires. See
+                // [`default_init_patch_ext_entry`] for the wire-spec
+                // citation and the foreign-interop failure mode this
+                // closes.
+                init_syn_ext => |field| unsafe { Self::init_ext_chain(field, true) },
+                init_ack_ext => |field| unsafe { Self::init_ext_chain(field, true) },
+                open_syn_ext => |field| unsafe { Self::init_ext_chain(field, false) },
+                open_ack_ext => |field| unsafe { Self::init_ext_chain(field, false) },
+            }
+        );
+    }
+
+    /// One handshake ext chain, written into `at`: empty, or holding the patch entry
+    /// ([`default_init_patch_ext_entry`]) the Init roles start with.
+    ///
+    /// Never inlined, for the stack: a chain is 200 bytes on `session-slot`, and four of them
+    /// made in `init_core` were four slots of its frame.
+    ///
+    /// # Safety
+    ///
+    /// `at` is valid for writes of the chain's mutex and holds no live value.
+    #[inline(never)]
+    unsafe fn init_ext_chain(at: *mut R::Mutex<ExtChainBuf>, patch: bool) {
+        // SAFETY: the caller's contract.
+        unsafe { at.write(R::new_mutex(ExtChainBuf::default())) };
+        if patch {
+            // SAFETY: written just above.
+            R::with_mutex_mut(unsafe { &*at }, |chain| {
+                chain.push(default_init_patch_ext_entry());
+            });
         }
     }
 
     /// The per-link half of the bundle as it holds it: behind the runtime's
-    /// `R::Shared` pointer, so N links can share a core and each keep a link, or
-    /// under `session-slot` as the bundle's own field.
+    /// `R::Shared` pointer, so N links can share a core and each keep a link.
+    /// (Under `session-slot` the half is the bundle's own field and is written
+    /// there by `build_in`.)
     #[cfg(not(feature = "session-slot"))]
     fn hold_link(link: LinkState<R>) -> R::Shared<LinkState<R>> {
         R::share(link)
-    }
-
-    /// See the shared form of [`Self::hold_link`].
-    #[cfg(feature = "session-slot")]
-    fn hold_link(link: LinkState<R>) -> LinkState<R> {
-        link
     }
 
     /// The kernel half of the bundle as it holds it; see `hold_link`.
     #[cfg(not(feature = "session-slot"))]
     fn hold_core(core: SessionCore<R, T>) -> R::Shared<SessionCore<R, T>> {
         R::share(core)
-    }
-
-    /// See the shared form of `hold_core`.
-    #[cfg(feature = "session-slot")]
-    fn hold_core(core: SessionCore<R, T>) -> SessionCore<R, T> {
-        core
     }
 
     /// R2952 — a second binding onto an existing session: `core` shared, `link`

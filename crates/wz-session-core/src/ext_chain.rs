@@ -56,13 +56,6 @@ pub struct ExtChainBuf(heapless::Vec<ExtEntryOwned, STAGED_EXT_KINDS>);
 #[cfg(all(feature = "session-slot", feature = "session-unicast"))]
 #[allow(dead_code)]
 impl ExtChainBuf {
-    /// A chain of exactly `entry`.
-    pub fn one(entry: ExtEntryOwned) -> Self {
-        let mut chain = Self::default();
-        chain.push(entry);
-        chain
-    }
-
     /// Append `entry`. The chain holds one entry per kind of extension the
     /// build stages (`STAGED_EXT_KINDS`), so this fits whenever the stager
     /// replaced the entry of its own id first, as every stager does; one that
@@ -157,19 +150,6 @@ pub(crate) fn decode_handshake_ext_chain_into(
             }
         }
         Err(InboundParseError::ExtChainOverflow)
-    }
-}
-
-/// A chain of exactly `entry`, in whichever form this profile stages it.
-#[cfg(feature = "session-unicast")]
-pub(crate) fn ext_chain_of(entry: ExtEntryOwned) -> ExtChainBuf {
-    #[cfg(not(feature = "session-slot"))]
-    {
-        alloc::vec![entry]
-    }
-    #[cfg(feature = "session-slot")]
-    {
-        ExtChainBuf::one(entry)
     }
 }
 

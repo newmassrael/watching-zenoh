@@ -408,18 +408,18 @@ where
     /// afterwards, and the returned handle is the first count on it (the claim's
     /// own count moves to it).
     ///
-    /// The bundle is built by value and then moved into the slot, so it is on
-    /// the stack once while it is built: the in-place build the Q lane's stack
-    /// verdict is there to catch on a board.
+    /// The bundle is built in the slot, field by field (`SessionLinkActions::build_in`), and is
+    /// never a value on the stack: its two halves are written one field at a time, so the
+    /// largest value on the way is one extension chain.
     ///
     /// The parameters are taken as the function that makes them and are made here. A value
     /// handed down by the dial would be copied into the frame of each caller on the way
     /// (the host's `dial`, its `open`, `new_session_in_slot`), 328 bytes each; made here it
     /// is one temporary of this function, gone when it returns.
     ///
-    /// Never inlined, for the stack: the bundle (2 KB on the fixed client) is a temporary of
-    /// this function and is gone when it returns. Inlined into the dial, it stayed in the
-    /// dial's frame while the pump and the engine were built beneath it.
+    /// Never inlined, for the stack: what this function holds while it builds the bundle is
+    /// gone when it returns. Inlined into the dial, it stayed in the dial's frame while the
+    /// pump and the engine were built beneath it.
     #[inline(never)]
     pub fn open(self, params: impl FnOnce() -> SessionInitParams, clock: T) -> SlotRef<R, T> {
         let params = params();
@@ -439,13 +439,12 @@ where
             driver,
             counted: false,
         };
-        let actions = SessionLinkActions::<R, T>::build(sink, params, clock);
         let placed: &'static SessionLinkActions<R, T> = {
             let at = cell.actions.get().cast::<SessionLinkActions<R, T>>();
             // SAFETY: the slot's bundle cell is unwritten (the state is
             // `Claimed`), and the pointer is valid for the slot's life.
             unsafe {
-                at.write(actions);
+                SessionLinkActions::<R, T>::build_in(at, sink, params, clock);
                 &*at
             }
         };
