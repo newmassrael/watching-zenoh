@@ -298782,6 +298782,40 @@
         "Also owed: the hand-off of the core is on the operations that wait; a put or delete that does not block still never yields, as upstream's; the files that run none, a build without unstable serves no admin key of its own, a lane for the harness, the margin of the main job, the pin bump to 1.10.2."
       ]
     },
+    "Round 3925": {
+      "decision_summary": "The routing file of upstream's tests still does not finish in the Z8 harness, and the cause is now a reproduction. In the Queryable and Get recipes of the three node test, in the orders where the asker joins last, one query in four is lost: the queryable receives the query that is made as the direct link of the two peers forms, replies without an error, and the asker's get never ends, while the links on both sides are two and two. Five of the six start orders pass in every run. The reproduction is a test of the top crate, ignored because it fails about one run in four, with the first asks of every order and the links each peer holds printed. Two tests that pass are kept beside it: an asker that began before the router and the queryable is answered, and a queryable declared before its router answers when the link comes.",
+      "changes_bullets": [
+        "crates/wz-zenoh/src/api/session.rs: tests an_asker_that_began_before_the_router_and_the_queryable_is_answered and a_queryable_declared_before_its_router_exists_answers_when_the_link_comes (passing), and peers_of_a_router_are_answered_fifty_times_in_every_start_order (ignored: the six start orders of the Queryable and Get recipes at once, fifty answers each in ten seconds)."
+      ],
+      "verification_bullets": [
+        "Locally: clippy with warnings denied passes for the top crate with unstable and with the default features, and its library tests pass (202, one ignored). The ignored test failed in about one run in four over fifty runs: always in the orders where the asker joins last, always with the queryable having received one query and both peers holding two links; the reply call returned no error. Not run: the Z8 harness (unchanged by this round), the other upstream files, the hosted run."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed, first: the query lost as the direct link of two peers forms (the ignored test of the top crate); it keeps three_node_combination from finishing after other tests. The first thing to look at is where the reply or the final of that query goes on the new link, with a trace of the frames, which the engine does not have. The double dial of the two peers is ruled out (both hold two links); the hand-off of the core is ruled out (the loss was seen before it covered get).",
+        "Owed, from the routing file: gossip_regression_1 and _2 want the admin host of a peer (the linkstate reply of the north region), gossip_regression_3 wants the multihop gossip key, which the engine does not act on.",
+        "Owed, from the router session: the admin host of the router and a router that joins a multicast group, which the adminspace read test asks for; the metadata of a push that a face sent, which a hosted subscriber is not handed; a router liveliness subscriber refused on egress is not ended; the sessions a router holds as the admin sessions leg. The peer session forwarding between its faces is with the other session.",
+        "Also owed: the files that run none, a build without unstable serves no admin key of its own, a lane for the harness, the margin of the main job, the pin bump to 1.10.2."
+      ],
+      "publishable_decision_summary": "The routing file of upstream's tests still does not finish in the Z8 harness, and the cause is now a reproduction. In the Queryable and Get recipes of the three node test, in the orders where the asker joins last, one query in four is lost: the queryable receives the query that is made as the direct link of the two peers forms, replies without an error, and the asker's get never ends, while the links on both sides are two and two. Five of the six start orders pass in every run. The reproduction is a test of the top crate, ignored because it fails about one run in four, with the first asks of every order and the links each peer holds printed. Two tests that pass are kept beside it: an asker that began before the router and the queryable is answered, and a queryable declared before its router answers when the link comes.",
+      "publishable_changes_bullets": [
+        "crates/wz-zenoh/src/api/session.rs: tests an_asker_that_began_before_the_router_and_the_queryable_is_answered and a_queryable_declared_before_its_router_exists_answers_when_the_link_comes (passing), and peers_of_a_router_are_answered_fifty_times_in_every_start_order (ignored: the six start orders of the Queryable and Get recipes at once, fifty answers each in ten seconds)."
+      ],
+      "publishable_verification_bullets": [
+        "Locally: clippy with warnings denied passes for the top crate with unstable and with the default features, and its library tests pass (202, one ignored). The ignored test failed in about one run in four over fifty runs: always in the orders where the asker joins last, always with the queryable having received one query and both peers holding two links; the reply call returned no error. Not run: the Z8 harness (unchanged by this round), the other upstream files, the hosted run."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed, first: the query lost as the direct link of two peers forms (the ignored test of the top crate); it keeps three_node_combination from finishing after other tests. The first thing to look at is where the reply or the final of that query goes on the new link, with a trace of the frames, which the engine does not have. The double dial of the two peers is ruled out (both hold two links); the hand-off of the core is ruled out (the loss was seen before it covered get).",
+        "Owed, from the routing file: gossip_regression_1 and _2 want the admin host of a peer (the linkstate reply of the north region), gossip_regression_3 wants the multihop gossip key, which the engine does not act on.",
+        "Owed, from the router session: the admin host of the router and a router that joins a multicast group, which the adminspace read test asks for; the metadata of a push that a face sent, which a hosted subscriber is not handed; a router liveliness subscriber refused on egress is not ended; the sessions a router holds as the admin sessions leg. The peer session forwarding between its faces is with the other session.",
+        "Also owed: the files that run none, a build without unstable serves no admin key of its own, a lane for the harness, the margin of the main job, the pin bump to 1.10.2."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
