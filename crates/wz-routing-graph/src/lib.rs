@@ -1786,7 +1786,8 @@ impl LinkstateNetwork {
         if self.is_single_hop_network() {
             return None;
         }
-        let gossip_introduces = self.object == NetObject::Gossip && !*self.full_linkstate;
+        let gossip_introduces =
+            self.object == NetObject::Gossip && !*self.full_linkstate && !self.gossip_multihop;
         Some(if neighbour_was_new || gossip_introduces {
             self.build_link_added_delta(neighbour)
         } else {
@@ -1821,7 +1822,9 @@ impl LinkstateNetwork {
         target_is_source: bool,
     ) -> Option<LinkstateListOwned> {
         let not_target = |z: &&Zid| target != Some(**z);
-        if !*self.full_linkstate {
+        // A multihop net floods links as a link-state one does: the pin reads both flags in the
+        // one test (`zenoh/src/net/protocol/network.rs` @ `if self.full_linkstate || self.gossip_multihop {`).
+        if !*self.full_linkstate && !self.gossip_multihop {
             let nodes: Vec<Zid> = changes
                 .new
                 .iter()
@@ -2013,7 +2016,7 @@ impl LinkstateNetwork {
         // zenoh `link_states` (`network.rs:699-700`) dispatches on the same flag
         // before doing anything else: the GOSSIP mode has a different ingest, not
         // a narrowed one.
-        if !*self.full_linkstate {
+        if !*self.full_linkstate && !self.gossip_multihop {
             return self.process_linkstates_peer_to_peer(states);
         }
         let mut changes = Changes::default();
