@@ -374,14 +374,21 @@ def counts(text: str) -> tuple[int, int, int]:
 #: file may ask for a `Runtime`).
 DEFAULT_FEATURES = "unstable,shared-memory,transport_tcp,transport_udp,transport_tls,transport_quic"
 
+#: Features a file asks for beyond the build's, because its tests are compiled out without them
+#: (`regions/main.rs` opens with `#![cfg(feature = "internal")]`: measured as 0 tests under the
+#: default, 126 with the feature). The files that ask for a `Runtime` of the node are not in this
+#: table: they need `zenoh::internal::runtime`, which this crate does not carry.
+FILE_FEATURES = {"regions": ("internal",)}
+
 
 def measure(names: list[str], out: pathlib.Path) -> int:
     report = out / "report"
     report.mkdir(exist_ok=True)
     features = os.environ.get("Z8_FEATURES", DEFAULT_FEATURES)
-    flags = ["--features", features] if features else []
     rows: list[str] = [f"# features: {features or '(none)'}"]
     for name in names:
+        wanted = [f for f in FILE_FEATURES.get(name, ()) if f not in features.split(",")]
+        flags = ["--features", ",".join([*filter(None, [features]), *wanted])] if features or wanted else []
         clog, rlog = report / f"{name}.compile.log", report / f"{name}.run.log"
         rc = run(["cargo", "test", "--test", name, *flags, "--no-run"], out, clog, COMPILE_BOUND_S)
         if rc != 0:

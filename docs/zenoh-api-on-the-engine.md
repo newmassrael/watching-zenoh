@@ -976,8 +976,33 @@ Each lands whole with its surface lines, tests and faults in one round.
       because the linkstate view of a peer node carries a peer two links away although
       `scouting/gossip/multihop` is off; that is the side of the node's peer net and its admin
       reply, and it is the next item.
-    - **Open:** `routing` (the two above) and the files that run none (`open_time`, whose four
-      tests are ignored, and `regions`).
+    - **`regions` (measured 2026-10-30; the harness now gives the file `internal`, whose `cfg`
+      compiled all of its tests out): 126 tests, 6 pass.** It is the 1.10 regions feature: a node
+      names its region (`region_name`, carried in the INIT extension), a gateway keeps the
+      subregions of its south apart (`gateway/south` with filters on modes, interfaces, zids and
+      region names), and a client with a multicast group is the gateway of the peers on that
+      group. Each scenario runs five kinds of test in several start orders (`putsub`, `getque`,
+      `toksub`, `pubsub`, `queque`). What fails, with its reason: (1) 66 tests refused
+      `region_name` (the key was read by the config but acted on by nobody:
+      `SessionLinkActions::set_local_region` had no caller outside the demo); the key is
+      honoured now, through the offer of each session of the node (`SessionOffer::region`), and
+      the count of tests that pass moved from 6 to 10 (the scenario 4 and 5 ones that observe
+      only delivery); (2) the delivery tests of scenarios 1, 2 and 3 end with a timeout
+      (`gateway/south` reaches the hats of a node only through the demo's flags, and a client or
+      a peer that holds a multicast group, dials what it scouts and keeps a subregion apart is
+      not a node of the API yet: such a peer stays on the registry); (3) the `pubsub` and
+      `queque` kinds, about 50 tests, also count events: they assert how many times a node's
+      north hat registered a subscriber or a queryable, read from tracing spans named
+      `demux{zid}` and `register_subscriber{self, res}` of upstream's routing code. That is a
+      count of upstream's steps, not an observable of the API, and the peers of those tests are
+      registry peers, which have no hat to register in; it can be met only by a routing that
+      opens the same spans, which is a decision of its own and is not made here. Slices, in
+      order: the gateway partition on the nodes of the API (the router node and the peer node
+      take `gateway/south`, with the region names of the remote's Init), the peer that holds a
+      multicast group and dials what it scouts as a node, the client that holds a group, then
+      the spans.
+    - **Open:** `routing` (the two above), `regions` (above) and `open_time` (its tests are
+      ignored upstream).
     - **Owed:** a lane that runs the harness (a pinned tree and a network on the host), the arm
       with `internal` and the files it asks for a `Runtime` of, and Windows.
 - **Owned slices for the configuration-driven features** named in D6 (acl, authentication, low
