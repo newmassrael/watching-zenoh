@@ -79,28 +79,39 @@ fn parse_endpoint(endpoint: &str, any_port: bool) -> Result<Locator, DialRefused
     else {
         return Err(DialRefused::Unsupported);
     };
-    if rest.contains(['?', '#']) {
+    let rest = rest.as_bytes();
+    if rest.iter().any(|&b| b == b'?' || b == b'#') {
         return Err(DialRefused::Unsupported);
     }
-    let (host, port) = rest.rsplit_once(':').ok_or(DialRefused::BadAddress)?;
-    let port: u16 = digits(port).ok_or(DialRefused::BadAddress)?;
-    if port == 0 && !any_port {
+    let colon = rest
+        .iter()
+        .rposition(|&b| b == b':')
+        .ok_or(DialRefused::BadAddress)?;
+    let (host, port) = (&rest[..colon], &rest[colon + 1..]);
+    let mut port_number = 0u32;
+    if !decimal(port, u32::from(u16::MAX), &mut port_number) || (port_number == 0 && !any_port) {
         return Err(DialRefused::BadAddress);
     }
+    // Four decimal fields of at most 255 between three dots, read in one pass.
     let mut addr = [0u8; 4];
-    let mut parts = host.split('.');
+    let mut fields = host.split(|&b| b == b'.');
     for octet in &mut addr {
-        *octet = parts
-            .next()
-            .and_then(digits)
-            .ok_or(DialRefused::BadAddress)?;
+        let mut value = 0u32;
+        let field = fields.next().ok_or(DialRefused::BadAddress)?;
+        if !decimal(field, u32::from(u8::MAX), &mut value) {
+            return Err(DialRefused::BadAddress);
+        }
+        *octet = value as u8;
     }
-    if parts.next().is_some() {
+    if fields.next().is_some() {
         return Err(DialRefused::BadAddress);
     }
     Ok(Locator {
         proto,
-        at: IpEndpoint { addr, port },
+        at: IpEndpoint {
+            addr,
+            port: port_number as u16,
+        },
     })
 }
 
@@ -115,12 +126,25 @@ pub fn dial_failed(refused: LinkOpenError) -> DialFailed {
     }
 }
 
-/// Decimal digits only: `str::parse` would also take a leading `+`.
-fn digits<T: core::str::FromStr>(text: &str) -> Option<T> {
-    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
+/// Read `text` as decimal digits only (`str::parse` would also take a leading `+`) into `value`,
+/// at most `max`; false for an empty text, another byte, or a number above `max`. One reader
+/// for the port and the octets: a generic `str::parse` is a copy of the integer reader for each
+/// width, and this is written once for both.
+fn decimal(text: &[u8], max: u32, value: &mut u32) -> bool {
+    *value = 0;
+    if text.is_empty() {
+        return false;
     }
-    text.parse().ok()
+    for &byte in text {
+        if !byte.is_ascii_digit() {
+            return false;
+        }
+        *value = *value * 10 + u32::from(byte - b'0');
+        if *value > max {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(not(feature = "session-slot"))]
@@ -398,9 +422,48 @@ mod parse_tests {
             ("udp/127.0.0.256:7447", DialRefused::BadAddress),
             ("udp/127.0.0.1.5:7447", DialRefused::BadAddress),
             ("udp/[::1]:7447", DialRefused::BadAddress),
+            ("udp/127.0.0:7447", DialRefused::BadAddress),
+            ("udp/127.0.0.:7447", DialRefused::BadAddress),
+            ("udp/.127.0.0.1:7447", DialRefused::BadAddress),
+            ("udp/127..0.1:7447", DialRefused::BadAddress),
+            ("udp/127.0.0.1:", DialRefused::BadAddress),
+            ("udp/:7447", DialRefused::BadAddress),
+            ("udp/127.0.0.1:65536", DialRefused::BadAddress),
+            (
+                "udp/127.0.0.1:99999999999999999999",
+                DialRefused::BadAddress,
+            ),
+            ("udp/127.0.0.1:-1", DialRefused::BadAddress),
+            ("udp/+1.0.0.1:7447", DialRefused::BadAddress),
+            ("udp/1.0.0.9999999999:7447", DialRefused::BadAddress),
+            ("udp//127.0.0.1:7447", DialRefused::BadAddress),
+            ("udp", DialRefused::Unsupported),
+            ("", DialRefused::Unsupported),
         ] {
             std::assert_eq!(parse_locator(text), Err(why), "{text}");
         }
+    }
+
+    /// The numbers the reader takes: leading zeros as `str::parse` does, and the widest of each.
+    #[test]
+    fn the_widest_numbers_and_leading_zeros_are_read() {
+        let at = |addr, port| IpEndpoint { addr, port };
+        std::assert_eq!(
+            parse_locator("udp/255.255.255.255:65535"),
+            Ok(Locator::udp(at([255; 4], 65535)))
+        );
+        std::assert_eq!(
+            parse_locator("udp/001.002.003.004:00080"),
+            Ok(Locator::udp(at([1, 2, 3, 4], 80)))
+        );
+        std::assert_eq!(
+            parse_locator("tcp/0.0.0.0:1"),
+            Ok(Locator::tcp(at([0; 4], 1)))
+        );
+        std::assert_eq!(
+            parse_listen_locator("udp/10.0.0.1:0"),
+            Ok(Locator::udp(at([10, 0, 0, 1], 0)))
+        );
     }
 
     #[test]

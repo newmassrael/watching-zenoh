@@ -282,6 +282,15 @@ carries about 6 KB of C library code wz does not, which is why the difference is
   372, the rest inlined at the manager's two calls), which is what the 680 is net of. Taking
   `grown_ms` out of line, one copy for the two calls, cost 40 bytes more. The schedule is one
   implementation for every profile, so the host and the board cannot differ in it.
+- TAKEN, text -496 bytes (148,268 to 147,772 on the fixed image; 152,564 to 152,060 on the batching
+  and 165,876 to 165,372 on the get image): the endpoint text read in one byte scan.
+  `dial::parse_endpoint` was `str::strip_prefix`, a search for either of two characters, `rsplit_once`,
+  `split('.')` and the generic `str::parse::<T>` for the u8 of each octet and the u16 of the port,
+  which the compiler writes once for each width: 886 bytes for the one function the slot dialer calls
+  at two places. Now `dial::decimal` reads the digits of both the port and the octets against a
+  maximum, and the scan is over bytes: 386 bytes. The tests keep the old refusals (a `+` sign, a
+  port of 0, 256, a fifth field, a name, a bracketed address, `?` and `#`) and add the empty
+  fields, a number wider than any integer, leading zeros, and the widest of each number.
 - NOT TAKEN, measured: `ClientNode::start` out of line (a call from the image's own `start`): the
   text was 161,700 bytes, 920 more than the image before, for the same frames: the node (152
   bytes) was passed by value across the call and the two functions each paid a prologue.
