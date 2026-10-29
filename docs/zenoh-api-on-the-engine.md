@@ -906,11 +906,39 @@ Each lands whole with its surface lines, tests and faults in one round.
       decision is where a callback runs: inline, as now, or on a dispatcher of its own with an
       ordered queue per entity, which lets a callback block and re-enter the session at the price of
       a hop per sample and a bound to choose. It is not made here.
-    - **Open, to be read:** `callback_drop_on_undeclare` (the three variants in which the session
-      publishes to itself), `cancellation` (`replies.is_disconnected()`), `connection_retry`
-      (`LinkFailed`), `events`, `namespace` (a timeout), `liveliness` (`sub.try_recv()`), `routing`
-      (no test finishes in 600 s), `interceptors` (it ends without naming a test), and the files
-      that run none (`open_time`, whose four tests are ignored, and `regions`).
+    - **Read again after the repairs of rounds 3866 to 3873:** `interceptors` (7 of 7),
+      `connection_retry` (6 of 6), `callback_drop_on_undeclare` (14 of 14), `cancellation` (4 of
+      4) and `events` pass. `namespace` passes 8 of 12 and `liveliness` runs 46 with every test
+      that opens no router passing; what each of them lacked is in the ledger (a repeated id of
+      the interceptors, the session's wait for the callbacks of every entity and the end of a get
+      that nobody answers, the session's own admin space, a liveliness key told once however many
+      tokens sit on it, and the namespace of the answer to an interest).
+    - **The router session (an owned slice, not a half-gate).** The refusal of `mode` = "router"
+      stays, and 15 files wait on it (`liveliness` 39 tests, `namespace` 4, `acl`, `adminspace`,
+      `matching`, `qos_overwrite`, `scouting`, `timestamp_instrumentation`, `unicity`, part of
+      `authentication`, `routing`). The data plane exists (`RouterForwarder`, with a Local face
+      that hosts a node's own declarations, `docs/peer-region-hats.md` section 12), and its
+      bootstrap lives in the demo binary (`crates/wz-ap-demo/src/runner.rs`,
+      `run_router_hat_until`, about 1,800 lines) over the library's `peer_loop`
+      (`crates/wz-runtime-tokio/src/accept_loop.rs`). The way in is an `Engine::Router` arm
+      whose node thread composes what `wz-capi-core` already builds privately (the bind, the
+      accept and dial configurations, the init parameters, the scouting responder) with a
+      `RouterForwarder` and `peer_loop`, in a module of its own. The order, each step landing whole
+      and judged by an upstream file: (1) the arm with its thread, responder, zid, close, listen
+      locators and peer list, every other method refusing by name, which opens the tests that
+      use a router only as a broker (`scouting`, the routed variants of `namespace`,
+      `timestamp_instrumentation` and `unicity`, and the client and peer variants of
+      `liveliness`); (2) an id-keyed hosted subscriber and queryable, publish and the node's
+      timestamp; (3) liveliness from the Local face (no door exists: a token, a hosted
+      liveliness subscriber and a liveliness query); (4) a get from the Local face (no door:
+      `route_request` is keyed by an inbound face) and the matching status; (5) the access
+      control, the authentication and the admin host, which the demo carries and must be
+      extracted. Three risks are recorded: the origination doors of steps 3 and 4 are new routing
+      code, a hosted callback runs under the read guard of the tables (a declaration made from it
+      deadlocks, and `session` and `unicity` already block inside callbacks), and the hosted
+      queryable cannot hold a reply or read a payload.
+    - **Open:** the context a callback runs in (above), `routing` (its tests open routers), and
+      the files that run none (`open_time`, whose four tests are ignored, and `regions`).
     - **Owed:** a lane that runs the harness (a pinned tree and a network on the host), the arm
       with `internal` and the files it asks for a `Runtime` of, and Windows.
 - **Owned slices for the configuration-driven features** named in D6 (acl, authentication, low
