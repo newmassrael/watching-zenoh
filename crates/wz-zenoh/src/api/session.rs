@@ -11600,6 +11600,231 @@ mod tests {
             );
         }
 
+        /// The Queryable and Get recipes of upstream's three node test, all six start orders at
+        /// once as four of its recipes run: each asker is answered fifty times in ten seconds.
+        /// It fails in about one run in four, in the orders where the asker joins last: the ask
+        /// that is made as the direct link of the two peers forms is received by the queryable
+        /// and never answered. Run it with `--ignored` to see it; each run prints the first asks
+        /// of every order and the links each peer holds at the end.
+        #[cfg(feature = "unstable")]
+        #[ignore = "a query made as the direct link of two peers forms is lost, about one run in four"]
+        #[tokio::test(flavor = "multi_thread", worker_threads = 9)]
+        async fn peers_of_a_router_are_answered_fifty_times_in_every_start_order() {
+            use std::time::{Duration, Instant};
+
+            let orders = [
+                (0, 1, 2),
+                (0, 2, 1),
+                (1, 2, 0),
+                (1, 0, 2),
+                (2, 0, 1),
+                (2, 1, 0),
+            ];
+            let mut recipes = Vec::new();
+            for (n, (router_s, queryable_s, asker_s)) in orders.into_iter().enumerate() {
+                recipes.push(tokio::spawn(async move {
+                    let port = unautoselected_port();
+                    let config = move |id: String, mode: &'static str, listens: bool| {
+                        let endpoints = if listens {
+                            format!(r#"listen: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},"#)
+                        } else {
+                            format!(r#"connect: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},"#)
+                        };
+                        Config::from_json5(&format!(
+                            r#"{{ id: "{id}", mode: "{mode}", {endpoints}
+                                  scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                        ))
+                        .expect("a configuration zenoh reads")
+                    };
+                    let started = Instant::now();
+                    let router_task = tokio::spawn({
+                        async move {
+                            tokio::time::sleep(Duration::from_secs(router_s)).await;
+                            let router = open(config(format!("a1b2d{n}0"), "router", true))
+                                .await
+                                .expect("a router opens");
+                            tokio::time::sleep(Duration::from_secs(40)).await;
+                            drop(router);
+                        }
+                    });
+                    let received = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                    let queryable_session =
+                        std::sync::Arc::new(std::sync::Mutex::new(None::<Session>));
+                    let queryable_task = tokio::spawn({
+                        let received = received.clone();
+                        let queryable_session = queryable_session.clone();
+                        async move {
+                            tokio::time::sleep(Duration::from_secs(queryable_s)).await;
+                            let peer = open(config(format!("a1b2d{n}1"), "peer", false))
+                                .await
+                                .expect("a peer opens");
+                            *queryable_session.lock().unwrap() = Some(peer.clone());
+                            let queryable = peer
+                                .declare_queryable("demo/every/order")
+                                .await
+                                .expect("declares");
+                            loop {
+                                let query = queryable.recv_async().await.expect("a query");
+                                received.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                if let Err(error) =
+                                    query.reply("demo/every/order", vec![0u8; 8]).await
+                                {
+                                    eprintln!("order {n}: the reply failed: {error}");
+                                }
+                            }
+                        }
+                    });
+                    tokio::time::sleep(Duration::from_secs(asker_s)).await;
+                    let asker = open(config(format!("a1b2d{n}2"), "peer", false))
+                        .await
+                        .expect("a peer opens");
+                    let (mut answered, mut asks) = (0usize, 0usize);
+                    let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+                        while answered < 50 {
+                            asks += 1;
+                            let asked = Instant::now();
+                            let replies = asker
+                                .get("demo/every/order")
+                                .timeout(Duration::from_secs(10))
+                                .await
+                                .expect("asks");
+                            let before = answered;
+                            while let Ok(reply) = replies.recv_async().await {
+                                if reply.result().is_ok() {
+                                    answered += 1;
+                                }
+                            }
+                            if asks <= 3
+                                || answered == before && asks.is_multiple_of(100)
+                                || asked.elapsed() > Duration::from_millis(500)
+                            {
+                                eprintln!(
+                                    "order {n}: ask {asks} at {:?} took {:?} and had {} answers; \
+                                     the asker sees peers {:?} and routers {:?}",
+                                    started.elapsed(),
+                                    asked.elapsed(),
+                                    answered - before,
+                                    asker.info().peers_zid().await.collect::<Vec<_>>(),
+                                    asker.info().routers_zid().await.collect::<Vec<_>>(),
+                                );
+                            }
+                            if answered == before {
+                                tokio::time::sleep(Duration::from_millis(1)).await;
+                            }
+                        }
+                    })
+                    .await;
+                    queryable_task.abort();
+                    router_task.abort();
+                    (
+                        n,
+                        (router_s, queryable_s, asker_s),
+                        outcome.is_ok(),
+                        answered,
+                        asks,
+                        started.elapsed(),
+                        received.load(std::sync::atomic::Ordering::SeqCst),
+                        asker.info().links().await.count(),
+                        {
+                            let held = queryable_session.lock().unwrap().clone();
+                            match held {
+                                Some(peer) => peer.info().links().await.count(),
+                                None => 0,
+                            }
+                        },
+                    )
+                }));
+            }
+            let mut failed = Vec::new();
+            for recipe in recipes {
+                let (n, order, ok, answered, asks, elapsed, received, asker_links, queryable_links) =
+                    recipe.await.expect("a recipe ends");
+                eprintln!(
+                    "order {n} {order:?}: the queryable received {received} queries; links at \
+                     the end: asker {asker_links}, queryable {queryable_links}"
+                );
+                eprintln!(
+                    "order {n} {order:?}: ok={ok} answered={answered} asks={asks} in {elapsed:?}"
+                );
+                if !ok {
+                    failed.push(format!(
+                        "{order:?} answered {answered} of 50 in {asks} asks"
+                    ));
+                }
+            }
+            assert!(failed.is_empty(), "not answered fifty times: {failed:?}");
+        }
+
+        /// A queryable declared by a peer before its router exists is answering once the router
+        /// is there and the peer has dialed it again.
+        #[cfg(feature = "unstable")]
+        #[tokio::test(flavor = "multi_thread", worker_threads = 9)]
+        async fn a_queryable_declared_before_its_router_exists_answers_when_the_link_comes() {
+            use std::time::{Duration, Instant};
+
+            let port = unautoselected_port();
+            let config = move |id: &str, mode: &str, listens: bool| {
+                let endpoints = if listens {
+                    format!(r#"listen: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},"#)
+                } else {
+                    format!(r#"connect: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},"#)
+                };
+                Config::from_json5(&format!(
+                    r#"{{ id: "{id}", mode: "{mode}", {endpoints}
+                          scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                ))
+                .expect("a configuration zenoh reads")
+            };
+            let started = Instant::now();
+            let queryable_peer = open(config("a1b2d90", "peer", false))
+                .await
+                .expect("a peer opens");
+            let queryable = queryable_peer
+                .declare_queryable("demo/before/router")
+                .callback(|query| {
+                    query
+                        .reply("demo/before/router", "answer")
+                        .wait()
+                        .expect("replies");
+                })
+                .await
+                .expect("declares");
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let router = open(config("a1b2d91", "router", true))
+                .await
+                .expect("a router opens");
+            let asker = open(config("a1b2d92", "peer", false))
+                .await
+                .expect("a peer opens");
+            let mut answered = false;
+            let mut log = Vec::new();
+            while started.elapsed() < Duration::from_secs(12) && !answered {
+                let asked = Instant::now();
+                let replies = asker
+                    .get("demo/before/router")
+                    .timeout(Duration::from_secs(10))
+                    .await
+                    .expect("asks");
+                let mut got = 0;
+                while let Ok(reply) = replies.recv_async().await {
+                    got += usize::from(reply.result().is_ok());
+                }
+                answered = got > 0;
+                log.push(format!(
+                    "at {:?} an ask took {:?} and had {got}; the queryable peer sees routers {:?}",
+                    started.elapsed(),
+                    asked.elapsed(),
+                    queryable_peer
+                        .info()
+                        .routers_zid()
+                        .await
+                        .collect::<Vec<_>>()
+                ));
+            }
+            drop((queryable, router));
+            assert!(answered, "no answer: {log:#?}");
+        }
+
         /// A router that dials a router which is not listening yet keeps dialing, and once the
         /// link is up what a client of the dialing router subscribed to reaches a publisher of the
         /// other: the start order of the nodes of a mesh does not matter.
