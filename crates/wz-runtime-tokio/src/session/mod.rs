@@ -7541,6 +7541,15 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     SendDeclareError::FragmentTxBudgetExhausted => {
                         LivelinessAliasError::FragmentChainAbandoned
                     }
+                    // A link that is released or reconnecting is a condition of the network and
+                    // not of the call: the declare is refused, nothing left the session, and the
+                    // caller declares again once the session is established. It is reached when
+                    // a token is declared as a link goes down, which a node with a router
+                    // dialled to it does as a matter of course.
+                    SendDeclareError::TransportUnavailable => {
+                        LivelinessAliasError::TransportUnavailable
+                    }
+                    SendDeclareError::RequiresUnicast => LivelinessAliasError::RequiresUnicast,
                     other => unreachable!(
                         "declare_token literal-mode prepare/seam returned \
                          {other:?} unexpectedly"
