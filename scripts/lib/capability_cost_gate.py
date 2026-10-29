@@ -156,7 +156,7 @@ CASES: tuple[Case, ...] = (
               "moves to that reading with its margin. 1,849,773 on hosted CI on 2026-10-27 "
               "(head `f4bdeaee5`, +16,600): the growth is in the code every pico build links "
               "and is not attributed to one commit; the budget moves to that reading"),
-    Case("pico-client-small", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_517_000,
+    Case("pico-client-small", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_520_800,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
                  CONNECTIVITY, MULTICAST),
          require=(SINGLE_THREADED,), profile="capi-small",
@@ -164,7 +164,14 @@ CASES: tuple[Case, ...] = (
               "1,468,134 measured against pico-client's 1,790,361 (-18.0%). Read 1,498,558 on "
               "hosted CI on 2026-10-26 with the key set's gate and the engine port's advanced "
               "plane, which pico-client's note above attributes. 1,510,582 on hosted CI on "
-              "2026-10-27 (head `f4bdeaee5`, +12,024), the growth pico-client's note states"),
+              "2026-10-27 (head `f4bdeaee5`, +12,024), the growth pico-client's note states. "
+              "1,517,026 measured locally on the head of round 3901 (`53b4fdc31`, 26 over "
+              "the earlier budget of 1,517,000, which no hosted run graded: they were "
+              "cancelled), and 1,517,268 with the router session's get on it (`9de15171e`, "
+              "+242) while no router symbol is linked into this build (`nm` finds none), so "
+              "the step is the layout of code every pico build links and not a plane this "
+              "build gained. The budget is the latter reading and 3,500, rounded up to the "
+              "hundred"),
     Case("pico-client-udp", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",link-udp", 1_922_900,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST),
