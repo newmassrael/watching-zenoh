@@ -2776,8 +2776,8 @@ pub struct RouterForwarder {
 }
 
 /// The namespace of the node's own session: upstream installs its decorator pair on the face of
-/// the session (`zenoh/src/api/session.rs` @ `Namespace::new`), and for a node that is the
-/// `Local` face. The key of every declaration, publication and query of the session is put under
+/// the session (`zenoh/src/net/runtime/mod.rs` @ `Arc::new(Namespace::new(ns.clone(), face))`),
+/// and for a node that is the `Local` face. The key of every declaration, publication and query of the session is put under
 /// the prefix on its way into the router, and what the router tells the session is stripped of it
 /// (a message about a key outside it is dropped), so the session names its keys relative to it.
 #[cfg(feature = "routing-namespace")]
