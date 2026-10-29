@@ -119,6 +119,8 @@ query-get = [
     "wz-session-core/codec-response",
     "wz-session-core/codec-response-final",
     "wz-session-core/query-selector-parameters",
+    # A node that asks is answered: the Responses and the ResponseFinal come back on the wire.
+    "wz-session-core/rx-response",
 ]
 pubsub-put = ["wz-session-core/pubsub-put"]
 # The dialer and the connection manager: a node that holds an initiator session with each endpoint

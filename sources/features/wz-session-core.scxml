@@ -22,7 +22,7 @@
   <sce:feature name="adminspace-metrics" requires="adminspace-core query-selector-parameters"/>
   <sce:feature name="adminspace-plugins-handlers" requires="adminspace-core"/>
   <sce:feature name="adminspace-router-linkstate" requires="adminspace-core"/>
-  <sce:feature name="adminspace-write" requires="keyexpr-wildcard-double keyexpr-wildcard-single"/>
+  <sce:feature name="adminspace-write" requires="keyexpr-wildcard-double keyexpr-wildcard-single rx-push"/>
   <sce:feature name="alloc" requires="storage-profile"/>
   <sce:feature name="attachment-bytes"/>
   <sce:feature name="bounded-heapless"/>
@@ -48,7 +48,7 @@
   <sce:feature name="declare-interest" requires="codec-declare"/>
   <sce:feature name="declare-keyexpr" requires="alloc codec-declare"/>
   <sce:feature name="declare-queryable" requires="codec-declare"/>
-  <sce:feature name="declare-subscriber" requires="codec-declare declare-final"/>
+  <sce:feature name="declare-subscriber" requires="codec-declare declare-final rx-push"/>
   <sce:feature name="declare-token" requires="codec-declare"/>
   <sce:feature name="declare-undeclare" requires="codec-declare"/>
   <sce:feature name="deferred-fire" requires="alloc"/>
@@ -82,7 +82,7 @@
   <sce:feature name="pubsub-ts-stack" requires="alloc"/>
   <sce:feature name="query-attachment" requires="attachment-bytes"/>
   <sce:feature name="query-consolidation" requires="query-get"/>
-  <sce:feature name="query-get"/>
+  <sce:feature name="query-get" requires="rx-response"/>
   <sce:feature name="query-queryable" requires="codec-request codec-response"/>
   <sce:feature name="query-reply" requires="codec-response"/>
   <sce:feature name="query-reply-err"/>
@@ -95,6 +95,8 @@
   <sce:feature name="reply-source-info"/>
   <sce:feature name="resource-snapshot"/>
   <sce:feature name="routing-namespace" requires="alloc keyexpr-prefix"/>
+  <sce:feature name="rx-push"/>
+  <sce:feature name="rx-response"/>
   <sce:feature name="rx-shared-bytes" requires="alloc"/>
   <sce:feature name="scouting-active"/>
   <sce:feature name="scouting-static"/>
@@ -105,11 +107,11 @@
   <sce:feature name="session-extqos" requires="transport-qos"/>
   <sce:feature name="session-extshm" requires="session-unicast transport-shm"/>
   <sce:feature name="session-matching" requires="alloc keyexpr-includes"/>
-  <sce:feature name="session-multicast"/>
+  <sce:feature name="session-multicast" requires="rx-push rx-response"/>
   <sce:feature name="session-reconnect" requires="alloc"/>
   <sce:feature name="session-slot" requires="bounded-heapless storage-profile tx-lend-only"/>
   <sce:feature name="session-unicast"/>
-  <sce:feature name="session-unicast-accept"/>
+  <sce:feature name="session-unicast-accept" requires="rx-push rx-response"/>
   <sce:feature name="session-unicast-open"/>
   <sce:feature name="storage-aligner" requires="storage-replication"/>
   <sce:feature name="storage-backend" requires="alloc"/>

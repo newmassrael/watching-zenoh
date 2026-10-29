@@ -682,18 +682,22 @@ pub struct InPlaceRecord<'a> {
 )]
 #[derive(Clone, Copy, Debug)]
 enum LentRecord<'a> {
-    #[cfg(feature = "codec-push")]
+    #[cfg(all(feature = "codec-push", any(feature = "alloc", feature = "rx-push")))]
     Push(&'a wz_codecs::push::Push<'a>),
     #[cfg(feature = "codec-request")]
     Request(&'a wz_codecs::request::RequestView<'a>),
-    #[cfg(feature = "codec-response")]
+    #[cfg(all(
+        feature = "codec-response",
+        any(feature = "alloc", feature = "rx-response")
+    ))]
     Response(&'a wz_codecs::response::Response<'a>),
     #[cfg(all(feature = "session-slot", feature = "codec-declare"))]
     Declare(&'a wz_codecs::declare::Declare<'a>),
     #[cfg(all(
         feature = "session-slot",
         feature = "codec-frame",
-        feature = "codec-response-final"
+        feature = "codec-response-final",
+        feature = "rx-response"
     ))]
     ResponseFinal(&'a wz_codecs::response_final::ResponseFinal<'a>),
     #[cfg(all(feature = "session-slot", feature = "codec-frame"))]
@@ -742,6 +746,7 @@ impl<'a> InPlaceRecord<'a> {
     /// A Push record of a frame (see [`Self::reliable`] and its siblings).
     #[cfg(all(
         feature = "codec-push",
+        any(feature = "alloc", feature = "rx-push"),
         any(
             test,
             feature = "session-unicast",
@@ -792,6 +797,7 @@ impl<'a> InPlaceRecord<'a> {
     /// A Response record of a frame.
     #[cfg(all(
         feature = "codec-response",
+        any(feature = "alloc", feature = "rx-response"),
         any(
             test,
             feature = "session-unicast",
@@ -845,6 +851,7 @@ impl<'a> InPlaceRecord<'a> {
         feature = "session-slot",
         feature = "codec-frame",
         feature = "codec-response-final",
+        feature = "rx-response",
         any(
             test,
             feature = "session-unicast",
@@ -915,9 +922,12 @@ impl<'a> InPlaceRecord<'a> {
 
     /// The Push, as it is decoded: its keyexpr, extensions and payload are
     /// ranges of the frame. `None` when the record is of another kind.
+    ///
+    /// Always `None` in a build that reads no Push off the wire (`rx-push`).
     #[cfg(feature = "codec-push")]
     pub fn push(&self) -> Option<&'a wz_codecs::push::Push<'a>> {
         match self.record {
+            #[cfg(any(feature = "alloc", feature = "rx-push"))]
             LentRecord::Push(push) => Some(push),
             #[allow(unreachable_patterns)]
             _ => None,
@@ -938,9 +948,12 @@ impl<'a> InPlaceRecord<'a> {
 
     /// The Response, as it is decoded, its keyexpr, extensions and body ranges
     /// of the frame. `None` when the record is of another kind.
+    ///
+    /// Always `None` in a build that reads no Response off the wire (`rx-response`).
     #[cfg(feature = "codec-response")]
     pub fn response(&self) -> Option<&'a wz_codecs::response::Response<'a>> {
         match self.record {
+            #[cfg(any(feature = "alloc", feature = "rx-response"))]
             LentRecord::Response(response) => Some(response),
             #[allow(unreachable_patterns)]
             _ => None,
@@ -968,6 +981,7 @@ impl<'a> InPlaceRecord<'a> {
     ))]
     pub fn response_final(&self) -> Option<&'a wz_codecs::response_final::ResponseFinal<'a>> {
         match self.record {
+            #[cfg(feature = "rx-response")]
             LentRecord::ResponseFinal(response_final) => Some(response_final),
             #[allow(unreachable_patterns)]
             _ => None,
@@ -1077,7 +1091,7 @@ pub(crate) fn report_lent_record(
         // Owned: the caller's, see above.
         #[cfg(feature = "alloc")]
         WalkedRecord::Owned(_) => {}
-        #[cfg(feature = "codec-push")]
+        #[cfg(all(feature = "codec-push", any(feature = "alloc", feature = "rx-push")))]
         WalkedRecord::Push(push) => {
             sink.record(InPlaceRecord::push_of_frame(push, reliable, sn, priority))
         }
@@ -1085,7 +1099,10 @@ pub(crate) fn report_lent_record(
         WalkedRecord::Request(request) => sink.record(InPlaceRecord::request_of_frame(
             request, reliable, sn, priority,
         )),
-        #[cfg(feature = "codec-response")]
+        #[cfg(all(
+            feature = "codec-response",
+            any(feature = "alloc", feature = "rx-response")
+        ))]
         WalkedRecord::Response(response) => sink.record(InPlaceRecord::response_of_frame(
             response, reliable, sn, priority,
         )),
@@ -1094,7 +1111,11 @@ pub(crate) fn report_lent_record(
         WalkedRecord::Declare(declare) => sink.record(InPlaceRecord::declare_of_frame(
             declare, reliable, sn, priority,
         )),
-        #[cfg(all(feature = "session-slot", feature = "codec-response-final"))]
+        #[cfg(all(
+            feature = "session-slot",
+            feature = "codec-response-final",
+            feature = "rx-response"
+        ))]
         WalkedRecord::ResponseFinal(response_final) => sink.record(
             InPlaceRecord::response_final_of_frame(response_final, reliable, sn, priority),
         ),

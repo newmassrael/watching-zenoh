@@ -181,6 +181,8 @@ connect-endpoints = []
 adminspace-write = [
     "keyexpr-wildcard-single",
     "keyexpr-wildcard-double",
+    # A config write arrives as a Put on an admin key: a Push.
+    "rx-push",
 ]
 
 # adminspace-metrics (§5.23) — the @/<zid>/<whatami>/metrics OpenMetrics body
@@ -434,6 +436,15 @@ codec-frame = ["wz-codecs/codec-frame"]
 # emits each fragment body through it so production shares the SSOT
 # `layer3_fragment.rs` byte-verifies against zenoh-pico.
 codec-fragment = ["wz-codecs/codec-fragment"]
+# What a node RECEIVES, on the slot profile that lends each record where it lies. The codec of a kind
+# is `codec-*` (it writes the kind too: a queryable writes Responses and a publisher Pushes); these say
+# the node reads the kind off the wire, and they pull no codec. A node that asked for no Push (it
+# declared no subscriber, takes no session and is written to by no admin space) and no Response (it
+# asked no query) does not decode them: 5 KB of text on the Zephyr client that only answers
+# (docs/text-ownership.md). A router does not send a kind the node did not ask for; one that does is
+# read as a MID this build has no decoder for, and ends the walk of its frame.
+rx-push = []
+rx-response = []
 codec-push = ["codec-frame", "wz-codecs/codec-push", "wz-codecs-test-support/codec-push"]
 codec-request = ["codec-frame", "wz-codecs/codec-request", "wz-codecs-test-support/codec-request"]
 codec-response = ["codec-frame", "wz-codecs/codec-response", "wz-codecs-test-support/codec-response"]
@@ -655,7 +666,9 @@ session-unicast = ["dep:sce-rust-runtime"]
 # Standalone gate-only (cfg-off = no-emit no-op). The wz-runtime-tokio
 # side forwards here so the role-gated action arms compile consistently.
 session-unicast-open = []
-session-unicast-accept = []
+# A node that takes the sessions a peer opens is asked and written to by that peer: it receives
+# whatever the peer sends.
+session-unicast-accept = ["rx-push", "rx-response"]
 
 # clock-quality (docs/observation-plane.md M1) — the clock-quality statechart
 # (`sources/session/clock_quality.scxml`): how far a node may trust the time it stamps with
@@ -754,7 +767,7 @@ transport-multilink = ["session-extauth"]
 # agnostic FSM + Router core, host-testable with no I/O. The
 # wz-runtime-tokio side forwards a `transport-multicast` foundational
 # feature here when the glue lands.
-session-multicast = ["dep:sce-rust-runtime"]
+session-multicast = ["dep:sce-rust-runtime", "rx-push", "rx-response"]
 
 # R311gi gc-2c — statechart switchboard (the AP dynamic
 # keyexpr -> SCXML-domain-event inbound adapter). Gates the
@@ -819,8 +832,9 @@ query-queryable = ["codec-request", "codec-response"]
 # from `wz-runtime-tokio`, whose same-named features forward here): `query-get` asks a query at
 # all; `query-target`, `query-timeout` and `query-consolidation` are the three request slots a
 # build may or may not honour. Gate-only: the type and its wire metadata are this crate's, and
-# the last hop that knows whether a slot is honoured is now the one that defines it.
-query-get = []
+# the last hop that knows whether a slot is honoured is now the one that defines it. A node that
+# asks is answered: it receives the Responses and the ResponseFinal that end its query.
+query-get = ["rx-response"]
 query-target = ["query-get"]
 query-timeout = ["query-get"]
 query-consolidation = ["query-get"]
@@ -903,7 +917,7 @@ query-reply = ["codec-response"]
 # this plane reaches. It used to arrive by accident: the builder was
 # `codec-declare`-gated and this feature pulls `codec-declare`, so the
 # dependency held without ever being declared. Now it is declared.
-declare-subscriber = ["codec-declare", "declare-final"]
+declare-subscriber = ["codec-declare", "declare-final", "rx-push"]
 declare-queryable = ["codec-declare"]
 # R311jf — keyexpr matching composition toggles (§5.6). Gate-only (no
 # dep): each strips a branch in `keyexpr_match.rs` (an always-compiled

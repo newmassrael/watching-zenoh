@@ -235,6 +235,23 @@ carries about 6 KB of C library code wz does not, which is why the difference is
   and did not into the old main function was not looked at. The text-owner rows moved with it: the 3,594
   bytes of the main function were `c:wz_` (the owner of a symbol is read off its name, and the
   main function's is a C name), and are `wz_session_mcu` and `wz_zephyr_admin_node` now.
+- TAKEN, text -6,488 bytes (160,356 to 153,868 on the fixed image; -6,480 on the batching image and
+  -1,688 on the get image), bss -640 bytes: a node reads off the wire only the kinds it asked for.
+  The slot profile decodes each record where it lies, one decoder for each kind of message, and
+  the Zephyr client that only answers carried the decoders of a Push (it declares no subscriber:
+  `Z_FEATURE_SUBSCRIPTION` is off in the pico it is compared with), a Response and a ResponseFinal
+  (it asks no query) beside the Request it is there for; a router sends none of them to it. They are
+  `rx-push` and `rx-response` of `wz-session-core` now, selectors that pull no codec (the codec of a
+  kind writes it too: a queryable writes Responses), turned on by what makes a node read the kind:
+  `declare-subscriber` and `adminspace-write` (a config write is a Put on an admin key) for the Push,
+  `query-get` (in `wz-session-mcu` too) for the Response, `session-unicast-accept` and
+  `session-multicast` for both (a node a peer opens a session to, or a group member, is written to and
+  asked). A build without them reads such a kind as a MID it has no decoder for, which ends the walk
+  of that frame as an unknown MID does; `InPlaceRecord::push()`, `response()` and `response_final()`
+  answer `None` there. A router does not send a kind the node did not ask for, so the answers on the
+  kit are the same (2,000 queries of each document, answered). The first run of the get image, with
+  `wz-session-mcu`'s `query-get` not yet turning `rx-response` on, never got a Response and the kit
+  lane said so (no getter line in 150 s); that is the check this change leans on.
 - NOT TAKEN, measured: `ClientNode::start` out of line (a call from the image's own `start`): the
   text was 161,700 bytes, 920 more than the image before, for the same frames: the node (152
   bytes) was passed by value across the call and the two functions each paid a prologue.

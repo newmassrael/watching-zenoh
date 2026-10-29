@@ -574,6 +574,7 @@ fn interest_view_admission(
 #[cfg(all(
     feature = "codec-frame",
     feature = "codec-response-final",
+    feature = "rx-response",
     feature = "session-slot",
     any(
         test,
@@ -611,7 +612,7 @@ fn oam_view_admission(oam: &wz_codecs::oam::Oam<'_>) -> crate::ext_admit::ExtAdm
 /// and the Push read where its frame lies (`push_view_admission`), so the
 /// receive path that delivers a Push without copying it refuses exactly what the
 /// one that copies it does.
-#[cfg(feature = "codec-push")]
+#[cfg(all(feature = "codec-push", any(feature = "alloc", feature = "rx-push")))]
 fn judge_push_chains<E: crate::ext_view::ExtEntryView>(
     outer: Option<&[E]>,
     body: crate::ext_admit::ZenohBody,
@@ -627,6 +628,7 @@ fn judge_push_chains<E: crate::ext_view::ExtEntryView>(
 #[cfg(all(
     feature = "codec-frame",
     feature = "codec-push",
+    any(feature = "alloc", feature = "rx-push"),
     any(
         test,
         feature = "session-unicast",
@@ -678,6 +680,7 @@ fn judge_request_chains<E: crate::ext_view::ExtEntryView, Q: crate::ext_view::Ex
     any(
         feature = "alloc",
         all(
+            feature = "rx-response",
             feature = "codec-frame",
             any(
                 test,
@@ -704,6 +707,7 @@ enum ResponseBodyChain<'c, E> {
     any(
         feature = "alloc",
         all(
+            feature = "rx-response",
             feature = "codec-frame",
             any(
                 test,
@@ -782,6 +786,7 @@ fn request_view_admission(
 #[cfg(all(
     feature = "codec-frame",
     feature = "codec-response",
+    any(feature = "alloc", feature = "rx-response"),
     any(
         test,
         feature = "session-unicast",
@@ -1139,14 +1144,17 @@ pub(crate) enum WalkedRecord<'r> {
     #[cfg(feature = "alloc")]
     Owned(&'r mut RecordBuf),
     /// A Push decoded where the payload lies, valid for the call.
-    #[cfg(feature = "codec-push")]
+    #[cfg(all(feature = "codec-push", any(feature = "alloc", feature = "rx-push")))]
     Push(&'r wz_codecs::push::Push<'r>),
     /// A Request read where the payload lies, valid for the call: its view, which holds its extension
     /// chains as the bytes they occupy and not as entries (the eager record is 1.8 KB).
     #[cfg(feature = "codec-request")]
     Request(&'r wz_codecs::request::RequestView<'r>),
     /// A Response decoded where the payload lies, valid for the call.
-    #[cfg(feature = "codec-response")]
+    #[cfg(all(
+        feature = "codec-response",
+        any(feature = "alloc", feature = "rx-response")
+    ))]
     Response(&'r wz_codecs::response::Response<'r>),
     /// A Declare decoded where the payload lies, valid for the call
     /// ([`RecordForm::LentControl`]).
@@ -1154,7 +1162,11 @@ pub(crate) enum WalkedRecord<'r> {
     Declare(&'r wz_codecs::declare::Declare<'r>),
     /// A ResponseFinal decoded where the payload lies, valid for the call
     /// ([`RecordForm::LentControl`]).
-    #[cfg(all(feature = "session-slot", feature = "codec-response-final"))]
+    #[cfg(all(
+        feature = "session-slot",
+        feature = "codec-response-final",
+        feature = "rx-response"
+    ))]
     ResponseFinal(&'r wz_codecs::response_final::ResponseFinal<'r>),
     /// An Interest decoded where the payload lies, valid for the call
     /// ([`RecordForm::LentControl`]).
@@ -1309,11 +1321,14 @@ fn lend_record(
     each: &mut impl FnMut(WalkedRecord<'_>) -> Result<(), crate::parse_error::InboundParseError>,
 ) -> Result<bool, crate::parse_error::InboundParseError> {
     match mid {
-        #[cfg(feature = "codec-push")]
+        #[cfg(all(feature = "codec-push", any(feature = "alloc", feature = "rx-push")))]
         wire_const::N_MID_PUSH => lend_push(cursor, each).map(|()| true),
         #[cfg(feature = "codec-request")]
         wire_const::N_MID_REQUEST => lend_request(cursor, each).map(|()| true),
-        #[cfg(feature = "codec-response")]
+        #[cfg(all(
+            feature = "codec-response",
+            any(feature = "alloc", feature = "rx-response")
+        ))]
         wire_const::N_MID_RESPONSE => lend_response(cursor, each).map(|()| true),
         _ => Ok(false),
     }
@@ -1348,6 +1363,7 @@ fn admit_lent(
 #[cfg(all(
     feature = "codec-frame",
     feature = "codec-push",
+    any(feature = "alloc", feature = "rx-push"),
     any(
         test,
         feature = "session-unicast",
@@ -1407,6 +1423,7 @@ fn lend_request(
 #[cfg(all(
     feature = "codec-frame",
     feature = "codec-response",
+    any(feature = "alloc", feature = "rx-response"),
     any(
         test,
         feature = "session-unicast",
@@ -1470,15 +1487,17 @@ fn lend_any_record(
         .map_err(crate::parse_error::InboundParseError::Codec)?[0]
         & 0x1F;
     match mid {
-        #[cfg(feature = "codec-push")]
+        // What the build reads off the wire (`rx-push`, `rx-response`): a kind it did not ask for
+        // is a MID with no decoder here, and ends the walk of its frame.
+        #[cfg(all(feature = "codec-push", feature = "rx-push"))]
         wire_const::N_MID_PUSH => lend_push(cursor, each).map(|()| Walk::Continue),
         #[cfg(feature = "codec-request")]
         wire_const::N_MID_REQUEST => lend_request(cursor, each).map(|()| Walk::Continue),
-        #[cfg(feature = "codec-response")]
+        #[cfg(all(feature = "codec-response", feature = "rx-response"))]
         wire_const::N_MID_RESPONSE => lend_response(cursor, each).map(|()| Walk::Continue),
         #[cfg(feature = "codec-declare")]
         wire_const::N_MID_DECLARE => lend_declare(cursor, each).map(|()| Walk::Continue),
-        #[cfg(feature = "codec-response-final")]
+        #[cfg(all(feature = "codec-response-final", feature = "rx-response"))]
         wire_const::N_MID_RESPONSE_FINAL => {
             lend_response_final(cursor, each).map(|()| Walk::Continue)
         }
@@ -1516,6 +1535,7 @@ fn lend_declare(
 #[cfg(all(
     feature = "codec-frame",
     feature = "codec-response-final",
+    feature = "rx-response",
     feature = "session-slot",
     any(
         test,

@@ -249,6 +249,14 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             # are deferred below as `impl-method`, beside the other method-only
             # features.
             "pubsub-congestion-control",
+            # `rx-push` and `rx-response` select what the slot profile's lent walk decodes, in
+            # private items (`lend_push`, `lend_response`, the helpers that judge them, the arms
+            # of `lend_any_record` and of `report_lent_record`) and in the variants of the
+            # crate-private `WalkedRecord` and `LentRecord`. The public surface they touch is
+            # `InPlaceRecord::push`, `response` and `response_final`, and those exist in every
+            # build (their gate is the codec's): without the feature they answer `None`.
+            "rx-push",
+            "rx-response",
             # `pubsub-delete` and `pubsub-put` LEFT this list, by the R2386
             # route: the round that delivered a Push read in place to its
             # subscriber lent made the claim false. `pubsub` (a `pub mod`) now
