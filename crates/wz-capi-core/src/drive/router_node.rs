@@ -73,6 +73,16 @@ impl RouterState {
         }
     }
 
+    /// What the queries of a queryable the node hosts are kept through: a handler asks it to keep
+    /// the query it is handed and answers it after it has returned. It holds the node weakly, as
+    /// the node holds the handler.
+    pub fn query_holder(&self) -> Arc<dyn wz_capi_port::QueryHolder> {
+        Arc::new(RouterQueryHolder {
+            forwarder: Arc::downgrade(&self.forwarder),
+            closed: self.stop.clone(),
+        })
+    }
+
     /// The node's own face, for liveliness: subscribers, and the keys alive.
     pub fn liveliness(&self) -> &LocalLiveliness {
         &self.liveliness
@@ -135,6 +145,42 @@ impl RouterState {
             .take();
         if let Some(handle) = handle {
             let _ = handle.join();
+        }
+    }
+}
+
+/// The queries of the queryables a router node hosts, kept through the node's forwarder.
+struct RouterQueryHolder {
+    forwarder: std::sync::Weak<RouterForwarder>,
+    closed: Arc<AtomicBool>,
+}
+
+impl wz_capi_port::QueryHolder for RouterQueryHolder {
+    fn hold_query(
+        &self,
+        _view: &dyn wz_session_core::query_sink::QueryView,
+    ) -> Box<dyn wz_capi_port::HeldQuery> {
+        // The query is the one the handler this thread is inside of was handed; outside one, or
+        // for a node that has gone, there is nothing to keep and the query is answered with nothing.
+        let held = self
+            .forwarder
+            .upgrade()
+            .and_then(|forwarder| forwarder.hold_current_query());
+        Box::new(RouterHeld(held))
+    }
+
+    fn session_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+}
+
+/// A query kept through the forwarder of a router node.
+struct RouterHeld(Option<wz_runtime_tokio::router_forward::HeldRouterQuery>);
+
+impl wz_capi_port::HeldQuery for RouterHeld {
+    fn reply(&self, answer: &mut dyn FnMut(&mut dyn wz_session_core::query_sink::ReplyOut)) {
+        if let Some(held) = &self.0 {
+            held.reply(answer);
         }
     }
 }

@@ -2674,6 +2674,61 @@ thread_local! {
     /// How many deliveries to hosted subscribers this thread is inside of, so that the queue above
     /// is drained by the outermost one and not by one nested in a handler.
     static HOSTED_DISPATCH_DEPTH: Cell<usize> = const { Cell::new(0) };
+
+    /// The query the hosted queryable this thread is inside of was handed: what
+    /// [`RouterForwarder::hold_current_query`] keeps past the handler.
+    static HOSTED_QUERY: RefCell<Option<Arc<HeldRecord>>> = const { RefCell::new(None) };
+}
+
+/// A query a hosted queryable was handed, as far as it can be answered past its handler: the
+/// branch of the query's fan the queryable is (`qid` in the pending table, whose last-out gate
+/// sends the one final of the query), what its replies are built from, and how many holds keep
+/// the branch open. The handler's own call is the first hold, so the branch does not end before
+/// the replies the handler wrote have gone out.
+pub struct HeldRecord {
+    qid: u64,
+    keyexpr: String,
+    accept: wz_session_core::reply_acceptance::ReplyKeyExpr,
+    reliable: bool,
+    holds: std::sync::atomic::AtomicUsize,
+}
+
+/// A query kept past the handler of a hosted queryable, answerable from any thread; the query's
+/// final is owed until every hold of it is dropped (`zenoh/src/api/queryable.rs` @
+/// `impl Drop for QueryInner {`). Dropping this releases one.
+pub struct HeldRouterQuery {
+    forwarder: Arc<RouterForwarder>,
+    record: Arc<HeldRecord>,
+}
+
+impl HeldRouterQuery {
+    /// Answer the query now with what `answer` writes into a responder built as the handler's
+    /// was. A query that has ended, by its timeout or because its querier is gone, is answered
+    /// with nothing.
+    pub fn reply(&self, answer: &mut dyn FnMut(&mut dyn ReplyOut)) {
+        self.forwarder.reply_held(&self.record, answer);
+    }
+}
+
+impl Drop for HeldRouterQuery {
+    fn drop(&mut self) {
+        self.forwarder.release_held(&self.record);
+    }
+}
+
+impl RouterForwarder {
+    /// Keep the query the hosted queryable this thread is inside of was handed, so that it can be
+    /// answered after the handler returns. `None` outside such a handler.
+    pub fn hold_current_query(self: &Arc<Self>) -> Option<HeldRouterQuery> {
+        let record = HOSTED_QUERY.with(|current| current.borrow().clone())?;
+        record
+            .holds
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Some(HeldRouterQuery {
+            forwarder: Arc::clone(self),
+            record,
+        })
+    }
 }
 
 /// How many refused samples the queue of one thread keeps, and how many it redelivers each time
@@ -3065,6 +3120,8 @@ router_entry_points! { on_tables_mut:
 
 router_entry_points! { on_tables:
     fn local_get(&self, request: &RequestOwned);
+    fn reply_held(&self, record: &HeldRecord, answer: &mut dyn FnMut(&mut dyn ReplyOut));
+    fn release_held(&self, record: &HeldRecord);
     fn publish(&self, keyexpr: &str, payload: &[u8]) -> Result<(), CodecError>;
     fn publish_qos(
         &self,
@@ -8706,23 +8763,24 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// uses, and emits them + the closing `ResponseFinal` (rid = the querier's) to
     /// `inbound`. The admin handler renders topology data + replies and NEVER
     /// self-queries, so — UNLIKE the peer — no self-query redelivery/`DeferredQuery`
-    /// path is needed. Returns `true` iff a local queryable matched (the caller
-    /// then skips the bare empty-route final). The reply's rid = the inbound
-    /// Request's rid, which at a transit router IS the qid it stamped on the
-    /// forward hop, so multi-hop route-back (`forward_response`) resolves it with
-    /// no new pending state here.
-    ///
-    /// `close` says this branch is the whole route and so ends the query with its
-    /// `ResponseFinal`; a branch beside others (item 751, step 6e) only answers, and the
-    /// fan's last-out gate sends the one final when the others are done.
+    /// path is needed. Returns how many queryables matched: each is a BRANCH of the
+    /// query's fan (`fan`, in the pending table under [`LOCAL_FACE`]), as a queryable
+    /// of a client face is, so the one final of the query is sent by the fan's last-out
+    /// gate when the branch ends, and the branch ends when the handler has returned and
+    /// every hold it let be taken ([`RouterForwarder::hold_current_query`]) is dropped.
+    /// The reply's rid = the inbound Request's rid, which at a transit router IS the qid
+    /// it stamped on the forward hop, so multi-hop route-back (`forward_response`)
+    /// resolves it with no new pending state here.
+    #[allow(clippy::too_many_arguments)]
     fn dispatch_router_local_queryables(
         &self,
         inbound: FaceId,
         reliable: bool,
         request: &RequestOwned,
         keyexpr: &str,
-        close: bool,
-    ) -> bool {
+        fan: &Arc<QueryFan>,
+        deadline: Instant,
+    ) -> usize {
         let query_chunks: Vec<&str> = keyexpr.split('/').collect();
         let target = read_request_target(request);
         let matched: Vec<Arc<Hosted<HostedQueryHandler>>> = {
@@ -8734,52 +8792,100 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 .map(|lq| Arc::clone(&lq.handler))
                 .collect()
         };
-        if matched.is_empty() {
-            return false;
-        }
         let view = LocalQueryView {
             keyexpr,
             parameters: wz_session_core::query::request_query_parameters(request),
             rid: request.rid,
             qos: wz_session_core::declare_ext_qos::read_request_qos(request),
         };
+        // R311y834 — the acceptance is read off the query's own selector parameters, as the
+        // requester's gate reads them; a query with none keeps the guarantee.
+        let accept = view
+            .parameters
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .map_or(
+                wz_session_core::reply_acceptance::ReplyKeyExpr::MatchingQuery,
+                wz_session_core::reply_acceptance::ReplyKeyExpr::from_parameters,
+            );
+        for handler in &matched {
+            let qid = self.pending.guard().allocate(LOCAL_FACE, fan, deadline);
+            let record = Arc::new(HeldRecord {
+                qid,
+                keyexpr: keyexpr.to_owned(),
+                accept,
+                reliable,
+                // The handler's own call.
+                holds: std::sync::atomic::AtomicUsize::new(1),
+            });
+            let mut replies = wz_session_core::reply_stage::ReplyStage::new();
+            {
+                let mut responder = QueryResponder::new(
+                    request.rid,
+                    keyexpr.to_string(),
+                    accept,
+                    view.qos,
+                    &mut replies,
+                );
+                let previous = HOSTED_QUERY.with(|current| current.replace(Some(record.clone())));
+                // A handler that is already running on this thread (it asks a query its own
+                // pattern answers) is not called again: it would wait for itself.
+                let _ = handler.call(|h| h(&view, &mut responder));
+                HOSTED_QUERY.with(|current| *current.borrow_mut() = previous);
+            }
+            for reply in replies {
+                if let Ok(resp) = reply.into_response() {
+                    self.send_to_face(inbound, reliable, || {
+                        NetworkMessage::Response(Box::new(resp.clone()))
+                    });
+                }
+            }
+            // The handler has returned: its hold is let go, and the branch ends with the last.
+            self.release_held(&record);
+        }
+        matched.len()
+    }
+
+    /// Answer a held query now (see [`HeldRouterQuery::reply`]): the replies `answer` writes go
+    /// to the querier under its own request id. A query that is no longer pending, its
+    /// timeout having ended it, is answered with nothing.
+    fn reply_held(&self, record: &HeldRecord, answer: &mut dyn FnMut(&mut dyn ReplyOut)) {
+        let Some(to) = self.pending.guard().peek(LOCAL_FACE, record.qid) else {
+            return;
+        };
         let mut replies = wz_session_core::reply_stage::ReplyStage::new();
         {
-            // R311y834 — `MatchingQuery`: the self-hosted admin handler renders
-            // net data under concrete keys inside the queried admin namespace,
-            // and `LocalQueryView` carries no selector parameters, so there is
-            // no `_anyke` to honour. Absent the opt-out, the guarantee holds.
             let mut responder = QueryResponder::new(
-                request.rid,
-                keyexpr.to_string(),
-                wz_session_core::reply_acceptance::ReplyKeyExpr::MatchingQuery,
-                view.qos,
+                to.rid,
+                record.keyexpr.clone(),
+                record.accept,
+                to.qos,
                 &mut replies,
             );
-            for handler in &matched {
-                // The self-hosted admin handler renders net data + replies; it never
-                // re-queries its own keyexpr, so `call` is never refused and
-                // no self-query redelivery (the peer's DeferredQuery path) is needed.
-                let _ = handler.call(|h| h(&view, &mut responder));
-            }
+            answer(&mut responder);
         }
         for reply in replies {
             if let Ok(resp) = reply.into_response() {
-                self.send_to_face(inbound, reliable, || {
+                self.send_to_face(to.face, record.reliable, || {
                     NetworkMessage::Response(Box::new(resp.clone()))
                 });
             }
         }
-        if close {
-            let final_msg = wz_session_core::response_final_build::build_response_final(
-                request.rid,
-                wz_session_core::declare_ext_qos::read_request_qos(request),
+    }
+
+    /// Let go of one hold of a held query; the last one ends its branch of the fan, which sends
+    /// the final of the query if it was the fan's last.
+    fn release_held(&self, record: &HeldRecord) {
+        if record
+            .holds
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
+            == 1
+        {
+            let ended = wz_session_core::response_final_build::build_response_final(
+                record.qid,
+                wz_session_core::sample::QosLevel::DEFAULT,
             );
-            self.send_to_face(inbound, reliable, || {
-                NetworkMessage::ResponseFinal(final_msg.clone())
-            });
+            self.forward_response_final(LOCAL_FACE, record.reliable, &ended);
         }
-        true
     }
 
     /// Ask a query as the node's own face: the pin routes a node's own get as a request from a
@@ -9020,38 +9126,27 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             ),
         };
 
-        // A branch that an egress chain refused was let go as it was sent, and the query is held
-        // by no branch when every one was: that is an empty route, and ends as one does.
-        let forwarded = if forwarded > 0 && Arc::strong_count(&fan) == 1 {
-            0
-        } else {
-            forwarded
-        };
         // The node's own face, a branch of the route (item 751, step 6e) under every target. The
         // pin picks a target's queryables hat by hat, `compute_final_route` being run once for
         // each region (`zenoh/src/net/routing/dispatcher/queries.rs` @ `for dst in rtables.hats.regions() {`),
-        // so the `Local` hat answers for itself beside the best of every other region. It answers
-        // and does not close unless it is the whole route: the replies go out now and the final
-        // belongs to the fan's last-out gate, as for the peer plane's local queryables (R2902).
-        // The router's own pick above is still ONE winner across the meshes and the clients;
-        // that it is not the pin's per-region pick is a finding about this router, in the note.
-        let local_answered = self.dispatch_router_local_queryables(
-            inbound,
-            reliable,
-            request,
-            &keyexpr,
-            forwarded == 0,
-        );
-        if forwarded == 0 {
-            // §5.23 adminspace-router-linkstate — a GET whose only match is a
-            // queryable HOSTED BY THIS router (self is excluded from the routing
-            // targets, so a self-hosted admin GET `@/<self-zid>/router/**` reaches
-            // the empty-route tail) self-dispatches to its handler, replying +
-            // emitting its own closing Final. Mirrors the peer's
-            // `finish_unrouted_request`. A non-admin empty route falls through.
-            if local_answered {
-                return;
-            }
+        // so the `Local` hat answers for itself beside the best of every other region. Each
+        // queryable it hosts is a branch of the fan, answering now or once it is answered (a
+        // query it keeps), and the final belongs to the fan's last-out gate, as for the peer
+        // plane's local queryables (R2902). The router's own pick above is still ONE winner
+        // across the meshes and the clients; that it is not the pin's per-region pick is a
+        // finding about this router, in the note.
+        let forwarded = forwarded
+            + self.dispatch_router_local_queryables(
+                inbound, reliable, request, &keyexpr, &fan, deadline,
+            );
+        // The query is held by no branch when every one of them has ended while the route was
+        // being served (a branch an egress chain refused is let go as it is sent, and a hosted
+        // queryable that answered at once is over before this line): the last-out gate could not
+        // send the final, as this function still held the fan, and so it ends as an empty route
+        // does. §5.23 adminspace-router-linkstate — a GET whose only match is a queryable HOSTED
+        // BY THIS router (self is excluded from the routing targets) ends this way too, its
+        // replies sent and its final here, as the peer's `finish_unrouted_request` does.
+        if forwarded == 0 || Arc::strong_count(&fan) == 1 {
             // zenoh route_query EMPTY route: no queryable matched, so PROMPT a
             // ResponseFinal back to the querier (its get() terminates at once). No
             // pending entry (nothing is awaited).
@@ -22473,6 +22568,92 @@ mod tests {
         }
         assert_eq!(heard[1], LocalFaceEvent::ReplyFinal { request_id: 77 });
         assert_eq!(fwd.pending.guard().len(), 0, "no branch is held");
+    }
+
+    /// The responses and finals a recorded sink was sent, as `Reply rid` and `Final rid`.
+    fn responses_sent(sink: &RecordingLinkDriver) -> Vec<String> {
+        use crate::session_glue::{parse_frame_payload, parse_inbound, InboundFrame};
+        (0..sink.frame_count())
+            .flat_map(|index| {
+                let InboundFrame::Frame { payload, .. } =
+                    parse_inbound(&sink.frame_bytes(index)).expect("parse frame")
+                else {
+                    panic!("not a Frame");
+                };
+                parse_frame_payload(&payload)
+                    .expect("parse payload")
+                    .into_iter()
+                    .filter_map(|message| match message {
+                        NetworkMessage::Response(response) => {
+                            Some(format!("Reply {}", response.request_id))
+                        }
+                        NetworkMessage::ResponseFinal(done) => {
+                            Some(format!("Final {}", done.request_id))
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// A queryable the router hosts is a branch of the query's fan: one that answers from its
+    /// handler ends the query once its replies have gone, with one final.
+    #[test]
+    fn a_hosted_queryable_that_answers_at_once_ends_the_query_with_one_final() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (querier, sink_querier) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &querier);
+        fwd.tick();
+        fwd.host_queryable(
+            "demo/h",
+            true,
+            Box::new(|_view: &dyn QueryView, out: &mut dyn ReplyOut| out.reply(b"now")),
+        );
+        sink_querier.reset();
+        forward_one(&fwd, FaceId(0), request_best(41, "demo/h"));
+        assert_eq!(responses_sent(&sink_querier), ["Reply 41", "Final 41"]);
+        assert_eq!(fwd.pending.guard().len(), 0, "no branch is held");
+    }
+
+    /// A hosted queryable that keeps its query keeps the branch open: the final waits for the
+    /// last hold to be dropped, replies made meanwhile reach the querier, and a reply made after
+    /// the query timed out is dropped.
+    #[test]
+    fn a_hosted_queryable_that_keeps_its_query_defers_the_final_until_it_is_dropped() {
+        let fwd = Arc::new(RouterForwarder::new(zid(0x01)));
+        let (querier, sink_querier) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &querier);
+        fwd.tick();
+        let kept = Arc::new(std::sync::Mutex::new(None));
+        let keeper = kept.clone();
+        let router = Arc::downgrade(&fwd);
+        fwd.host_queryable(
+            "demo/h",
+            true,
+            Box::new(move |_view: &dyn QueryView, _out: &mut dyn ReplyOut| {
+                let held = router.upgrade().and_then(|fwd| fwd.hold_current_query());
+                *keeper.lock().unwrap() = held;
+            }),
+        );
+        sink_querier.reset();
+        forward_one(&fwd, FaceId(0), request_best(42, "demo/h"));
+        assert!(
+            responses_sent(&sink_querier).is_empty(),
+            "the query is open: neither a reply nor a final yet"
+        );
+        assert_eq!(fwd.pending.guard().len(), 1, "the branch is held");
+
+        let held = kept.lock().unwrap().take().expect("the query was kept");
+        held.reply(&mut |out: &mut dyn ReplyOut| out.reply(b"later"));
+        assert_eq!(responses_sent(&sink_querier), ["Reply 42"]);
+        drop(held);
+        assert_eq!(responses_sent(&sink_querier), ["Reply 42", "Final 42"]);
+        assert_eq!(
+            fwd.pending.guard().len(),
+            0,
+            "the branch ended with the last hold"
+        );
     }
 
     /// A query of the local face that no queryable can answer ends at once, as any query with an

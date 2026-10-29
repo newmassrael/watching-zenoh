@@ -755,7 +755,38 @@ impl Engine {
     /// peer, as the origin allows.
     fn declare_queryable(&self, queryable: QueryableDeclaration<'_>) -> ZResult<u64> {
         match self {
-            Engine::Router(_) => RouterEngine::refuses("a queryable"),
+            Engine::Router(router) => {
+                let QueryableDeclaration {
+                    key,
+                    complete,
+                    origin,
+                    callback,
+                    notifier,
+                    zid,
+                    eid,
+                    #[cfg(feature = "unstable")]
+                    timestamps,
+                    ..
+                } = queryable;
+                // A router node does not tell the queries of its own session from the others', so
+                // an origin it cannot honour is refused and not ignored.
+                if origin != Locality::Any {
+                    return RouterEngine::refuses("a queryable restricted by its origin");
+                }
+                let sink = tokio_engine::queryable_sink(
+                    callback,
+                    notifier,
+                    zid,
+                    eid,
+                    #[cfg(feature = "unstable")]
+                    timestamps,
+                );
+                let handler = sink(router.node.query_holder());
+                Ok(router
+                    .node
+                    .forwarder()
+                    .host_queryable(key, complete, handler))
+            }
             Engine::Tokio(state) => {
                 let QueryableDeclaration {
                     key,
@@ -799,7 +830,9 @@ impl Engine {
     fn undeclare_queryable(&self, id: u64) {
         match self {
             Engine::Tokio(state) => state.shared.as_engine().undeclare_queryable(id),
-            Engine::Router(_) => {}
+            Engine::Router(router) => {
+                router.node.forwarder().unhost_queryable(id);
+            }
         }
     }
 
@@ -1867,50 +1900,54 @@ mod tokio_engine {
         Ok(())
     }
 
-    /// Put `publication` on a router node, which publishes a payload with a priority and the
-    /// express flag and nothing else yet: each setting it cannot carry refuses the put by name, and
-    /// is not dropped.
+    /// Put or delete `publication` on a router node, which publishes a payload (a put) with a
+    /// priority and the express flag and nothing else yet: each setting it cannot carry refuses
+    /// the publication by name, and is not dropped. A delete takes the route a put to its key
+    /// would, and carries no priority or express flag of its own.
     pub(super) fn router_publish(
         forwarder: &wz_runtime_tokio::router_forward::RouterForwarder,
         publication: &Publication<'_>,
     ) -> ZResult<()> {
-        let refused = if publication.kind != SampleKind::Put {
-            Some("a delete")
-        } else if publication.encoding != Encoding::default() {
-            Some("a put with an encoding")
+        let put = publication.kind == SampleKind::Put;
+        let what = if put { "a put" } else { "a delete" };
+        let refused = if publication.encoding != Encoding::default() {
+            Some(format!("{what} with an encoding"))
         } else if publication.timestamp.is_some() {
-            Some("a put with a timestamp")
+            Some(format!("{what} with a timestamp"))
         } else if publication.attachment.is_some() {
-            Some("a put with an attachment")
+            Some(format!("{what} with an attachment"))
         } else if publication.destination != Locality::Any {
-            Some("a put restricted by its destination")
+            Some(format!("{what} restricted by its destination"))
         } else if publication.congestion_control != CongestionControl::Drop {
-            Some("a put that blocks on congestion")
+            Some(format!("{what} that blocks on congestion"))
         } else {
             None
         };
-        if let Some(what) = refused {
-            return super::RouterEngine::refuses(what);
+        if let Some(refused) = refused {
+            return super::RouterEngine::refuses(&refused);
         }
         #[cfg(feature = "unstable")]
         if publication.source_info.is_some() {
-            return super::RouterEngine::refuses("a put with a source info");
+            return super::RouterEngine::refuses(&format!("{what} with a source info"));
         }
-        let payload = publication.payload.to_bytes();
-        forwarder
-            .publish_qos(
+        let published = if put {
+            let payload = publication.payload.to_bytes();
+            forwarder.publish_qos(
                 publication.key,
                 &payload,
                 EnginePriority::from_wire(publication.priority as u8),
                 publication.is_express,
             )
-            .map_err(|error| {
-                zerror!(
-                    "the router could not publish on {}: {error:?}",
-                    publication.key
-                )
-                .into()
-            })
+        } else {
+            forwarder.publish_delete(publication.key)
+        };
+        published.map_err(|error| {
+            zerror!(
+                "the router could not publish on {}: {error:?}",
+                publication.key
+            )
+            .into()
+        })
     }
 
     /// What the engine hands the samples of a subscription to: the callback, called once for each
@@ -10570,6 +10607,93 @@ mod tests {
             );
         }
 
+        /// A queryable of a router answers the get of a peer: at once from its callback, and from
+        /// another thread after the callback has returned (the query is kept), and the get ends
+        /// only when the query has been dropped.
+        #[test]
+        fn a_queryable_of_a_router_answers_a_peer_at_once_and_later() {
+            use std::time::Duration;
+
+            let port = unautoselected_port();
+            let router = router("a1b2ea", port);
+            let _now = router
+                .declare_queryable("demo/rq/now")
+                .callback(|query| {
+                    query
+                        .reply(query.key_expr().clone(), "at once")
+                        .wait()
+                        .expect("replies");
+                })
+                .wait()
+                .expect("a router hosts a queryable");
+            let kept = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let keeper = kept.clone();
+            let _later = router
+                .declare_queryable("demo/rq/later")
+                .callback(move |query| keeper.lock().unwrap().push(query))
+                .wait()
+                .expect("a router hosts a queryable");
+            let peer = peer_of("a1b2eb", port);
+            assert_eq!(connected(&peer, 1).0.len(), 1, "the peer is linked");
+
+            let ask = |key: &str| -> Vec<String> {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                loop {
+                    let replies = peer
+                        .get(key)
+                        .timeout(Duration::from_secs(3))
+                        .wait()
+                        .expect("asks");
+                    let told: Vec<String> = replies
+                        .into_iter()
+                        .filter_map(|reply| {
+                            reply.into_result().ok().map(|sample| {
+                                sample.payload().try_to_string().unwrap().into_owned()
+                            })
+                        })
+                        .collect();
+                    if !told.is_empty() || std::time::Instant::now() > deadline {
+                        return told;
+                    }
+                }
+            };
+            assert_eq!(ask("demo/rq/now"), ["at once"]);
+
+            // The query is kept by the callback; the get stays open until it is answered and
+            // dropped, and the answer comes from this thread.
+            let asked = std::thread::spawn({
+                let peer = peer.clone();
+                move || {
+                    peer.get("demo/rq/later")
+                        .timeout(Duration::from_secs(10))
+                        .wait()
+                        .expect("asks")
+                        .into_iter()
+                        .filter_map(|reply| {
+                            reply.into_result().ok().map(|sample| {
+                                sample.payload().try_to_string().unwrap().into_owned()
+                            })
+                        })
+                        .collect::<Vec<String>>()
+                }
+            });
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let query = loop {
+                if let Some(query) = kept.lock().unwrap().pop() {
+                    break query;
+                }
+                assert!(std::time::Instant::now() < deadline, "the query arrives");
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            std::thread::sleep(Duration::from_millis(300));
+            query
+                .reply(query.key_expr().clone(), "later")
+                .wait()
+                .expect("replies after the callback returned");
+            drop(query);
+            assert_eq!(asked.join().expect("the get ends"), ["later"]);
+        }
+
         #[test]
         fn a_subscriber_of_a_router_hears_a_peer_and_a_put_of_the_router_reaches_a_peer() {
             use std::sync::mpsc;
@@ -10603,7 +10727,11 @@ mod tests {
             let _peer_subscriber = peer
                 .declare_subscriber("demo/p/**".to_owned())
                 .callback(move |sample: Sample| {
-                    let _ = seen.lock().unwrap().send(sample.key_expr().to_string());
+                    let _ = seen.lock().unwrap().send(format!(
+                        "{} {:?}",
+                        sample.key_expr(),
+                        sample.kind()
+                    ));
                 })
                 .wait()
                 .expect("declares");
@@ -10616,7 +10744,17 @@ mod tests {
                     .expect("a router puts");
                 got = received.recv_timeout(Duration::from_millis(200)).ok();
             }
-            assert_eq!(got.as_deref(), Some("demo/p/down"));
+            assert_eq!(got.as_deref(), Some("demo/p/down Put"));
+            // The delete of the router takes the route of its put.
+            while received.try_recv().is_ok() {}
+            router
+                .delete("demo/p/down")
+                .wait()
+                .expect("a router deletes");
+            assert_eq!(
+                received.recv_timeout(Duration::from_secs(5)).as_deref(),
+                Ok("demo/p/down Delete")
+            );
         }
 
         #[test]
@@ -10702,11 +10840,14 @@ mod tests {
                     "{what}: {text}"
                 );
             }
-            refused("a delete", router.delete("a/b").wait());
             refused(
-                "a queryable",
-                router.declare_queryable("a/b".to_owned()).wait(),
+                "a queryable restricted by its origin",
+                router
+                    .declare_queryable("a/b".to_owned())
+                    .allowed_origin(Locality::Remote)
+                    .wait(),
             );
+            refused("a querier", router.declare_querier("a/b".to_owned()).wait());
         }
     }
 
