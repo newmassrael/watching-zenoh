@@ -775,7 +775,7 @@ pub fn parse_inbound_consuming_in(
 
 /// [`parse_inbound_consuming`] that writes the message into `out` and returns where it ended:
 /// the session's receive, which keeps the message in one slot of its own frame and lends it to
-/// each step that reads it (see [`parse_unit_into`]).
+/// each step that reads it (see `parse_unit_into`).
 pub fn parse_inbound_consuming_into(
     bytes: &[u8],
     out: &mut InboundFrame,
