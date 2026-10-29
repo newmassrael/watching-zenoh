@@ -26,7 +26,7 @@
 use std::{
     fmt,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
@@ -329,6 +329,29 @@ pub(crate) struct QuerierDeclaration<'a> {
 enum Engine {
     #[cfg(feature = "engine-tokio")]
     Tokio(wz_capi_core::drive::SessionState),
+    /// A router node, which forwards between the sessions that dial it. What a program does
+    /// through it is owed (the router session of `docs/zenoh-api-on-the-engine.md`), and each
+    /// operation that is not carried says so by name.
+    #[cfg(feature = "engine-tokio")]
+    Router(RouterEngine),
+}
+
+/// The router node and the counter of the entity ids it hands out.
+#[cfg(feature = "engine-tokio")]
+struct RouterEngine {
+    node: wz_capi_core::drive::RouterState,
+    ids: AtomicU64,
+}
+
+#[cfg(feature = "engine-tokio")]
+impl RouterEngine {
+    /// The refusal of an operation the router session does not carry yet, by what it was.
+    fn refuses<T>(what: &str) -> ZResult<T> {
+        Err(
+            zerror!("this session is a router: {what} is not carried by the router session yet")
+                .into(),
+        )
+    }
 }
 
 #[cfg(feature = "engine-tokio")]
@@ -352,17 +375,10 @@ impl Engine {
         tokio_engine::refuse_repeated_ids(&document)?;
         let plan = OpenPlan::resolve(role, stated, Some(&document.to_string()))
             .map_err(tokio_engine::refusal_error)?;
-        // A router is refused by the key that makes the session one (decision D6 of the seam note).
-        // The engine opens a session that listens and dials, and what it announces to a node that
-        // dials it is a peer's role whatever `mode` says: a router is the router data plane, which
-        // this session does not carry, and is a slice of its own. Announcing the role without being
-        // one would be the silent fallback the other refusals of this function exist against.
-        if expanded.mode() == zenoh_protocol::core::WhatAmI::Router {
-            bail!(
-                "`mode` = \"router\": this engine's session is a peer or a client; a router needs \
-                 the router data plane, which a session does not carry yet"
-            );
-        }
+        // A router is the router data plane run as a node (`RouterEngine`), not the registry of
+        // faces a peer or a client is: announcing the role over that registry would be the
+        // silent fallback the other refusals of this function exist against.
+        let router = expanded.mode() == zenoh_protocol::core::WhatAmI::Router;
         // Decision D6: a key the configuration states with a value other than its default, that
         // upstream acts on and this engine does not, is refused by its name, and not left to do
         // nothing.
@@ -383,32 +399,62 @@ impl Engine {
             listened,
             listen_deadline: plan.listen_phase.policy.budget.deadline().is_some(),
         };
-        let state = plan
-            .into_arguments(AbiChoices {
-                tx_queue: Default::default(),
-                start_read_task: true,
-                // Upstream runs the callbacks of a delivery a session makes to itself inside the
-                // call that causes it, on the calling thread.
-                local_delivery: tokio_engine::LocalDeliveryDrain::Caller,
-                // Upstream tells the liveliness subscribers of a session of the tokens of that
-                // session, and its liveliness get finds them.
-                liveliness_to_self: true,
-                initial_interest: true,
-                // Each face of the session has a thread of its own, so a callback that blocks
-                // holds up its link and no other.
-                face_drive: tokio_engine::FaceDrive::PerFace,
-                shm_clients: tokio_engine::no_shm_clients(),
-                offer_shm: false,
-                groups_report_shm: false,
-            })
+        let arguments = plan.into_arguments(AbiChoices {
+            tx_queue: Default::default(),
+            start_read_task: true,
+            // Upstream runs the callbacks of a delivery a session makes to itself inside the
+            // call that causes it, on the calling thread.
+            local_delivery: tokio_engine::LocalDeliveryDrain::Caller,
+            // Upstream tells the liveliness subscribers of a session of the tokens of that
+            // session, and its liveliness get finds them.
+            liveliness_to_self: true,
+            initial_interest: true,
+            // Each face of the session has a thread of its own, so a callback that blocks
+            // holds up its link and no other.
+            face_drive: tokio_engine::FaceDrive::PerFace,
+            shm_clients: tokio_engine::no_shm_clients(),
+            offer_shm: false,
+            groups_report_shm: false,
+        });
+        if router {
+            if let Some(ask) = arguments.router_refusal() {
+                bail!("`mode` = \"router\": the router session does not carry {ask} yet");
+            }
+            let node = arguments
+                .run_router()
+                .map_err(|error| tokio_engine::open_error(error, scope))?;
+            let engine = Engine::Router(RouterEngine {
+                node,
+                ids: AtomicU64::new(0),
+            });
+            return Ok((engine, zid));
+        }
+        let state = arguments
             .run()
             .map_err(|error| tokio_engine::open_error(error, scope))?;
         Ok((Engine::Tokio(state), zid))
     }
 
+    /// Whether this engine is a router node, which carries no local API yet.
+    #[cfg(feature = "unstable")]
+    fn is_router(&self) -> bool {
+        matches!(self, Engine::Router(_))
+    }
+
+    /// The refusal of `what` when this engine is a router node, which carries none of the local
+    /// API yet, and `Ok` when it is not.
+    #[cfg(feature = "unstable")]
+    fn require_local_api(&self, what: &str) -> ZResult<()> {
+        match self {
+            Engine::Tokio(_) => Ok(()),
+            Engine::Router(_) => RouterEngine::refuses(what),
+        }
+    }
+
     fn is_closed(&self) -> bool {
         match self {
             Engine::Tokio(state) => state.is_closed(),
+            Engine::Router(router) => router.node.is_closed(),
         }
     }
 
@@ -417,24 +463,29 @@ impl Engine {
     fn close(&self) {
         match self {
             Engine::Tokio(state) => state.close(),
+            Engine::Router(router) => router.node.close(),
         }
     }
 
     fn acquire_keyexpr(&self, keyexpr: &str) -> Option<u64> {
         match self {
             Engine::Tokio(state) => state.shared.as_engine().acquire_keyexpr(keyexpr.to_owned()),
+            // A node that declares no key expression to its peers names none by an id.
+            Engine::Router(_) => None,
         }
     }
 
     fn release_keyexpr(&self, mapping_id: u64) {
         match self {
             Engine::Tokio(state) => state.shared.as_engine().release_keyexpr(mapping_id),
+            Engine::Router(_) => {}
         }
     }
 
     fn next_entity_id(&self) -> u64 {
         match self {
             Engine::Tokio(state) => state.shared.as_engine().next_entity_id(),
+            Engine::Router(router) => router.ids.fetch_add(1, Ordering::Relaxed) + 1,
         }
     }
 
@@ -443,6 +494,8 @@ impl Engine {
     fn peer_identities(&self) -> Vec<(Vec<u8>, u8)> {
         match self {
             Engine::Tokio(state) => state.shared.as_engine().peer_identities(),
+            // Owed: the router node does not list the sessions it holds yet.
+            Engine::Router(_) => Vec::new(),
         }
     }
 
@@ -451,6 +504,8 @@ impl Engine {
     #[cfg(feature = "unstable")]
     fn faces(&self) -> Vec<Face> {
         match self {
+            // Owed: the router node does not list the sessions it holds yet.
+            Engine::Router(_) => Vec::new(),
             Engine::Tokio(state) => state
                 .shared
                 .as_engine()
@@ -466,6 +521,8 @@ impl Engine {
     #[cfg(feature = "unstable")]
     fn node_clock(&self) -> Box<dyn Fn() -> Option<uhlc::Timestamp> + Send + Sync> {
         match self {
+            // Owed: the router's clock is not read off the node yet.
+            Engine::Router(_) => Box::new(|| None),
             Engine::Tokio(state) => {
                 let shared = state.shared.clone();
                 Box::new(move || {
@@ -482,6 +539,7 @@ impl Engine {
     /// The next timestamp off the node's clock, or `None` for a node that holds none.
     fn node_timestamp(&self) -> Option<uhlc::Timestamp> {
         match self {
+            Engine::Router(_) => None,
             Engine::Tokio(state) => state
                 .shared
                 .as_engine()
@@ -496,6 +554,7 @@ impl Engine {
     fn listen_locators(&self) -> Vec<String> {
         match self {
             Engine::Tokio(state) => state.shared.as_engine().listen_locators(),
+            Engine::Router(router) => router.node.listen_locators().to_vec(),
         }
     }
 
@@ -504,6 +563,11 @@ impl Engine {
     #[cfg(feature = "unstable")]
     fn watch_faces(&self, sink: FaceSink) -> u64 {
         match self {
+            // Refused by name before this is reached (`require_local_api`).
+            Engine::Router(_) => {
+                let _ = sink;
+                0
+            }
             Engine::Tokio(state) => state
                 .shared
                 .as_engine()
@@ -515,6 +579,9 @@ impl Engine {
     #[cfg(feature = "unstable")]
     fn unwatch_faces(&self, id: u64) {
         match self {
+            Engine::Router(_) => {
+                let _ = id;
+            }
             Engine::Tokio(state) => {
                 state.shared.as_engine().unwatch_faces(id);
             }
@@ -526,6 +593,7 @@ impl Engine {
     fn keyexpr_declarations(&self) -> Vec<(u64, String)> {
         match self {
             Engine::Tokio(state) => state.shared.as_engine().keyexpr_declarations(),
+            Engine::Router(_) => Vec::new(),
         }
     }
 
@@ -533,6 +601,7 @@ impl Engine {
     /// every peer, as its destination allows.
     fn publish(&self, publication: &Publication<'_>) -> ZResult<()> {
         match self {
+            Engine::Router(_) => RouterEngine::refuses("a put"),
             Engine::Tokio(state) => {
                 let options = tokio_engine::publish_options(publication);
                 let wire = tokio_engine::wire_key(publication);
@@ -552,6 +621,7 @@ impl Engine {
     /// every peer, as its origin allows.
     fn declare_subscriber(&self, subscription: Subscription<'_>) -> ZResult<Id> {
         match self {
+            Engine::Router(_) => RouterEngine::refuses("a subscriber"),
             Engine::Tokio(state) => {
                 let Subscription {
                     key,
@@ -589,6 +659,7 @@ impl Engine {
     fn undeclare_subscriber(&self, id: Id) {
         match self {
             Engine::Tokio(state) => state.shared.as_engine().undeclare_subscriber(u64::from(id)),
+            Engine::Router(_) => {}
         }
     }
 
@@ -598,6 +669,7 @@ impl Engine {
     /// [`Engine::undeclare_publisher`].
     fn declare_publisher(&self, publisher: PublisherDeclaration<'_>) -> ZResult<Id> {
         match self {
+            Engine::Router(_) => RouterEngine::refuses("a publisher"),
             Engine::Tokio(state) => {
                 let PublisherDeclaration {
                     key,
@@ -626,6 +698,7 @@ impl Engine {
     /// the key holds it.
     fn undeclare_publisher(&self, id: Id) {
         match self {
+            Engine::Router(_) => {}
             Engine::Tokio(state) => state
                 .shared
                 .as_engine()
@@ -638,6 +711,7 @@ impl Engine {
     /// peer, as the origin allows.
     fn declare_queryable(&self, queryable: QueryableDeclaration<'_>) -> ZResult<u64> {
         match self {
+            Engine::Router(_) => RouterEngine::refuses("a queryable"),
             Engine::Tokio(state) => {
                 let QueryableDeclaration {
                     key,
@@ -681,6 +755,7 @@ impl Engine {
     fn undeclare_queryable(&self, id: u64) {
         match self {
             Engine::Tokio(state) => state.shared.as_engine().undeclare_queryable(id),
+            Engine::Router(_) => {}
         }
     }
 
@@ -690,13 +765,14 @@ impl Engine {
     fn query(&self, request: QueryRequest<'_>) -> ZResult<()> {
         match self {
             Engine::Tokio(state) => tokio_engine::ask(state.shared.engine_ref(), request),
+            Engine::Router(_) => RouterEngine::refuses("a get"),
         }
     }
 
     /// What stops the legs of a query that is about to be asked.
     fn new_query_fan(&self) -> Arc<QueryFan> {
         match self {
-            Engine::Tokio(_) => QueryFan::new(),
+            Engine::Tokio(_) | Engine::Router(_) => QueryFan::new(),
         }
     }
 
@@ -705,6 +781,7 @@ impl Engine {
     /// querier asks the session itself. The id is released by [`Engine::undeclare_querier`].
     fn declare_querier(&self, querier: QuerierDeclaration<'_>) -> ZResult<Id> {
         match self {
+            Engine::Router(_) => RouterEngine::refuses("a querier"),
             Engine::Tokio(state) => {
                 let QuerierDeclaration {
                     key,
@@ -737,6 +814,7 @@ impl Engine {
     /// key holds it.
     fn undeclare_querier(&self, id: Id) {
         match self {
+            Engine::Router(_) => {}
             Engine::Tokio(state) => state
                 .shared
                 .as_engine()
@@ -757,6 +835,7 @@ impl Engine {
         notifier: Option<SyncGroupNotifier>,
     ) -> ZResult<Id> {
         match self {
+            Engine::Router(_) => RouterEngine::refuses("a matching listener"),
             Engine::Tokio(state) => {
                 let id = state
                     .shared
@@ -782,6 +861,7 @@ impl Engine {
     /// Stop the matching listener `id` and let go of its callback.
     fn undeclare_matching_listener(&self, id: Id) {
         match self {
+            Engine::Router(_) => {}
             Engine::Tokio(state) => state
                 .shared
                 .as_engine()
@@ -798,6 +878,7 @@ impl Engine {
         suffix: Option<String>,
     ) -> ZResult<Id> {
         match self {
+            Engine::Router(_) => RouterEngine::refuses("a liveliness token"),
             Engine::Tokio(state) => {
                 let wire = tokio_engine::wire_key_of(scope, suffix);
                 // The retraction names its token by id alone, as upstream's does.
@@ -820,6 +901,7 @@ impl Engine {
     /// Retract the liveliness token `id`, which tells the peers it is gone.
     fn undeclare_liveliness_token(&self, id: Id) {
         match self {
+            Engine::Router(_) => {}
             Engine::Tokio(state) => state
                 .shared
                 .as_engine()
@@ -835,6 +917,7 @@ impl Engine {
         subscription: LivelinessSubscription<'_>,
     ) -> ZResult<Id> {
         match self {
+            Engine::Router(_) => RouterEngine::refuses("a liveliness subscriber"),
             Engine::Tokio(state) => {
                 let LivelinessSubscription {
                     key,
@@ -870,6 +953,7 @@ impl Engine {
     /// Ask which liveliness tokens are alive: the query `request` says.
     fn liveliness_query(&self, request: LivelinessRequest<'_>) -> ZResult<()> {
         match self {
+            Engine::Router(_) => RouterEngine::refuses("a liveliness get"),
             Engine::Tokio(state) => {
                 tokio_engine::ask_liveliness(state.shared.engine_ref(), request)
             }
@@ -884,6 +968,7 @@ impl Engine {
         destination: Locality,
     ) -> ZResult<bool> {
         match self {
+            Engine::Router(_) => RouterEngine::refuses("a matching status"),
             Engine::Tokio(state) => state
                 .shared
                 .as_engine()
@@ -2861,6 +2946,8 @@ impl SessionInner {
         if self.engine.is_closed() {
             return Err(SessionClosedError.into());
         }
+        self.engine
+            .require_local_api("a transport or link events listener")?;
         let watch = self.engine.watch_faces(sink);
         let Ok(id) = Id::try_from(watch) else {
             self.engine.unwatch_faces(watch);
@@ -3506,8 +3593,11 @@ impl Session {
             #[cfg(feature = "unstable")]
             link_listeners: std::sync::Mutex::new(vec![]),
         }));
+        // A router node carries none of the local API yet, and its admin space with it.
         #[cfg(feature = "unstable")]
-        crate::api::admin::init(session.downgrade());
+        if !session.0.engine.is_router() {
+            crate::api::admin::init(session.downgrade());
+        }
         Ok(session)
     }
 }
@@ -5282,14 +5372,28 @@ mod tests {
     }
 
     #[test]
-    fn a_router_is_refused_by_the_key_that_makes_the_session_one() {
-        let config = Config::from_json5(
-            r#"{ mode: "router", listen: { endpoints: ["tcp/127.0.0.1:0"] },
-                 scouting: { multicast: { enabled: false } } }"#,
-        )
-        .expect("a configuration zenoh reads");
-        let error = open(config).wait().expect_err("a router");
-        assert!(error.to_string().contains("`mode` = \"router\""), "{error}");
+    fn a_router_is_refused_for_what_it_does_not_carry_by_what_was_asked() {
+        for (ask, endpoints) in [
+            (
+                "connect endpoints",
+                r#"connect: { endpoints: ["tcp/127.0.0.1:1"] },"#,
+            ),
+            ("a namespace", r#"namespace: "ns","#),
+        ] {
+            let config = Config::from_json5(&format!(
+                r#"{{ mode: "router", listen: {{ endpoints: ["tcp/127.0.0.1:0"] }}, {endpoints}
+                     scouting: {{ multicast: {{ enabled: false }} }} }}"#
+            ))
+            .expect("a configuration zenoh reads");
+            let error = open(config)
+                .wait()
+                .expect_err("a router that asks too much");
+            let text = error.to_string();
+            assert!(
+                text.contains("`mode` = \"router\"") && text.contains(ask),
+                "{ask}: {text}"
+            );
+        }
     }
 
     #[test]
@@ -5817,7 +5921,9 @@ mod tests {
         fn ask(session: &Session, key: &str, options: QueryOptions) -> Vec<String> {
             let lines = Arc::new(std::sync::Mutex::new(vec![]));
             let (ended, over) = mpsc::channel::<()>();
-            let Engine::Tokio(state) = &session.0.engine;
+            let Engine::Tokio(state) = &session.0.engine else {
+                unreachable!("these tests open peers")
+            };
             let issued = state.shared.as_engine().get_on_wire(
                 key,
                 &WireKey::literal(),
@@ -6607,6 +6713,7 @@ mod tests {
         fn held(session: &Session, id: Id) -> bool {
             match &session.0.engine {
                 Engine::Tokio(state) => state.shared.as_engine().write_filter_active(u64::from(id)),
+                Engine::Router(_) => unreachable!("these tests open peers"),
             }
         }
 
@@ -9423,6 +9530,7 @@ mod tests {
         fn held(session: &Session, id: Id) -> bool {
             match &session.0.engine {
                 Engine::Tokio(state) => state.shared.as_engine().write_filter_active(u64::from(id)),
+                Engine::Router(_) => unreachable!("these tests open peers"),
             }
         }
 
@@ -9726,6 +9834,69 @@ mod tests {
             );
             publisher.undeclare().wait().expect("undeclares");
             assert_eq!(session.0.engine.keyexpr_declarations().len(), before - 1);
+        }
+    }
+
+    /// A router node as a session: it listens and is dialled, a peer sees it by its role, and what
+    /// it does not carry yet fails by name and not by silence.
+    mod router_session {
+        use super::*;
+
+        fn router(id: &str, port: u16) -> Session {
+            open(
+                Config::from_json5(&format!(
+                    r#"{{ id: "{id}", mode: "router",
+                          listen: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                          scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                ))
+                .expect("a configuration zenoh reads"),
+            )
+            .wait()
+            .expect("a router opens")
+        }
+
+        #[test]
+        fn a_router_opens_listens_and_a_peer_sees_it_as_a_router() {
+            let port = unautoselected_port();
+            let router = router("a1b2e1", port);
+            assert_eq!(router.zid().to_string(), "a1b2e1");
+            let peer = open(
+                Config::from_json5(&format!(
+                    r#"{{ id: "a1b2e2", mode: "peer",
+                          connect: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                          scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                ))
+                .expect("a configuration zenoh reads"),
+            )
+            .wait()
+            .expect("opens");
+            assert_eq!(connected(&peer, 1).0, vec!["a1b2e1".to_owned()]);
+            router.close().wait().expect("closes");
+            assert!(router.is_closed());
+        }
+
+        #[test]
+        fn what_a_router_does_not_carry_yet_fails_by_name() {
+            let router = router("a1b2e3", unautoselected_port());
+            fn refused<T>(what: &str, result: ZResult<T>) {
+                let Err(error) = result else {
+                    panic!("{what} was not refused");
+                };
+                let text = error.to_string();
+                assert!(
+                    text.contains("this session is a router") && text.contains(what),
+                    "{what}: {text}"
+                );
+            }
+            refused(
+                "a subscriber",
+                router.declare_subscriber("a/b".to_owned()).wait(),
+            );
+            refused("a put", router.put("a/b", "x").wait());
+            refused(
+                "a queryable",
+                router.declare_queryable("a/b".to_owned()).wait(),
+            );
         }
     }
 

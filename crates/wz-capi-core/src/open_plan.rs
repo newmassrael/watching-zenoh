@@ -1059,6 +1059,22 @@ impl OpenArguments {
             self.stance,
         )
     }
+
+    /// What the configuration asks of a router node that the node does not carry yet, by name
+    /// (`None` when it asks nothing of the kind). A caller that opens the node reports this to
+    /// whoever wrote the configuration; [`Self::run_router`] refuses the same asks.
+    #[cfg(feature = "router-node")]
+    pub fn router_refusal(&self) -> Option<&'static str> {
+        crate::drive::router_refused_ask(&self.connect, &self.stance)
+    }
+
+    /// Open the node as a router: the router data plane run as a session, which the other roles
+    /// are not (see [`crate::drive::RouterState`]). The role the plan resolved is the caller's
+    /// to have asked for; what the node does not carry yet fails the open by name.
+    #[cfg(feature = "router-node")]
+    pub fn run_router(self) -> Result<crate::drive::RouterState, OpenError> {
+        crate::drive::open_router_blocking(self.connect, self.listen, self.tls, self.stance)
+    }
 }
 
 /// A build without the interceptors holds no traffic policy, so a config that states one does not

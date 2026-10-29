@@ -4491,6 +4491,15 @@ pub fn open_blocking(
     }
 }
 
+/// A router node: the router data plane run as a session a program holds, which is not the
+/// registry of faces the other roles are (see the module).
+#[cfg(feature = "router-node")]
+mod router_node;
+#[cfg(feature = "router-node")]
+pub use router_node::RouterState;
+#[cfg(feature = "router-node")]
+pub(crate) use router_node::{open_router_blocking, refused_ask as router_refused_ask};
+
 #[cfg(test)]
 mod tests {
     use super::*;

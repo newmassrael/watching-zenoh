@@ -384,8 +384,12 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "`SessionResources`, the accessor of the shared session) and is turned on by the top "
         "crate `zenoh`, whose upstream namespace tests run against it (slice Z8a of "
         "docs/zenoh-api-on-the-engine.md), while the plan's own test holds both its "
-        "arms, a build that carries the prefix and a build that refuses it by its key",
-        frozenset({"routing-namespace", "transport-shm"}),
+        "arms, a build that carries the prefix and a build that refuses it by its key; "
+        "`router-node` gates the router node (`drive::RouterState` and "
+        "`OpenArguments::run_router`), turned on by the top crate `zenoh` alone, whose "
+        "router tests (`api::session::tests::router_session`) and upstream's scouting, "
+        "timestamp instrumentation and liveliness files run against it",
+        frozenset({"router-node", "routing-namespace", "transport-shm"}),
     ),
     "wz-capi-coop": (
         "the cooperative engine behind a wz C ABI: a workspace-internal rlib the C ABI crate "
