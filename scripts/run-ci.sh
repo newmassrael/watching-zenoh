@@ -9109,12 +9109,17 @@ layer_c1bm_cargo_test_pico_failfast() {
 # `route_cache::` witnesses to both arms: that a cache of shareable routes is `Send + Sync`, and that
 # eight threads asking for one key all get its route and it is kept once. PRINTED by each command:
 # 17 and 21.
+#
+# 17 -> 10 and 21 -> 14: the single-net peer forwarder was retired (`refactor(router)`,
+# c714ae0d6) with the seven witnesses it held, and the router arm is still the peer arm's four
+# `router_forward` witnesses more. Re-derived by running both commands on the build host: the
+# libtest summaries printed `10 passed` and `14 passed` (hosted C1x: `expected exactly 17`).
 layer_c1x_cargo_test_routing_routes() {
-    _runci_guarded_test "C1X route cache peer 17" 17 \
+    _runci_guarded_test "C1X route cache peer 10" 10 \
         cargo test -p wz-runtime-tokio --features routing-routes --lib --quiet -- \
         route_cache:: _route_is_served _leg_is_served _route_is_computed_every_time \
         a_push_naming_a_declared_id timeout_err_names a_router_serves_both_mesh_legs || return 1
-    _runci_guarded_test "C1X route cache router 21" 21 \
+    _runci_guarded_test "C1X route cache router 14" 14 \
         cargo test -p wz-runtime-tokio --features routing-routes,routing-router-hat --lib --quiet -- \
         route_cache:: _route_is_served _leg_is_served _route_is_computed_every_time \
         a_push_naming_a_declared_id timeout_err_names a_router_serves_both_mesh_legs || return 1
