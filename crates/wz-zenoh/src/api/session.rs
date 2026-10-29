@@ -3170,8 +3170,13 @@ mod tokio_engine {
             // when the endpoint names none, from the highest priority, the lowest number
             // (`zenoh/src/api/info.rs` @ `lowest numerical value`), and whether the link delivers
             // reliably.
-            priorities: is_qos.then_some((WirePriority::MAX as u8, WirePriority::MIN as u8)),
-            reliability: is_qos.then(|| match link.is_reliable() {
+            // The band and the class the handshake negotiated for the link, when the endpoint
+            // named them (`prio=` and `rel=`), else every priority and what the protocol is.
+            priorities: is_qos.then(|| {
+                link.priorities
+                    .unwrap_or((WirePriority::MAX as u8, WirePriority::MIN as u8))
+            }),
+            reliability: is_qos.then(|| match link.reliable.or_else(|| link.is_reliable()) {
                 Some(true) => WireReliability::Reliable,
                 Some(false) | None => WireReliability::BestEffort,
             }),
@@ -8516,6 +8521,8 @@ mod tests {
                 mtu: 1200,
                 group: None,
                 cert_common_name: Some("alice".to_owned()),
+                priorities: None,
+                reliable: None,
             }
         }
 
@@ -11294,6 +11301,71 @@ mod tests {
             assert_eq!(
                 heard.recv_timeout(Duration::from_secs(5)).as_deref(),
                 Ok("demo/l/router Delete")
+            );
+        }
+
+        /// The band and the class a dialing side names for its link (`prio=` and `rel=` of the
+        /// endpoint) ride the QoS extension of the handshake, and the router that accepts the
+        /// link reports them for it; a link that names none reports every priority.
+        #[cfg(feature = "unstable")]
+        #[test]
+        fn a_router_reports_the_band_and_the_class_a_dialing_side_named_for_its_link() {
+            use std::time::{Duration, Instant};
+
+            let qos = r#"transport: { unicast: { qos: { enabled: true } } }"#;
+            let port = unautoselected_port();
+            let router = open(
+                Config::from_json5(&format!(
+                    r#"{{ id: "a1b2f8", mode: "router",
+                          listen: {{ endpoints: ["tcp/127.0.0.1:{port}"] }}, {qos},
+                          scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                ))
+                .expect("a configuration zenoh reads"),
+            )
+            .wait()
+            .expect("opens");
+            let dial = |id: &str, suffix: &str| {
+                open(
+                    Config::from_json5(&format!(
+                        r#"{{ id: "{id}", mode: "peer", {qos},
+                              connect: {{ endpoints: ["tcp/127.0.0.1:{port}{suffix}"] }},
+                              scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                    ))
+                    .expect("a configuration zenoh reads"),
+                )
+                .wait()
+                .expect("opens")
+            };
+            let named = dial("a1b2f9", "?prio=2-5;rel=1");
+            let unnamed = dial("a1b2fa", "");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let links = loop {
+                let links: Vec<_> = router.info().links().wait().collect();
+                if links.len() == 2 || Instant::now() > deadline {
+                    break links;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            assert_eq!(links.len(), 2, "both peers are linked: {links:?}");
+            let of = |zid: ZenohId| {
+                links
+                    .iter()
+                    .find(|link| link.zid() == &zid)
+                    .expect("a link")
+            };
+            let named = of(named.zid());
+            assert_eq!(named.priorities(), Some((2, 5)));
+            assert_eq!(
+                named.reliability(),
+                Some(zenoh_protocol::core::Reliability::Reliable)
+            );
+            let unnamed = of(unnamed.zid());
+            assert_eq!(
+                unnamed.priorities(),
+                Some((
+                    zenoh_protocol::core::Priority::MAX as u8,
+                    zenoh_protocol::core::Priority::MIN as u8
+                ))
             );
         }
 

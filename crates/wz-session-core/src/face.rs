@@ -50,6 +50,14 @@ pub struct LinkSnapshot {
     /// states the collapse). Read it through [`Self::auth_identifier`], which says for which
     /// links a name is the identifier of the link.
     pub cert_common_name: Option<String>,
+    /// The inclusive priority band the transport negotiated for the link, as the wire's bytes,
+    /// the highest priority (the lowest number) first: what the QoS extension of the handshake
+    /// carried (`prio=` of the endpoint). `None` when none was named, or when the transport did
+    /// not negotiate QoS.
+    pub priorities: Option<(u8, u8)>,
+    /// Whether the link was negotiated as a reliable one (`rel=` of the endpoint), `None` when it
+    /// named none.
+    pub reliable: Option<bool>,
 }
 
 impl LinkSnapshot {
@@ -65,6 +73,8 @@ impl LinkSnapshot {
             mtu,
             group: None,
             cert_common_name: subject.and_then(|s| s.cert_common_name.clone()),
+            priorities: None,
+            reliable: None,
         }
     }
 
@@ -158,10 +168,32 @@ impl FaceSnapshot {
         zid[..n].copy_from_slice(&peer[..n]);
         let subject = actions.link_subject().cloned();
         let mtu = u16::try_from(actions.negotiated_batch_mtu()).unwrap_or(u16::MAX);
+        // What the handshake negotiated for the links of the transport: the band and the class the
+        // QoS extension carried, which the links of the face share.
+        #[cfg(feature = "session-extqos")]
+        let (priorities, reliable) = {
+            let negotiated = actions.qos_link_metadata();
+            (
+                negotiated
+                    .priorities
+                    .map(|band| (band.start() as u8, band.end() as u8)),
+                negotiated
+                    .reliability
+                    .map(|class| matches!(class, crate::reliability::Reliability::Reliable)),
+            )
+        };
+        #[cfg(not(feature = "session-extqos"))]
+        let (priorities, reliable) = (None, None);
         let links = actions
             .link_endpoints_all()
             .into_iter()
-            .map(|e| LinkSnapshot::unicast(e.src.as_str(), e.dst.as_str(), subject.as_ref(), mtu))
+            .map(|e| {
+                let mut link =
+                    LinkSnapshot::unicast(e.src.as_str(), e.dst.as_str(), subject.as_ref(), mtu);
+                link.priorities = priorities;
+                link.reliable = reliable;
+                link
+            })
             .collect();
         // A build without `transport-qos` never negotiates the ext, so `false` is the MEASURED
         // answer there rather than a stand-in: there is no conduit split to report. `is_qos`

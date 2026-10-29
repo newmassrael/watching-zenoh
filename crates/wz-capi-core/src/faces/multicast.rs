@@ -115,6 +115,8 @@ fn member_snapshot(
                 endpoint: endpoint.to_owned(),
             }),
             cert_common_name: None,
+            priorities: None,
+            reliable: None,
         }],
     })
 }

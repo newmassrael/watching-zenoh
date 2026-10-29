@@ -1932,6 +1932,8 @@ mod tests {
                 mtu: 2048,
                 group: None,
                 cert_common_name: None,
+                priorities: None,
+                reliable: None,
             }],
         }
     }
@@ -2007,6 +2009,8 @@ mod tests {
                 endpoint: "udp/224.0.0.224:7447#iface=lo".to_owned(),
             }),
             cert_common_name: None,
+            priorities: None,
+            reliable: None,
         };
         let held = HeldLink(link_of([7; 16], &member));
         assert_eq!(held.0.src.as_bytes(), b"udp/224.0.0.224:7447iface=lo");
@@ -2040,6 +2044,8 @@ mod tests {
                 endpoint: "reth/30:03:8c:c8:00:a2#iface=lo;whitelist=30:03:8c:c8:00:a1,".to_owned(),
             }),
             cert_common_name: None,
+            priorities: None,
+            reliable: None,
         };
         let held = HeldLink(link_of([7; 16], &member));
         assert_eq!(
@@ -2276,6 +2282,8 @@ mod tests {
                         mtu: 1,
                         group: None,
                         cert_common_name: None,
+                        priorities: None,
+                        reliable: None,
                     },
                 ),
             };
@@ -2342,6 +2350,8 @@ mod tests {
                     mtu: 1,
                     group: None,
                     cert_common_name: None,
+                    priorities: None,
+                    reliable: None,
                 },
             );
             let mut group = z_owned_string_t::null_value();
