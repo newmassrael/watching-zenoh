@@ -307,6 +307,18 @@ DEFERRED: dict[str, str] = {
         "settle job; it reads the source only at the place rustc points to, "
         "to tell a `compile_error!` guard from a defect."
     ),
+    "z8_upstream_suite.py": (
+        "R3866 -- it provisions the pinned upstream tree with a network "
+        "clone and then compiles and runs each of upstream's integration "
+        "test files, on its own, against the patched graph: a build of the "
+        "whole family, which the hook does not do, and a clone, which a "
+        "gate on a developer's machine cannot depend on. No hosted layer "
+        "runs it today (docs/zenoh-api-on-the-engine.md, Z8a): it is run "
+        "by hand with `measure` after a change to the session surface, "
+        "and its table is read there. The cost of the row is that the "
+        "commit that moves a test file's outcome cannot see it; its "
+        "--selftest, the parsers on text, is the part a layer could carry."
+    ),
 }
 
 
