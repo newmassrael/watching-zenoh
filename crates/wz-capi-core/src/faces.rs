@@ -608,6 +608,56 @@ struct FaceEntry {
     /// named one. A session keeps ONE face per remote zid, as zenoh's transport
     /// manager keeps one transport per zid: see [`SharedSession::face_up`].
     peer_zid: Option<Vec<u8>>,
+    /// Whether this session dialled the link (the dial role's face) and not took it off its
+    /// port. Two links to one node that went opposite ways are decided by
+    /// [`wz_session_core::link_admission::judge_second_link`], which reads it.
+    dialled: bool,
+}
+
+/// What the registry does with a face that comes up to a node.
+#[derive(Debug, PartialEq, Eq)]
+enum Admission {
+    /// No other face links this session to the node: the face is held.
+    Admit,
+    /// A face that stays already does: the new link is closed.
+    Refuse,
+    /// The new link is the one to keep: the face `0` is closed and removed, and the new one
+    /// takes its place.
+    Replace(u64),
+}
+
+/// The decision for a link `dialled` (or not) that has completed its handshake to the node
+/// `zid`, as face `id`, against the faces `held` (each its id, the node it links to and whether
+/// this session dialled it). The rule is `wz_session_core::link_admission`'s, which the
+/// cooperative engine's face table calls too: the first up when two links went the same way, and
+/// of two that went opposite ways the one the lower zid dialled, so that both ends of a link
+/// keep the same one. A face with no zid (its handshake named none) cannot be matched and is
+/// held.
+fn admission_of<'a>(
+    local_zid: &[u8],
+    held: impl Iterator<Item = (u64, Option<&'a [u8]>, bool)>,
+    id: u64,
+    zid: Option<&[u8]>,
+    dialled: bool,
+) -> Admission {
+    use wz_session_core::link_admission::{judge_second_link, SecondLink};
+    let Some(zid) = zid else {
+        return Admission::Admit;
+    };
+    for (held_id, held_zid, held_dialled) in held {
+        if held_id == id {
+            continue;
+        }
+        let Some(held_zid) = held_zid else { continue };
+        if !wz_runtime_tokio::zid_hex::same_zid(held_zid, zid) {
+            continue;
+        }
+        return match judge_second_link(held_dialled, dialled, local_zid, zid) {
+            SecondLink::Refuse => Admission::Refuse,
+            SecondLink::Replace => Admission::Replace(held_id),
+        };
+    }
+    Admission::Admit
 }
 
 impl FaceEntry {
@@ -1767,6 +1817,7 @@ impl SharedSession {
                 revised: Arc::new(Notify::new()),
                 // The plane is no link to anyone.
                 peer_zid: None,
+                dialled: false,
             }),
             // Both upstreams number a session's first entity 1.
             next_entity_id: 1,
@@ -2000,7 +2051,16 @@ impl SharedSession {
     /// (`io/zenoh-transport/src/unicast/manager.rs` @
     /// `init_existing_transport_unicast`); the face that came second is the
     /// refused link, and the caller closes it.
-    pub fn face_up(&self, id: u64, actions: &Arc<SessionLinkActions>) -> bool {
+    ///
+    /// `dialled` says whether this session dialled the link (the dial role) or took it off its
+    /// port. Two links to one node that went the same way keep the first up, as above. Two that
+    /// went opposite ways are two nodes that dialled each other at the same moment, which "the
+    /// first up" decides differently at the two ends (each keeps the link that completed first on
+    /// its side, and each closes the one the other kept): the rule then reads the two zids,
+    /// which both ends read alike, and keeps the link the lower zid dialled
+    /// ([`wz_session_core::link_admission`]). When that is the NEW link, the held face is closed
+    /// (`MaxLinks`, the reason zenoh gives) and removed, and the new one takes its place.
+    pub fn face_up(&self, id: u64, actions: &Arc<SessionLinkActions>, dialled: bool) -> bool {
         let observer = Arc::new(WzMutex::new(ApplicationLayerObserver::new()));
         // R311y554 — THE hand-off that makes `allowed_destination` honourable.
         //
@@ -2047,15 +2107,40 @@ impl SharedSession {
         // together cannot both pass: the one that takes the lock second sees the
         // first.
         let peer_zid = actions.peer_zid();
-        if let Some(zid) = peer_zid.as_deref() {
-            if guard.faces.iter().any(|(held, face)| {
-                *held != id
-                    && face
-                        .peer_zid
-                        .as_deref()
-                        .is_some_and(|held_zid| wz_runtime_tokio::zid_hex::same_zid(held_zid, zid))
-            }) {
-                return false;
+        loop {
+            let verdict = admission_of(
+                &self.zid,
+                guard
+                    .faces
+                    .iter()
+                    .map(|(held, face)| (*held, face.peer_zid.as_deref(), face.dialled)),
+                id,
+                peer_zid.as_deref(),
+                dialled,
+            );
+            match verdict {
+                Admission::Admit => break,
+                Admission::Refuse => return false,
+                Admission::Replace(held_id) => {
+                    // The held link is the one to close: it is told why, the way zenoh tells a
+                    // link refused for the node it already holds, and its face leaves the
+                    // registry, with the events and the replay state that go with it, before
+                    // this one is admitted. Both happen OUTSIDE the lock, which a close and a
+                    // face's departure take again. The decision is read again after, because the
+                    // registry may have changed while the lock was open.
+                    let held = guard
+                        .faces
+                        .get(&held_id)
+                        .map(|face| face.session.actions().clone());
+                    drop(guard);
+                    if let Some(held) = held {
+                        held.send_close_with_reason(
+                            wz_session_core::close_reason::CloseReason::MaxLinks,
+                        );
+                    }
+                    self.face_down(held_id);
+                    guard = self.lock();
+                }
             }
         }
         // Keyexpr aliases replay FIRST, before the subscriber and queryable
@@ -2226,6 +2311,7 @@ impl SharedSession {
                 groups,
                 revised: Arc::new(Notify::new()),
                 peer_zid,
+                dialled,
             },
         );
         guard.refresh_face_set();
@@ -2256,6 +2342,26 @@ impl SharedSession {
                 .as_deref()
                 .is_some_and(|held| wz_runtime_tokio::zid_hex::same_zid(held, zid))
         })
+    }
+
+    /// Whether a link the node `zid` dialled to this session's port is refused, because a face
+    /// that stays already links the session to it. The accept loop asks it before it admits the
+    /// link, which is [`Self::holds_peer`] for a link that is not the one to keep: a face the
+    /// dial role made yields to an inbound link the lower zid dialled (the rule is
+    /// [`Self::face_up`]'s), and that link is then admitted and replaces it.
+    pub fn refuses_inbound_from(&self, zid: &[u8]) -> bool {
+        let guard = self.lock();
+        // No face has id `u64::MAX`, so every held face is a candidate.
+        admission_of(
+            &self.zid,
+            guard
+                .faces
+                .iter()
+                .map(|(held, face)| (*held, face.peer_zid.as_deref(), face.dialled)),
+            u64::MAX,
+            Some(zid),
+            false,
+        ) == Admission::Refuse
     }
 
     /// A face left the live set (peer Close / link loss).
@@ -4908,7 +5014,7 @@ impl FaceForwarder for CApiForwarder {
         // is a single task, so nothing came up between the question and this call
         // that the loop did not see. A refusal here would be a face the loop holds
         // and the registry does not, which is why the question is asked there.
-        let admitted = self.shared.face_up(id.0 + self.base, actions);
+        let admitted = self.shared.face_up(id.0 + self.base, actions, false);
         debug_assert!(
             admitted,
             "the accept loop admitted a face the registry refuses"
@@ -4934,9 +5040,10 @@ impl FaceForwarder for CApiForwarder {
         self.shared.node_namespace().cloned()
     }
 
-    /// A node the DIAL role already holds a face to.
+    /// A node a face that stays already links this session to: the dial role's, unless the
+    /// inbound link is the one to keep ([`SharedSession::face_up`] states the rule).
     fn holds_peer(&self, zid: &[u8]) -> bool {
-        self.shared.holds_peer(zid)
+        self.shared.refuses_inbound_from(zid)
     }
 
     fn deregister(&self, id: FaceId) {
@@ -6047,5 +6154,111 @@ mod matching_aggregate_tests {
         );
         assert!(replayed.is_empty());
         assert!(found.is_empty());
+    }
+}
+
+/// The registry's decision for a face that comes up to a node it may already hold
+/// ([`admission_of`], which [`SharedSession::face_up`] and
+/// [`SharedSession::refuses_inbound_from`] both read). The rule itself is
+/// `wz_session_core::link_admission`'s and is held there; these hold that this registry hands it
+/// the right facts: which face is held, in which direction, and the node's zid however spelled.
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+
+    const LOW: [u8; 1] = [0x10];
+    const HIGH: [u8; 1] = [0xa0];
+    const NODE: [u8; 1] = [0x42];
+
+    /// The decision for face `1` to `NODE`, against `held`: `(id, zid, dialled)` rows.
+    fn decide(
+        local: &[u8],
+        held: &[(u64, Option<&[u8]>, bool)],
+        zid: Option<&[u8]>,
+        dialled: bool,
+    ) -> Admission {
+        admission_of(local, held.iter().copied(), 1, zid, dialled)
+    }
+
+    #[test]
+    fn a_face_to_a_node_no_face_holds_is_admitted() {
+        assert_eq!(decide(&LOW, &[], Some(&NODE), true), Admission::Admit);
+        assert_eq!(
+            decide(&LOW, &[(2, Some(&[0x77]), true)], Some(&NODE), true),
+            Admission::Admit,
+            "a face to another node is no reason to refuse this one"
+        );
+    }
+
+    #[test]
+    fn a_face_that_names_no_node_cannot_be_matched_and_is_held() {
+        assert_eq!(
+            decide(&LOW, &[(2, Some(&NODE), true)], None, true),
+            Admission::Admit
+        );
+        assert_eq!(
+            decide(&LOW, &[(2, None, true)], Some(&NODE), true),
+            Admission::Admit,
+            "a held face with no zid is not a face to this node"
+        );
+    }
+
+    #[test]
+    fn a_second_link_that_went_the_same_way_is_refused_whatever_the_zids() {
+        for dialled in [true, false] {
+            for local in [&LOW, &HIGH] {
+                assert_eq!(
+                    decide(local, &[(2, Some(&NODE), dialled)], Some(&NODE), dialled),
+                    Admission::Refuse,
+                    "the first up stays (dialled: {dialled})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn of_two_links_that_went_opposite_ways_the_one_the_lower_zid_dialled_is_kept() {
+        // This session's zid is the lower one: the link IT dialled wins.
+        assert_eq!(
+            decide(&LOW, &[(2, Some(&HIGH), false)], Some(&HIGH), true),
+            Admission::Replace(2),
+            "the new link was dialled by the lower zid, which is this session"
+        );
+        assert_eq!(
+            decide(&LOW, &[(2, Some(&HIGH), true)], Some(&HIGH), false),
+            Admission::Refuse,
+            "the held link was dialled by the lower zid, so it stays"
+        );
+        // The node's zid is the lower one: the link IT dialled wins.
+        assert_eq!(
+            decide(&HIGH, &[(2, Some(&LOW), true)], Some(&LOW), false),
+            Admission::Replace(2),
+            "the new link was dialled by the lower zid, which is the node"
+        );
+        assert_eq!(
+            decide(&HIGH, &[(2, Some(&LOW), false)], Some(&LOW), true),
+            Admission::Refuse,
+            "the held link was dialled by the lower zid, so it stays"
+        );
+    }
+
+    #[test]
+    fn the_node_is_matched_by_the_id_and_not_by_its_spelling() {
+        // The wire form trims a zid's trailing zero bytes and a handshake keeps the bytes it
+        // was given: `[0x42]` and `[0x42, 0x00]` are one node.
+        assert_eq!(
+            decide(&LOW, &[(2, Some(&[0x42, 0x00]), true)], Some(&[0x42]), true),
+            Admission::Refuse
+        );
+    }
+
+    #[test]
+    fn the_face_being_decided_is_not_its_own_rival() {
+        // A face id the registry already holds is the face being brought up again: it is not
+        // a second link to its own node.
+        assert_eq!(
+            decide(&LOW, &[(1, Some(&NODE), true)], Some(&NODE), true),
+            Admission::Admit
+        );
     }
 }

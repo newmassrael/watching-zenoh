@@ -213,7 +213,10 @@ fn eventually(what: &str, mut holds: impl FnMut() -> bool) {
 /// restart is longer than the redial period (a second), so `a`'s redial has had its turn.
 #[test]
 fn a_restarted_peer_that_dials_back_while_its_old_dialler_redials_keeps_one_transport() {
-    for round in 0..4 {
+    // The zids are minted by each open, so which of the two is the lower one is the draw of the
+    // round: with eight rounds both orders are run, each engine deciding both ways, which is the
+    // rule's two arms (a link refused, a held link replaced).
+    for round in 0..8 {
         let (a_port, b_port) = (free_port(), free_port());
         // SAFETY: fresh configs and sessions, each closed before the round ends.
         unsafe {

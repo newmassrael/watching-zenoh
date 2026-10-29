@@ -793,13 +793,19 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
     the question decides it alike: the question is asked at both ends of a link, and the two
     answers must name one link. Its tests run both ends over every order the links can complete
     in and require the same link kept.
-  - The tokio engine's registry does not call it. Its `face_up` keeps the first up for every case
-    (two clients that share a fixture zid are both held there: Layer E3, E5, where the acceptor
-    keeps no such rule), and its linkstate peer keeps it by "first up" too. Putting the tokio
-    registry on `judge_second_link` is open: the face record would gain the direction it was
-    opened in, a replaced face's link would be closed by the registry's caller, and the fixtures
-    that share a zid would be given zids of their own. It changes what the tokio engine does, so
-    it waits for the one who owns that registry.
+  - The tokio engine's registry (`wz-capi-core`, which the pico and the zenoh-c ABIs run on) calls
+    it too. `SharedSession::face_up` is told whether the face is the dial role's, decides by
+    `admission_of` (a pure function, with its own tests: same direction refuses, opposite
+    directions keep the lower zid's link, the node matched by id and not by spelling), and on a
+    replacement sends `Close(MaxLinks)` to the held link and removes its face before the new one
+    is admitted. The accept loop's question `holds_peer` is answered by
+    `refuses_inbound_from`, so an inbound link the lower zid dialled is not dropped before the
+    registry can decide it. The two ABIs' engines therefore keep one link alike when two nodes
+    dial each other, and the zenoh-c differential against the real library (two peers that dial
+    each other keep one link, wz with wz and either way with libzenohc) still passes. Not through
+    this: the linkstate peer of the AP node (`wz-runtime-tokio`'s `router_forward`, whose
+    forwarders key the graph on the zid), which keeps the first up and is not part of the C ABIs'
+    path.
     A cooperative listener refuses the second of two clients of one zid, as zenoh does; the
     routers of a test are given zids of their own for it (`tests::face_table`).
 

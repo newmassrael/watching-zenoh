@@ -1854,7 +1854,7 @@ async fn drive_face(
     // one ([`SharedSession::face_up`]). The link is closed the way every face's
     // is, through the drain, and `on_up` does not run: the open was not
     // released by a face that is not held.
-    if !shared.face_up(face, &actions) {
+    if !shared.face_up(face, &actions, true) {
         OpenedSession {
             engine,
             actions,
