@@ -296968,6 +296968,38 @@
         "Owed, from the router session: step three, the liveliness of the Local face (a token the router declares, a subscriber it hosts that is told by key as a peer's is, a get that folds the router's token tables), which opens ten tests of the liveliness file; a queryable of the router, which needs a reply held past the handler's call; the router's get and matching status; a put that carries an encoding, a timestamp or an attachment, and a delete; a namespace and an authentication; the sessions the node holds (its info is empty). The peer session of this crate, which does not forward between its faces (9 tests of the liveliness file and regression_3). Also owed: the context a callback runs in (session and unicity), the files that run none, a build without unstable serves no admin key of its own, a lane for the harness, the margin of the main job, the pin bump to 1.10.2."
       ]
     },
+    "Round 3877": {
+      "decision_summary": "The last completed hosted run (the one for round 3866's feature commit) had ten red jobs. Read against the tree after round 3875, nine of them are repaired by other sessions' rounds and the tenth is closed here. Each was re-run on a build host: the timestamp-stack metadata test (1 ran), the interceptor leg of the routing-peer build (43 ran), the wzconfig_ leg (4 ran), the lwip pump allocation test, the reduced docs of wz-node-time (6 configurations, no finding), the router-hat mesh (8 ran) and the replay vocabulary gate. The tenth: round_fed_gate_reach reds because z8_upstream_suite.py reads what a round changes and the hook does not run it; it needs a network clone and a build of the family, so it gets a DEFERRED row that says so and that no layer runs it yet. The two reds carried from round 3837 (capability cost, peer token replay) are not in that run either. The four static gates carried in round 3843 pass.",
+      "changes_bullets": [
+        "`scripts/lib/round_fed_gate_reach.py`: a DEFERRED row for `z8_upstream_suite.py`, the harness that runs upstream's integration tests against the patched graph. The row gives its cost (a network clone of the pinned tree and a build of the family), says that no hosted layer runs it today, and names its `--selftest` as the part a layer could carry.",
+        "No other file changed. The nine other red jobs of the run needed no change here."
+      ],
+      "verification_bullets": [
+        "The pre-push static gate array ran whole on the tree after round 3874: 120 pass and one red (round_fed_gate_reach); with the row it passes. Build host runs, all exit 0 with a non-zero count where a filter was used: metadata test 1, interceptor leg 43, wzconfig_ leg 4, pump allocation test, wz-node-time reduced docs 6 configurations, router-hat mesh 8. Not run: the hosted layers themselves, and the run for the tree after round 3874 had not finished, so whether anything newer is red is not known."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "Z8's harness has no hosted layer: a test file of upstream's that moves between outcomes is seen only when someone runs `measure` by hand. The next read of a completed hosted run decides whether anything is red after round 3874. Open from the SN work: TCP loss, reordering and duplication captures, clients other than 1.10.1, links that really lose packets, and why the 10% and 20% UDP sessions end."
+      ],
+      "publishable_decision_summary": "The last completed hosted run (the one for round 3866's feature commit) had ten red jobs. Read against the tree after round 3875, nine of them are repaired by other sessions' rounds and the tenth is closed here. Each was re-run on a build host: the timestamp-stack metadata test (1 ran), the interceptor leg of the routing-peer build (43 ran), the wzconfig_ leg (4 ran), the lwip pump allocation test, the reduced docs of wz-node-time (6 configurations, no finding), the router-hat mesh (8 ran) and the replay vocabulary gate. The tenth: round_fed_gate_reach reds because z8_upstream_suite.py reads what a round changes and the hook does not run it; it needs a network clone and a build of the family, so it gets a DEFERRED row that says so and that no layer runs it yet. The two reds carried from round 3837 (capability cost, peer token replay) are not in that run either. The four static gates carried in round 3843 pass.",
+      "publishable_changes_bullets": [
+        "`scripts/lib/round_fed_gate_reach.py`: a DEFERRED row for `z8_upstream_suite.py`, the harness that runs upstream's integration tests against the patched graph. The row gives its cost (a network clone of the pinned tree and a build of the family), says that no hosted layer runs it today, and names its `--selftest` as the part a layer could carry.",
+        "No other file changed. The nine other red jobs of the run needed no change here."
+      ],
+      "publishable_verification_bullets": [
+        "The pre-push static gate array ran whole on the tree after round 3874: 120 pass and one red (round_fed_gate_reach); with the row it passes. Build host runs, all exit 0 with a non-zero count where a filter was used: metadata test 1, interceptor leg 43, wzconfig_ leg 4, pump allocation test, wz-node-time reduced docs 6 configurations, router-hat mesh 8. Not run: the hosted layers themselves, and the run for the tree after round 3874 had not finished, so whether anything newer is red is not known."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Z8's harness has no hosted layer: a test file of upstream's that moves between outcomes is seen only when someone runs `measure` by hand. The next read of a completed hosted run decides whether anything is red after round 3874. Open from the SN work: TCP loss, reordering and duplication captures, clients other than 1.10.1, links that really lose packets, and why the 10% and 20% UDP sessions end."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
