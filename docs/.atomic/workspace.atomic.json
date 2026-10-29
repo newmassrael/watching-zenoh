@@ -298454,6 +298454,42 @@
         "The compare build of the fixed image should be near 149,360 bytes of text against 145,364 for the single-thread pico image (1.0275), which is a figure and not a result: the matrix of Round 3911 read 150,040 and 680 bytes are gone since. The gap is some 4.0 KB. `RetryPolicy::grows` still compares the factor as an `f64` (two soft-float comparisons in a build that calls it; this image does not). What the symbol table names for the rest: the Request decoder (1.7 KB, the kind this client is there for), the pump task with what it inlines (2.4 KB), the observer's dispatch among the registered sinks, the connect machine's planner (`perform` 1.2 KB) with the SCE engine's `walk_entry` and `select_transitions` for it (this image dials one endpoint and holds no node by zid), and `ReplyStage` 0.9 KB. Replacing the connect machine for a static single endpoint with a plain dialer would be the largest remaining piece (some 3 KB) and is a decision about the product's thesis, a state machine generated from SCXML for every connect, not an arithmetic one."
       ]
     },
+    "Round 3916": {
+      "decision_summary": "Layer Z on a build host reached its guarded legs and stopped at three faults, none in the link-collision rule. (1) The pinned zenohd nulls gateway/south in its config tree, so the fixture classes it with the nulled keys. (2) The host slot nodes left their run arena to a default that the compile-time assertion in slot_node::assemble refuses; RUN and RUN_ACTIVE state the measured size. (3) A wz peer told its router nothing of itself: the north net of a peer was built as a Network, whose new-link send names direct neighbours by zid, where the pin builds the Gossip object, whose send names every node with its locators, so a foreign peer could never dial wz. The north hat of a peer is now the Gossip object, and a differential test that had pinned the old send follows the pin's gossip.rs.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward.rs: MeshHat::new builds the peer hat north of a peer node as LinkstateNetwork::new (the Gossip object); new test a_peer_tells_the_router_it_dials_its_own_entry_with_its_locators.",
+        "crates/wz-runtime-tokio/src/router_forward/peer_differential_tests.rs: the new-link test now expects self first and every node held, as the pin's gossip.rs sends.",
+        "crates/wz-integration-tests/tests/wz_gossip_autoconnect_zenohd_interop.rs: the neuter leg prints the foreign router and peer logs when the dial never lands.",
+        "crates/wz-integration-tests/tests/wz_reads_a_stock_zenohd_config.rs: gateway/south is classed among the keys the pinned zenohd nulls.",
+        "deploy/host-slot-node: tuning::RUN and tuning::RUN_ACTIVE state the run arena of the node and of the declared node."
+      ],
+      "verification_bullets": [
+        "wz-runtime-tokio on a build host: 104 targets, 1314 tests pass, none fail (lib 1006, with the new test red before the fix and the old differential test red after it until its expectation followed gossip.rs). The seven gossip interop legs pass against the pinned zenohd with the demo rebuilt. Layer Z passes (268 tests, 0 failed; the network-namespace legs skip on a host with none). The 121 static gates the hook defers pass on the rebased tree, and the upstream citation gate resolves."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "carry_forward_bullets": [
+        "The cooperative engine has no tls link: a build with tls selects the tokio engine by design, and a transport feature of its own is a new design. The scouting legs in a network namespace run on the tokio library only, since no namespace can be built on this host. Whether a redial reached the new node is not observable through the pico ABI."
+      ],
+      "publishable_decision_summary": "Layer Z on a build host reached its guarded legs and stopped at three faults, none in the link-collision rule. (1) The pinned zenohd nulls gateway/south in its config tree, so the fixture classes it with the nulled keys. (2) The host slot nodes left their run arena to a default that the compile-time assertion in slot_node::assemble refuses; RUN and RUN_ACTIVE state the measured size. (3) A wz peer told its router nothing of itself: the north net of a peer was built as a Network, whose new-link send names direct neighbours by zid, where the pin builds the Gossip object, whose send names every node with its locators, so a foreign peer could never dial wz. The north hat of a peer is now the Gossip object, and a differential test that had pinned the old send follows the pin's gossip.rs.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward.rs: MeshHat::new builds the peer hat north of a peer node as LinkstateNetwork::new (the Gossip object); new test a_peer_tells_the_router_it_dials_its_own_entry_with_its_locators.",
+        "crates/wz-runtime-tokio/src/router_forward/peer_differential_tests.rs: the new-link test now expects self first and every node held, as the pin's gossip.rs sends.",
+        "crates/wz-integration-tests/tests/wz_gossip_autoconnect_zenohd_interop.rs: the neuter leg prints the foreign router and peer logs when the dial never lands.",
+        "crates/wz-integration-tests/tests/wz_reads_a_stock_zenohd_config.rs: gateway/south is classed among the keys the pinned zenohd nulls.",
+        "deploy/host-slot-node: tuning::RUN and tuning::RUN_ACTIVE state the run arena of the node and of the declared node."
+      ],
+      "publishable_verification_bullets": [
+        "wz-runtime-tokio on a build host: 104 targets, 1314 tests pass, none fail (lib 1006, with the new test red before the fix and the old differential test red after it until its expectation followed gossip.rs). The seven gossip interop legs pass against the pinned zenohd with the demo rebuilt. Layer Z passes (268 tests, 0 failed; the network-namespace legs skip on a host with none). The 121 static gates the hook defers pass on the rebased tree, and the upstream citation gate resolves."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The cooperative engine has no tls link: a build with tls selects the tokio engine by design, and a transport feature of its own is a new design. The scouting legs in a network namespace run on the tokio library only, since no namespace can be built on this host. Whether a redial reached the new node is not observable through the pico ABI."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
