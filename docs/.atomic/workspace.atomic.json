@@ -298490,6 +298490,38 @@
         "The cooperative engine has no tls link: a build with tls selects the tokio engine by design, and a transport feature of its own is a new design. The scouting legs in a network namespace run on the tokio library only, since no namespace can be built on this host. Whether a redial reached the new node is not observable through the pico ABI."
       ]
     },
+    "Round 3917": {
+      "decision_summary": "The per-key publisher QoS of the configuration (qos/publication) is applied. The session reads the key at open into a tree of key expressions, and a put, a delete and a publisher declared through a session take the congestion control, priority, express flag, reliability and allowed destination of the first entry whose key includes theirs, in place of what their builder says, as upstream's builders do; when several entries include a key, one is used and the others are named in a warning. The key is no longer refused at open as one the engine does not act on, because the session acts on it itself. The upstream qos file passes (2 of 2, from 1). The Z8 harness forwards the tls feature of the registry's link-commons, which open_time names, so that file compiles again.",
+      "changes_bullets": [
+        "crates/wz-zenoh/src/api/session.rs: SessionInner::publisher_qos_tree, built at open from qos/publication; Session::get_publisher_qos_overwrite; qos/publication is a key the session acts on (acted_on_by_the_session), so the open does not refuse it.",
+        "crates/wz-zenoh/src/api/builders/publisher.rs: PublisherBuilder::apply_qos_overwrites, called by the put, delete and declare_publisher builders.",
+        "scripts/lib/z8_upstream_suite.py: transport_tls forwards zenoh-link-commons/tls."
+      ],
+      "verification_bullets": [
+        "Locally: the upstream qos file passes (2 of 2), and open_time compiles with the tls and quic features (it runs none of its six tests, which are ignored); clippy with warnings denied passes for the top crate by default, with unstable, and with unstable, shared-memory and internal; the static gate array passes. Not run: a unit test of the lookup (the upstream file is its witness), the other upstream files after this change, the legs gate and the hosted run."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed: the upstream files that still fail are adminspace and routing (the router session's owner), liveliness (regression_3 and the six clientviapeer, which need a peer that forwards between its faces), namespace (four routed tests, landed on origin after this change's base) and shm (implicit promotion of a large payload into shared memory by transport_optimization/message_size_threshold, and shared memory over multicast). Also owed: qos/network cannot be written through the admin space; transport/link/tls/close_link_on_expiration and the five inline *_base64 certificate keys are refused; the capic-default size grew with the router carrying an authentication and was not attributed by symbol; a lane for the harness; the files that run none; a build without unstable serves no admin key of its own; the pin bump to 1.10.2."
+      ],
+      "publishable_decision_summary": "The per-key publisher QoS of the configuration (qos/publication) is applied. The session reads the key at open into a tree of key expressions, and a put, a delete and a publisher declared through a session take the congestion control, priority, express flag, reliability and allowed destination of the first entry whose key includes theirs, in place of what their builder says, as upstream's builders do; when several entries include a key, one is used and the others are named in a warning. The key is no longer refused at open as one the engine does not act on, because the session acts on it itself. The upstream qos file passes (2 of 2, from 1). The Z8 harness forwards the tls feature of the registry's link-commons, which open_time names, so that file compiles again.",
+      "publishable_changes_bullets": [
+        "crates/wz-zenoh/src/api/session.rs: SessionInner::publisher_qos_tree, built at open from qos/publication; Session::get_publisher_qos_overwrite; qos/publication is a key the session acts on (acted_on_by_the_session), so the open does not refuse it.",
+        "crates/wz-zenoh/src/api/builders/publisher.rs: PublisherBuilder::apply_qos_overwrites, called by the put, delete and declare_publisher builders.",
+        "scripts/lib/z8_upstream_suite.py: transport_tls forwards zenoh-link-commons/tls."
+      ],
+      "publishable_verification_bullets": [
+        "Locally: the upstream qos file passes (2 of 2), and open_time compiles with the tls and quic features (it runs none of its six tests, which are ignored); clippy with warnings denied passes for the top crate by default, with unstable, and with unstable, shared-memory and internal; the static gate array passes. Not run: a unit test of the lookup (the upstream file is its witness), the other upstream files after this change, the legs gate and the hosted run."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed: the upstream files that still fail are adminspace and routing (the router session's owner), liveliness (regression_3 and the six clientviapeer, which need a peer that forwards between its faces), namespace (four routed tests, landed on origin after this change's base) and shm (implicit promotion of a large payload into shared memory by transport_optimization/message_size_threshold, and shared memory over multicast). Also owed: qos/network cannot be written through the admin space; transport/link/tls/close_link_on_expiration and the five inline *_base64 certificate keys are refused; the capic-default size grew with the router carrying an authentication and was not attributed by symbol; a lane for the harness; the files that run none; a build without unstable serves no admin key of its own; the pin bump to 1.10.2."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
