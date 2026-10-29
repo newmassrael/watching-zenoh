@@ -44,7 +44,7 @@ use wz_session_core::driver_loop::{DriverOutcome, EventSink};
 use wz_session_core::entropy::EntropySource;
 use wz_session_core::link::BoxedLinkDriver;
 use wz_session_core::session_init_params::SessionInitParams;
-use wz_session_core::session_slot::SessionSlots;
+use wz_session_core::session_slot::{ClaimRefused, SessionSlots, SlotClaim};
 
 /// Why a session could not be opened for want of room in a table. Each table keeps its own
 /// count of the refusals it made (`SessionSlots::refused`, `PumpSlots::refused`,
@@ -92,6 +92,10 @@ type SessionTable<C, T, E, const S: usize> = SessionSlots<
     E,
     S,
 >;
+
+/// A slot of that table that is claimed and holds a driver, not yet a session.
+type SlotClaimOf<C, T, E> =
+    SlotClaim<CoopRuntime<C, <T as SlotStack>::Driver>, CoopTime<C>, <T as SlotStack>::Driver, E>;
 
 /// The tables a node opens sessions in, and the means to run what it opens. All are `static`s
 /// the image declared, or handles to them, so the host is a few references and costs the heap
@@ -159,10 +163,27 @@ where
     where
         F: EventSink + 'static,
     {
-        let runtime = self.local.runtime();
         let Ok(claim) = self.sessions.claim(driver, entropy) else {
             return Err(OpenRefused::SessionSlot);
         };
+        self.open_claimed(claim, lane, params, config, on_event)
+    }
+
+    /// The rest of [`Self::open`] over a slot that is claimed: the session built in it, its pump
+    /// cell and its task. Shared by the two ways a slot is claimed, a driver handed in
+    /// ([`Self::open`]) and a driver made in the slot ([`Self::dial`]).
+    fn open_claimed<F>(
+        &self,
+        claim: SlotClaimOf<C, T, E>,
+        lane: Option<T::Lane>,
+        params: impl FnOnce() -> SessionInitParams,
+        config: SessionDriveConfig,
+        on_event: impl FnOnce(&SessionHandle<C, T::Driver>) -> F,
+    ) -> Result<OpenedSession<C, T::Driver>, OpenRefused>
+    where
+        F: EventSink + 'static,
+    {
+        let runtime = self.local.runtime();
         let driver = claim.driver_handle();
         let actions = new_session_in_slot(claim, params, CoopTime::new(runtime));
         let pump_link = self.stack.pump(driver, lane);
@@ -206,9 +227,15 @@ where
     where
         F: EventSink + 'static,
     {
-        let driver = bind().map_err(DialRefused::Link)?;
+        // The link is made by the claim, in the slot's own call: a driver bound here and handed
+        // on by value was a copy of it in this frame and in each one it went through.
+        let claim = match self.sessions.claim_with(bind, entropy) {
+            Ok(claim) => claim,
+            Err(ClaimRefused::Link(why)) => return Err(DialRefused::Link(why)),
+            Err(ClaimRefused::Full) => return Err(DialRefused::Open(OpenRefused::SessionSlot)),
+        };
         let opened = self
-            .open(driver, None, entropy, params, config, on_event)
+            .open_claimed(claim, None, params, config, on_event)
             .map_err(DialRefused::Open)?;
         if let Some(zid) = expected_zid {
             opened.actions.expect_peer_zid(zid);

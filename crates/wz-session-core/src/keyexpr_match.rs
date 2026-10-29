@@ -61,6 +61,7 @@
 //! hand-maintained copies of one fact, two of them stale: the reason
 //! the impl axis belongs in a gated tag, not in prose.
 
+#[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
 use crate::bounded::BoundedVec;
 
 /// Maximum number of `/`-separated chunks a target keyexpr is split
@@ -75,23 +76,34 @@ use crate::bounded::BoundedVec;
 /// declared-bound precedent.
 pub const MAX_KEYEXPR_CHUNKS: usize = 32;
 
-/// How many chunks of a keyexpr [`KeyChunks`] holds on the stack. Real keys are a handful of
-/// chunks deep (`@/<zid>/peer/status/connect` is five), so a scan of one almost never leaves it.
-const STACK_KEY_CHUNKS: usize = 16;
+/// How many chunks of a keyexpr [`KeyChunks`] holds on the stack on the FIXED backing (`alloc` off,
+/// or `bounded-heapless` on): every chunk the backing can represent, since a key deeper than
+/// [`MAX_KEYEXPR_CHUNKS`] is not representable and the view has nothing to spill into. The view is
+/// one array of that many (256 bytes), where a view with a vector to spill into was over 400, and
+/// two of them are on the stack at once under a wildcard walk.
+#[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
+const INLINE_KEY_CHUNKS: usize = MAX_KEYEXPR_CHUNKS;
+
+/// How many chunks of a keyexpr [`KeyChunks`] holds on the stack on the growable backing. Real
+/// keys are a handful of chunks deep (`@/<zid>/peer/status/connect` is five), so a scan of one
+/// almost never leaves it.
+#[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
+const INLINE_KEY_CHUNKS: usize = 16;
 
 /// A keyexpr split on `/` into a view of its chunks, held on the stack when it has at most
-/// `STACK_KEY_CHUNKS` of them.
+/// `INLINE_KEY_CHUNKS` of them.
 ///
 /// Every scan in this crate splits the key it is asked about, and on the growable (AP and
-/// heap-MCU) backing a [`BoundedVec`] of chunks is a `Vec` that grows as it is pushed to: a split
+/// heap-MCU) backing a `BoundedVec` of chunks is a `Vec` that grows as it is pushed to: a split
 /// of a five-chunk key cost two or three allocations and as many frees, on every message and for
 /// every queryable the message was tried against. A key deeper than the stack view is split into
-/// the [`BoundedVec`] as before, so what it holds and what it refuses are exactly what they
+/// the `BoundedVec` as before, so what it holds and what it refuses are exactly what they
 /// were: on the fixed backing a key deeper than [`MAX_KEYEXPR_CHUNKS`] is not representable and
 /// [`KeyChunks::split`] answers `None`, which every caller reads as no-match.
 pub struct KeyChunks<'a> {
-    inline: [&'a str; STACK_KEY_CHUNKS],
+    inline: [&'a str; INLINE_KEY_CHUNKS],
     len: usize,
+    #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
     spilled: Option<BoundedVec<&'a str, MAX_KEYEXPR_CHUNKS>>,
 }
 
@@ -118,6 +130,7 @@ impl<'a> KeyChunks<'a> {
             // of the same size, a call to the copy function for every split.
             inline: core::array::from_fn(|_| ""),
             len: 0,
+            #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
             spilled: None,
         }
     }
@@ -126,12 +139,15 @@ impl<'a> KeyChunks<'a> {
     /// than the backing can represent, and `self` is then not to be read.
     pub fn split_into(&mut self, text: &'a str) -> bool {
         self.len = 0;
-        self.spilled = None;
+        #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
+        {
+            self.spilled = None;
+        }
         self.fill_inline(text) || self.spill(text)
     }
 
     /// Write `text`'s chunks into the inline array. `false` when there are more than it holds,
-    /// with the array full (`len == STACK_KEY_CHUNKS`) for [`Self::spill`] to start over.
+    /// with the array full (`len == INLINE_KEY_CHUNKS`) for [`Self::spill`] to start over.
     fn fill_inline(&mut self, text: &'a str) -> bool {
         // By a scan of the bytes, not `str::split('/')`: the searcher behind that has a fixed
         // cost per chunk that a key of a few short chunks never earns back (4 of these splits
@@ -143,7 +159,7 @@ impl<'a> KeyChunks<'a> {
         loop {
             let end_of_chunk = at == bytes.len();
             if end_of_chunk || bytes[at] == b'/' {
-                if self.len == STACK_KEY_CHUNKS {
+                if self.len == INLINE_KEY_CHUNKS {
                     return false;
                 }
                 self.inline[self.len] = &text[start..at];
@@ -159,6 +175,7 @@ impl<'a> KeyChunks<'a> {
 
     /// The key deeper than the inline array: every chunk into the bounded vector. `false` when
     /// even that cannot hold them, which every caller reads as no-match.
+    #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
     fn spill(&mut self, text: &'a str) -> bool {
         let mut spilled: BoundedVec<&'a str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
         for chunk in text.split('/') {
@@ -169,16 +186,24 @@ impl<'a> KeyChunks<'a> {
         self.spilled = Some(spilled);
         true
     }
+
+    /// The fixed backing holds every chunk it can represent inline, so a key that did not fit
+    /// there is one it cannot represent: no-match.
+    #[cfg(any(not(feature = "alloc"), feature = "bounded-heapless"))]
+    fn spill(&mut self, _text: &'a str) -> bool {
+        false
+    }
 }
 
 impl<'a> core::ops::Deref for KeyChunks<'a> {
     type Target = [&'a str];
 
     fn deref(&self) -> &[&'a str] {
-        match &self.spilled {
-            Some(spilled) => spilled,
-            None => &self.inline[..self.len],
+        #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
+        if let Some(spilled) = &self.spilled {
+            return spilled;
         }
+        &self.inline[..self.len]
     }
 }
 
@@ -1077,21 +1102,26 @@ mod tests {
     }
 
     /// The stack view holds exactly the chunks `str::split('/')` yields, at every depth around its
-    /// own bound (it spills past `STACK_KEY_CHUNKS`) and the backing's (`MAX_KEYEXPR_CHUNKS`), and
-    /// refuses exactly what the backing refuses: the matchers that use it answer as they did.
+    /// own bound (it spills past `INLINE_KEY_CHUNKS` where there is a vector to spill into) and
+    /// the backing's (`MAX_KEYEXPR_CHUNKS`), and refuses exactly what the backing refuses: the
+    /// matchers that use it answer as they did.
     #[test]
     fn key_chunks_are_the_split_at_every_depth_around_both_bounds() {
         for depth in [
             1usize,
             2,
             5,
-            STACK_KEY_CHUNKS - 1,
-            STACK_KEY_CHUNKS,
-            STACK_KEY_CHUNKS + 1,
+            INLINE_KEY_CHUNKS - 1,
+            INLINE_KEY_CHUNKS,
+            INLINE_KEY_CHUNKS + 1,
         ] {
-            let key = ["k"; STACK_KEY_CHUNKS + 1][..depth].join("/");
+            // One past the inline bound is a key the fixed backing holds only up to its own.
+            if crate::bounded::ENFORCES_CAPACITY && depth > MAX_KEYEXPR_CHUNKS {
+                continue;
+            }
+            let key = ["k"; MAX_KEYEXPR_CHUNKS + 2][..depth].join("/");
             let view = KeyChunks::split(&key).expect("a key this shallow is representable");
-            let want: [&str; STACK_KEY_CHUNKS + 1] = ["k"; STACK_KEY_CHUNKS + 1];
+            let want: [&str; MAX_KEYEXPR_CHUNKS + 2] = ["k"; MAX_KEYEXPR_CHUNKS + 2];
             assert_eq!(&*view, &want[..depth], "depth {depth}");
         }
         // Distinct chunks, so a reordering or a drop shows.

@@ -305,14 +305,49 @@ where
         driver: D,
         entropy: E,
     ) -> Result<SlotClaim<R, T, D, E>, SlotsFull<D, E>> {
-        let Some(cell) = self
-            .cells
-            .iter()
-            .find(|cell| cell.state.get() == CellState::Free)
-        else {
+        let Some(cell) = self.free_cell() else {
             self.refused.set(self.refused.get().saturating_add(1));
             return Err(SlotsFull { driver, entropy });
         };
+        Ok(Self::occupy(cell, driver, entropy))
+    }
+
+    /// [`Self::claim`] for a link that is made by `make`, which is the call of this function and
+    /// not an argument of it: the driver (176 bytes on the fixed client's UDP link) is written into
+    /// the slot from here, and the caller's frame never holds it. Passed by value it was a copy in
+    /// each frame it went through, the dial's among them.
+    ///
+    /// `make` runs whether or not a slot is free, and first: a link that cannot be made is
+    /// refused as such before the table is touched or counted, and a table with no slot counts
+    /// its refusal after the link was made and gives it back (drops it), as `claim` does with the
+    /// values it is handed.
+    ///
+    /// Never inlined: the driver `make` returns is a value of this frame while it is moved into
+    /// the slot, and is gone when this returns.
+    #[inline(never)]
+    pub fn claim_with<Err>(
+        &'static self,
+        make: impl FnOnce() -> Result<D, Err>,
+        entropy: E,
+    ) -> Result<SlotClaim<R, T, D, E>, ClaimRefused<Err>> {
+        let cell = self.free_cell();
+        let driver = make().map_err(ClaimRefused::Link)?;
+        let Some(cell) = cell else {
+            self.refused.set(self.refused.get().saturating_add(1));
+            return Err(ClaimRefused::Full);
+        };
+        Ok(Self::occupy(cell, driver, entropy))
+    }
+
+    /// The first slot that is free, if there is one.
+    fn free_cell(&'static self) -> Option<&'static SlotCell<R, T, D, E>> {
+        self.cells
+            .iter()
+            .find(|cell| cell.state.get() == CellState::Free)
+    }
+
+    /// Move `driver` and `entropy` into the free `cell` and mark it claimed.
+    fn occupy(cell: &'static SlotCell<R, T, D, E>, driver: D, entropy: E) -> SlotClaim<R, T, D, E> {
         // SAFETY: the slot is free, so nothing refers into it, and each part is
         // written once; the state below says so to `release_cell`.
         unsafe {
@@ -322,8 +357,18 @@ where
         cell.state.set(CellState::Claimed);
         cell.head.refs.set(1);
         cell.head.release.set(Some(release_cell::<R, T, D, E>));
-        Ok(SlotClaim { cell })
+        SlotClaim { cell }
     }
+}
+
+/// Why [`SessionSlots::claim_with`] gave no slot.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ClaimRefused<Err> {
+    /// The link could not be made; no table was touched.
+    Link(Err),
+    /// The link was made and the table had no slot free: it counted the refusal and dropped the
+    /// link.
+    Full,
 }
 
 /// A claimed slot that holds a driver and an entropy source and not yet a

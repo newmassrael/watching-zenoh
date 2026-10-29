@@ -163,6 +163,25 @@ carries about 6 KB of C library code wz does not, which is why the difference is
   secure channel's stack type); text is +244 bytes. An image states its arena's size and the loop
   checks it when it is compiled (`run_bytes_needed`): a layer or a stack that grows past it is a
   build error that names the line, as the TLS image's was the first time it was built.
+- TAKEN: four copies of a large value removed on the first dial and on the receive, found by the
+  kit's own sequence (`READY`, then `stack: peak` before `session established`: the peak is the
+  first tick, which dials). (1) The dial's link is made in the slot's claim (`SessionSlots::claim_with`,
+  never inlined): the driver, 176 bytes on the UDP link, was held in several copies in
+  `dial_expecting`, now 688 to 256 bytes; the order is the contract of the dial's tests (a bind
+  refused for want of a socket is answered before any session table is touched), so `claim_with`
+  makes the link first and only then counts a full table. (2) The receive's records are decoded in the
+  binding that lends them: `lend_declare` was 2,064 bytes and `lend_push` 1,776, three copies of the
+  largest message a record can be (a default, the value `decode` returns, the `?` that unwraps it);
+  the generated `decode_into` writes it once, as `lend_response` already did. (3) The key matcher's
+  view of a key, `KeyChunks`, is one array of 32 on the fixed profile (264 bytes) and not an array
+  of 16 and a spill vector (over 400), which was two of them on the stack under a wildcard walk.
+  (4) The peer table builds an entry in its row: `PeerEntry::init_in` over the machine's
+  `new_in_place` (the engine of SCE has one), so the planner's `open` no longer holds the machine's
+  kilobyte as a temporary, 1,008 bytes of frame to 200. Together: the bound 5,420 to 4,240, the
+  main stacks 7,232, 7,232 and 8,320 to 5,696, 5,696 and 6,720, the kit's reading 3,640 to 3,208
+  (fixed), text 161,692 to 160,692, `.bss` 1,024 bytes less (the view of a key, kept in a table).
+  The first of these did not move the reading (3,640 to 3,584) and the second did not either: the
+  planner's path was above them both, and was not the one the direct chain follows.
 - NOT TAKEN, measured: taking `judge_ext_chain`'s two helpers out of line (7 instances) moved the
   text by +16 bytes; the link-time optimizer already shares them.
 - `wz_session_core` is a long tail (525 symbols in a build without LTO, none over 1.6 KB) and the

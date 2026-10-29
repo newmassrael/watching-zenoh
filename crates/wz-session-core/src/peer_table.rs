@@ -26,6 +26,9 @@
 //! refuses (and counts) only when every entry holds a peer the node is told to
 //! hold.
 
+use core::mem::MaybeUninit;
+use core::ptr::addr_of_mut;
+
 use sce_rust_runtime::Engine;
 
 use crate::constant_session_id::built_under_constant_id;
@@ -192,28 +195,37 @@ struct PeerEntry<K> {
 }
 
 impl<K> PeerEntry<K> {
-    /// The entry of `key`, its machine built and not yet started: [`Self::start`] enters the
-    /// initial state once the entry is where the table keeps it.
+    /// Build the entry of `key` in `slot`, where the table keeps it, and enter its machine's
+    /// initial state.
     ///
-    /// The machine is the call's own result, written into the entry as it is returned. Started
-    /// here it would be a local that is then moved into the entry, a second kilobyte in this
-    /// frame beside the one the caller holds the entry in.
-    fn new(key: K) -> Self {
-        Self {
-            key,
-            engine: Engine::new(built_under_constant_id(
-                PeerConnectionPolicy::new_with_session_id(
-                    PEER_CONNECTION_SESSION_ID,
-                    PeerBinding::default(),
+    /// The machine is a kilobyte. Built as a value and moved (into the entry, and the entry into
+    /// the table's vector) it was a slot of the frame of every function it passed through, the
+    /// planner's among them, on the path of the first dial, and the deepest the node reaches when
+    /// it starts. The machine's own `new_in_place` writes it where it will live.
+    fn init_in(slot: &mut MaybeUninit<Self>, key: K) -> &mut Self {
+        let at = slot.as_mut_ptr();
+        // SAFETY: `at` points at storage for one entry that holds no value. The key is written to
+        // its field, and the machine is built in its field by `new_in_place`, which writes every
+        // field of the engine; with both written the entry is whole, and it is lent as such.
+        let entry = unsafe {
+            addr_of_mut!((*at).key).write(key);
+            let engine = &mut *addr_of_mut!((*at).engine)
+                .cast::<MaybeUninit<Engine<PeerConnectionPolicy<PeerBinding>>>>();
+            Engine::new_in_place(
+                engine,
+                built_under_constant_id(
+                    PeerConnectionPolicy::new_with_session_id(
+                        PEER_CONNECTION_SESSION_ID,
+                        PeerBinding::default(),
+                    ),
+                    "the peer connection session id",
                 ),
-                "the peer connection session id",
-            )),
-        }
-    }
-
-    /// W3C SCXML 3.3: enter the initial `Idle` leaf.
-    fn start(&mut self) {
-        self.engine.initialize();
+            );
+            &mut *at
+        };
+        // W3C SCXML 3.3: enter the initial `Idle` leaf.
+        entry.engine.initialize();
+        entry
     }
 
     fn drive(&mut self, event: PeerConnectionEvent) -> PeerDuties {
@@ -319,28 +331,44 @@ impl<K: PartialEq, const N: usize> PeerTable<K, N> {
 
     /// An entry for a new peer: a free one, or one whose peer is in `Idle`.
     fn take_entry(&mut self, key: K) -> Result<usize, PeerTableRefusal> {
-        if !self.entries.is_full() {
-            // Not full, so the push cannot fail.
-            let _ = self.entries.push(PeerEntry::new(key));
-            let at = self.entries.len() - 1;
-            self.entries[at].start();
-            return Ok(at);
-        }
-        match self
-            .entries
-            .iter()
-            .position(|entry| !entry.state().in_intent())
-        {
-            Some(at) => {
-                self.entries[at] = PeerEntry::new(key);
-                self.entries[at].start();
-                Ok(at)
-            }
-            None => {
+        if self.entries.is_full() {
+            let Some(at) = self
+                .entries
+                .iter()
+                .position(|entry| !entry.state().in_intent())
+            else {
                 self.refused += 1;
-                Err(PeerTableRefusal::Full)
-            }
+                return Err(PeerTableRefusal::Full);
+            };
+            // The row of a peer the node is not working to hold is given up, and the new peer
+            // takes the free row at the end (the order of the rows is not a contract: `forget`
+            // takes a row out the same way).
+            drop(self.entries.swap_remove(at));
         }
+        Ok(self.push_new(key))
+    }
+
+    /// Build the entry of `key` in the row after the last one, where it stays, and return its
+    /// index. The table is not full.
+    fn push_new(&mut self, key: K) -> usize {
+        assert!(
+            !self.entries.is_full(),
+            "the caller made room for the entry"
+        );
+        let at = self.entries.len();
+        // SAFETY: the table is not full, so row `at` is inside the vector's capacity and holds no
+        // value; `init_in` writes the whole entry there, and the length moves over the row only
+        // after that (an entry that failed to build is never counted, and so never dropped).
+        unsafe {
+            let slot = &mut *self
+                .entries
+                .as_mut_ptr()
+                .add(at)
+                .cast::<MaybeUninit<PeerEntry<K>>>();
+            PeerEntry::init_in(slot, key);
+            self.entries.set_len(at + 1);
+        }
+        at
     }
 }
 

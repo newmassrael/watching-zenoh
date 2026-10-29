@@ -252,6 +252,20 @@ IMAGES = (
     # the dial is: `wz_app_main` 704, `reconcile` 456, `drive` 536, `dial_peer` 112,
     # `dial_expecting` 688, the slot's `open` 856, `ext_chain_of` 212, 7 frames and 7 calls through
     # a register. The kit's reading is 3,640, 76 over.
+    #
+    # `peak` is 3,192 bytes once the dial's link is made in the slot's claim (`claim_with`: the
+    # 176-byte driver is no longer a copy in `dial_expecting`'s frame) and the receive's records are
+    # decoded in the binding that lends them (`lend_declare` 2,064 bytes and `lend_push` 1,776 were
+    # a default, the decode's return value and the unwrapped copy of the largest message a record
+    # can be; the generated `decode_into` writes it once): the largest frame is now the eager
+    # `Response` record, 1,280 bytes, and the chain is 12 frames.
+    #
+    # `peak` is 3,132 bytes once the peer table builds an entry in its row (`PeerEntry::init_in`;
+    # the planner's `open` was 1,008 bytes of frame, the machine's kilobyte as a temporary) and the
+    # key matcher's view of a key is one array on this profile: the dial is the longest direct
+    # chain, 7 frames: `wz_app_main` 704, `reconcile` 456, `drive` 536, `dial_peer` 112,
+    # `dial_expecting` 256, the slot's `open` 856, `ext_chain_of` 212, and 9 calls through a
+    # register on the path. The kit's reading is 3,208, 76 over.
     Image(
         key="zephyr-client-fixed",
         elf=None,
@@ -259,7 +273,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=3564,
+        peak=3132,
     ),
     # The same client with the session coalescing a send window into one datagram
     # (`overlays/t2g_client_batching.conf`). The batch writer and its flush path are two more
@@ -299,7 +313,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=3588,
+        peak=3156,
     ),
     # The fixed client that ASKS (`overlays/t2g_client_get.conf`): the getter of
     # `wz_session_mcu::slot_getter` is the application layer the observer's drain runs inside, and
@@ -354,7 +368,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=4204,
+        peak=4008,
     ),
     # The fixed client over the secure channel (`overlays/t2g_client_tls.conf`, decision D9):
     # the dial completes a TLS 1.3 handshake in Mbed TLS before the session sees a byte, and every

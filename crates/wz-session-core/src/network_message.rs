@@ -1359,7 +1359,9 @@ fn lend_push(
     cursor: &mut SceCursor<'_>,
     each: &mut impl FnMut(WalkedRecord<'_>) -> Result<(), crate::parse_error::InboundParseError>,
 ) -> Result<(), crate::parse_error::InboundParseError> {
-    let push = wz_codecs::push::Push::decode(cursor)
+    // Decoded into the binding that lends it (see `lend_declare`).
+    let mut push = wz_codecs::push::Push::default();
+    wz_codecs::push::Push::decode_into(cursor, &mut push)
         .map_err(crate::parse_error::InboundParseError::Codec)?;
     admit_lent(push_view_admission(&push))?;
     each(WalkedRecord::Push(&push))
@@ -1501,7 +1503,11 @@ fn lend_declare(
     cursor: &mut SceCursor<'_>,
     each: &mut impl FnMut(WalkedRecord<'_>) -> Result<(), crate::parse_error::InboundParseError>,
 ) -> Result<(), crate::parse_error::InboundParseError> {
-    let declare = wz_codecs::declare::Declare::decode(cursor)
+    // Decoded into the binding that lends it (see `lend_response`): `Declare::decode` builds a
+    // default, decodes into it, and returns it by value, and the `?` that unwraps it moves it again,
+    // so three copies of the largest message a record can be were in this frame.
+    let mut declare = wz_codecs::declare::Declare::default();
+    wz_codecs::declare::Declare::decode_into(cursor, &mut declare)
         .map_err(crate::parse_error::InboundParseError::Codec)?;
     admit_lent(declare_view_admission(&declare))?;
     each(WalkedRecord::Declare(&declare))
@@ -1522,7 +1528,9 @@ fn lend_response_final(
     cursor: &mut SceCursor<'_>,
     each: &mut impl FnMut(WalkedRecord<'_>) -> Result<(), crate::parse_error::InboundParseError>,
 ) -> Result<(), crate::parse_error::InboundParseError> {
-    let response_final = wz_codecs::response_final::ResponseFinal::decode(cursor)
+    // Decoded into the binding that lends it (see `lend_declare`).
+    let mut response_final = wz_codecs::response_final::ResponseFinal::default();
+    wz_codecs::response_final::ResponseFinal::decode_into(cursor, &mut response_final)
         .map_err(crate::parse_error::InboundParseError::Codec)?;
     admit_lent(response_final_view_admission(&response_final))?;
     each(WalkedRecord::ResponseFinal(&response_final))
@@ -1542,7 +1550,9 @@ fn lend_interest(
     cursor: &mut SceCursor<'_>,
     each: &mut impl FnMut(WalkedRecord<'_>) -> Result<(), crate::parse_error::InboundParseError>,
 ) -> Result<(), crate::parse_error::InboundParseError> {
-    let interest = wz_codecs::interest::Interest::decode(cursor)
+    // Decoded into the binding that lends it (see `lend_declare`).
+    let mut interest = wz_codecs::interest::Interest::default();
+    wz_codecs::interest::Interest::decode_into(cursor, &mut interest)
         .map_err(crate::parse_error::InboundParseError::Codec)?;
     admit_lent(interest_view_admission(&interest))?;
     each(WalkedRecord::Interest(&interest))
@@ -1562,7 +1572,9 @@ fn lend_oam(
     cursor: &mut SceCursor<'_>,
     each: &mut impl FnMut(WalkedRecord<'_>) -> Result<(), crate::parse_error::InboundParseError>,
 ) -> Result<(), crate::parse_error::InboundParseError> {
-    let oam = wz_codecs::oam::Oam::decode(cursor)
+    // Decoded into the binding that holds it (see `lend_declare`).
+    let mut oam = wz_codecs::oam::Oam::default();
+    wz_codecs::oam::Oam::decode_into(cursor, &mut oam)
         .map_err(crate::parse_error::InboundParseError::Codec)?;
     admit_lent(oam_view_admission(&oam))?;
     each(WalkedRecord::Skipped)
