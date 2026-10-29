@@ -1992,6 +1992,17 @@ impl SharedSession {
         let _ = locators;
     }
 
+    /// The graph of each region this node's admin space answers a `linkstate` query for, as text,
+    /// by the region's name: a node that gossips holds one, its `north` region. A node that does
+    /// not gossip holds none.
+    pub fn linkstate_regions(&self) -> Vec<(String, String)> {
+        #[cfg(feature = "gossip")]
+        if let Some(gossip) = &self.gossip {
+            return vec![("north".to_owned(), gossip.graph_text())];
+        }
+        Vec::new()
+    }
+
     /// Send what the gossip plane answered, each message on the face it names. `new_face` is
     /// the face a caller holds the registry lock for and has not inserted yet, with its actions;
     /// every other face is looked up in `faces`.

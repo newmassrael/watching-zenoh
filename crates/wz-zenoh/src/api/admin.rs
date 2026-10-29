@@ -281,6 +281,32 @@ pub(crate) fn init(session: WeakSession) {
         None,
     );
 
+    // The graph of each region the node holds, `@/<own_zid>/<whatami>/linkstate/<region>`
+    // (`zenoh/src/net/runtime/adminspace.rs` @ `add_handler!("linkstate", "*", linkstate_data);`),
+    // served by a node that runs the runtime's admin space.
+    if admin_enabled {
+        let own_zid = session.zid().into_keyexpr();
+        let prefix: OwnedKeyExpr = format!("@/{own_zid}/{whatami}/linkstate")
+            .try_into()
+            .expect("the linkstate space of a node is a key");
+        let linkstate = session.declare_queryable_inner(
+            &KeyExpr::from(&prefix / KE_STARSTAR),
+            true,
+            Locality::SessionLocal,
+            Callback::from({
+                let session = session.clone();
+                move |query| on_linkstate_query(&session, &prefix, query)
+            }),
+            None,
+        );
+        if let Err(e) = linkstate {
+            tracing::error!(
+                "Unable to serve the linkstate space of the admin space: {}",
+                e
+            );
+        }
+    }
+
     // Queryable simulating advanced publisher to allow advanced subscriber to receive historical data
     let prefix = ke_prefix(&own_zid);
     let adv_prefix = ke_adv_prefix(&own_zid);
@@ -372,6 +398,27 @@ fn reply<T: serde::Serialize>(
                     .wait();
             }
             Err(e) => tracing::debug!("Admin query error: {}", e),
+        }
+    }
+}
+
+/// Answer a query on the `linkstate` space: one reply for each region whose key the query
+/// intersects, with the graph of that region as text
+/// (`zenoh/src/net/runtime/adminspace.rs` @ `fn linkstate_data`).
+fn on_linkstate_query(session: &WeakSession, prefix: &keyexpr, query: Query) {
+    for (region, graph) in session.linkstate_regions() {
+        let Ok(region) = keyexpr::new(region.as_str()) else {
+            continue;
+        };
+        let reply_key = prefix / region;
+        if query.key_expr().intersects(&reply_key) {
+            if let Err(e) = query
+                .reply(reply_key, graph)
+                .encoding(Encoding::TEXT_PLAIN)
+                .wait()
+            {
+                tracing::error!("Error sending AdminSpace reply: {:?}", e);
+            }
         }
     }
 }

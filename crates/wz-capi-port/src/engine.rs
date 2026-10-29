@@ -88,6 +88,13 @@ pub trait SessionEngine: Send + Sync + 'static {
         false
     }
 
+    /// The graph of each region the node's admin space answers a `linkstate` query for, as text
+    /// by the region's name. An engine that holds no such graph lists none, which is the
+    /// provided answer.
+    fn linkstate_regions(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
     /// The locators this node's listeners actually got, without the loopback ones: where a
     /// neighbour can dial it. A node that listens on nothing, and an engine that listens on
     /// nothing at all, has none, which is the provided answer.

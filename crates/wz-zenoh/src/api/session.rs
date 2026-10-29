@@ -585,6 +585,16 @@ impl Engine {
         }
     }
 
+    /// The graph of each region the session's admin space answers a `linkstate` query for, as
+    /// text, by the region's name. A router node holds no graph the session reads yet.
+    #[cfg(feature = "unstable")]
+    fn linkstate_regions(&self) -> Vec<(String, String)> {
+        match self {
+            Engine::Tokio(state) => state.shared.as_engine().linkstate_regions(),
+            Engine::Router(_) => Vec::new(),
+        }
+    }
+
     /// Tell `sink` each time a face comes up or goes down, from now on, until
     /// [`Engine::unwatch_faces`] is called with the id returned.
     #[cfg(feature = "unstable")]
@@ -1227,6 +1237,11 @@ impl Engine {
 
     #[cfg(feature = "unstable")]
     fn listen_locators(&self) -> Vec<String> {
+        match *self {}
+    }
+
+    #[cfg(feature = "unstable")]
+    fn linkstate_regions(&self) -> Vec<(String, String)> {
         match *self {}
     }
 
@@ -4453,6 +4468,13 @@ impl WeakSession {
         transport: Option<&Transport>,
     ) -> Box<dyn Iterator<Item = Link> + Send + Sync> {
         self.0.links(transport)
+    }
+
+    /// The graph of each region the admin space answers a `linkstate` query for, as text, by the
+    /// region's name.
+    #[cfg(feature = "unstable")]
+    pub(crate) fn linkstate_regions(&self) -> Vec<(String, String)> {
+        self.0.engine.linkstate_regions()
     }
 
     /// Declare a transport events listener. The id of the engine's watch, released at undeclare or
@@ -11823,6 +11845,105 @@ mod tests {
             }
             drop((queryable, router));
             assert!(answered, "no answer: {log:#?}");
+        }
+
+        /// With `scouting/gossip/multihop` on every node, a peer hears of the peers two links away:
+        /// peer 3 dials peer 2, which dials the router, which holds peer 1.
+        #[cfg(feature = "unstable")]
+        #[test]
+        fn with_multihop_a_peer_hears_of_the_peer_two_links_away() {
+            use std::time::{Duration, Instant};
+
+            let node = |id: &str, mode: &str, extra: &str| {
+                open(
+                    Config::from_json5(&format!(
+                        r#"{{ id: "{id}", mode: "{mode}", {extra}
+                              scouting: {{ multicast: {{ enabled: false }},
+                                           gossip: {{ multihop: true, autoconnect: ["router"] }} }},
+                              adminspace: {{ enabled: true }} }}"#
+                    ))
+                    .expect("a configuration zenoh reads"),
+                )
+                .wait()
+                .expect("a node opens")
+            };
+            let router_port = unautoselected_port();
+            let peer_port = unautoselected_port();
+            let _router = node(
+                "a1b2c1",
+                "router",
+                &format!(r#"listen: {{ endpoints: ["tcp/127.0.0.1:{router_port}"] }},"#),
+            );
+            std::thread::sleep(Duration::from_millis(500));
+            let peer1 = node(
+                "a1b2c2",
+                "peer",
+                &format!(r#"connect: {{ endpoints: ["tcp/127.0.0.1:{router_port}"] }},"#),
+            );
+            std::thread::sleep(Duration::from_millis(500));
+            let peer2 = node(
+                "a1b2c3",
+                "peer",
+                &format!(
+                    r#"connect: {{ endpoints: ["tcp/127.0.0.1:{router_port}"] }},
+                       listen: {{ endpoints: ["tcp/127.0.0.1:{peer_port}"] }},"#
+                ),
+            );
+            std::thread::sleep(Duration::from_millis(500));
+            let peer3 = node(
+                "a1b2c4",
+                "peer",
+                &format!(r#"connect: {{ endpoints: ["tcp/127.0.0.1:{peer_port}"] }},"#),
+            );
+            let graph_of = |peer: &Session| -> String {
+                let replies = peer
+                    .get("@/*/peer/linkstate/north")
+                    .timeout(Duration::from_secs(2))
+                    .wait()
+                    .expect("asks");
+                replies
+                    .recv_timeout(Duration::from_secs(3))
+                    .ok()
+                    .flatten()
+                    .and_then(|reply| {
+                        reply
+                            .into_result()
+                            .ok()
+                            .map(|sample| sample.payload().try_to_string().unwrap().into_owned())
+                    })
+                    .unwrap_or_default()
+            };
+            let deadline = Instant::now() + Duration::from_secs(6);
+            let (mut text2, mut text3) = (String::new(), String::new());
+            while Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(300));
+                text2 = graph_of(&peer2);
+                text3 = graph_of(&peer3);
+                if text3.contains("a1b2c2") {
+                    break;
+                }
+            }
+            assert!(
+                text3.contains("a1b2c2"),
+                "peer 3 never heard of peer 1.\n--- peer 2 ---\n{text2}\n--- peer 3 ---\n{text3}"
+            );
+
+            // And it hears that peer 1 is gone.
+            peer1.close().wait().expect("closes");
+            let deadline = Instant::now() + Duration::from_secs(6);
+            while Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(300));
+                text2 = graph_of(&peer2);
+                text3 = graph_of(&peer3);
+                if !text3.contains("a1b2c2") {
+                    break;
+                }
+            }
+            assert!(
+                !text3.contains("a1b2c2"),
+                "peer 3 never heard peer 1 was gone.\n--- peer 2 ---\n{text2}\n--- peer 3 \
+                 ---\n{text3}"
+            );
         }
 
         /// A router that dials a router which is not listening yet keeps dialing, and once the

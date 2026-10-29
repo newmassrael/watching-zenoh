@@ -180,6 +180,10 @@ impl SessionEngine for SharedSession {
         SharedSession::unwatch_faces(self, id)
     }
 
+    fn linkstate_regions(&self) -> Vec<(String, String)> {
+        SharedSession::linkstate_regions(self)
+    }
+
     fn publish_on_wire_all(
         &self,
         keyexpr: &str,
