@@ -298858,6 +298858,44 @@
         "Also owed: a node that gossips tells the faces it keeps when a face of its own goes down only through the router's flood; the gossip core itself sends nothing when a face goes down under multihop, as a chain of peers without a router would need; the files that run none, a build without unstable serves no admin key of its own, a lane for the harness, the margin of the main job, the pin bump to 1.10.2."
       ]
     },
+    "Round 3927": {
+      "decision_summary": "A router node answers the admin space of its own: the root with its sessions and locators, the metrics, the entities listed by kind while they are declared and not after, and the successor routes of its graph; its linkstate keys answer for the router and the peer region. The answers are the library's, built per query from views of the router's tables and hosted on the forwarder as a queryable. The node's own publishers and queriers are kept as reporting-only future interests of its Local face, so they are listed as a client's are. Upstream's adminspace read test still asks for the multicast group of a router and for the plugins.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward.rs: declare_local_interest and undeclare_local_interest keep the interest of the node's own publisher or querier under the Local face, and the fold of interests names that face with the node's own zid among the clients.",
+        "crates/wz-zenoh/src/api/session.rs: the router engine declares and undeclares those interests, hands out RouterAdminViews and hosts a queryable on the router; its linkstate regions are the router graph under north and the peer graph under the peer region; a test of a router that lists each kind while declared and the route toward a router that dialed.",
+        "crates/wz-zenoh/src/api/admin.rs: host_router_admin answers @/<zid>/router/** with the root, the declarations, the sessions, the routes and the metrics, as the router host of the demo does.",
+        "crates/wz-zenoh/Cargo.toml: the engine feature reaches the session core, and the runtime is built with the admin space features it answers from."
+      ],
+      "verification_bullets": [
+        "Locally: clippy with warnings denied passes for the runtime with all features, the core of the C API with all features, and the top crate with the default features and with unstable; the runtime's router forwarder and future interest tests pass (424) and the top crate's library tests pass (204, one ignored), among them the new one. The 36 static gates pass with no pin or budget moved. Not run: the Z8 harness over the adminspace file, the other upstream files, the hosted run. The adminspace read test of upstream is not expected to pass yet: it asks for a router multicast group."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed, first: the query lost as the direct link of two peers forms (the ignored test of the top crate); it keeps three_node_combination from finishing after other tests, and with it the routing file in the harness. Where the reply or the final of that query goes on the new link wants a trace of the frames, which the engine does not have.",
+        "Owed, from the router session: a router that joins a multicast group, which the adminspace read test asks for, with the locators of its listeners; the plugins keys of that test; the metadata of a push that a face sent, which a hosted subscriber is not handed; a router liveliness subscriber refused on egress is not ended; the sessions a router holds as the admin sessions leg.",
+        "Also owed: the gossip core itself sends nothing when a face goes down under multihop, as a chain of peers without a router would need; the files that run none, a build without unstable serves no admin key of its own, a lane for the harness, the margin of the main job, the pin bump to 1.10.2."
+      ],
+      "publishable_decision_summary": "A router node answers the admin space of its own: the root with its sessions and locators, the metrics, the entities listed by kind while they are declared and not after, and the successor routes of its graph; its linkstate keys answer for the router and the peer region. The answers are the library's, built per query from views of the router's tables and hosted on the forwarder as a queryable. The node's own publishers and queriers are kept as reporting-only future interests of its Local face, so they are listed as a client's are. Upstream's adminspace read test still asks for the multicast group of a router and for the plugins.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward.rs: declare_local_interest and undeclare_local_interest keep the interest of the node's own publisher or querier under the Local face, and the fold of interests names that face with the node's own zid among the clients.",
+        "crates/wz-zenoh/src/api/session.rs: the router engine declares and undeclares those interests, hands out RouterAdminViews and hosts a queryable on the router; its linkstate regions are the router graph under north and the peer graph under the peer region; a test of a router that lists each kind while declared and the route toward a router that dialed.",
+        "crates/wz-zenoh/src/api/admin.rs: host_router_admin answers @/<zid>/router/** with the root, the declarations, the sessions, the routes and the metrics, as the router host of the demo does.",
+        "crates/wz-zenoh/Cargo.toml: the engine feature reaches the session core, and the runtime is built with the admin space features it answers from."
+      ],
+      "publishable_verification_bullets": [
+        "Locally: clippy with warnings denied passes for the runtime with all features, the core of the C API with all features, and the top crate with the default features and with unstable; the runtime's router forwarder and future interest tests pass (424) and the top crate's library tests pass (204, one ignored), among them the new one. The 36 static gates pass with no pin or budget moved. Not run: the Z8 harness over the adminspace file, the other upstream files, the hosted run. The adminspace read test of upstream is not expected to pass yet: it asks for a router multicast group."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed, first: the query lost as the direct link of two peers forms (the ignored test of the top crate); it keeps three_node_combination from finishing after other tests, and with it the routing file in the harness. Where the reply or the final of that query goes on the new link wants a trace of the frames, which the engine does not have.",
+        "Owed, from the router session: a router that joins a multicast group, which the adminspace read test asks for, with the locators of its listeners; the plugins keys of that test; the metadata of a push that a face sent, which a hosted subscriber is not handed; a router liveliness subscriber refused on egress is not ended; the sessions a router holds as the admin sessions leg.",
+        "Also owed: the gossip core itself sends nothing when a face goes down under multihop, as a chain of peers without a router would need; the files that run none, a build without unstable serves no admin key of its own, a lane for the harness, the margin of the main job, the pin bump to 1.10.2."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
