@@ -298710,6 +298710,34 @@
         "Owed: a unit test of a group descriptor in the engine (the upstream file is its only test); the Join of a shared-memory group does not announce the extension, so a member's admin view of the transport does not say shared memory; a query value and a reply in shared memory, and the query and reply lists of the optimisation; the promotion is made by the top crate and not at the link; a differential of a ZShm over a link and a group to an upstream node; a router carries no shared memory. From the router session of this crate: regression_3 and the six clientviapeer (a peer that forwards between its faces), adminspace and routing. Also owed: qos/network through the admin space; transport/link/tls/close_link_on_expiration and the inline certificate keys; the capic-default size; a lane for the harness; the pin bump to 1.10.2."
       ]
     },
+    "Round 3923": {
+      "decision_summary": "The hosted interop job on macOS and Windows was red from the round that gave the router node a rich publish: the demo, which the job builds with the features of its host links and without pubsub-qos, did not compile. RouterForwarder::publish_qos built its options with the builders with_priority and with_express, which exist only where pubsub-qos does, and the field they set is public and always there. It now sets the field, as the code before that round did through the push metadata, so the level the node sends does not depend on the features of the build that holds it. The default level still carries no extension. The Windows C ABI job also failed once on a put too big for one frame (the free key's put was not delivered inside the harness window); it is not attributed, and the next hosted run reads it again.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward.rs: RouterForwarder::publish_qos sets the qos field of the options from QosLevel::from_parts, and leaves it unset at the default level."
+      ],
+      "verification_bullets": [
+        "Locally: the demo builds with the feature set the interop job builds it with (ws, tls, quic, udp-reliable, quic-datagram, routing-peer). Not run: the hosted interop job and the Windows C ABI job, which the next hosted run reads."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed: the Windows C ABI put-too-big-for-one-frame red at the round before, unattributed. A peer that listens and accepts sessions is the router node at node mode Peer upstream; measured with the node carrying it, the upstream liveliness file passes 45 of 46 and runs in a third of the time, but low_pass, matching, namespace, timestamp_instrumentation and shm regress, because the node does not carry their features for a peer yet. Kept out until it does."
+      ],
+      "publishable_decision_summary": "The hosted interop job on macOS and Windows was red from the round that gave the router node a rich publish: the demo, which the job builds with the features of its host links and without pubsub-qos, did not compile. RouterForwarder::publish_qos built its options with the builders with_priority and with_express, which exist only where pubsub-qos does, and the field they set is public and always there. It now sets the field, as the code before that round did through the push metadata, so the level the node sends does not depend on the features of the build that holds it. The default level still carries no extension. The Windows C ABI job also failed once on a put too big for one frame (the free key's put was not delivered inside the harness window); it is not attributed, and the next hosted run reads it again.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward.rs: RouterForwarder::publish_qos sets the qos field of the options from QosLevel::from_parts, and leaves it unset at the default level."
+      ],
+      "publishable_verification_bullets": [
+        "Locally: the demo builds with the feature set the interop job builds it with (ws, tls, quic, udp-reliable, quic-datagram, routing-peer). Not run: the hosted interop job and the Windows C ABI job, which the next hosted run reads."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed: the Windows C ABI put-too-big-for-one-frame red at the round before, unattributed. A peer that listens and accepts sessions is the router node at node mode Peer upstream; measured with the node carrying it, the upstream liveliness file passes 45 of 46 and runs in a third of the time, but low_pass, matching, namespace, timestamp_instrumentation and shm regress, because the node does not carry their features for a peer yet. Kept out until it does."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
