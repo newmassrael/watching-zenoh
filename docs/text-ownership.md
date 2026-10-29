@@ -252,6 +252,22 @@ carries about 6 KB of C library code wz does not, which is why the difference is
   kit are the same (2,000 queries of each document, answered). The first run of the get image, with
   `wz-session-mcu`'s `query-get` not yet turning `rx-response` on, never got a Response and the kit
   lane said so (no getter line in 150 s); that is the check this change leans on.
+- TAKEN, text -4,920 bytes (153,868 to 148,948 on the fixed image; -5,016 on the batching image and
+  -4,488 on the get image): the same for the control records of a peer, `rx-control`: the Declare, the
+  Interest and the Oam. The answering client sends no Interest and holds no token, and a router
+  declares a key expression to a face only when the face is on its north side or sent a key-expression
+  interest, and a subscriber only to a face with a matching interest (read in the pinned zenoh:
+  `zenoh/src/net/routing/dispatcher/resource.rs` @ `pub fn decl_key`, `zenoh/src/net/routing/hat/broker/pubsub.rs`
+  @ `.filter(|(_, i)| i.options.subscribers() && i.matches(res))`), so none reaches it; the node
+  keeps the limits of the remote tables at zero (`MAX_REMOTE_DECLS`, `MAX_INBOUND_SUB_INTERESTS`)
+  for the same reason. Turned on by `declare-subscriber`, `declare-token`, `liveliness-token`,
+  `liveliness-subscriber`, `liveliness-get`, `session-unicast-accept` and `session-multicast`; `query-get`
+  does not (a client that asks is answered, and told nothing it did not ask). `wz_session_core` fell
+  3,488 bytes and `wz_codecs` 1,354; the stack call contracts lost the sites of the Declare and the
+  Interest (`record` 3 to 1, `own-mapping` 1 to 0). The kit answered 2,000 queries of each document
+  and the get image's getter reported on its queries, as before. An experiment that stopped at taking
+  the three arms out of the walk measured 3,560 bytes, less than the 4,920 of the change, because the
+  verdict function they share and the sink arms were still linked.
 - NOT TAKEN, measured: `ClientNode::start` out of line (a call from the image's own `start`): the
   text was 161,700 bytes, 920 more than the image before, for the same frames: the node (152
   bytes) was passed by value across the call and the two functions each paid a prologue.

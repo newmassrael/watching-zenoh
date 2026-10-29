@@ -257,6 +257,10 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             # build (their gate is the codec's): without the feature they answer `None`.
             "rx-push",
             "rx-response",
+            # `rx-control` is the same kind of selector for the Declare, the Interest and the
+            # Oam of a peer: `InPlaceRecord::declare` and `interest` exist in every slot build
+            # and answer `None` without it.
+            "rx-control",
             # `pubsub-delete` and `pubsub-put` LEFT this list, by the R2386
             # route: the round that delivered a Push read in place to its
             # subscriber lent made the claim false. `pubsub` (a `pub mod`) now

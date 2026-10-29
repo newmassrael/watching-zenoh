@@ -176,6 +176,14 @@ macro_rules! own_wire {
         feature = "alloc",
         all(
             feature = "session-slot",
+            // Named by the arms of `lend_any_record`, each of which is a kind the build reads.
+            any(
+                feature = "codec-request",
+                all(feature = "codec-push", feature = "rx-push"),
+                all(feature = "codec-response", feature = "rx-response"),
+                all(feature = "codec-response-final", feature = "rx-response"),
+                feature = "rx-control"
+            ),
             any(
                 test,
                 feature = "session-unicast",
@@ -312,13 +320,17 @@ impl NetworkMessage {
 // nothing. Each item below is gated on the union of ITS callers, because the
 // workspace builds with warnings denied: an item wider than its callers is dead
 // code in a build that has none, and a caller wider than the item has no callee.
+//
+// A node reads only the kinds it asked for (`rx-push`, `rx-response`, `rx-control`), so on a build
+// with no allocator each verdict is a caller when its selector is on.
 #[cfg(any(
     feature = "alloc",
-    feature = "codec-declare",
-    feature = "codec-push",
+    all(feature = "codec-declare", feature = "rx-control"),
+    all(feature = "codec-push", feature = "rx-push"),
     all(
         feature = "codec-frame",
         feature = "codec-response",
+        feature = "rx-response",
         any(
             test,
             feature = "session-unicast",
@@ -328,6 +340,7 @@ impl NetworkMessage {
     all(
         feature = "codec-frame",
         feature = "session-slot",
+        any(feature = "rx-control", feature = "rx-response"),
         any(
             test,
             feature = "session-unicast",
@@ -372,6 +385,8 @@ fn judge_chain<E: crate::ext_view::ExtEntryView>(
         )
     )
 ))]
+// Unused in a slot build that reads no kind of record (no `rx-*`, no request codec).
+#[allow(dead_code)]
 fn judge_headers(
     carrier: crate::ext_admit::ExtCarrier,
     headers: Option<impl Iterator<Item = u8>>,
@@ -508,7 +523,10 @@ impl NetworkMessage {
 /// ([`NetworkMessage::ext_admission`]) and the Declare read where its frame lies
 /// (`declare_view_admission`), so the receive path that delivers a Declare
 /// without copying it refuses exactly what the one that copies it does.
-#[cfg(feature = "codec-declare")]
+#[cfg(all(
+    feature = "codec-declare",
+    any(feature = "alloc", feature = "rx-control")
+))]
 fn judge_declare_chains<E: crate::ext_view::ExtEntryView>(
     outer: Option<&[E]>,
     kind: crate::ext_admit::DeclarationKind,
@@ -524,6 +542,7 @@ fn judge_declare_chains<E: crate::ext_view::ExtEntryView>(
 #[cfg(all(
     feature = "codec-frame",
     feature = "codec-declare",
+    feature = "rx-control",
     feature = "session-slot",
     any(
         test,
@@ -555,6 +574,7 @@ fn declare_view_admission(
 /// [`NetworkMessage::ext_admission`] for an Interest read where its frame lies.
 #[cfg(all(
     feature = "codec-frame",
+    feature = "rx-control",
     feature = "session-slot",
     any(
         test,
@@ -595,6 +615,7 @@ fn response_final_view_admission(
 /// [`NetworkMessage::ext_admission`] for an Oam read where its frame lies.
 #[cfg(all(
     feature = "codec-frame",
+    feature = "rx-control",
     feature = "session-slot",
     any(
         test,
@@ -1140,6 +1161,10 @@ pub(crate) enum RecordForm {
     allow(dead_code)
 )]
 pub(crate) enum WalkedRecord<'r> {
+    /// Never made: it holds the lifetime in a build that reads no kind of record (a slot profile
+    /// with no `rx-*` and no request codec), where no other variant does.
+    #[allow(dead_code)]
+    Never(core::convert::Infallible, core::marker::PhantomData<&'r ()>),
     /// The record's owned message, the one entry of the buffer.
     #[cfg(feature = "alloc")]
     Owned(&'r mut RecordBuf),
@@ -1158,7 +1183,11 @@ pub(crate) enum WalkedRecord<'r> {
     Response(&'r wz_codecs::response::Response<'r>),
     /// A Declare decoded where the payload lies, valid for the call
     /// ([`RecordForm::LentControl`]).
-    #[cfg(all(feature = "session-slot", feature = "codec-declare"))]
+    #[cfg(all(
+        feature = "session-slot",
+        feature = "codec-declare",
+        feature = "rx-control"
+    ))]
     Declare(&'r wz_codecs::declare::Declare<'r>),
     /// A ResponseFinal decoded where the payload lies, valid for the call
     /// ([`RecordForm::LentControl`]).
@@ -1170,7 +1199,7 @@ pub(crate) enum WalkedRecord<'r> {
     ResponseFinal(&'r wz_codecs::response_final::ResponseFinal<'r>),
     /// An Interest decoded where the payload lies, valid for the call
     /// ([`RecordForm::LentControl`]).
-    #[cfg(feature = "session-slot")]
+    #[cfg(all(feature = "session-slot", feature = "rx-control"))]
     Interest(&'r wz_codecs::interest::Interest<'r>),
     /// A record the walk read and judged and no consumer reads further: an Oam, or
     /// the tail of a payload that opens with a MID this build has no decoder for
@@ -1349,6 +1378,8 @@ fn lend_record(
         feature = "session-slot"
     )
 ))]
+// Unused in a slot build that reads no kind of record (no `rx-*`, no request codec).
+#[allow(dead_code)]
 fn admit_lent(
     admission: crate::ext_admit::ExtAdmission,
 ) -> Result<(), crate::parse_error::InboundParseError> {
@@ -1454,6 +1485,8 @@ fn lend_response(
     )
 ))]
 enum Walk {
+    // Never made in a slot build that reads no kind of record (no `rx-*`, no request codec).
+    #[allow(dead_code)]
     Continue,
     End,
 }
@@ -1487,21 +1520,25 @@ fn lend_any_record(
         .map_err(crate::parse_error::InboundParseError::Codec)?[0]
         & 0x1F;
     match mid {
-        // What the build reads off the wire (`rx-push`, `rx-response`): a kind it did not ask for
-        // is a MID with no decoder here, and ends the walk of its frame.
+        // What the build reads off the wire (`rx-push`, `rx-response`, `rx-control`): a kind it did
+        // not ask for is a MID with no decoder here, and ends the walk of its frame.
         #[cfg(all(feature = "codec-push", feature = "rx-push"))]
         wire_const::N_MID_PUSH => lend_push(cursor, each).map(|()| Walk::Continue),
         #[cfg(feature = "codec-request")]
         wire_const::N_MID_REQUEST => lend_request(cursor, each).map(|()| Walk::Continue),
         #[cfg(all(feature = "codec-response", feature = "rx-response"))]
         wire_const::N_MID_RESPONSE => lend_response(cursor, each).map(|()| Walk::Continue),
-        #[cfg(feature = "codec-declare")]
-        wire_const::N_MID_DECLARE => lend_declare(cursor, each).map(|()| Walk::Continue),
         #[cfg(all(feature = "codec-response-final", feature = "rx-response"))]
         wire_const::N_MID_RESPONSE_FINAL => {
             lend_response_final(cursor, each).map(|()| Walk::Continue)
         }
+        // The control records of a peer (`rx-control`): the declarations it makes, the interests it
+        // takes in ours and its OAM.
+        #[cfg(all(feature = "codec-declare", feature = "rx-control"))]
+        wire_const::N_MID_DECLARE => lend_declare(cursor, each).map(|()| Walk::Continue),
+        #[cfg(feature = "rx-control")]
         wire_const::N_MID_INTEREST => lend_interest(cursor, each).map(|()| Walk::Continue),
+        #[cfg(feature = "rx-control")]
         wire_const::N_MID_OAM => lend_oam(cursor, each).map(|()| Walk::Continue),
         _ => lend_unknown(cursor, each),
     }
@@ -1510,6 +1547,7 @@ fn lend_any_record(
 #[cfg(all(
     feature = "codec-frame",
     feature = "codec-declare",
+    feature = "rx-control",
     feature = "session-slot",
     any(
         test,
@@ -1558,6 +1596,7 @@ fn lend_response_final(
 
 #[cfg(all(
     feature = "codec-frame",
+    feature = "rx-control",
     feature = "session-slot",
     any(
         test,
@@ -1580,6 +1619,7 @@ fn lend_interest(
 
 #[cfg(all(
     feature = "codec-frame",
+    feature = "rx-control",
     feature = "session-slot",
     any(
         test,

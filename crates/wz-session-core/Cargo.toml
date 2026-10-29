@@ -445,6 +445,15 @@ codec-fragment = ["wz-codecs/codec-fragment"]
 # read as a MID this build has no decoder for, and ends the walk of its frame.
 rx-push = []
 rx-response = []
+# The control records of a peer: the declarations it makes (a key expression it aliases, a subscriber,
+# a queryable, a token), the interests it takes in ours and its OAM. A router declares a key
+# expression to a face only when the face is on its north side or sent a key-expression interest
+# (`zenoh/src/net/routing/dispatcher/resource.rs` @ `pub fn decl_key`), and a subscriber only to a
+# face with a matching interest (`zenoh/src/net/routing/hat/broker/pubsub.rs` @
+# `.filter(|(_, i)| i.options.subscribers() && i.matches(res))`). A node that sends no Interest,
+# holds no token for an interest to find and takes no session a peer opens is therefore sent none of
+# these, so the Zephyr client that only answers does not decode them (docs/text-ownership.md).
+rx-control = []
 codec-push = ["codec-frame", "wz-codecs/codec-push", "wz-codecs-test-support/codec-push"]
 codec-request = ["codec-frame", "wz-codecs/codec-request", "wz-codecs-test-support/codec-request"]
 codec-response = ["codec-frame", "wz-codecs/codec-response", "wz-codecs-test-support/codec-response"]
@@ -668,7 +677,7 @@ session-unicast = ["dep:sce-rust-runtime"]
 session-unicast-open = []
 # A node that takes the sessions a peer opens is asked and written to by that peer: it receives
 # whatever the peer sends.
-session-unicast-accept = ["rx-push", "rx-response"]
+session-unicast-accept = ["rx-push", "rx-response", "rx-control"]
 
 # clock-quality (docs/observation-plane.md M1) — the clock-quality statechart
 # (`sources/session/clock_quality.scxml`): how far a node may trust the time it stamps with
@@ -767,7 +776,7 @@ transport-multilink = ["session-extauth"]
 # agnostic FSM + Router core, host-testable with no I/O. The
 # wz-runtime-tokio side forwards a `transport-multicast` foundational
 # feature here when the glue lands.
-session-multicast = ["dep:sce-rust-runtime", "rx-push", "rx-response"]
+session-multicast = ["dep:sce-rust-runtime", "rx-push", "rx-response", "rx-control"]
 
 # R311gi gc-2c — statechart switchboard (the AP dynamic
 # keyexpr -> SCXML-domain-event inbound adapter). Gates the
@@ -917,7 +926,7 @@ query-reply = ["codec-response"]
 # this plane reaches. It used to arrive by accident: the builder was
 # `codec-declare`-gated and this feature pulls `codec-declare`, so the
 # dependency held without ever being declared. Now it is declared.
-declare-subscriber = ["codec-declare", "declare-final", "rx-push"]
+declare-subscriber = ["codec-declare", "declare-final", "rx-push", "rx-control"]
 declare-queryable = ["codec-declare"]
 # R311jf — keyexpr matching composition toggles (§5.6). Gate-only (no
 # dep): each strips a branch in `keyexpr_match.rs` (an always-compiled
@@ -958,7 +967,7 @@ keyexpr-prefix = []
 # reference names), and the per-session slot profile has no such table yet, so a
 # build that declares keyexprs takes the heap profile's.
 declare-keyexpr = ["codec-declare", "alloc"]
-declare-token = ["codec-declare"]
+declare-token = ["codec-declare", "rx-control"]
 declare-final = ["codec-declare"]
 declare-interest = ["codec-declare"]
 declare-undeclare = ["codec-declare"]
@@ -968,14 +977,14 @@ declare-undeclare = ["codec-declare"]
 # blocks until that terminator arrives
 # (`vendor/zenoh-pico/src/session/liveliness.c` @
 # `_z_liveliness_unregister_pending_query`).
-liveliness-token = ["codec-declare", "declare-final"]
-liveliness-subscriber = ["codec-declare"]
+liveliness-token = ["codec-declare", "declare-final", "rx-control"]
+liveliness-subscriber = ["codec-declare", "rx-control"]
 # liveliness-get — requester-side snapshot get. The CURRENT Interest +
 # the inbound DeclToken / DeclFinal reply decode are the declaration
 # plane, so the dependency is `codec-declare` (NOT the query / Request
 # plane). The reply-delivery surface reuses the un-gated
 # `reply_sink::ReplySink` seam, so no query-get / codec-response edge.
-liveliness-get = ["codec-declare"]
+liveliness-get = ["codec-declare", "rx-control"]
 
 # R311kl — transport-batching gates ONLY the TX coalescing machinery
 # (`BatchTx` accumulation arm + the batch_start/flush/stop window),

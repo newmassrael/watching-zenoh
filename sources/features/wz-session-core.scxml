@@ -48,8 +48,8 @@
   <sce:feature name="declare-interest" requires="codec-declare"/>
   <sce:feature name="declare-keyexpr" requires="alloc codec-declare"/>
   <sce:feature name="declare-queryable" requires="codec-declare"/>
-  <sce:feature name="declare-subscriber" requires="codec-declare declare-final rx-push"/>
-  <sce:feature name="declare-token" requires="codec-declare"/>
+  <sce:feature name="declare-subscriber" requires="codec-declare declare-final rx-control rx-push"/>
+  <sce:feature name="declare-token" requires="codec-declare rx-control"/>
   <sce:feature name="declare-undeclare" requires="codec-declare"/>
   <sce:feature name="deferred-fire" requires="alloc"/>
   <sce:feature name="dissect" requires="alloc codec-close codec-declare codec-fragment codec-frame codec-init-body codec-join codec-keep-alive codec-open-body codec-push codec-request codec-response codec-response-final"/>
@@ -64,9 +64,9 @@
   <sce:feature name="keyexpr-wildcard-double"/>
   <sce:feature name="keyexpr-wildcard-single"/>
   <sce:feature name="lifecycle-contract"/>
-  <sce:feature name="liveliness-get" requires="codec-declare"/>
-  <sce:feature name="liveliness-subscriber" requires="codec-declare"/>
-  <sce:feature name="liveliness-token" requires="codec-declare declare-final"/>
+  <sce:feature name="liveliness-get" requires="codec-declare rx-control"/>
+  <sce:feature name="liveliness-subscriber" requires="codec-declare rx-control"/>
+  <sce:feature name="liveliness-token" requires="codec-declare declare-final rx-control"/>
   <sce:feature name="multicast-declarations" requires="alloc codec-declare codec-push session-multicast"/>
   <sce:feature name="multicast-ingress-gate" requires="alloc session-multicast"/>
   <sce:feature name="pubsub-attachment" requires="attachment-bytes"/>
@@ -95,6 +95,7 @@
   <sce:feature name="reply-source-info"/>
   <sce:feature name="resource-snapshot"/>
   <sce:feature name="routing-namespace" requires="alloc keyexpr-prefix"/>
+  <sce:feature name="rx-control"/>
   <sce:feature name="rx-push"/>
   <sce:feature name="rx-response"/>
   <sce:feature name="rx-shared-bytes" requires="alloc"/>
@@ -107,11 +108,11 @@
   <sce:feature name="session-extqos" requires="transport-qos"/>
   <sce:feature name="session-extshm" requires="session-unicast transport-shm"/>
   <sce:feature name="session-matching" requires="alloc keyexpr-includes"/>
-  <sce:feature name="session-multicast" requires="rx-push rx-response"/>
+  <sce:feature name="session-multicast" requires="rx-control rx-push rx-response"/>
   <sce:feature name="session-reconnect" requires="alloc"/>
   <sce:feature name="session-slot" requires="bounded-heapless storage-profile tx-lend-only"/>
   <sce:feature name="session-unicast"/>
-  <sce:feature name="session-unicast-accept" requires="rx-push rx-response"/>
+  <sce:feature name="session-unicast-accept" requires="rx-control rx-push rx-response"/>
   <sce:feature name="session-unicast-open"/>
   <sce:feature name="storage-aligner" requires="storage-replication"/>
   <sce:feature name="storage-backend" requires="alloc"/>
