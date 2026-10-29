@@ -299006,6 +299006,44 @@
         "Owed: the regions file, in order: the gateway partition (gateway/south, with the region names of the remote's Init) on the router node and the peer node; the peer that holds a multicast group and dials what it scouts as a node; the client that holds a group; the tracing spans of the pubsub and queque kinds. Upstream routing gossip_regression_1 and gossip_regression_2 are with the peer-on-router session. The ledger entry of round 3929 lists liveliness regression_3 as owed: it passed in the run of that round (46 of 46). Query and reply in shared memory, the Join extension of a group, and the pin bump to 1.10.2 stay owed."
       ]
     },
+    "Round 3931": {
+      "decision_summary": "gateway/south was read by the config and carried by the demo's flags alone: a router node of the API placed every peer in one south region, so peers of different regions were told of each other and linked (upstream's regions_gossip). The plan and the stance now carry the partition and the node applies it (RouterForwarder::with_south_partition) before any face registers, so a remote is placed by its role, zid, interfaces and the region name it announced (region_name, last round) and hears of its own region alone; regions_gossip passes and a unit test holds it. Two faults met on the way: a node that listens and dials the peers it scouts meets one remote on a dialled and an accepted link at once, and a debug_assert on the second face panicked the drive thread, so the refused link is closed with MaxLinks as zenoh does; failures of the dial setup and of a runtime build said nothing and now say why. The harness raises the open files limit of its runs (a dozen sessions pass 1,024).",
+      "changes_bullets": [
+        "crates/wz-capi-core/src/open_plan.rs: OpenPlan.gateway_south, read from the node config, handed to the stance. crates/wz-capi-core/src/drive.rs: OpenStance.gateway_south; prepare_dial logs why the dial setup failed. crates/wz-capi-pico/src/session.rs: the stance of a pico session holds the auto preset.",
+        "crates/wz-capi-core/src/drive/router_node.rs: open_router_blocking applies the partition to the forwarder before any face registers, for a router and for a peer node.",
+        "crates/wz-capi-core/src/faces.rs: CApiForwarder::register closes the link the registry refuses (MaxLinks) where it asserted.",
+        "crates/wz-zenoh-runtime/src/lib.rs: the panic of a runtime that cannot be built carries the error.",
+        "crates/wz-zenoh/src/api/session.rs: tests that a router keeps the regions of its peers apart, that peers of one region on groups of their own open, and that a peer names its region; the node matching test waits for the callback of its queue.",
+        "scripts/lib/z8_upstream_suite.py: the open files limit of a run is raised to 65,536. scripts/lib/capability_cost_gate.py: capic-client-small 1,969,000 and the note of capic-default."
+      ],
+      "verification_bullets": [
+        "Locally: clippy -D warnings of wz-capi-core (three feature sets), wz-capi-pico, zenoh-runtime and zenoh (with and without unstable); the unit tests of wz-capi-core (136), zenoh-runtime and the top crate (219, with and without unstable; the node matching test 8 of 8 repeated); the static gates (the cost gate measured capic-client-small at 1,965,443 and capic-default at 9,333,524, within the budgets after the move). The upstream regions file: regions_gossip passes; scenario 8 putsub passes; scenarios 3, 5 and 6 deliver and stop at the count of tracing spans. Not run: the hosted lanes; the whole regions file (the failing tests wait out a minute each)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed, from the regions file: a client that holds a multicast group and keeps a south of its own (scenario 1: the forwarder has no public client constructor and the node role has no client); a peer that holds a group, scouts and dials as a node with the partition (scenarios 2 and 3: such a peer stays on the registry, which has no hats); duplicates when two routers share a group (scenario 7 fails the unique timestamps of its subscribers); and the tracing spans of the pubsub, putsub and queque kinds, whose counts are upstream's steps and no observable of the API. Upstream routing gossip_regression_1 and _2 stay with the peer-on-router session. Query and reply in shared memory, the Join extension of a group, and the pin bump to 1.10.2 stay owed."
+      ],
+      "publishable_decision_summary": "gateway/south was read by the config and carried by the demo's flags alone: a router node of the API placed every peer in one south region, so peers of different regions were told of each other and linked (upstream's regions_gossip). The plan and the stance now carry the partition and the node applies it (RouterForwarder::with_south_partition) before any face registers, so a remote is placed by its role, zid, interfaces and the region name it announced (region_name, last round) and hears of its own region alone; regions_gossip passes and a unit test holds it. Two faults met on the way: a node that listens and dials the peers it scouts meets one remote on a dialled and an accepted link at once, and a debug_assert on the second face panicked the drive thread, so the refused link is closed with MaxLinks as zenoh does; failures of the dial setup and of a runtime build said nothing and now say why. The harness raises the open files limit of its runs (a dozen sessions pass 1,024).",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-core/src/open_plan.rs: OpenPlan.gateway_south, read from the node config, handed to the stance. crates/wz-capi-core/src/drive.rs: OpenStance.gateway_south; prepare_dial logs why the dial setup failed. crates/wz-capi-pico/src/session.rs: the stance of a pico session holds the auto preset.",
+        "crates/wz-capi-core/src/drive/router_node.rs: open_router_blocking applies the partition to the forwarder before any face registers, for a router and for a peer node.",
+        "crates/wz-capi-core/src/faces.rs: CApiForwarder::register closes the link the registry refuses (MaxLinks) where it asserted.",
+        "crates/wz-zenoh-runtime/src/lib.rs: the panic of a runtime that cannot be built carries the error.",
+        "crates/wz-zenoh/src/api/session.rs: tests that a router keeps the regions of its peers apart, that peers of one region on groups of their own open, and that a peer names its region; the node matching test waits for the callback of its queue.",
+        "scripts/lib/z8_upstream_suite.py: the open files limit of a run is raised to 65,536. scripts/lib/capability_cost_gate.py: capic-client-small 1,969,000 and the note of capic-default."
+      ],
+      "publishable_verification_bullets": [
+        "Locally: clippy -D warnings of wz-capi-core (three feature sets), wz-capi-pico, zenoh-runtime and zenoh (with and without unstable); the unit tests of wz-capi-core (136), zenoh-runtime and the top crate (219, with and without unstable; the node matching test 8 of 8 repeated); the static gates (the cost gate measured capic-client-small at 1,965,443 and capic-default at 9,333,524, within the budgets after the move). The upstream regions file: regions_gossip passes; scenario 8 putsub passes; scenarios 3, 5 and 6 deliver and stop at the count of tracing spans. Not run: the hosted lanes; the whole regions file (the failing tests wait out a minute each)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed, from the regions file: a client that holds a multicast group and keeps a south of its own (scenario 1: the forwarder has no public client constructor and the node role has no client); a peer that holds a group, scouts and dials as a node with the partition (scenarios 2 and 3: such a peer stays on the registry, which has no hats); duplicates when two routers share a group (scenario 7 fails the unique timestamps of its subscribers); and the tracing spans of the pubsub, putsub and queque kinds, whose counts are upstream's steps and no observable of the API. Upstream routing gossip_regression_1 and _2 stay with the peer-on-router session. Query and reply in shared memory, the Join extension of a group, and the pin bump to 1.10.2 stay owed."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
