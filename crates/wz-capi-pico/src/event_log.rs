@@ -29,6 +29,14 @@ pub const WZ_EXT_EVENT_EMPTY: u8 = 1;
 /// What a read found: events were overwritten before they were read; `sequence` is how many.
 pub const WZ_EXT_EVENT_LOST: u8 = 2;
 
+/// The level of every event the library writes (a program's own levels are its own).
+pub const WZ_EXT_EVENT_LEVEL_LIBRARY: u8 = wz_node_time::event_log::library::LIBRARY_LEVEL;
+/// The first source number the library uses; a program's sources are below it.
+pub const WZ_EXT_EVENT_SOURCE_LIBRARY: u16 = wz_node_time::event_log::library::LIBRARY_SOURCE_BASE;
+/// A supervised checkpoint missed its deadline. One integer: the checkpoint's number.
+pub const WZ_EXT_EVENT_SOURCE_SUPERVISION_EXPIRED: u16 =
+    wz_node_time::event_log::library::SUPERVISION_EXPIRED;
+
 /// One event, as `wz_ext_event_read` gives it.
 #[repr(C)]
 #[allow(non_camel_case_types)]

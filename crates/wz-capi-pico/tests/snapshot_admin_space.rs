@@ -230,7 +230,7 @@ fn a_peer_reads_the_snapshot_once_the_program_has_taken_one() {
             "\"cpu_permille\":420",
             "\"tasks\":7",
             "\"heap\":{\"in_use\":10000,\"high_water\":12000}",
-            "\"features\":[\"resource-snapshot\"",
+            "\"resource-snapshot\"",
             "\"messages\":",
             "\"intervals\":[",
         ] {

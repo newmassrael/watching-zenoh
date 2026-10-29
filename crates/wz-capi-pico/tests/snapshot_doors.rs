@@ -28,7 +28,7 @@ use wz_capi_pico::{
 use wz_runtime_tokio_test_support::free_port;
 use wz_session_core::caps::{SNAPSHOT_HISTOGRAM_BUCKETS, SNAPSHOT_PERIOD_MS};
 use wz_session_core::resource_snapshot::{
-    feature_bits, Snapshot, HAS_CPU, HAS_HEAP, HAS_TASKS, LAYOUT_VERSION,
+    feature_bits, Snapshot, HAS_CPU, HAS_EVENTS, HAS_HEAP, HAS_TASKS, LAYOUT_VERSION,
 };
 
 type Decoded = Snapshot<SNAPSHOT_HISTOGRAM_BUCKETS>;
@@ -111,7 +111,14 @@ fn a_snapshot_is_taken_on_its_period_and_read_as_bytes() {
         assert_eq!(wz_ext_snapshot_poll(z_session_loan(&listener)), 1);
         assert_eq!(wz_ext_snapshot_poll(z_session_loan(&listener)), 0);
         let first = read_latest();
-        assert_eq!(first.available, HAS_CPU | HAS_HEAP | HAS_TASKS);
+        // The ring's loss count is the library's to state, so it is measured exactly when the
+        // build has the ring, whatever the program's source answers.
+        let ring = if cfg!(feature = "event-ring") {
+            HAS_EVENTS
+        } else {
+            0
+        };
+        assert_eq!(first.available, HAS_CPU | HAS_HEAP | HAS_TASKS | ring);
         assert_eq!(first.cpu_permille, 420);
         assert_ne!(
             first.features & feature_bits::RESOURCE_SNAPSHOT,
@@ -172,7 +179,10 @@ fn a_snapshot_is_taken_on_its_period_and_read_as_bytes() {
         assert_eq!(wz_ext_snapshot_poll(z_session_loan(&listener)), 1);
         let second = read_latest();
         assert_eq!(second.sequence, first.sequence.wrapping_add(1));
-        assert_eq!(second.available, 0, "no source, nothing available");
+        assert_eq!(
+            second.available, ring,
+            "no source, so none of the platform's parts is available"
+        );
         assert_eq!(second.cpu_permille, 0);
         assert!(
             second.messages >= first.messages,

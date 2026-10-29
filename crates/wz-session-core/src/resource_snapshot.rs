@@ -80,6 +80,9 @@ pub const HAS_CPU: u8 = 1 << 0;
 pub const HAS_HEAP: u8 = 1 << 1;
 /// [`Snapshot::tasks`] was measured.
 pub const HAS_TASKS: u8 = 1 << 2;
+/// [`Snapshot::events_dropped`] was measured: the host has an event ring and said how many events
+/// it refused.
+pub const HAS_EVENTS: u8 = 1 << 3;
 
 /// The bits of [`Snapshot::features`], one for each instrument of the observation plane an image
 /// can have (`docs/observation-plane.md`). A bit is assigned once and never moved or reused, and a
@@ -113,6 +116,10 @@ pub struct ResourceReading {
     pub heap: Option<HeapReading>,
     /// How many tasks the node runs.
     pub tasks: Option<u16>,
+    /// How many events the node's event ring refused because it was full. Not the platform's to
+    /// say: the host that holds the ring fills it in after the platform's source has answered, so
+    /// the snapshot states the ring's loss in the one place a reader looks at a node's load.
+    pub events_dropped: Option<u32>,
 }
 
 /// Heap use as the platform counts it.
@@ -323,8 +330,14 @@ pub struct Snapshot<const B: usize> {
     pub sequence: u32,
     /// The host's time at the sample, in microseconds on its wrapping counter.
     pub taken_at_us: u32,
-    /// Which of the platform's fields were measured: [`HAS_CPU`], [`HAS_HEAP`], [`HAS_TASKS`].
+    /// Which of the fields were measured: [`HAS_CPU`], [`HAS_HEAP`], [`HAS_TASKS`],
+    /// [`HAS_EVENTS`].
     pub available: u8,
+    /// How many events the node's event ring refused because it was full, or 0 when not measured.
+    /// Bytes 20 to 24 of the record, which version 1 first wrote as zero: a snapshot written
+    /// before this field has [`HAS_EVENTS`] clear and reads as not measured, so the layout version
+    /// is the same.
+    pub events_dropped: u32,
     /// CPU use in thousandths, or 0 when not measured.
     pub cpu_permille: u16,
     /// Tasks, or 0 when not measured.
@@ -376,6 +389,11 @@ impl<const B: usize> Snapshot<B> {
             )?;
         } else {
             out.write_str(",\"heap\":null")?;
+        }
+        if self.available & HAS_EVENTS != 0 {
+            write!(out, ",\"events_dropped\":{}", self.events_dropped)?;
+        } else {
+            out.write_str(",\"events_dropped\":null")?;
         }
         out.write_str(",\"features\":[")?;
         let mut first = true;
@@ -486,7 +504,7 @@ impl<const B: usize> Snapshot<B> {
         put(out, 10, &0u16.to_le_bytes());
         put(out, 12, &self.sequence.to_le_bytes());
         put(out, 16, &self.taken_at_us.to_le_bytes());
-        put(out, 20, &0u32.to_le_bytes());
+        put(out, 20, &self.events_dropped.to_le_bytes());
         put(out, 24, &self.heap_in_use.to_le_bytes());
         put(out, 32, &self.heap_high_water.to_le_bytes());
         put(out, 40, &self.features.to_le_bytes());
@@ -520,6 +538,7 @@ impl<const B: usize> Snapshot<B> {
         Ok(Self {
             sequence: u32_at(bytes, 12),
             taken_at_us: u32_at(bytes, 16),
+            events_dropped: u32_at(bytes, 20),
             available: bytes[5],
             cpu_permille: u16_at(bytes, 6),
             tasks: u16_at(bytes, 8),
@@ -604,6 +623,9 @@ impl<const B: usize> Sampler<B> {
         if reading.tasks.is_some() {
             available |= HAS_TASKS;
         }
+        if reading.events_dropped.is_some() {
+            available |= HAS_EVENTS;
+        }
         let heap = reading.heap.unwrap_or(HeapReading {
             in_use: 0,
             high_water: 0,
@@ -612,6 +634,7 @@ impl<const B: usize> Sampler<B> {
             sequence: self.sequence,
             taken_at_us: now_us,
             available,
+            events_dropped: reading.events_dropped.unwrap_or(0),
             cpu_permille: reading.cpu_permille.unwrap_or(0),
             tasks: reading.tasks.unwrap_or(0),
             heap_in_use: heap.in_use,
@@ -895,6 +918,7 @@ mod tests {
                 high_water: 8192,
             }),
             tasks: None,
+            events_dropped: None,
         };
         sampler.poll(10, &mut Fixed(measured), no_messages);
         let snapshot = sampler.latest().unwrap();
@@ -1052,6 +1076,7 @@ mod tests {
             sequence: 7,
             taken_at_us: 0xDEAD_BEEF,
             available: HAS_CPU | HAS_TASKS,
+            events_dropped: 0,
             cpu_permille: 731,
             tasks: 12,
             heap_in_use: 1 << 40,
@@ -1072,7 +1097,7 @@ mod tests {
         assert_eq!(
             text,
             "{\"version\":1,\"sequence\":7,\"taken_at_us\":3735928559,\
-             \"cpu_permille\":731,\"tasks\":12,\"heap\":null,\
+             \"cpu_permille\":731,\"tasks\":12,\"heap\":null,\"events_dropped\":null,\
              \"features\":[\"resource-snapshot\"],\
              \"messages\":18446744073709551612,\"interval_sum_us\":123456,\
              \"intervals\":[1,2,3,18446744073709551615]}"
@@ -1088,6 +1113,61 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("\"features\":[]"), "{text}");
+    }
+
+    #[test]
+    fn the_rings_loss_count_rides_in_the_reserved_word_and_only_counts_when_it_was_measured() {
+        let mut snapshot = sample_snapshot();
+        snapshot.available |= HAS_EVENTS;
+        snapshot.events_dropped = 0x0102_0304;
+        let mut bytes = [0u8; Snapshot::<4>::SIZE];
+        snapshot.to_bytes(&mut bytes).unwrap();
+        assert_eq!(&bytes[20..24], &[4, 3, 2, 1], "little-endian at byte 20");
+        assert_eq!(
+            bytes[..5],
+            [1, 0, 96, 0, 4],
+            "the layout is still version 1"
+        );
+        assert_eq!(Snapshot::<4>::from_bytes(&bytes), Ok(snapshot.clone()));
+        let mut text = std::string::String::new();
+        snapshot.write_json(&mut text).unwrap();
+        assert!(text.contains("\"events_dropped\":16909060,"), "{text}");
+        // What an older writer produced, zero there and the bit clear, reads as not measured.
+        bytes[20..24].fill(0);
+        bytes[5] &= !HAS_EVENTS;
+        let older = Snapshot::<4>::from_bytes(&bytes).unwrap();
+        assert_eq!((older.available & HAS_EVENTS, older.events_dropped), (0, 0));
+        text.clear();
+        older.write_json(&mut text).unwrap();
+        assert!(text.contains("\"events_dropped\":null,"), "{text}");
+    }
+
+    #[test]
+    fn the_sampler_marks_the_ring_loss_measured_only_when_the_host_gave_it() {
+        let mut sampler = Sampler::<4>::new(1000, 0).unwrap();
+        sampler.take(0, ResourceReading::default(), MessageReading::empty());
+        let first = sampler.latest().unwrap();
+        assert_eq!((first.available & HAS_EVENTS, first.events_dropped), (0, 0));
+        let told = ResourceReading {
+            events_dropped: Some(5),
+            ..ResourceReading::default()
+        };
+        sampler.take(1000, told, MessageReading::empty());
+        let second = sampler.latest().unwrap();
+        assert_eq!(
+            (second.available & HAS_EVENTS, second.events_dropped),
+            (HAS_EVENTS, 5)
+        );
+        let none = ResourceReading {
+            events_dropped: Some(0),
+            ..ResourceReading::default()
+        };
+        sampler.take(2000, none, MessageReading::empty());
+        assert_eq!(
+            sampler.latest().unwrap().available & HAS_EVENTS,
+            HAS_EVENTS,
+            "a ring that lost nothing is measured, not absent"
+        );
     }
 
     #[test]

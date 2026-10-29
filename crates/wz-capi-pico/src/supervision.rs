@@ -162,6 +162,18 @@ pub extern "C" fn wz_ext_supervision_check() -> ZResult {
             if !check.hook(index) {
                 continue;
             }
+            // The expiry is written to the node's event log before the program's hook runs, so
+            // it is in the log whatever the hook does, and once: the supervisor reports each
+            // expiry to exactly one check. A build without the log writes nothing.
+            #[cfg(feature = "event-ring")]
+            {
+                use wz_node_time::event_log::{global, library};
+                global().emit_now(
+                    library::LIBRARY_LEVEL,
+                    library::SUPERVISION_EXPIRED,
+                    &[index as u64],
+                );
+            }
             if let Some(hook) = hook {
                 // SAFETY: the program's hook, under the contract of `set_hook`.
                 unsafe { (hook.run)(hook.context, index as u8) };

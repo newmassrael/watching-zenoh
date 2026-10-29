@@ -326,6 +326,10 @@ transport-link-unixpipe,transport-link-ws|"
     # and the target that asks a peer's admin space for the same snapshot as a document
     # (`snapshot_admin_space`, which also needs the admin space and the query).
     "wz-capi-pico|hook|resource-snapshot,peer,query,admin-space|"
+    # The four instruments of the observation plane together, and the links between them: the
+    # clock's time on an event, a supervision expiry written as an event, the ring's loss count in
+    # the snapshot (`observation_links`, which `Cargo.toml` requires all four features for).
+    "wz-capi-pico|hook|clock-source,event-ring,supervision,resource-snapshot,peer|--test=observation_links"
     # The two node-config features the zenoh-c ABI turns on: the usrpwd
     # credential machinery and the interceptor chain (`access_control`,
     # `low_pass_filter`, `downsampling`). Both are off here by default, so the

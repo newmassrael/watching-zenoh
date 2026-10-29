@@ -97,6 +97,7 @@ impl Source {
                 high_water: out.heap_high_water,
             }),
             tasks: (out.available & HAS_TASKS != 0).then_some(out.tasks),
+            events_dropped: None,
         }
     }
 }
@@ -133,6 +134,7 @@ fn features() -> u64 {
 /// The latest snapshot as the admin space's JSON document, or `None` before the program has taken
 /// the first one: the node does not sample on its own, so there is nothing to say until it is
 /// asked to.
+#[cfg(feature = "admin-space")]
 pub(crate) fn latest_json() -> Option<String> {
     let doors = locked();
     let mut text = String::new();
@@ -199,6 +201,14 @@ pub unsafe extern "C" fn wz_ext_snapshot_poll(session: *const z_loaned_session_t
             // SAFETY: the program's source, under the contract of `set_source`.
             Some(source) => unsafe { source.read() },
             None => ResourceReading::default(),
+        };
+        // The event ring's loss is the library's to say, not the program's source's: a build with
+        // the ring states how many events it refused, so a reader of the snapshot is told of a
+        // log that is losing events beside the load that may be the reason.
+        #[cfg(feature = "event-ring")]
+        let reading = ResourceReading {
+            events_dropped: Some(wz_node_time::event_log::global().dropped()),
+            ..reading
         };
         let messages = handle
             .drive

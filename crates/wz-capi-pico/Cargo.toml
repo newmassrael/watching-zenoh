@@ -356,6 +356,10 @@ name = "snapshot_doors"
 required-features = ["resource-snapshot", "peer"]
 
 [[test]]
+name = "observation_links"
+required-features = ["clock-source", "event-ring", "supervision", "resource-snapshot", "peer"]
+
+[[test]]
 name = "snapshot_admin_space"
 required-features = ["resource-snapshot", "admin-space", "peer", "query"]
 

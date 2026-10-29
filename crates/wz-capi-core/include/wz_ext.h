@@ -94,6 +94,18 @@ z_result_t wz_ext_clock_report(wz_ext_clock_event_t event);
 #define WZ_EXT_EVENT_LOST 2   /* events were overwritten before they were read;
                                  sequence is how many */
 
+/* What the library itself writes into the log. A program numbers its own
+ * sources and levels; the library's events carry level 255 and a source from
+ * 0xFF00 up, so a program keeps its sources below WZ_EXT_EVENT_SOURCE_LIBRARY
+ * and a reader that filters by level keeps 255 to see what the node says about
+ * itself. A source is assigned once and never reused; the integers of each are
+ * written beside it. */
+#define WZ_EXT_EVENT_LEVEL_LIBRARY 255
+#define WZ_EXT_EVENT_SOURCE_LIBRARY 0xFF00
+/* A supervised checkpoint missed its deadline (a build with the supervision
+ * capability too). One integer: the checkpoint's number. */
+#define WZ_EXT_EVENT_SOURCE_SUPERVISION_EXPIRED 0xFF00
+
 typedef struct wz_ext_event_t {
   uint8_t kind;      /* WZ_EXT_EVENT_RECORD, _EMPTY or _LOST */
   uint8_t level;     /* how serious, in the program's own scale */
