@@ -27,7 +27,9 @@ use wz_capi_pico::{
 };
 use wz_runtime_tokio_test_support::free_port;
 use wz_session_core::caps::{SNAPSHOT_HISTOGRAM_BUCKETS, SNAPSHOT_PERIOD_MS};
-use wz_session_core::resource_snapshot::{Snapshot, HAS_CPU, HAS_HEAP, HAS_TASKS, LAYOUT_VERSION};
+use wz_session_core::resource_snapshot::{
+    feature_bits, Snapshot, HAS_CPU, HAS_HEAP, HAS_TASKS, LAYOUT_VERSION,
+};
 
 type Decoded = Snapshot<SNAPSHOT_HISTOGRAM_BUCKETS>;
 
@@ -111,6 +113,16 @@ fn a_snapshot_is_taken_on_its_period_and_read_as_bytes() {
         let first = read_latest();
         assert_eq!(first.available, HAS_CPU | HAS_HEAP | HAS_TASKS);
         assert_eq!(first.cpu_permille, 420);
+        assert_ne!(
+            first.features & feature_bits::RESOURCE_SNAPSHOT,
+            0,
+            "the image says it has the snapshot it just took"
+        );
+        assert_eq!(
+            first.features & feature_bits::SUPERVISION != 0,
+            cfg!(feature = "supervision"),
+            "and says it has the other instruments exactly when it was built with them"
+        );
         assert_eq!(first.tasks, 7);
         assert_eq!((first.heap_in_use, first.heap_high_water), (10_000, 12_000));
         assert!(

@@ -356,6 +356,10 @@ name = "snapshot_doors"
 required-features = ["resource-snapshot", "peer"]
 
 [[test]]
+name = "snapshot_admin_space"
+required-features = ["resource-snapshot", "admin-space", "peer", "query"]
+
+[[test]]
 name = "clock_source_stamps"
 required-features = ["engine-tokio", "peer", "clock-source"]
 

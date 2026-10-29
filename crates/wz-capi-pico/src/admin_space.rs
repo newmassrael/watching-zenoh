@@ -284,6 +284,16 @@ fn replies(identity: &Identity, faces: &[FaceSnapshot], query: &str) -> Vec<(Str
         );
         answer(&mut out, query, key, || peer_doc(face));
     }
+    // wz's own document, with no counterpart in pico's: the latest resource snapshot, once the
+    // program has taken one. Present only in a build with the capability, which no build that is
+    // compared against pico's documents has.
+    #[cfg(feature = "resource-snapshot")]
+    answer(
+        &mut out,
+        query,
+        format!("{base}/wz/snapshot"),
+        crate::snapshot::latest_json,
+    );
     out
 }
 

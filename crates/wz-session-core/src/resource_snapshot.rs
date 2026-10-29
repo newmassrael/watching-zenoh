@@ -81,6 +81,29 @@ pub const HAS_HEAP: u8 = 1 << 1;
 /// [`Snapshot::tasks`] was measured.
 pub const HAS_TASKS: u8 = 1 << 2;
 
+/// The bits of [`Snapshot::features`], one for each instrument of the observation plane an image
+/// can have (`docs/observation-plane.md`). A bit is assigned once and never moved or reused, and a
+/// reader ignores the bits it does not know, which is how an image with a later instrument is read
+/// by an older reader. The host sets the bits of the instruments it was built with.
+pub mod feature_bits {
+    /// The clock the program registers (`clock-source`).
+    pub const CLOCK_SOURCE: u64 = 1 << 0;
+    /// The event ring (`event-ring`).
+    pub const EVENT_RING: u64 = 1 << 1;
+    /// The supervisor (`supervision`).
+    pub const SUPERVISION: u64 = 1 << 2;
+    /// This snapshot (`resource-snapshot`).
+    pub const RESOURCE_SNAPSHOT: u64 = 1 << 3;
+
+    /// Each bit and the capability it names, in bit order.
+    pub const NAMES: [(u64, &str); 4] = [
+        (CLOCK_SOURCE, "clock-source"),
+        (EVENT_RING, "event-ring"),
+        (SUPERVISION, "supervision"),
+        (RESOURCE_SNAPSHOT, "resource-snapshot"),
+    ];
+}
+
 /// What the platform could say about the node now. A field left `None` was not measured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ResourceReading {
@@ -318,6 +341,66 @@ pub struct Snapshot<const B: usize> {
     pub interval_sum_us: u64,
     /// How the intervals between messages are spread, since the counter began.
     pub intervals: [u64; B],
+}
+
+impl<const B: usize> Snapshot<B> {
+    /// Write this snapshot as one JSON object, for a reader that wants text: the admin space.
+    ///
+    /// A part the platform did not measure is `null`, not 0, so a node that uses no CPU is told
+    /// from one nobody measured. `features` names the instruments of [`feature_bits`] the image
+    /// has and leaves out a bit this code does not know. The histogram is the counts of the
+    /// buckets in order, bucket `i` holding the intervals of `2^i` microseconds up to but not
+    /// including `2^(i+1)`, and the last one everything longer; with `interval_sum_us` and
+    /// `messages` it gives the mean, and two snapshots give the mean of the time between them.
+    pub fn write_json(&self, out: &mut impl core::fmt::Write) -> core::fmt::Result {
+        write!(
+            out,
+            "{{\"version\":{},\"sequence\":{},\"taken_at_us\":{}",
+            LAYOUT_VERSION, self.sequence, self.taken_at_us
+        )?;
+        if self.available & HAS_CPU != 0 {
+            write!(out, ",\"cpu_permille\":{}", self.cpu_permille)?;
+        } else {
+            out.write_str(",\"cpu_permille\":null")?;
+        }
+        if self.available & HAS_TASKS != 0 {
+            write!(out, ",\"tasks\":{}", self.tasks)?;
+        } else {
+            out.write_str(",\"tasks\":null")?;
+        }
+        if self.available & HAS_HEAP != 0 {
+            write!(
+                out,
+                ",\"heap\":{{\"in_use\":{},\"high_water\":{}}}",
+                self.heap_in_use, self.heap_high_water
+            )?;
+        } else {
+            out.write_str(",\"heap\":null")?;
+        }
+        out.write_str(",\"features\":[")?;
+        let mut first = true;
+        for (bit, name) in feature_bits::NAMES {
+            if self.features & bit != 0 {
+                if !first {
+                    out.write_char(',')?;
+                }
+                first = false;
+                write!(out, "\"{name}\"")?;
+            }
+        }
+        write!(
+            out,
+            "],\"messages\":{},\"interval_sum_us\":{},\"intervals\":[",
+            self.messages, self.interval_sum_us
+        )?;
+        for (i, count) in self.intervals.iter().enumerate() {
+            if i != 0 {
+                out.write_char(',')?;
+            }
+            write!(out, "{count}")?;
+        }
+        out.write_str("]}")
+    }
 }
 
 /// Why a buffer is not a snapshot this reader can take.
@@ -978,6 +1061,51 @@ mod tests {
             interval_sum_us: 123_456,
             intervals: [1, 2, 3, u64::MAX],
         }
+    }
+
+    #[test]
+    fn the_json_names_what_was_measured_and_nulls_what_was_not() {
+        let mut text = std::string::String::new();
+        sample_snapshot().write_json(&mut text).unwrap();
+        // `features` is 0xF0F0_0F0F_1234_5678: of the bits this code names only bit 3 is set, and
+        // the bits it does not know are left out and not guessed at.
+        assert_eq!(
+            text,
+            "{\"version\":1,\"sequence\":7,\"taken_at_us\":3735928559,\
+             \"cpu_permille\":731,\"tasks\":12,\"heap\":null,\
+             \"features\":[\"resource-snapshot\"],\
+             \"messages\":18446744073709551612,\"interval_sum_us\":123456,\
+             \"intervals\":[1,2,3,18446744073709551615]}"
+        );
+        let mut all = sample_snapshot();
+        all.available = HAS_CPU | HAS_HEAP | HAS_TASKS;
+        all.features = 0;
+        all.messages = 0;
+        text.clear();
+        all.write_json(&mut text).unwrap();
+        assert!(
+            text.contains("\"heap\":{\"in_use\":1099511627776,\"high_water\":1099511627781}"),
+            "{text}"
+        );
+        assert!(text.contains("\"features\":[]"), "{text}");
+    }
+
+    #[test]
+    fn the_feature_bits_are_single_distinct_bits_with_distinct_names() {
+        let mut seen = 0u64;
+        for (bit, name) in feature_bits::NAMES {
+            assert_eq!(bit.count_ones(), 1, "{name} is one bit");
+            assert_eq!(seen & bit, 0, "{name} reuses a bit");
+            seen |= bit;
+        }
+        let mut names = feature_bits::NAMES.map(|(_, name)| name);
+        names.sort_unstable();
+        assert!(names.windows(2).all(|pair| pair[0] != pair[1]));
+        // Pinned: a bit is assigned once, so moving one is a change of layout, not of code.
+        assert_eq!(feature_bits::CLOCK_SOURCE, 1);
+        assert_eq!(feature_bits::EVENT_RING, 2);
+        assert_eq!(feature_bits::SUPERVISION, 4);
+        assert_eq!(feature_bits::RESOURCE_SNAPSHOT, 8);
     }
 
     #[test]

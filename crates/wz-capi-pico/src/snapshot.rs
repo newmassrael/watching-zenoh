@@ -26,8 +26,8 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Instant;
 
 use wz_session_core::resource_snapshot::{
-    BuildSampler, HeapReading, MessageReading, ResourceReading, Snapshot, HAS_CPU, HAS_HEAP,
-    HAS_TASKS,
+    feature_bits, BuildSampler, HeapReading, MessageReading, ResourceReading, Snapshot, HAS_CPU,
+    HAS_HEAP, HAS_TASKS,
 };
 
 use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_NULL, Z_ERR_OVERFLOW, Z_OK};
@@ -114,12 +114,37 @@ impl Doors {
     }
 }
 
+/// The instruments of the observation plane this image was built with, as the bits of
+/// [`feature_bits`]: this snapshot's own, and each of the other three this crate has a feature for.
+fn features() -> u64 {
+    let mut word = feature_bits::RESOURCE_SNAPSHOT;
+    if cfg!(feature = "clock-source") {
+        word |= feature_bits::CLOCK_SOURCE;
+    }
+    if cfg!(feature = "event-ring") {
+        word |= feature_bits::EVENT_RING;
+    }
+    if cfg!(feature = "supervision") {
+        word |= feature_bits::SUPERVISION;
+    }
+    word
+}
+
+/// The latest snapshot as the admin space's JSON document, or `None` before the program has taken
+/// the first one: the node does not sample on its own, so there is nothing to say until it is
+/// asked to.
+pub(crate) fn latest_json() -> Option<String> {
+    let doors = locked();
+    let mut text = String::new();
+    doors.sampler.latest()?.write_json(&mut text).ok()?;
+    Some(text)
+}
+
 fn doors() -> &'static Mutex<Doors> {
     static DOORS: OnceLock<Mutex<Doors>> = OnceLock::new();
     DOORS.get_or_init(|| {
         Mutex::new(Doors {
-            // The word of what the image has is the readers' step (5b2c); until then it is 0.
-            sampler: BuildSampler::for_build(0),
+            sampler: BuildSampler::for_build(features()),
             source: None,
             origin: Instant::now(),
         })
