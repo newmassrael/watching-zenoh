@@ -156,7 +156,7 @@ CASES: tuple[Case, ...] = (
               "moves to that reading with its margin. 1,849,773 on hosted CI on 2026-10-27 "
               "(head `f4bdeaee5`, +16,600): the growth is in the code every pico build links "
               "and is not attributed to one commit; the budget moves to that reading"),
-    Case("pico-client-small", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_520_800,
+    Case("pico-client-small", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_528_500,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
                  CONNECTIVITY, MULTICAST),
          require=(SINGLE_THREADED,), profile="capi-small",
@@ -171,7 +171,10 @@ CASES: tuple[Case, ...] = (
               "+242) while no router symbol is linked into this build (`nm` finds none), so "
               "the step is the layout of code every pico build links and not a plane this "
               "build gained. The budget is the latter reading and 3,500, rounded up to the "
-              "hundred"),
+              "hundred. 1,524,973 measured locally on the head of the round that ends the "
+              "queries pending on a face with it (4,173 over 1,520,800): the head under it was "
+              "not measured here, so what is that round's and what the earlier rounds' is not "
+              "separated, and the budget is that reading and 3,500, rounded up to the hundred"),
     Case("pico-client-udp", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",link-udp", 1_922_900,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST),
@@ -412,7 +415,7 @@ CASES: tuple[Case, ...] = (
          forbid=(GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY, MULTICAST),
          require=(ACCEPT, RESPONDER, SCOUTING, UDP, SINGLE_THREADED),
          note="peer implies scout and with it the UDP group"),
-    Case("pico-default", "wz-capi-pico", "libwz_capi_pico.so", None, 4_300_000,
+    Case("pico-default", "wz-capi-pico", "libwz_capi_pico.so", None, 4_304_900,
          forbid=(SINGLE_THREADED,),
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
                   CONNECTIVITY, MULTICAST),
@@ -422,10 +425,13 @@ CASES: tuple[Case, ...] = (
               "door that answers what a configuration asks of the operating system "
               "(`wz_ext_config_device_requires`). 4,216,542 "
               "measured with the multicast transport pico's default has (open-debt item 913), "
-              "3,790,610 without it"),
+              "3,790,610 without it. 4,301,320 measured locally on the head of the round that "
+              "ends the queries pending on a face with it (1,320 over 4,300,000), the growth "
+              "pico-client-small's note states: the budget is that reading and 3,500, rounded "
+              "up to the hundred"),
     Case("capic-client", "wz-capi-c", "libwz_capi_c.so", "", 3_000_000,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST)),
-    Case("capic-client-small", "wz-capi-c", "libwz_capi_c.so", "", 1_969_000,
+    Case("capic-client-small", "wz-capi-c", "libwz_capi_c.so", "", 1_973_800,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
          profile="capi-small",
          note="the capic-client build with panics aborting: 1,797,992 measured against "
@@ -459,13 +465,17 @@ CASES: tuple[Case, ...] = (
               "`region_name` key a client reads and announces in its Init, and the partition "
               "of `gateway/south` the plan now carries to the stance, which the node "
               "applies and a client only holds. The budget is that reading and 3,500, "
-              "rounded up to the hundred: 1,969,000."),
+              "rounded up to the hundred: 1,969,000. 1,970,277 measured locally on the head "
+              "of the round that ends the queries pending on a face with it (1,277 over): "
+              "the head under it was not measured here, so what is that round's and what the "
+              "earlier rounds' is not separated, and the budget is that reading and 3,500, "
+              "rounded up to the hundred."),
     Case("capic-scout", "wz-capi-c", "libwz_capi_c.so", "scout", 3_275_000,
          forbid=(ACCEPT, RESPONDER, GOSSIP, CLOCK, ADVANCED, MULTICAST),
          require=(SCOUTING, UDP)),
     Case("capic-peer", "wz-capi-c", "libwz_capi_c.so", "peer", 4_065_000,
          forbid=(GOSSIP, CLOCK, ADVANCED, MULTICAST), require=(ACCEPT, RESPONDER, SCOUTING, UDP)),
-    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 9_335_200,
+    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 9_340_400,
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
          exports=836,
          note="zenoh-c's default links and pubkey auth (rustls on ring, quinn, tungstenite, "
@@ -490,7 +500,10 @@ CASES: tuple[Case, ...] = (
               "region_name key, whose reader, name check and offer link the region "
               "extension's emit into every build that holds a session. The growth is the "
               "features', chosen. The budget is that reading and 3,500, rounded up to the "
-              "hundred"),
+              "hundred. 9,336,873 measured locally on the head of the round that ends the "
+              "queries pending on a face with it (1,673 over 9,335,200), the growth "
+              "capic-client-small's note states: the budget is that reading and 3,500, "
+              "rounded up to the hundred"),
 )
 
 
