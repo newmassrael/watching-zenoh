@@ -270,6 +270,9 @@ pub(crate) struct LivelinessRequest<'a> {
     pub(crate) cancellation_token: Option<CancellationToken>,
     /// What stops the legs of the query, when something may: see [`QueryRequest::fan`].
     pub(crate) fan: Option<Arc<QueryFan>>,
+    /// Held until the callback is dropped, so that a close of the session that waits for
+    /// callbacks waits for this query's as well: they run on a task of their own.
+    pub(crate) notifier: Option<SyncGroupNotifier>,
 }
 
 /// What the declaration of a liveliness subscription asks of the engine, in the types of this
@@ -1260,12 +1263,16 @@ mod tokio_engine {
         zenoh_protocol::network::timestamp_stack::interception_point,
     };
 
+    use std::{collections::BTreeMap, sync::Mutex};
+
+    use zenoh_protocol::core::Timestamp;
+
     use super::{Arc, LivelinessRequest, Publication, QueryRequest};
     use crate::api::{
         bytes::ZBytes,
         cancellation::SyncGroupNotifier,
         encoding::Encoding,
-        handlers::Callback,
+        handlers::{Callback, Ordered},
         key_expr::KeyExpr,
         matching::{MatchingStatus, MatchingStatusType},
         query::{Reply, ReplyError},
@@ -1918,14 +1925,12 @@ mod tokio_engine {
         #[cfg(feature = "unstable")] timestamps: Arc<TimestampSource>,
     ) -> SubscriberSink {
         struct Delivery {
-            callback: Callback<Sample>,
-            _notifier: Option<SyncGroupNotifier>,
+            ordered: Arc<Ordered<Sample>>,
             #[cfg(feature = "unstable")]
             timestamps: Arc<TimestampSource>,
         }
         let delivery = Arc::new(Delivery {
-            callback,
-            _notifier: notifier,
+            ordered: Ordered::new(callback, notifier),
             #[cfg(feature = "unstable")]
             timestamps,
         });
@@ -1937,7 +1942,7 @@ mod tokio_engine {
                     #[cfg(feature = "unstable")]
                     Some(&delivery.timestamps),
                 ) {
-                    Ok(sample) => delivery.callback.call(sample),
+                    Ok(sample) => delivery.ordered.deliver(sample),
                     Err(error) => tracing::error!("a sample could not be delivered: {error}"),
                 }
             })
@@ -2057,16 +2062,14 @@ mod tokio_engine {
         #[cfg(feature = "unstable")] timestamps: Arc<TimestampSource>,
     ) -> QueryableSink {
         struct Delivery {
-            callback: Callback<Query>,
-            _notifier: Option<SyncGroupNotifier>,
+            ordered: Arc<Ordered<Query>>,
             zid: ZenohId,
             eid: Id,
             #[cfg(feature = "unstable")]
             timestamps: Arc<TimestampSource>,
         }
         let delivery = Arc::new(Delivery {
-            callback,
-            _notifier: notifier,
+            ordered: Ordered::new(callback, notifier),
             zid,
             eid,
             #[cfg(feature = "unstable")]
@@ -2084,7 +2087,7 @@ mod tokio_engine {
                     #[cfg(feature = "unstable")]
                     &delivery.timestamps,
                 ) {
-                    Ok(query) => delivery.callback.call(query),
+                    Ok(query) => delivery.ordered.deliver(query),
                     Err(error) => tracing::error!("a query could not be delivered: {error}"),
                 }
             })
@@ -2326,7 +2329,7 @@ mod tokio_engine {
                     *stack = engine_stack_of(&arrived);
                 }));
         }
-        let mut leg = leg_minter(callback, fan.clone());
+        let mut leg = leg_minter(callback, fan.clone(), consolidation);
         let issued = engine.get_on_wire(key, &wire, &options, fan.as_deref(), &mut leg);
         // The closure holds the delivery the legs share: what it let go of is the last hold, when
         // no leg is left.
@@ -2352,16 +2355,20 @@ mod tokio_engine {
             #[cfg(feature = "unstable")]
             cancellation_token,
             fan,
+            notifier,
         } = request;
-        #[cfg(feature = "unstable")]
         let mut callback = callback;
         #[cfg(feature = "unstable")]
-        tie_to_end(cancellation_token, fan.as_ref(), None, &mut callback)?;
+        tie_to_end(cancellation_token, fan.as_ref(), notifier, &mut callback)?;
+        #[cfg(not(feature = "unstable"))]
+        if let Some(notifier) = notifier {
+            callback.set_on_drop(move || drop(notifier));
+        }
         let wire = wire_key_of(scope, suffix);
         // As for a query, `0` is the default timeout of the engine and a timeout of nothing is an
         // instant one.
         let timeout_ms = u32::try_from(timeout.as_millis().max(1)).unwrap_or(u32::MAX);
-        let mut leg = leg_minter(callback, fan.clone());
+        let mut leg = leg_minter(callback, fan.clone(), ConsolidationMode::None);
         let issued =
             engine.liveliness_get_on_wire(key, &wire, timeout_ms, fan.as_deref(), &mut leg);
         drop(leg);
@@ -2376,15 +2383,17 @@ mod tokio_engine {
     fn leg_minter(
         callback: Callback<Reply>,
         fan: Option<Arc<CancellableFan>>,
+        consolidation: ConsolidationMode,
     ) -> impl FnMut() -> ReplyCallback {
         let delivery = Arc::new(ReplyDelivery {
-            callback,
+            ordered: Ordered::new(callback, None),
+            consolidator: Consolidator::new(consolidation),
             _fan: fan,
         });
         move || -> ReplyCallback {
             let delivery = Arc::clone(&delivery);
             Box::new(move |view: &dyn ReplyView| match reply_of(view) {
-                Ok(reply) => delivery.callback.call(reply),
+                Ok(reply) => delivery.deliver(reply),
                 Err(error) => tracing::error!("a reply could not be delivered: {error}"),
             })
         }
@@ -2399,12 +2408,10 @@ mod tokio_engine {
         notifier: Option<SyncGroupNotifier>,
     ) -> LivelinessSink {
         struct Delivery {
-            callback: Callback<Sample>,
-            _notifier: Option<SyncGroupNotifier>,
+            ordered: Arc<Ordered<Sample>>,
         }
         let delivery = Arc::new(Delivery {
-            callback,
-            _notifier: notifier,
+            ordered: Ordered::new(callback, notifier),
         });
         let presence = Arc::new(std::sync::Mutex::new(Presence::default()));
         Arc::new(move || {
@@ -2419,7 +2426,7 @@ mod tokio_engine {
                     return;
                 }
                 match liveliness_sample_of(&change) {
-                    Ok(sample) => delivery.callback.call(sample),
+                    Ok(sample) => delivery.ordered.deliver(sample),
                     Err(error) => {
                         tracing::error!("a liveliness change could not be delivered: {error}")
                     }
@@ -2580,10 +2587,206 @@ mod tokio_engine {
 
     /// What the legs of a query are handed their replies to.
     struct ReplyDelivery {
-        callback: Callback<Reply>,
+        ordered: Arc<Ordered<Reply>>,
+        /// What the replies of every leg are consolidated by, when the query asks for it.
+        consolidator: Option<Consolidator>,
         /// What stops the legs, held for as long as the query is under way: whoever keeps a
         /// `Weak` of it reads the end of the query in it.
         _fan: Option<Arc<CancellableFan>>,
+    }
+
+    impl ReplyDelivery {
+        /// Hand on what the consolidation of the query lets through of `reply`.
+        fn deliver(&self, reply: Reply) {
+            let Some(consolidator) = &self.consolidator else {
+                self.ordered.deliver(reply);
+                return;
+            };
+            // The replies a `Latest` query holds come before the timeout that ends it, as upstream
+            // calls them: data first, then the reason the stream stopped.
+            if is_timeout(&reply) {
+                self.release();
+            }
+            if let Some(reply) = consolidator.admit(reply) {
+                self.ordered.deliver(reply);
+            }
+        }
+
+        /// Hand on the replies a `Latest` query holds.
+        fn release(&self) {
+            if let Some(consolidator) = &self.consolidator {
+                for held in consolidator.release() {
+                    self.ordered.deliver(held);
+                }
+            }
+        }
+    }
+
+    /// The last leg's end is the end of the query: the replies that a `Latest` query held are its
+    /// result.
+    impl Drop for ReplyDelivery {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+
+    /// Whether `reply` is the one that ends a query by its timeout.
+    fn is_timeout(reply: &Reply) -> bool {
+        reply.result.as_ref().err().is_some_and(|error| {
+            error.encoding() == &Encoding::ZENOH_STRING
+                && error
+                    .payload()
+                    .try_to_string()
+                    .is_ok_and(|text| text == "Timeout")
+        })
+    }
+
+    /// What upstream's session does with the replies of a query across every peer that answers: one
+    /// leg of the engine consolidates the replies of its own face, and these are the replies of all
+    /// of them, so the consolidation is done here once more, over what the legs hand on. `Latest`
+    /// holds the most recent reply of each key and hands them on when the query ends; `Monotonic`
+    /// hands on a reply when it is at least as recent as the last one of its key.
+    struct Consolidator {
+        mode: ConsolidationMode,
+        last: Mutex<BTreeMap<String, LastReply>>,
+    }
+
+    /// What a query knows of the last reply of a key.
+    struct LastReply {
+        timestamp: Option<Timestamp>,
+        /// The reply itself, when `Latest` holds it for the end of the query.
+        held: Option<Reply>,
+    }
+
+    impl Consolidator {
+        fn new(mode: ConsolidationMode) -> Option<Self> {
+            matches!(
+                mode,
+                ConsolidationMode::Monotonic | ConsolidationMode::Latest | ConsolidationMode::Auto
+            )
+            .then(|| Self {
+                mode,
+                last: Mutex::new(BTreeMap::new()),
+            })
+        }
+
+        fn last(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, LastReply>> {
+            self.last
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        }
+
+        /// The reply to hand on at once, if any: an error always, a sample when `Monotonic` finds
+        /// it at least as recent as its key's last, and none when `Latest` keeps it.
+        fn admit(&self, reply: Reply) -> Option<Reply> {
+            let Ok(sample) = &reply.result else {
+                return Some(reply);
+            };
+            let key = sample.key_expr.as_str().to_owned();
+            let timestamp = sample.timestamp;
+            let latest = self.mode != ConsolidationMode::Monotonic;
+            let mut last = self.last();
+            if last
+                .get(&key)
+                .is_some_and(|last| timestamp < last.timestamp)
+            {
+                return None;
+            }
+            if latest {
+                last.insert(
+                    key,
+                    LastReply {
+                        timestamp,
+                        held: Some(reply),
+                    },
+                );
+                None
+            } else {
+                last.insert(
+                    key,
+                    LastReply {
+                        timestamp,
+                        held: None,
+                    },
+                );
+                Some(reply)
+            }
+        }
+
+        /// The replies a `Latest` query holds, which it no longer does.
+        fn release(&self) -> Vec<Reply> {
+            std::mem::take(&mut *self.last())
+                .into_values()
+                .filter_map(|last| last.held)
+                .collect()
+        }
+    }
+
+    #[cfg(test)]
+    mod consolidation_tests {
+        use zenoh_protocol::core::{ZenohIdProto, NTP64};
+
+        use super::*;
+        use crate::api::builders::sample::SampleBuilder;
+
+        fn reply(key: &'static str, payload: &str, time: Option<u64>) -> Reply {
+            let id = ZenohIdProto::try_from([1u8].as_slice()).expect("an id");
+            let sample = SampleBuilder::put(KeyExpr::try_from(key).expect("a key"), payload)
+                .timestamp(time.map(|time| Timestamp::new(NTP64(time), id.into())));
+            Reply {
+                result: Ok(sample.into()),
+                #[cfg(feature = "unstable")]
+                replier_id: None,
+            }
+        }
+
+        fn payload_of(reply: &Reply) -> String {
+            reply
+                .result()
+                .expect("a sample")
+                .payload()
+                .try_to_string()
+                .expect("a text")
+                .into_owned()
+        }
+
+        #[test]
+        fn latest_holds_the_most_recent_reply_of_each_key_until_the_end() {
+            let consolidator = Consolidator::new(ConsolidationMode::Latest).expect("consolidates");
+            assert!(consolidator.admit(reply("a", "old", Some(1))).is_none());
+            assert!(consolidator.admit(reply("a", "new", Some(2))).is_none());
+            assert!(consolidator.admit(reply("a", "stale", Some(1))).is_none());
+            assert!(consolidator.admit(reply("b", "only", None)).is_none());
+            let released: Vec<String> = consolidator.release().iter().map(payload_of).collect();
+            assert_eq!(released, ["new", "only"]);
+            assert!(consolidator.release().is_empty(), "released once");
+        }
+
+        #[test]
+        fn replies_without_a_timestamp_tie_and_the_later_one_is_kept() {
+            let consolidator = Consolidator::new(ConsolidationMode::Auto).expect("consolidates");
+            assert!(consolidator.admit(reply("a", "first", None)).is_none());
+            assert!(consolidator.admit(reply("a", "second", None)).is_none());
+            let released: Vec<String> = consolidator.release().iter().map(payload_of).collect();
+            assert_eq!(released, ["second"]);
+        }
+
+        #[test]
+        fn monotonic_hands_on_a_reply_at_least_as_recent_as_the_last_of_its_key() {
+            let consolidator =
+                Consolidator::new(ConsolidationMode::Monotonic).expect("consolidates");
+            let told = |reply| consolidator.admit(reply).map(|reply| payload_of(&reply));
+            assert_eq!(told(reply("a", "one", Some(2))), Some("one".to_owned()));
+            assert_eq!(told(reply("a", "stale", Some(1))), None);
+            assert_eq!(told(reply("a", "same", Some(2))), Some("same".to_owned()));
+            assert_eq!(told(reply("b", "other", Some(1))), Some("other".to_owned()));
+            assert!(consolidator.release().is_empty(), "monotonic holds nothing");
+        }
+
+        #[test]
+        fn a_query_that_asks_for_none_consolidates_nothing() {
+            assert!(Consolidator::new(ConsolidationMode::None).is_none());
+        }
     }
 
     /// Have the callback of the query tell, when it is dropped with the last leg, whoever waits on
@@ -2695,15 +2898,8 @@ mod tokio_engine {
         callback: Callback<MatchingStatus>,
         notifier: Option<SyncGroupNotifier>,
     ) -> MatchingSink {
-        struct Delivery {
-            callback: Callback<MatchingStatus>,
-            _notifier: Option<SyncGroupNotifier>,
-        }
-        let delivery = Arc::new(Delivery {
-            callback,
-            _notifier: notifier,
-        });
-        Arc::new(move |matching| delivery.callback.call(MatchingStatus { matching }))
+        let ordered = Ordered::new(callback, notifier);
+        Arc::new(move |matching| ordered.deliver(MatchingStatus { matching }))
     }
 
     /// The face a snapshot of the engine describes, as the Rust API reports it, or `None` for a
@@ -3086,6 +3282,7 @@ impl SessionInner {
             #[cfg(feature = "unstable")]
             cancellation_token,
             fan,
+            notifier: self.callbacks_drop_sync_group.notifier(),
         })
     }
 
@@ -9403,6 +9600,16 @@ mod tests {
 
         /// Two connected nodes: the one that declares tokens and the one that watches them.
         fn pair(ids: (&str, &str)) -> (Session, Session) {
+            let (writer, reader, ()) = pair_after(ids, |_| {});
+            (writer, reader)
+        }
+
+        /// [`pair`], with `before_dial` given the listening node before the other one dials it; what
+        /// it returns is kept by the caller for as long as it wants the node to hold it.
+        fn pair_after<T>(
+            ids: (&str, &str),
+            before_dial: impl FnOnce(&Session) -> T,
+        ) -> (Session, Session, T) {
             let port = unautoselected_port();
             let on = |id: &str, listen: &str, connect: &str| {
                 open(
@@ -9418,9 +9625,10 @@ mod tests {
                 .expect("opens")
             };
             let writer = on(ids.0, &format!(r#""tcp/127.0.0.1:{port}""#), "");
+            let kept = before_dial(&writer);
             let reader = on(ids.1, "", &format!(r#""tcp/127.0.0.1:{port}""#));
             assert_eq!(connected(&reader, 1).1.len(), 1, "the nodes are linked");
-            (writer, reader)
+            (writer, reader, kept)
         }
 
         /// Every change a liveliness subscriber is told of, as `key kind`.
@@ -9619,33 +9827,36 @@ mod tests {
         /// (`zenoh/src/api/session.rs` @ `Timeout on liveliness query {}! Send error and close.`):
         /// with an error reply `Timeout` encoded as a string, after which the channel of the
         /// handler closes. The peer is kept from ending it by holding the thread that reads its
-        /// link inside a subscriber's callback, so the interest of the get waits unread; a
-        /// timeout of nothing is an instant one, and ends the same way.
+        /// link inside a transport listener's callback (the callback of a subscriber runs on a task
+        /// of its own, off that thread), so the interest of the get waits unread; a timeout of
+        /// nothing is an instant one, and ends the same way.
+        #[cfg(feature = "unstable")]
         #[test]
         fn a_get_that_a_peer_does_not_end_is_ended_by_its_timeout_with_an_error_reply() {
-            let (held, asker) = pair(("a1b2d7", "a1b2d8"));
             let (entered_tx, entered) = mpsc::channel();
             let entered_tx = std::sync::Mutex::new(entered_tx);
             let (release_tx, release) = mpsc::channel::<()>();
             let release = std::sync::Mutex::new(release);
-            let _holder = held
-                .declare_subscriber("demo/l/hold")
-                .callback(move |_| {
-                    let _ = entered_tx.lock().unwrap().send(());
-                    // Returns at once when the test lets go of the sender.
-                    let _ = release.lock().unwrap().recv();
-                })
-                .wait()
-                .expect("declares");
-            // The declaration reaches the asker some time after it returns: put until the
-            // callback holds the thread that reads the link.
+            let (_held, asker, _holder) = pair_after(("a1b2d7", "a1b2d8"), |held| {
+                held.info()
+                    .transport_events_listener()
+                    .history(false)
+                    .callback(move |_| {
+                        let _ = entered_tx.lock().unwrap().send(());
+                        // Returns at once when the test lets go of the sender.
+                        let _ = release.lock().unwrap().recv();
+                    })
+                    .wait()
+                    .expect("declares")
+            });
+            entered
+                .recv_timeout(WAIT)
+                .expect("the thread that reads the link is held");
+            // The peer is listed once its INIT is read, before the transport is open and a get can
+            // be sent over it: a get asked until then has no peer to wait for, and its channel
+            // closes at once with no reply. It is asked again until the peer holds it.
             let deadline = std::time::Instant::now() + WAIT;
-            while entered.recv_timeout(Duration::from_millis(50)).is_err() {
-                assert!(std::time::Instant::now() < deadline, "the put arrives");
-                asker.put("demo/l/hold", "x").wait().expect("puts");
-            }
-
-            let timeout_of = |timeout: Duration| {
+            let timeout_of = |timeout: Duration| loop {
                 let started = std::time::Instant::now();
                 let replies = asker
                     .liveliness()
@@ -9653,10 +9864,19 @@ mod tests {
                     .timeout(timeout)
                     .wait()
                     .expect("asks");
-                let reply = replies
-                    .recv_timeout(WAIT)
-                    .expect("the get is open")
-                    .expect("the get timed out with a reply");
+                let reply = match replies.recv_timeout(WAIT) {
+                    Ok(Some(reply)) => reply,
+                    Ok(None) => panic!("the get timed out with a reply"),
+                    // The channel closed with no reply.
+                    Err(_) => {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "a get reaches the peer"
+                        );
+                        std::thread::sleep(Duration::from_millis(20));
+                        continue;
+                    }
+                };
                 let waited = started.elapsed();
                 let told = match reply.result() {
                     Err(error) => format!(
@@ -9670,7 +9890,7 @@ mod tests {
                     replies.recv_timeout(WAIT).is_err(),
                     "the channel closes with the timeout reply"
                 );
-                (told, waited)
+                break (told, waited);
             };
             let (told, waited) = timeout_of(Duration::from_millis(400));
             assert_eq!(told, "Err Timeout zenoh/string");

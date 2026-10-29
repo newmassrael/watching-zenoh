@@ -13,7 +13,8 @@
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 // Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
-// src/api/handlers/callback.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
+// src/api/handlers/callback.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). It adds
+// `Ordered`, the queue a callback is called from when the item comes from the thread of a face.
 
 //! Callback handler trait.
 
@@ -222,5 +223,217 @@ where
 
     fn into_handler(self) -> (Callback<Event>, Self::Handler) {
         (move |evt| (self.callback)(evt), ()).into_handler()
+    }
+}
+
+pub(crate) use ordered::Ordered;
+
+mod ordered {
+    //! Where the callback of an entity runs.
+    //!
+    //! Upstream runs a callback on a worker of its receive runtime, and a program writes for that:
+    //! its callback may call `tokio::task::block_in_place` and wait for another thread, as
+    //! upstream's own tests of the session do. The thread that reads a face here is not a worker
+    //! (it drives a single-threaded runtime over state that is not `Send`), so a callback called
+    //! on it would be refused `block_in_place`, and one that waits for the face would wait for the
+    //! thread it is on.
+    //!
+    //! A callback is therefore run by a task of the receive runtime ([`ZRuntime::RX`]). What an
+    //! entity is handed is queued in the order it came, and one task at a time drains the queue,
+    //! so a callback is never called twice at once and sees its items in order, as it does on a
+    //! thread of its own. The queue holds what keeps a wait on the entity's group open (its
+    //! notifier), so a wait that returns has seen the last callback return and drop what it held.
+
+    use std::{
+        collections::VecDeque,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc, Mutex,
+        },
+    };
+
+    use zenoh_runtime::ZRuntime;
+
+    use super::Callback;
+    use crate::api::cancellation::SyncGroupNotifier;
+
+    /// Whether the calling thread is inside a single-threaded runtime: where `block_in_place` is
+    /// refused, and where a call that waits for the thread it runs on never returns.
+    fn on_a_single_threaded_runtime() -> bool {
+        tokio::runtime::Handle::try_current().is_ok_and(|handle| {
+            handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread
+        })
+    }
+
+    /// A callback and the items waiting for it, in the order they were delivered.
+    pub(crate) struct Ordered<T: Send + 'static> {
+        callback: Callback<T>,
+        /// Held for as long as the queue is: the callback can be called while it is.
+        _notifier: Option<SyncGroupNotifier>,
+        queue: Mutex<VecDeque<T>>,
+        /// Whether a task is draining the queue.
+        running: AtomicBool,
+    }
+
+    impl<T: Send + 'static> Ordered<T> {
+        pub(crate) fn new(callback: Callback<T>, notifier: Option<SyncGroupNotifier>) -> Arc<Self> {
+            Arc::new(Self {
+                callback,
+                _notifier: notifier,
+                queue: Mutex::new(VecDeque::new()),
+                running: AtomicBool::new(false),
+            })
+        }
+
+        /// Hand `item` to the callback. Called from a thread that may block (one of a
+        /// multi-threaded runtime, or none of a runtime's: the thread of a program that publishes
+        /// to its own session), it is called there, as upstream calls the callback of a delivery
+        /// a session makes to itself. Called from the thread of a face, which drives a
+        /// single-threaded runtime, it is queued, and a task drains the queue unless one does.
+        pub(crate) fn deliver(self: &Arc<Self>, item: T) {
+            if !on_a_single_threaded_runtime() {
+                self.callback.call(item);
+                return;
+            }
+            self.lock().push_back(item);
+            if !self.running.swap(true, Ordering::AcqRel) {
+                let drain = Arc::clone(self);
+                ZRuntime::RX.spawn(async move { drain.drain() });
+            }
+        }
+
+        fn lock(&self) -> std::sync::MutexGuard<'_, VecDeque<T>> {
+            self.queue
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        }
+
+        fn drain(&self) {
+            /// A callback that panics leaves the entity able to run its next item: the flag is
+            /// let go.
+            struct Release<'a>(&'a AtomicBool);
+            impl Drop for Release<'_> {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::Release);
+                }
+            }
+            loop {
+                let release = Release(&self.running);
+                while let Some(item) = self.lock().pop_front() {
+                    self.callback.call(item);
+                }
+                drop(release);
+                // An item delivered after the last pop and before the flag fell found the flag set
+                // and started nothing: it is taken here, unless a delivery has started a task for
+                // it.
+                if self.lock().is_empty() || self.running.swap(true, Ordering::AcqRel) {
+                    return;
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::{sync::mpsc, time::Duration};
+
+        use super::*;
+
+        fn ordered(sender: mpsc::Sender<u32>) -> Arc<Ordered<u32>> {
+            let sender = Mutex::new(sender);
+            Ordered::new(
+                Callback::from(move |item: u32| {
+                    let _ = sender.lock().unwrap().send(item);
+                }),
+                None,
+            )
+        }
+
+        /// Deliver `items` as a face does: from a thread that drives a single-threaded runtime.
+        fn deliver_from_a_face(ordered: &Arc<Ordered<u32>>, items: impl IntoIterator<Item = u32>) {
+            let ordered = Arc::clone(ordered);
+            let items: Vec<u32> = items.into_iter().collect();
+            std::thread::spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .expect("runtime")
+                    .block_on(async {
+                        for item in items {
+                            ordered.deliver(item);
+                        }
+                    });
+            })
+            .join()
+            .expect("the face thread");
+        }
+
+        #[test]
+        fn a_delivery_from_a_thread_that_may_block_is_called_there() {
+            let (sender, received) = mpsc::channel();
+            let sender = Mutex::new(sender);
+            let ordered = Ordered::new(
+                Callback::from(move |_: u32| {
+                    let _ = sender.lock().unwrap().send(std::thread::current().id());
+                }),
+                None,
+            );
+            ordered.deliver(1);
+            assert_eq!(
+                received.try_recv(),
+                Ok(std::thread::current().id()),
+                "the callback was called before `deliver` returned, on the caller's thread"
+            );
+        }
+
+        #[test]
+        fn the_items_reach_the_callback_in_the_order_they_were_delivered() {
+            let (sender, received) = mpsc::channel();
+            let ordered = ordered(sender);
+            deliver_from_a_face(&ordered, 0..200);
+            let got: Vec<u32> = (0..200)
+                .map(|_| {
+                    received
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("delivered")
+                })
+                .collect();
+            assert_eq!(got, (0..200).collect::<Vec<_>>());
+        }
+
+        #[test]
+        fn a_callback_may_block_in_place() {
+            let (sender, received) = mpsc::channel();
+            let sender = Mutex::new(sender);
+            let ordered = Ordered::new(
+                Callback::from(move |item: u32| {
+                    // What upstream's tests do in a callback: wait for a thread that is not this
+                    // one.
+                    tokio::task::block_in_place(|| {
+                        std::thread::sleep(Duration::from_millis(10));
+                    });
+                    let _ = sender.lock().unwrap().send(item);
+                }),
+                None,
+            );
+            deliver_from_a_face(&ordered, [7]);
+            assert_eq!(received.recv_timeout(Duration::from_secs(5)), Ok(7));
+        }
+
+        #[test]
+        fn a_callback_that_panics_does_not_stop_the_next_item() {
+            let (sender, received) = mpsc::channel();
+            let sender = Mutex::new(sender);
+            let ordered = Ordered::new(
+                Callback::from(move |item: u32| {
+                    assert!(item != 0, "the first item is refused");
+                    let _ = sender.lock().unwrap().send(item);
+                }),
+                None,
+            );
+            deliver_from_a_face(&ordered, [0]);
+            std::thread::sleep(Duration::from_millis(200));
+            deliver_from_a_face(&ordered, [1]);
+            assert_eq!(received.recv_timeout(Duration::from_secs(5)), Ok(1));
+        }
     }
 }
