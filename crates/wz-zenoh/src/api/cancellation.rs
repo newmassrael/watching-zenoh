@@ -33,6 +33,36 @@ use zenoh_core::{Resolvable, Wait};
 use zenoh_result::ZResult;
 use zenoh_runtime::ZRuntime;
 
+/// Run `operation`, which holds the thread it is called on while it works, as a call from a
+/// future's `poll` should: on a worker of a multi-threaded runtime the worker gives its core,
+/// and with it the driving of the runtime's timers and I/O, to another thread first.
+///
+/// An operation of the session resolves where it is polled (the future of a builder is
+/// `Ready`), and a task that declares and undeclares in a loop never returns to its scheduler.
+/// The worker that polls it is then the one that was to drive the timers, and every sleep of
+/// the runtime waits for the loop to end. A thread that is not a worker of a multi-threaded
+/// runtime (a program's own, or a single-threaded runtime's) just runs `operation`.
+pub(crate) fn blocking<R>(operation: impl FnOnce() -> R) -> R {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(operation)
+        }
+        _ => operation(),
+    }
+}
+
+/// [`blocking`] when `may_wait`, else `operation` as it is. The hand-off costs a few microseconds
+/// a call (measured at 8 us on a task that yields between calls, against under 2 us for the
+/// yield alone), which an operation that can wait for the engine repays and a publication that
+/// never waits would not: only one with `CongestionControl::Block` can.
+pub(crate) fn blocking_if<R>(may_wait: bool, operation: impl FnOnce() -> R) -> R {
+    if may_wait {
+        blocking(operation)
+    } else {
+        operation()
+    }
+}
+
 /// A permit of a group, held by something whose end the group's wait is for. A group made as the
 /// child of another ([`SyncGroup::child_of`]) has its notifiers hold a permit of the parent as
 /// well, so that waiting for the parent waits for every notifier of its children.
@@ -461,5 +491,48 @@ mod test {
         ct.cancel().await.unwrap();
         assert_eq!(n.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(t.await.unwrap(), 1);
+    }
+}
+
+#[cfg(test)]
+mod blocking_tests {
+    use std::time::{Duration, Instant};
+
+    use super::blocking;
+
+    /// With one worker, a sleep of the runtime can only end while another task of the worker
+    /// blocks if the worker gave its core to another thread when it began to.
+    #[test]
+    fn a_blocking_call_on_a_worker_leaves_the_timers_of_its_runtime_running() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let slept = runtime.block_on(async {
+            let blocker = tokio::spawn(async {
+                blocking(|| std::thread::sleep(Duration::from_millis(1500)));
+            });
+            let started = Instant::now();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let slept = started.elapsed();
+            blocker.await.expect("the blocking task ends");
+            slept
+        });
+        assert!(
+            slept < Duration::from_millis(1000),
+            "the sleep ended after {slept:?}, when the blocking call had ended"
+        );
+    }
+
+    /// On a thread of a single-threaded runtime, where `block_in_place` is refused, and on one of
+    /// no runtime, the operation just runs.
+    #[test]
+    fn a_blocking_call_off_a_multi_threaded_runtime_just_runs() {
+        assert_eq!(blocking(|| 1), 1);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("a runtime");
+        assert_eq!(runtime.block_on(async { blocking(|| 2) }), 2);
     }
 }

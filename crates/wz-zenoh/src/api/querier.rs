@@ -332,7 +332,7 @@ impl IntoFuture for QuerierUndeclaration<'_> {
     type IntoFuture = Ready<<Self as Resolvable>::To>;
 
     fn into_future(self) -> Self::IntoFuture {
-        std::future::ready(self.wait())
+        std::future::ready(crate::api::cancellation::blocking(|| self.wait()))
     }
 }
 

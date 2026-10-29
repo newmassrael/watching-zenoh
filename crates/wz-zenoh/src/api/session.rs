@@ -11304,6 +11304,356 @@ mod tests {
             );
         }
 
+        /// A client that declares and undeclares a token as fast as it can does not starve the
+        /// router it is linked to: another node that joins meanwhile is linked, and a subscriber
+        /// of the tokens is told of the churn.
+        #[cfg(feature = "unstable")]
+        #[test]
+        fn a_router_keeps_serving_while_a_client_churns_tokens() {
+            use std::time::{Duration, Instant};
+
+            let port = unautoselected_port();
+            let router = router("a1b2fb", port);
+            let churn = client_of("a1b2fc", port);
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let worker = std::thread::spawn({
+                let stop = stop.clone();
+                move || {
+                    let mut cycles = 0u64;
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        let token = churn
+                            .liveliness()
+                            .declare_token("demo/churn")
+                            .wait()
+                            .expect("declares");
+                        token.undeclare().wait().expect("undeclares");
+                        cycles += 1;
+                    }
+                    cycles
+                }
+            });
+            std::thread::sleep(Duration::from_millis(500));
+            let started = Instant::now();
+            let late = peer_of("a1b2fd", port);
+            let linked = connected(&late, 1).0.len();
+            let took = started.elapsed();
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            let cycles = worker.join().expect("the churn ends");
+            eprintln!("churn: {cycles} cycles, a late node linked in {took:?}");
+            assert_eq!(linked, 1, "the late node is linked");
+            assert!(took < Duration::from_secs(5), "linked in {took:?}");
+            drop(late);
+
+            // And a router that dials the churned router while the churn goes on opens.
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let churn = client_of("a1b2fe", port);
+            let worker = std::thread::spawn({
+                let stop = stop.clone();
+                move || {
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        let token = churn
+                            .liveliness()
+                            .declare_token("demo/churn")
+                            .wait()
+                            .expect("declares");
+                        token.undeclare().wait().expect("undeclares");
+                    }
+                }
+            });
+            std::thread::sleep(Duration::from_millis(500));
+            let started = Instant::now();
+            let second = open(
+                Config::from_json5(&format!(
+                    r#"{{ id: "a1b2ff", mode: "router",
+                          connect: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                          scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                ))
+                .expect("a configuration zenoh reads"),
+            )
+            .wait()
+            .expect("a router dials a router");
+            eprintln!("churn: a router opened in {:?}", started.elapsed());
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            worker.join().expect("the churn ends");
+            drop(second);
+            drop(router);
+        }
+
+        /// Two peers that reach each other only through the router both dial exchange
+        /// publications through it, whichever of the three opens first.
+        #[cfg(feature = "unstable")]
+        #[test]
+        fn two_peers_of_one_router_exchange_publications_through_it() {
+            use std::time::{Duration, Instant};
+
+            let node_of = |id: &str, mode: &str, gossip: bool, port: u16| {
+                open(
+                    Config::from_json5(&format!(
+                        r#"{{ id: "{id}", mode: "{mode}",
+                              connect: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                              scouting: {{ multicast: {{ enabled: false }},
+                                           gossip: {{ enabled: {gossip} }} }} }}"#
+                    ))
+                    .expect("a configuration zenoh reads"),
+                )
+                .wait()
+                .expect("a node opens")
+            };
+            let mut silent = Vec::new();
+            for (n, (hub, publishing, subscribing, gossip)) in [
+                ("router", "client", "client", true),
+                ("router", "peer", "client", true),
+                ("router", "client", "peer", true),
+                ("peer", "peer", "peer", true),
+                ("router", "peer", "peer", true),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let port = unautoselected_port();
+                let router = open(
+                    Config::from_json5(&format!(
+                        r#"{{ id: "a1b2f6{n}", mode: "{hub}",
+                              listen: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                              scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                    ))
+                    .expect("a configuration zenoh reads"),
+                )
+                .wait()
+                .expect("a hub opens");
+                let publisher = node_of(&format!("a1b2f7{n}"), publishing, gossip, port);
+                let subscriber_node = node_of(&format!("a1b2f8{n}"), subscribing, gossip, port);
+                let subscriber = subscriber_node
+                    .declare_subscriber("demo/peers/through")
+                    .wait()
+                    .expect("declares");
+
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut heard = false;
+                while Instant::now() < deadline && !heard {
+                    publisher
+                        .put("demo/peers/through", "hello")
+                        .wait()
+                        .expect("puts");
+                    heard = subscriber
+                        .recv_timeout(Duration::from_millis(100))
+                        .ok()
+                        .flatten()
+                        .is_some();
+                }
+                if !heard {
+                    silent.push(format!(
+                        "{publishing} to {subscribing} by a {hub} (gossip {}; the publisher sees \
+                         peers {:?} and routers {:?}; the subscriber's node sees peers {:?})",
+                        if gossip { "on" } else { "off" },
+                        publisher.info().peers_zid().wait().collect::<Vec<_>>(),
+                        publisher.info().routers_zid().wait().collect::<Vec<_>>(),
+                        subscriber_node
+                            .info()
+                            .peers_zid()
+                            .wait()
+                            .collect::<Vec<_>>(),
+                    ));
+                }
+                drop((publisher, subscriber, subscriber_node, router));
+            }
+            assert!(silent.is_empty(), "nothing was heard from: {silent:?}");
+        }
+
+        /// Two peers of one router that gossip links directly are asked and answer as they do
+        /// through the router, whether the queryable or the asker is there first.
+        #[cfg(feature = "unstable")]
+        #[test]
+        fn two_peers_of_one_router_query_each_other_whoever_comes_first() {
+            use std::time::{Duration, Instant};
+
+            let peer_of = |id: &str, port: u16| {
+                open(
+                    Config::from_json5(&format!(
+                        r#"{{ id: "{id}", mode: "peer",
+                              connect: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                              scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                    ))
+                    .expect("a configuration zenoh reads"),
+                )
+                .wait()
+                .expect("a peer opens")
+            };
+            let mut silent = Vec::new();
+            for (n, queryable_delay_ms) in [0u64, 1500].into_iter().enumerate() {
+                let port = unautoselected_port();
+                let router = router(&format!("a1b2f9{n}"), port);
+                let asker = peer_of(&format!("a1b2fa{n}"), port);
+                let answerer = std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(queryable_delay_ms));
+                    let peer = peer_of(&format!("a1b2fb{n}"), port);
+                    let queryable = peer
+                        .declare_queryable("demo/peers/ask")
+                        .callback(|query| {
+                            query
+                                .reply("demo/peers/ask", "answer")
+                                .wait()
+                                .expect("replies");
+                        })
+                        .wait()
+                        .expect("declares");
+                    (peer, queryable)
+                });
+                let deadline = Instant::now() + Duration::from_secs(9);
+                let mut answered = false;
+                while Instant::now() < deadline && !answered {
+                    let replies = asker
+                        .get("demo/peers/ask")
+                        .timeout(Duration::from_secs(1))
+                        .wait()
+                        .expect("asks");
+                    while let Ok(Some(reply)) = replies.recv_timeout(Duration::from_secs(2)) {
+                        answered |= reply.result().is_ok();
+                    }
+                }
+                if !answered {
+                    silent.push(format!(
+                        "the queryable came after {queryable_delay_ms} ms and was never heard"
+                    ));
+                }
+                let kept = answerer.join().expect("the answering peer opens");
+                drop((kept, asker, router));
+            }
+            assert!(silent.is_empty(), "no reply came: {silent:?}");
+        }
+
+        /// An asker that loops on `get` from the first moment, before the router it dials is
+        /// there and before anything answers, still gets its answers when they come: the loop of
+        /// upstream's Get task, on a runtime of nine workers.
+        #[cfg(feature = "unstable")]
+        #[tokio::test(flavor = "multi_thread", worker_threads = 9)]
+        async fn an_asker_that_began_before_the_router_and_the_queryable_is_answered() {
+            use std::time::{Duration, Instant};
+
+            let port = unautoselected_port();
+            let peer_of = move |id: &'static str| async move {
+                open(
+                    Config::from_json5(&format!(
+                        r#"{{ id: "{id}", mode: "peer",
+                              connect: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                              scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                    ))
+                    .expect("a configuration zenoh reads"),
+                )
+                .await
+                .expect("a peer opens")
+            };
+            let router_task = tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(1200)).await;
+                let router = open(
+                    Config::from_json5(&format!(
+                        r#"{{ id: "a1b2fc0", mode: "router",
+                              listen: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                              scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                    ))
+                    .expect("a configuration zenoh reads"),
+                )
+                .await
+                .expect("a router opens");
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                drop(router);
+            });
+            let queryable_task = tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(2000)).await;
+                let peer = peer_of("a1b2fc1").await;
+                let queryable = peer
+                    .declare_queryable("demo/early/ask")
+                    .await
+                    .expect("declares");
+                loop {
+                    let query = queryable.recv_async().await.expect("a query");
+                    query
+                        .reply("demo/early/ask", vec![0u8; 8])
+                        .await
+                        .expect("replies");
+                }
+            });
+            let asker = peer_of("a1b2fc2").await;
+            let started = Instant::now();
+            let mut counter = 0;
+            let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+                while counter < 50 {
+                    let replies = asker
+                        .get("demo/early/ask")
+                        .timeout(Duration::from_secs(10))
+                        .await
+                        .expect("asks");
+                    while let Ok(reply) = replies.recv_async().await {
+                        if reply.result().is_ok() {
+                            counter += 1;
+                        }
+                    }
+                }
+            })
+            .await;
+            queryable_task.abort();
+            router_task.abort();
+            assert!(
+                outcome.is_ok(),
+                "{counter} answers in {:?}, 50 were asked for",
+                started.elapsed()
+            );
+        }
+
+        /// A router that dials a router which is not listening yet keeps dialing, and once the
+        /// link is up what a client of the dialing router subscribed to reaches a publisher of the
+        /// other: the start order of the nodes of a mesh does not matter.
+        #[cfg(feature = "unstable")]
+        #[test]
+        fn a_router_that_dialed_before_its_peer_listened_federates_when_it_does() {
+            use std::time::{Duration, Instant};
+
+            let first_port = unautoselected_port();
+            let dialer_port = unautoselected_port();
+            let dialer = open(
+                Config::from_json5(&format!(
+                    r#"{{ id: "a1b2f3", mode: "router",
+                          listen: {{ endpoints: ["tcp/127.0.0.1:{dialer_port}"] }},
+                          connect: {{ endpoints: ["tcp/127.0.0.1:{first_port}"] }},
+                          scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                ))
+                .expect("a configuration zenoh reads"),
+            )
+            .wait()
+            .expect("a router opens while the one it dials is not there");
+            let subscriber_client = client_of("a1b2f4", dialer_port);
+            let subscriber = subscriber_client
+                .declare_subscriber("demo/late/router")
+                .wait()
+                .expect("declares");
+            std::thread::sleep(Duration::from_millis(1000));
+            let first = router("a1b2f1", first_port);
+            let publisher_client = client_of("a1b2f5", first_port);
+
+            let deadline = Instant::now() + Duration::from_secs(8);
+            let mut heard = false;
+            while Instant::now() < deadline && !heard {
+                publisher_client
+                    .put("demo/late/router", "hello")
+                    .wait()
+                    .expect("puts");
+                heard = subscriber
+                    .recv_timeout(Duration::from_millis(100))
+                    .ok()
+                    .flatten()
+                    .is_some();
+            }
+            assert!(
+                heard,
+                "the subscriber of the dialing router heard nothing; the routers the dialing router \
+                 sees: {:?}, the routers the first sees: {:?}",
+                dialer.info().routers_zid().wait().collect::<Vec<_>>(),
+                first.info().routers_zid().wait().collect::<Vec<_>>(),
+            );
+            drop(first);
+            drop(dialer);
+        }
+
         /// The band and the class a dialing side names for its link (`prio=` and `rel=` of the
         /// endpoint) ride the QoS extension of the handshake, and the router that accepts the
         /// link reports them for it; a link that names none reports every priority.

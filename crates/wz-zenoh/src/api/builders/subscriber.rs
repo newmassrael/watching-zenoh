@@ -250,7 +250,7 @@ where
     type IntoFuture = Ready<<Self as Resolvable>::To>;
 
     fn into_future(self) -> Self::IntoFuture {
-        std::future::ready(self.wait())
+        std::future::ready(crate::api::cancellation::blocking(|| self.wait()))
     }
 }
 
@@ -276,6 +276,6 @@ impl IntoFuture for SubscriberBuilder<'_, '_, Callback<Sample>, true> {
     type IntoFuture = Ready<<Self as Resolvable>::To>;
 
     fn into_future(self) -> Self::IntoFuture {
-        std::future::ready(self.wait())
+        std::future::ready(crate::api::cancellation::blocking(|| self.wait()))
     }
 }

@@ -34,7 +34,7 @@ use crate::{
             TimestampInstrumentationBuilderTrait,
         },
         bytes::{OptionZBytes, ZBytes},
-        cancellation::SyncGroup,
+        cancellation::{blocking_if, SyncGroup},
         encoding::Encoding,
         key_expr::KeyExpr,
         publisher::{Priority, Publisher},
@@ -304,7 +304,8 @@ impl IntoFuture for PublicationBuilder<PublisherBuilder<'_, '_>, PublicationBuil
     type IntoFuture = Ready<<Self as Resolvable>::To>;
 
     fn into_future(self) -> Self::IntoFuture {
-        std::future::ready(self.wait())
+        let may_wait = self.publisher.congestion_control == CongestionControl::Block;
+        std::future::ready(blocking_if(may_wait, || self.wait()))
     }
 }
 
@@ -313,7 +314,8 @@ impl IntoFuture for PublicationBuilder<PublisherBuilder<'_, '_>, PublicationBuil
     type IntoFuture = Ready<<Self as Resolvable>::To>;
 
     fn into_future(self) -> Self::IntoFuture {
-        std::future::ready(self.wait())
+        let may_wait = self.publisher.congestion_control == CongestionControl::Block;
+        std::future::ready(blocking_if(may_wait, || self.wait()))
     }
 }
 
@@ -513,7 +515,7 @@ impl IntoFuture for PublisherBuilder<'_, '_> {
     type IntoFuture = Ready<<Self as Resolvable>::To>;
 
     fn into_future(self) -> Self::IntoFuture {
-        std::future::ready(self.wait())
+        std::future::ready(crate::api::cancellation::blocking(|| self.wait()))
     }
 }
 
@@ -568,7 +570,8 @@ impl IntoFuture for PublicationBuilder<&Publisher<'_>, PublicationBuilderPut> {
     type IntoFuture = Ready<<Self as Resolvable>::To>;
 
     fn into_future(self) -> Self::IntoFuture {
-        std::future::ready(self.wait())
+        let may_wait = self.publisher.congestion_control == CongestionControl::Block;
+        std::future::ready(blocking_if(may_wait, || self.wait()))
     }
 }
 
@@ -577,6 +580,7 @@ impl IntoFuture for PublicationBuilder<&Publisher<'_>, PublicationBuilderDelete>
     type IntoFuture = Ready<<Self as Resolvable>::To>;
 
     fn into_future(self) -> Self::IntoFuture {
-        std::future::ready(self.wait())
+        let may_wait = self.publisher.congestion_control == CongestionControl::Block;
+        std::future::ready(blocking_if(may_wait, || self.wait()))
     }
 }
