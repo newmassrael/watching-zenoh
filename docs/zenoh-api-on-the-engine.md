@@ -1003,8 +1003,20 @@ Each lands whole with its surface lines, tests and faults in one round.
       the spans.
     - **Open:** `routing` (the two above), `regions` (above) and `open_time` (its tests are
       ignored upstream).
-    - **Owed:** a lane that runs the harness (a pinned tree and a network on the host), the arm
-      with `internal` and the files it asks for a `Runtime` of, and Windows.
+    - **The hosted lane (Layer Z8, `z8-upstream` in `ci.yml`) and the table it holds the report
+      to.** `docs/z8-expected.tsv` names, for each file of upstream's `zenoh/tests`, the outcome
+      it has, the fewest tests that pass and whether the lane runs it; `scripts/lib/z8_expectation_gate.py`
+      compares the report of the harness with it. A file below its row fails the lane, a file
+      above it is a line to raise. The first measurement with the table caught a regression in
+      `liveliness` (44 of 46, then 43) that no other gate saw: a node peer's open returned when
+      its first link was up, before the nodes it dialled had told it what they hold, so a
+      subscriber declared right after the open was told of tokens that were already alive;
+      the open now waits for one connected and ingested node for each endpoint it dials, as
+      upstream's start conditions count one connector for each. The `regions` file is in the
+      table and not in the lane (each failing test waits out a minute). The harness raises the
+      open files limit of its runs: a dozen sessions of one process pass a shell's 1,024.
+    - **Owed:** the files it asks for a `Runtime` of (the arm with `internal`), Windows, a margin
+      gate for the lane once it has measured runs, and the rows of `regions` that fail today.
 - **Owned slices for the configuration-driven features** named in D6 (acl, authentication, low
   pass, downsampling, qos overwrite, namespace, admin space, connection retry, tcp buffers): each is
   a slice or an explicit, recorded refusal; none is implicit in Z1.

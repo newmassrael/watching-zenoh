@@ -130,7 +130,8 @@
         "ci.yml:routing-adminspace",
         "ci.yml:adminspace-lanes",
         "ci.yml:transport-modes",
-        "ci.yml:reduced-docs"
+        "ci.yml:reduced-docs",
+        "ci.yml:z8-upstream"
       ],
       "budget_mb": 700,
       "measured_mb": 659,

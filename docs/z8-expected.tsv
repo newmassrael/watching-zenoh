@@ -1,0 +1,37 @@
+# Z8: what each file of upstream's zenoh/tests must still do against the patched graph.
+# Graded by scripts/lib/z8_expectation_gate.py against the report of scripts/lib/z8_upstream_suite.py.
+# Columns: name <TAB> status <TAB> min_passed <TAB> lane <TAB> reason. Measured 2026-10-30 on the tree of round 3931.
+# `lane` says whether the hosted lane runs the file (`yes`) or only a person does (`no`).
+# A file that does better than its row is a line to raise in the commit that made it better.
+acl	pass	10	yes	all of it
+adminspace	pass	6	yes	all of it
+atexit	pass	3	yes	3 tests are ignored upstream
+attachments	pass	2	yes	all of it
+authentication	pass	7	yes	all of it
+bytes	pass	1	yes	all of it
+callback_drop_on_undeclare	pass	14	yes	all of it
+cancellation	pass	4	yes	all of it
+connection_retry	pass	6	yes	all of it
+connectivity	pass	9	yes	all of it
+events	pass	1	yes	all of it
+formatters	pass	1	yes	all of it
+handler	pass	2	yes	all of it
+interceptors	pass	7	yes	all of it
+keyexpr	pass	15	yes	all of it
+liveliness	pass	46	yes	all of it; 4 tests are ignored upstream
+low_pass	pass	4	yes	all of it
+matching	pass	24	yes	all of it
+namespace	pass	12	yes	all of it
+open_time	empty	0	yes	its 6 tests are ignored upstream
+qos	pass	2	yes	all of it
+qos_overwrite	pass	10	yes	all of it
+queryable	pass	3	yes	all of it
+regions	fail	10	no	needs the client node and the group peer as nodes, and counts the steps of upstream's routing by tracing span; each failing test waits out a minute, so a person runs it
+routing	fail	5	yes	gossip_regression_1 and _2 (the linkstate reply of a peer node carries a peer two links away); three_node_combination loses a query about one run in four
+scouting	pass	3	yes	all of it
+session	pass	5	yes	all of it
+shm	pass	10	yes	all of it
+source_info	pass	4	yes	all of it
+tcp_buffers	pass	4	yes	all of it
+timestamp_instrumentation	pass	48	yes	all of it
+unicity	pass	2	yes	all of it

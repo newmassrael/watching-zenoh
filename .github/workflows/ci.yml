@@ -2130,6 +2130,47 @@ jobs:
       - name: Layer C1co — the pico client-only build dials a listener
         run: bash scripts/run-ci.sh --layer C1co
 
+  # Layer Z8, in a job of its own: upstream's integration tests (`zenoh/tests`, at the pin) run
+  # against the patched family, a file at a time, and the report is held to `docs/z8-expected.tsv`
+  # (what each file must still do). A repair that breaks a file passes every gate that does not
+  # run the file; this is the lane that does. The files whose failing tests each wait out a
+  # minute are not in it (`lane` = `no` in the table).
+  #
+  # It builds a package of its own under `target/z8-suite` (the family by path, upstream's tests
+  # and its helper crate from a shallow clone of the tag), so it WRITES no rust-cache entry and
+  # reads the `ci` job's for the registry and the family's own dependencies. Measured locally,
+  # warm: about 40 minutes for 31 files (liveliness 220 s, routing 120 s, the rest under a
+  # minute each, plus the compile of each file); cold on a hosted runner it is longer, and the
+  # first run is the measurement.
+  #
+  # NO BUDGET GATE YET, on the precedent of `pico-client-only` and `e2e-router-scale`: a margin
+  # gate's floor and alarm are derived from measured runs and this job has none.
+  # `timeout-minutes` is a ceiling until then.
+  z8-upstream:
+    name: upstream's tests against the patched graph (Layer Z8)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: bash scripts/lib/rust-toolchain-pinned.sh
+
+      - name: Cache Cargo registry + build artifacts
+        # A READER of the `ci` job's entry (class `rust-ci`); see there.
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          add-job-id-key: "false"
+          save-if: "false"
+          workspaces: crates -> target
+
+      - name: Layer Z8 — upstream's own tests against the patched graph
+        run: bash scripts/run-ci.sh --layer Z8
+
   # ─────────────────────────────────────────────────────────────────
   # R2165 — the PASSIVE-DISSECTION job, peeled off `feature-gates` when that
   # job's margin step fired at 97% of 2700s on run 33087340444.

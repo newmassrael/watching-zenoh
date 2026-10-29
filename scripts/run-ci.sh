@@ -3266,6 +3266,11 @@ layer_c0_test_discipline() {
     # synthetic input: its matcher, its budget arithmetic and the control that every plane it
     # forbids somewhere it requires somewhere else.
     python3 scripts/lib/capability_cost_gate.py --selftest || return 1
+    # Z8 -- the harness that runs upstream's tests against the family (Layer Z8) and the gate that
+    # holds its report to the table of what each file must still do: the parsers and the verdicts,
+    # on synthetic text, before the lane that needs a network and an hour uses them.
+    python3 scripts/lib/z8_upstream_suite.py --selftest || return 1
+    python3 scripts/lib/z8_expectation_gate.py --selftest || return 1
     # The build configuration is declared once (deploy/wz-config.toml, docs/build-configuration.md
     # C1): the capability graph and the limits an image can state for itself. The generated
     # Kconfig files, the generated limit values, caps.rs's bindings and the three C ABI manifests
@@ -10875,6 +10880,34 @@ layer_c1cf_reduced_features() {
 # artifact in the target directory of its profile.
 layer_c1cs_capability_cost() {
     python3 scripts/lib/capability_cost_gate.py --check || return 1
+}
+
+# ─── Layer Z8 — upstream's own tests against the patched graph ──────────
+#
+# The family is a drop-in: a user patches one entry per crate and the graph meets the same types.
+# `z8_upstream_suite.py` builds that graph the way a user would and runs the integration tests of
+# upstream's `zenoh` (`zenoh/tests`, at the pin) against it, a file at a time. A measurement nobody
+# compares with anything drifts: a repair that breaks a file passes every gate that does not run it.
+# This lane is the comparison. `docs/z8-expected.tsv` holds, for each file, the outcome it has and
+# the fewest tests that pass; `z8_expectation_gate.py` holds the report to it, and a file that falls
+# below its row fails the lane. The files whose failing tests each wait out a minute are not run
+# here (`lane` = `no` in the table) and a person runs them.
+#
+# The pinned tree is a shallow clone of the tag (the harness asserts its commit), the package is
+# generated under `target/z8-suite` and never committed, and the open files limit is raised by the
+# harness (a shell's 1,024 is passed by a dozen sessions of one process).
+layer_z8_upstream_suite() {
+    # Opt-in on a machine: it needs the network (the tag is cloned) and about an hour. The hosted
+    # lane names it (`--layer Z8`); a person asks with `WZ_RUN_LAYER_Z8=1`.
+    if [[ "$ONLY_LAYER" != "Z8" && "${WZ_RUN_LAYER_Z8:-0}" -ne 1 ]]; then
+        echo "Layer Z8 SKIP (opt-in: needs the network and an hour; --layer Z8 or WZ_RUN_LAYER_Z8=1)"
+        return 0
+    fi
+    local names
+    names="$(python3 scripts/lib/z8_expectation_gate.py --names)" || return 1
+    # shellcheck disable=SC2086 -- the names are words by construction (file stems)
+    python3 scripts/lib/z8_upstream_suite.py measure $names || return 1
+    python3 scripts/lib/z8_expectation_gate.py --check "${Z8_OUT:-$PWD/target/z8-suite}/report.tsv" || return 1
 }
 
 # ─── Layer C1co — the pico client-only build dials a listener ──────────
@@ -25079,6 +25112,7 @@ run_layer C1cg layer_c1cg_cargo_test_runtime_partition || overall=1
 run_layer C1ch layer_c1ch_capi_c_config_surface || overall=1
 run_layer C1cf layer_c1cf_reduced_features || overall=1
 run_layer C1cs layer_c1cs_capability_cost || overall=1
+run_layer Z8 layer_z8_upstream_suite || overall=1
 run_layer C1co layer_c1co_pico_client_dials_a_listener || overall=1
 run_layer C1cn layer_c1cn_nondefault_features || overall=1
 run_layer C1i layer_c1i_cargo_test_scouting || overall=1

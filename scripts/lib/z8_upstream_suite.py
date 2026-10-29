@@ -420,7 +420,7 @@ def measure(names: list[str], out: pathlib.Path) -> int:
             continue
         rc = run(["cargo", "test", "--test", name, *flags, "--", "--test-threads=1"], out, rlog, RUN_BOUND_S)
         passed, failed, ignored = counts(rlog.read_text(encoding="utf-8", errors="replace"))
-        ran = f"ran={passed + failed} ignored={ignored}"
+        ran = f"ran={passed + failed} passed={passed} ignored={ignored}"
         if rc is None:
             rows.append(f"{name}\ttimeout\t{ran}")
         elif rc == 0 and passed + failed == 0:
