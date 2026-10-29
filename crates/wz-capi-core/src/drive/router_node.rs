@@ -472,7 +472,10 @@ pub(crate) fn open_router_blocking(
     let node_forwarder = forwarder.clone();
     let node_shutdown = shutdown.clone();
     let node_stop = stop.clone();
-    let dials_any = !connect.is_empty();
+    // How many nodes the open waits for: each endpoint it connects to is a node that must have
+    // connected and told it what it holds (upstream's `start_conditions` counts one connector
+    // for each).
+    let dials = connect.len();
     let handle = std::thread::Builder::new()
         .name("wz-capi-router".to_owned())
         .stack_size(DRIVE_THREAD_STACK_BYTES)
@@ -522,9 +525,15 @@ pub(crate) fn open_router_blocking(
         Ok(Ok(listen_locators)) => {
             match role {
                 NodeRole::Router => std::thread::sleep(hold),
-                NodeRole::Peer if dials_any => {
+                // The start condition of a peer is met when the node it dialled is connected and
+                // has told it what it holds: upstream releases the open when the gossip of a
+                // remote that is not a peer arrives, which a router sends after the declarations
+                // it replays on the new link (`zenoh/src/net/protocol/gossip.rs` @
+                // `terminate_peer_connector_zid(src)`). A subscriber declared right after the open
+                // is then told of what comes alive after it and not of what was already there.
+                NodeRole::Peer if dials > 0 => {
                     let deadline = std::time::Instant::now() + window;
-                    while forwarder.face_snapshots().is_empty()
+                    while (forwarder.face_snapshots().len() < dials || forwarder.ingested() < dials)
                         && std::time::Instant::now() < deadline
                     {
                         std::thread::sleep(std::time::Duration::from_millis(5));
