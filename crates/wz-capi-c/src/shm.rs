@@ -6892,7 +6892,13 @@ pub unsafe extern "C" fn z_open_with_custom_shm_clients(
             return Z_EINVAL;
         };
         // SAFETY: the caller's contract, delegated.
-        unsafe { crate::session::open_session(this_, config, Some(set)) }
+        unsafe {
+            crate::session::open_session(
+                this_,
+                config,
+                Some(wz_capi_core::faces::ShmReader::Clients(set)),
+            )
+        }
     })
 }
 

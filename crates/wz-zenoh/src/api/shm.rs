@@ -45,6 +45,285 @@ pub(crate) fn init_if_asked(config: &zenoh_config::ExpandedConfig) {
     }
 }
 
+/// What carries a buffer of shared memory across the engine, in both directions.
+///
+/// The process holds two shared-memory systems that share no type: this crate's (`zenoh::shm`,
+/// the family crate `zenoh-shm`), whose buffer an application holds as a `ZShm`, and the engine's
+/// own. They agree on the protocol (POSIX segments, a metadata slot that counts references, the
+/// descriptor on the wire), so the buffer is carried and not converted: the engine is given a
+/// [`ShmSendBuffer`] that wraps the slice of the application's `ZBytes` to send, and a
+/// [`ShmResolver`] that reads a received descriptor with this crate's reader into a slice the
+/// application receives as it is. The reference a sender takes for its receiver is the one the
+/// receiver's slice gives back when it drops, exactly as in upstream's codec.
+#[cfg(all(feature = "shared-memory", feature = "engine-tokio"))]
+pub(crate) mod transport {
+    use std::{any::Any, num::NonZeroUsize, sync::Arc};
+
+    use wz_session_core::{
+        extshm::{ShmDescriptor, ShmReservation, ShmResolver, ShmSendBuffer, ShmSendHandle},
+        link::{RxBytes, RxStorage, ShmChunkView},
+    };
+    use zenoh_buffers::ZSlice;
+    use zenoh_shm::{
+        api::client_storage::{ShmClientStorage, GLOBAL_CLIENT_STORAGE},
+        metadata::descriptor::MetadataDescriptor,
+        reader::ShmReader,
+        ShmBufInfo, ShmBufInner,
+    };
+
+    use crate::api::bytes::ZBytes;
+
+    fn buffer_of(slice: &ZSlice) -> Option<&ShmBufInner> {
+        slice.downcast_ref::<ShmBufInner>()
+    }
+
+    /// A slice of shared memory as the engine hands it up: the bytes are the page, and the slice
+    /// itself can be got back out of the view ([`RxStorage::as_any`]).
+    struct SliceStorage {
+        slice: ZSlice,
+    }
+
+    impl RxStorage for SliceStorage {
+        fn as_slice(&self) -> &[u8] {
+            self.slice.as_slice()
+        }
+
+        fn shm_chunk(&self) -> Option<&dyn ShmChunkView> {
+            Some(self)
+        }
+
+        fn as_any(&self) -> Option<&dyn Any> {
+            Some(self)
+        }
+    }
+
+    impl ShmChunkView for SliceStorage {
+        fn is_unique(&self) -> bool {
+            buffer_of(&self.slice).is_some_and(|buffer| buffer.ref_count() == 1)
+        }
+
+        fn writable_ptr(&self) -> Option<*mut u8> {
+            None
+        }
+    }
+
+    /// The view of `slice` the engine hands a receiver.
+    fn view_of(slice: ZSlice) -> Option<RxBytes> {
+        let len = slice.as_slice().len();
+        RxBytes::shared(Arc::new(SliceStorage { slice }), 0..len)
+    }
+
+    /// The payload a received view carries, when it is a slice of shared memory this reader
+    /// made; `None` for any other bytes, which the caller copies as it always did.
+    pub(crate) fn payload_of(view: &RxBytes) -> Option<ZBytes> {
+        let (any, range) = view.host_storage()?;
+        let storage = any.downcast_ref::<SliceStorage>()?;
+        // A payload that is a part of the buffer is not the buffer.
+        (range == (0..storage.slice.as_slice().len()))
+            .then(|| ZBytes::from_shm_slice(storage.slice.clone()))
+    }
+
+    /// The buffer a put of `payload` is sent from, when it is one slice of shared memory.
+    pub(crate) fn send_handle_of(payload: &ZBytes) -> Option<ShmSendHandle> {
+        let slice = payload.single_shm_slice()?;
+        buffer_of(slice)?;
+        Some(ShmSendHandle::new(Arc::new(SendBuffer {
+            slice: slice.clone(),
+        })))
+    }
+
+    /// A buffer some provider of this process owns, as the engine sends it.
+    struct SendBuffer {
+        slice: ZSlice,
+    }
+
+    impl SendBuffer {
+        fn buffer(&self) -> &ShmBufInner {
+            // Checked where the handle is made: the slice is a `ShmBufInner`.
+            buffer_of(&self.slice).expect("a send buffer wraps a shared-memory slice")
+        }
+    }
+
+    impl ShmSendBuffer for SendBuffer {
+        fn bytes(&self) -> &[u8] {
+            self.slice.as_slice()
+        }
+
+        fn protocol(&self) -> u32 {
+            self.buffer().protocol()
+        }
+
+        fn receiver_view(&self) -> Option<RxBytes> {
+            view_of(self.slice.clone())
+        }
+
+        fn reserve_for_receiver(self: Arc<Self>) -> Box<dyn ShmReservation> {
+            // SAFETY: the reference taken here is the receiver's, given back by `commit`'s
+            // receiver when it lets go, or by this reservation when the frame is not sent.
+            unsafe { self.buffer().inc_ref_count() };
+            Box::new(Reservation {
+                buffer: self,
+                committed: false,
+            })
+        }
+    }
+
+    /// The reference taken for one receiver, and the descriptor naming it.
+    struct Reservation {
+        buffer: Arc<SendBuffer>,
+        committed: bool,
+    }
+
+    impl ShmReservation for Reservation {
+        fn descriptor(&self) -> ShmDescriptor {
+            let info = &self.buffer.buffer().info;
+            ShmDescriptor {
+                data_len: u32::try_from(info.data_len.get()).unwrap_or(u32::MAX),
+                metadata_id: info.metadata.id,
+                metadata_index: info.metadata.index,
+                generation: info.generation,
+            }
+        }
+
+        fn commit(mut self: Box<Self>) {
+            self.committed = true;
+        }
+    }
+
+    impl Drop for Reservation {
+        fn drop(&mut self) {
+            if !self.committed {
+                // SAFETY: the reference this reservation took and nobody was sent.
+                unsafe { self.buffer.buffer().dec_ref_count() };
+            }
+        }
+    }
+
+    /// Reads a received descriptor with this crate's reader.
+    pub(crate) struct ReaderResolver {
+        reader: ShmReader,
+    }
+
+    impl ReaderResolver {
+        pub(crate) fn new(storage: Arc<ShmClientStorage>) -> Self {
+            Self {
+                reader: ShmReader::new(storage),
+            }
+        }
+
+        /// The buffer `descriptor` names. It owns the reference the sender took for this
+        /// receiver, and gives it back when it drops.
+        fn read(&self, descriptor: &ShmDescriptor) -> Option<Arc<ShmBufInner>> {
+            let info = ShmBufInfo::new(
+                NonZeroUsize::new(descriptor.data_len as usize)?,
+                MetadataDescriptor {
+                    id: descriptor.metadata_id,
+                    index: descriptor.metadata_index,
+                },
+                descriptor.generation,
+            );
+            self.reader.read_shmbuf(info).ok()
+        }
+    }
+
+    impl ShmResolver for ReaderResolver {
+        fn resolve(&self, descriptor: &ShmDescriptor) -> Option<Vec<u8>> {
+            let buffer = self.read(descriptor)?;
+            Some(AsRef::<[u8]>::as_ref(&*buffer).to_vec())
+        }
+
+        fn resolve_shared(&self, descriptor: &ShmDescriptor) -> Option<RxBytes> {
+            view_of(ZSlice::from(self.read(descriptor)?))
+        }
+    }
+
+    /// The implicit optimisation of large messages: a payload that is a plain buffer as large as
+    /// `transport/shared_memory/transport_optimization/message_size_threshold` is copied into the
+    /// session's provider, so that it is sent to a peer that negotiated shared memory as a
+    /// descriptor and not as bytes (upstream does the same at the link, per peer, in
+    /// `io/zenoh-transport/src/common/shm/interop.rs` @ `fn wrap_in_place<const ID: u8>(`).
+    ///
+    /// Done for a message the configuration lists (`messages`) and only when some peer could read
+    /// it, so a session none of whose peers shares memory copies nothing. The provider is made on
+    /// the first large message, in the background, and a message that finds it not yet made is
+    /// sent as bytes, as upstream's is.
+    #[cfg(feature = "unstable")]
+    pub(crate) struct Promoter {
+        provider: Arc<super::LazyShmProvider>,
+        threshold: usize,
+        put: bool,
+    }
+
+    #[cfg(feature = "unstable")]
+    impl Promoter {
+        /// The promoter the configuration asks for, or `None` when it asks for none (shared memory
+        /// off, or its transport optimisation off).
+        pub(crate) fn new(
+            config: &zenoh_config::ExpandedConfig,
+            provider: Option<&Arc<super::LazyShmProvider>>,
+        ) -> Option<Self> {
+            let provider = Arc::clone(provider?);
+            let optimisation = &config.transport().shared_memory().transport_optimization;
+            Some(Self {
+                provider,
+                threshold: *optimisation.message_size_threshold(),
+                put: optimisation
+                    .messages()
+                    .contains(&zenoh_config::DataMessage::Put),
+            })
+        }
+
+        /// `payload` as a buffer of shared memory, when a put of it is to be promoted and some
+        /// peer could read the promoted buffer; `None` when it is to be sent as it is.
+        pub(crate) fn promote(
+            &self,
+            payload: &ZBytes,
+            peer_shares_memory: impl FnOnce() -> bool,
+        ) -> Option<ShmSendHandle> {
+            use zenoh_core::Wait;
+            use zenoh_shm::api::provider::shm_provider::{
+                ConstBool, Defragment, GarbageCollect, JustAlloc,
+            };
+
+            if !self.put || payload.is_empty() || payload.len() < self.threshold {
+                return None;
+            }
+            if payload.single_shm_slice().is_some() || !peer_shares_memory() {
+                return None;
+            }
+            let crate::net::runtime::ShmProviderState::Ready(provider) = self.provider.state()
+            else {
+                return None;
+            };
+            let bytes = payload.to_bytes();
+            // SAFETY: the policy is upstream's for this copy: it may defragment and collect, and
+            // the buffer it returns is ours alone until it is sent.
+            let mut buffer = unsafe {
+                provider
+                    .alloc(bytes.len())
+                    .with_unsafe_policy::<Defragment<GarbageCollect<JustAlloc, JustAlloc, ConstBool<false>>>>()
+                    .wait()
+            }
+            .ok()?;
+            buffer.as_mut().copy_from_slice(&bytes);
+            send_handle_of(&ZBytes::from_shm_slice(buffer.into()))
+        }
+    }
+
+    /// The reader every session of an engine is given: over the storage of clients the
+    /// application opened the session with, or over the process's global one.
+    pub(crate) fn resolver_factory(
+        storage: Option<Arc<ShmClientStorage>>,
+    ) -> Arc<dyn Fn() -> Box<dyn ShmResolver + Send + Sync> + Send + Sync> {
+        Arc::new(move || {
+            let storage = storage
+                .clone()
+                .unwrap_or_else(|| Arc::clone(&GLOBAL_CLIENT_STORAGE.read()));
+            Box::new(ReaderResolver::new(storage))
+        })
+    }
+}
+
 #[cfg(feature = "unstable")]
 pub(crate) use lazy::{provider_of, LazyShmProvider};
 

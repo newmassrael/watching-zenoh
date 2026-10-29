@@ -932,6 +932,99 @@ impl Drop for WireReference<'_> {
     }
 }
 
+/// A guard of the engine's own chunk is a reservation like the one any other buffer hands out
+/// ([`ShmSendBuffer::reserve_for_receiver`]), so the publish legs of a session ask the same thing
+/// of the two.
+impl ShmReservation for WireReference<'_> {
+    fn descriptor(&self) -> ShmDescriptor {
+        WireReference::descriptor(self)
+    }
+
+    fn commit(self: Box<Self>) {
+        WireReference::commit(*self);
+    }
+}
+
+/// What the publish legs of a session ask of a chunk of shared memory a message is sent from: the
+/// bytes it holds (for a peer that cannot map the segment), the protocol its provider reads it
+/// through, the reference one remote receiver releases, and the view a receiver of the SAME
+/// session is handed.
+///
+/// The two things a session publishes this way are the chunk of the engine's own provider
+/// ([`ShmBackedPayload`]) and a buffer some other owner of a segment holds
+/// ([`ShmSendHandle`]), which is how the Rust API publishes a `ZShm`. One set of legs serves both,
+/// and neither knows how the other counts its references.
+pub trait ShmPublishable {
+    /// The shared-memory protocol the chunk belongs to; see [`ShmSendBuffer::protocol`].
+    fn protocol(&self) -> u32;
+
+    /// The bytes the chunk holds.
+    fn bytes(&self) -> &[u8];
+
+    /// Take the reference one remote receiver will release, and the descriptor naming it. The
+    /// reference goes back unless the reservation is committed.
+    fn reserve(&self) -> Box<dyn ShmReservation + '_>;
+
+    /// The chunk as a receiver of this session holds it; see [`ShmSendBuffer::receiver_view`].
+    fn receiver_view(&self) -> Option<RxBytes>;
+}
+
+impl ShmPublishable for ShmBackedPayload {
+    fn protocol(&self) -> u32 {
+        ShmBackedPayload::protocol(self)
+    }
+
+    fn bytes(&self) -> &[u8] {
+        ShmBackedPayload::bytes(self)
+    }
+
+    fn reserve(&self) -> Box<dyn ShmReservation + '_> {
+        Box::new(self.wire_reference())
+    }
+
+    fn receiver_view(&self) -> Option<RxBytes> {
+        ShmBackedPayload::receiver_view(self)
+    }
+}
+
+/// A shared chunk is published as the chunk it points to, which is how a caller that holds an
+/// `Arc` of one hands it over by reference.
+impl<T: ShmPublishable + ?Sized> ShmPublishable for Arc<T> {
+    fn protocol(&self) -> u32 {
+        (**self).protocol()
+    }
+
+    fn bytes(&self) -> &[u8] {
+        (**self).bytes()
+    }
+
+    fn reserve(&self) -> Box<dyn ShmReservation + '_> {
+        (**self).reserve()
+    }
+
+    fn receiver_view(&self) -> Option<RxBytes> {
+        (**self).receiver_view()
+    }
+}
+
+impl ShmPublishable for wz_session_core::extshm::ShmSendHandle {
+    fn protocol(&self) -> u32 {
+        wz_session_core::extshm::ShmSendHandle::protocol(self)
+    }
+
+    fn bytes(&self) -> &[u8] {
+        wz_session_core::extshm::ShmSendHandle::bytes(self)
+    }
+
+    fn reserve(&self) -> Box<dyn ShmReservation + '_> {
+        self.reserve_for_receiver()
+    }
+
+    fn receiver_view(&self) -> Option<RxBytes> {
+        wz_session_core::extshm::ShmSendHandle::receiver_view(self)
+    }
+}
+
 /// R3062 -- [`WireReference`] that OWNS its payload, for a message whose send outlives the
 /// call that took the reference: a reply is staged by a queryable's handler and sent when the
 /// handler's job drains, so the reservation travels with the staged reply and cannot borrow

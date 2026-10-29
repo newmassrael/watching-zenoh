@@ -75,6 +75,10 @@ shared-memory = [
     "zenoh-buffers/shared-memory",
     "zenoh-codec/shared-memory",
     "zenoh-protocol/shared-memory",
+    # The engine's side of shared memory: the handshake offer and the buffers a message is sent
+    # from and read into (`api::shm::transport`).
+    "wz-capi-core?/session-extshm",
+    "dep:wz-session-core",
 ]
 # `unstable` carries the timestamp instrumentation of a message, which records on the timestamp
 # stack the engine reads and writes only with `pubsub-ts-stack`.
@@ -107,6 +111,10 @@ uhlc = { version = "0.8.0", default-features = false, features = ["std"] }
 # fragmentation of what is larger than a batch. Compression and the user and password method are
 # capabilities of the engine that its default features carry.
 wz-capi-core = { path = "../wz-capi-core", optional = true, features = ["transport-qos", "routing-namespace", "router-node"] }
+# What the engine's shared-memory seams are spelled in: the buffer a message is sent from, the
+# resolver of a received descriptor and the bytes it is read into. Only a build with shared memory
+# names them.
+wz-session-core = { path = "../wz-session-core", optional = true, default-features = false, features = ["alloc", "rx-shared-bytes", "session-extshm"] }
 # The vocabulary of the port the engine is run through: the query a queryable keeps and answers
 # later, which the engine's crate does not re-export.
 wz-capi-port = { path = "../wz-capi-port", optional = true }

@@ -138,6 +138,10 @@ pub(crate) struct Publication<'a> {
     /// on a message it routes out.
     #[cfg(feature = "unstable")]
     pub(crate) wire_ts_stack: Option<zenoh_protocol::network::timestamp_stack::TimestampStack>,
+    /// What copies a large payload into shared memory for a peer that could read it, when the
+    /// configuration asks for the optimisation.
+    #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+    pub(crate) shm_promoter: Option<&'a crate::api::shm::transport::Promoter>,
 }
 
 /// What a subscription asks of the engine, in the types of this crate: the key as the wire names
@@ -368,7 +372,12 @@ impl RouterEngine {
 impl Engine {
     /// Open a session on this engine, from the document the configuration is, and the id the
     /// session stands on.
-    fn open(config: &Config) -> ZResult<(Engine, ZenohId)> {
+    fn open(
+        config: &Config,
+        #[cfg(feature = "shared-memory")] shm_clients: Option<
+            Arc<zenoh_shm::api::client_storage::ShmClientStorage>,
+        >,
+    ) -> ZResult<(Engine, ZenohId)> {
         use wz_capi_core::open_plan::{AbiChoices, OpenPlan, StatedEndpoints};
 
         let expanded = config.0.clone().expanded();
@@ -422,8 +431,20 @@ impl Engine {
             // Each face of the session has a thread of its own, so a callback that blocks
             // holds up its link and no other.
             face_drive: tokio_engine::FaceDrive::PerFace,
+            // A router node carries no shared memory; any other session reads a received
+            // descriptor with this crate's reader and offers shared memory as its configuration
+            // says (`transport/shared_memory/enabled`).
+            #[cfg(feature = "shared-memory")]
+            shm_clients: if router {
+                tokio_engine::no_shm_clients()
+            } else {
+                Some(wz_capi_core::faces::ShmReader::Host(
+                    crate::api::shm::transport::resolver_factory(shm_clients),
+                ))
+            },
+            #[cfg(not(feature = "shared-memory"))]
             shm_clients: tokio_engine::no_shm_clients(),
-            offer_shm: false,
+            offer_shm: cfg!(feature = "shared-memory") && !router,
             groups_report_shm: false,
         });
         if router {
@@ -610,6 +631,59 @@ impl Engine {
             Engine::Tokio(state) => {
                 let options = tokio_engine::publish_options(publication);
                 let wire = tokio_engine::wire_key(publication);
+                // A large put that the configuration asks to be optimised, and that a peer could
+                // read from shared memory, is sent to the peers as a copy in the provider; a
+                // subscriber of the session itself is given the bytes it was put with, as
+                // upstream's, which promotes at the link and not before it.
+                #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+                if publication.kind == SampleKind::Put {
+                    let engine = state.shared.as_engine();
+                    if let Some(handle) = publication.shm_promoter.and_then(|promoter| {
+                        promoter.promote(&publication.payload, || engine.has_shm_peer())
+                    }) {
+                        let mut delivered = Ok(0);
+                        if options.allowed_destination.allows_remote() {
+                            let remote = options
+                                .clone()
+                                .with_locality(wz_capi_core::runtime::locality::Locality::Remote);
+                            delivered = engine.publish_shm_on_wire_all(
+                                publication.key,
+                                &wire,
+                                handle,
+                                &remote,
+                            );
+                        }
+                        if delivered.is_ok() && options.allowed_destination.allows_local() {
+                            let local = options.with_locality(
+                                wz_capi_core::runtime::locality::Locality::SessionLocal,
+                            );
+                            delivered = engine.publish_on_wire_all(
+                                publication.key,
+                                &wire,
+                                &publication.payload.to_bytes(),
+                                &local,
+                            );
+                        }
+                        return delivered
+                            .map(|_delivered| ())
+                            .map_err(|refusal| tokio_engine::publish_error(refusal, publication));
+                    }
+                }
+                // A put whose payload is a buffer of shared memory is sent as the buffer: its
+                // descriptor to a peer that negotiated shared memory, its bytes to any other.
+                #[cfg(feature = "shared-memory")]
+                if publication.kind == SampleKind::Put {
+                    if let Some(handle) =
+                        crate::api::shm::transport::send_handle_of(&publication.payload)
+                    {
+                        return state
+                            .shared
+                            .as_engine()
+                            .publish_shm_on_wire_all(publication.key, &wire, handle, &options)
+                            .map(|_delivered| ())
+                            .map_err(|refusal| tokio_engine::publish_error(refusal, publication));
+                    }
+                }
                 let payload = publication.payload.to_bytes();
                 state
                     .shared
@@ -1102,7 +1176,12 @@ impl Engine {
 
 #[cfg(not(feature = "engine-tokio"))]
 impl Engine {
-    fn open(_config: &Config) -> ZResult<(Engine, ZenohId)> {
+    fn open(
+        _config: &Config,
+        #[cfg(feature = "shared-memory")] _shm_clients: Option<
+            Arc<zenoh_shm::api::client_storage::ShmClientStorage>,
+        >,
+    ) -> ZResult<(Engine, ZenohId)> {
         bail!("this build of zenoh selects no engine: enable the feature `engine-tokio`")
     }
 
@@ -1665,6 +1744,12 @@ mod tokio_engine {
     fn acted_on_by_the_session(key: &str) -> bool {
         key == "qos/publication"
             || (cfg!(feature = "shared-memory") && key == "transport/shared_memory/mode")
+            // The implicit optimisation of large messages, which `api::shm::transport::Promoter`
+            // carries out for a put (the lists of `query` and `reply` are not promoted yet, and a
+            // list that names them is read and not acted on for those).
+            || (cfg!(all(feature = "shared-memory", feature = "unstable"))
+                && (key == "transport/shared_memory/transport_optimization/message_size_threshold"
+                    || key == "transport/shared_memory/transport_optimization/messages"))
     }
 
     /// An open the plan refuses, in the words upstream refuses it in where it does, and by the key
@@ -1987,6 +2072,20 @@ mod tokio_engine {
     ///
     /// The payload is copied out of the frame: handing it over as the frame's own bytes is the
     /// zero-copy payload of slice Z2 that no engine offers yet.
+    /// The payload of a sample the engine hands up: the buffer of shared memory it is when the
+    /// reader of this crate made it ([`crate::api::shm::transport`]), the bytes copied out of the
+    /// frame otherwise.
+    fn payload_of_view(view: &dyn SampleView) -> ZBytes {
+        #[cfg(feature = "shared-memory")]
+        if let Some(shared) = view
+            .payload_shared()
+            .and_then(crate::api::shm::transport::payload_of)
+        {
+            return shared;
+        }
+        ZBytes::from(view.payload().to_vec())
+    }
+
     fn sample_of(
         view: &dyn SampleView,
         #[cfg(feature = "unstable")] receive: Option<&TimestampSource>,
@@ -2001,7 +2100,7 @@ mod tokio_engine {
         let qos = view.qos().map_or_else(QoS::default, qos_from);
         Ok(Sample {
             key_expr,
-            payload: ZBytes::from(view.payload().to_vec()),
+            payload: payload_of_view(view),
             kind,
             encoding,
             timestamp,
@@ -3235,6 +3334,10 @@ pub(crate) struct SessionInner {
     /// first asked for ([`Session::get_shm_provider`]); `None` when it asks for none.
     #[cfg(all(feature = "unstable", feature = "shared-memory"))]
     shm_provider: Option<Arc<crate::api::shm::LazyShmProvider>>,
+    /// What copies a large put into the provider for a peer that could read it, when the
+    /// configuration asks for the optimisation (`transport_optimization`).
+    #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+    shm_promoter: Option<crate::api::shm::transport::Promoter>,
     /// The clients of shared memory segments the application opened the session with
     /// ([`OpenBuilder::with_shm_clients`](crate::session::OpenBuilder::with_shm_clients)). The
     /// session negotiates no shared memory with its peers yet, so no segment is read through them:
@@ -3909,6 +4012,8 @@ impl SessionInner {
             ts_stack,
             #[cfg(feature = "unstable")]
             wire_ts_stack,
+            #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+            shm_promoter: self.shm_promoter.as_ref(),
         })
     }
 
@@ -4097,7 +4202,11 @@ impl Session {
             Arc<zenoh_shm::api::client_storage::ShmClientStorage>,
         >,
     ) -> ZResult<Session> {
-        let (engine, zid) = Engine::open(&config)?;
+        let (engine, zid) = Engine::open(
+            &config,
+            #[cfg(feature = "shared-memory")]
+            shm_clients.clone(),
+        )?;
         #[cfg(feature = "shared-memory")]
         let expanded = config.0.clone().expanded();
         #[cfg(feature = "shared-memory")]
@@ -4113,6 +4222,8 @@ impl Session {
                 .queries_default_timeout()
                 .unwrap_or(zenoh_config::defaults::queries_default_timeout),
         );
+        #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+        let shm_provider = crate::api::shm::provider_of(&expanded);
         let session = Session(Arc::new(SessionInner {
             strong_counter: AtomicUsize::new(1),
             engine,
@@ -4136,7 +4247,12 @@ impl Session {
                 node_clock,
             )),
             #[cfg(all(feature = "unstable", feature = "shared-memory"))]
-            shm_provider: crate::api::shm::provider_of(&expanded),
+            shm_promoter: crate::api::shm::transport::Promoter::new(
+                &expanded,
+                shm_provider.as_ref(),
+            ),
+            #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+            shm_provider,
             #[cfg(feature = "shared-memory")]
             shm_clients,
             subscriptions: std::sync::Mutex::new(vec![]),
@@ -6059,6 +6175,8 @@ mod tests {
             ts_stack: None,
             #[cfg(feature = "unstable")]
             wire_ts_stack: None,
+            #[cfg(all(feature = "unstable", feature = "shared-memory"))]
+            shm_promoter: None,
         }
     }
 

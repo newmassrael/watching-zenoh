@@ -124,6 +124,29 @@ pub trait SessionEngine: Send + Sync + 'static {
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError>;
 
+    /// Whether some peer negotiated shared memory, so that a payload put into shared memory is
+    /// sent to someone as a descriptor. The provided answer is no, which is right for an engine
+    /// with none.
+    #[cfg(feature = "transport-shm")]
+    fn has_shm_peer(&self) -> bool {
+        false
+    }
+
+    /// [`Self::publish_on_wire_all`] for a payload that is a buffer of shared memory some owner of
+    /// a segment holds: a peer that negotiated shared memory is sent the buffer's descriptor and
+    /// any other the bytes it holds, and a subscriber of this session is handed the buffer. The
+    /// provided answer is the bytes, which is right for an engine with no shared memory.
+    #[cfg(feature = "transport-shm")]
+    fn publish_shm_on_wire_all(
+        &self,
+        keyexpr: &str,
+        wire: &WireKey,
+        payload: wz_session_core::extshm::ShmSendHandle,
+        opts: &PublishOptions,
+    ) -> Result<usize, FanoutError> {
+        self.publish_on_wire_all(keyexpr, wire, payload.bytes(), opts)
+    }
+
     /// Declare a subscriber on `keyexpr`, announced as `wire`, receiving what `allowed_origin`
     /// admits through callbacks `sink` mints. `retraction` is the key its undeclaration names
     /// beside its id, when the declaring ABI's reference library names one.

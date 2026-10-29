@@ -312,6 +312,13 @@ impl LegBytes for Arc<wz_runtime_tokio::shm_provider::ShmBackedPayload> {
     }
 }
 
+#[cfg(feature = "transport-shm")]
+impl LegBytes for wz_session_core::extshm::ShmSendHandle {
+    fn leg_bytes(&self) -> &[u8] {
+        self.bytes()
+    }
+}
+
 /// The faces and the groups one fan-out sends to; see [`SharedSession`]'s `fan_targets`.
 struct FanTargets {
     faces: Arc<Vec<TokioSession>>,
@@ -1537,7 +1544,25 @@ pub struct SharedSession {
 /// had before the C ABI could be given one. Without the SHM feature there is no reader to
 /// configure and the type is a unit struct that carries nothing.
 #[cfg(feature = "transport-shm")]
-pub type OpenShmClients = Option<Arc<wz_runtime_tokio::shm_clients::ShmClientSet>>;
+pub type OpenShmClients = Option<ShmReader>;
+
+/// How a session reads a shared-memory descriptor it was sent, when its host chose.
+///
+/// The engine's reader maps a chunk through the clients of a set, one for each protocol, and
+/// hands the application a view of the page. A host whose application holds its own types for a
+/// chunk of shared memory (the Rust API's `ZShm`) needs the reader to hand it THOSE, so it
+/// supplies the resolver itself and keeps what a chunk is to itself.
+#[cfg(feature = "transport-shm")]
+#[derive(Clone)]
+pub enum ShmReader {
+    /// The reader is the engine's, over this set of clients.
+    Clients(Arc<wz_runtime_tokio::shm_clients::ShmClientSet>),
+    /// The reader is the host's: this makes one for each session. The protocols the session
+    /// offers are the default (POSIX alone), so a resolver of this kind reads POSIX chunks.
+    Host(
+        Arc<dyn Fn() -> Box<dyn wz_session_core::extshm::ShmResolver + Send + Sync> + Send + Sync>,
+    ),
+}
 /// See the SHM-feature definition above.
 #[cfg(not(feature = "transport-shm"))]
 #[derive(Clone, Copy, Debug)]
@@ -1649,10 +1674,14 @@ impl Default for SessionResources {
 /// session keeps the default POSIX reader every session is built with.
 #[cfg(feature = "transport-shm")]
 fn install_shm_reader(session: &TokioSession, clients: &OpenShmClients) {
-    if let Some(clients) = clients {
-        session.set_shm_resolver(Box::new(
-            wz_runtime_tokio::shm_clients::ShmClientResolver::new(Arc::clone(clients)),
-        ));
+    match clients {
+        Some(ShmReader::Clients(clients)) => {
+            session.set_shm_resolver(Box::new(
+                wz_runtime_tokio::shm_clients::ShmClientResolver::new(Arc::clone(clients)),
+            ));
+        }
+        Some(ShmReader::Host(make)) => session.set_shm_resolver(make()),
+        None => {}
     }
 }
 
@@ -2948,6 +2977,65 @@ impl SharedSession {
         _payload: &[u8],
     ) -> Result<usize, FanoutError> {
         Ok(0)
+    }
+
+    /// Whether some peer of this session negotiated shared memory and reads the default (POSIX)
+    /// protocol: whether a payload put into shared memory would be sent to anyone as a descriptor.
+    /// A host that promotes large payloads into shared memory asks first, so that it copies
+    /// nothing for a session none of whose peers could read it.
+    #[cfg(feature = "transport-shm")]
+    pub fn has_shm_peer(&self) -> bool {
+        self.fan_targets()
+            .faces
+            .iter()
+            .any(|session| session.actions().shm_admits(0))
+    }
+
+    /// [`Self::publish_on_wire_all`] for a payload that is a buffer of shared memory some owner
+    /// of a segment holds, which is how a program that supplies its own provider publishes: each
+    /// face that negotiated shared memory is sent the buffer's descriptor, each that did not the
+    /// bytes read back out of it, and a subscriber of this session is handed the buffer.
+    #[cfg(feature = "transport-shm")]
+    pub fn publish_shm_handle_on_wire_all(
+        &self,
+        keyexpr: &str,
+        wire: &WireKey,
+        payload: wz_session_core::extshm::ShmSendHandle,
+        opts: &PublishOptions,
+    ) -> Result<usize, FanoutError> {
+        if wire.is_literal() {
+            self.fan_out_with(
+                opts,
+                PutKey::Literal(keyexpr),
+                payload,
+                |session, leg, payload| Leg::of_publish(session.publish_shm(keyexpr, payload, leg)),
+                |session, leg, payload| {
+                    Leg::of_publish(session.publish_shm(keyexpr, &payload, leg))
+                },
+            )
+        } else {
+            let mapping_id = wire.mapping_id;
+            let suffix = wire.suffix.as_deref();
+            self.fan_out_with(
+                opts,
+                PutKey::Declared {
+                    literal: keyexpr,
+                    mapping_id,
+                    suffix,
+                },
+                payload,
+                |session, leg, payload| {
+                    Leg::of_alias(
+                        session.publish_shm_aliased_auto(mapping_id, suffix, payload, leg),
+                    )
+                },
+                |session, leg, payload| {
+                    Leg::of_alias(
+                        session.publish_shm_aliased_auto(mapping_id, suffix, &payload, leg),
+                    )
+                },
+            )
+        }
     }
 
     /// Fan a publish on `keyexpr` over every face, naming it on the wire as

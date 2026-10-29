@@ -4599,6 +4599,7 @@ dependencies = [
  "wz-capi-port",
  "wz-runtime-tokio",
  "wz-runtime-tokio-test-support",
+ "wz-session-core",
  "zenoh-buffers",
  "zenoh-codec",
  "zenoh-collections",

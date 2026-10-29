@@ -4163,8 +4163,22 @@ impl OpenStance {
         set: Arc<wz_runtime_tokio::shm_clients::ShmClientSet>,
     ) -> Result<Self, wz_runtime_tokio::shm_clients::TooManyShmProtocols> {
         self.offer = self.offer.with_shm_protocols(set.advertised()?);
-        self.shm_clients = Some(set);
+        self.shm_clients = Some(crate::faces::ShmReader::Clients(set));
         Ok(self)
+    }
+
+    /// This stance for a session whose shared-memory reader is the host's own: `make` builds the
+    /// resolver of each session. The offer lists the default protocols (POSIX alone), so the
+    /// resolver must read POSIX chunks; a host that reads others supplies a set of clients
+    /// ([`Self::with_shm_clients`]) instead.
+    pub fn with_shm_resolver(
+        mut self,
+        make: Arc<
+            dyn Fn() -> Box<dyn wz_session_core::extshm::ShmResolver + Send + Sync> + Send + Sync,
+        >,
+    ) -> Self {
+        self.shm_clients = Some(crate::faces::ShmReader::Host(make));
+        self
     }
 }
 

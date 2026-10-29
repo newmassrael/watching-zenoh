@@ -256,6 +256,23 @@ impl ZBytes {
         ZBytesSliceIterator(self.0.slices())
     }
 }
+/// What the engine's transport of shared memory needs of a payload (`api::shm::transport`).
+#[cfg(feature = "shared-memory")]
+impl ZBytes {
+    /// The slice of shared memory this payload is, when it is exactly one.
+    pub(crate) fn single_shm_slice(&self) -> Option<&ZSlice> {
+        let mut zslices = self.0.zslices();
+        let slice = zslices.next()?;
+        slice.downcast_ref::<zenoh_shm::ShmBufInner>()?;
+        zslices.next().is_none().then_some(slice)
+    }
+
+    /// The payload that is `slice`, a slice of shared memory.
+    pub(crate) fn from_shm_slice(slice: ZSlice) -> Self {
+        Self(slice.into())
+    }
+}
+
 #[cfg(all(feature = "unstable", feature = "shared-memory"))]
 const _: () = {
     use zenoh_shm::{api::buffer::zshm::zshm, ShmBufInner};

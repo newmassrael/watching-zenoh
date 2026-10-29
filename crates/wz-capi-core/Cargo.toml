@@ -269,7 +269,7 @@ routing-namespace = ["wz-runtime-tokio/routing-namespace", "wz-session-core/rout
 # `transport-qos` above: `FaceSnapshot::of` reads `SessionLinkActions::is_shm`,
 # which is `transport-shm`-gated upstream. It feeds the SHM arm's twentieth
 # transport byte, which upstream adds only when `Z_FEATURE_SHARED_MEMORY` is set.
-transport-shm = ["wz-runtime-tokio/transport-shm"]
+transport-shm = ["wz-runtime-tokio/transport-shm", "wz-capi-port/transport-shm"]
 # R3065 -- the SHM establishment, for a host that gives its sessions a reader of its own: the
 # session's offer lists the protocols that reader resolves in the segment it publishes
 # (`OpenStance::with_shm_clients`). The zenoh-c arm that has client storages turns it on.

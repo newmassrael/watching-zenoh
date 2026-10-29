@@ -814,17 +814,17 @@ impl<'a> GroupKey<'a> {
 /// first push). A type that exists only where it is read cannot be left unread.
 #[cfg(all(feature = "transport-shm", feature = "pubsub-allow-loop"))]
 enum ShmHand<'a> {
-    Borrowed(&'a crate::shm_provider::ShmBackedPayload),
+    Borrowed(&'a dyn crate::shm_provider::ShmPublishable),
     Handed(std::sync::Arc<crate::shm_provider::ShmBackedPayload>),
 }
 
 #[cfg(all(feature = "transport-shm", feature = "pubsub-allow-loop"))]
 impl ShmHand<'_> {
     /// The payload, whichever way it is held.
-    fn payload(&self) -> &crate::shm_provider::ShmBackedPayload {
+    fn payload(&self) -> &dyn crate::shm_provider::ShmPublishable {
         match self {
-            ShmHand::Borrowed(payload) => payload,
-            ShmHand::Handed(payload) => payload,
+            ShmHand::Borrowed(payload) => *payload,
+            ShmHand::Handed(payload) => &**payload,
         }
     }
 
@@ -4019,7 +4019,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     pub fn publish_shm(
         &self,
         keyexpr: &str,
-        payload: &crate::shm_provider::ShmBackedPayload,
+        payload: &dyn crate::shm_provider::ShmPublishable,
         mut opts: PublishOptions,
     ) -> Result<usize, PublishError> {
         // R311y818 — the third publish body, and the same `resolve_put` head.
@@ -4049,7 +4049,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     fn publish_shm_legs<B, E, I>(
         &self,
         loopback_keyexpr: &str,
-        payload: &crate::shm_provider::ShmBackedPayload,
+        payload: &dyn crate::shm_provider::ShmPublishable,
         opts: PublishOptions,
         build: B,
         inline: I,
@@ -4105,7 +4105,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         mapping_id: u64,
         inline_suffix: Option<&str>,
         loopback_keyexpr: &str,
-        payload: &crate::shm_provider::ShmBackedPayload,
+        payload: &dyn crate::shm_provider::ShmPublishable,
         mut opts: PublishOptions,
     ) -> Result<usize, PublishError> {
         // The same `resolve_put` head as the two bodies around it; idempotent, so the
@@ -4143,7 +4143,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         &self,
         mapping_id: u64,
         inline_suffix: Option<&str>,
-        payload: &crate::shm_provider::ShmBackedPayload,
+        payload: &dyn crate::shm_provider::ShmPublishable,
         opts: PublishOptions,
     ) -> Result<usize, PublishAliasError> {
         let mut loopback_keyexpr = self
@@ -4162,7 +4162,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     #[cfg(all(feature = "transport-shm", feature = "codec-push"))]
     fn send_shm_descriptor<B, E>(
         &self,
-        payload: &crate::shm_provider::ShmBackedPayload,
+        payload: &dyn crate::shm_provider::ShmPublishable,
         opts: &PublishOptions,
         build: B,
     ) -> Result<(), PublishError>
@@ -4178,7 +4178,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         // RECEIVER, as it does upstream, and the receiver's resolver gives it
         // back. The guard returns it if the frame does not build or the send
         // refuses, so the count is only left raised for a frame that left.
-        let wire = payload.wire_reference();
+        let wire = payload.reserve();
         let push = build(&wire.descriptor(), &meta)
             .map_err(Into::<wz_session_core::send_wire_error::SendWireError>::into)?;
         // R311y-item3 — route the SHM descriptor leg through the QoS send

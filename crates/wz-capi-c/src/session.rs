@@ -239,7 +239,8 @@ pub(crate) unsafe fn open_session(
     // reader: the stance takes both from the one set, so the list a peer's sender reads is
     // never wider than what the session resolves.
     #[cfg(feature = "zenoh-c-shared-memory")]
-    if let Some(set) = arguments.stance.shm_clients.clone() {
+    if let Some(wz_capi_core::faces::ShmReader::Clients(set)) = arguments.stance.shm_clients.clone()
+    {
         arguments.stance = match arguments.stance.with_shm_clients(set) {
             Ok(stance) => stance,
             // More protocols than an auth segment has slots for: upstream's

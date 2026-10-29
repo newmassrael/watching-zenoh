@@ -39,6 +39,10 @@ crate-type = ["rlib"]
 # critical section an MCU image links (src/sync.rs), and the token waits for the MCU host layer.
 default = ["std"]
 std = []
+# A publish that takes a buffer of shared memory some owner of a segment holds
+# (`Engine::publish_shm_on_wire_all`): the buffer's type is the session core's, behind its own
+# feature. An engine that has no shared memory answers the method with the bytes.
+transport-shm = ["wz-session-core/transport-shm"]
 
 [dependencies]
 # The lock of a build without `std` (src/sync.rs): the image links the implementation, as it does

@@ -190,6 +190,22 @@ impl SessionEngine for SharedSession {
         SharedSession::publish_on_wire_all(self, keyexpr, wire, payload, opts)
     }
 
+    #[cfg(feature = "transport-shm")]
+    fn has_shm_peer(&self) -> bool {
+        SharedSession::has_shm_peer(self)
+    }
+
+    #[cfg(feature = "transport-shm")]
+    fn publish_shm_on_wire_all(
+        &self,
+        keyexpr: &str,
+        wire: &WireKey,
+        payload: wz_session_core::extshm::ShmSendHandle,
+        opts: &PublishOptions,
+    ) -> Result<usize, FanoutError> {
+        SharedSession::publish_shm_handle_on_wire_all(self, keyexpr, wire, payload, opts)
+    }
+
     fn declare_subscriber_on_wire(
         &self,
         keyexpr: String,

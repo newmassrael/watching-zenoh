@@ -1453,6 +1453,14 @@ pub trait RxStorage: Send + Sync {
         None
     }
 
+    /// The storage as the value its host made it from, when the host wants to get that value
+    /// back out of the bytes it handed up: a host whose application holds its own type for a
+    /// chunk of shared memory reads it back from a received payload through this, and no other
+    /// storage answers.
+    fn as_any(&self) -> Option<&dyn core::any::Any> {
+        None
+    }
+
     /// R3124 -- the slices of a storage that is a LIST of them, kept apart: upstream's `ZBuf`
     /// (`commons/zenoh-buffers/src/zbuf.rs` @ `pub struct ZBuf {`), whose slices a reader can
     /// walk without joining them. `None` for every storage that is one contiguous run, which
@@ -1709,6 +1717,20 @@ impl RxBytes {
         match &self.0 {
             RxRepr::Owned(_) | RxRepr::Leased { .. } => None,
             RxRepr::Shared { storage, .. } => storage.shm_chunk(),
+        }
+    }
+
+    /// The host's own value behind these bytes, when they are a range of a storage that kept
+    /// one ([`RxStorage::as_any`]): the range, and the value. `None` for every other storage.
+    #[cfg(feature = "rx-shared-bytes")]
+    pub fn host_storage(&self) -> Option<(&dyn core::any::Any, core::ops::Range<usize>)> {
+        match &self.0 {
+            RxRepr::Shared {
+                storage,
+                start,
+                end,
+            } => storage.as_any().map(|any| (any, *start..*end)),
+            _ => None,
         }
     }
 

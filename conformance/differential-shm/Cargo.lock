@@ -1252,6 +1252,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "memmap2"
+version = "0.9.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b0ca1155a9ecc25aa12e8313a119f32edf0255fea2f44839c4ac0a12b2ac157"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3429,6 +3438,7 @@ dependencies = [
  "hashbrown 0.15.5",
  "libc",
  "log",
+ "memmap2",
  "parking_lot",
  "portable-atomic",
  "quinn",
@@ -3438,6 +3448,7 @@ dependencies = [
  "sce-forge-runtime",
  "sce-rust-runtime",
  "socket2 0.6.5",
+ "talc",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
@@ -3509,6 +3520,7 @@ dependencies = [
  "wz-capi-core",
  "wz-capi-port",
  "wz-runtime-tokio",
+ "wz-session-core",
  "zenoh-buffers 1.10.1",
  "zenoh-codec 1.10.1",
  "zenoh-collections 1.10.1",

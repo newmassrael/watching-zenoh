@@ -255,10 +255,15 @@ impl ShmBufInner {
 
     /// Decrements buffer's reference count
     ///
+    /// Public for the transport of the crate that sends a buffer: it takes a reference for the
+    /// receiver with [`Self::inc_ref_count`] before the descriptor is built and gives it back with
+    /// this when the frame is not sent, which a clone of the buffer cannot do (a clone also
+    /// holds the buffer's confirmation of its memory, which the receiver's reference does not).
+    ///
     /// # Safety
     /// You should understand what you are doing, as underestimation
     /// of the reference counter can lead to memory being stalled or double-freed.
-    unsafe fn dec_ref_count(&self) {
+    pub unsafe fn dec_ref_count(&self) {
         self.metadata
             .owned
             .header()
