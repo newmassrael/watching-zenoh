@@ -297144,6 +297144,34 @@
         "A weights round must re-pin the C consumer's opening in the dissection ABI tests, which no local gate reads (this round did, on the build host). Open: clients other than 1.10.1, links that really lose packets, a reordered TCP session that gets further than one SN step, why the 10% and 20% UDP sessions end, and more protocols on the null side (SSH, SMTP). Two undecoded units now read `no`; if a null protocol the corpus does not hold decodes badly in a way that mimics zenoh, that is where the threshold matters."
       ]
     },
+    "Round 3882": {
+      "decision_summary": "Hosted run 40790079138 (head 1ab111232) was read per job; its C0 was already repaired at the tip (round-fed-gate-reach passes). Paid here: C1bz (six redundant explicit doc link targets in the lifecycle files), the C1bzr settle (a ledger row for admin_host push_str that now measures 0), C1x (10 and 14 witnesses once the single-net peer forwarder was retired, not 17 and 21), E7c (a client's subscription on a router names the node in routers, as the pin's merge does; the leg still expected the old body), and the pico-client-udp text budget (1,919,305 hosted, 305 over). C1cn shard 1/2 failed with its job log gone (404), so it is not attributed.",
+      "changes_bullets": [
+        "lifecycle_node.rs, lifecycle_contract.rs: six link targets dropped. reduced_docs_ledger.txt: one row dropped. run-ci.sh: C1x 17/21 to 10/14. wz_router_hat_adminspace_linkstate_interop.rs: at-r2 body names r2_zid in routers. capability_cost_gate.py: pico-client-udp 1,919,000 to 1,922,900."
+      ],
+      "verification_bullets": [
+        "cargo doc --all-features of wz-session-core passes on pc2. The two C1x commands printed 10 and 14 passed on pc2. The edited integration test compiles. capability_cost_gate.py selftest passes. E7c, C1bzr settle and C1cs are judged by the hosted run."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "C1cn shard 1/2 of run 40790079138 is unattributed until a run keeps its log. The E7c via-r1 body was not reached by the failed run and may need the same reading."
+      ],
+      "publishable_decision_summary": "Hosted run 40790079138 (head 1ab111232) was read per job; its C0 was already repaired at the tip (round-fed-gate-reach passes). Paid here: C1bz (six redundant explicit doc link targets in the lifecycle files), the C1bzr settle (a ledger row for admin_host push_str that now measures 0), C1x (10 and 14 witnesses once the single-net peer forwarder was retired, not 17 and 21), E7c (a client's subscription on a router names the node in routers, as the pin's merge does; the leg still expected the old body), and the pico-client-udp text budget (1,919,305 hosted, 305 over). C1cn shard 1/2 failed with its job log gone (404), so it is not attributed.",
+      "publishable_changes_bullets": [
+        "lifecycle_node.rs, lifecycle_contract.rs: six link targets dropped. reduced_docs_ledger.txt: one row dropped. run-ci.sh: C1x 17/21 to 10/14. wz_router_hat_adminspace_linkstate_interop.rs: at-r2 body names r2_zid in routers. capability_cost_gate.py: pico-client-udp 1,919,000 to 1,922,900."
+      ],
+      "publishable_verification_bullets": [
+        "cargo doc --all-features of wz-session-core passes on pc2. The two C1x commands printed 10 and 14 passed on pc2. The edited integration test compiles. capability_cost_gate.py selftest passes. E7c, C1bzr settle and C1cs are judged by the hosted run."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "C1cn shard 1/2 of run 40790079138 is unattributed until a run keeps its log. The E7c via-r1 body was not reached by the failed run and may need the same reading."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
