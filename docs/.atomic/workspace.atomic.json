@@ -299076,6 +299076,40 @@
         "Read the hosted run of the current tree for anything the Layer C0 step hid, and for the Layer Z legs of the gateway/south key (the defaults leg's auto claim, the census, the drop-in exception). A peer with a partition has no stock zenohd witness yet. Also open: stale LinkstateForwarder comments and the linkstate_forward module name; the router's subscriber and queryable interest dumps return early on an unrestricted interest; a current subscriber Interest from a north peer; a router node's south peer region relays nothing between link-state peers."
       ]
     },
+    "Round 3933": {
+      "decision_summary": "An unrestricted current Interest (the wire's R flag clear) for subscribers or queryables is answered with every declaration the router holds, as upstream's matchers do for an absent resource (res.is_none_or in the peer hat's remote_subscribers_matching and remote_queryables_matching). The router's two dumps used to return before sending anything, so the asker received only the DeclareFinal and read it as nothing declared. The token dump had been fixed in R2614; the subscriber and queryable dumps now take the same accessor, unrestricted_entries, which is available with the router-hat feature and not only with token tables, and the aggregate flag is dropped for an interest that carries no keyexpr to key the reply on. An unrestricted interest is not stored as a future one, as for tokens.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward.rs: dump_interest_subs and dump_interest_qabls take an Option target, use unrestricted_entries for the mesh hats and match every held declaration of the broker hats, and drop the aggregate flag when there is no keyexpr; one test over both kinds with a restricted control.",
+        "crates/wz-runtime-tokio/src/linkstate_interest.rs: unrestricted_entries is gated on routing-router-hat and its doc cites the two matchers.",
+        "docs/peer-region-hats.md: the open item on the unrestricted interest is closed for subscribers and queryables."
+      ],
+      "verification_bullets": [
+        "The new test passes with routing-router-hat and routing-token-tables, and the 309 tests of the router_forward module pass. Clippy -D warnings over all targets with routing-router-hat alone is clean for the crate (the warnings in that log are the ring dependency's). The unrestricted-token test and the new one both ran. Not run: the other feature sets of the runtime crate and the integration tests, which a hosted run covers."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted run of the current tree for the Layer Z legs of the gateway/south key and anything the Layer C0 step hid before it was fixed. A peer with a partition has no stock zenohd witness yet. Also open: stale LinkstateForwarder comments (about 70) and the linkstate_forward module name; a current subscriber Interest from a north peer; a router node's south peer region relays nothing between link-state peers."
+      ],
+      "publishable_decision_summary": "An unrestricted current Interest (the wire's R flag clear) for subscribers or queryables is answered with every declaration the router holds, as upstream's matchers do for an absent resource (res.is_none_or in the peer hat's remote_subscribers_matching and remote_queryables_matching). The router's two dumps used to return before sending anything, so the asker received only the DeclareFinal and read it as nothing declared. The token dump had been fixed in R2614; the subscriber and queryable dumps now take the same accessor, unrestricted_entries, which is available with the router-hat feature and not only with token tables, and the aggregate flag is dropped for an interest that carries no keyexpr to key the reply on. An unrestricted interest is not stored as a future one, as for tokens.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward.rs: dump_interest_subs and dump_interest_qabls take an Option target, use unrestricted_entries for the mesh hats and match every held declaration of the broker hats, and drop the aggregate flag when there is no keyexpr; one test over both kinds with a restricted control.",
+        "crates/wz-runtime-tokio/src/linkstate_interest.rs: unrestricted_entries is gated on routing-router-hat and its doc cites the two matchers.",
+        "docs/peer-region-hats.md: the open item on the unrestricted interest is closed for subscribers and queryables."
+      ],
+      "publishable_verification_bullets": [
+        "The new test passes with routing-router-hat and routing-token-tables, and the 309 tests of the router_forward module pass. Clippy -D warnings over all targets with routing-router-hat alone is clean for the crate (the warnings in that log are the ring dependency's). The unrestricted-token test and the new one both ran. Not run: the other feature sets of the runtime crate and the integration tests, which a hosted run covers."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted run of the current tree for the Layer Z legs of the gateway/south key and anything the Layer C0 step hid before it was fixed. A peer with a partition has no stock zenohd witness yet. Also open: stale LinkstateForwarder comments (about 70) and the linkstate_forward module name; a current subscriber Interest from a north peer; a router node's south peer region relays nothing between link-state peers."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
