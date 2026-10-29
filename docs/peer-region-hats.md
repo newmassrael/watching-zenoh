@@ -784,8 +784,10 @@ honoured, and the census pins move in the same commit.
 - **Rule 7b's 'asks no one' also reached the unrestricted interest.** An Interest carrying no
   keyexpr is answered with the whole token table (R2614, upstream's `res.is_none_or`) and
   was answered by the single-net forwarder only; the router's token dump now does it too
-  (`an_unrestricted_token_interest_is_answered_with_every_token`). The router's subscriber
-  and queryable dumps still return early on it, a debt of their own atoms.
+  (`an_unrestricted_token_interest_is_answered_with_every_token`). The subscriber and
+  queryable dumps took the same accessor afterwards, as upstream's two matchers read the
+  same way (`an_unrestricted_subscriber_and_queryable_interest_is_answered_with_every_declaration`);
+  an unrestricted interest is not stored as a future one, as the token twin is not.
 - **A frame on a joined link was dropped at the face table (7b), now routed as the primary
   face's** (`router_forward/joined_link_tests.rs`), with the shared-memory acknowledgement
   going to the joined link's own peer.

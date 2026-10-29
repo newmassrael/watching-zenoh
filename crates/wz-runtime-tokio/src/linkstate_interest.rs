@@ -250,7 +250,11 @@ impl<V> LinkstatepeerInterest<V> {
     /// EVERY declaration matches, which is upstream's own reading: its matcher is
     /// `res.is_none_or(|res| res.matches(token))`
     /// (`zenoh/src/net/routing/hat/peer/token.rs` @ `res.is_none_or`), so a `None`
-    /// resource admits the whole table rather than none of it.
+    /// resource admits the whole table rather than none of it. The subscriber and the
+    /// queryable matchers read the same way
+    /// (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `res.is_none_or` and
+    /// `zenoh/src/net/routing/hat/peer/queries.rs` @ `res.is_none_or`), so the three
+    /// dumps of the region-hat forwarder take this accessor for a missing target.
     ///
     /// R2614 — wz used to answer such an interest with NOTHING, which is the
     /// opposite of upstream and not a narrower version of it. Neither reference
@@ -259,7 +263,7 @@ impl<V> LinkstatepeerInterest<V> {
     /// at both of its liveliness sites), so this is reachable only from a peer
     /// that builds the message itself -- but wz is a drop-in for the node that
     /// ANSWERS, and upstream answers it.
-    #[cfg(feature = "routing-token-tables")]
+    #[cfg(feature = "routing-router-hat")]
     pub(crate) fn unrestricted_entries(&self, exclude: Option<&Zid>) -> Vec<(&str, Zid, &V)> {
         self.entries_matching(None, exclude)
     }

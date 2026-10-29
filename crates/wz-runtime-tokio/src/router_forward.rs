@@ -6655,35 +6655,46 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     ) where
         T: std::ops::DerefMut,
     {
-        let Some(target) = target else {
-            return; // match-all deferred; the caller's DeclareFinal still closes the interest.
-        };
+        // `target: None` is an UNRESTRICTED interest (see `dump_interest_tokens`): upstream's
+        // matcher admits every subscriber for an absent resource
+        // (`zenoh/src/net/routing/hat/peer/pubsub.rs` @ `res.is_none_or`).
+        let target_chunks: Option<Vec<&str>> = target.map(|t| t.split('/').collect());
         let mut per_ke: HashMap<String, ()> = HashMap::new();
         for table in self.mesh_hats().map(|hat| &hat.subs) {
-            for (ke, _zid, ()) in table.matching_entries(target, Some(self_zid)) {
+            let hits = match target {
+                Some(target) => table.matching_entries(target, Some(self_zid)),
+                None => table.unrestricted_entries(Some(self_zid)),
+            };
+            for (ke, _zid, ()) in hits {
                 per_ke.insert(ke.to_string(), ());
             }
         }
-        let target_chunks: Vec<&str> = target.split('/').collect();
         for hat in self.broker_hats() {
             for (face, by_id) in hat.subs.iter() {
                 if *face == inbound {
                     continue; // never advertise a face its own subscription
                 }
                 for k in face_sub_keyexprs(by_id) {
-                    if keyexpr_intersects_target(k, &target_chunks) {
+                    let matched = match target_chunks.as_deref() {
+                        None => true,
+                        Some(chunks) => keyexpr_intersects_target(k, chunks),
+                    };
+                    if matched {
                         per_ke.insert(k.to_string(), ());
                     }
                 }
             }
         }
+        // An unrestricted interest cannot aggregate: the aggregate reply is keyed on the
+        // interest's own keyexpr, which it does not carry.
+        let aggregate = aggregate && target.is_some();
         // The replies are built first, interning their ids in the store as they go, and sent after:
         // the store is written while they are built, and nothing may read the tables from the
         // sink at the same time.
         let mut replies = Vec::new();
         emit_current_interest_replies(
             interest_id,
-            target,
+            target.unwrap_or(""),
             aggregate,
             per_ke,
             |a, _b| a,
@@ -6730,26 +6741,34 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     ) where
         T: std::ops::DerefMut,
     {
-        let Some(target) = target else {
-            return;
-        };
+        // `target: None` is an UNRESTRICTED interest (see `dump_interest_tokens`): upstream's
+        // matcher admits every queryable for an absent resource
+        // (`zenoh/src/net/routing/hat/peer/queries.rs` @ `res.is_none_or`).
+        let target_chunks: Option<Vec<&str>> = target.map(|t| t.split('/').collect());
         let mut per_ke: HashMap<String, QueryableInfo> = HashMap::new();
         for table in self.mesh_hats().map(|hat| &hat.qabls) {
-            for (ke, _zid, info) in table.matching_entries(target, Some(self_zid)) {
+            let hits = match target {
+                Some(target) => table.matching_entries(target, Some(self_zid)),
+                None => table.unrestricted_entries(Some(self_zid)),
+            };
+            for (ke, _zid, info) in hits {
                 per_ke
                     .entry(ke.to_string())
                     .and_modify(|e| *e = e.merge(*info))
                     .or_insert(*info);
             }
         }
-        let target_chunks: Vec<&str> = target.split('/').collect();
         for hat in self.broker_hats() {
             for (face, by_id) in hat.qabls.iter() {
                 if *face == inbound {
                     continue;
                 }
                 for (k, info) in face_qabls(by_id) {
-                    if keyexpr_intersects_target(k, &target_chunks) {
+                    let matched = match target_chunks.as_deref() {
+                        None => true,
+                        Some(chunks) => keyexpr_intersects_target(k, chunks),
+                    };
+                    if matched {
                         per_ke
                             .entry(k.to_string())
                             .and_modify(|e| *e = e.merge(info))
@@ -6758,10 +6777,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 }
             }
         }
+        // An unrestricted interest cannot aggregate (see `dump_interest_subs`).
+        let aggregate = aggregate && target.is_some();
         let mut replies = Vec::new();
         emit_current_interest_replies(
             interest_id,
-            target,
+            target.unwrap_or(""),
             aggregate,
             per_ke,
             |a, b| a.merge(b),
@@ -26068,6 +26089,72 @@ mod tests {
             DeclareOwnedVariant::CodecZenohDeclFinal(_)
         ));
         assert_eq!(sink_h.frame_count(), 0, "the holder is told nothing");
+    }
+
+    /// An UNRESTRICTED CURRENT subscriber or queryable interest (the wire's `R` flag clear)
+    /// is answered with EVERY declaration, as upstream's `res.is_none_or` matcher does and as
+    /// the token dump already does (`an_unrestricted_token_interest_is_answered_with_every_token`).
+    /// The router's dumps used to return before sending anything, so the asker got only the
+    /// `DeclareFinal`, which tells it nothing is declared.
+    ///
+    /// The two holders share no prefix on purpose: a reply that still matched some target could
+    /// not carry both. The control is the restricted interest over the same two, which yields one.
+    #[test]
+    fn an_unrestricted_subscriber_and_queryable_interest_is_answered_with_every_declaration() {
+        use wz_session_core::interest_build::{build_interest_propagated, InterestKinds};
+
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (holder_a, _sa) = face(zid(0xAA), WIRE_CLIENT);
+        let (holder_b, _sb) = face(zid(0xAB), WIRE_CLIENT);
+        let (asker, sink) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &holder_a);
+        fwd.register(FaceId(1), &holder_b);
+        fwd.register(FaceId(2), &asker);
+        client_sub(&fwd, 0, 7, "demo/route");
+        client_sub(&fwd, 1, 8, "other/thing");
+        client_qabl(&fwd, 0, 9, "demo/svc", true);
+        client_qabl(&fwd, 1, 10, "other/svc", false);
+        let told = |sink: &RecordingLinkDriver| {
+            let (mut subs, mut qabls) = (0, 0);
+            for i in 0..sink.frame_count() {
+                match forwarded_declare(&sink.frame_bytes(i)).body {
+                    DeclareOwnedVariant::CodecZenohDeclSubscriber(_) => subs += 1,
+                    DeclareOwnedVariant::CodecZenohDeclQueryable(_) => qabls += 1,
+                    _ => {}
+                }
+            }
+            (subs, qabls)
+        };
+
+        // THE SUBJECT: no keyexpr at all.
+        sink.reset();
+        let unrestricted = build_interest_propagated(
+            9,
+            InterestKinds::SUBSCRIBERS | InterestKinds::QUERYABLES,
+            /* aggregate */ false,
+            /* current_future */ false,
+            None,
+        )
+        .expect("build unrestricted get");
+        forward_one(&fwd, FaceId(2), NetworkMessage::Interest(unrestricted));
+        assert_eq!(
+            told(&sink),
+            (2, 2),
+            "an unrestricted CURRENT interest is answered with every subscriber and queryable"
+        );
+
+        // THE CONTROL: a restricted interest over the same declarations still discriminates.
+        sink.reset();
+        forward_one(
+            &fwd,
+            FaceId(2),
+            interest_msg(10, "demo/**", true, false, false),
+        );
+        assert_eq!(
+            told(&sink),
+            (1, 0),
+            "the restricted arm matches only `demo/**`, or the assertion above proves nothing"
+        );
     }
 
     /// A face that subscribes its OWN key and then publishes on it is not sent
