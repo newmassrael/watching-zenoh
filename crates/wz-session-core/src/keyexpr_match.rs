@@ -101,7 +101,10 @@ const INLINE_KEY_CHUNKS: usize = 16;
 /// were: on the fixed backing a key deeper than [`MAX_KEYEXPR_CHUNKS`] is not representable and
 /// [`KeyChunks::split`] answers `None`, which every caller reads as no-match.
 pub struct KeyChunks<'a> {
-    inline: [&'a str; INLINE_KEY_CHUNKS],
+    /// The first `len` slots are chunks and the rest are not written: an array of fat pointers
+    /// built to hold none was a loop of 32 stores and a second copy of the buffer (256 bytes on
+    /// the fixed backing) in the frame of whoever made the value.
+    inline: core::mem::MaybeUninit<[&'a str; INLINE_KEY_CHUNKS]>,
     len: usize,
     #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
     spilled: Option<BoundedVec<&'a str, MAX_KEYEXPR_CHUNKS>>,
@@ -126,9 +129,7 @@ impl<'a> KeyChunks<'a> {
     /// will use it with this and fills it with `split_into`, and `split` is for the rest.
     pub fn empty() -> Self {
         Self {
-            // Not `[""; N]`: that array of fat pointers is built by copying a constant template
-            // of the same size, a call to the copy function for every split.
-            inline: core::array::from_fn(|_| ""),
+            inline: core::mem::MaybeUninit::uninit(),
             len: 0,
             #[cfg(all(feature = "alloc", not(feature = "bounded-heapless")))]
             spilled: None,
@@ -162,7 +163,15 @@ impl<'a> KeyChunks<'a> {
                 if self.len == INLINE_KEY_CHUNKS {
                     return false;
                 }
-                self.inline[self.len] = &text[start..at];
+                // SAFETY: `len < INLINE_KEY_CHUNKS` (checked above), so the slot is inside the
+                // array; it is written before `len` covers it.
+                unsafe {
+                    self.inline
+                        .as_mut_ptr()
+                        .cast::<&'a str>()
+                        .add(self.len)
+                        .write(&text[start..at]);
+                }
                 self.len += 1;
                 if end_of_chunk {
                     return true;
@@ -203,7 +212,9 @@ impl<'a> core::ops::Deref for KeyChunks<'a> {
         if let Some(spilled) = &self.spilled {
             return spilled;
         }
-        &self.inline[..self.len]
+        // SAFETY: the first `len` slots are written (`fill_inline` writes a slot before it counts
+        // it, and `split_into` starts `len` at zero), and `len <= INLINE_KEY_CHUNKS`.
+        unsafe { core::slice::from_raw_parts(self.inline.as_ptr().cast::<&'a str>(), self.len) }
     }
 }
 

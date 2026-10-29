@@ -210,6 +210,13 @@ carries about 6 KB of C library code wz does not, which is why the difference is
   follows the bound (4,240, set by the key matching under a query's answer) and does not move;
   the stack used falls by 160 bytes and the RAM image grows by 256, which the matrix grades as
   two rows (`stack_used` and `ram`).
+- TAKEN for the stack, text -112 bytes (160,892 to 160,780 on the fixed image): the key matcher's
+  view of a key (`KeyChunks`) keeps its 32 slots uninitialised and writes each as its chunk is
+  found, where `empty()` built an array of 32 fat pointers (a loop of stores, and a second copy of
+  the view, 256 bytes, in the frame of `keyexpr_intersects_target`). The bound fell from 4,240 to
+  3,816 bytes (the longest path under the observer is a query's reply through the network
+  stack's send now) and the main stack, which follows it, from 5,696 to 5,120: 576 bytes of
+  `stack_reserved` on the fixed image; 5,376 and 6,336 on the batching and get images.
 - NOT TAKEN, measured: the loop's log lines (`port.log(&[...])`, arrays of parts) said by one
   out-of-line function: the frame of `wz_app_main` stayed 704 bytes (the compiler had given the
   arrays one slot) and the text grew 232 bytes.

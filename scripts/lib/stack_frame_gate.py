@@ -293,6 +293,12 @@ IMAGES = (
     # 80, the session events 28, `dispatch_event_among` 576, `keyexpr_intersects_text` 552,
     # `keyexpr_intersects_target` 560 and three small ones, 4 calls through a register. The kit's
     # reading is 2,888, 76 over.
+    #
+    # `peak` is 2,784 bytes once the key matcher's view of a key is not built before it is used
+    # (`KeyChunks` keeps its 32 slots uninitialised, and `keyexpr_intersects_target` no longer holds
+    # a second copy of the view, 256 bytes): the longest chain is the same path, 13 frames, and the
+    # bound (3,816, 4,016 and 4,744 on the three images) is a query's reply through the network
+    # stack's send. The kit's reading is unchanged, 2,888.
     Image(
         key="zephyr-client-fixed",
         elf=None,
@@ -300,7 +306,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=2812,
+        peak=2784,
     ),
     # The same client with the session coalescing a send window into one datagram
     # (`overlays/t2g_client_batching.conf`). The batch writer and its flush path are two more
@@ -340,7 +346,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=2812,
+        peak=2784,
     ),
     # The fixed client that ASKS (`overlays/t2g_client_get.conf`): the getter of
     # `wz_session_mcu::slot_getter` is the application layer the observer's drain runs inside, and
