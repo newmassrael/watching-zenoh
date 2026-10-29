@@ -1445,14 +1445,117 @@ mod tokio_engine {
             .get("access_control")
             .filter(|acl| acl.get("enabled").and_then(serde_json::Value::as_bool) == Some(true))
         {
-            if let Some(id) = repeated(acl.get("rules")) {
+            refuse_malformed_access_control(acl)?;
+        }
+        Ok(())
+    }
+
+    /// The checks upstream makes of an enabled access control when it builds its policy, in the
+    /// order it makes them and in its words
+    /// (`zenoh/src/net/routing/interceptor/authorization.rs` @ `fn policy_information_point(`
+    /// and the loop over the lists before it): the three lists come together, an empty one leaves
+    /// the policy empty and is judged no further, then the ids, the subjects' values and what each
+    /// policy names.
+    fn refuse_malformed_access_control(acl: &serde_json::Value) -> ZResult<()> {
+        use std::collections::HashSet;
+
+        use serde_json::Value;
+
+        let list = |name: &str| acl.get(name).and_then(Value::as_array);
+        let (Some(rules), Some(subjects), Some(policies)) =
+            (list("rules"), list("subjects"), list("policies"))
+        else {
+            bail!("All ACL rules/subjects/policies config lists must be provided");
+        };
+        if rules.is_empty() || subjects.is_empty() || policies.is_empty() {
+            return Ok(());
+        }
+        let text = |entry: &'_ Value, key: &str| {
+            entry
+                .get(key)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let blank = |value: &str| value.trim().is_empty();
+        if rules.iter().any(|rule| blank(&text(rule, "id"))) {
+            bail!("Found empty rule id in rules list");
+        }
+        if subjects.iter().any(|subject| blank(&text(subject, "id"))) {
+            bail!("Found empty subject id in subjects list");
+        }
+        let mut rule_ids = HashSet::new();
+        for rule in rules {
+            let id = text(rule, "id");
+            if !rule_ids.insert(id.clone()) {
                 bail!("Rule id must be unique: id '{id}' is repeated");
             }
-            if let Some(id) = repeated(acl.get("subjects")) {
+        }
+        let mut subject_ids = HashSet::new();
+        for subject in subjects {
+            let id = text(subject, "id");
+            if subject_ids.contains(&id) {
                 bail!("Subject id must be unique: id '{id}' is repeated");
             }
-            if let Some(id) = repeated(acl.get("policies")) {
-                bail!("Policy id must be unique: id '{id}' is repeated");
+            for (key, what) in [
+                ("interfaces", "interface"),
+                ("cert_common_names", "cert_common_name"),
+                ("usernames", "username"),
+            ] {
+                let any_blank = subject
+                    .get(key)
+                    .and_then(Value::as_array)
+                    .is_some_and(|values| {
+                        values
+                            .iter()
+                            .any(|value| blank(value.as_str().unwrap_or_default()))
+                    });
+                if any_blank {
+                    bail!("Found empty {what} value in subject '{id}'");
+                }
+            }
+            subject_ids.insert(id);
+        }
+        let mut policy_ids = HashSet::new();
+        for (number, policy) in policies.iter().enumerate() {
+            if let Some(id) = policy.get("id").and_then(Value::as_str) {
+                if !policy_ids.insert(id.to_owned()) {
+                    bail!("Policy id must be unique: id '{id}' is repeated");
+                }
+            }
+            let named = |key: &str| {
+                policy
+                    .get(key)
+                    .and_then(Value::as_array)
+                    .map(|values| {
+                        values
+                            .iter()
+                            .map(|value| value.as_str().unwrap_or_default().to_owned())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            };
+            let (policy_rules, policy_subjects) = (named("rules"), named("subjects"));
+            if policy_rules.is_empty() || policy_subjects.is_empty() {
+                bail!("Policy #{number} is malformed: empty subjects or rules list");
+            }
+            for subject in &policy_subjects {
+                if blank(subject) {
+                    bail!("Found empty subject id in policy #{number}");
+                }
+                if !subject_ids.contains(subject) {
+                    bail!(
+                        "Subject '{subject}' in policy #{number} does not exist in subjects list"
+                    );
+                }
+            }
+            for rule in &policy_rules {
+                if blank(rule) {
+                    bail!("Found empty rule id in policy #{number}");
+                }
+                if !rule_ids.contains(rule) {
+                    bail!("Rule '{rule}' in policy #{number} does not exist in rules list");
+                }
             }
         }
         Ok(())
@@ -8534,19 +8637,81 @@ mod tests {
             assert_eq!(refusal("downsampling", &downsampling("a", "b"), None), None);
             let rules = r#"[{ id: "r", key_exprs: ["t/**"], messages: ["put"], permission: "allow" },
                             { id: "r", key_exprs: ["u/**"], messages: ["put"], permission: "allow" }]"#;
-            assert_eq!(
-                refusal(
-                    "access_control/rules",
-                    rules,
-                    Some(("access_control/enabled", "true"))
+            let access_control = |rules: &str, lists: &str| {
+                format!(
+                    r#"{{ enabled: true, default_permission: "deny", rules: {rules}, {lists} }}"#
                 )
-                .as_deref(),
+            };
+            let others = r#"subjects: [{ id: "s", interfaces: ["lo"] }],
+                            policies: [{ rules: ["r"], subjects: ["s"] }]"#;
+            assert_eq!(
+                refusal("access_control", &access_control(rules, others), None).as_deref(),
                 Some("Rule id must be unique: id 'r' is repeated")
             );
             assert_eq!(
                 refusal("access_control/rules", rules, None),
                 None,
                 "an access control that is not enabled is not built, and is not judged"
+            );
+            let one_rule =
+                r#"[{ id: "r", key_exprs: ["t/**"], messages: ["put"], permission: "allow" }]"#;
+            let policy = |policy: &str| {
+                access_control(
+                    one_rule,
+                    &format!(r#"subjects: [{{ id: "s" }}], policies: [{policy}]"#),
+                )
+            };
+            for (policy_text, words) in [
+                (
+                    r#"{ rules: ["missing"], subjects: ["s"] }"#,
+                    "Rule 'missing' in policy #0 does not exist in rules list",
+                ),
+                (
+                    r#"{ rules: ["r"], subjects: ["none"] }"#,
+                    "Subject 'none' in policy #0 does not exist in subjects list",
+                ),
+                (
+                    r#"{ rules: [], subjects: ["s"] }"#,
+                    "Policy #0 is malformed: empty subjects or rules list",
+                ),
+                (
+                    r#"{ rules: ["r"], subjects: [" "] }"#,
+                    "Found empty subject id in policy #0",
+                ),
+            ] {
+                assert_eq!(
+                    refusal("access_control", &policy(policy_text), None).as_deref(),
+                    Some(words)
+                );
+            }
+            assert_eq!(
+                refusal(
+                    "access_control",
+                    &policy(r#"{ rules: ["r"], subjects: ["s"] }"#),
+                    None
+                ),
+                None,
+                "a policy that names a rule and a subject that exist"
+            );
+            assert_eq!(
+                refusal("access_control", &access_control("[]", others), None),
+                None,
+                "an empty list leaves the policy empty, which is no refusal"
+            );
+            // The three lists come together or the access control is no configuration, and that
+            // is said before an id is looked at.
+            assert_eq!(
+                refusal("access_control", &access_control(rules, ""), None).as_deref(),
+                Some("All ACL rules/subjects/policies config lists must be provided")
+            );
+            assert_eq!(
+                refusal(
+                    "access_control",
+                    r#"{ enabled: true, default_permission: "deny" }"#,
+                    None
+                )
+                .as_deref(),
+                Some("All ACL rules/subjects/policies config lists must be provided")
             );
         }
 
