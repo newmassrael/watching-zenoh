@@ -1,14 +1,12 @@
 === a hosted queryable beside a client's
 0: Up(0, 170, Peer)
-  topology face 0: LinkState { entries: 0, nodes: [] }
-  graph face 0: Graph { nodes: 1, edges: 0 }
+  topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
+  graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
   counters face 0: Counters([0, 0, 0, 0, 0])
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n}\n[]")
+  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 1: Up(1, 204, Client)
 2: LinkBack(0, 170, 5)
-  graph face 0: Graph { nodes: 2, edges: 0 }
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 3: Tick
 4: NodeHostQueryable("both/**", true, "hosted")
   data face 0: DeclareQueryable { keyexpr: "both/**", complete: true, answer_to: None }
@@ -42,15 +40,13 @@
   data face 0: ResponseFinal { request_id: 23 }
 === queriers declare themselves
 0: Up(0, 170, Peer)
-  topology face 0: LinkState { entries: 0, nodes: [] }
-  graph face 0: Graph { nodes: 1, edges: 0 }
+  topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
+  graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
   counters face 0: Counters([0, 0, 0, 0, 0])
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n}\n[]")
+  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 1: Up(1, 204, Client)
 2: LinkBack(0, 170, 5)
-  graph face 0: Graph { nodes: 2, edges: 0 }
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 3: Tick
 4: Interest(1, 3, InterestKinds(4), false, true, "q/**")
   admin face 0: Admin { leg: "querier", keyexpr: "q/**", routers: [], peers: [], clients: ["cccccccc"] }
@@ -81,15 +77,13 @@
   linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n}\n[]")
 === a node hosts
 0: Up(0, 170, Peer)
-  topology face 0: LinkState { entries: 0, nodes: [] }
-  graph face 0: Graph { nodes: 1, edges: 0 }
+  topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
+  graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
   counters face 0: Counters([0, 0, 0, 0, 0])
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n}\n[]")
+  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 1: Up(1, 193, Client)
 2: LinkBack(0, 170, 5)
-  graph face 0: Graph { nodes: 2, edges: 0 }
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 3: Tick
 4: NodeHost("demo/h/**")
   data face 0: DeclareSubscriber { keyexpr: "demo/h/**", answer_to: None }
@@ -135,23 +129,22 @@
   data face 1: Request { keyexpr: "demo/q/z", target: None, timeout_ms: None, body: "None None" }
 === a node publishes
 0: Up(0, 170, Peer)
-  topology face 0: LinkState { entries: 0, nodes: [] }
-  graph face 0: Graph { nodes: 1, edges: 0 }
+  topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
+  graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
   counters face 0: Counters([0, 0, 0, 0, 0])
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n}\n[]")
+  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 1: Up(1, 187, Peer)
-  topology face 1: LinkState { entries: 0, nodes: [] }
+  topology face 0: LinkState { entries: 2, nodes: [([187, 187, 187, 187], [])] }
+  topology face 1: LinkState { entries: 3, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], []), ([187, 187, 187, 187], [])] }
+  graph face 0: Graph { nodes: 3, edges: 0 }
+  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n    2 [ label = \"bbbbbbbb\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\"), (\"1010101\", \"bbbbbbbb\", \"bbbbbbbb\")]")
 2: Up(2, 193, Client)
 3: Up(3, 194, Client)
 4: LinkBack(0, 170, 5)
   topology face 1: LinkState { entries: 1, nodes: [([170, 170, 170, 170], [])] }
-  graph face 0: Graph { nodes: 2, edges: 0 }
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 5: LinkBack(1, 187, 5)
   topology face 0: LinkState { entries: 1, nodes: [([187, 187, 187, 187], [])] }
-  graph face 0: Graph { nodes: 3, edges: 0 }
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n    2 [ label = \"bbbbbbbb\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\"), (\"1010101\", \"bbbbbbbb\", \"bbbbbbbb\")]")
 6: Tick
 7: NodePut("demo/none", [110, 48], Data, false)
 8: Subscribe(0, "demo/**")
@@ -185,24 +178,23 @@
 16: NodePut("demo/a", [110, 53], Data, false)
   data face 1: Push { keyexpr: "demo/a", payload: Some([110, 53]) }
 17: Down(1)
-  graph face 0: Graph { nodes: 2, edges: 0 }
+  topology face 0: LinkState { entries: 1, nodes: [] }
+  graph face 0: Graph { nodes: 2, edges: 1 }
   admin face 0: Admin { leg: "subscriber", keyexpr: "demo/c/**", routers: [], peers: ["1010101"], clients: ["c1c1c1c1"] }
   counters face 0: Counters([1, 0, 0, 0, 0])
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
+  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n    0 -- 1 [ label = \"100.09309745232879\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 18: NodePut("demo/a", [110, 54], Data, false)
 19: NodeDelete("demo/c/x")
   data face 2: Push { keyexpr: "demo/c/x", payload: None }
 === a timeout shorter than the default
 0: Up(0, 170, Peer)
-  topology face 0: LinkState { entries: 0, nodes: [] }
-  graph face 0: Graph { nodes: 1, edges: 0 }
+  topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
+  graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
   counters face 0: Counters([0, 0, 0, 0, 0])
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n}\n[]")
+  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 1: Up(1, 193, Client)
 2: LinkBack(0, 170, 5)
-  graph face 0: Graph { nodes: 2, edges: 0 }
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 3: Tick
 4: Queryable(1, "demo/s", true)
   data face 0: DeclareQueryable { keyexpr: "demo/s", complete: true, answer_to: None }
@@ -221,15 +213,13 @@
 12: Final(1)
 === two replies under each consolidation mode
 0: Up(0, 170, Peer)
-  topology face 0: LinkState { entries: 0, nodes: [] }
-  graph face 0: Graph { nodes: 1, edges: 0 }
+  topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
+  graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
   counters face 0: Counters([0, 0, 0, 0, 0])
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n}\n[]")
+  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 1: Up(1, 193, Client)
 2: LinkBack(0, 170, 5)
-  graph face 0: Graph { nodes: 2, edges: 0 }
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 3: Tick
 4: Queryable(1, "demo/k", true)
   data face 0: DeclareQueryable { keyexpr: "demo/k", complete: true, answer_to: None }
@@ -262,16 +252,14 @@
   data face 0: ResponseFinal { request_id: 62 }
 === finals and replies in every order
 0: Up(0, 170, Peer)
-  topology face 0: LinkState { entries: 0, nodes: [] }
-  graph face 0: Graph { nodes: 1, edges: 0 }
+  topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
+  graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
   counters face 0: Counters([0, 0, 0, 0, 0])
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n}\n[]")
+  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 1: Up(1, 193, Client)
 2: Up(2, 194, Client)
 3: LinkBack(0, 170, 5)
-  graph face 0: Graph { nodes: 2, edges: 0 }
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 4: Tick
 5: Queryable(1, "demo/o", true)
   data face 0: DeclareQueryable { keyexpr: "demo/o", complete: true, answer_to: None }
@@ -300,23 +288,22 @@
 19: ReplyAfterFinal(1, "demo/o", [97, 102, 116, 101, 114, 32, 98, 111, 116, 104])
 === what a querier asks for
 0: Up(0, 170, Peer)
-  topology face 0: LinkState { entries: 0, nodes: [] }
-  graph face 0: Graph { nodes: 1, edges: 0 }
+  topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
+  graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
   counters face 0: Counters([0, 0, 0, 0, 0])
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n}\n[]")
+  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 1: Up(1, 193, Client)
 2: Up(2, 194, Client)
 3: Up(3, 238, Router)
-  topology face 3: LinkState { entries: 0, nodes: [] }
-4: LinkBack(0, 170, 5)
-  topology face 3: LinkState { entries: 1, nodes: [([170, 170, 170, 170], [])] }
-  graph face 0: Graph { nodes: 2, edges: 0 }
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
-5: LinkBack(3, 238, 5)
-  topology face 0: LinkState { entries: 1, nodes: [([238, 238, 238, 238], [])] }
+  topology face 0: LinkState { entries: 2, nodes: [([238, 238, 238, 238], [])] }
+  topology face 3: LinkState { entries: 3, nodes: [([1, 1, 1, 1], [[170, 170, 170, 170], [238, 238, 238, 238]]), ([170, 170, 170, 170], []), ([238, 238, 238, 238], [])] }
   graph face 0: Graph { nodes: 3, edges: 0 }
   linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n    2 [ label = \"eeeeeeee\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\"), (\"1010101\", \"eeeeeeee\", \"eeeeeeee\")]")
+4: LinkBack(0, 170, 5)
+  topology face 3: LinkState { entries: 1, nodes: [([170, 170, 170, 170], [])] }
+5: LinkBack(3, 238, 5)
+  topology face 0: LinkState { entries: 1, nodes: [([238, 238, 238, 238], [])] }
 6: Tick
 7: Queryable(1, "demo/a", true)
   data face 0: DeclareQueryable { keyexpr: "demo/a", complete: true, answer_to: None }
@@ -395,16 +382,14 @@
 49: Final(2)
 === an error reply and a timeout
 0: Up(0, 170, Peer)
-  topology face 0: LinkState { entries: 0, nodes: [] }
-  graph face 0: Graph { nodes: 1, edges: 0 }
+  topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
+  graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
   counters face 0: Counters([0, 0, 0, 0, 0])
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n}\n[]")
+  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 1: Up(1, 193, Client)
 2: Up(2, 194, Client)
 3: LinkBack(0, 170, 5)
-  graph face 0: Graph { nodes: 2, edges: 0 }
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 4: Tick
 5: Queryable(1, "demo/e", true)
   data face 0: DeclareQueryable { keyexpr: "demo/e", complete: true, answer_to: None }
@@ -434,15 +419,13 @@
 17: Final(2)
 === a query across a recompute
 0: Up(0, 170, Peer)
-  topology face 0: LinkState { entries: 0, nodes: [] }
-  graph face 0: Graph { nodes: 1, edges: 0 }
+  topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
+  graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
   counters face 0: Counters([0, 0, 0, 0, 0])
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n}\n[]")
+  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 1: Up(1, 193, Client)
 2: LinkBack(0, 170, 5)
-  graph face 0: Graph { nodes: 2, edges: 0 }
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 3: Tick
 4: Queryable(1, "demo/r", true)
   data face 0: DeclareQueryable { keyexpr: "demo/r", complete: true, answer_to: None }
@@ -452,11 +435,12 @@
   data face 1: Request { keyexpr: "demo/r", target: None, timeout_ms: None, body: "None None" }
 6: Up(2, 238, Router)
   data face 2: DeclareQueryable { keyexpr: "demo/r", complete: true, answer_to: None }
-  topology face 2: LinkState { entries: 1, nodes: [([170, 170, 170, 170], [])] }
+  topology face 0: LinkState { entries: 2, nodes: [([238, 238, 238, 238], [])] }
+  topology face 2: LinkState { entries: 3, nodes: [([1, 1, 1, 1], [[170, 170, 170, 170], [238, 238, 238, 238]]), ([170, 170, 170, 170], []), ([238, 238, 238, 238], [])] }
+  graph face 0: Graph { nodes: 3, edges: 1 }
+  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n    2 [ label = \"eeeeeeee\" ]\n    0 -- 1 [ label = \"100.09309745232879\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\"), (\"1010101\", \"eeeeeeee\", \"eeeeeeee\")]")
 7: LinkBack(2, 238, 5)
   topology face 0: LinkState { entries: 1, nodes: [([238, 238, 238, 238], [])] }
-  graph face 0: Graph { nodes: 3, edges: 0 }
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n    2 [ label = \"eeeeeeee\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\"), (\"1010101\", \"eeeeeeee\", \"eeeeeeee\")]")
 8: Tick
 9: Reply(1, "demo/r", [97, 99, 114, 111, 115, 115])
   data face 0: Response { request_id: 31, keyexpr: "demo/r", payload: Some([97, 99, 114, 111, 115, 115]) }
@@ -470,31 +454,32 @@
   data face 2: ResponseFinal { request_id: 32 }
 === queries between peers, clients and a router
 0: Up(0, 170, Peer)
-  topology face 0: LinkState { entries: 0, nodes: [] }
-  graph face 0: Graph { nodes: 1, edges: 0 }
+  topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
+  graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
   counters face 0: Counters([0, 0, 0, 0, 0])
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n}\n[]")
+  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 1: Up(1, 204, Peer)
-  topology face 1: LinkState { entries: 0, nodes: [] }
+  topology face 0: LinkState { entries: 2, nodes: [([204, 204, 204, 204], [])] }
+  topology face 1: LinkState { entries: 3, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], []), ([204, 204, 204, 204], [])] }
+  graph face 0: Graph { nodes: 3, edges: 0 }
+  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n    2 [ label = \"cccccccc\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\"), (\"1010101\", \"cccccccc\", \"cccccccc\")]")
 2: Up(2, 221, Client)
 3: Up(3, 238, Router)
-  topology face 3: LinkState { entries: 0, nodes: [] }
+  topology face 0: LinkState { entries: 2, nodes: [([238, 238, 238, 238], [])] }
+  topology face 1: LinkState { entries: 2, nodes: [([238, 238, 238, 238], [])] }
+  topology face 3: LinkState { entries: 4, nodes: [([1, 1, 1, 1], [[170, 170, 170, 170], [204, 204, 204, 204], [238, 238, 238, 238]]), ([170, 170, 170, 170], []), ([204, 204, 204, 204], []), ([238, 238, 238, 238], [])] }
+  graph face 0: Graph { nodes: 4, edges: 0 }
+  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n    2 [ label = \"cccccccc\" ]\n    3 [ label = \"eeeeeeee\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\"), (\"1010101\", \"cccccccc\", \"cccccccc\"), (\"1010101\", \"eeeeeeee\", \"eeeeeeee\")]")
 4: LinkBack(0, 170, 5)
   topology face 1: LinkState { entries: 1, nodes: [([170, 170, 170, 170], [])] }
   topology face 3: LinkState { entries: 1, nodes: [([170, 170, 170, 170], [])] }
-  graph face 0: Graph { nodes: 2, edges: 0 }
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 5: LinkBack(1, 204, 5)
   topology face 0: LinkState { entries: 1, nodes: [([204, 204, 204, 204], [])] }
   topology face 3: LinkState { entries: 1, nodes: [([204, 204, 204, 204], [])] }
-  graph face 0: Graph { nodes: 3, edges: 0 }
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n    2 [ label = \"cccccccc\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\"), (\"1010101\", \"cccccccc\", \"cccccccc\")]")
 6: LinkBack(3, 238, 5)
   topology face 0: LinkState { entries: 1, nodes: [([238, 238, 238, 238], [])] }
   topology face 1: LinkState { entries: 1, nodes: [([238, 238, 238, 238], [])] }
-  graph face 0: Graph { nodes: 4, edges: 0 }
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n    2 [ label = \"cccccccc\" ]\n    3 [ label = \"eeeeeeee\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\"), (\"1010101\", \"cccccccc\", \"cccccccc\"), (\"1010101\", \"eeeeeeee\", \"eeeeeeee\")]")
 7: Tick
 8: Queryable(1, "demo/q", true)
   admin face 0: Admin { leg: "queryable", keyexpr: "demo/q", routers: [], peers: ["cccccccc"], clients: [] }
@@ -539,17 +524,18 @@
   counters face 0: Counters([0, 1, 0, 0, 0])
 2: Up(1, 170, Peer)
   data face 1: DeclareQueryable { keyexpr: "demo/q", complete: true, answer_to: None }
-  topology face 1: LinkState { entries: 0, nodes: [] }
-3: LinkBack(1, 170, 5)
+  topology face 1: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
   graph face 0: Graph { nodes: 2, edges: 0 }
   linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
+3: LinkBack(1, 170, 5)
 4: Up(2, 238, Router)
   data face 2: DeclareQueryable { keyexpr: "demo/q", complete: true, answer_to: None }
-  topology face 2: LinkState { entries: 1, nodes: [([170, 170, 170, 170], [])] }
+  topology face 1: LinkState { entries: 2, nodes: [([238, 238, 238, 238], [])] }
+  topology face 2: LinkState { entries: 3, nodes: [([1, 1, 1, 1], [[170, 170, 170, 170], [238, 238, 238, 238]]), ([170, 170, 170, 170], []), ([238, 238, 238, 238], [])] }
+  graph face 0: Graph { nodes: 3, edges: 1 }
+  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n    2 [ label = \"eeeeeeee\" ]\n    0 -- 1 [ label = \"100.09309745232879\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\"), (\"1010101\", \"eeeeeeee\", \"eeeeeeee\")]")
 5: LinkBack(2, 238, 5)
   topology face 1: LinkState { entries: 1, nodes: [([238, 238, 238, 238], [])] }
-  graph face 0: Graph { nodes: 3, edges: 0 }
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n    2 [ label = \"eeeeeeee\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\"), (\"1010101\", \"eeeeeeee\", \"eeeeeeee\")]")
 6: Tick
 7: Query(1, 5, "demo/q")
   data face 0: Request { keyexpr: "demo/q", target: None, timeout_ms: None, body: "None None" }
@@ -565,15 +551,13 @@
   data face 2: ResponseFinal { request_id: 6 }
 === a queryable face goes down mid-query
 0: Up(0, 170, Peer)
-  topology face 0: LinkState { entries: 0, nodes: [] }
-  graph face 0: Graph { nodes: 1, edges: 0 }
+  topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
+  graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
   counters face 0: Counters([0, 0, 0, 0, 0])
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n}\n[]")
+  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 1: Up(1, 221, Client)
 2: LinkBack(0, 170, 5)
-  graph face 0: Graph { nodes: 2, edges: 0 }
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 3: Tick
 4: Queryable(1, "demo/q", true)
   data face 0: DeclareQueryable { keyexpr: "demo/q", complete: true, answer_to: None }
@@ -588,21 +572,20 @@
   counters face 0: Counters([0, 0, 0, 0, 0])
 === two peers
 0: Up(0, 170, Peer)
-  topology face 0: LinkState { entries: 0, nodes: [] }
-  graph face 0: Graph { nodes: 1, edges: 0 }
+  topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
+  graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
   counters face 0: Counters([0, 0, 0, 0, 0])
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n}\n[]")
-1: Up(1, 187, Peer)
-  topology face 1: LinkState { entries: 0, nodes: [] }
-2: LinkBack(0, 170, 5)
-  topology face 1: LinkState { entries: 1, nodes: [([170, 170, 170, 170], [])] }
-  graph face 0: Graph { nodes: 2, edges: 0 }
   linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
-3: LinkBack(1, 187, 5)
-  topology face 0: LinkState { entries: 1, nodes: [([187, 187, 187, 187], [])] }
+1: Up(1, 187, Peer)
+  topology face 0: LinkState { entries: 2, nodes: [([187, 187, 187, 187], [])] }
+  topology face 1: LinkState { entries: 3, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], []), ([187, 187, 187, 187], [])] }
   graph face 0: Graph { nodes: 3, edges: 0 }
   linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n    2 [ label = \"bbbbbbbb\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\"), (\"1010101\", \"bbbbbbbb\", \"bbbbbbbb\")]")
+2: LinkBack(0, 170, 5)
+  topology face 1: LinkState { entries: 1, nodes: [([170, 170, 170, 170], [])] }
+3: LinkBack(1, 187, 5)
+  topology face 0: LinkState { entries: 1, nodes: [([187, 187, 187, 187], [])] }
 4: Tick
 5: Subscribe(1, "demo/**")
   admin face 0: Admin { leg: "subscriber", keyexpr: "demo/**", routers: [], peers: ["bbbbbbbb"], clients: [] }
@@ -610,22 +593,21 @@
 6: Put(0, "demo/data", [112, 97, 121, 108, 111, 97, 100])
 === a peer, a router and a client
 0: Up(0, 170, Peer)
-  topology face 0: LinkState { entries: 0, nodes: [] }
-  graph face 0: Graph { nodes: 1, edges: 0 }
+  topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
+  graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
   counters face 0: Counters([0, 0, 0, 0, 0])
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n}\n[]")
+  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 1: Up(1, 221, Router)
-  topology face 1: LinkState { entries: 0, nodes: [] }
+  topology face 0: LinkState { entries: 2, nodes: [([221, 221, 221, 221], [])] }
+  topology face 1: LinkState { entries: 3, nodes: [([1, 1, 1, 1], [[170, 170, 170, 170], [221, 221, 221, 221]]), ([170, 170, 170, 170], []), ([221, 221, 221, 221], [])] }
+  graph face 0: Graph { nodes: 3, edges: 0 }
+  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n    2 [ label = \"dddddddd\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\"), (\"1010101\", \"dddddddd\", \"dddddddd\")]")
 2: Up(2, 204, Client)
 3: LinkBack(0, 170, 5)
   topology face 1: LinkState { entries: 1, nodes: [([170, 170, 170, 170], [])] }
-  graph face 0: Graph { nodes: 2, edges: 0 }
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 4: LinkBack(1, 221, 5)
   topology face 0: LinkState { entries: 1, nodes: [([221, 221, 221, 221], [])] }
-  graph face 0: Graph { nodes: 3, edges: 0 }
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n    2 [ label = \"dddddddd\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\"), (\"1010101\", \"dddddddd\", \"dddddddd\")]")
 5: Tick
 6: Subscribe(1, "demo/**")
   admin face 0: Admin { leg: "subscriber", keyexpr: "demo/**", routers: [], peers: ["dddddddd"], clients: [] }
@@ -649,17 +631,18 @@
   counters face 0: Counters([1, 0, 0, 0, 0])
 2: Up(1, 170, Peer)
   data face 1: DeclareSubscriber { keyexpr: "demo/**", answer_to: None }
-  topology face 1: LinkState { entries: 0, nodes: [] }
-3: LinkBack(1, 170, 5)
+  topology face 1: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
   graph face 0: Graph { nodes: 2, edges: 0 }
   linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
+3: LinkBack(1, 170, 5)
 4: Up(2, 221, Router)
   data face 2: DeclareSubscriber { keyexpr: "demo/**", answer_to: None }
-  topology face 2: LinkState { entries: 1, nodes: [([170, 170, 170, 170], [])] }
+  topology face 1: LinkState { entries: 2, nodes: [([221, 221, 221, 221], [])] }
+  topology face 2: LinkState { entries: 3, nodes: [([1, 1, 1, 1], [[170, 170, 170, 170], [221, 221, 221, 221]]), ([170, 170, 170, 170], []), ([221, 221, 221, 221], [])] }
+  graph face 0: Graph { nodes: 3, edges: 1 }
+  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n    2 [ label = \"dddddddd\" ]\n    0 -- 1 [ label = \"100.09309745232879\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\"), (\"1010101\", \"dddddddd\", \"dddddddd\")]")
 5: LinkBack(2, 221, 5)
   topology face 1: LinkState { entries: 1, nodes: [([221, 221, 221, 221], [])] }
-  graph face 0: Graph { nodes: 3, edges: 0 }
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n    2 [ label = \"dddddddd\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\"), (\"1010101\", \"dddddddd\", \"dddddddd\")]")
 6: Tick
 7: Put(2, "demo/late", [102, 114, 111, 109, 32, 116, 104, 101, 32, 114, 111, 117, 116, 101, 114])
   data face 0: Push { keyexpr: "demo/late", payload: Some([102, 114, 111, 109, 32, 116, 104, 101, 32, 114, 111, 117, 116, 101, 114]) }
@@ -667,16 +650,14 @@
   data face 0: Push { keyexpr: "demo/late", payload: Some([102, 114, 111, 109, 32, 116, 104, 101, 32, 112, 101, 101, 114]) }
 === withdrawn and gone
 0: Up(0, 170, Peer)
-  topology face 0: LinkState { entries: 0, nodes: [] }
-  graph face 0: Graph { nodes: 1, edges: 0 }
+  topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
+  graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
   counters face 0: Counters([0, 0, 0, 0, 0])
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n}\n[]")
+  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 1: Up(1, 204, Client)
 2: Up(2, 205, Client)
 3: LinkBack(0, 170, 5)
-  graph face 0: Graph { nodes: 2, edges: 0 }
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 4: Tick
 5: Subscribe(1, "demo/data")
   data face 0: DeclareSubscriber { keyexpr: "demo/data", answer_to: None }
@@ -705,18 +686,19 @@
   counters face 0: Counters([0, 0, 0, 0, 0])
   linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n}\n[]")
 1: Up(1, 170, Peer)
-  topology face 1: LinkState { entries: 0, nodes: [] }
+  topology face 1: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
+  graph face 0: Graph { nodes: 2, edges: 0 }
+  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 2: Up(2, 221, Router)
-  topology face 2: LinkState { entries: 0, nodes: [] }
+  topology face 1: LinkState { entries: 2, nodes: [([221, 221, 221, 221], [])] }
+  topology face 2: LinkState { entries: 3, nodes: [([1, 1, 1, 1], [[170, 170, 170, 170], [221, 221, 221, 221]]), ([170, 170, 170, 170], []), ([221, 221, 221, 221], [])] }
+  graph face 0: Graph { nodes: 3, edges: 0 }
+  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n    2 [ label = \"dddddddd\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\"), (\"1010101\", \"dddddddd\", \"dddddddd\")]")
 3: Up(3, 205, Client)
 4: LinkBack(1, 170, 5)
   topology face 2: LinkState { entries: 1, nodes: [([170, 170, 170, 170], [])] }
-  graph face 0: Graph { nodes: 2, edges: 0 }
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 5: LinkBack(2, 221, 5)
   topology face 1: LinkState { entries: 1, nodes: [([221, 221, 221, 221], [])] }
-  graph face 0: Graph { nodes: 3, edges: 0 }
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n    2 [ label = \"dddddddd\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\"), (\"1010101\", \"dddddddd\", \"dddddddd\")]")
 6: Tick
 7: Subscribe(1, "demo/**")
   admin face 0: Admin { leg: "subscriber", keyexpr: "demo/**", routers: [], peers: ["aaaaaaaa"], clients: [] }
@@ -735,15 +717,13 @@
   data face 3: Push { keyexpr: "demo/data", payload: Some([102, 114, 111, 109, 32, 97, 32, 99, 108, 105, 101, 110, 116]) }
 === a client asks what peers declared
 0: Up(0, 170, Peer)
-  topology face 0: LinkState { entries: 0, nodes: [] }
-  graph face 0: Graph { nodes: 1, edges: 0 }
+  topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
+  graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
   counters face 0: Counters([0, 0, 0, 0, 0])
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n}\n[]")
+  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 1: Up(1, 204, Client)
 2: LinkBack(0, 170, 5)
-  graph face 0: Graph { nodes: 2, edges: 0 }
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 3: Tick
 4: Subscribe(0, "demo/a")
   admin face 0: Admin { leg: "subscriber", keyexpr: "demo/a", routers: [], peers: ["aaaaaaaa"], clients: [] }
@@ -790,22 +770,21 @@
   admin face 0: Admin { leg: "queryable", keyexpr: "demo/r", routers: [], peers: ["aaaaaaaa"], clients: [] }
 === a peer and a router ask what a client declared
 0: Up(0, 170, Peer)
-  topology face 0: LinkState { entries: 0, nodes: [] }
-  graph face 0: Graph { nodes: 1, edges: 0 }
+  topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
+  graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
   counters face 0: Counters([0, 0, 0, 0, 0])
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n}\n[]")
+  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 1: Up(1, 204, Client)
 2: Up(2, 238, Router)
-  topology face 2: LinkState { entries: 0, nodes: [] }
-3: LinkBack(0, 170, 5)
-  topology face 2: LinkState { entries: 1, nodes: [([170, 170, 170, 170], [])] }
-  graph face 0: Graph { nodes: 2, edges: 0 }
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
-4: LinkBack(2, 238, 5)
-  topology face 0: LinkState { entries: 1, nodes: [([238, 238, 238, 238], [])] }
+  topology face 0: LinkState { entries: 2, nodes: [([238, 238, 238, 238], [])] }
+  topology face 2: LinkState { entries: 3, nodes: [([1, 1, 1, 1], [[170, 170, 170, 170], [238, 238, 238, 238]]), ([170, 170, 170, 170], []), ([238, 238, 238, 238], [])] }
   graph face 0: Graph { nodes: 3, edges: 0 }
   linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n    2 [ label = \"eeeeeeee\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\"), (\"1010101\", \"eeeeeeee\", \"eeeeeeee\")]")
+3: LinkBack(0, 170, 5)
+  topology face 2: LinkState { entries: 1, nodes: [([170, 170, 170, 170], [])] }
+4: LinkBack(2, 238, 5)
+  topology face 0: LinkState { entries: 1, nodes: [([238, 238, 238, 238], [])] }
 5: Tick
 6: Subscribe(1, "demo/s")
   data face 0: DeclareSubscriber { keyexpr: "demo/s", answer_to: None }
@@ -837,16 +816,14 @@
   counters face 0: Counters([2, 1, 0, 0, 0])
 === liveliness tokens
 0: Up(0, 170, Peer)
-  topology face 0: LinkState { entries: 0, nodes: [] }
-  graph face 0: Graph { nodes: 1, edges: 0 }
+  topology face 0: LinkState { entries: 2, nodes: [([1, 1, 1, 1], []), ([170, 170, 170, 170], [])] }
+  graph face 0: Graph { nodes: 2, edges: 0 }
   admin: none
   counters face 0: Counters([0, 0, 0, 0, 0])
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n}\n[]")
+  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 1: Up(1, 193, Client)
 2: Up(2, 194, Client)
 3: LinkBack(0, 170, 5)
-  graph face 0: Graph { nodes: 2, edges: 0 }
-  linkview face 0: Dot("graph {\n    0 [ label = \"1010101\" ]\n    1 [ label = \"aaaaaaaa\" ]\n}\n[(\"1010101\", \"aaaaaaaa\", \"aaaaaaaa\")]")
 4: Tick
 5: Token(1, "live/a")
   data face 0: DeclareToken { keyexpr: "live/a", answer_to: None }
