@@ -33,10 +33,12 @@ use std::{
 };
 
 use async_trait::async_trait;
+use zenoh_config::qos::{PublisherQoSConfList, PublisherQoSConfig};
 #[cfg(feature = "unstable")]
 use zenoh_config::wrappers::EntityGlobalId;
 use zenoh_config::wrappers::ZenohId;
 use zenoh_core::{Resolve, ResolveClosure, Wait};
+use zenoh_keyexpr::keyexpr_tree::{IKeyExprTree, IKeyExprTreeNode, KeBoxTree};
 use zenoh_protocol::core::{CongestionControl, EntityId, ExprId, Parameters, Timestamp};
 #[cfg(feature = "unstable")]
 use zenoh_protocol::core::{Locator, Reliability};
@@ -1664,9 +1666,13 @@ mod tokio_engine {
 
     /// Whether a key the engine does not act on is one this crate acts on itself, so that the
     /// engine's ignoring it is no reason to refuse it. `transport/shared_memory/mode`, which the
-    /// session reads as it opens (`api::shm::init_if_asked`) in a build with shared memory.
+    /// session reads as it opens (`api::shm::init_if_asked`) in a build with shared memory, and
+    /// `qos/publication`, the per-key defaults of the publications, which the session holds as
+    /// a tree of keys and applies to every publisher and put it builds
+    /// ([`Session::get_publisher_qos_overwrite`]).
     fn acted_on_by_the_session(key: &str) -> bool {
-        cfg!(feature = "shared-memory") && key == "transport/shared_memory/mode"
+        key == "qos/publication"
+            || (cfg!(feature = "shared-memory") && key == "transport/shared_memory/mode")
     }
 
     /// An open the plan refuses, in the words upstream refuses it in where it does, and by the key
@@ -3250,6 +3256,9 @@ pub(crate) struct SessionInner {
     callbacks_drop_sync_group: SyncGroup,
     /// How long a query waits for its replies when it does not say, from the configuration.
     queries_default_timeout: Duration,
+    /// The quality of service the configuration (`qos/publication`) sets for the publications on
+    /// the keys it names, which a publisher or a put takes in place of what its builder says.
+    publisher_qos_tree: KeBoxTree<PublisherQoSConfig>,
     /// The configuration the session was opened with, as the application reads it
     /// ([`Session::config`]).
     #[cfg(feature = "unstable")]
@@ -4149,6 +4158,12 @@ impl Session {
             zid,
             callbacks_drop_sync_group: SyncGroup::default(),
             queries_default_timeout,
+            publisher_qos_tree: config
+                .0
+                .get_json("qos/publication")
+                .ok()
+                .and_then(|json| serde_json::from_str::<PublisherQoSConfList>(&json).ok())
+                .map_or_else(KeBoxTree::new, Into::into),
             #[cfg(feature = "unstable")]
             config: crate::api::config::Notifier::new(config.0.clone().expanded()),
             #[cfg(feature = "unstable")]
@@ -5223,6 +5238,38 @@ impl Session {
     /// How long a query waits for its replies when it does not say, as the configuration states.
     pub(crate) fn queries_default_timeout(&self) -> Duration {
         self.0.queries_default_timeout
+    }
+
+    /// The quality of service `qos/publication` sets for a publication on `key_expr`: the entry
+    /// of the first key the configuration names that includes it, or none set. When several
+    /// include it, one is used and the others are said.
+    pub(crate) fn get_publisher_qos_overwrite(
+        &self,
+        key_expr: &zenoh_keyexpr::keyexpr,
+    ) -> PublisherQoSConfig {
+        let mut nodes_including = self
+            .0
+            .publisher_qos_tree
+            .nodes_including(key_expr)
+            .filter(|n| n.weight().is_some())
+            .peekable();
+        if let Some(node) = nodes_including.next() {
+            if nodes_including.peek().is_some() {
+                let others: Vec<String> =
+                    nodes_including.map(|n| n.keyexpr().to_string()).collect();
+                tracing::warn!(
+                    "Publisher declared on `{}` which is included by multiple key_exprs in qos config ({}). Using qos config for `{}`",
+                    key_expr,
+                    others.join(", "),
+                    node.keyexpr(),
+                );
+            }
+            return node
+                .weight()
+                .expect("first node weight should not be None")
+                .clone();
+        }
+        PublisherQoSConfig::default()
     }
 
     /// Hand a query to the engine, with its replies going to `callback`.

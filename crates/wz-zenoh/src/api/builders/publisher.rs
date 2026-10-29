@@ -14,10 +14,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 // Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.1, file
 // src/api/builders/publisher.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1). A partial
-// derivative: `apply_qos_overwrites` is not here. It reads the configuration key
-// `qos/publication`, which a session of this crate refuses to open with a value of its own
-// (decision D6, docs/zenoh-api-on-the-engine.md), so there is no overwrite to apply. The matching
-// listener of a publisher and the state it keeps arrive with slice Z4.
+// derivative: the matching listener of a publisher and the state it keeps arrive with slice Z4.
 
 use std::future::{IntoFuture, Ready};
 
@@ -254,7 +251,8 @@ impl<P, T> Resolvable for PublicationBuilder<P, T> {
 
 impl Wait for PublicationBuilder<PublisherBuilder<'_, '_>, PublicationBuilderPut> {
     #[inline]
-    fn wait(self) -> <Self as Resolvable>::To {
+    fn wait(mut self) -> <Self as Resolvable>::To {
+        self.publisher = self.publisher.apply_qos_overwrites();
         self.publisher.session.resolve_put(
             &self.publisher.key_expr?,
             self.kind.payload,
@@ -278,7 +276,8 @@ impl Wait for PublicationBuilder<PublisherBuilder<'_, '_>, PublicationBuilderPut
 
 impl Wait for PublicationBuilder<PublisherBuilder<'_, '_>, PublicationBuilderDelete> {
     #[inline]
-    fn wait(self) -> <Self as Resolvable>::To {
+    fn wait(mut self) -> <Self as Resolvable>::To {
+        self.publisher = self.publisher.apply_qos_overwrites();
         self.publisher.session.resolve_put(
             &self.publisher.key_expr?,
             ZBytes::new(),
@@ -424,6 +423,36 @@ impl QoSBuilderTrait for PublisherBuilder<'_, '_> {
 }
 
 impl PublisherBuilder<'_, '_> {
+    /// Looks up whether any configured QoS overwrites apply to the builder's key expression.
+    /// Returns a new builder with the overwritten QoS parameters.
+    pub(crate) fn apply_qos_overwrites(self) -> Self {
+        let qos_overwrites = self.key_expr.as_ref().map_or(Default::default(), |ke| {
+            self.session.get_publisher_qos_overwrite(ke)
+        });
+        Self {
+            congestion_control: qos_overwrites
+                .congestion_control
+                .map(|cc| cc.into())
+                .unwrap_or(self.congestion_control),
+            priority: qos_overwrites
+                .priority
+                .map(|p| p.into())
+                .unwrap_or(self.priority),
+            is_express: qos_overwrites.express.unwrap_or(self.is_express),
+            #[cfg(feature = "unstable")]
+            reliability: qos_overwrites
+                .reliability
+                .map(|r| r.into())
+                .unwrap_or(self.reliability),
+            #[cfg(feature = "unstable")]
+            destination: qos_overwrites
+                .allowed_destination
+                .map(|d| d.into())
+                .unwrap_or(self.destination),
+            ..self
+        }
+    }
+
     /// Changes the [`Locality`](crate::sample::Locality) applied when routing the data.
     ///
     /// This restricts the matching subscribers that will receive the published data to the ones
@@ -454,7 +483,8 @@ impl<'b> Resolvable for PublisherBuilder<'_, 'b> {
 }
 
 impl Wait for PublisherBuilder<'_, '_> {
-    fn wait(self) -> <Self as Resolvable>::To {
+    fn wait(mut self) -> <Self as Resolvable>::To {
+        self = self.apply_qos_overwrites();
         let mut key_expr = self.key_expr?;
         key_expr = self.session.declare_keyexpr(key_expr).wait()?;
         let id = self

@@ -274,7 +274,9 @@ def manifest(deps: dict[str, str], member: dict[str, list[str]], out: pathlib.Pa
         'plugins = ["zenoh/plugins"]',
         'transport_tcp = ["zenoh/transport_tcp"]',
         'transport_udp = ["zenoh/transport_udp"]',
-        'transport_tls = ["zenoh/transport_tls"]',
+        # The link-commons of the registry carries the tls module a test names only with its own
+        # feature; upstream's tls link switches it on, and this package has no such link.
+        'transport_tls = ["zenoh/transport_tls", "zenoh-link-commons/tls"]',
         'transport_quic = ["zenoh/transport_quic"]',
     ]
     lines += ["", "[patch.crates-io]"]
