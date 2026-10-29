@@ -352,6 +352,36 @@ struct RouterEngine {
     ids: AtomicU64,
 }
 
+/// The handler a queryable hosted on the router node runs for each query it is asked.
+#[cfg(feature = "unstable")]
+pub(crate) type RouterQueryHandler = Box<
+    dyn FnMut(
+            &dyn wz_session_core::query_sink::QueryView,
+            &mut dyn wz_session_core::query_sink::ReplyOut,
+        ) + Send,
+>;
+
+/// What the admin space of a router node answers from: views of the router's tables, which show
+/// them as they are when a query asks, and the locators its listeners got.
+#[cfg(feature = "unstable")]
+#[cfg_attr(not(feature = "engine-tokio"), allow(dead_code))]
+pub(crate) struct RouterAdminViews {
+    /// The sessions the router holds, one for each face.
+    #[cfg(feature = "engine-tokio")]
+    pub(crate) sessions: wz_runtime_tokio::router_forward::RouterSessionsView,
+    /// What the faces declared, by kind, folded by tier as the pin folds them.
+    #[cfg(feature = "engine-tokio")]
+    pub(crate) declarations: wz_runtime_tokio::router_forward::RouterDeclarationsView,
+    /// The graph of the north region: the routers.
+    #[cfg(feature = "engine-tokio")]
+    pub(crate) routers: wz_runtime_tokio::linkstate_forward::LinkstateNetView,
+    /// The graph of the south region of the peers.
+    #[cfg(feature = "engine-tokio")]
+    pub(crate) peers: wz_runtime_tokio::linkstate_forward::LinkstateNetView,
+    /// Where the router's listeners can be reached.
+    pub(crate) locators: Vec<String>,
+}
+
 #[cfg(feature = "engine-tokio")]
 impl RouterEngine {
     /// The mark of the id of a liveliness subscriber among the ids the engine undeclares as
@@ -586,12 +616,65 @@ impl Engine {
     }
 
     /// The graph of each region the session's admin space answers a `linkstate` query for, as
-    /// text, by the region's name. A router node holds no graph the session reads yet.
+    /// text, by the region's name: a router node holds the graph of its routers, the north
+    /// region, and the one of its peers, the south region they are in.
     #[cfg(feature = "unstable")]
     fn linkstate_regions(&self) -> Vec<(String, String)> {
         match self {
             Engine::Tokio(state) => state.shared.as_engine().linkstate_regions(),
-            Engine::Router(_) => Vec::new(),
+            Engine::Router(_) => {
+                let Some(views) = self.router_admin_views() else {
+                    return Vec::new();
+                };
+                vec![
+                    (
+                        wz_session_core::extbound::Region::North.to_string(),
+                        views.routers.dot(),
+                    ),
+                    (
+                        wz_session_core::extbound::Region::default_south(
+                            wz_session_core::WhatAmI::Peer,
+                        )
+                        .to_string(),
+                        views.peers.dot(),
+                    ),
+                ]
+            }
+        }
+    }
+
+    /// The views the admin space of a router node answers from, or `None` for a session that is
+    /// no router node.
+    #[cfg(feature = "unstable")]
+    fn router_admin_views(&self) -> Option<RouterAdminViews> {
+        match self {
+            Engine::Router(router) => {
+                let forwarder = router.node.forwarder();
+                Some(RouterAdminViews {
+                    sessions: forwarder.sessions_view(),
+                    declarations: forwarder.declarations_view(),
+                    routers: forwarder.routers_net_view(),
+                    peers: forwarder.peers_net_view(),
+                    locators: router.node.listen_locators().to_vec(),
+                })
+            }
+            Engine::Tokio(_) => None,
+        }
+    }
+
+    /// Host `handler` as a queryable of the router node on `key`, answered from the router's
+    /// own thread, or say that the session is no router node.
+    #[cfg(feature = "unstable")]
+    fn host_router_queryable(&self, key: &str, handler: RouterQueryHandler) -> bool {
+        match self {
+            Engine::Router(router) => {
+                router
+                    .node
+                    .forwarder()
+                    .register_local_queryable(key, true, handler);
+                true
+            }
+            Engine::Tokio(_) => false,
         }
     }
 
@@ -796,7 +879,16 @@ impl Engine {
         match self {
             // A router holds the declarations of every face it serves, so a publisher has no
             // interest to send for: its matching is worked out from the tables the router holds.
-            Engine::Router(router) => router.entity_id(),
+            // The admin space lists it, as it lists the publisher of a client, from the interest
+            // the node's own face keeps.
+            Engine::Router(router) => {
+                let id = router.entity_id()?;
+                router
+                    .node
+                    .forwarder()
+                    .declare_local_interest(u64::from(id), publisher.key, false);
+                Ok(id)
+            }
             Engine::Tokio(state) => {
                 let PublisherDeclaration {
                     key,
@@ -825,7 +917,10 @@ impl Engine {
     /// the key holds it.
     fn undeclare_publisher(&self, id: Id) {
         match self {
-            Engine::Router(_) => {}
+            Engine::Router(router) => router
+                .node
+                .forwarder()
+                .undeclare_local_interest(u64::from(id), false),
             Engine::Tokio(state) => state
                 .shared
                 .as_engine()
@@ -938,7 +1033,14 @@ impl Engine {
     /// querier asks the session itself. The id is released by [`Engine::undeclare_querier`].
     fn declare_querier(&self, querier: QuerierDeclaration<'_>) -> ZResult<Id> {
         match self {
-            Engine::Router(router) => router.entity_id(),
+            Engine::Router(router) => {
+                let id = router.entity_id()?;
+                router
+                    .node
+                    .forwarder()
+                    .declare_local_interest(u64::from(id), querier.key, true);
+                Ok(id)
+            }
             Engine::Tokio(state) => {
                 let QuerierDeclaration {
                     key,
@@ -971,7 +1073,10 @@ impl Engine {
     /// key holds it.
     fn undeclare_querier(&self, id: Id) {
         match self {
-            Engine::Router(_) => {}
+            Engine::Router(router) => router
+                .node
+                .forwarder()
+                .undeclare_local_interest(u64::from(id), true),
             Engine::Tokio(state) => state
                 .shared
                 .as_engine()
@@ -1242,6 +1347,25 @@ impl Engine {
 
     #[cfg(feature = "unstable")]
     fn linkstate_regions(&self) -> Vec<(String, String)> {
+        match *self {}
+    }
+
+    #[cfg(feature = "unstable")]
+    fn router_admin_views(&self) -> Option<RouterAdminViews> {
+        match *self {}
+    }
+
+    #[cfg(feature = "unstable")]
+    fn host_router_queryable(
+        &self,
+        _key: &str,
+        _handler: Box<
+            dyn FnMut(
+                    &dyn wz_session_core::query_sink::QueryView,
+                    &mut dyn wz_session_core::query_sink::ReplyOut,
+                ) + Send,
+        >,
+    ) -> bool {
         match *self {}
     }
 
@@ -4475,6 +4599,20 @@ impl WeakSession {
     #[cfg(feature = "unstable")]
     pub(crate) fn linkstate_regions(&self) -> Vec<(String, String)> {
         self.0.engine.linkstate_regions()
+    }
+
+    /// The views the admin space of a router node answers from, or `None` for a session that is
+    /// no router node.
+    #[cfg(feature = "unstable")]
+    pub(crate) fn router_admin_views(&self) -> Option<RouterAdminViews> {
+        self.0.engine.router_admin_views()
+    }
+
+    /// Host `handler` as a queryable of the router node on `key`; `false` for a session that is
+    /// no router node.
+    #[cfg(feature = "unstable")]
+    pub(crate) fn host_router_queryable(&self, key: &str, handler: RouterQueryHandler) -> bool {
+        self.0.engine.host_router_queryable(key, handler)
     }
 
     /// Declare a transport events listener. The id of the engine's watch, released at undeclare or
@@ -11944,6 +12082,128 @@ mod tests {
                 "peer 3 never heard peer 1 was gone.\n--- peer 2 ---\n{text2}\n--- peer 3 \
                  ---\n{text3}"
             );
+        }
+
+        /// The admin space of a router node answers what the router holds: its root, metrics and
+        /// the graph of its routers, the entities it declared, listed while they are declared and
+        /// not after, and the successor routes toward a router that dialed it. The read of
+        /// upstream's own adminspace test, without the multicast group and the plugins.
+        #[cfg(feature = "unstable")]
+        #[test]
+        fn a_router_node_answers_its_admin_space() {
+            use std::time::{Duration, Instant};
+
+            let port = unautoselected_port();
+            let router = open(
+                Config::from_json5(&format!(
+                    r#"{{ id: "a1b2e5", mode: "router",
+                          listen: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                          scouting: {{ multicast: {{ enabled: false }} }},
+                          adminspace: {{ enabled: true,
+                                         permissions: {{ read: true, write: false }} }} }}"#
+                ))
+                .expect("a configuration zenoh reads"),
+            )
+            .wait()
+            .expect("a router opens");
+            let second = open(
+                Config::from_json5(&format!(
+                    r#"{{ id: "a1b2e6", mode: "router", listen: {{ endpoints: [] }},
+                          connect: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                          scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                ))
+                .expect("a configuration zenoh reads"),
+            )
+            .wait()
+            .expect("a router dials a router");
+            let zid = router.zid();
+            let zid2 = second.zid();
+            let keys = |pattern: &str| -> Vec<String> {
+                let replies = router.get(pattern).wait().expect("asks");
+                let mut found = Vec::new();
+                while let Ok(Some(reply)) = replies.recv_timeout(Duration::from_secs(2)) {
+                    found.push(reply.result().expect("a sample").key_expr().to_string());
+                }
+                found
+            };
+
+            assert!(!keys(&format!("@/{zid}/router")).is_empty(), "no root");
+            assert!(
+                !keys(&format!("@/{zid}/router/metrics")).is_empty(),
+                "no metrics"
+            );
+            assert!(
+                !keys(&format!("@/{zid}/router/linkstate/north")).is_empty(),
+                "no graph of the routers"
+            );
+
+            // An entity is listed while it is declared.
+            macro_rules! listed {
+                ($kind:literal, $entity:ident = $declare:expr) => {{
+                    let pattern = format!("@/{zid}/router/{}/**", $kind);
+                    assert_eq!(keys(&pattern), Vec::<String>::new(), "{} before", $kind);
+                    let $entity = $declare;
+                    assert_eq!(
+                        keys(&pattern),
+                        vec![format!("@/{zid}/router/{}/some/key", $kind)],
+                        "{} declared",
+                        $kind
+                    );
+                    $entity.undeclare().wait().expect("ends");
+                    assert_eq!(keys(&pattern), Vec::<String>::new(), "{} after", $kind);
+                }};
+            }
+            listed!(
+                "subscriber",
+                entity = router
+                    .declare_subscriber("some/key")
+                    .wait()
+                    .expect("declares")
+            );
+            listed!(
+                "publisher",
+                entity = router
+                    .declare_publisher("some/key")
+                    .wait()
+                    .expect("declares")
+            );
+            listed!(
+                "queryable",
+                entity = router
+                    .declare_queryable("some/key")
+                    .wait()
+                    .expect("declares")
+            );
+            listed!(
+                "querier",
+                entity = router.declare_querier("some/key").wait().expect("declares")
+            );
+            listed!(
+                "token",
+                entity = router
+                    .liveliness()
+                    .declare_token("some/key")
+                    .wait()
+                    .expect("declares")
+            );
+
+            // The successor routes toward the router that dialed come once its link is up.
+            let deadline = Instant::now() + Duration::from_secs(8);
+            let mut routes = keys(&format!("@/{zid}/router/route/successor/**"));
+            while routes.is_empty() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(200));
+                routes = keys(&format!("@/{zid}/router/route/successor/**"));
+            }
+            assert!(!routes.is_empty(), "no successor route");
+            assert!(
+                !keys(&format!(
+                    "@/{zid}/router/route/successor/src/{zid}/dst/{zid2}"
+                ))
+                .is_empty(),
+                "no route to the router that dialed"
+            );
+            assert!(keys("@/**").len() > 1, "nothing under @/**");
+            drop(second);
         }
 
         /// A router that dials a router which is not listening yet keeps dialing, and once the

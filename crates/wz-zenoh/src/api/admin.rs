@@ -305,6 +305,9 @@ pub(crate) fn init(session: WeakSession) {
                 e
             );
         }
+        // A router node answers the rest of the runtime's admin space too.
+        #[cfg(feature = "engine-tokio")]
+        host_router_admin(&session);
     }
 
     // Queryable simulating advanced publisher to allow advanced subscriber to receive historical data
@@ -377,6 +380,104 @@ pub(crate) fn init(session: WeakSession) {
     });
     if let Err(e) = session.declare_link_events_listener_inner(callback, false, None, None) {
         tracing::error!("Unable to subscribe to link events: {}", e);
+    }
+}
+
+/// Host the admin space a router node answers on `@/<own_zid>/router/**`: the root with the
+/// sessions and locators it holds, its configuration and metrics, what the faces declared by kind,
+/// and the successor routes of its graph (`zenoh/src/net/runtime/adminspace.rs` @
+/// `add_handler!(local_data);`). The answers are the library's, the ones the demo's router host
+/// gives, built per query from views of the router's tables, so an entity declared a moment ago is
+/// listed and one undeclared is not. The `linkstate` space has its own queryable, by region.
+#[cfg(feature = "engine-tokio")]
+fn host_router_admin(session: &WeakSession) {
+    use wz_runtime_tokio::adminspace::{
+        admin_queryable_key, answer_admin_query, answer_router_admin_query, AdminAnswerCtx,
+        AdminAnswerOutcome, AdminDeclaration, AdminEntityKind, AdminPlugin, AdminRouterCtx,
+    };
+    use wz_session_core::query_sink::{QueryView, ReplyOut};
+
+    let Some(views) = session.router_admin_views() else {
+        return;
+    };
+    let zid_hex = session.zid().to_string();
+    let whatami = WhatAmI::Router.to_str();
+    let key = admin_queryable_key(&zid_hex, whatami);
+    let config = session.config_notifier();
+    let version = env!("CARGO_PKG_VERSION").to_owned();
+    let handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
+        let (read, config_json, metadata_json) = {
+            let config = config.lock();
+            (
+                config.adminspace.permissions().read,
+                config.get_json("").unwrap_or_else(|_| "{}".to_owned()),
+                config
+                    .get_json("metadata")
+                    .unwrap_or_else(|_| "null".to_owned()),
+            )
+        };
+        let ctx = AdminAnswerCtx {
+            zid_hex: &zid_hex,
+            whatami,
+            version: &version,
+            locators: &views.locators,
+            metadata_json: &metadata_json,
+            read,
+            stats: None,
+            multicast_peers: &[],
+        };
+        let kinds = [
+            (
+                AdminEntityKind::Subscriber,
+                views.declarations.subscribers(),
+            ),
+            (AdminEntityKind::Publisher, views.declarations.publishers()),
+            (AdminEntityKind::Queryable, views.declarations.queryables()),
+            (AdminEntityKind::Querier, views.declarations.queriers()),
+            (AdminEntityKind::Token, views.declarations.tokens()),
+        ];
+        let declarations: Vec<AdminDeclaration> = kinds
+            .into_iter()
+            .flat_map(|(kind, entries)| {
+                entries
+                    .into_iter()
+                    .map(move |(keyexpr, sources)| AdminDeclaration {
+                        kind,
+                        keyexpr,
+                        sources,
+                    })
+            })
+            .collect();
+        let plugins: Vec<AdminPlugin> = Vec::new();
+        let sessions = views.sessions.admin_sessions();
+        if answer_admin_query(
+            view,
+            out,
+            &ctx,
+            &sessions,
+            &declarations,
+            &plugins,
+            &config_json,
+        ) == AdminAnswerOutcome::DeniedRead
+        {
+            tracing::error!(
+                "{}",
+                wz_runtime_tokio::adminspace::denied_read_diagnostic(view.keyexpr())
+            );
+        }
+        let successors = views.routers.route_successors_hex();
+        let routes = AdminRouterCtx {
+            zid_hex: &zid_hex,
+            whatami,
+            routers_dot: None,
+            peers_dot: None,
+            successors: &successors,
+            read,
+        };
+        let _ = answer_router_admin_query(view, out, &routes);
+    };
+    if !session.host_router_queryable(&key, Box::new(handler)) {
+        tracing::error!("Unable to serve the admin space of the router node");
     }
 }
 

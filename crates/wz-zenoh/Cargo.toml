@@ -55,7 +55,7 @@ doctest = false
 # transports below have meaning today, and the rest join the manifest with the slice that maps the
 # engine's capabilities onto them (the catalogue of docs/build-configuration.md, C1).
 default = ["engine-tokio", "transport_tcp", "transport_udp"]
-engine-tokio = ["dep:wz-capi-core", "dep:wz-capi-port", "dep:wz-runtime-tokio"]
+engine-tokio = ["dep:wz-capi-core", "dep:wz-capi-port", "dep:wz-runtime-tokio", "dep:wz-session-core"]
 # `transport_tcp` is what gives the configuration its default listening endpoints (`tcp/[::]:7447`
 # for a router, `tcp/[::]:0` for a peer), as it does upstream; the engine carries the link always.
 transport_tcp = ["zenoh-config/transport_tcp"]
@@ -125,6 +125,13 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", optional = true, default-feat
     "zenoh-config",
     "session-extqos",
     "transport-lowlatency",
+    # The router node answers the admin space of its own: the root, the declarations it holds, the
+    # routes of its graph, the metrics and the permission to read them.
+    "adminspace-core",
+    "adminspace-introspection-handlers",
+    "adminspace-router-linkstate",
+    "adminspace-metrics",
+    "adminspace-read",
 ] }
 zenoh-buffers = { path = "../wz-zenoh-buffers", features = ["std"] }
 zenoh-codec = { path = "../wz-zenoh-codec" }

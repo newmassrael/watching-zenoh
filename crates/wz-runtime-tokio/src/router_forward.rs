@@ -2081,6 +2081,16 @@ impl RouterDeclarationsView {
 
         let mut by_key: HashMap<String, AdminSources> = HashMap::new();
         for (face, target, _) in store.iter_interests() {
+            // The node's own face is a client of the `Local` region and is held in no face
+            // table: its zid is the node's.
+            if face == LOCAL_FACE {
+                by_key
+                    .entry(target.to_owned())
+                    .or_default()
+                    .clients
+                    .push(zid_to_zenoh_hex(tables.north_net().self_zid().as_slice()));
+                continue;
+            }
             let Some(state) = tables.faces.get(&face) else {
                 continue;
             };
@@ -3418,6 +3428,8 @@ macro_rules! router_entry_points {
 }
 
 router_entry_points! { on_tables_mut:
+    fn declare_local_interest(&self, id: u64, keyexpr: &str, queryables: bool);
+    fn undeclare_local_interest(&self, id: u64, queryables: bool);
     fn set_gossip_multihop(&self, enabled: bool);
     fn set_peer_region_full_linkstate(&self, enabled: bool);
     fn update_router_link_weights(&self, link_weights: HashMap<Zid, LinkEdgeWeight>) -> bool;
@@ -8796,6 +8808,52 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         T: std::ops::DerefMut,
     {
         self.host_subscriber_from(keyexpr, wz_session_core::locality::Locality::Any, handler)
+    }
+
+    /// Record that the node's own session publishes on `keyexpr` (`queryables` false) or asks
+    /// queries on it (`queryables` true), as the future interest a client face declares when it
+    /// does: it is read by the admin `publisher` and `querier` legs and by nothing else, since
+    /// the node's own matching is worked out from the tables. `id` is the session's number for
+    /// the entity, the one [`undeclare_local_interest`](Self::undeclare_local_interest) takes.
+    pub fn declare_local_interest(&mut self, id: u64, keyexpr: &str, queryables: bool)
+    where
+        T: std::ops::DerefMut,
+    {
+        let keyexpr = self.fwd.wire_key(keyexpr);
+        #[cfg(feature = "adminspace-introspection-handlers")]
+        if queryables {
+            self.tables.future_qabls.store_reporting_only_interest(
+                LOCAL_FACE,
+                id,
+                keyexpr.to_string(),
+                false,
+            );
+        } else {
+            self.tables.future_subs.store_reporting_only_interest(
+                LOCAL_FACE,
+                id,
+                keyexpr.to_string(),
+                false,
+            );
+        }
+        #[cfg(not(feature = "adminspace-introspection-handlers"))]
+        let _ = (id, keyexpr, queryables);
+    }
+
+    /// Forget the interest [`declare_local_interest`](Self::declare_local_interest) recorded
+    /// under `id`.
+    pub fn undeclare_local_interest(&mut self, id: u64, queryables: bool)
+    where
+        T: std::ops::DerefMut,
+    {
+        #[cfg(feature = "adminspace-introspection-handlers")]
+        if queryables {
+            self.tables.future_qabls.remove_interest(LOCAL_FACE, id);
+        } else {
+            self.tables.future_subs.remove_interest(LOCAL_FACE, id);
+        }
+        #[cfg(not(feature = "adminspace-introspection-handlers"))]
+        let _ = (id, queryables);
     }
 
     /// [`host_subscriber`](Self::host_subscriber) for the publications `origin` admits: those of
