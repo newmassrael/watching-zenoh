@@ -178,6 +178,27 @@ impl RouterState {
         Ok(())
     }
 
+    /// Publish a chunk of shared memory as the node's own session: see
+    /// [`RouterForwarder::publish_shm_with`].
+    #[cfg(feature = "transport-shm")]
+    pub fn publish_shm(
+        &self,
+        keyexpr: &str,
+        payload: wz_session_core::extshm::ShmSendHandle,
+        options: &wz_session_core::publish_options::PublishOptions,
+    ) -> Result<(), String> {
+        self.forwarder
+            .publish_shm_with(keyexpr, payload, options)
+            .map_err(|error| format!("{error:?}"))
+    }
+
+    /// Whether some face of the node negotiated shared memory: see
+    /// [`RouterForwarder::has_shm_peer`].
+    #[cfg(feature = "transport-shm")]
+    pub fn has_shm_peer(&self) -> bool {
+        self.forwarder.has_shm_peer()
+    }
+
     /// Where the node listens, as the listeners got their addresses.
     pub fn listen_locators(&self) -> &[String] {
         &self.listen_locators
@@ -348,6 +369,8 @@ pub(crate) fn open_router_blocking(
         policy,
         auth,
         gossip,
+        #[cfg(feature = "transport-shm")]
+        shm_clients,
         #[cfg(feature = "routing-namespace")]
         namespace,
         #[cfg(feature = "gossip")]
@@ -401,6 +424,12 @@ pub(crate) fn open_router_blocking(
     }
     let forwarder = Arc::new(forwarder);
     policy.install_on(&*forwarder);
+    // The program's own reader of shared memory, for the subscribers of the node's session: a
+    // descriptor is read into the buffer the program works with.
+    #[cfg(feature = "transport-shm")]
+    if let Some(crate::faces::ShmReader::Host(make)) = &shm_clients {
+        forwarder.set_host_shm_resolver(Arc::from(make()));
+    }
     // A peer dials the nodes its neighbours tell it of, as the policy of its gossip admits
     // (upstream's autoconnect): the forwarder emits an intent for each node it learns of from
     // the topology it is flooded, and the face loop dials it. Without it, a peer reaches only

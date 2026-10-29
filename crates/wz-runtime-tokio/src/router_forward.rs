@@ -2613,6 +2613,12 @@ pub struct RouterForwarder {
     /// send a reference nobody took.
     #[cfg(feature = "transport-shm")]
     shm_relay: crate::shm_relay::ShmRelay,
+    /// transport-shm -- how the node's own session reads a descriptor it is handed: the reader of
+    /// the program that holds the node, since the buffer a subscriber of that program receives is
+    /// the program's type (see [`Self::set_host_shm_resolver`]). `None` for a node whose program
+    /// reads none, which delivers nothing of a message whose payload is a descriptor.
+    #[cfg(feature = "transport-shm")]
+    host_shm: PlainRwLock<Option<Arc<dyn wz_session_core::extshm::ShmResolver + Send + Sync>>>,
     /// transport-shm -- messages this router received with a descriptor it did not route, because
     /// the face they arrived on never negotiated shared memory. Upstream maps a descriptor only
     /// for a link that did, and a router that opened a segment a stranger named would map
@@ -3483,6 +3489,13 @@ router_entry_points! { on_tables:
         payload: &[u8],
         options: &PublishOptions,
     ) -> Result<(), CodecError>;
+    #[cfg(feature = "transport-shm")]
+    fn publish_shm_with(
+        &self,
+        keyexpr: &str,
+        payload: wz_session_core::extshm::ShmSendHandle,
+        options: &PublishOptions,
+    ) -> Result<(), CodecError>;
     fn publish_qos(
         &self,
         keyexpr: &str,
@@ -3595,6 +3608,31 @@ impl RouterForwarder {
     #[cfg(feature = "session-extauth")]
     pub fn set_session_auth(&self, auth: crate::accept_loop::SessionAuth) {
         *self.session_auth.write() = Some(auth);
+    }
+
+    /// Set how the node's own session reads a descriptor it is handed, so that the subscribers
+    /// of the program that holds the node are delivered a message whose payload lives in shared
+    /// memory as the program's own buffer, and not as the bytes of it. Every descriptor is read
+    /// with a reference of its own, taken for the session as for any other receiver, which the
+    /// buffer gives back when the program lets go of it.
+    #[cfg(feature = "transport-shm")]
+    pub fn set_host_shm_resolver(
+        &self,
+        resolver: Arc<dyn wz_session_core::extshm::ShmResolver + Send + Sync>,
+    ) {
+        *self.host_shm.write() = Some(resolver);
+    }
+
+    /// Whether some face of the node negotiated shared memory and reads the default (POSIX)
+    /// protocol: whether a payload put into shared memory would be sent to anyone as a
+    /// descriptor.
+    #[cfg(feature = "transport-shm")]
+    pub fn has_shm_peer(&self) -> bool {
+        self.tables
+            .read()
+            .faces
+            .values()
+            .any(|face| face.actions.shm_admits(0))
     }
 
     /// A router driver seeded with the local node (`self_zid`), using the
@@ -3920,6 +3958,8 @@ impl RouterForwarder {
             data_sent: Counter::new(),
             #[cfg(feature = "transport-shm")]
             shm_relay: crate::shm_relay::ShmRelay::posix(),
+            #[cfg(feature = "transport-shm")]
+            host_shm: PlainRwLock::new(None),
             #[cfg(feature = "transport-shm")]
             shm_unnegotiated_dropped: Counter::new(),
             #[cfg(feature = "transport-shm")]
@@ -9165,18 +9205,37 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             push
         };
         // The sample a host subscriber sees, with all that the message says of it: a Put or a
-        // Del of the body (upstream's admin subscriber is handed the whole body). A sliced Put
-        // names a shared-memory buffer and this seam holds no resolver: nothing is delivered,
-        // rather than the descriptor handed to a host subscriber in place of its data.
-        let Some(sample) =
-            wz_session_core::pubsub::sample_of_inline_push(push, keyexpr, reliability, false)
-        else {
+        // Del of the body (upstream's admin subscriber is handed the whole body). The payload of
+        // a Put is read once for the subscribers that get it, whichever key they are shown it
+        // under, because a payload that lives in shared memory is read with a reference that is
+        // given back when it is let go of. A Put whose payload names a chunk that nobody reads
+        // is delivered to no one, rather than as the descriptor in place of its data.
+        let mut payload: Option<Option<wz_session_core::link::RxBytes>> = None;
+        let mut payload_of =
+            |put: &wz_codecs::msg_put::MsgPutOwned<wz_session_core::wire::WireStorage>| {
+                payload
+                    .get_or_insert_with(|| self.payload_for_session(put))
+                    .clone()
+            };
+        let Some(sample) = wz_session_core::pubsub::sample_of_push(
+            push,
+            keyexpr,
+            reliability,
+            false,
+            &mut payload_of,
+        ) else {
             return;
         };
         // What the subscribers of the node's own session are handed: the key without the
         // namespace of the session, and nothing for a key outside it.
         let relative = self.fwd.relative_key(keyexpr).and_then(|relative| {
-            wz_session_core::pubsub::sample_of_inline_push(push, relative, reliability, false)
+            wz_session_core::pubsub::sample_of_push(
+                push,
+                relative,
+                reliability,
+                false,
+                &mut payload_of,
+            )
         });
         // A publication of a face reaches the subscribers that admit a remote origin.
         self.deliver_to_hosted_subscribers(
@@ -9184,6 +9243,41 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             &sample,
             relative.as_ref().map(|view| view as &dyn SampleView),
         );
+    }
+
+    /// The payload of the Put `put` as the node's own session is handed it: the bytes when they
+    /// travel in the message, and when they name a chunk of shared memory the buffer the program
+    /// that holds the node reads it as, taken with a reference of its own from the chunk the pass
+    /// of this message holds. `None` when the payload names a chunk that nothing here reads.
+    fn payload_for_session(
+        &self,
+        put: &wz_codecs::msg_put::MsgPutOwned<wz_session_core::wire::WireStorage>,
+    ) -> Option<wz_session_core::link::RxBytes> {
+        if let Some(bytes) = wz_session_core::put_payload::inline_bytes(put) {
+            return Some(wz_session_core::link::RxBytes::from(bytes.to_vec()));
+        }
+        #[cfg(feature = "transport-shm")]
+        {
+            use wz_session_core::extshm::ShmRelayHolds;
+            let host = self.host_shm.read().clone()?;
+            let descriptors = wz_session_core::put_payload::shm_descriptors(put);
+            // A payload of one chunk: the buffer a program reads is one range of one page.
+            let [slice] = descriptors.as_slice() else {
+                return None;
+            };
+            let held = self
+                .shm_relay
+                .held(&wz_session_core::extshm::decode_shm_descriptor(slice)?)?;
+            let reservation = held.reserve_for_receiver();
+            let read = host.resolve_shared(&reservation.descriptor());
+            if read.is_some() {
+                // The reader owns the reference now and gives it back with the buffer.
+                reservation.commit();
+            }
+            return read;
+        }
+        #[cfg(not(feature = "transport-shm"))]
+        None
     }
 
     /// Hand a publication to the subscribers this router hosts: `full` carries its key as the
@@ -9364,6 +9458,51 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             .fwd
             .local_namespace_is_set()
             .then(|| options.loopback_sample(keyexpr, payload));
+        self.route_local_push(
+            options.priority_band(),
+            options.qos.is_some_and(|qos| qos.is_express()),
+            &push,
+            &wire,
+            options.allowed_destination,
+            &own,
+            own_relative.as_ref().unwrap_or(&own),
+        );
+        Ok(())
+    }
+
+    /// [`Self::publish_with`] for a payload that is a chunk of shared memory its owner holds: a
+    /// face that negotiated shared memory is sent the chunk's descriptor with a reference of its
+    /// own, any other face the bytes, and a subscriber of the node's own session the chunk
+    /// itself. The caller may let go of `payload` when this returns.
+    #[cfg(feature = "transport-shm")]
+    pub fn publish_shm_with(
+        &self,
+        keyexpr: &str,
+        payload: wz_session_core::extshm::ShmSendHandle,
+        options: &PublishOptions,
+    ) -> Result<(), CodecError> {
+        // Only the descriptor is wanted of this reservation: the reference it took goes back
+        // when it drops, and each face is sent a reference of its own.
+        let descriptor = payload.reserve_for_receiver().descriptor();
+        let _pass = self.shm_relay.adopt(descriptor, payload.clone());
+        let wire = self.fwd.wire_key(keyexpr);
+        let meta = options.push_metadata();
+        let push = wz_session_core::push_build::build_push_shm_literal(&wire, &descriptor, &meta)?;
+        // What the session's own subscribers are handed: the chunk where it can be viewed, the
+        // copy of its bytes the options describe where it cannot.
+        let mut own = options.loopback_sample(&wire, payload.bytes());
+        let mut own_relative = self
+            .fwd
+            .local_namespace_is_set()
+            .then(|| options.loopback_sample(keyexpr, payload.bytes()));
+        if options.allowed_destination.allows_local() {
+            if let Some(view) = payload.receiver_view() {
+                own.payload = view.clone();
+                if let Some(relative) = own_relative.as_mut() {
+                    relative.payload = view;
+                }
+            }
+        }
         self.route_local_push(
             options.priority_band(),
             options.qos.is_some_and(|qos| qos.is_express()),

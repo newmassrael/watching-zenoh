@@ -2513,13 +2513,35 @@ pub fn sample_of_inline_push(
     reliability: Reliability,
     routed: bool,
 ) -> Option<Sample> {
+    sample_of_push(push, keyexpr, reliability, routed, &mut |put| {
+        Some(crate::link::RxBytes::from(
+            crate::put_payload::inline_bytes(put)?.to_vec(),
+        ))
+    })
+}
+
+/// [`sample_of_inline_push`] for a reader that knows how to read the payload of a Put: a Put
+/// whose payload names a segment of shared memory is the sample `payload_of` makes of it, and
+/// `None` when it makes none.
+#[cfg(all(
+    feature = "alloc",
+    any(feature = "pubsub-put", feature = "pubsub-delete")
+))]
+pub fn sample_of_push(
+    push: &PushOwned,
+    keyexpr: &str,
+    reliability: Reliability,
+    routed: bool,
+    payload_of: &mut dyn FnMut(
+        &wz_codecs::msg_put::MsgPutOwned<crate::wire::WireStorage>,
+    ) -> Option<crate::link::RxBytes>,
+) -> Option<Sample> {
     let (mut sample, timestamp, encoding, attachment, source_info) = match &push.body {
         #[cfg(feature = "pubsub-put")]
         PushOwnedVariant::CodecZenohMsgPut(put) => {
             let exts: &[crate::wire::parts::ExtEntryOwned] =
                 put.extensions.as_deref().unwrap_or(&[]);
-            let payload =
-                crate::link::RxBytes::from(crate::put_payload::inline_bytes(put)?.to_vec());
+            let payload = payload_of(put)?;
             #[cfg(feature = "pubsub-timestamp")]
             let timestamp = put.timestamp.as_ref().map(TimestampHint::from_codec);
             #[cfg(not(feature = "pubsub-timestamp"))]

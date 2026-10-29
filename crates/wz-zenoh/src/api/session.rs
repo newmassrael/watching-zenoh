@@ -473,11 +473,11 @@ impl Engine {
             // Each face of the session has a thread of its own, so a callback that blocks
             // holds up its link and no other.
             face_drive: tokio_engine::FaceDrive::PerFace,
-            // A router node carries no shared memory; any other session reads a received
-            // descriptor with this crate's reader and offers shared memory as its configuration
-            // says (`transport/shared_memory/enabled`).
+            // A router carries no shared memory; any other session, a peer that forwards
+            // included, reads a received descriptor with this crate's reader and offers shared
+            // memory as its configuration says (`transport/shared_memory/enabled`).
             #[cfg(feature = "shared-memory")]
-            shm_clients: if node {
+            shm_clients: if router {
                 tokio_engine::no_shm_clients()
             } else {
                 Some(wz_capi_core::faces::ShmReader::Host(
@@ -486,7 +486,7 @@ impl Engine {
             },
             #[cfg(not(feature = "shared-memory"))]
             shm_clients: tokio_engine::no_shm_clients(),
-            offer_shm: cfg!(feature = "shared-memory") && !node,
+            offer_shm: cfg!(feature = "shared-memory") && !router,
             // The multicast groups of a session that holds a shared-memory context are
             // shared-memory ones, and what a member of one sends it reads through that reader.
             groups_report_shm: cfg!(feature = "shared-memory") && !node,
@@ -732,9 +732,7 @@ impl Engine {
     /// every peer, as its destination allows.
     fn publish(&self, publication: &Publication<'_>) -> ZResult<()> {
         match self {
-            Engine::Router(router) => {
-                tokio_engine::router_publish(router.node.forwarder(), publication)
-            }
+            Engine::Router(router) => tokio_engine::router_publish(&router.node, publication),
             Engine::Tokio(state) => {
                 let options = tokio_engine::publish_options(publication);
                 let wire = tokio_engine::wire_key(publication);
@@ -2171,9 +2169,10 @@ mod tokio_engine {
     /// the publication by name, and is not dropped. A delete takes the route a put to its key
     /// would, and carries no priority or express flag of its own.
     pub(super) fn router_publish(
-        forwarder: &wz_runtime_tokio::router_forward::RouterForwarder,
+        node: &wz_capi_core::drive::RouterState,
         publication: &Publication<'_>,
     ) -> ZResult<()> {
+        let forwarder = node.forwarder();
         // The metadata of the publication rides the push to the other faces and the sample the
         // session's own subscribers are handed, as the options of a session describe them.
         let options = publish_options(publication);
@@ -2187,6 +2186,55 @@ mod tokio_engine {
             options
         };
         let payload = publication.payload.to_bytes();
+        // A put whose payload is a buffer of shared memory is sent as the buffer: its descriptor
+        // to a face that negotiated shared memory, its bytes to any other.
+        #[cfg(feature = "shared-memory")]
+        if publication.kind == SampleKind::Put {
+            if let Some(handle) = crate::api::shm::transport::send_handle_of(&publication.payload) {
+                return node
+                    .publish_shm(publication.key, handle, &options)
+                    .map_err(|error| {
+                        zerror!("the node could not publish on {}: {error}", publication.key).into()
+                    });
+            }
+            // A large put the configuration asks to be optimised, and that a face could read
+            // from shared memory, is sent to the faces as a copy in the provider; a subscriber
+            // of the session itself is given the bytes it was put with.
+            #[cfg(feature = "unstable")]
+            if let Some(handle) = publication
+                .shm_promoter
+                .and_then(|promoter| promoter.promote(&publication.payload, || node.has_shm_peer()))
+            {
+                use wz_capi_core::runtime::locality::Locality as EngineLocality;
+                let mut published = Ok(());
+                if options.allowed_destination.allows_remote() {
+                    published = node
+                        .publish_shm(
+                            publication.key,
+                            handle,
+                            &options.clone().with_locality(EngineLocality::Remote),
+                        )
+                        .map_err(|error| {
+                            zerror!("the node could not publish on {}: {error}", publication.key)
+                        });
+                }
+                if published.is_ok() && options.allowed_destination.allows_local() {
+                    published = forwarder
+                        .publish_with(
+                            publication.key,
+                            &payload,
+                            &options.with_locality(EngineLocality::SessionLocal),
+                        )
+                        .map_err(|error| {
+                            zerror!(
+                                "the node could not publish on {}: {error:?}",
+                                publication.key
+                            )
+                        });
+                }
+                return published.map_err(Into::into);
+            }
+        }
         let published = forwarder.publish_with(publication.key, &payload, &options);
         published.map_err(|error| {
             zerror!(

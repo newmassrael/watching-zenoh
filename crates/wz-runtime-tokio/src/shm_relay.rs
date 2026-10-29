@@ -196,6 +196,24 @@ impl ShmRelay {
     }
 }
 
+impl ShmRelay {
+    /// Open a pass over a chunk this node publishes itself: `handle` holds the chunk, and
+    /// `descriptor` is what a message that names it carries. The faces the message is routed to
+    /// are sent the descriptor with a reference of their own, or the bytes, exactly as for a
+    /// chunk that arrived. The pass owns nothing the handle does not: nothing was received, so
+    /// nothing is owed back when it ends.
+    pub fn adopt(&self, descriptor: ShmDescriptor, handle: ShmSendHandle) -> RelayPass<'_> {
+        let mut held = self.held.lock().unwrap_or_else(|e| e.into_inner());
+        let start = held.len();
+        held.push((descriptor, handle));
+        RelayPass {
+            relay: self,
+            start,
+            slices: 1,
+        }
+    }
+}
+
 /// What came of sending one message to one face through [`ShmRelay::send`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelaySend {
