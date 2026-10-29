@@ -54,6 +54,15 @@ comments and the definition. Empty population is a FAIL, not a pass.
   2. Every PRODUCTION caller under `router-multicast-faces`. If an egress-only
      production attach appears, the partition this round measured has changed
      and that residual needs re-reading, so it reds rather than passing.
+
+"Under" means the atom itself or a feature of the CALLER'S OWN crate that turns
+the atom on. The C ABI's `router-node` is the second kind: it lists
+`wz-runtime-tokio/router-multicast-faces`, and the module that holds its one
+production attach is gated on `router-node` alone. Asking for the atom's name in
+that file would be a second cfg that restates the first, and a feature that
+forwards the atom is exactly as unable to reach the plane with the atom off. The
+names a crate turns on are read from its own `Cargo.toml`, by closure, so a
+feature that forwards one that forwards the atom counts too.
 """
 
 from __future__ import annotations
@@ -62,6 +71,8 @@ import pathlib
 import re
 import subprocess
 import sys
+import tempfile
+import tomllib
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -92,6 +103,94 @@ def tracked_rust(root: pathlib.Path) -> list[pathlib.Path]:
     except (OSError, subprocess.CalledProcessError) as exc:
         raise InputError(f"cannot list tracked rust ({exc})") from exc
     return [root / line for line in out.splitlines() if line]
+
+
+def atom_features(features: dict[str, list[str]]) -> set[str]:
+    """The names, in one crate's `[features]`, that turn the atom on.
+
+    A member is the atom's name bare, or a dependency's feature of that name
+    (`dep/name`, `dep?/name`); a member that names another feature of the same
+    crate carries that feature's answer, so the set is the closure.
+    """
+    names = {ATOM_FEATURE}
+    changed = True
+    while changed:
+        changed = False
+        for feature, members in features.items():
+            if feature in names:
+                continue
+            if any(m.split("/")[-1] in names for m in members):
+                names.add(feature)
+                changed = True
+    return names
+
+
+def crate_atom_features(root: pathlib.Path, rel: str) -> set[str]:
+    """`atom_features` of the crate that owns the tracked file `rel`."""
+    directory = (root / rel).parent
+    while directory != root.parent:
+        manifest = directory / "Cargo.toml"
+        if manifest.is_file():
+            try:
+                doc = tomllib.loads(manifest.read_text(encoding="utf-8"))
+            except (OSError, tomllib.TOMLDecodeError) as exc:
+                raise InputError(f"{manifest} is not readable ({exc})") from exc
+            if "package" in doc:
+                return atom_features(doc.get("features", {}))
+        directory = directory.parent
+    return {ATOM_FEATURE}
+
+
+MOD_ROOTS = ("lib", "main")
+
+
+def declared_cfgs(root: pathlib.Path, rel: str) -> list[str]:
+    """The `#[cfg]` bodies written against `mod <stem>;` in the files that declare `rel`.
+
+    An out-of-line module is gated by the declaration in its parent, not by
+    anything in its own text: `#[cfg(feature = "router-node")] mod router_node;`
+    in `drive.rs` gates every line of `drive/router_node.rs`. The parent is
+    `<dir>.rs`, `<dir>/mod.rs` or the crate root beside it; the walk goes up
+    until a crate root has been read.
+    """
+    cfgs: list[str] = []
+    path = pathlib.PurePosixPath(rel)
+    while path.stem not in MOD_ROOTS:
+        if path.stem == "mod":
+            module, directory = path.parent.name, path.parent.parent
+        else:
+            module, directory = path.stem, path.parent
+        decl = re.compile(
+            r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+" + re.escape(module) + r"\s*;"
+        )
+        found: pathlib.PurePosixPath | None = None
+        for parent in (
+            directory.with_suffix(".rs"),
+            directory / "mod.rs",
+            directory / "lib.rs",
+            directory / "main.rs",
+        ):
+            try:
+                lines = (root / parent).read_text(encoding="utf-8").splitlines()
+            except (OSError, UnicodeDecodeError):
+                continue
+            for i, line in enumerate(lines):
+                if decl.match(line):
+                    cfgs += _attrs_above(lines, i)[0]
+                    found = parent
+                    break
+            if found is not None:
+                break
+        if found is None:
+            break
+        path = found
+    return cfgs
+
+
+def gated_by(cfgs: list[str], names: set[str]) -> bool:
+    """Whether one of the `#[cfg]` bodies names a feature of `names`."""
+    joined = " ".join(cfgs)
+    return any(re.search(rf'"{re.escape(name)}"', joined) for name in names)
 
 
 def _attrs_above(lines: list[str], idx: int) -> tuple[list[str], bool]:
@@ -189,13 +288,16 @@ def audit(root: pathlib.Path) -> tuple[list[str], list[str], list[str]]:
             raise InputError(f"{path} is not readable ({exc})") from exc
         if ENTRY_POINT not in text:
             continue
+        atom_names = crate_atom_features(root, rel)
+        declared = declared_cfgs(root, rel)
         for line, scope, cfgs in call_sites(rel, text):
             population += 1
             site = f"{rel}:{line}"
+            cfgs = cfgs + declared
             joined = " ".join(cfgs)
             if scope == "prod":
                 prod.append(site)
-                if ATOM_FEATURE not in joined:
+                if not gated_by(cfgs, atom_names):
                     findings.append(
                         f"{site} attaches a multicast egress group from PRODUCTION "
                         f"without `{ATOM_FEATURE}`. R2343 withdrew that atom's "
@@ -204,7 +306,7 @@ def audit(root: pathlib.Path) -> tuple[list[str], list[str], list[str]]:
                     )
             elif scope == "def":
                 defs.append((site, joined))
-            elif BROAD_FEATURE in joined and ATOM_FEATURE not in joined:
+            elif BROAD_FEATURE in joined and not gated_by(cfgs, atom_names):
                 egress_only.append(site)
 
     if population == 0:
@@ -320,6 +422,55 @@ def selftest() -> int:
         "fn run() {\n    forwarder.attach_mcast_group(tx);\n}\n",
         [("prod", True)],
     )
+    # A feature of the caller's crate that forwards the atom is the atom's gate.
+    features = {
+        "router-node": ["peer", "wz-runtime-tokio/router-multicast-faces"],
+        "bundle": ["router-node"],
+        "optional-form": ["wz-runtime-tokio?/router-multicast-faces"],
+        "multicast-transport": ["peer", "wz-runtime-tokio/transport-multicast"],
+        "peer": [],
+    }
+    names = atom_features(features)
+    if names != {ATOM_FEATURE, "router-node", "bundle", "optional-form"}:
+        failures.append(f"the closure of the features that turn the atom on: got {sorted(names)}")
+    routed = [
+        c for _, _, c in call_sites(
+            "crates/y/src/a.rs",
+            '#[cfg(feature = "router-node")]\n'
+            "mod node {\n    fn run() {\n        forwarder.attach_mcast_group(tx);\n    }\n}\n",
+        )
+    ]
+    if not routed or not gated_by(routed[0], names):
+        failures.append(f"a production call under a feature that forwards the atom: {routed}")
+    unrelated = [
+        c for _, _, c in call_sites(
+            "crates/y/src/a.rs",
+            '#[cfg(feature = "multicast-transport")]\n'
+            "fn run() {\n    forwarder.attach_mcast_group(tx);\n}\n",
+        )
+    ]
+    if not unrelated or gated_by(unrelated[0], names):
+        failures.append(f"a feature that does not forward the atom is not its gate: {unrelated}")
+
+    # An out-of-line module is gated by its parent's declaration, up to the crate root.
+    with tempfile.TemporaryDirectory() as td:
+        d = pathlib.Path(td)
+        for rel_name, body in (
+            ("crates/y/src/lib.rs", '#[cfg(feature = "outer")]\nmod drive;\n'),
+            ("crates/y/src/drive.rs", '#[cfg(feature = "router-node")]\nmod node;\nmod plain;\n'),
+            ("crates/y/src/drive/node.rs", "fn run() {}\n"),
+            ("crates/y/src/drive/plain.rs", "fn run() {}\n"),
+        ):
+            p = d / rel_name
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(body, encoding="utf-8")
+        got_node = declared_cfgs(d, "crates/y/src/drive/node.rs")
+        got_plain = declared_cfgs(d, "crates/y/src/drive/plain.rs")
+        if got_node != ['feature = "router-node"', 'feature = "outer"']:
+            failures.append(f"a module declared under a cfg, in a module under a cfg: {got_node}")
+        if got_plain != ['feature = "outer"']:
+            failures.append(f"a module declared bare still inherits its parent's: {got_plain}")
+
     for label, src in (
         ("a doc reference is neither call nor def", "/// see attach_mcast_group(tx)\n"),
         ("a line comment is neither call nor def", "// fwd.attach_mcast_group(tx);\n"),
