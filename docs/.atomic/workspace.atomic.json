@@ -297106,6 +297106,44 @@
         "Owed, from the router session: the withdrawal of a client's token across two routers (subget_router_history_before: the router that held the token before its neighbour connected does not tell the withdrawal, probably the source of the face-up replay against that of the flood), regression_3, and the peer session of this crate, which does not forward between its faces (six clientviapeer tests); a peer of the router is still told the tokens that come alive after its interest by the flood and replay and not by a stored interest; the queryable, the get and the matching status of the router; a put that carries an encoding, a timestamp or an attachment, and a delete; a namespace and an authentication; the sessions the node holds. Also owed: the context a callback runs in (session and unicity), the files that run none, a build without unstable serves no admin key of its own, a lane for the harness, the margin of the main job, the pin bump to 1.10.2."
       ]
     },
+    "Round 3881": {
+      "decision_summary": "The corpus gains six zenoh captures on emulated links: TCP at 1% and 5% loss, and TCP and UDP each with a quarter of the packets reordered and with 5% repeated. All six read two yes flows. UDP steps break where the link repeats or reorders (13 of 251, 28 of 211); TCP steps never break (0 of 238, 239, 239), because TCP hands the stream over in order. The first reordering captures used a 10 ms delay under a publisher that sends once a second, so nothing overtook anything (0 of 236 broken); they were taken again with 1.5 s and the first set was dropped. The counts the measured weights rest on move (6075 units, 300 framing directions, 304 cookies, 306 Init pairs, 612 versions) and so do the weights: a residual or undecoded unit weighs -10986 on the yes sum, so two undecoded units now cross -20000 on the no sum and three null captures decide more flows no (lan-dns, stack-coap, lan-ssdp). The SN steps stay assumed.",
+      "changes_bullets": [
+        "`captures/corpus/`: `zenoh-tcp-loss-1`, `zenoh-tcp-loss-5`, `zenoh-tcp-reorder-25`, `zenoh-tcp-dup-5`, `zenoh-udp-reorder-25`, `zenoh-udp-dup-5` (anonymised, 51 files are fixed points), with manifest entries and README rows.",
+        "`crates/wz-capture/src/zenoh_evidence.rs`: the counts (units 6075, framing 300, cookie 304, roles 306, versions 612) and the weights computed from them: unit residual -10986 / -9618, undecoded -10986 / -10122, read whole +965 / +3983, framing lost -6653 / -6642, cookie fidelity -14, differing -6672, roles +986 / -5682, foreign version -7672.",
+        "`crates/wz-capture/src/zenoh_corpus_tests.rs`: six zenoh rows (2, 0, 0) and three moved null rows: lan-dns (0, 159, 28), lan-ssdp (0, 2, 0), stack-coap (0, 25, 0).",
+        "Pinned sums moved with the weights: `session_table_tests.rs`, `wz-capi-dissect/src/tests/session_table.rs`, `wz_dissect.h`, and the C consumer's opening (no sum 11949).",
+        "`docs/flow-zenoh-verdict.md`: the counts, the weight table, the tables of broken steps for the new links, and what moved on the null captures."
+      ],
+      "verification_bullets": [
+        "On a build host: wz-capture 1610 pass (6 ignored), clippy clean for wz-capture and wz-capi-dissect, wz-capi-dissect 227 pass and its C consumer built against the release cdylib and read the tree. The weights were first recomputed offline by a port that reproduces the previous weights from the previous counts, and the tests then agreed with it. The pre-push static gate array: 121 of 121 pass. The corpus verifier: 51 files are fixed points. Not run: the hosted layers, and a different 1.10.x client, a link that really loses packets, or a real TCP reordering; TCP reordering got one SN step in two minutes and its cause was not traced."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "A weights round must re-pin the C consumer's opening in the dissection ABI tests, which no local gate reads (this round did, on the build host). Open: clients other than 1.10.1, links that really lose packets, a reordered TCP session that gets further than one SN step, why the 10% and 20% UDP sessions end, and more protocols on the null side (SSH, SMTP). Two undecoded units now read `no`; if a null protocol the corpus does not hold decodes badly in a way that mimics zenoh, that is where the threshold matters."
+      ],
+      "publishable_decision_summary": "The corpus gains six zenoh captures on emulated links: TCP at 1% and 5% loss, and TCP and UDP each with a quarter of the packets reordered and with 5% repeated. All six read two yes flows. UDP steps break where the link repeats or reorders (13 of 251, 28 of 211); TCP steps never break (0 of 238, 239, 239), because TCP hands the stream over in order. The first reordering captures used a 10 ms delay under a publisher that sends once a second, so nothing overtook anything (0 of 236 broken); they were taken again with 1.5 s and the first set was dropped. The counts the measured weights rest on move (6075 units, 300 framing directions, 304 cookies, 306 Init pairs, 612 versions) and so do the weights: a residual or undecoded unit weighs -10986 on the yes sum, so two undecoded units now cross -20000 on the no sum and three null captures decide more flows no (lan-dns, stack-coap, lan-ssdp). The SN steps stay assumed.",
+      "publishable_changes_bullets": [
+        "`captures/corpus/`: `zenoh-tcp-loss-1`, `zenoh-tcp-loss-5`, `zenoh-tcp-reorder-25`, `zenoh-tcp-dup-5`, `zenoh-udp-reorder-25`, `zenoh-udp-dup-5` (anonymised, 51 files are fixed points), with manifest entries and README rows.",
+        "`crates/wz-capture/src/zenoh_evidence.rs`: the counts (units 6075, framing 300, cookie 304, roles 306, versions 612) and the weights computed from them: unit residual -10986 / -9618, undecoded -10986 / -10122, read whole +965 / +3983, framing lost -6653 / -6642, cookie fidelity -14, differing -6672, roles +986 / -5682, foreign version -7672.",
+        "`crates/wz-capture/src/zenoh_corpus_tests.rs`: six zenoh rows (2, 0, 0) and three moved null rows: lan-dns (0, 159, 28), lan-ssdp (0, 2, 0), stack-coap (0, 25, 0).",
+        "Pinned sums moved with the weights: `session_table_tests.rs`, `wz-capi-dissect/src/tests/session_table.rs`, `wz_dissect.h`, and the C consumer's opening (no sum 11949).",
+        "`docs/flow-zenoh-verdict.md`: the counts, the weight table, the tables of broken steps for the new links, and what moved on the null captures."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: wz-capture 1610 pass (6 ignored), clippy clean for wz-capture and wz-capi-dissect, wz-capi-dissect 227 pass and its C consumer built against the release cdylib and read the tree. The weights were first recomputed offline by a port that reproduces the previous weights from the previous counts, and the tests then agreed with it. The pre-push static gate array: 121 of 121 pass. The corpus verifier: 51 files are fixed points. Not run: the hosted layers, and a different 1.10.x client, a link that really loses packets, or a real TCP reordering; TCP reordering got one SN step in two minutes and its cause was not traced."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A weights round must re-pin the C consumer's opening in the dissection ABI tests, which no local gate reads (this round did, on the build host). Open: clients other than 1.10.1, links that really lose packets, a reordered TCP session that gets further than one SN step, why the 10% and 20% UDP sessions end, and more protocols on the null side (SSH, SMTP). Two undecoded units now read `no`; if a null protocol the corpus does not hold decodes badly in a way that mimics zenoh, that is where the threshold matters."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
