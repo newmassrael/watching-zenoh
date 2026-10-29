@@ -1638,11 +1638,11 @@ impl LinkstateNetwork {
     /// self's and direct neighbours' do. zenoh's `gossip` enabled flag is
     /// implicitly true here — wz only builds a link-state when it gossips.
     fn propagate_locators(&self, idx: NodeIndex) -> bool {
-        self.gossip_multihop
-            || idx == self.idx
-            || self.graph[self.idx]
-                .links
-                .contains_key(&self.graph[idx].zid)
+        // A neighbour is a node self holds a link to, as the pin's own test reads its link table
+        // (`zenoh/src/net/protocol/network.rs` @ `self.links.values().any(|link| {`), not an
+        // edge of the graph: a single-hop gossip `Network` writes no edge for its own links, and
+        // the peers a router holds would otherwise be withheld from each other.
+        self.gossip_multihop || idx == self.idx || self.is_direct_neighbour(&self.graph[idx].zid)
     }
 
     /// R2893 (open-debt item 751, rule 8d) — what a NEW link is told, by mode.
