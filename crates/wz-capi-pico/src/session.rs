@@ -752,6 +752,8 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             // node states no traffic policy, as it never has.
             policy: wz_capi_core::node_policy::NodePolicy::default(),
             namespace: None,
+            // And no `gateway` key: a pico session has no south to keep apart.
+            gateway_south: wz_session_core::region_partition::SouthPartition::Auto,
             // The group its listen endpoint names, when it names one.
             groups,
         },

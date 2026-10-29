@@ -425,7 +425,7 @@ impl ZRuntimePool {
             .get_or_init(|| {
                 Slot::new(
                     zrt.init()
-                        .unwrap_or_else(|_| panic!("Failed to init {zrt}")),
+                        .unwrap_or_else(|error| panic!("Failed to init {zrt}: {error}")),
                 )
             })
             .handle

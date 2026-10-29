@@ -1361,7 +1361,13 @@ fn prepare_dial(
 ) -> Option<DialSetup> {
     let mut dial_cfgs: Vec<(String, DialConfig)> = Vec::with_capacity(endpoints.len());
     for endpoint in endpoints {
-        dial_cfgs.push((endpoint.clone(), dial_config(tls, endpoint).ok()?));
+        match dial_config(tls, endpoint) {
+            Ok(config) => dial_cfgs.push((endpoint.clone(), config)),
+            Err(error) => {
+                log_open_failure("dial configuration of a connect endpoint", &error);
+                return None;
+            }
+        }
     }
     let scheduled: Vec<(String, RetryPolicy)> = endpoints
         .iter()
@@ -1370,7 +1376,13 @@ fn prepare_dial(
     // R311y820 — fallible the way the step above is: report the open failure to the C caller
     // rather than dial with a cookie key anybody could forge. Minted ONCE, before the phase: it
     // is not a connect failure, so it is not what `connect/retry` re-attempts.
-    let params = init_params(whatami, ctx.zid.to_vec(), ctx.link_conf).ok()?;
+    let params = match init_params(whatami, ctx.zid.to_vec(), ctx.link_conf) {
+        Ok(params) => params,
+        Err(error) => {
+            log_open_failure("session parameters of the dial", &error);
+            return None;
+        }
+    };
     let dialer = Arc::new(Dialer {
         dial_cfgs,
         params,
@@ -4050,6 +4062,10 @@ pub struct OpenStance {
     /// are the wire's. A build without `routing-namespace` has no decorator to install one with,
     /// and an open that is handed a prefix it cannot install fails ([`OpenError::DriveFailed`]).
     pub namespace: Option<String>,
+    /// How the node keeps its south apart (`gateway/south`). Only a node that forwards between
+    /// its faces has a south to partition ([`router_node`]); the registry of faces holds the
+    /// value and places nothing by it.
+    pub gateway_south: wz_session_core::region_partition::SouthPartition,
     /// Open-debt item 913 — the multicast groups the session joins, each one face to every
     /// member beside the unicast ones, bound before the open answers. The calling ABI decides
     /// which of its endpoints names a group and what the group's beacon advertises; empty for
@@ -5402,6 +5418,7 @@ mod tests {
             auth: None,
             policy: crate::node_policy::NodePolicy::default(),
             namespace: None,
+            gateway_south: wz_session_core::region_partition::SouthPartition::Auto,
             groups: Vec::new(),
         }
     }

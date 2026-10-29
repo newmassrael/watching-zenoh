@@ -5165,15 +5165,18 @@ impl CApiForwarder {
 #[cfg(feature = "peer")]
 impl FaceForwarder for CApiForwarder {
     fn register(&self, id: FaceId, actions: &Arc<SessionLinkActions>) {
-        // Admitted already: the loop asked `holds_peer` before it got here, and it
-        // is a single task, so nothing came up between the question and this call
-        // that the loop did not see. A refusal here would be a face the loop holds
-        // and the registry does not, which is why the question is asked there.
-        let admitted = self.shared.face_up(id.0 + self.base, actions, false);
-        debug_assert!(
-            admitted,
-            "the accept loop admitted a face the registry refuses"
-        );
+        // Admitted in the usual case: the loop asked `holds_peer` before it got here, and it is a
+        // single task, so nothing came up in ITS OWN loop between the question and this call. A
+        // link another task of the node brought up in the meantime is not in its view: a node
+        // that dials the peers it scouts while it listens meets the same peer on a dialled link
+        // and on an accepted one at the same moment. The registry then refuses the face that
+        // came second, and that link is the one to close, with the reason zenoh gives a link
+        // refused for the node it already holds
+        // (`io/zenoh-transport/src/unicast/manager.rs` @ `init_existing_transport_unicast`);
+        // the loop sees the session end and lets the face go.
+        if !self.shared.face_up(id.0 + self.base, actions, false) {
+            actions.send_close_with_reason(wz_session_core::close_reason::CloseReason::MaxLinks);
+        }
     }
 
     /// One face per remote node, across BOTH roles: see [`SharedSession::face_up`].

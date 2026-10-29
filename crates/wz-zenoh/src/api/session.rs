@@ -6108,6 +6108,111 @@ mod tests {
             .expect("the default of an unmapped key opens");
     }
 
+    /// A peer that names its region, one that keeps its south apart by the region names of its
+    /// remotes, and one that scouts on a group of its own, each open (the keys of upstream's
+    /// regions tests, which stated them together).
+    #[test]
+    fn a_peer_that_names_its_region_and_partitions_its_south_opens() {
+        open(peer_with("region_name", r#""main""#))
+            .wait()
+            .expect("a region name");
+        let gateway = r#"{south:[{filters:[{negated:true,region_names:["main"]}]}]}"#;
+        open(peer_with("gateway", gateway))
+            .wait()
+            .expect("a partition of the south by region names");
+        let mut together = peer_with("gateway", gateway);
+        together
+            .insert_json5("scouting/multicast/enabled", "true")
+            .expect("a key");
+        together
+            .insert_json5("scouting/multicast/address", r#""224.2.1.1:9100""#)
+            .expect("a key");
+        together
+            .insert_json5("region_name", r#""main""#)
+            .expect("a key");
+        open(together)
+            .wait()
+            .expect("a peer on a group of its own that names its region");
+    }
+
+    /// The first three nodes of upstream's second regions scenario: peers of one region on a
+    /// group of their own each, the second and third told where the earlier ones listen.
+    #[cfg(feature = "unstable")]
+    #[test]
+    fn peers_of_one_region_on_groups_of_their_own_open_one_after_another() {
+        let node = |id: &str, group: &str, connect: &[String]| {
+            let mut config = Config::default();
+            for (key, value) in [
+                ("mode", r#""peer""#.to_owned()),
+                ("id", format!("{id:?}")),
+                ("listen/endpoints", r#"["tcp/0.0.0.0:0"]"#.to_owned()),
+                ("scouting/multicast/enabled", "true".to_owned()),
+                ("scouting/multicast/address", format!("{group:?}")),
+                ("adminspace/enabled", "true".to_owned()),
+                ("timestamping/enabled", "true".to_owned()),
+                ("region_name", r#""main""#.to_owned()),
+                (
+                    "gateway",
+                    r#"{south:[{filters:[{negated:true,region_names:["main"]}]}]}"#.to_owned(),
+                ),
+            ] {
+                config.insert_json5(key, &value).expect("a key zenoh reads");
+            }
+            if !connect.is_empty() {
+                config
+                    .insert_json5("connect/endpoints", &format!("{connect:?}"))
+                    .expect("a key zenoh reads");
+            }
+            config
+        };
+        let locator = |session: &Session| {
+            session
+                .info()
+                .locators()
+                .wait()
+                .into_iter()
+                .find(|locator| !locator.as_str().contains('['))
+                .expect("a listener")
+                .to_string()
+        };
+        let first = open(node("21aa9100", "224.2.1.1:9100", &[]))
+            .wait()
+            .expect("the first peer");
+        let second = open(node("21aa9200", "224.2.1.1:9200", &[locator(&first)]))
+            .wait()
+            .expect("the second peer, told where the first listens");
+        let _third = open(node(
+            "21aa9300",
+            "224.2.1.1:9300",
+            &[locator(&first), locator(&second)],
+        ))
+        .wait()
+        .expect("the third peer, told where the two listen");
+        // The peers of a subregion: no region of their own and no partition, on the group of one
+        // of the above. Each finds the peer of the group by scouting.
+        let plain = |id: &str, group: &str| {
+            let mut config = Config::default();
+            for (key, value) in [
+                ("mode", r#""peer""#.to_owned()),
+                ("id", format!("{id:?}")),
+                ("listen/endpoints", r#"["tcp/0.0.0.0:0"]"#.to_owned()),
+                ("scouting/multicast/enabled", "true".to_owned()),
+                ("scouting/multicast/address", format!("{group:?}")),
+                ("adminspace/enabled", "true".to_owned()),
+                ("timestamping/enabled", "true".to_owned()),
+            ] {
+                config.insert_json5(key, &value).expect("a key zenoh reads");
+            }
+            config
+        };
+        let _sub_one = open(plain("21aa9110", "224.2.1.1:9100"))
+            .wait()
+            .expect("a peer of the first group");
+        let _sub_two = open(plain("21aa9120", "224.2.1.1:9100"))
+            .wait()
+            .expect("a second peer of the first group");
+    }
+
     #[test]
     fn a_mapped_key_with_a_value_of_its_own_opens_and_an_inert_one_does_too() {
         // `connect/timeout_ms` is read by the engine (the dial phase).
@@ -8125,7 +8230,9 @@ mod tests {
         }
 
         /// A listener declared on a peer that accepts sessions, which is the router node at node
-        /// mode Peer, is told what already matches before its declaration returns.
+        /// mode Peer, is told what already matches at its declaration: the verdict is queued
+        /// before the declaration returns, ahead of every change that follows, and the callback
+        /// is called from the queue (a node's callbacks run off the thread of its face).
         #[test]
         fn a_listener_of_a_node_is_told_what_already_matches_at_its_declaration() {
             let session = with_the_node(|| open(peer("a1b2f9")).wait().expect("opens"));
@@ -8143,7 +8250,7 @@ mod tests {
                 .callback(callback)
                 .wait()
                 .expect("declares");
-            assert_eq!(told.try_recv(), Ok(true));
+            assert_eq!(told.recv_timeout(WAIT), Ok(true));
         }
 
         #[test]
@@ -11070,6 +11177,59 @@ mod tests {
             )
             .wait()
             .expect("a router opens")
+        }
+
+        /// A router whose `gateway/south` names two subregions by region name places each peer in
+        /// the one that matches the region the peer announced, and tells a peer of the peers of its
+        /// own region alone: two peers of one region find each other, and a peer of the other
+        /// stays linked to the router only (upstream's `regions_gossip`, in small).
+        #[cfg(feature = "unstable")]
+        #[test]
+        fn a_router_that_partitions_its_south_keeps_the_regions_of_its_peers_apart() {
+            let port = unautoselected_port();
+            let _router = open(
+                Config::from_json5(&format!(
+                    r#"{{ id: "a1b2f0", mode: "router",
+                          listen: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                          scouting: {{ multicast: {{ enabled: false }} }},
+                          gateway: {{ south: [
+                              {{ filters: [{{ region_names: ["one"] }}] }},
+                              {{ filters: [{{ region_names: ["two"] }}] }}
+                          ] }} }}"#
+                ))
+                .expect("a configuration zenoh reads"),
+            )
+            .wait()
+            .expect("a router opens");
+            let in_region = |id: &str, region: &str| {
+                open(
+                    Config::from_json5(&format!(
+                        r#"{{ id: "{id}", mode: "peer", region_name: "{region}",
+                              connect: {{ endpoints: ["tcp/127.0.0.1:{port}"] }},
+                              listen: {{ endpoints: ["tcp/127.0.0.1:0"] }},
+                              scouting: {{ multicast: {{ enabled: false }} }} }}"#
+                    ))
+                    .expect("a configuration zenoh reads"),
+                )
+                .wait()
+                .expect("a peer opens")
+            };
+            let transports = |session: &Session| session.info().transports().wait().count();
+            let first = in_region("a1b2f1", "one");
+            let second = in_region("a1b2f2", "one");
+            let other = in_region("a1b2f3", "two");
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            while transports(&first) < 2 && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            std::thread::sleep(Duration::from_secs(1));
+            assert_eq!(
+                transports(&first),
+                2,
+                "the router and the peer of its region"
+            );
+            assert_eq!(transports(&second), 2);
+            assert_eq!(transports(&other), 1, "the router alone");
         }
 
         #[test]

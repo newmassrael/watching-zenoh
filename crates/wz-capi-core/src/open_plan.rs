@@ -45,6 +45,7 @@ use wz_runtime_tokio::zenoh_config::{
 };
 #[cfg(feature = "routing-namespace")]
 use wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr;
+use wz_session_core::region_partition::SouthPartition;
 
 use crate::drive::{
     names_a_group, open_blocking, CapiTlsConfig, ConfiguredZid, DialPhase, FaceDrive,
@@ -617,6 +618,10 @@ pub struct OpenPlan {
     /// no decorator to install it with and refuses a document that states one
     /// ([`OpenRefusal::Namespace`]); so a plan that carries one is one the build can carry out.
     pub namespace: Option<String>,
+    /// How the node keeps its south apart: the subregions of `gateway/south`, or the preset that
+    /// places a remote by its role alone. Carried out by a node that forwards between its faces
+    /// ([`OpenArguments::run_node`]); the registry of faces has no south to partition.
+    pub gateway_south: SouthPartition,
     /// The certificate material for the `tls/` and `quic/` links.
     pub tls: CapiTlsConfig,
     /// The files [`Self::resolve`] read for the material above and for the authentication, in the
@@ -673,6 +678,11 @@ impl OpenPlan {
             .map_or_else(Vec::new, |ingest| ingest.ignored.clone());
         let node = ingest.map(|ingest| ingest.config);
         let namespace_text = node.as_ref().and_then(|node| node.namespace.clone());
+        // How the node keeps its south apart (`gateway/south`): the preset unless the document
+        // states subregions.
+        let gateway_south = node
+            .as_ref()
+            .map_or(SouthPartition::Auto, |node| node.gateway_south.clone());
         let batch_size = node
             .as_ref()
             .map_or(DEFAULT_BATCH_SIZE, |node| node.batch_size);
@@ -927,6 +937,7 @@ impl OpenPlan {
             auth,
             policy,
             namespace,
+            gateway_south,
             tls,
             read_files,
             ignored,
@@ -1047,6 +1058,7 @@ impl OpenPlan {
                 auth: self.auth,
                 policy: self.policy,
                 namespace: self.namespace,
+                gateway_south: self.gateway_south,
                 groups,
             },
         }

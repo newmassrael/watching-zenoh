@@ -374,6 +374,7 @@ pub(crate) fn open_router_blocking(
         shm_clients,
         #[cfg(feature = "routing-namespace")]
         namespace,
+        gateway_south,
         groups,
         ..
     } = stance;
@@ -415,6 +416,10 @@ pub(crate) fn open_router_blocking(
         Some(prefix) => forwarder.with_local_namespace(prefix),
         None => forwarder,
     };
+    // How the node keeps its south apart: a remote is placed in the first subregion whose
+    // filters match it (its role, its zid, its interfaces, the region name it announced), and a
+    // remote in a subregion hears of its own region alone. Before any face registers.
+    let forwarder = forwarder.with_south_partition(gateway_south);
     // Whether the graphs the router floods carry the nodes past the next hop
     // (`scouting/gossip/multihop`), so that a peer hears of the peers two links away.
     #[cfg(feature = "gossip")]
