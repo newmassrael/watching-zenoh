@@ -375,8 +375,8 @@ def counts(text: str) -> tuple[int, int, int]:
 DEFAULT_FEATURES = "unstable,shared-memory,transport_tcp,transport_udp,transport_tls,transport_quic"
 
 #: Features a file asks for beyond the build's, because its tests are compiled out without them
-#: (`regions/main.rs` opens with `#![cfg(feature = "internal")]`: measured as 0 tests under the
-#: default, 126 with the feature). The files that ask for a `Runtime` of the node are not in this
+#: (the entry of the `regions` test directory opens with `#![cfg(feature = "internal")]`:
+#: measured as 0 tests under the default, 126 with the feature). The files that ask for a `Runtime` of the node are not in this
 #: table: they need `zenoh::internal::runtime`, which this crate does not carry.
 FILE_FEATURES = {"regions": ("internal",)}
 

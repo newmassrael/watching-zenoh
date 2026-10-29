@@ -460,7 +460,7 @@ CASES: tuple[Case, ...] = (
          require=(SCOUTING, UDP)),
     Case("capic-peer", "wz-capi-c", "libwz_capi_c.so", "peer", 4_065_000,
          forbid=(GOSSIP, CLOCK, ADVANCED, MULTICAST), require=(ACCEPT, RESPONDER, SCOUTING, UDP)),
-    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 9_331_100,
+    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 9_335_200,
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
          exports=836,
          note="zenoh-c's default links and pubkey auth (rustls on ring, quinn, tungstenite, "
@@ -481,8 +481,11 @@ CASES: tuple[Case, ...] = (
               "router node's multicast group and the peer as a node, which carries the "
               "peer hat, the autoconnect intents, the whole sample and query a hosted "
               "subscriber or queryable is shown, and the shared memory of the node's "
-              "session. The growth is the features', chosen. The budget is that reading "
-              "and 3,500, rounded up to the hundred"),
+              "session. 9,331,648 measured locally on 2026-10-30 (+4,070 since): the "
+              "region_name key, whose reader, name check and offer link the region "
+              "extension's emit into every build that holds a session. The growth is the "
+              "features', chosen. The budget is that reading and 3,500, rounded up to the "
+              "hundred"),
 )
 
 
