@@ -4149,7 +4149,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             // an unknown face has no relay path anyway
             return InterceptorVerdict::Admit;
         };
-        let ctx = RouterFaceContext { face };
+        let ctx = RouterFaceContext { face, known: None };
         // R2348 (`routing-interceptor-hotreload`) — serve this (face, keyexpr)'s
         // precomputed verdict table while the chain that produced it is still
         // installed, recomputing when the version says otherwise. The same rule
@@ -4187,6 +4187,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         id: FaceId,
         state: &RouterFaceState,
         msg: &NetworkMessage,
+        known: Option<&str>,
     ) -> InterceptorVerdict {
         // `id` is the EGRESS cache key and has no other use, so with the cache
         // feature off it is genuinely unused. Discarded explicitly rather than
@@ -4198,14 +4199,16 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         if chain.is_empty() {
             return InterceptorVerdict::Admit;
         }
-        let ctx = RouterFaceContext { face: state };
+        let ctx = RouterFaceContext { face: state, known };
         // R2348 — the EGRESS half, and the router's most-consulted seam: this
         // runs once per message PER DESTINATION FACE across `fan_out_tier`, so an
         // uncached chain is re-evaluated fan-out-width times for one publish.
         // `id` is a parameter rather than a lookup because both call sites
         // already hold it (`*id` in the fan-out loop, `target` in `send_to_face`).
         #[cfg(feature = "routing-interceptor-hotreload")]
-        if let Some(keyexpr) = resolve_governed_keyexpr(msg, &state.keyexpr_table) {
+        if let Some(keyexpr) =
+            resolve_governed_keyexpr(msg, &state.keyexpr_table).or_else(|| known.map(str::to_owned))
+        {
             let mut cache = self.egress_keyexpr_cache.guard();
             let recomputes = &self.egress_interceptor_cache_recomputes;
             let mut compute = || {
@@ -4481,7 +4484,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 continue;
             }
             if let Some(msg) = build(*id, state.peer_zid)? {
-                if self.egress_to_face(*id, state, msg, reliable, express, priority) {
+                if self.egress_to_face(*id, state, msg, reliable, express, priority, None) {
                     sent += 1;
                 }
             }
@@ -4521,7 +4524,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 continue;
             }
             if let Some(msg) = build(*id, state.peer_zid)? {
-                if self.egress_to_face(*id, state, msg, reliable, express, priority) {
+                if self.egress_to_face(*id, state, msg, reliable, express, priority, None) {
                     sent += 1;
                 }
             }
@@ -4548,6 +4551,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// [`fan_out_to_faces_qos`](Self::fan_out_to_faces_qos) and
     /// [`send_to_face`](Self::send_to_face) all send through. Whether the face
     /// accepted the message.
+    ///
+    /// `known` is the key the router knows `msg` to be about when `msg` names none (see
+    /// [`RouterFaceContext::known`]); `None` for a message that says its own.
+    #[allow(clippy::too_many_arguments)]
     fn egress_to_face(
         &self,
         id: FaceId,
@@ -4556,13 +4563,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         reliable: bool,
         express: bool,
         priority: Priority,
+        known: Option<&str>,
     ) -> bool {
         // §5.16 EGRESS access control (y113): gate the built message by the
         // DESTINATION face's subject before it leaves — a denied outbound is
         // dropped for THIS face (not sent, not counted) and witnessed. The
         // router twin of `LinkstateForwarder::fan_out`'s `admit_outbound`
         // gate; empty chain (no ACL) is a no-op fast path.
-        let verdict = self.admit_outbound(id, state, &msg);
+        let verdict = self.admit_outbound(id, state, &msg, known);
         if let Some(kind) = verdict.dropped_by() {
             self.interceptor_dropped.bump();
             // R2371 — the router twin of the linkstate forwarder's
@@ -4574,6 +4582,16 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 kind,
                 InterceptorFlow::Egress,
             );
+            // A query that the egress chain refuses is answered as if the face's queryable had
+            // ended it, as upstream's multiplexer does (`zenoh/src/net/primitives/mux.rs` @
+            // `face.send_response_final(&mut ResponseFinal {`): the branch of the query held for
+            // this face closes now and not at its timeout. The branch is let go and no final is
+            // sent here, because the router's own hold on the query is still open while its
+            // branches are sent (upstream sends them after it dropped its hold): the final of the
+            // query is sent by the last branch to go, or by `route_request` when none is left.
+            if let NetworkMessage::Request(request) = &msg {
+                let _ = self.pending.guard().take(id, request.rid);
+            }
             return false;
         }
         // `pubsub-ts-stack` -- this router is a node the message passes on its way: it records
@@ -7267,10 +7285,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let forgets = tables
             .future_subs
             .forgets_for_withdrawn(withdrawn_ke, |rk| any_sub_matches_in(hats, rk));
-        for (face, _reply_ke, id) in forgets {
-            self.send_one_to_face(
+        for (face, reply_ke, id) in forgets {
+            self.send_one_to_face_about(
                 face,
                 NetworkMessage::Declare(Box::new(build_undeclare_subscriber(id))),
+                &reply_ke,
             );
         }
     }
@@ -7312,10 +7331,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             });
             (forgets, re_pushes)
         };
-        for (face, _reply_ke, id) in forgets {
-            self.send_one_to_face(
+        for (face, reply_ke, id) in forgets {
+            self.send_one_to_face_about(
                 face,
                 NetworkMessage::Declare(Box::new(build_undeclare_queryable(id))),
+                &reply_ke,
             );
         }
         for (face, reply_ke, id, info) in re_pushes {
@@ -7758,10 +7778,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             .future_tokens
             .forgets_for_withdrawn(withdrawn_ke, |rk| any_token_matches_in(hats, rk));
         let announced: Vec<FaceId> = forgets.iter().map(|(face, _, _)| *face).collect();
-        for (face, _reply_ke, id) in forgets {
-            self.send_one_to_face(
+        for (face, reply_ke, id) in forgets {
+            self.send_one_to_face_about(
                 face,
                 NetworkMessage::Declare(Box::new(build_undeclare_token(id))),
+                &reply_ke,
             );
         }
         // R3334 — the second arm of upstream's `maybe_unpropagate_token`: a face
@@ -8858,6 +8879,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             ),
         };
 
+        // A branch that an egress chain refused was let go as it was sent, and the query is held
+        // by no branch when every one was: that is an empty route, and ends as one does.
+        let forwarded = if forwarded > 0 && Arc::strong_count(&fan) == 1 {
+            0
+        } else {
+            forwarded
+        };
         // The node's own face, a branch of the route (item 751, step 6e) under every target. The
         // pin picks a target's queryables hat by hat, `compute_final_route` being run once for
         // each region (`zenoh/src/net/routing/dispatcher/queries.rs` @ `for dst in rtables.hats.regions() {`),
@@ -9542,6 +9570,19 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         &self,
         target: FaceId,
         reliable: bool,
+        build: impl FnMut() -> NetworkMessage,
+    ) -> bool {
+        self.send_to_face_about(target, reliable, None, build)
+    }
+
+    /// [`send_to_face`](Self::send_to_face) for a message that names no key although it is about
+    /// one (an undeclaration by id): `known` is the key, which the egress chain is asked about
+    /// as upstream's is (see [`RouterFaceContext::known`]).
+    fn send_to_face_about(
+        &self,
+        target: FaceId,
+        reliable: bool,
+        known: Option<&str>,
         mut build: impl FnMut() -> NetworkMessage,
     ) -> bool {
         // The node's own face has no transport: what is sent to it goes to the program's sink.
@@ -9562,7 +9603,15 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // Response / ResponseFinal / prompt final) by the destination's subject —
         // a denied reply is dropped and witnessed, not returned — in the same
         // egress SSOT the fan-outs use.
-        self.egress_to_face(target, state, build(), reliable, false, Priority::DEFAULT)
+        self.egress_to_face(
+            target,
+            state,
+            build(),
+            reliable,
+            false,
+            Priority::DEFAULT,
+            known,
+        )
     }
 
     /// [`send_to_face`](Self::send_to_face) for an already-BUILT owned message —
@@ -9729,6 +9778,15 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             carrier.take().expect("send_one_to_face builds once")
         });
     }
+
+    /// [`send_one_to_face`](Self::send_one_to_face) for an undeclaration by id, with the key it
+    /// concerns (see [`send_to_face_about`](Self::send_to_face_about)).
+    fn send_one_to_face_about(&self, face: FaceId, msg: NetworkMessage, known: &str) {
+        let mut carrier = Some(msg);
+        self.send_to_face_about(face, true, Some(known), || {
+            carrier.take().expect("send_one_to_face_about builds once")
+        });
+    }
 }
 
 /// What the accept loop calls, as methods of the router with its tables held. The
@@ -9752,8 +9810,35 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     InterceptorFlow::Ingress,
                 );
             }
+            self.end_refused_ask(id, message);
         }
         verdict.is_admitted()
+    }
+
+    /// A request or an interest that the ingress chain refused is ended for whoever asked, as
+    /// upstream's demultiplexer ends it, so that the asker does not wait out its timeout: a
+    /// request with the `ResponseFinal` that closes it, an interest with the `DeclareFinal` that
+    /// answers it (`zenoh/src/net/primitives/demux.rs` @
+    /// `request was blocked by an interceptor, we need to send response final to avoid timeout error`).
+    fn end_refused_ask(&self, id: FaceId, message: &NetworkMessage) {
+        match message {
+            NetworkMessage::Request(request) => {
+                let closing = wz_session_core::response_final_build::build_response_final(
+                    request.rid,
+                    wz_session_core::declare_ext_qos::read_request_qos(request),
+                );
+                self.send_one_to_face(id, NetworkMessage::ResponseFinal(closing));
+            }
+            NetworkMessage::Interest(interest) => {
+                self.send_one_to_face(
+                    id,
+                    NetworkMessage::Declare(Box::new(build_declare_final_reply(
+                        interest.interest_id,
+                    ))),
+                );
+            }
+            _ => {}
+        }
     }
 
     /// A topology link-state from face `id` in `tier`: ingest it into the tier's net, re-flood
@@ -10642,6 +10727,11 @@ impl FaceForwarder for RouterForwarder {
 /// for egress (the subject is the peer on the other end of the link either way).
 struct RouterFaceContext<'a> {
     face: &'a RouterFaceState,
+    /// The key the router knows a message is about, for a message that names none: an
+    /// undeclaration by id, which upstream sends with the resource it concerns in its routing
+    /// context (`RoutingContext::with_expr(.., res.expr())`) and its egress interceptors read it
+    /// from there. `None` for a message that arrived, which says its own key.
+    known: Option<&'a str>,
 }
 
 impl InterceptorContext for RouterFaceContext<'_> {
@@ -10667,6 +10757,7 @@ impl InterceptorContext for RouterFaceContext<'_> {
         // same free fn), alias-resolved against THIS face's table — one
         // governed-kind match for both forwarders.
         resolve_governed_keyexpr(msg, &self.face.keyexpr_table)
+            .or_else(|| self.known.map(str::to_owned))
     }
 }
 
@@ -19924,6 +20015,40 @@ mod tests {
         ));
     }
 
+    /// The same under an access control that allows everything (`default_permission: allow`, no
+    /// rule): the withdrawal of a token carries an id and no key, and the chain admits it, so the
+    /// reader is told as it is without a chain (`zenoh/tests/acl.rs` @ `test_liveliness_allow`).
+    #[cfg(all(feature = "routing-token-tables", feature = "access-acl"))]
+    #[test]
+    fn client_token_withdraw_reaches_a_reader_under_an_access_control_that_allows_all() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        fwd.set_interceptors(InterceptorConfig {
+            acl: Some(AclPolicy::new(AclConfig {
+                default_permission: Permission::Allow,
+                rules: Vec::new(),
+            })),
+            ..Default::default()
+        });
+        let (a, _sa) = face(zid(0xAA), WIRE_CLIENT); // token holder
+        let (b, sink_b) = face(zid(0xBB), WIRE_CLIENT); // future reader
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &b);
+        forward_one(
+            &fwd,
+            FaceId(1),
+            token_interest_msg(7, "live/data", true, true, false),
+        );
+        forward_one(&fwd, FaceId(0), declare_client_token_msg(9, "live/data"));
+        assert!(sink_b.frame_count() >= 1, "the reader is told of the token");
+        sink_b.reset();
+        forward_one(&fwd, FaceId(0), undeclare_client_token_msg(9));
+        assert_eq!(sink_b.frame_count(), 1, "the reader is told it withdrew");
+        assert!(matches!(
+            forwarded_declare(&sink_b.frame_bytes(0)).body,
+            DeclareOwnedVariant::CodecZenohUndeclToken(_)
+        ));
+    }
+
     #[cfg(feature = "routing-token-tables")]
     #[test]
     fn token_node_detach_undeclares_to_a_pushed_reader() {
@@ -22121,6 +22246,95 @@ mod tests {
             Some(NetworkMessage::Response(r)) => *r,
             other => panic!("expected a forwarded Response, got {other:?}"),
         }
+    }
+
+    /// A policy that denies `Query` on `flow` for every key.
+    #[cfg(feature = "access-acl")]
+    fn deny_query_on(flow: AclFlow) -> AclPolicy {
+        AclPolicy::new(AclConfig {
+            default_permission: Permission::Allow,
+            rules: vec![AclRule {
+                subject: SubjectSelector::Any,
+                key_exprs: vec!["**".to_owned()],
+                messages: vec![AclMessage::Query],
+                flow,
+                permission: Permission::Deny,
+                link_protocols: Vec::new(),
+                interfaces: Vec::new(),
+                usernames: Vec::new(),
+                cert_common_names: Vec::new(),
+            }],
+        })
+    }
+
+    /// A query that the ingress chain refuses is ended for its querier, as upstream's
+    /// demultiplexer ends it (`zenoh/src/net/primitives/demux.rs` @
+    /// `request was blocked by an interceptor, we need to send response final to avoid timeout error`):
+    /// the querier is sent the final of its own id at once, and nothing is forwarded.
+    #[cfg(feature = "access-acl")]
+    #[test]
+    fn a_query_the_ingress_chain_refuses_is_ended_for_its_querier() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (querier, sink_querier) = face(zid(0xAA), WIRE_CLIENT);
+        let (queryable, sink_queryable) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &querier);
+        fwd.register(FaceId(1), &queryable);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/q", true));
+        fwd.set_interceptors(InterceptorConfig {
+            acl: Some(deny_query_on(AclFlow::Ingress)),
+            ..Default::default()
+        });
+        sink_querier.reset();
+        sink_queryable.reset();
+
+        forward_one(&fwd, FaceId(0), request_best(99, "demo/q"));
+
+        assert_eq!(sink_querier.frame_count(), 1, "the querier is answered");
+        assert_eq!(
+            forwarded_response_final_rid(&sink_querier.frame_bytes(0)),
+            99,
+            "with the final of its own request"
+        );
+        assert_eq!(sink_queryable.frame_count(), 0, "nothing is forwarded");
+        assert_eq!(fwd.pending.guard().len(), 0, "no branch is held");
+    }
+
+    /// A query that the egress chain refuses toward a face closes the branch held for that face
+    /// at once, as upstream's multiplexer does (`zenoh/src/net/primitives/mux.rs` @
+    /// `face.send_response_final(&mut ResponseFinal {`): the querier is sent its final, the
+    /// queryable is sent nothing and the router holds no branch.
+    #[cfg(feature = "access-acl")]
+    #[test]
+    fn a_query_the_egress_chain_refuses_closes_its_branch_for_the_querier() {
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (querier, sink_querier) = face(zid(0xAA), WIRE_CLIENT);
+        let (queryable, sink_queryable) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &querier);
+        fwd.register(FaceId(1), &queryable);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_qabl("demo/q", true));
+        fwd.set_interceptors(InterceptorConfig {
+            acl: Some(deny_query_on(AclFlow::Egress)),
+            ..Default::default()
+        });
+        sink_querier.reset();
+        sink_queryable.reset();
+
+        forward_one(&fwd, FaceId(0), request_best(99, "demo/q"));
+
+        assert_eq!(
+            sink_queryable.frame_count(),
+            0,
+            "the queryable is not asked"
+        );
+        assert_eq!(sink_querier.frame_count(), 1, "the querier is answered");
+        assert_eq!(
+            forwarded_response_final_rid(&sink_querier.frame_bytes(0)),
+            99,
+            "with the final of its own request"
+        );
+        assert_eq!(fwd.pending.guard().len(), 0, "no branch is held");
     }
 
     #[test]
