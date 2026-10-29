@@ -297348,6 +297348,38 @@
         "The tokio registry's face_up still keeps the first up and does not call judge_second_link; the other header arms' cooperative builds and the cooperative engine's TLS link are not made; session-slot with codec-response and no link kind does not lint clean outside network_message.rs."
       ]
     },
+    "Round 3888": {
+      "decision_summary": "The verdict doc said the causes of the sessions that end on a 10% and 20% UDP link were not traced. They are now, from eight more runs (four at each loss, 150 s, the router and both clients at debug level; not kept in the corpus). Of 16 clients, 9 never opened a session: 8 waited out the 10 s open deadline and one received a KeepAlive where it expected the OpenAck; the zenoh examples unwrap the open and exit. The handshake is four datagrams that UDP does not resend, which predicts 66% to open at 10% and 41% at 20%; 4 of 8 and 3 of 8 did. A session that is open ends when one side hears nothing for the 10 s lease: in two of the four 20% runs and in none at 10%. Four of the 7 sessions that opened also lost an interest's DeclareFinal, which timed out after 10 s. The corpus capture at 10%, which ended in a new handshake after 110 s, fits the lease, but its packets alone do not say so. No code changed, so the verdict, the weights and the corpus are as they were.",
+      "changes_bullets": [
+        "`docs/flow-zenoh-verdict.md`: the sentence that said the causes were not traced is replaced by what the logs of eight runs show: 9 of 16 clients never opened (8 open deadlines, 1 KeepAlive in place of the OpenAck), lease expiries in two of the four 20% runs, and interests whose DeclareFinal never arrived in four of the 7 sessions that opened.",
+        "No other file changed."
+      ],
+      "verification_bullets": [
+        "The eight runs were read with scripts over their logs (every close, lease expiry, open failure and DeclareFinal timeout with its offset); the counts in the doc are those. The pre-push static gate array ran whole on the changed tree: 121 of 121 pass. The 4-datagram survival figures are 0.9^4 and 0.8^4, not a fit. Not done: the same runs at other losses, with TCP, or with a client other than 1.10.1; eight runs bound none of the rates tightly."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "Open: clients other than 1.10.1, links that really lose packets, and a reordered TCP session that gets further than one SN step. A lossy capture meant to hold many SN steps is cheaper to get from a client whose first open is retried: the examples unwrap it and exit, so at 20% more than half of the runs hold nothing (the retry that follows a lease expiry is the library's, and it was seen working)."
+      ],
+      "publishable_decision_summary": "The verdict doc said the causes of the sessions that end on a 10% and 20% UDP link were not traced. They are now, from eight more runs (four at each loss, 150 s, the router and both clients at debug level; not kept in the corpus). Of 16 clients, 9 never opened a session: 8 waited out the 10 s open deadline and one received a KeepAlive where it expected the OpenAck; the zenoh examples unwrap the open and exit. The handshake is four datagrams that UDP does not resend, which predicts 66% to open at 10% and 41% at 20%; 4 of 8 and 3 of 8 did. A session that is open ends when one side hears nothing for the 10 s lease: in two of the four 20% runs and in none at 10%. Four of the 7 sessions that opened also lost an interest's DeclareFinal, which timed out after 10 s. The corpus capture at 10%, which ended in a new handshake after 110 s, fits the lease, but its packets alone do not say so. No code changed, so the verdict, the weights and the corpus are as they were.",
+      "publishable_changes_bullets": [
+        "`docs/flow-zenoh-verdict.md`: the sentence that said the causes were not traced is replaced by what the logs of eight runs show: 9 of 16 clients never opened (8 open deadlines, 1 KeepAlive in place of the OpenAck), lease expiries in two of the four 20% runs, and interests whose DeclareFinal never arrived in four of the 7 sessions that opened.",
+        "No other file changed."
+      ],
+      "publishable_verification_bullets": [
+        "The eight runs were read with scripts over their logs (every close, lease expiry, open failure and DeclareFinal timeout with its offset); the counts in the doc are those. The pre-push static gate array ran whole on the changed tree: 121 of 121 pass. The 4-datagram survival figures are 0.9^4 and 0.8^4, not a fit. Not done: the same runs at other losses, with TCP, or with a client other than 1.10.1; eight runs bound none of the rates tightly."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: clients other than 1.10.1, links that really lose packets, and a reordered TCP session that gets further than one SN step. A lossy capture meant to hold many SN steps is cheaper to get from a client whose first open is retried: the examples unwrap it and exit, so at 20% more than half of the runs hold nothing (the retry that follows a lease expiry is the library's, and it was seen working)."
+      ]
+    },
     "Round 39": {
       "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
       "changes_bullets": [
