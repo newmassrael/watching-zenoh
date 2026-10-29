@@ -129,6 +129,9 @@ impl<const B: usize> Default for IntervalMeter<B> {
     }
 }
 
+/// The meter of a build: `SNAPSHOT_HISTOGRAM_BUCKETS` buckets.
+pub type BuildIntervalMeter = IntervalMeter<{ crate::caps::SNAPSHOT_HISTOGRAM_BUCKETS }>;
+
 #[cfg(test)]
 mod tests {
     extern crate std;

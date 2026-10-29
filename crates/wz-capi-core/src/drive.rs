@@ -3856,6 +3856,10 @@ async fn serve_group<D, B, Fut>(
     }));
     let session = shared.new_mcast_face_session(producer.clone(), &membership);
     let revised = Arc::new(Notify::new());
+    // The meter of what the group delivers: the loop feeds it across re-joins, the registry
+    // reads it for the session's snapshot and retires it when the face leaves.
+    #[cfg(feature = "resource-snapshot")]
+    let messages = Arc::new(wz_session_core::interval_meter::BuildIntervalMeter::new());
     let serve = serve_group_face(
         GroupFaceSpec {
             label: "capi multicast group",
@@ -3866,6 +3870,8 @@ async fn serve_group<D, B, Fut>(
             // The group's events feed this one session's observer, which must tell two members'
             // declarations apart.
             scope_members: true,
+            #[cfg(feature = "resource-snapshot")]
+            messages: Some(messages.as_ref()),
         },
         bind,
         GroupFaceSeams {
@@ -3889,6 +3895,8 @@ async fn serve_group<D, B, Fut>(
                         endpoint: label.endpoint,
                         is_shm: label.is_shm,
                         declarations: label.declarations,
+                        #[cfg(feature = "resource-snapshot")]
+                        messages: &messages,
                     },
                 ),
                 Err(e) => log_open_failure(&format!("join {}", label.endpoint), e),
@@ -5823,9 +5831,29 @@ mod multicast_face_tests {
                     "an undeclared subscriber heard"
                 );
 
+                // `resource-snapshot`: what the group's face delivered is in the session's count,
+                // and stays in it when the face leaves. B heard A's beacons and puts, so its
+                // count is more than the one beacon; when both faces have ended the registry
+                // holds no face and still reads what they counted, which is the ledger's.
+                #[cfg(feature = "resource-snapshot")]
+                let counted = {
+                    let reading = b.message_reading();
+                    assert!(
+                        reading.messages >= 2,
+                        "B's group face counted the messages A sent: {reading:?}"
+                    );
+                    reading.messages
+                };
+
                 stop_tx.send(true).expect("the faces watch the stop");
                 a_task.await.expect("A's face ended");
                 b_task.await.expect("B's face ended");
+
+                #[cfg(feature = "resource-snapshot")]
+                assert!(
+                    b.message_reading().messages >= counted,
+                    "a group that has left keeps what it counted: the node's count does not fall"
+                );
             })
             .await;
     }

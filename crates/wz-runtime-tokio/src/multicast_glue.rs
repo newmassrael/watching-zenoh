@@ -1447,6 +1447,8 @@ pub fn spawn_router_mcast_egress(
         // No host reads this face's members: the egress helper hands back only
         // its sender and its stop handle.
         None,
+        // Nor does it deliver any message to count: it consumes no group ingress.
+        GroupMessages::default(),
         move |opts| {
             Box::pin(crate::UdpDriver::bind_multicast_tx(
                 group,
@@ -1584,6 +1586,7 @@ fn spawn_group_face<B, F, G, H>(
     opts: crate::McastGroupOptions,
     node_stats: Option<crate::node_stats::NodeStats>,
     membership: Option<McastGroupMembership>,
+    messages: GroupMessages,
     bind: B,
     on_event: F,
     producer: MulticastTxProducer,
@@ -1599,6 +1602,8 @@ where
     // R2333 — the stop channel. `false` is the resting value; the loop watches for
     // a CHANGE, so the initial value is never mistaken for a stop.
     let (signal, mut shutdown) = tokio::sync::watch::channel(false);
+    #[cfg(not(feature = "resource-snapshot"))]
+    let NoMessages = messages;
     let task = pool.spawn(async move {
         serve_group_face(
             GroupFaceSpec {
@@ -1609,6 +1614,8 @@ where
                 membership: membership.as_ref(),
                 // A node's group face hands what its members declare on to its router.
                 scope_members: false,
+                #[cfg(feature = "resource-snapshot")]
+                messages: messages.as_deref(),
             },
             || bind(&opts),
             GroupFaceSeams {
@@ -1624,6 +1631,20 @@ where
     });
     McastFaceStop { signal, task }
 }
+
+/// What a host hands a group face for counting the messages it delivers: the host's meter, shared
+/// with the face's task, under `resource-snapshot`; nothing without it, so a call names the
+/// argument in every build and one `cfg` stays out of the argument list.
+#[cfg(feature = "resource-snapshot")]
+type GroupMessages = Option<std::sync::Arc<wz_session_core::interval_meter::BuildIntervalMeter>>;
+#[cfg(not(feature = "resource-snapshot"))]
+type GroupMessages = NoMessages;
+
+/// What a group face is handed to count with in a build without `resource-snapshot`: nothing, as a
+/// type of its own, so the argument is not a unit value.
+#[cfg(not(feature = "resource-snapshot"))]
+#[derive(Default)]
+struct NoMessages;
 
 /// What a group face is, apart from its link and the seams its loop calls: how it
 /// names itself, the profile its beacon advertises, the cadence of its loop, and
@@ -1648,6 +1669,12 @@ pub struct GroupFaceSpec<'a> {
     /// (`MulticastDispatcher::scope_member_declarations`): what a face whose events feed one
     /// session's observer wants, and a face that hands the ids on must not.
     pub scope_members: bool,
+    /// `resource-snapshot` — the meter that spaces the transport messages the group delivers,
+    /// held by the host that holds the face: the same meter across the re-joins of one face,
+    /// which the host reads for the node's snapshot and retires when it leaves the group
+    /// ([`wz_session_core::resource_snapshot::ReceiveLedger`]). `None` counts nothing.
+    #[cfg(feature = "resource-snapshot")]
+    pub messages: Option<&'a wz_session_core::interval_meter::BuildIntervalMeter>,
 }
 
 /// The seams a group face's loop calls, carried across re-joins: each received
@@ -1711,6 +1738,8 @@ where
         node_stats,
         membership,
         scope_members,
+        #[cfg(feature = "resource-snapshot")]
+        messages,
     } = spec;
     let GroupFaceSeams {
         mut on_event,
@@ -1752,6 +1781,19 @@ where
             }
         };
         let recorder = GroupFaceRecorder::open(node_stats, driver, label);
+        // `resource-snapshot` — the recorder the loop reports into also spaces each transport
+        // message on the loop's own clock, so a node's snapshot counts a group's messages as it
+        // counts a unicast session's. Without the feature it is the recorder itself.
+        #[cfg(feature = "resource-snapshot")]
+        let tap = wz_session_core::multicast_stats::IntervalTap::new(
+            recorder.recorder(),
+            messages,
+            || clock.now_monotonic_us() as u32,
+        );
+        #[cfg(feature = "resource-snapshot")]
+        let drive_recorder = &tap;
+        #[cfg(not(feature = "resource-snapshot"))]
+        let drive_recorder = recorder.recorder();
         // R2859 — this join's member view, labelled by the bound link as upstream
         // labels a multicast transport's link. A link whose addresses cannot be
         // read keeps no view, and says so, rather than listing members under a
@@ -1779,7 +1821,7 @@ where
             &mut on_members,
             &mut on_group_subs,
             Some(&mut *shutdown),
-            recorder.recorder(),
+            drive_recorder,
             membership_join.as_ref().map(|join| &join.membership),
         );
         // The face is reported open once the loop has attached the group's pipeline to
@@ -2346,8 +2388,29 @@ pub struct RouterMcastGroup {
     /// table holds them: what the node's adminspace lists in `sessions[]`.
     /// Unlike `members`, a view read on demand rather than a stream of changes.
     pub membership: McastGroupMembership,
+    /// `resource-snapshot` — the meter of the transport messages the group delivers, which the
+    /// face's task feeds across its re-joins. The router reads it for its snapshot
+    /// ([`Self::message_reading`]) and retires it into the node's
+    /// [`ReceiveLedger`](wz_session_core::resource_snapshot::ReceiveLedger) when it leaves the
+    /// group.
+    #[cfg(feature = "resource-snapshot")]
+    pub messages: std::sync::Arc<wz_session_core::interval_meter::BuildIntervalMeter>,
     /// The face's stop handle.
     pub stop: McastFaceStop,
+}
+
+#[cfg(all(
+    feature = "transport-multicast",
+    feature = "transport-link-udp",
+    feature = "routing-accept",
+    feature = "codec-push",
+    feature = "resource-snapshot"
+))]
+impl RouterMcastGroup {
+    /// What the group's face has counted of the messages its members sent, cumulative.
+    pub fn message_reading(&self) -> wz_session_core::resource_snapshot::BuildMessageReading {
+        self.messages.reading()
+    }
 }
 
 /// R2850 (open-debt item 821) — spawn a router's [`RouterMcastGroup`] face.
@@ -2398,6 +2461,14 @@ pub fn spawn_router_mcast_group(
     let mut source: Option<wz_session_core::driver_loop::MulticastPeerId> = None;
     let (members_tx, members) = tokio::sync::mpsc::unbounded_channel::<Vec<Vec<u8>>>();
     let (group_subs_tx, group_subs) = tokio::sync::mpsc::unbounded_channel::<Vec<String>>();
+    // The meter of what this group delivers: the face's task feeds it, and the router that holds
+    // the group reads it for the node's snapshot and retires it when the group is left.
+    #[cfg(feature = "resource-snapshot")]
+    let messages = std::sync::Arc::new(wz_session_core::interval_meter::BuildIntervalMeter::new());
+    #[cfg(feature = "resource-snapshot")]
+    let messages_for_face: GroupMessages = Some(std::sync::Arc::clone(&messages));
+    #[cfg(not(feature = "resource-snapshot"))]
+    let messages_for_face: GroupMessages = NoMessages;
     let stop = spawn_group_face(
         WzRuntime::Rx.handle(),
         "router multicast group",
@@ -2405,6 +2476,7 @@ pub fn spawn_router_mcast_group(
         opts,
         node_stats,
         Some(membership.clone()),
+        messages_for_face,
         move |opts| {
             Box::pin(crate::UdpDriver::bind_multicast_link(
                 group,
@@ -2502,6 +2574,8 @@ pub fn spawn_router_mcast_group(
         members,
         group_subs,
         membership,
+        #[cfg(feature = "resource-snapshot")]
+        messages,
         stop,
     }
 }

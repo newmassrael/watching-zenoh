@@ -1724,17 +1724,14 @@ pub struct RouterMessagesView {
 impl RouterMessagesView {
     /// The count of every face's receive path. Taken under the tables' read lock, which a face's
     /// removal holds for writing, so a face that goes down in the middle is counted once.
-    pub fn reading(
-        &self,
-    ) -> wz_session_core::resource_snapshot::MessageReading<
-        { wz_session_core::caps::SNAPSHOT_HISTOGRAM_BUCKETS },
-    > {
+    pub fn reading(&self) -> wz_session_core::resource_snapshot::BuildMessageReading {
         let tables = self.tables.read();
-        let mut total = tables.departed_messages.clone();
-        for face in tables.faces.values() {
-            total.merge(&face.actions.message_reading());
-        }
-        total
+        tables.receive_ledger.total(
+            tables
+                .faces
+                .values()
+                .map(|face| face.actions.message_reading()),
+        )
     }
 }
 
@@ -2268,12 +2265,11 @@ pub(crate) struct Tables {
     /// unchanged — `Rc<RefCell<T>>` derefs to `RefCell<T>`.
     faces: HashMap<FaceId, RouterFaceState>,
     /// `resource-snapshot` — what the receive paths of the faces that have gone had counted when
-    /// they went, added to in the step that removes the face, so the router's `message_reading`
-    /// never falls when a link does and a reader may take windows by subtraction.
+    /// they went, retired in the step that removes the face, so the router's reading
+    /// ([`RouterMessagesView::reading`]) never falls when a link does and a reader may take
+    /// windows by subtraction.
     #[cfg(feature = "resource-snapshot")]
-    departed_messages: wz_session_core::resource_snapshot::MessageReading<
-        { wz_session_core::caps::SNAPSHOT_HISTOGRAM_BUCKETS },
-    >,
+    receive_ledger: wz_session_core::resource_snapshot::BuildReceiveLedger,
     /// The joined aggregated links of the sessions in [`Self::faces`]: a second or
     /// later physical link of a peer's session is not a face of its own, so the
     /// table above holds only the primary. Two readers: a frame that arrives on a
@@ -3625,7 +3621,7 @@ impl RouterForwarder {
                 partition: SouthPartition::Auto,
                 faces: HashMap::new(),
                 #[cfg(feature = "resource-snapshot")]
-                departed_messages: Default::default(),
+                receive_ledger: Default::default(),
                 joined_links: HashMap::new(),
                 local_queryables: Vec::new(),
                 local_subscribers: Vec::new(),
@@ -10699,8 +10695,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // removes it, so a reader sees the face's count in one place and never in two or none.
         #[cfg(feature = "resource-snapshot")]
         self.tables
-            .departed_messages
-            .merge(&state.actions.message_reading());
+            .receive_ledger
+            .retire(&state.actions.message_reading());
         // What it held for its link goes with it, and no face waits on it or for it.
         self.forget_egress_of(id, &state);
         let tier = state.tier;

@@ -4230,11 +4230,7 @@ impl OpenedSession {
     /// Delegates to
     /// [`SessionLinkActions::message_reading`](wz_session_core::session_actions::SessionLinkActions::message_reading).
     #[cfg(feature = "resource-snapshot")]
-    pub fn message_reading(
-        &self,
-    ) -> wz_session_core::resource_snapshot::MessageReading<
-        { wz_session_core::caps::SNAPSHOT_HISTOGRAM_BUCKETS },
-    > {
+    pub fn message_reading(&self) -> wz_session_core::resource_snapshot::BuildMessageReading {
         self.actions.message_reading()
     }
 

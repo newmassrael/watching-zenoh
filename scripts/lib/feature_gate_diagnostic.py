@@ -699,10 +699,6 @@ DEFERRED: dict[str, dict[str, str]] = {
                 "clock-source",
                 "declare-interest",
                 "declare-undeclare",
-                # `resource-snapshot` gates `SessionCore::rx_intervals`, a field of a type that
-                # is always there, and its accessor `message_reading`, a method; the meter and
-                # the snapshot are in this package whatever the feature says.
-                "resource-snapshot",
                 "multicast-declarations",
                 # The five metadata features of a publish join: `PublishOptions` moved here
                 # from `wz-runtime-tokio` (`publish_options.rs`), and what each gates is its

@@ -106,13 +106,7 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// built without the `resource-snapshot` feature, which is the provided answer, and from one
     /// with no counter; a reader asks again for each snapshot and takes windows by subtraction,
     /// since every count is cumulative.
-    fn message_reading(
-        &self,
-    ) -> Option<
-        wz_session_core::resource_snapshot::MessageReading<
-            { wz_session_core::caps::SNAPSHOT_HISTOGRAM_BUCKETS },
-        >,
-    > {
+    fn message_reading(&self) -> Option<wz_session_core::resource_snapshot::BuildMessageReading> {
         None
     }
 

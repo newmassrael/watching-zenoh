@@ -18650,6 +18650,15 @@ PY
         cargo test -p wz-runtime-tokio \
         --features transport-multicast,transport-fragmentation,routing-accept,transport-stats \
         --test multicast_pubsub_loopback a_router_group_face_counts -- --ignored --quiet || return 1
+    # `resource-snapshot` (docs/observation-plane.md M4) — the same group face spaces the
+    # transport messages its members send, on the same recorder seam the registry counts them on,
+    # into a meter its host reads for the node's snapshot. The meter half is `resource-snapshot`-
+    # gated, which the legs above do not compose, so the witness is compiled out there and counted
+    # here. 1 = the number this command PRINTED.
+    _runci_guarded_test "M router group face meter" 1 \
+        cargo test -p wz-runtime-tokio \
+        --features transport-multicast,transport-fragmentation,routing-accept,resource-snapshot \
+        --test multicast_pubsub_loopback a_router_group_face_spaces -- --ignored --quiet || return 1
     # R311y232/y234 — the transport-qos ARM of the multicast e2e (BOTH qos tests, the
     # `qos` filter): the POSITIVE arm (both-is_qos group, a direct
     # TokioMulticastSession::publish_qos prioritized publish delivers -- the composed

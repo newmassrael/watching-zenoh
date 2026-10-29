@@ -1410,3 +1410,84 @@ async fn a_router_group_face_counts_its_traffic_in_the_node_registry() {
         "and nothing of it is still open:\n{closed}"
     );
 }
+
+/// `resource-snapshot`: a router's group face spaces the transport messages its members send, on
+/// the same seam the node registry counts them on, and the count is the group's own meter, which
+/// the router reads for its snapshot. Before the face's recorder carried the meter, a node that
+/// received only through a group reported no messages at all.
+///
+/// The member's beacon and its Put reach the face, so at least two transport messages are
+/// counted and the first has no interval; with the registry on as well, the two counters name
+/// the same number of transport messages.
+#[cfg(all(feature = "routing-accept", feature = "resource-snapshot"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "multicast loopback e2e; Layer M runs via --layer M / WZ_RUN_LAYER_M=1 --ignored"]
+async fn a_router_group_face_spaces_the_messages_its_members_send() {
+    use wz_runtime_tokio::multicast_glue::spawn_router_mcast_group;
+
+    const FACE_PORT: u16 = 7472;
+    let mut face = spawn_router_mcast_group(
+        GROUP,
+        FACE_PORT,
+        router_profile(vec![0xAE; 4]),
+        group_options_on(),
+        None,
+    );
+    assert_eq!(
+        face.message_reading().messages,
+        0,
+        "a group nobody has spoken in has counted nothing"
+    );
+
+    let mut member =
+        MulticastLink::new(|| UdpDriver::bind_multicast_tx(GROUP, FACE_PORT, loopback_on()));
+    let mut dispatcher = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
+    let params = mc_params(0xB1);
+    let tx = MulticastTxProducer::new();
+    let clock = TokioTime::new();
+    let drive = drive_multicast_session(
+        &mut dispatcher,
+        MulticastDriveConfig {
+            params: &params,
+            tick_ms: 10,
+            max_iters: None,
+        },
+        &mut member,
+        &clock,
+        |_| {},
+        &tx,
+    );
+    let scenario = async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        tx.push(multicast_put_literal(KEYEXPR, PAYLOAD).expect("put item"))
+            .expect("the member's loop has attached its pipeline");
+        tokio::time::timeout(Duration::from_secs(3), face.ingress.recv())
+            .await
+            .expect("the face's ingress yielded nothing within 3s")
+            .expect("the face's ingress channel closed")
+    };
+    tokio::select! {
+        _ = drive => panic!("the member's drive loop ended unexpectedly"),
+        _ = scenario => {}
+    };
+
+    let reading = face.message_reading();
+    assert!(
+        reading.messages >= 2,
+        "the member's beacon and its Put were counted: {reading:?}"
+    );
+    let spaced: u64 = reading.intervals.iter().sum();
+    assert!(
+        spaced >= 1 && spaced < reading.messages,
+        "the first message has no interval and a later one has: {reading:?}"
+    );
+    assert!(
+        reading.interval_sum_us < 5_000_000,
+        "the messages are a fraction of a second apart, so the clock read is on the loop's epoch: {reading:?}"
+    );
+
+    // The meter is the group's and outlives its face: what it counted is still there to retire.
+    let meter = std::sync::Arc::clone(&face.messages);
+    face.stop.stop().await;
+    assert!(meter.reading().messages >= reading.messages);
+}

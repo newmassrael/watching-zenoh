@@ -6718,6 +6718,18 @@ async fn run_router_hat_until(
     // drops this node's own loopback, so it never self-delivers. I3b relays the
     // on-group ROUTER members (the Designated-Router candidates) and S2 the
     // group-SUBSCRIBER key expressions, advertised into the mesh.
+    // The meters of the groups the router joins, for its resource snapshot: what each group
+    // delivers is counted beside what each unicast face does. The group is joined for the
+    // router's life, so nothing retires its meter.
+    #[cfg(feature = "resource-snapshot")]
+    #[cfg_attr(not(feature = "router-multicast-faces"), allow(unused_mut))]
+    let mut group_readers: Vec<
+        Box<
+            dyn Fn() -> wz::runtime_tokio::resource_snapshot_host::NodeMessageReading
+                + Send
+                + 'static,
+        >,
+    > = Vec::new();
     #[cfg(feature = "router-multicast-faces")]
     let (mcast_ingress, mcast_members, mcast_group_subs, mcast_membership) = {
         let face = wz::runtime_tokio::multicast_glue::spawn_router_mcast_group(
@@ -6742,6 +6754,11 @@ async fn run_router_hat_until(
             mcast_opts.iface.as_deref(),
         ));
         forwarder.attach_mcast_group(face.outbound);
+        #[cfg(feature = "resource-snapshot")]
+        {
+            let meter = std::sync::Arc::clone(&face.messages);
+            group_readers.push(Box::new(move || meter.reading()));
+        }
         mcast_stops.push(("group", face.stop));
         // R2584 made the group either family; `SocketAddr` is what brackets a v6
         // address before its port, where `{group}:{port}` would print
@@ -7187,8 +7204,16 @@ async fn run_router_hat_until(
             let snapshot_cfg = Arc::clone(&host_cfg);
             let service = SnapshotService::new();
             let messages = forwarder.messages_view();
+            // What the router's unicast faces have counted, and what each group it joined has.
+            let group_readers = group_readers;
             // The task runs as long as the node does; its handle is not kept.
-            drop(service.spawn(move || messages.reading()));
+            drop(service.spawn(move || {
+                let mut total = messages.reading();
+                for group in &group_readers {
+                    total.merge(&group());
+                }
+                total
+            }));
             let snapshot_handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
                 let read =
                     wz::runtime_tokio::admin_read_permit(&snapshot_cfg.guard().admin_permissions());

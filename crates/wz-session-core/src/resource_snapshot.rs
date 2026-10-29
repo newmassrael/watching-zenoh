@@ -266,6 +266,55 @@ impl<const B: usize> Default for MessageReading<B> {
     }
 }
 
+/// The message reading of a build: `SNAPSHOT_HISTOGRAM_BUCKETS` buckets.
+pub type BuildMessageReading = MessageReading<{ crate::caps::SNAPSHOT_HISTOGRAM_BUCKETS }>;
+
+/// What a node's receive paths have counted in all, when its transports come and go.
+///
+/// A node counts the messages of each transport it holds, a link to a peer or a joined group, and a
+/// transport that ends takes its counter with it. A reader of the snapshot takes windows by
+/// subtracting two readings, so the node's reading must never fall when a transport ends, or a
+/// window would be negative. The ledger keeps what ended transports had counted
+/// ([`Self::retire`]) and adds it to what the live ones read now ([`Self::total`]).
+///
+/// The one rule is the caller's to keep, and it is the whole of why this type exists: a transport
+/// is retired in the same step, under the same lock, that removes it from the set `total` is asked
+/// about, so that a reader sees its count in the retired total or among the live readings and
+/// never in both or in neither. Every host that holds transports does that once, in one place per
+/// kind of transport, and every host's total is this type's, so the invariant is tested here and
+/// not once for each host.
+#[derive(Debug, Clone, Default)]
+pub struct ReceiveLedger<const B: usize> {
+    retired: MessageReading<B>,
+}
+
+impl<const B: usize> ReceiveLedger<B> {
+    /// A ledger no transport has ended in.
+    pub const fn new() -> Self {
+        Self {
+            retired: MessageReading::empty(),
+        }
+    }
+
+    /// A transport has ended having counted `gone`: it is in the total from now on without being
+    /// among the live readings.
+    pub fn retire(&mut self, gone: &MessageReading<B>) {
+        self.retired.merge(gone);
+    }
+
+    /// What the retired transports counted, and the live ones read now: the node's reading.
+    pub fn total(&self, live: impl IntoIterator<Item = MessageReading<B>>) -> MessageReading<B> {
+        let mut total = self.retired.clone();
+        for reading in live {
+            total.merge(&reading);
+        }
+        total
+    }
+}
+
+/// The ledger of a build.
+pub type BuildReceiveLedger = ReceiveLedger<{ crate::caps::SNAPSHOT_HISTOGRAM_BUCKETS }>;
+
 /// The message statistics of a host with one thread to count on: the plain accumulator, with no
 /// atomics. A host whose receivers run on several threads counts with an `IntervalMeter` instead.
 #[derive(Debug, Clone)]
@@ -1125,6 +1174,49 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("\"features\":[]"), "{text}");
+    }
+
+    /// The invariant the ledger exists for, over every order of three things a node does: a
+    /// transport counts a message, a transport ends, a transport begins. The total never falls,
+    /// and it is always what every transport that ever lived counted, so a window taken between
+    /// two readings is never negative and never double counts a transport that ended mid-window.
+    #[test]
+    fn the_total_never_falls_when_a_transport_ends_and_is_what_every_transport_counted() {
+        for seed in 1..=300u64 {
+            let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+            let mut ledger = ReceiveLedger::<8>::new();
+            let mut live: Vec<MessageStats<8>> = Vec::new();
+            let mut observed = 0u64;
+            let mut clock = 0u32;
+            let mut last_total = 0u64;
+            for _ in 0..200 {
+                match rng.next() % 5 {
+                    0 => live.push(MessageStats::new()),
+                    1 if !live.is_empty() => {
+                        let at = (rng.next() as usize) % live.len();
+                        ledger.retire(&live.remove(at).reading());
+                    }
+                    _ if !live.is_empty() => {
+                        let at = (rng.next() as usize) % live.len();
+                        clock = clock.wrapping_add((rng.next() % 5_000) as u32);
+                        live[at].observe(clock);
+                        observed += 1;
+                    }
+                    _ => {}
+                }
+                let total = ledger.total(live.iter().map(MessageStats::reading));
+                assert!(
+                    total.messages >= last_total,
+                    "seed {seed}: the total fell from {last_total} to {}",
+                    total.messages
+                );
+                last_total = total.messages;
+                // Every message any transport was told of is in the total once, whether its
+                // transport is still live or has ended: counted by the test itself, and not by
+                // the code under test.
+                assert_eq!(total.messages, observed, "seed {seed}");
+            }
+        }
     }
 
     #[test]

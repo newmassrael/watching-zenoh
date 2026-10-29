@@ -166,6 +166,10 @@ pub(super) struct McastFaceEntry {
     /// The Interest each write filter asked the group by, keyed by the filter, so the filter's
     /// end ends it on the group ([`GroupDeclarations::asks_for_filters`]).
     pub(super) filters: BTreeMap<FilterId, u64>,
+    /// `resource-snapshot` — what the group's face counts of the messages it delivers. The
+    /// registry's reading adds it to the unicast faces' and retires it when the face leaves.
+    #[cfg(feature = "resource-snapshot")]
+    pub(super) messages: Arc<wz_session_core::interval_meter::BuildIntervalMeter>,
 }
 
 /// What a group face is made of when it comes up ([`SharedSession::mcast_face_up`]).
@@ -185,6 +189,11 @@ pub struct McastFaceParts<'a> {
     pub is_shm: bool,
     /// What the session tells the group of its declarations (`GroupJoin::declarations`).
     pub declarations: GroupDeclarations,
+    /// `resource-snapshot` — the meter of the transport messages the group delivers, which the
+    /// face's task feeds and the registry reads for the node's snapshot and retires when the
+    /// face leaves.
+    #[cfg(feature = "resource-snapshot")]
+    pub messages: &'a Arc<wz_session_core::interval_meter::BuildIntervalMeter>,
 }
 
 /// A group face as a sender takes it: the session and its re-arm signal, read
@@ -431,6 +440,8 @@ impl SharedSession {
             endpoint,
             is_shm,
             declarations,
+            #[cfg(feature = "resource-snapshot")]
+            messages,
         } = parts;
         let mut guard = self.lock();
         // The replay announces nothing: zenoh tells a group that comes up of no subscriber the
@@ -482,8 +493,18 @@ impl SharedSession {
                 declarations,
                 announced: Vec::new(),
                 filters: BTreeMap::new(),
+                #[cfg(feature = "resource-snapshot")]
+                messages: Arc::clone(messages),
             },
         );
+        // A face replaced under the same id leaves with what it counted, unless it is the same
+        // face and so the same meter, which is still counted live and must not be counted twice.
+        #[cfg(feature = "resource-snapshot")]
+        if let Some(old) = &replaced {
+            if !Arc::ptr_eq(&old.messages, messages) {
+                guard.receive_ledger.retire(&old.messages.reading());
+            }
+        }
         guard.refresh_mcast_set();
         drop(guard);
         drop(replaced);
@@ -593,6 +614,11 @@ impl SharedSession {
         let removed = {
             let mut guard = self.lock();
             let removed = guard.mcast_faces.remove(&id);
+            // What the group delivered stays in the node's total, in the step that removes it.
+            #[cfg(feature = "resource-snapshot")]
+            if let Some(face) = &removed {
+                guard.receive_ledger.retire(&face.messages.reading());
+            }
             guard.group_locators.remove(&id);
             guard.refresh_mcast_set();
             removed

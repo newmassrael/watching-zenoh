@@ -3795,9 +3795,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// messages and the spacing of the ones that made an interval. Cumulative, so
     /// a reader takes a window by subtracting two readings.
     #[cfg(feature = "resource-snapshot")]
-    pub fn message_reading(
-        &self,
-    ) -> crate::resource_snapshot::MessageReading<{ crate::caps::SNAPSHOT_HISTOGRAM_BUCKETS }> {
+    pub fn message_reading(&self) -> crate::resource_snapshot::BuildMessageReading {
         self.rx_intervals.reading()
     }
 

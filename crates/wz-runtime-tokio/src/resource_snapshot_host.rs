@@ -29,13 +29,12 @@ use std::time::Duration;
 // task read the same time, and a test that pauses the runtime's time pauses both.
 use tokio::time::Instant;
 
-use wz_session_core::caps::SNAPSHOT_HISTOGRAM_BUCKETS;
 use wz_session_core::resource_snapshot::{
-    feature_bits, BuildSampler, MessageReading, ResourceReading, ResourceSource,
+    feature_bits, BuildMessageReading, BuildSampler, ResourceReading, ResourceSource,
 };
 
 /// The message reading a node hands the service on each sample.
-pub type NodeMessageReading = MessageReading<SNAPSHOT_HISTOGRAM_BUCKETS>;
+pub type NodeMessageReading = BuildMessageReading;
 
 /// The jiffies the machine's CPUs have spent busy and in all, from the first line of
 /// `/proc/stat` (`cpu  user nice system idle iowait irq softirq steal ...`). Idle time and the

@@ -178,3 +178,157 @@ impl<R: MulticastStatsRecorder> MulticastStatsRecorder for Option<R> {
         }
     }
 }
+
+/// `resource-snapshot` — a recorder that spaces the transport messages a group receives
+/// (`docs/observation-plane.md` M4) and passes every report on to the recorder it wraps.
+///
+/// The counting of a transport message is one seam, [`MulticastStatsRecorder::transport_message_received`],
+/// which the stats registry already hangs its count on; the interval meter hangs on the same one,
+/// so the two count the same messages as a unicast session's two do
+/// (`drive::note_rx_transport_message`). The tap holds no state of its own: the meter belongs to
+/// the host that holds the group, which reads it and keeps it across a re-join of the group and
+/// retires it into the node's [`ReceiveLedger`](crate::resource_snapshot::ReceiveLedger) when the
+/// group is left. `meter` is `None` for a host that does not count, and the tap is then the
+/// recorder it wraps.
+///
+/// `now_us` reads the host's clock in microseconds, the low 32 bits of it: the meter reads spans
+/// modulo 2^32, and the clock is the one the loop runs on, so every group of a node reads one.
+#[cfg(feature = "resource-snapshot")]
+pub struct IntervalTap<'a, R: ?Sized, C> {
+    inner: &'a R,
+    meter: Option<&'a crate::interval_meter::BuildIntervalMeter>,
+    now_us: C,
+}
+
+#[cfg(feature = "resource-snapshot")]
+impl<'a, R: ?Sized, C> IntervalTap<'a, R, C> {
+    /// A tap over `inner` that feeds `meter`, reading the time from `now_us`.
+    pub fn new(
+        inner: &'a R,
+        meter: Option<&'a crate::interval_meter::BuildIntervalMeter>,
+        now_us: C,
+    ) -> Self {
+        Self {
+            inner,
+            meter,
+            now_us,
+        }
+    }
+}
+
+#[cfg(feature = "resource-snapshot")]
+impl<R: MulticastStatsRecorder + ?Sized, C: Fn() -> u32> MulticastStatsRecorder
+    for IntervalTap<'_, R, C>
+{
+    fn datagram_sent(&self, bytes: usize, transport_messages: u64) {
+        self.inner.datagram_sent(bytes, transport_messages);
+    }
+
+    fn datagram_received(&self, bytes: usize) {
+        self.inner.datagram_received(bytes);
+    }
+
+    fn transport_message_received(&self) {
+        self.inner.transport_message_received();
+        if let Some(meter) = self.meter {
+            meter.observe((self.now_us)());
+        }
+    }
+
+    #[cfg(all(
+        feature = "alloc",
+        any(
+            feature = "codec-push",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            any(feature = "liveliness-token", feature = "declare-subscriber")
+        )
+    ))]
+    fn network_message_sent(&self, tally: &crate::multicast_tx::MulticastTxTally) {
+        self.inner.network_message_sent(tally);
+    }
+
+    #[cfg(all(
+        feature = "alloc",
+        any(
+            feature = "codec-push",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            any(feature = "liveliness-token", feature = "declare-subscriber")
+        )
+    ))]
+    fn network_message_dropped(&self, tally: &crate::multicast_tx::MulticastTxTally) {
+        self.inner.network_message_dropped(tally);
+    }
+
+    #[cfg(feature = "alloc")]
+    fn network_message_received(&self, zid: &[u8], msg: &NetworkMessage) {
+        self.inner.network_message_received(zid, msg);
+    }
+
+    fn peer_arrived(&self, arrived: &MulticastPeerArrived) {
+        self.inner.peer_arrived(arrived);
+    }
+
+    fn peer_lost(&self, lost: &MulticastPeerLost) {
+        self.inner.peer_lost(lost);
+    }
+}
+
+#[cfg(all(test, feature = "resource-snapshot"))]
+mod tap_tests {
+    extern crate std;
+
+    use super::*;
+    use crate::interval_meter::BuildIntervalMeter;
+    use core::cell::Cell;
+
+    /// Counts what is reported to it, and nothing else.
+    #[derive(Default)]
+    struct Counting {
+        messages: Cell<u64>,
+        datagrams: Cell<u64>,
+    }
+
+    impl MulticastStatsRecorder for Counting {
+        fn datagram_received(&self, _bytes: usize) {
+            self.datagrams.set(self.datagrams.get() + 1);
+        }
+
+        fn transport_message_received(&self) {
+            self.messages.set(self.messages.get() + 1);
+        }
+    }
+
+    #[test]
+    fn the_tap_spaces_each_transport_message_and_passes_every_report_on() {
+        let inner = Counting::default();
+        let meter = BuildIntervalMeter::new();
+        let clock = Cell::new(1_000u32);
+        let tap = IntervalTap::new(&inner, Some(&meter), || {
+            clock.set(clock.get() + 100);
+            clock.get()
+        });
+        for _ in 0..4 {
+            tap.transport_message_received();
+        }
+        tap.datagram_received(64);
+        let reading = meter.reading();
+        assert_eq!(reading.messages, 4, "each transport message is counted");
+        assert_eq!(reading.interval_sum_us, 300, "three intervals of 100");
+        assert_eq!(
+            (inner.messages.get(), inner.datagrams.get()),
+            (4, 1),
+            "the wrapped recorder was told of everything, so the two count the same messages"
+        );
+    }
+
+    #[test]
+    fn a_tap_with_no_meter_is_the_recorder_it_wraps() {
+        let inner = Counting::default();
+        let tap = IntervalTap::new(&inner, None, || panic!("no meter, so no clock read"));
+        tap.transport_message_received();
+        tap.transport_message_received();
+        assert_eq!(inner.messages.get(), 2);
+    }
+}

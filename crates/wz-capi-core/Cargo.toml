@@ -371,7 +371,7 @@ supervision = ["unstable-api"]
 # The node's resource snapshot (`deploy/wz-config.toml`, off by default: wz's own doors). The
 # snapshot and its sampler are in `wz-session-core`; the feature there adds the session's message
 # meter and the call that feeds it, so the model needs it forwarded.
-resource-snapshot = ["unstable-api", "wz-session-core/resource-snapshot"]
+resource-snapshot = ["unstable-api", "wz-session-core/resource-snapshot", "wz-runtime-tokio/resource-snapshot"]
 local-subscriber = []
 local-queryable = []
 

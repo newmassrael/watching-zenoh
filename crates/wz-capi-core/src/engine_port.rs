@@ -158,13 +158,7 @@ impl SessionEngine for SharedSession {
     }
 
     #[cfg(feature = "resource-snapshot")]
-    fn message_reading(
-        &self,
-    ) -> Option<
-        wz_session_core::resource_snapshot::MessageReading<
-            { wz_session_core::caps::SNAPSHOT_HISTOGRAM_BUCKETS },
-        >,
-    > {
+    fn message_reading(&self) -> Option<wz_session_core::resource_snapshot::BuildMessageReading> {
         Some(SharedSession::message_reading(self))
     }
 
