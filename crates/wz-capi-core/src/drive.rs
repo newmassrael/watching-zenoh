@@ -2703,7 +2703,7 @@ impl CapiTlsConfig {
     /// Separate from the fields because "mTLS enabled" and "the material for it
     /// arrived" are two conditions, and a half-configured pair must not silently
     /// degrade to one-way TLS.
-    #[cfg(feature = "transport-link-tls")]
+    #[cfg(any(feature = "transport-link-tls", feature = "transport-link-quic"))]
     fn client_auth(&self) -> Option<wz_runtime_tokio::tls_config::ClientAuthPem<'_>> {
         match (&self.connect_cert_pem, &self.connect_key_pem) {
             (Some(cert), Some(key)) => Some(wz_runtime_tokio::tls_config::ClientAuthPem {
@@ -2767,22 +2767,24 @@ fn listen_accept_config(tls: &CapiTlsConfig) -> std::io::Result<AcceptConfig> {
         }
     };
 
+    // The mTLS client-CA bundle is the SAME root-CA value pico uses for the dial side; pico
+    // carries one CA per config, not one per direction. Both certificate-bearing links take it.
+    #[cfg(any(feature = "transport-link-tls", feature = "transport-link-quic"))]
+    let client_ca = tls
+        .require_client_auth
+        .then_some(tls.root_ca_pem.as_deref())
+        .flatten();
+
     #[cfg(feature = "transport-link-tls")]
     let cfg = {
         use wz_runtime_tokio::session_open::TlsAcceptConfig;
-        // The mTLS client-CA bundle is the SAME root-CA value pico uses for the
-        // dial side; pico carries one CA per config, not one per direction.
-        let client_ca = tls
-            .require_client_auth
-            .then_some(tls.root_ca_pem.as_deref())
-            .flatten();
         cfg.with_tls(TlsAcceptConfig::from_pem(cert, key, client_ca)?)
     };
 
     #[cfg(feature = "transport-link-quic")]
     let cfg = {
         use wz_runtime_tokio::session_open::QuicAcceptConfig;
-        cfg.with_quic(QuicAcceptConfig::from_cert_key_pem(cert, key)?)
+        cfg.with_quic(QuicAcceptConfig::from_pem(cert, key, client_ca)?)
     };
 
     // Neither backend compiled in: the cert material is inert because a `tls/` or
@@ -2850,7 +2852,20 @@ fn dial_config(tls: &CapiTlsConfig, endpoint: &str) -> std::io::Result<DialConfi
         cfg
     } else {
         use wz_runtime_tokio::session_open::QuicDialConfig;
-        cfg.with_quic(QuicDialConfig::from_ca_pem(root_ca, server_name)?)
+        use wz_runtime_tokio::tls_config::ServerNameVerification;
+        // The same two keys as the tls link: whether the name dialled is checked against the
+        // certificate, and the client certificate a server that asks for one is given.
+        let verification = if tls.verify_name_on_connect {
+            ServerNameVerification::Verify
+        } else {
+            ServerNameVerification::AnyName
+        };
+        cfg.with_quic(QuicDialConfig::from_pem(
+            root_ca,
+            server_name,
+            tls.client_auth(),
+            verification,
+        )?)
     };
 
     #[cfg(not(any(feature = "transport-link-tls", feature = "transport-link-quic")))]
@@ -3428,6 +3443,16 @@ async fn drive_listen(
         }
     };
     let listeners: Vec<&BoundListener> = legs.iter().map(|leg| &leg.listening.listener).collect();
+    // Where this node listens, for what the session reports of itself (`info().locators()`): the
+    // locators the listeners ACTUALLY got, without the loopback ones an unspecified bind expands
+    // to. [`drive_dial`] records them for a node that dials, and this role is the one that does
+    // not (a listener that does not gossip, scout or connect), so it records them itself: before
+    // it did, a peer that listened and dialled nobody reported that it listened nowhere, and a
+    // program that asks a listener where to reach it (every upstream test that opens a pair)
+    // was told of none. A node that does not gossip tells no gossip plane.
+    let bound_before = Advertised::of_all(&listeners).remote;
+    shared.set_listen_locators(bound_before.clone());
+    let late = late.listening(bound_before, false);
     let _findable = match bound_responder(
         scouting.as_ref(),
         whatami,

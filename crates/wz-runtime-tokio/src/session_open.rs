@@ -477,6 +477,27 @@ impl QuicDialConfig {
             server_name: server_name.to_owned(),
         })
     }
+
+    /// [`Self::from_ca_pem`] with the optional mutual-TLS client certificate and the policy for
+    /// the server's name: the QUIC sibling of [`TlsDialConfig::from_pem`], so a `quic/` dial takes
+    /// `connect_certificate`, `connect_private_key` and `verify_name_on_connect` as a `tls/` one
+    /// does.
+    pub fn from_pem(
+        custom_root_ca_pem: Option<&[u8]>,
+        server_name: &str,
+        client_auth: Option<crate::tls_config::ClientAuthPem<'_>>,
+        name_verification: crate::tls_config::ServerNameVerification,
+    ) -> io::Result<Self> {
+        let client_config = crate::quic_config::quic_client_config_with_verification(
+            custom_root_ca_pem,
+            client_auth,
+            name_verification,
+        )?;
+        Ok(Self {
+            client_config,
+            server_name: server_name.to_owned(),
+        })
+    }
 }
 
 /// The ACCEPT-side config, mirror of [`DialConfig`]: the per-scheme server
@@ -625,6 +646,23 @@ impl QuicAcceptConfig {
                 cert_chain_pem,
                 private_key_pem,
                 None,
+            )?,
+        })
+    }
+
+    /// [`Self::from_cert_key_pem`] that asks the dialer for a certificate when `client_ca_pem` is
+    /// given: the acceptor then requires one and verifies it against that bundle
+    /// (`transport/link/tls/enable_mtls`), the QUIC twin of [`TlsAcceptConfig::from_pem`].
+    pub fn from_pem(
+        cert_chain_pem: &[u8],
+        private_key_pem: &[u8],
+        client_ca_pem: Option<&[u8]>,
+    ) -> io::Result<Self> {
+        Ok(Self {
+            server_config: crate::quic_config::quic_server_config_from_pem(
+                cert_chain_pem,
+                private_key_pem,
+                client_ca_pem,
             )?,
         })
     }

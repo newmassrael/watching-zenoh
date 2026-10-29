@@ -62,6 +62,10 @@ transport_tcp = ["zenoh-config/transport_tcp"]
 # `transport_udp` asks the engine for its udp link, which its own default features also carry: this
 # build cannot yet take the link away.
 transport_udp = ["wz-capi-core?/link-udp"]
+# The tls and quic links, which the engine carries when it is asked for them: `listen` and
+# `connect` endpoints of those protocols, and the certificates of `transport/link/tls` they take.
+transport_tls = ["wz-capi-core?/transport_tls"]
+transport_quic = ["wz-capi-core?/transport_quic"]
 internal =["zenoh-config/internal", "zenoh-keyexpr/internal", "zenoh-protocol/internal"]
 # Upstream's marker for the plugin interface: with it the configuration's notifier can be
 # subscribed to (`Notifier::subscribe`).

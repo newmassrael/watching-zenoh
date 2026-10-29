@@ -274,6 +274,8 @@ def manifest(deps: dict[str, str], member: dict[str, list[str]], out: pathlib.Pa
         'plugins = ["zenoh/plugins"]',
         'transport_tcp = ["zenoh/transport_tcp"]',
         'transport_udp = ["zenoh/transport_udp"]',
+        'transport_tls = ["zenoh/transport_tls"]',
+        'transport_quic = ["zenoh/transport_quic"]',
     ]
     lines += ["", "[patch.crates-io]"]
     for name, directory in FAMILY.items():
@@ -363,10 +365,12 @@ def counts(text: str) -> tuple[int, int, int]:
 
 
 #: The features of the build the tests are run in, upstream's own CI selection first: the unstable
-#: surface, shared memory and the two transports the top crate carries. `Z8_FEATURES` replaces it
-#: (a second arm is `unstable,internal`, which the harness runs apart because `internal` is the
-#: arm in which a file may ask for a `Runtime`).
-DEFAULT_FEATURES = "unstable,shared-memory,transport_tcp,transport_udp"
+#: surface, shared memory and the four transports the top crate carries (upstream's defaults are
+#: all of them, and the authentication file opens tls and quic listeners without a `cfg` that
+#: would leave it out of a build that lacks them). `Z8_FEATURES` replaces it (a second arm is
+#: `unstable,internal`, which the harness runs apart because `internal` is the arm in which a
+#: file may ask for a `Runtime`).
+DEFAULT_FEATURES = "unstable,shared-memory,transport_tcp,transport_udp,transport_tls,transport_quic"
 
 
 def measure(names: list[str], out: pathlib.Path) -> int:

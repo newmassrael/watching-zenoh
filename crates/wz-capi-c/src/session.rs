@@ -81,6 +81,7 @@ fn refusal_code(refusal: OpenRefusal) -> ZResult {
         OpenRefusal::QosWithLowlatency
         | OpenRefusal::GossipTarget
         | OpenRefusal::NothingToDial
+        | OpenRefusal::UnsupportedProtocol
         | OpenRefusal::GroupInConnect
         | OpenRefusal::NoDialableEndpoint => Z_ENETWORK,
     }

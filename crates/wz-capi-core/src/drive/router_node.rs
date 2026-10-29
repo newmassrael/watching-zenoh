@@ -222,9 +222,6 @@ impl wz_capi_port::HeldQuery for RouterHeld {
 /// capability the node does not carry yet, and a node opened without it would be the silent
 /// fallback the refusals of the open exist against.
 pub(crate) fn refused_ask(stance: &OpenStance) -> Option<&'static str> {
-    if stance.auth.is_some() {
-        return Some("an authentication");
-    }
     if stance.namespace.is_some() {
         return Some("a namespace");
     }
@@ -268,6 +265,7 @@ pub(crate) fn open_router_blocking(
         scouting,
         listen_phase,
         policy,
+        auth,
         ..
     } = stance;
     let link_conf = LinkConf {
@@ -289,6 +287,14 @@ pub(crate) fn open_router_blocking(
         timestamping,
     ));
     policy.install_on(&*forwarder);
+    // The authentication the config states, asked of the sessions the node accepts and offered to
+    // the ones it dials, installed before the node is served (the accept loop reads it once).
+    #[cfg(any(feature = "access-extauth-usrpwd", feature = "access-extauth-pubkey"))]
+    if let Some(auth) = &auth {
+        forwarder.set_session_auth(auth.session_auth());
+    }
+    #[cfg(not(any(feature = "access-extauth-usrpwd", feature = "access-extauth-pubkey")))]
+    let _ = auth;
     // The node's own face, told of the tokens of the others from the first.
     let (liveliness, face_sink) =
         LocalLiveliness::start(Arc::downgrade(&forwarder)).map_err(|error| {

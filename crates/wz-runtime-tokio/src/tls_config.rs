@@ -333,12 +333,12 @@ pub enum ServerNameVerification {
 /// `ring::default_provider().signature_verification_algorithms` rather than a
 /// direct `webpki` dependency (same algorithm set, one fewer dep).
 #[derive(Debug)]
-struct AnyServerNameVerifier {
+pub(crate) struct AnyServerNameVerifier {
     roots: RootCertStore,
 }
 
 impl AnyServerNameVerifier {
-    fn new(roots: RootCertStore) -> Self {
+    pub(crate) fn new(roots: RootCertStore) -> Self {
         Self { roots }
     }
 }

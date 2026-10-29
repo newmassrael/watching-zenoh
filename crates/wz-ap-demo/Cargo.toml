@@ -279,6 +279,10 @@ preset-ap-full = [
     # and absent here, the AP-full binary would compile the ingress in with no argv
     # that hosts it.
     "session-close-ingress",
+    # The demo key for the `resource-snapshot` atom the facade preset carries: with the key
+    # declared and absent here, the AP-full binary would compile the snapshot in with no argv
+    # that hosts it.
+    "resource-snapshot",
     "tls",
     "quic",
     "quic-datagram",

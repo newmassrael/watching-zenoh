@@ -32,7 +32,8 @@ use tokio_rustls::rustls::crypto::ring;
 use tokio_rustls::rustls::{version::TLS13, ClientConfig, ServerConfig};
 
 use crate::tls_config::{
-    certs_from_pem, client_auth_roots, private_key_from_pem, server_trust_roots, ClientAuthPem,
+    certs_from_pem, client_auth_roots, private_key_from_pem, server_trust_roots,
+    AnyServerNameVerifier, ClientAuthPem, ServerNameVerification,
 };
 // R2602 — these two serve ONLY the locator-material builders below, which are
 // `transport-unicast`-gated because `session_open` is their sole consumer.
@@ -71,21 +72,42 @@ where
 /// `quinn::crypto::rustls::QuicClientConfig::try_from` in
 /// [`crate::quic_pipeline::dial_quic`].
 ///
-/// Unlike the TLS link, no `ServerNameVerification::AnyName` knob (yet): the
-/// QUIC dial seam always verifies chain + name, the safe default. A raw-IP QUIC
-/// dial would need that knob added here (a clean extension point), mirroring how
-/// the TLS link grew it.
+/// This one always verifies chain AND name, the safe default;
+/// [`quic_client_config_with_verification`] is the one that takes the policy
+/// (`transport/link/tls/verify_name_on_connect`).
 pub fn quic_client_config_from_pem(
     custom_root_ca_pem: Option<&[u8]>,
     client_auth: Option<ClientAuthPem<'_>>,
+) -> io::Result<Arc<ClientConfig>> {
+    quic_client_config_with_verification(
+        custom_root_ca_pem,
+        client_auth,
+        ServerNameVerification::Verify,
+    )
+}
+
+/// [`quic_client_config_from_pem`] with the server-name policy of the TLS link
+/// ([`crate::tls_config::client_config_from_pem`]): `Verify` checks the chain and
+/// the name, `AnyName` checks the chain and not the name, which is what
+/// `verify_name_on_connect: false` asks of a certificate that cannot carry the
+/// address it is dialled at.
+pub fn quic_client_config_with_verification(
+    custom_root_ca_pem: Option<&[u8]>,
+    client_auth: Option<ClientAuthPem<'_>>,
+    name_verification: ServerNameVerification,
 ) -> io::Result<Arc<ClientConfig>> {
     let roots = server_trust_roots(custom_root_ca_pem)?;
     let provider = Arc::new(ring::default_provider());
 
     let builder = ClientConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&TLS13])
-        .map_err(invalid_data)?
-        .with_root_certificates(roots);
+        .map_err(invalid_data)?;
+    let builder = match name_verification {
+        ServerNameVerification::Verify => builder.with_root_certificates(roots),
+        ServerNameVerification::AnyName => builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AnyServerNameVerifier::new(roots))),
+    };
 
     let mut config = match client_auth {
         Some(auth) => {

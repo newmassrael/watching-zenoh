@@ -208,6 +208,11 @@ pub enum OpenRefusal {
     GroupInConnect,
     /// A client's only endpoints are multicast groups, which no unicast link can dial.
     NoDialableEndpoint,
+    /// An endpoint to listen on or dial names a protocol that `transport/link/protocols` leaves
+    /// out. Upstream's transport manager refuses it when it makes the link manager
+    /// (`Unsupported protocol: {}. Supported protocols are: {:?}`); an open that listened on it
+    /// anyway would be a node that ignores the whitelist it was given.
+    UnsupportedProtocol,
     /// The document states a `namespace` the open cannot carry out: it is not a key expression a
     /// prefix can be (it holds a wildcard, or is empty), or the build has no `routing-namespace`.
     /// A session told to prefix every key it publishes that opens and does not is worse than one
@@ -230,6 +235,7 @@ impl OpenRefusal {
             Self::RoleNotInBuild => "mode, listen/endpoints",
             Self::TimestampingNotInBuild => "timestamping/enabled",
             Self::GossipTarget => "scouting/gossip/target",
+            Self::UnsupportedProtocol => "transport/link/protocols",
             Self::NothingToDial => "connect/endpoints, scouting/multicast/enabled",
             Self::GroupInConnect | Self::NoDialableEndpoint => "connect/endpoints",
             Self::Namespace => "namespace",
@@ -460,20 +466,22 @@ fn node_security_of(node: &ZenohNodeConfig) -> Result<(Option<NodeAuth>, NodePol
 /// path that cannot be read fails this open where upstream's would fail only once such a link
 /// was made, which is the direction a security setting fails in on this surface. A dial checks
 /// the name it dials against the peer's certificate, which is upstream's behaviour when
-/// `verify_name_on_connect` is left unstated; the reader does not read that key, nor the mutual
-/// TLS ones, so a session never presents a client certificate.
+/// `verify_name_on_connect` is left unstated, and `false` turns that check off. A dial presents
+/// the client certificate `connect_certificate` and its key `connect_private_key`, when it has
+/// both, and a listener with `enable_mtls` asks every peer for one and verifies it against the root
+/// certificate.
 #[cfg(any(feature = "transport_tls", feature = "transport_quic"))]
 fn tls_of(node: &ZenohNodeConfig) -> std::io::Result<CapiTlsConfig> {
     use wz_runtime_tokio::tls_config::read_pem_file;
     let read = |path: Option<&String>| path.map(read_pem_file).transpose();
     Ok(CapiTlsConfig {
         root_ca_pem: read(node.tls_root_ca.as_ref())?,
-        verify_name_on_connect: true,
-        connect_cert_pem: None,
-        connect_key_pem: None,
+        verify_name_on_connect: node.tls_verify_name_on_connect.unwrap_or(true),
+        connect_cert_pem: read(node.tls_connect_certificate.as_ref())?,
+        connect_key_pem: read(node.tls_connect_private_key.as_ref())?,
         listen_cert_pem: read(node.tls_listen_certificate.as_ref())?,
         listen_key_pem: read(node.tls_listen_private_key.as_ref())?,
-        require_client_auth: false,
+        require_client_auth: node.tls_enable_mtls.unwrap_or(false),
     })
 }
 
@@ -495,6 +503,8 @@ fn files_read_by_resolve(node: &ZenohNodeConfig) -> Vec<String> {
             &node.tls_root_ca,
             &node.tls_listen_certificate,
             &node.tls_listen_private_key,
+            &node.tls_connect_certificate,
+            &node.tls_connect_private_key,
         ]
         .into_iter()
         .flatten()
@@ -808,6 +818,19 @@ impl OpenPlan {
         } else {
             connect
         };
+        // `transport/link/protocols`, when the document states it, is the whitelist of the
+        // unicast links the node makes: an endpoint to listen on or dial whose protocol it leaves
+        // out is refused, as upstream refuses it when it makes the link manager. A group is a
+        // multicast transport, which this list does not govern.
+        if let Some(protocols) = node.as_ref().and_then(|node| node.link_protocols.as_ref()) {
+            let left_out = |endpoint: &String| {
+                let protocol = endpoint.split('/').next().unwrap_or_default();
+                !protocols.iter().any(|allowed| allowed == protocol)
+            };
+            if listen.iter().chain(connect.iter()).any(left_out) {
+                return Err(OpenRefusal::UnsupportedProtocol);
+            }
+        }
         // A build without `multicast-transport` is handed the groups all the same, and its open
         // refuses them (`OpenStance::groups`), rather than binding a group as a unicast port.
         let shm = node.as_ref().map_or(
@@ -1708,6 +1731,29 @@ mod tests {
         )
         .expect("opens");
         assert_eq!(plan.ignored, ["transport/unicast/open_timeout"]);
+    }
+
+    /// `transport/link/protocols` is a whitelist of the unicast links the node makes: an endpoint
+    /// to listen on or dial that it leaves out refuses the open, one it names opens, and a
+    /// document that states none leaves every protocol open.
+    #[test]
+    fn the_protocols_whitelist_refuses_an_endpoint_it_leaves_out() {
+        let open =
+            |endpoints: &[&str], document: &str| plan_of(WhatAmI::Client, endpoints, &[], document);
+        let scouting_off = "scouting: { multicast: { enabled: false } }";
+        let listed =
+            format!(r#"{{ transport: {{ link: {{ protocols: ["tcp"] }} }}, {scouting_off} }}"#);
+        assert!(open(&["tcp/127.0.0.1:1"], &listed).is_ok());
+        assert_eq!(
+            open(&["tls/127.0.0.1:1"], &listed).err(),
+            Some(OpenRefusal::UnsupportedProtocol),
+            "tls is not in the whitelist"
+        );
+        let unlisted = format!("{{ {scouting_off} }}");
+        assert!(
+            open(&["tls/127.0.0.1:1"], &unlisted).is_ok(),
+            "a document that states no whitelist leaves every protocol open"
+        );
     }
 
     /// A plan's description never holds a credential, so a golden built from it cannot leak one.

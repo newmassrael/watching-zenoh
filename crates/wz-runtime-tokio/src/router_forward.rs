@@ -2680,6 +2680,11 @@ pub struct RouterForwarder {
     /// of `LinkstateForwarder`(crate::linkstate_forward)'s `ingress_interceptors`.
     /// Empty (admits everything) until [`set_interceptors`](Self::set_interceptors).
     ingress_interceptors: PlainRwLock<InterceptorChain>,
+    /// The authentication this router asks of the sessions it accepts and answers to the ones it
+    /// dials ([`set_session_auth`](Self::set_session_auth)); none until it is set, which is a
+    /// router that authenticates nobody.
+    #[cfg(feature = "session-extauth")]
+    session_auth: PlainRwLock<Option<crate::accept_loop::SessionAuth>>,
     /// §5.16 access-control EGRESS interceptor chain — consulted per outbound
     /// message in [`fan_out_tier`](Self::fan_out_tier) + [`send_to_face`](Self::send_to_face),
     /// the router twin of the single-net `egress_interceptors`. This closes the
@@ -3419,6 +3424,15 @@ impl RouterForwarder {
     /// overrides via [`set_query_timeout`](Self::set_query_timeout).
     pub const DEFAULT_QUERY_TIMEOUT: Duration = Duration::from_millis(10_000);
 
+    /// Set the authentication the accept loop installs on every session it opens for this
+    /// router, before the first wire byte: the credentials it verifies of the peers it accepts
+    /// and the ones it presents to the peers it dials. Read once, when the loop starts, so it is
+    /// set before the node is served.
+    #[cfg(feature = "session-extauth")]
+    pub fn set_session_auth(&self, auth: crate::accept_loop::SessionAuth) {
+        *self.session_auth.write() = Some(auth);
+    }
+
     /// A router driver seeded with the local node (`self_zid`), using the
     /// production `Instant::now` clock. Self is a `WhatAmI::Router` in BOTH meshes,
     /// so both nets are constructed with [`WhatAmI::Router`].
@@ -3682,6 +3696,8 @@ impl RouterForwarder {
             #[cfg(feature = "routing-token-tables")]
             future_token_pushes: Counter::new(),
             ingress_interceptors: PlainRwLock::new(InterceptorChain::new()),
+            #[cfg(feature = "session-extauth")]
+            session_auth: PlainRwLock::new(None),
             egress_interceptors: PlainRwLock::new(InterceptorChain::new()),
             interceptor_version: PlainCell::new(0),
             watchers: std::sync::atomic::AtomicUsize::new(0),
@@ -11240,6 +11256,11 @@ impl FaceForwarder for RouterForwarder {
 
     fn south_partition(&self) -> SouthPartition {
         self.on_tables().south_partition()
+    }
+
+    #[cfg(feature = "session-extauth")]
+    fn session_auth(&self) -> Option<crate::accept_loop::SessionAuth> {
+        self.session_auth.read().clone()
     }
 
     #[cfg(feature = "router-multicast-faces")]

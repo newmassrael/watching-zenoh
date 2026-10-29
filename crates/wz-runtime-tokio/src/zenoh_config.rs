@@ -1228,6 +1228,21 @@ pub struct ZenohNodeConfig {
     pub tls_listen_certificate: Option<String>,
     /// `transport/link/tls/listen_private_key`. wz's `--tls-key`.
     pub tls_listen_private_key: Option<String>,
+    /// `transport/link/tls/connect_certificate`: the certificate chain a dial presents when the
+    /// server asks for one (mutual TLS), a path to a PEM file.
+    pub tls_connect_certificate: Option<String>,
+    /// `transport/link/tls/connect_private_key`: the key of [`Self::tls_connect_certificate`].
+    pub tls_connect_private_key: Option<String>,
+    /// `transport/link/tls/enable_mtls`: a listener asks every peer for a certificate and
+    /// verifies it against the root certificate. `None` is an unnamed key, which upstream
+    /// resolves to `false`.
+    pub tls_enable_mtls: Option<bool>,
+    /// `transport/link/tls/verify_name_on_connect`: a dial checks the name it dials against the
+    /// server's certificate. `None` is an unnamed key, which upstream resolves to `true`.
+    pub tls_verify_name_on_connect: Option<bool>,
+    /// `transport/link/protocols`: the whitelist of the link protocols this node makes. `None`
+    /// is an unnamed key, which leaves every protocol the build carries open.
+    pub link_protocols: Option<Vec<String>>,
     /// R2593 — `transport/link/tcp/so_rcvbuf`, `transport/link/tcp/so_sndbuf`,
     /// `transport/link/tls/so_rcvbuf` and `transport/link/tls/so_sndbuf`, in that
     /// order: the per-link-kind socket buffers upstream's tcp and tls
@@ -1534,6 +1549,11 @@ impl Default for ZenohNodeConfig {
             shm_pool_size: 16 * 1024 * 1024,
             tls_root_ca: None,
             tls_listen_certificate: None,
+            tls_connect_certificate: None,
+            tls_connect_private_key: None,
+            tls_enable_mtls: None,
+            tls_verify_name_on_connect: None,
+            link_protocols: None,
             tls_listen_private_key: None,
             // R2593 — all four resolve to `null` on a running zenohd: no buffer
             // size is set, and the kernel's defaults stand.
@@ -2008,6 +2028,18 @@ impl ZenohNodeConfig {
             ",\n      \"rx\": {{ \"max_message_size\": {} }}",
             self.link_rx.max_message_size
         );
+        // The whitelist of link protocols, only when the caller stated one: an absent key leaves
+        // every protocol open, which is what emitting nothing says.
+        if let Some(protocols) = &self.link_protocols {
+            out.push_str(",\n      \"protocols\": [");
+            for (i, protocol) in protocols.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                escape_into(protocol, &mut out);
+            }
+            out.push(']');
+        }
         // R2593 — the tcp block, only for the buffers the caller set: an absent
         // key is zenoh's own "kernel default", so emitting nothing is exact.
         let buffers = self.link_socket_buffers;
@@ -2036,6 +2068,8 @@ impl ZenohNodeConfig {
             ("root_ca_certificate", self.tls_root_ca.as_ref()),
             ("listen_certificate", self.tls_listen_certificate.as_ref()),
             ("listen_private_key", self.tls_listen_private_key.as_ref()),
+            ("connect_certificate", self.tls_connect_certificate.as_ref()),
+            ("connect_private_key", self.tls_connect_private_key.as_ref()),
         ]
         .into_iter()
         .filter_map(|(k, v)| {
@@ -2046,6 +2080,14 @@ impl ZenohNodeConfig {
             })
         })
         .collect();
+        for (key, value) in [
+            ("enable_mtls", self.tls_enable_mtls),
+            ("verify_name_on_connect", self.tls_verify_name_on_connect),
+        ] {
+            if let Some(value) = value {
+                tls.push((key, value.to_string()));
+            }
+        }
         for (key, value) in [
             ("so_rcvbuf", buffers.tls_so_rcvbuf),
             ("so_sndbuf", buffers.tls_so_sndbuf),
@@ -2256,6 +2298,15 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     "transport/link/tls/root_ca_certificate",
     "transport/link/tls/listen_certificate",
     "transport/link/tls/listen_private_key",
+    // MOVED from `UNHONOURED_UPSTREAM_CONFIG_KEYS` (and `UNHONOURED_READER_GAP`, and for
+    // `protocols` the beyond-wz group), so the surface total is unchanged: the mutual-TLS half of
+    // the tls block, which a dial and a listener take to the tls and quic links, and the
+    // whitelist of link protocols, which the open applies to the endpoints it is given.
+    "transport/link/tls/connect_certificate",
+    "transport/link/tls/connect_private_key",
+    "transport/link/tls/enable_mtls",
+    "transport/link/tls/verify_name_on_connect",
+    "transport/link/protocols",
     // R2593 — the per-link-kind socket buffers. MOVED from
     // `UNHONOURED_UPSTREAM_CONFIG_KEYS` (and its beyond-wz group), so the
     // surface total is unchanged. They reach every tcp and tls link through
@@ -2637,17 +2688,17 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // `password`, the INITIATOR's own credentials, stayed until the C ABI began
     // presenting them from its config when it dials, and then LEFT too, for
     // [`HONOURED_CONFIG_KEYS`].
-    "transport/link/protocols",
+    // `transport/link/protocols` LEFT this list for `HONOURED_CONFIG_KEYS`: the open refuses an
+    // endpoint whose protocol it leaves out.
     "transport/link/rx/buffer_size",
     // `transport/link/rx/max_message_size` LEFT this list for
     // `HONOURED_CONFIG_KEYS`: a session's reassembly now ends a chain past it.
     // R2593 — `transport/link/{tcp,tls}/so_{rcvbuf,sndbuf}` LEFT this list for
     // `HONOURED_CONFIG_KEYS`: `LinkDefaults` now carries them to every link.
     "transport/link/tls/close_link_on_expiration",
-    "transport/link/tls/connect_certificate",
-    "transport/link/tls/connect_private_key",
-    "transport/link/tls/enable_mtls",
-    "transport/link/tls/verify_name_on_connect",
+    // `transport/link/tls/{connect_certificate,connect_private_key,enable_mtls,
+    // verify_name_on_connect}` LEFT this list for `HONOURED_CONFIG_KEYS`: the reader reads them
+    // and the open hands them to the tls links.
     // `transport/link/tx/keep_alive` LEFT this list for [`C_ABI_SESSION_HONOURED_KEYS`]: the
     // zenoh-c session's keepalive speaks at its own lease divided by it.
     "transport/link/tx/queue/allocation/mode",
@@ -2852,7 +2903,7 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // negative-assertion list is for — implementing the capability makes the row
     // false, so the key cannot be honoured quietly. The same went for `user` and
     // `password` once the C ABI presented them when it dials.
-    "transport/link/protocols",
+    // `transport/link/protocols` LEFT this half: the open refuses an endpoint it leaves out.
     "transport/link/rx/buffer_size",
     // `transport/link/rx/max_message_size` left this half too: wz acts on it.
     // R2593 — the four socket-buffer keys left this half with the surface's
@@ -2925,12 +2976,8 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
 ///   `--plugin`. `plugins_loading/search_dirs` stays in
 ///   [`UNHONOURED_BEYOND_WZ`]: wz loads by explicit path and has no discovery.
 ///   (R2788: `plugins` itself left this list — the reader carries the section.)
-/// * `transport/link/tls/{connect_certificate,connect_private_key,enable_mtls,
-///   verify_name_on_connect}` — `tls_config.rs`. `ClientAuthPem` carries the
-///   client `cert_chain_pem` + `private_key_pem` an mTLS dial presents, and
-///   `ServerNameVerification` is the `verify_name_on_connect` axis, named after
-///   `Z_CONFIG_TLS_VERIFY_NAME_ON_CONNECT` in its own doc. The C ABI already
-///   exposes both.
+/// * (`transport/link/tls/{connect_certificate,connect_private_key,enable_mtls,
+///   verify_name_on_connect}` LEFT this list: the reader reads them, [`HONOURED_CONFIG_KEYS`].)
 /// * `transport/link/unixpipe/file_access_mask` — the unixpipe link's FIFO
 ///   creation mode, which R2363 made configurable:
 ///   `crate::unixpipe_pipeline::DEFAULT_FILE_MASK` and the
@@ -2979,10 +3026,9 @@ pub const UNHONOURED_READER_GAP: &[&str] = &[
     // `multihop`, whose capability (a graph that floods more than one hop) the session's plane
     // does not use.
     "scouting/gossip/multihop",
-    "transport/link/tls/connect_certificate",
-    "transport/link/tls/connect_private_key",
-    "transport/link/tls/enable_mtls",
-    "transport/link/tls/verify_name_on_connect",
+    // `transport/link/tls/{connect_certificate,connect_private_key,enable_mtls,
+    // verify_name_on_connect}` LEFT this list for `HONOURED_CONFIG_KEYS`: the reader reads them
+    // and the open hands them to the tls links.
     // R2363 — MOVED here from `UNHONOURED_BEYOND_WZ`, and the move is the
     // finding rather than the bookkeeping: that list's `LinkTxConf` group said
     // wz lacked "a configurable link-TX surface" for this key, which was true
@@ -3063,7 +3109,8 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
         "a configurable link-TX surface",
         "LinkTxConf",
         &[
-            "transport/link/protocols",
+            // `transport/link/protocols` LEFT this group: the open refuses an endpoint whose
+            // protocol the whitelist leaves out.
             "transport/link/rx/buffer_size",
             // `transport/link/rx/max_message_size` LEFT this group: wz now has
             // the bound it configures, a session's reassembly cap.
@@ -3392,26 +3439,9 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
     // And the same for `transport/auth/usrpwd/user` and `password`: their rows said
     // wz names them only to configure a FOREIGN zenohd, and the C ABI now reads
     // them for itself, so the rows are removed for the same reason.
-    (
-        "transport/link/tls/connect_certificate",
-        "wz-has-it",
-        "ClientAuthPem",
-    ),
-    (
-        "transport/link/tls/connect_private_key",
-        "wz-has-it",
-        "ClientAuthPem",
-    ),
-    (
-        "transport/link/tls/enable_mtls",
-        "wz-has-it",
-        "ClientAuthPem",
-    ),
-    (
-        "transport/link/tls/verify_name_on_connect",
-        "wz-has-it",
-        "ServerNameVerification",
-    ),
+    // And for `transport/link/tls/{connect_certificate,connect_private_key,enable_mtls,
+    // verify_name_on_connect}`: their rows said the capability was in wz and the reader was
+    // not, and the reader reads them now.
     // R2363 — the unixpipe FIFO mode. The anchor is the DEFAULT rather than the
     // parse, because the default is the whole of wz's declared divergence
     // (0o600 where upstream defaults to 0o777) and it is what a reader
@@ -7449,6 +7479,32 @@ impl ZenohNodeConfig {
             out.tls_listen_private_key = Some(v);
             named.push("transport/link/tls/listen_private_key");
         }
+        if let Some(v) = want_string(&doc, "transport/link/tls/connect_certificate", "a path")? {
+            out.tls_connect_certificate = Some(v);
+            named.push("transport/link/tls/connect_certificate");
+        }
+        if let Some(v) = want_string(&doc, "transport/link/tls/connect_private_key", "a path")? {
+            out.tls_connect_private_key = Some(v);
+            named.push("transport/link/tls/connect_private_key");
+        }
+        if let Some(v) = want_bool(&doc, "transport/link/tls/enable_mtls")? {
+            out.tls_enable_mtls = Some(v);
+            named.push("transport/link/tls/enable_mtls");
+        }
+        if let Some(v) = want_bool(&doc, "transport/link/tls/verify_name_on_connect")? {
+            out.tls_verify_name_on_connect = Some(v);
+            named.push("transport/link/tls/verify_name_on_connect");
+        }
+        // `transport/link/protocols` is `Option<Vec<String>>` upstream: absent is every protocol,
+        // and a list that names none leaves none open.
+        if let Some(value) = honoured(&doc, "transport/link/protocols") {
+            out.link_protocols = Some(string_list_of(
+                value,
+                "transport/link/protocols",
+                "a list of link protocol names",
+            )?);
+            named.push("transport/link/protocols");
+        }
         // R2593 — the four per-link-kind socket buffers, each a `u32` upstream.
         {
             let buffers = &mut out.link_socket_buffers;
@@ -8824,6 +8880,28 @@ mod tests {
             (
                 "transport/link/tls/listen_private_key",
                 r#"{ "transport": { "link": { "tls": { "listen_private_key": "/etc/srv.key" } } } }"#,
+            ),
+            // The mutual-TLS half of the tls block and the whitelist of link protocols, each
+            // driven to a value that is not its default (`false`, `true`, absent, absent).
+            (
+                "transport/link/tls/connect_certificate",
+                r#"{ "transport": { "link": { "tls": { "connect_certificate": "/etc/cli.pem" } } } }"#,
+            ),
+            (
+                "transport/link/tls/connect_private_key",
+                r#"{ "transport": { "link": { "tls": { "connect_private_key": "/etc/cli.key" } } } }"#,
+            ),
+            (
+                "transport/link/tls/enable_mtls",
+                r#"{ "transport": { "link": { "tls": { "enable_mtls": true } } } }"#,
+            ),
+            (
+                "transport/link/tls/verify_name_on_connect",
+                r#"{ "transport": { "link": { "tls": { "verify_name_on_connect": false } } } }"#,
+            ),
+            (
+                "transport/link/protocols",
+                r#"{ "transport": { "link": { "protocols": ["tls", "quic"] } } }"#,
             ),
             // R2593 — the four socket buffers, each to a size no kernel
             // defaults to.

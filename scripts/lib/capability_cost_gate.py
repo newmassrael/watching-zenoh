@@ -425,7 +425,7 @@ CASES: tuple[Case, ...] = (
               "3,790,610 without it"),
     Case("capic-client", "wz-capi-c", "libwz_capi_c.so", "", 3_000_000,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST)),
-    Case("capic-client-small", "wz-capi-c", "libwz_capi_c.so", "", 1_957_600,
+    Case("capic-client-small", "wz-capi-c", "libwz_capi_c.so", "", 1_962_900,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
          profile="capi-small",
          note="the capic-client build with panics aborting: 1,797,992 measured against "
@@ -452,20 +452,29 @@ CASES: tuple[Case, ...] = (
               "else, and the question stays open. 1,954,049 measured locally with the QoS "
               "overwrite of `qos/network` (the interceptor, the reader of the key and the "
               "rewrite the session applies): +11,880 over the 1,942,169 the parent measured. "
-              "The budget is that reading and 3,500, rounded up to the hundred."),
+              "The budget is that reading and 3,500, rounded up to the hundred. 1,959,369 "
+              "with the mutual-TLS and server-name keys of the tls link read and the quic "
+              "link taking them (+5,320): 1,962,900 with the margin."),
     Case("capic-scout", "wz-capi-c", "libwz_capi_c.so", "scout", 3_275_000,
          forbid=(ACCEPT, RESPONDER, GOSSIP, CLOCK, ADVANCED, MULTICAST),
          require=(SCOUTING, UDP)),
     Case("capic-peer", "wz-capi-c", "libwz_capi_c.so", "peer", 4_065_000,
          forbid=(GOSSIP, CLOCK, ADVANCED, MULTICAST), require=(ACCEPT, RESPONDER, SCOUTING, UDP)),
-    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 9_291_600,
+    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 9_309_700,
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
          exports=836,
          note="zenoh-c's default links and pubkey auth (rustls on ring, quinn, tungstenite, "
               "rsa): 8,866,359 measured, up from about 5.1 MB without them; 9,029,823 with "
               "the multicast transport (open-debt item 913). 9,214,622 and 836 exports on "
               "hosted CI on 2026-10-27 (head `e6d953fc2`), 4,622 over the earlier budget with "
-              "the door `wz_capi_c_config_device_requires` (the pin's revision 7)"),
+              "the door `wz_capi_c_config_device_requires` (the pin's revision 7). 9,246,262 "
+              "measured locally with the QoS overwrite, and 9,306,189 with the router node "
+              "carrying an authentication and the quic link taking the mutual-TLS and "
+              "server-name keys of the tls link (+59,927, nearly all of it in the peer and "
+              "router roles: the client builds moved by about 5,300). The accept loop is "
+              "instantiated for the router forwarder, which handed it no authentication "
+              "before and so had none of that code to carry. The budget is that reading and "
+              "3,500, rounded up to the hundred"),
 )
 
 
