@@ -204,8 +204,11 @@ fn run_window<C: ClockSource + Clone + 'static>(
         return actions;
     }
     let sent = window.open().is_some_and(|scout| members.send(&scout));
+    // The budget is the least time the window stays open, so the start is read rounded UP to the
+    // millisecond and each tick rounded down: a start read rounded down closed the window up to a
+    // millisecond inside its budget (measured, 299.917 ms of a 300 ms one).
     let now_ms = |clock: &C| clock.now_us() / 1000;
-    window.sent(now_ms(clock), sent);
+    window.sent(clock.now_us().div_ceil(1000), sent);
     let mut buffer = vec![0u8; MAX_DATAGRAM];
     while !window.resolved() {
         let any = members.drain(&mut buffer, |datagram| window.datagram(datagram));
