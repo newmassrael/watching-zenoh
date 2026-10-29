@@ -220,7 +220,9 @@ impl OpenRefusal {
     pub const fn key(self) -> &'static str {
         match self {
             Self::DocumentUnreadable => "(the configuration document)",
-            Self::Security => "transport/auth, access_control, low_pass_filter, downsampling",
+            Self::Security => {
+                "transport/auth, access_control, low_pass_filter, downsampling, qos/network"
+            }
             Self::TlsMaterial => "transport/link/tls",
             Self::ZenohId => "id",
             Self::QosWithLowlatency => "transport/unicast/qos, transport/unicast/lowlatency",
@@ -397,12 +399,12 @@ fn zenoh_group_profile(
 ///     and asked of the peers it accepts (`NodeAuth::with_pubkey_config`); an identity that
 ///     cannot be loaded fails the open. A build without `auth_pubkey` cannot hold one, so there
 ///     a config that states any of the four keys fails the open.
-///   * `access_control`, `low_pass_filter` and `downsampling` are compiled into the node's
-///     traffic policy and enforced on every face in both directions; a subtree the compiler
+///   * `access_control`, `low_pass_filter`, `downsampling` and `qos/network` are compiled into the
+///     node's traffic policy and enforced on every face in both directions; a subtree the compiler
 ///     refuses (a policy naming a rule that does not exist) fails the open, as zenoh's start
 ///     does. A disabled `access_control` and an absent filter state no policy at all. A build
 ///     without `interceptors` cannot hold a policy, so there a config that enables
-///     `access_control` or states a filter or a downsampling rule fails the open.
+///     `access_control` or states a filter, a downsampling rule or a QoS overwrite fails the open.
 fn node_security_of(node: &ZenohNodeConfig) -> Result<(Option<NodeAuth>, NodePolicy), OpenRefusal> {
     #[cfg(not(feature = "auth_pubkey"))]
     if node.pubkey_public_key_pem.is_some()
@@ -439,6 +441,7 @@ fn node_security_of(node: &ZenohNodeConfig) -> Result<(Option<NodeAuth>, NodePol
         // enforce one that starts and enforces nothing is worse than one that does not start.
         if !node.low_pass_filter.is_empty()
             || !node.downsampling.is_empty()
+            || !node.qos_network.is_empty()
             || node.access_control.enabled
         {
             return Err(OpenRefusal::Security);

@@ -4289,6 +4289,67 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         chain.admit(&ctx, msg)
     }
 
+    /// The QoS overwrite of the INGRESS chain, applied to a message that arrived on face `id`:
+    /// the message as it should be routed when a rule changed its QoS (a copy, because the frame
+    /// the message came in is borrowed), and the band it is routed at, which follows the QoS the
+    /// message now carries. A message no rule changed is `None` and keeps the band it arrived on.
+    ///
+    /// Upstream runs the chain over the message in place at the demultiplexer, so everything
+    /// downstream of it, the route computation and the fan-out, sees the rewritten QoS. Here the
+    /// forwarder that owns the frame swaps the message once and routes the swap.
+    #[cfg(feature = "access-qos-overwrite")]
+    fn overwritten_ingress(
+        &self,
+        id: FaceId,
+        message: &NetworkMessage,
+        reliable: bool,
+        band: Priority,
+    ) -> (Option<NetworkMessage>, Priority) {
+        let chain = self.ingress_interceptors.read();
+        if !chain.overwrites_qos() {
+            return (None, band);
+        }
+        let Some(face) = self.tables.faces.get(&id) else {
+            return (None, band);
+        };
+        let ctx = RouterFaceContext { face, known: None };
+        let Some(qos) = chain.overwritten_qos(&ctx, message, reliable) else {
+            return (None, band);
+        };
+        let Some(mut owned) = crate::interceptor::qos_overwrite::clone_for_rewrite(message) else {
+            return (None, band);
+        };
+        crate::interceptor::qos_overwrite::apply_qos(&mut owned, qos);
+        (Some(owned), qos.priority())
+    }
+
+    /// The QoS overwrite of the EGRESS chain, applied to a message about to leave toward the
+    /// face whose `state` the caller holds. The message is the caller's own, so it is rewritten
+    /// in place; the band and the express flag it is sent with follow the QoS it now carries.
+    #[cfg(feature = "access-qos-overwrite")]
+    fn overwritten_egress(
+        &self,
+        state: &RouterFaceState,
+        mut msg: NetworkMessage,
+        reliable: bool,
+        express: bool,
+        priority: Priority,
+        known: Option<&str>,
+    ) -> (NetworkMessage, bool, Priority) {
+        let chain = self.egress_interceptors.read();
+        if !chain.overwrites_qos() {
+            return (msg, express, priority);
+        }
+        let ctx = RouterFaceContext { face: state, known };
+        match chain.overwritten_qos(&ctx, &msg, reliable) {
+            Some(qos) => {
+                crate::interceptor::qos_overwrite::apply_qos(&mut msg, qos);
+                (msg, qos.is_express(), qos.priority())
+            }
+            None => (msg, express, priority),
+        }
+    }
+
     /// R2348 — how many (face, keyexpr) INGRESS verdict tables the router has
     /// computed. Rises on a miss or a stale hit, never on a fresh hit.
     #[cfg(feature = "routing-interceptor-hotreload")]
@@ -4657,6 +4718,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             }
             return false;
         }
+        // The QoS overwrite of the egress chain: the message leaves with the QoS the rules give it
+        // for THIS destination, and is sent at the band and the express flag that QoS names.
+        #[cfg(feature = "access-qos-overwrite")]
+        let (msg, express, priority) =
+            self.overwritten_egress(state, msg, reliable, express, priority, known);
         // `pubsub-ts-stack` -- this router is a node the message passes on its way: it records
         // its routing on the stack the message carries, once for each destination it goes to
         // (upstream's dispatcher does, as it hands the message to each face).
@@ -10657,6 +10723,12 @@ impl RouterForwarder {
                 if !on.admits_ingress(id, message) {
                     continue;
                 }
+                // The QoS overwrite of the ingress chain: what is routed from here on is the
+                // message with the QoS the rules give it, at the band that QoS names.
+                #[cfg(feature = "access-qos-overwrite")]
+                let (rewritten, band) = on.overwritten_ingress(id, message, *reliable, *priority);
+                #[cfg(feature = "access-qos-overwrite")]
+                let (message, priority) = (rewritten.as_ref().unwrap_or(message), &band);
                 match message {
                     // A data Push: count the reception (the data-plane witness), then
                     // route it through [`route_push`](Self::route_push), the router's

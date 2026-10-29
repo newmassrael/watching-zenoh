@@ -425,7 +425,7 @@ CASES: tuple[Case, ...] = (
               "3,790,610 without it"),
     Case("capic-client", "wz-capi-c", "libwz_capi_c.so", "", 3_000_000,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST)),
-    Case("capic-client-small", "wz-capi-c", "libwz_capi_c.so", "", 1_942_600,
+    Case("capic-client-small", "wz-capi-c", "libwz_capi_c.so", "", 1_957_600,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
          profile="capi-small",
          note="the capic-client build with panics aborting: 1,797,992 measured against "
@@ -449,7 +449,10 @@ CASES: tuple[Case, ...] = (
               "budget is that reading and 3,500, rounded up to the hundred. Whether to shrink the "
               "reader instead of accepting the growth was not put to the owner of `d8995bc4f1`, "
               "whom no session could name: the budget moves so that the gate says something "
-              "else, and the question stays open."),
+              "else, and the question stays open. 1,954,049 measured locally with the QoS "
+              "overwrite of `qos/network` (the interceptor, the reader of the key and the "
+              "rewrite the session applies): +11,880 over the 1,942,169 the parent measured. "
+              "The budget is that reading and 3,500, rounded up to the hundred."),
     Case("capic-scout", "wz-capi-c", "libwz_capi_c.so", "scout", 3_275_000,
          forbid=(ACCEPT, RESPONDER, GOSSIP, CLOCK, ADVANCED, MULTICAST),
          require=(SCOUTING, UDP)),

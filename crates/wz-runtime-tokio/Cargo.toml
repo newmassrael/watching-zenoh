@@ -1343,6 +1343,21 @@ access-quota = [
     "wz-session-core/attachment-bytes",
     "wz-session-core/query-value",
 ]
+# The QoS overwrite (zenoh `zenoh/src/net/routing/interceptor/qos_overwrite.rs` @ `pub(crate) struct QosInterceptor`, the `qos/network` key): the
+# one interceptor that REWRITES the message it is shown instead of admitting or dropping it, so the
+# seam gains a `rewrite` beside `intercept` and the forwarders that run a chain apply it. It sets
+# the `ext_qos` of a Push or a Request through the session-core setters, and a rule may select on
+# the size of the payload it governs, which is the read the low-pass cap makes: the same two
+# session-core features, for the same reason. It composes none of the other access knobs.
+access-qos-overwrite = [
+    "link-interfaces",
+    "dep:wz-routing-graph",
+    "codec-push",
+    "codec-request",
+    "codec-declare",
+    "codec-response",
+    "wz-session-core/query-value",
+]
 # R311y39 — §5.23 config-mutate-runtime: the LIVE leg of the typed WzConfig.
 # Gates the re-apply in `WzConfig::reconfigure_interceptors` so a config
 # mutation RE-DRIVES the live forwarder (config-driven), vs OFF where the

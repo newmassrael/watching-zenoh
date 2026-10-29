@@ -65,6 +65,8 @@ pub mod downsampling;
 pub(crate) mod keyexpr;
 #[cfg(feature = "access-quota")]
 pub mod low_pass;
+#[cfg(feature = "access-qos-overwrite")]
+pub mod qos_overwrite;
 
 use std::any::Any;
 // The policy engine's types, nameable from the seam that takes them: `InterceptorConfig::with_acl`
@@ -86,6 +88,8 @@ use self::access_control::AclInterceptor;
 use self::downsampling::{DownsamplingInterceptor, DownsamplingRule};
 #[cfg(feature = "access-quota")]
 use self::low_pass::{LowPassInterceptor, LowPassRule};
+#[cfg(feature = "access-qos-overwrite")]
+use self::qos_overwrite::{QosOverwriteInterceptor, QosOverwriteRule};
 
 /// The per-message context an [`Interceptor`] reads — the wz mirror of zenoh
 /// `InterceptorContext`. The resolved subject (who is on the other end of the
@@ -285,6 +289,10 @@ pub enum InterceptorKind {
     Downsampling,
     /// The low-pass size cap refused the message.
     LowPass,
+    /// The QoS overwrite. It never refuses a message, so no verdict carries this kind; it is named
+    /// because every interceptor on a chain names itself, and so that a build can tell the chain
+    /// holds one. It reaches no stats counter, as upstream has none for it.
+    QosOverwrite,
 }
 
 /// Whether a chain admitted a message, and if not, WHO dropped it.
@@ -409,6 +417,37 @@ pub trait Interceptor: Send + Sync {
     ) -> bool {
         self.intercept(ctx, msg)
     }
+
+    /// Whether this interceptor rewrites the QoS of the messages it is shown. The chain reads it
+    /// once, when the interceptor is pushed, so that a chain with no rewriter takes no step on
+    /// behalf of one: a forwarder asks [`InterceptorChain::overwrites_qos`] before it builds the
+    /// context [`Self::overwrite_qos`] needs.
+    #[cfg(feature = "access-qos-overwrite")]
+    fn rewrites_qos(&self) -> bool {
+        false
+    }
+
+    /// The QoS `msg` should leave this interceptor with, given the QoS it has reached it with.
+    ///
+    /// The one place an interceptor changes a message instead of judging it (zenoh's
+    /// `InterceptorTrait::intercept` takes the message mutably; wz's takes it by reference, so
+    /// the change is returned and the forwarder that owns the message writes it, which keeps a
+    /// borrowed ingress message from being copied until a rule has changed it). `qos` is passed in
+    /// rather than read off `msg` so that interceptors on one chain compose: each is handed what
+    /// the earlier ones produced. The default changes nothing.
+    ///
+    /// `reliable` is the reliability of the frame the message rides, which a message does not
+    /// carry itself (upstream reads it off the message it was decoded into).
+    #[cfg(feature = "access-qos-overwrite")]
+    fn overwrite_qos(
+        &self,
+        _ctx: &dyn InterceptorContext,
+        _msg: &NetworkMessage,
+        qos: wz_session_core::sample::QosLevel,
+        _reliable: bool,
+    ) -> wz_session_core::sample::QosLevel {
+        qos
+    }
 }
 
 /// What one interceptor precomputes for one (face, keyexpr) — the type
@@ -458,6 +497,9 @@ pub struct InterceptorChain {
     /// `set_interceptors` builds chains at a FRESH version, so every cache
     /// computed against a previous chain compares unequal and is recomputed.
     version: u64,
+    /// Whether any interceptor on the chain rewrites QoS, read when each was pushed.
+    #[cfg(feature = "access-qos-overwrite")]
+    rewrites_qos: bool,
 }
 
 impl InterceptorChain {
@@ -534,7 +576,41 @@ impl InterceptorChain {
 
     /// Append an interceptor to the chain.
     pub fn push(&mut self, interceptor: Box<dyn Interceptor>) {
+        #[cfg(feature = "access-qos-overwrite")]
+        {
+            self.rewrites_qos |= interceptor.rewrites_qos();
+        }
         self.interceptors.push(interceptor);
+    }
+
+    /// Whether any interceptor on the chain rewrites QoS. A forwarder asks before it builds the
+    /// context [`Self::overwritten_qos`] needs, so a chain of an ACL and a size cap pays nothing.
+    #[cfg(feature = "access-qos-overwrite")]
+    pub fn overwrites_qos(&self) -> bool {
+        self.rewrites_qos
+    }
+
+    /// The QoS `msg` leaves the chain with, or `None` when it leaves with the QoS it had (or
+    /// carries none a rule may set). Each interceptor is handed what the earlier ones produced, in
+    /// the chain's order. The caller writes the answer into the message it owns
+    /// ([`qos_overwrite::apply_qos`]); the chain only decides.
+    #[cfg(feature = "access-qos-overwrite")]
+    pub fn overwritten_qos(
+        &self,
+        ctx: &dyn InterceptorContext,
+        msg: &NetworkMessage,
+        reliable: bool,
+    ) -> Option<wz_session_core::sample::QosLevel> {
+        if !self.rewrites_qos {
+            return None;
+        }
+        let before = self::qos_overwrite::message_qos(msg)?;
+        let after = self
+            .interceptors
+            .iter()
+            .filter(|i| i.rewrites_qos())
+            .fold(before, |qos, i| i.overwrite_qos(ctx, msg, qos, reliable));
+        (after != before).then_some(after)
     }
 
     /// Whether to ADMIT `msg`: every interceptor must admit it (zenoh's chain
@@ -639,6 +715,10 @@ pub struct InterceptorConfig {
     /// interceptor. Present only under `access-quota`.
     #[cfg(feature = "access-quota")]
     pub low_pass: Vec<LowPassRule>,
+    /// The QoS overwrite rules (`qos/network`); empty installs no overwriting interceptor.
+    /// Present only under `access-qos-overwrite`.
+    #[cfg(feature = "access-qos-overwrite")]
+    pub qos_overwrite: Vec<QosOverwriteRule>,
     /// Whether this config governs a MULTICAST session too. `false` (the default) is upstream's
     /// shape: it installs no interceptor on a multicast transport, so a policy written for the
     /// node's unicast sessions leaves its groups alone. `true` applies the whole pipeline above
@@ -670,6 +750,10 @@ impl InterceptorConfig {
         #[cfg(feature = "access-quota")]
         {
             inert &= self.low_pass.is_empty();
+        }
+        #[cfg(feature = "access-qos-overwrite")]
+        {
+            inert &= self.qos_overwrite.is_empty();
         }
         inert
     }
@@ -719,10 +803,19 @@ impl InterceptorConfig {
         self
     }
 
+    /// Set the QoS overwrite rules, returning `self` for chaining.
+    /// See [`with_acl`](Self::with_acl) for why these are builders.
+    #[cfg(feature = "access-qos-overwrite")]
+    #[must_use]
+    pub fn with_qos_overwrite(mut self, rules: Vec<QosOverwriteRule>) -> Self {
+        self.qos_overwrite = rules;
+        self
+    }
+
     /// Build the interceptor chain for `flow`, in zenoh's FIXED factory order:
-    /// downsampling, then access-control, then low-pass (zenoh
-    /// `interceptor_factories` `mod.rs:133-136`, minus the qos-overwrite wz does
-    /// not implement). The order is deterministic regardless of which features a
+    /// downsampling, then access-control, then the QoS overwrite, then low-pass
+    /// (`zenoh/src/net/routing/interceptor/mod.rs` @ `res.extend(qos_overwrite_interceptor_factories(`).
+    /// The order is deterministic regardless of which features a
     /// deploy enables — unlike per-setter append order, which depended on call
     /// order. Each flow gets its OWN interceptor instances (a per-flow
     /// downsampling timer, a per-flow ACL enforcer bound to `flow`), as zenoh
@@ -737,7 +830,8 @@ impl InterceptorConfig {
         #[cfg(not(any(
             feature = "access-acl",
             feature = "access-downsampling",
-            feature = "access-quota"
+            feature = "access-quota",
+            feature = "access-qos-overwrite"
         )))]
         let _ = flow;
         // `mut` is exercised by whichever interceptor pushes compile in; a
@@ -755,6 +849,13 @@ impl InterceptorConfig {
         #[cfg(feature = "access-acl")]
         if let Some(policy) = &self.acl {
             chain.push(Box::new(AclInterceptor::new(policy.clone(), flow.into())));
+        }
+        // The QoS overwrite rules are FLOW-SCOPED as the low-pass ones are, and sit between the
+        // ACL and the low-pass cap as upstream installs them: a message is judged by the ACL on
+        // the QoS it arrived with, and the cap reads the size, which no rewrite changes.
+        #[cfg(feature = "access-qos-overwrite")]
+        if let Some(overwrite) = QosOverwriteInterceptor::for_flow(&self.qos_overwrite, flow) {
+            chain.push(Box::new(overwrite));
         }
         // R311y451 — the low-pass rules are FLOW-SCOPED: only the subset whose
         // `flows` names this flow is installed, and a flow no rule governs gets

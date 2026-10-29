@@ -2082,6 +2082,20 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
             self.end_refused_ask(&msg);
             return Ok(());
         }
+        // The QoS overwrite of the egress chain. The base seam sends at the default band; a
+        // message whose rules name another is sent through the priority-carrying seam, which is
+        // this one with the default band.
+        #[cfg(all(feature = "access-acl", feature = "access-qos-overwrite"))]
+        {
+            let (msg, express, priority) = self.overwritten_egress(
+                msg,
+                reliable,
+                express,
+                wz_session_core::qos::Priority::DEFAULT,
+            );
+            Tp::send_network_message_qos(&self.transport, msg, reliable, express, priority)
+        }
+        #[cfg(not(all(feature = "access-acl", feature = "access-qos-overwrite")))]
         Tp::send_network_message(&self.transport, msg, reliable, express)
     }
 
@@ -2091,12 +2105,15 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     /// (`zenoh/src/net/primitives/mux.rs` @ `send declare final to avoid timeout on blocked interest`).
     #[cfg(feature = "access-acl")]
     fn end_refused_ask(&self, msg: &wz_session_core::network_message::NetworkMessage) {
-        use wz_session_core::network_message::NetworkMessage;
+        // Qualified in each arm: a build with neither `query-get` nor `liveliness-get` has no arm
+        // that names the type, and an import then stands unused.
         match msg {
             #[cfg(all(feature = "transport-unicast", feature = "query-get"))]
-            NetworkMessage::Request(request) => self.finalize_local_query(request.rid),
+            wz_session_core::network_message::NetworkMessage::Request(request) => {
+                self.finalize_local_query(request.rid)
+            }
             #[cfg(feature = "liveliness-get")]
-            NetworkMessage::Interest(interest) => {
+            wz_session_core::network_message::NetworkMessage::Interest(interest) => {
                 let interest_id = interest.interest_id;
                 match self.local_delivery {
                     LocalDeliveryDrain::Caller => {
@@ -2161,6 +2178,10 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
             self.end_refused_ask(&msg);
             return Ok(());
         }
+        // The QoS overwrite of the egress chain: the message is sent with the QoS the rules give
+        // it, at the band and express flag that QoS names.
+        #[cfg(all(feature = "access-acl", feature = "access-qos-overwrite"))]
+        let (msg, express, priority) = self.overwritten_egress(msg, reliable, express, priority);
         Tp::send_network_message_qos(&self.transport, msg, reliable, express, priority)
     }
 
@@ -2222,8 +2243,11 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         if empty {
             return;
         }
-        if let wz_session_core::driver_loop::DriverLoopOutcome::FramePayload { messages, .. } =
-            outcome
+        if let wz_session_core::driver_loop::DriverLoopOutcome::FramePayload {
+            messages,
+            reliable,
+            ..
+        } = outcome
         {
             messages.retain(|msg| {
                 self.acl_admits_on(
@@ -2232,6 +2256,21 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                     crate::interceptor::InterceptorFlow::Ingress,
                 )
             });
+            // The QoS overwrite of the ingress chain, on what the chain admitted. The batch is
+            // owned here, so a message is rewritten where it lies.
+            #[cfg(feature = "access-qos-overwrite")]
+            for msg in messages.iter_mut() {
+                if let Some(qos) = self.overwritten_qos_on(
+                    &self.interceptors_ingress,
+                    msg,
+                    *reliable,
+                    crate::interceptor::InterceptorFlow::Ingress,
+                ) {
+                    crate::interceptor::qos_overwrite::apply_qos(msg, qos);
+                }
+            }
+            #[cfg(not(feature = "access-qos-overwrite"))]
+            let _ = reliable;
         }
     }
 
@@ -2276,15 +2315,33 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
             return true;
         };
         // FIRST lock: the alias tables, for the governed keyexpr. Released here.
-        //
-        // Which table answers which mapping bit depends on who SENT the message. An inbound
-        // message was sent by the peer: its `M=1` is the peer's table and its `M=0` is ours. An
-        // outbound message was sent by us: its `M=1` is OUR table (the ids this node declared,
-        // which every put on a declared publisher carries) and its `M=0` the peer's. Reading
-        // our own ids out of the peer's table is not a harmless miss: an unresolved governed key
-        // is DENIED, so an egress policy refused every put on a declared key, whether the
-        // policy named that key or not.
-        let keyexpr = R::with_mutex_mut(&self.observer, |obs| {
+        let keyexpr = self.governed_keyexpr(actions, msg, flow);
+        let ctx = SessionAclContext { actions, keyexpr };
+        // SECOND lock: the chain. The context holds no lock of its own.
+        R::with_mutex_mut(chain_slot, |chain| chain.admit(&ctx, msg).is_admitted())
+    }
+
+    /// The literal key `msg` names on this session's link, in the direction `flow`, or `None`
+    /// when it names none the session can resolve.
+    ///
+    /// Which table answers which mapping bit depends on who SENT the message. An inbound
+    /// message was sent by the peer: its `M=1` is the peer's table and its `M=0` is ours. An
+    /// outbound message was sent by us: its `M=1` is OUR table (the ids this node declared,
+    /// which every put on a declared publisher carries) and its `M=0` the peer's. Reading
+    /// our own ids out of the peer's table is not a harmless miss: an unresolved governed key
+    /// is DENIED, so an egress policy refused every put on a declared key, whether the
+    /// policy named that key or not.
+    ///
+    /// Takes the observer lock and releases it before returning, which is the ordering the
+    /// callers depend on (see [`Self::acl_admits_on`]).
+    #[cfg(feature = "access-acl")]
+    fn governed_keyexpr(
+        &self,
+        actions: &Arc<wz_session_core::session_actions::SessionLinkActions<R, T>>,
+        msg: &wz_session_core::network_message::NetworkMessage,
+        flow: crate::interceptor::InterceptorFlow,
+    ) -> Option<String> {
+        R::with_mutex_mut(&self.observer, |obs| {
             let spaces = obs.subscribers.mapping_spaces();
             let peer = spaces.peer();
             match flow {
@@ -2303,10 +2360,59 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                     })
                 }
             }
-        });
+        })
+    }
+
+    /// The QoS `msg` should leave this session's chain `chain_slot` with, or `None` when no rule
+    /// changes it. The twin of [`Self::acl_admits_on`] for the interceptor that rewrites: the same
+    /// fast path (a chain with no rewriter takes no lock past the first), the same two sequential
+    /// locks, the same context. A multicast transport answers none, as upstream installs no QoS
+    /// overwrite on a group.
+    #[cfg(all(feature = "access-acl", feature = "access-qos-overwrite"))]
+    fn overwritten_qos_on(
+        &self,
+        chain_slot: &Arc<<R as Runtime>::Mutex<crate::interceptor::InterceptorChain>>,
+        msg: &wz_session_core::network_message::NetworkMessage,
+        reliable: bool,
+        flow: crate::interceptor::InterceptorFlow,
+    ) -> Option<wz_session_core::sample::QosLevel> {
+        if !R::with_mutex_mut(chain_slot, |chain| chain.overwrites_qos()) {
+            return None;
+        }
+        let actions = Tp::acl_subject_source(&self.transport)?;
+        let keyexpr = self.governed_keyexpr(actions, msg, flow);
         let ctx = SessionAclContext { actions, keyexpr };
-        // SECOND lock: the chain. The context holds no lock of its own.
-        R::with_mutex_mut(chain_slot, |chain| chain.admit(&ctx, msg).is_admitted())
+        R::with_mutex_mut(chain_slot, |chain| {
+            chain.overwritten_qos(&ctx, msg, reliable)
+        })
+    }
+
+    /// `msg` as this session sends it: the message with the QoS its egress chain gives it, and the
+    /// band and express flag that QoS names. A message no rule changes is returned as it came.
+    #[cfg(all(feature = "access-acl", feature = "access-qos-overwrite"))]
+    fn overwritten_egress(
+        &self,
+        mut msg: wz_session_core::network_message::NetworkMessage,
+        reliable: bool,
+        express: bool,
+        priority: wz_session_core::qos::Priority,
+    ) -> (
+        wz_session_core::network_message::NetworkMessage,
+        bool,
+        wz_session_core::qos::Priority,
+    ) {
+        match self.overwritten_qos_on(
+            &self.interceptors_egress,
+            &msg,
+            reliable,
+            crate::interceptor::InterceptorFlow::Egress,
+        ) {
+            Some(qos) => {
+                crate::interceptor::qos_overwrite::apply_qos(&mut msg, qos);
+                (msg, qos.is_express(), qos.priority())
+            }
+            None => (msg, express, priority),
+        }
     }
 
     /// Borrow the observer handle. Application code registers

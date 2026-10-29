@@ -294,6 +294,21 @@ pub fn read_push_qos(push: &crate::wire::PushOwned) -> QosLevel {
     read_qos_chain(push.extensions.as_ref())
 }
 
+/// Set a `Push`'s `ext_qos` in place (`QosLevel::DEFAULT` REMOVES it, the omit-on-DEFAULT gate every
+/// setter here applies). The QoS overwrite of a node's interceptors rewrites a message with this on
+/// its way through (`zenoh/src/net/routing/interceptor/qos_overwrite.rs` @
+/// `self.overwrite_qos(QosOverwriteMessage::Put, ext_qos);`).
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+pub fn set_push_qos(push: &mut crate::wire::PushOwned, qos: QosLevel) {
+    set_qos_chain(&mut push.extensions, &mut push.header, qos);
+}
+
+/// Set a `Request`'s `ext_qos` in place, as [`set_push_qos`] does a `Push`'s.
+#[cfg(all(feature = "alloc", feature = "codec-request"))]
+pub fn set_request_qos(request: &mut crate::wire::RequestOwned, qos: QosLevel) {
+    set_qos_chain(&mut request.extensions, &mut request.header, qos);
+}
+
 /// R2825 — read an `OAM`'s `ext_qos`. Absent means `QosLevel::DEFAULT`.
 #[cfg(feature = "alloc")]
 pub fn read_oam_qos(oam: &wz_codecs::oam::OamOwned) -> QosLevel {
@@ -452,6 +467,42 @@ mod interest_tests {
              last thing on an Interest's wire"
         );
         assert_eq!(wire[0] & MESSAGE_FLAG_Z, MESSAGE_FLAG_Z, "header Z set");
+    }
+}
+
+/// The setters of a `Push`'s and a `Request`'s `ext_qos`: what is set is what is read back, the
+/// other entries of the chain stay, and the default removes the entry and its header bit.
+#[cfg(all(test, feature = "codec-push", feature = "codec-request"))]
+mod overwrite_tests {
+    use super::*;
+    use crate::ext_nodeid::MESSAGE_FLAG_Z;
+    use crate::push_build::build_push_literal;
+    use crate::request_build::build_request_query;
+
+    fn express_real_time() -> QosLevel {
+        QosLevel::from_parts(Priority::RealTime, CongestionControl::Block, true)
+    }
+
+    #[test]
+    fn a_push_carries_the_qos_it_was_set_to_and_loses_it_on_the_default() {
+        let mut push = build_push_literal("demo/k", b"v").expect("build");
+        assert_eq!(read_push_qos(&push), QosLevel::DEFAULT);
+        set_push_qos(&mut push, express_real_time());
+        assert_eq!(read_push_qos(&push), express_real_time());
+        assert_eq!(push.header & MESSAGE_FLAG_Z, MESSAGE_FLAG_Z);
+        set_push_qos(&mut push, QosLevel::DEFAULT);
+        assert_eq!(read_push_qos(&push), QosLevel::DEFAULT);
+        assert_eq!(push.header & MESSAGE_FLAG_Z, 0);
+        assert!(push.extensions.is_none());
+    }
+
+    #[test]
+    fn a_request_carries_the_qos_it_was_set_to_and_loses_it_on_the_default() {
+        let mut request = build_request_query(7, 0, Some("demo/k")).expect("build");
+        set_request_qos(&mut request, express_real_time());
+        assert_eq!(read_request_qos(&request), express_real_time());
+        set_request_qos(&mut request, QosLevel::DEFAULT);
+        assert_eq!(read_request_qos(&request), QosLevel::DEFAULT);
     }
 }
 

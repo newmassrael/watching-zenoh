@@ -21,7 +21,11 @@
 //! as the assertion it is and refuse, rather than unwrapping in a running node.
 
 use super::InterceptorConfig;
-#[cfg(any(feature = "access-quota", feature = "access-downsampling"))]
+#[cfg(any(
+    feature = "access-quota",
+    feature = "access-downsampling",
+    feature = "access-qos-overwrite"
+))]
 use super::InterceptorFlow;
 use crate::zenoh_config::ZenohNodeConfig;
 
@@ -33,7 +37,11 @@ use crate::zenoh_config::ZenohNodeConfig;
 /// rule compiled with the empty list governs no flow, and `for_flow` then installs nothing, so a
 /// document that left `flows` out (the usual form) was honoured by the reader and did nothing at
 /// all.
-#[cfg(any(feature = "access-quota", feature = "access-downsampling"))]
+#[cfg(any(
+    feature = "access-quota",
+    feature = "access-downsampling",
+    feature = "access-qos-overwrite"
+))]
 pub(crate) fn flows_or_both(flows: Vec<InterceptorFlow>) -> Vec<InterceptorFlow> {
     if flows.is_empty() {
         InterceptorFlow::ALL.to_vec()
@@ -117,6 +125,63 @@ pub(crate) fn downsampling_rules(
     Some(rules)
 }
 
+/// `qos/network` items as enforcement rules. An item that omits `flows` governs both, as the other
+/// interceptor keys' do; one that omits a list that narrows (`zids`, `interfaces`,
+/// `link_protocols`, `key_exprs`) leaves it empty, which narrows nothing.
+#[cfg(feature = "access-qos-overwrite")]
+pub(crate) fn qos_overwrite_rules(
+    items: &[crate::zenoh_config::QosNetworkItemConf],
+) -> Option<Vec<super::qos_overwrite::QosOverwriteRule>> {
+    use super::qos_overwrite::{
+        PayloadRange, PriorityUpdate, QosFilter, QosOverwriteMessage, QosOverwriteRule,
+        QosOverwrites,
+    };
+    use crate::zenoh_config::QosNetworkPriority;
+
+    let mut rules = Vec::with_capacity(items.len());
+    for item in items {
+        let messages = item
+            .messages
+            .iter()
+            .map(|m| QosOverwriteMessage::from_upstream_str(m))
+            .collect::<Option<Vec<_>>>()?;
+        let flows = item
+            .flows
+            .iter()
+            .flatten()
+            .map(|f| InterceptorFlow::from_upstream_str(f))
+            .collect::<Option<Vec<_>>>()?;
+        rules.push(QosOverwriteRule {
+            zids: item.zids.clone().unwrap_or_default(),
+            interfaces: item.interfaces.clone().unwrap_or_default(),
+            link_protocols: item.link_protocols.clone().unwrap_or_default(),
+            messages,
+            key_exprs: item.key_exprs.clone().unwrap_or_default(),
+            overwrite: QosOverwrites {
+                priority: item.overwrite.priority.map(|p| match p {
+                    QosNetworkPriority::Band(band) => PriorityUpdate::Set(band),
+                    QosNetworkPriority::Shift(by) => PriorityUpdate::Shift(by),
+                }),
+                congestion_control: item.overwrite.congestion_control,
+                express: item.overwrite.express,
+            },
+            flows: flows_or_both(flows),
+            filter: item
+                .qos
+                .map_or_else(QosFilter::default, |filter| QosFilter {
+                    priority: filter.priority,
+                    congestion_control: filter.congestion_control,
+                    express: filter.express,
+                    reliable: filter.reliable,
+                }),
+            payload_size: item
+                .payload_size
+                .map(|(start, end)| PayloadRange { start, end }),
+        });
+    }
+    Some(rules)
+}
+
 /// Why a node's document could not become an interceptor config.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InterceptorCompileError {
@@ -131,6 +196,9 @@ pub enum InterceptorCompileError {
     /// `downsampling`, likewise.
     #[cfg(feature = "access-downsampling")]
     Downsampling,
+    /// `qos/network`, likewise.
+    #[cfg(feature = "access-qos-overwrite")]
+    QosOverwrite,
 }
 
 impl core::fmt::Display for InterceptorCompileError {
@@ -138,7 +206,8 @@ impl core::fmt::Display for InterceptorCompileError {
         not(any(
             feature = "access-acl",
             feature = "access-quota",
-            feature = "access-downsampling"
+            feature = "access-downsampling",
+            feature = "access-qos-overwrite"
         )),
         allow(unused_variables)
     )]
@@ -150,12 +219,15 @@ impl core::fmt::Display for InterceptorCompileError {
             Self::LowPassFilter => f.write_str("low_pass_filter holds a literal wz does not know"),
             #[cfg(feature = "access-downsampling")]
             Self::Downsampling => f.write_str("downsampling holds a literal wz does not know"),
+            #[cfg(feature = "access-qos-overwrite")]
+            Self::QosOverwrite => f.write_str("qos/network holds a literal wz does not know"),
             // Every variant is behind a feature: with none on the type has no value, and a
             // reference to it is still taken to hold one, so the match needs its empty form.
             #[cfg(not(any(
                 feature = "access-acl",
                 feature = "access-quota",
-                feature = "access-downsampling"
+                feature = "access-downsampling",
+                feature = "access-qos-overwrite"
             )))]
             _ => match *self {},
         }
@@ -173,7 +245,8 @@ impl InterceptorConfig {
             not(any(
                 feature = "access-acl",
                 feature = "access-quota",
-                feature = "access-downsampling"
+                feature = "access-downsampling",
+                feature = "access-qos-overwrite"
             )),
             allow(unused_mut)
         )]
@@ -194,6 +267,11 @@ impl InterceptorConfig {
         {
             config.low_pass = low_pass_rules(&node.low_pass_filter)
                 .ok_or(InterceptorCompileError::LowPassFilter)?;
+        }
+        #[cfg(feature = "access-qos-overwrite")]
+        {
+            config.qos_overwrite = qos_overwrite_rules(&node.qos_network)
+                .ok_or(InterceptorCompileError::QosOverwrite)?;
         }
         Ok(config)
     }
@@ -242,6 +320,58 @@ mod tests {
         assert_eq!(config.downsampling.len(), 2);
         assert_eq!(config.downsampling[0].key_exprs, vec!["a/**".to_owned()]);
         assert_eq!(config.downsampling[1].key_exprs, vec!["b/**".to_owned()]);
+    }
+
+    #[cfg(feature = "access-qos-overwrite")]
+    #[test]
+    fn a_qos_network_item_compiles_to_a_rule_that_sets_what_it_names() {
+        use crate::interceptor::qos_overwrite::{PriorityUpdate, QosOverwriteMessage};
+        use wz_session_core::qos::{CongestionControl, Priority};
+
+        let config = InterceptorConfig::from_node_config(&node(
+            r#"{ qos: { network: [ { messages: ["put", "query"], key_exprs: ["a/**"],
+                                     overwrite: { priority: "real_time",
+                                                  congestion_control: "block", express: true },
+                                     qos: { priority: "data", reliability: "reliable" },
+                                     payload_size: "4..", flows: ["egress"] },
+                                   { messages: ["delete"], overwrite: { priority: -2 } } ] } }"#,
+        ))
+        .unwrap();
+        assert!(!config.is_inert());
+        assert_eq!(config.qos_overwrite.len(), 2);
+        let first = &config.qos_overwrite[0];
+        assert_eq!(
+            first.messages,
+            vec![QosOverwriteMessage::Put, QosOverwriteMessage::Query]
+        );
+        assert_eq!(first.key_exprs, vec!["a/**".to_owned()]);
+        assert_eq!(
+            first.overwrite.priority,
+            Some(PriorityUpdate::Set(Priority::RealTime))
+        );
+        assert_eq!(
+            first.overwrite.congestion_control,
+            Some(CongestionControl::Block)
+        );
+        assert_eq!(first.overwrite.express, Some(true));
+        assert_eq!(first.filter.priority, Some(Priority::Data));
+        assert_eq!(first.filter.reliable, Some(true));
+        assert_eq!(
+            first.payload_size.map(|r| (r.start, r.end)),
+            Some((Some(4), None))
+        );
+        assert_eq!(first.flows, vec![InterceptorFlow::Egress]);
+        let second = &config.qos_overwrite[1];
+        assert_eq!(
+            second.flows,
+            InterceptorFlow::ALL.to_vec(),
+            "no flows means both"
+        );
+        assert!(
+            second.key_exprs.is_empty(),
+            "no key_exprs governs every key"
+        );
+        assert_eq!(second.overwrite.priority, Some(PriorityUpdate::Shift(-2)));
     }
 
     #[cfg(feature = "access-acl")]

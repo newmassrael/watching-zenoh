@@ -223,8 +223,9 @@ access-extauth-usrpwd = [
     "wz-session-core/access-extauth-usrpwd",
 ]
 # The policy a node's config states for the traffic of its sessions: `access_control`,
-# `low_pass_filter` and `downsampling`, compiled from the document (`NodePolicy`) and enforced on
-# every face, in both directions. The three are one feature because they are one chain: the
+# `low_pass_filter`, `downsampling` and the QoS overwrite of `qos/network`, compiled from the
+# document (`NodePolicy`) and enforced on every face, in both directions. The four are one feature
+# because they are one chain: the
 # session installs the chain through the ACL's seam, so a node with a size cap and no ACL still
 # needs it. Off by default for the reason the credential feature is; the zenoh-c ABI turns it on.
 interceptors = [
@@ -232,6 +233,7 @@ interceptors = [
     "wz-runtime-tokio/access-acl",
     "wz-runtime-tokio/access-downsampling",
     "wz-runtime-tokio/access-quota",
+    "wz-runtime-tokio/access-qos-overwrite",
 ]
 # A serial drive (the pico ABI: one thread runs every face and callback) also
 # runs the session's tokio runtime on that thread alone, so a round trip does

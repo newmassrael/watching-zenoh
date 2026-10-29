@@ -138,6 +138,9 @@ use wz_session_core::json5::{number_as_u64, Json5Value};
 // because upstream types it too; the reader therefore names the enum rather than
 // carrying protocol text it has already validated.
 use wz_session_core::link::InterceptorLink;
+// `qos/network` is typed at the parse for the same reason: its priorities and congestion controls
+// are enums upstream, so the reader holds the enum and not the text it has already validated.
+use wz_session_core::qos::{CongestionControl, Priority};
 // Item 751 — what `gateway/south` reads into: the partition a node places its
 // remotes by.
 use wz_session_core::region_partition::{RegionFilter, SouthPartition, SouthSubregion};
@@ -1410,6 +1413,12 @@ pub struct ZenohNodeConfig {
     /// to (MEASURED: it renders `"downsampling":[]`, not `null`), so the absent
     /// and the empty document say the same thing and neither is a wildcard.
     pub downsampling: Vec<DownsamplingItemConf>,
+    /// `qos/network[]`, exactly as the document stated it: the rules of the QoS overwrite.
+    ///
+    /// Empty = no rule, which is what an unmentioned key resolves to (the schema default is an
+    /// empty list), so the absent and the empty document say the same thing and neither is a
+    /// wildcard.
+    pub qos_network: Vec<QosNetworkItemConf>,
     /// R2652 — the five `access_control/*` keys, in the document's own shape.
     ///
     /// Unlike the two interceptor keys above, these do NOT map one-to-one onto a
@@ -1579,6 +1588,7 @@ impl Default for ZenohNodeConfig {
             router_transport_weights: Vec::new(),
             low_pass_filter: Vec::new(),
             downsampling: Vec::new(),
+            qos_network: Vec::new(),
             access_control: AclConfigInputs::default(),
             plugins: None,
             metadata: None,
@@ -2216,6 +2226,12 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // slice is fed by it ALONE. Moved for the reason its sibling records: the
     // acceptance boundary is the two lists chained, so honouring is a move.
     "downsampling",
+    // `qos/network`, MOVED here from `UNHONOURED_UPSTREAM_CONFIG_KEYS` when the QoS overwrite
+    // interceptor was built, for the reason the two above record: the acceptance boundary is the
+    // two lists chained, so honouring a key is a move and the surface total is unchanged. Its
+    // sibling `qos/publication` stays behind: that is the API's per-key publisher defaults, a
+    // different capability.
+    "qos/network",
     // R2652 — the five that close the interceptor seam, moved together because
     // upstream compiles them together: they are ONE subtree, and its
     // `PolicyEnforcer::init` reads all five before any rule exists. The
@@ -2567,7 +2583,8 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // DISCOVERS plugin libraries, which is a different capability.
     "plugins_loading/enabled",
     "plugins_loading/search_dirs",
-    "qos/network",
+    // `qos/network` LEFT this list for `HONOURED_CONFIG_KEYS`: the QoS overwrite interceptor is
+    // built. Same partition, same total.
     "qos/publication",
     // R2230 (open-debt item 579) — ARRIVED in 1.10.0, the gateway plane's other
     // half: a node's own region label, which upstream's subregion filters match
@@ -2679,10 +2696,11 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 /// the gate checks that they do, so the two cannot drift.
 ///
 /// * `aggregation/*` — a declaration-aggregation strategy (`AggregationConf`).
-/// * `qos/*` — a QoS-OVERWRITE interceptor (`QosOverwriteItemConf`). R2150 split
-///   this from `downsampling` / `low_pass_filter`, which are rules on the
-///   `InterceptorChain` wz HAS; `interceptor/` holds `access_control`,
-///   `downsampling` and `low_pass`, and no overwriter.
+/// * `qos/publication` — the API's per-key publisher defaults (`PublisherQoSConfList`):
+///   a congestion control, a priority, an express flag, a reliability and an allowed destination
+///   that a publisher takes from the first rule whose keys include its own. Its sibling
+///   `qos/network` is the QoS overwrite interceptor, which wz has since `interceptor/` gained
+///   `qos_overwrite`.
 /// * `plugins_loading/search_dirs` — plugin auto-discovery from a search path
 ///   (`PluginSearchDirs`). wz loads a plugin by explicit path only.
 /// * `transport/auth/*` — a credential store (`CredentialStore`). wz has the
@@ -2784,7 +2802,7 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // R2950 — `connect_scouted` left for the honoured list; `declares` stays.
     "open/return_conditions/declares",
     "plugins_loading/search_dirs",
-    "qos/network",
+    // `qos/network` LEFT this list as it left its sibling above: wz has the interceptor now.
     "qos/publication",
     // ⚠ R2539 — `region_name` LEFT THIS LIST for [`UNHONOURED_READER_GAP`],
     // and the gate is what said it had to. R2230 filed it here as a capability
@@ -3025,9 +3043,9 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
         &["aggregation/publishers", "aggregation/subscribers"],
     ),
     (
-        "a QoS-overwrite interceptor",
-        "QosOverwriteItemConf",
-        &["qos/network", "qos/publication"],
+        "per-key publisher QoS defaults",
+        "PublisherQoSConfList",
+        &["qos/publication"],
     ),
     (
         "plugin auto-discovery from a search path",
@@ -3305,8 +3323,8 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
     // `z_advanced_pub` have neither flag nor `--cfg`), and a per-conduit
     // reassembly witness needs two priorities on one link before it has a
     // subject at all. wz honours nothing here: the key stays in the
-    // `QosOverwriteItemConf` beyond-wz group, whose subject is an interceptor
-    // wz does not have.
+    // `PublisherQoSConfList` beyond-wz group, whose subject is the API's per-key
+    // publisher defaults, which wz does not read.
     (
         "qos/publication",
         "foreign-node-config",
@@ -6274,6 +6292,307 @@ fn low_pass_filters_of(
     Ok(out)
 }
 
+/// The message kinds a `qos/network` item may name. THREE, and not [`DATA_MESSAGE_LITERALS`]'s
+/// four: upstream types the key's `messages` as `QosOverwriteMessage`, which has no `reply`.
+pub const QOS_OVERWRITE_MESSAGE_LITERALS: &[&str] = &["put", "delete", "query"];
+
+/// The priorities a `qos/network` item spells by name (`PriorityConf`): the seven application
+/// bands, without `control`.
+pub const QOS_PRIORITY_LITERALS: &[(&str, Priority)] = &[
+    ("real_time", Priority::RealTime),
+    ("interactive_high", Priority::InteractiveHigh),
+    ("interactive_low", Priority::InteractiveLow),
+    ("data_high", Priority::DataHigh),
+    ("data", Priority::Data),
+    ("data_low", Priority::DataLow),
+    ("background", Priority::Background),
+];
+
+/// The congestion controls a `qos/network` item spells (`CongestionControlConf`).
+pub const QOS_CONGESTION_LITERALS: &[(&str, CongestionControl)] = &[
+    ("drop", CongestionControl::Drop),
+    ("block", CongestionControl::Block),
+    ("block_first", CongestionControl::BlockFirst),
+];
+
+/// How a `qos/network` item sets the priority (`PriorityUpdateConf`): a band by name, or a signed
+/// number of bands to move by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QosNetworkPriority {
+    /// `priority: "real_time"`.
+    Band(Priority),
+    /// `priority: 2` or `priority: -2`, within `-7..=7`.
+    Shift(i8),
+}
+
+/// What a `qos/network` item sets (`QosOverwrites`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct QosNetworkOverwrite {
+    /// The priority to set, or to shift by.
+    pub priority: Option<QosNetworkPriority>,
+    /// The congestion control to set.
+    pub congestion_control: Option<CongestionControl>,
+    /// The express flag to set.
+    pub express: Option<bool>,
+}
+
+/// The QoS a message must carry for a `qos/network` item to select it (`QosFilter`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct QosNetworkFilter {
+    /// The priority the message carries.
+    pub priority: Option<Priority>,
+    /// The congestion control the message carries.
+    pub congestion_control: Option<CongestionControl>,
+    /// The express flag the message carries.
+    pub express: Option<bool>,
+    /// The reliability of the frame it rides: `true` for `reliable`, `false` for `best_effort`.
+    pub reliable: Option<bool>,
+}
+
+/// One `qos/network[]` entry as the OPERATOR's document spells it, with each literal already
+/// checked against the vocabulary upstream deserializes it into.
+///
+/// An echo of the document, for the reason [`LowPassFilterConf`] is one: this struct is feature-
+/// independent and the rule it becomes (`interceptor::qos_overwrite::QosOverwriteRule`) is not.
+/// The compile is `interceptor::document::qos_overwrite_rules`.
+///
+/// A list that upstream types `NEVec` is `Some(non-empty)` or `None` here: an empty list in the
+/// document is refused when it is read, so no value of this type holds one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QosNetworkItemConf {
+    /// Optional operator label. Upstream refuses two items with one id when it builds the
+    /// interceptors (`Invalid Qos Overwrite config: id '..' is repeated`); the API layer that
+    /// opens a session makes that check, as it does for the other interceptor lists.
+    pub id: Option<String>,
+    /// The peers the item governs.
+    pub zids: Option<Vec<Zid>>,
+    /// The NIC names the item governs.
+    pub interfaces: Option<Vec<String>>,
+    /// The link protocols the item governs.
+    pub link_protocols: Option<Vec<InterceptorLink>>,
+    /// The message kinds the item governs; never empty.
+    pub messages: Vec<String>,
+    /// The key expressions the item governs, or every key.
+    pub key_exprs: Option<Vec<String>>,
+    /// What the item sets.
+    pub overwrite: QosNetworkOverwrite,
+    /// The flows the item applies on, or both.
+    pub flows: Option<Vec<String>>,
+    /// The QoS a message must carry to be selected.
+    pub qos: Option<QosNetworkFilter>,
+    /// The inclusive payload-size range selected, as `(start, end)` with either bound left out.
+    pub payload_size: Option<(Option<u64>, Option<u64>)>,
+}
+
+/// `"a..b"`, `"a.."`, `"..b"` or `".."`: an inclusive range of sizes whose bounds may each be
+/// left out. Upstream's `ConfRange` reads it the same way, and refuses a text without `..` and a
+/// bound that is not an unsigned integer.
+fn payload_range_of(text: &str) -> Option<(Option<u64>, Option<u64>)> {
+    let (start, end) = text.split_once("..")?;
+    let bound = |b: &str| -> Option<Option<u64>> {
+        if b.is_empty() {
+            Some(None)
+        } else {
+            b.parse::<u64>().ok().map(Some)
+        }
+    };
+    Some((bound(start)?, bound(end)?))
+}
+
+/// The literal `value` spells in `table`, or `None`.
+fn literal_in<T: Copy>(value: &Json5Value, table: &[(&str, T)]) -> Option<T> {
+    let Json5Value::String(text) = value else {
+        return None;
+    };
+    table.iter().find(|(name, _)| name == text).map(|(_, v)| *v)
+}
+
+/// `qos/network` as a list of [`QosNetworkItemConf`].
+fn qos_network_items_of(
+    value: &Json5Value,
+    path: &'static str,
+) -> Result<Vec<QosNetworkItemConf>, ConfigIngestError> {
+    const SHAPE: &str = "a list of { messages: [put|delete|query], \
+                         overwrite: { priority?: <name>|<-7..7>, congestion_control?: \
+                         drop|block|block_first, express?: bool }, id?, zids?, interfaces?, \
+                         link_protocols?, key_exprs?, flows?, qos?: { priority?, \
+                         congestion_control?, express?, reliability? }, payload_size?: \"a..b\" }";
+    let bad = || ConfigIngestError::WrongType {
+        path,
+        expected: SHAPE,
+    };
+    // An optional list that upstream types `NEVec`: absent is `None`, present and empty is refused.
+    let non_empty = |field: &Json5Value| -> Result<Vec<String>, ConfigIngestError> {
+        let list = string_list_of(field, path, SHAPE)?;
+        if list.is_empty() {
+            return Err(bad());
+        }
+        Ok(list)
+    };
+    let Json5Value::Array(items) = value else {
+        return Err(bad());
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let Json5Value::Object(fields) = item else {
+            return Err(bad());
+        };
+        let mut conf = QosNetworkItemConf {
+            id: None,
+            zids: None,
+            interfaces: None,
+            link_protocols: None,
+            messages: Vec::new(),
+            key_exprs: None,
+            overwrite: QosNetworkOverwrite::default(),
+            flows: None,
+            qos: None,
+            payload_size: None,
+        };
+        let mut saw_overwrite = false;
+        for (key, field) in fields {
+            match key.as_str() {
+                "id" => {
+                    let Json5Value::String(text) = field else {
+                        return Err(bad());
+                    };
+                    conf.id = Some(text.clone());
+                }
+                "zids" => {
+                    let mut zids = Vec::new();
+                    for text in non_empty(field)? {
+                        let bytes = zenoh_hex_to_zid(&text).ok_or_else(|| {
+                            ConfigIngestError::MalformedZid {
+                                path,
+                                value: text.clone(),
+                            }
+                        })?;
+                        zids.push(Zid::from_slice(&bytes));
+                    }
+                    conf.zids = Some(zids);
+                }
+                "interfaces" => conf.interfaces = Some(non_empty(field)?),
+                "link_protocols" => {
+                    conf.link_protocols = Some(
+                        non_empty(field)?
+                            .iter()
+                            .map(|n| InterceptorLink::from_upstream_str(n))
+                            .collect::<Option<Vec<_>>>()
+                            .ok_or_else(bad)?,
+                    );
+                }
+                "messages" => {
+                    let kinds = enum_list_of(field, path, SHAPE, QOS_OVERWRITE_MESSAGE_LITERALS)?;
+                    if kinds.is_empty() {
+                        return Err(bad());
+                    }
+                    conf.messages = kinds;
+                }
+                "key_exprs" => conf.key_exprs = Some(non_empty(field)?),
+                "flows" => {
+                    let flows = enum_list_of(field, path, SHAPE, INTERCEPTOR_FLOW_LITERALS)?;
+                    if flows.is_empty() {
+                        return Err(bad());
+                    }
+                    conf.flows = Some(flows);
+                }
+                // `QosOverwrites` and `QosFilter` carry no `deny_unknown_fields` upstream, so a
+                // field they do not know is ignored there and is here; only the item itself
+                // refuses one (the catch-all below).
+                "overwrite" => {
+                    let Json5Value::Object(set) = field else {
+                        return Err(bad());
+                    };
+                    for (name, setting) in set {
+                        match name.as_str() {
+                            "priority" => {
+                                conf.overwrite.priority = Some(match setting {
+                                    Json5Value::String(_) => QosNetworkPriority::Band(
+                                        literal_in(setting, QOS_PRIORITY_LITERALS)
+                                            .ok_or_else(bad)?,
+                                    ),
+                                    Json5Value::Number(text) => {
+                                        let by: i64 = text.parse().map_err(|_| bad())?;
+                                        if !(-7..=7).contains(&by) {
+                                            return Err(bad());
+                                        }
+                                        QosNetworkPriority::Shift(by as i8)
+                                    }
+                                    _ => return Err(bad()),
+                                });
+                            }
+                            "congestion_control" => {
+                                conf.overwrite.congestion_control = Some(
+                                    literal_in(setting, QOS_CONGESTION_LITERALS).ok_or_else(bad)?,
+                                );
+                            }
+                            "express" => {
+                                let Json5Value::Bool(express) = setting else {
+                                    return Err(bad());
+                                };
+                                conf.overwrite.express = Some(*express);
+                            }
+                            _ => {}
+                        }
+                    }
+                    saw_overwrite = true;
+                }
+                "qos" => {
+                    let Json5Value::Object(set) = field else {
+                        return Err(bad());
+                    };
+                    let mut filter = QosNetworkFilter::default();
+                    for (name, setting) in set {
+                        match name.as_str() {
+                            "priority" => {
+                                filter.priority = Some(
+                                    literal_in(setting, QOS_PRIORITY_LITERALS).ok_or_else(bad)?,
+                                );
+                            }
+                            "congestion_control" => {
+                                filter.congestion_control = Some(
+                                    literal_in(setting, QOS_CONGESTION_LITERALS).ok_or_else(bad)?,
+                                );
+                            }
+                            "express" => {
+                                let Json5Value::Bool(express) = setting else {
+                                    return Err(bad());
+                                };
+                                filter.express = Some(*express);
+                            }
+                            "reliability" => {
+                                filter.reliable = Some(
+                                    literal_in(
+                                        setting,
+                                        &[("best_effort", false), ("reliable", true)],
+                                    )
+                                    .ok_or_else(bad)?,
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                    conf.qos = Some(filter);
+                }
+                "payload_size" => {
+                    let Json5Value::String(text) = field else {
+                        return Err(bad());
+                    };
+                    conf.payload_size = Some(payload_range_of(text).ok_or_else(bad)?);
+                }
+                // The item carries `deny_unknown_fields` upstream.
+                _ => return Err(bad()),
+            }
+        }
+        // `messages` is a required `NEVec` and `overwrite` a required member.
+        if conf.messages.is_empty() || !saw_overwrite {
+            return Err(bad());
+        }
+        out.push(conf);
+    }
+    Ok(out)
+}
+
 /// R2633 — `routing/router/linkstate/transport_weights`: a LIST of
 /// `{ dst_zid, weight }` rows.
 ///
@@ -6996,6 +7315,13 @@ impl ZenohNodeConfig {
         if let Some(value) = honoured(&doc, "downsampling") {
             out.downsampling = downsampling_items_of(value, "downsampling")?;
             named.push("downsampling");
+        }
+        // `qos/network`, the third list of the interceptor keys, and an empty list is NAMED for
+        // the reason its siblings' are: the schema default is the empty list, so "no rule" and
+        // "said nothing" are one instruction.
+        if let Some(value) = honoured(&doc, "qos/network") {
+            out.qos_network = qos_network_items_of(value, "qos/network")?;
+            named.push("qos/network");
         }
         // R2652 — the five `access_control/*` keys. Read INDIVIDUALLY, because
         // each is its own honoured key and a document may name any subset; they
@@ -8432,6 +8758,13 @@ mod tests {
                 r#"{ "downsampling": [ { "messages": ["put"],
                      "rules": [ { "key_expr": "demo/**", "freq": 0.5 } ] } ] }"#,
             ),
+            // `qos/network`, in the position `HONOURED_CONFIG_KEYS` lists it, with a rule that is
+            // not the empty list so the ingest has to MOVE.
+            (
+                "qos/network",
+                r#"{ "qos": { "network": [ { "messages": ["put"],
+                     "overwrite": { "priority": "real_time" } } ] } }"#,
+            ),
             // R2652 — the five `access_control/*` keys, each driven off a value
             // its own slice does not default to, and in the ALPHABETICAL order
             // `HONOURED_CONFIG_KEYS` lists them: this table's rows are compared
@@ -9248,6 +9581,150 @@ mod tests {
                 "a flow outside the two directions",
                 r#"{ low_pass_filter: [ { messages: ["put"], key_exprs: ["x"],
                      size_limit: 1, flows: ["sideways"] } ] }"#,
+            ),
+        ] {
+            assert!(
+                ZenohNodeConfig::from_json5(doc).is_err(),
+                "the reader must refuse {why}"
+            );
+        }
+    }
+
+    /// `qos/network`, held to the boundary its siblings are: it reads what upstream reads and
+    /// turns away what upstream turns away. The refusals are the claim; an accept-only test
+    /// would pass a reader that took anything.
+    ///
+    /// The vocabulary is the sharp part. A `reply` is a `DataMessage` and not a
+    /// `QosOverwriteMessage`, so a reader that reused the other interceptors' four kinds would
+    /// accept an item a real zenohd refuses; a priority is a name or a number within `-7..=7`,
+    /// and `control` is not one of the names.
+    #[test]
+    fn the_qos_network_reader_refuses_exactly_what_upstream_refuses() {
+        let ok = ZenohNodeConfig::from_json5(
+            r#"{ qos: { network: [ { id: "q1", zids: ["38a4829bce9166ee"], interfaces: ["lo"],
+                 link_protocols: ["tcp"], flows: ["ingress"], messages: ["put", "query"],
+                 key_exprs: ["demo/**"],
+                 overwrite: { priority: "real_time", congestion_control: "block", express: true },
+                 qos: { priority: "data", congestion_control: "drop", express: false,
+                        reliability: "best_effort" },
+                 payload_size: "1..1000" },
+                 { messages: ["delete"], overwrite: { priority: -3 } } ] } }"#,
+        )
+        .expect("the shape a real zenohd starts on is accepted");
+        assert_eq!(ok.config.qos_network.len(), 2);
+        let first = &ok.config.qos_network[0];
+        assert_eq!(first.id.as_deref(), Some("q1"));
+        assert_eq!(first.messages, vec!["put", "query"]);
+        assert_eq!(first.payload_size, Some((Some(1), Some(1000))));
+        assert_eq!(
+            first.overwrite.priority,
+            Some(QosNetworkPriority::Band(Priority::RealTime))
+        );
+        assert_eq!(
+            first.qos.map(|f| f.reliable),
+            Some(Some(false)),
+            "best_effort is the unreliable frame"
+        );
+        assert_eq!(
+            ok.config.qos_network[1].overwrite.priority,
+            Some(QosNetworkPriority::Shift(-3))
+        );
+        assert!(
+            ok.named.contains(&"qos/network"),
+            "a document that states the key must report it NAMED"
+        );
+        let open_ended = ZenohNodeConfig::from_json5(
+            r#"{ qos: { network: [ { messages: ["put"], overwrite: { express: true },
+                 payload_size: "1000000.." } ] } }"#,
+        )
+        .expect("a range with one bound left out is accepted");
+        assert_eq!(
+            open_ended.config.qos_network[0].payload_size,
+            Some((Some(1_000_000), None))
+        );
+
+        for (why, doc) in [
+            (
+                "a reply, which is a DataMessage and not a QosOverwriteMessage",
+                r#"{ qos: { network: [ { messages: ["reply"], overwrite: { express: true } } ] } }"#,
+            ),
+            (
+                "an EMPTY messages list, which is a NEVec upstream",
+                r#"{ qos: { network: [ { messages: [], overwrite: { express: true } } ] } }"#,
+            ),
+            (
+                "a missing messages list",
+                r#"{ qos: { network: [ { overwrite: { express: true } } ] } }"#,
+            ),
+            (
+                "a missing overwrite",
+                r#"{ qos: { network: [ { messages: ["put"] } ] } }"#,
+            ),
+            (
+                "a field upstream's deny_unknown_fields refuses",
+                r#"{ qos: { network: [ { messages: ["put"], overwrite: {}, nope: 1 } ] } }"#,
+            ),
+            (
+                "a flow outside the two directions",
+                r#"{ qos: { network: [ { messages: ["put"], overwrite: {}, flows: ["down"] } ] } }"#,
+            ),
+            (
+                "an EMPTY flows list",
+                r#"{ qos: { network: [ { messages: ["put"], overwrite: {}, flows: [] } ] } }"#,
+            ),
+            (
+                "an EMPTY interfaces list",
+                r#"{ qos: { network: [ { messages: ["put"], overwrite: {}, interfaces: [] } ] } }"#,
+            ),
+            (
+                "an EMPTY zids list",
+                r#"{ qos: { network: [ { messages: ["put"], overwrite: {}, zids: [] } ] } }"#,
+            ),
+            (
+                "a zid that is not hexadecimal",
+                r#"{ qos: { network: [ { messages: ["put"], overwrite: {}, zids: ["zz"] } ] } }"#,
+            ),
+            (
+                "a link protocol outside the vocabulary",
+                r#"{ qos: { network: [ { messages: ["put"], overwrite: {},
+                     link_protocols: ["carrier-pigeon"] } ] } }"#,
+            ),
+            (
+                "the control priority, which is not a name",
+                r#"{ qos: { network: [ { messages: ["put"],
+                     overwrite: { priority: "control" } } ] } }"#,
+            ),
+            (
+                "an increment above seven",
+                r#"{ qos: { network: [ { messages: ["put"], overwrite: { priority: 8 } } ] } }"#,
+            ),
+            (
+                "an increment below minus seven",
+                r#"{ qos: { network: [ { messages: ["put"], overwrite: { priority: -8 } } ] } }"#,
+            ),
+            (
+                "a fractional increment",
+                r#"{ qos: { network: [ { messages: ["put"], overwrite: { priority: 1.5 } } ] } }"#,
+            ),
+            (
+                "a congestion control outside the vocabulary",
+                r#"{ qos: { network: [ { messages: ["put"],
+                     overwrite: { congestion_control: "maybe" } } ] } }"#,
+            ),
+            (
+                "a reliability outside the vocabulary",
+                r#"{ qos: { network: [ { messages: ["put"], overwrite: {},
+                     qos: { reliability: "sometimes" } } ] } }"#,
+            ),
+            (
+                "a payload range without the two dots",
+                r#"{ qos: { network: [ { messages: ["put"], overwrite: {},
+                     payload_size: "10" } ] } }"#,
+            ),
+            (
+                "a payload range bound that is not a number",
+                r#"{ qos: { network: [ { messages: ["put"], overwrite: {},
+                     payload_size: "a..b" } ] } }"#,
             ),
         ] {
             assert!(

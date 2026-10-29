@@ -330,8 +330,9 @@ pub(crate) fn charge_interceptor_drop(
     let reason = match kind {
         InterceptorKind::Downsampling => StatDrop::Downsampling,
         InterceptorKind::LowPass => StatDrop::LowPass,
-        // No upstream counter; see this function's docs.
-        InterceptorKind::AccessControl => return,
+        // No upstream counter; see this function's docs. The QoS overwrite drops nothing, so
+        // no verdict names it; it is here because the match is exhaustive.
+        InterceptorKind::AccessControl | InterceptorKind::QosOverwrite => return,
     };
     // The peer's alias space is not reachable from here either (the face table
     // holds it, but a dropped message's SPACE moves no counter this function
