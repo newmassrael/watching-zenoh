@@ -601,6 +601,15 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
         "queries_default_timeout",
         "routing/interests/timeout",
         "scouting/timeout",
+        // Item 751 (step 7d-2) — MEASURED on zenohd 1.10.1 (the pinned oracle) with this leg's
+        // silent census file: `"gateway":{"south":null}`, and its debug print of the loaded
+        // config says `gateway: GatewayConf { south: None }`. The pinned `DEFAULT_CONFIG.json5`
+        // does state `south: "auto"`, but that file documents the default and is not what a
+        // zenohd with a file loads under it: the preset is applied where the key is read. So the
+        // tree has no value to compare, as for the keys above. What wz does with the same
+        // silence is asserted below, where the claims are, as the preset the reader's writer
+        // spells.
+        "gateway/south",
         // R2958 (open-debt item 840) — MEASURED on zenohd 1.10.0 with this
         // leg's silent census file: `"scouting":{"delay":null,…}` and
         // `"open":{"return_conditions":{"connect_scouted":null,…}}`. Both are
@@ -803,12 +812,6 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
             "access_control/default_permission",
             quoted(&wz.access_control.default_permission),
         ),
-        // Item 751 (step 7d-2) — the preset, which the pinned
-        // `DEFAULT_CONFIG.json5` states (`south: "auto"`), so a silent file
-        // resolves to it and the tree answers. Rendered by the reader's own
-        // writer for the reason the row above is: a string literal in the value
-        // position is read by `config_key_fixture_gate.py` as a second key.
-        ("gateway/south", gateway_south_json(&wz.gateway_south)),
         ("transport/unicast/max_links", wz.max_links.to_string()),
         (
             "transport/unicast/max_sessions",
@@ -902,6 +905,13 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
     assert!(
         wz.router_transport_weights.is_empty(),
         "the fixture states no transport weights"
+    );
+    // The key the tree cannot answer (`THE_TREE_ANSWERS_NULL`): a silent file leaves wz on the
+    // `auto` preset, the one the pinned `DEFAULT_CONFIG.json5` documents.
+    assert_eq!(
+        gateway_south_json(&wz.gateway_south),
+        "\"auto\"",
+        "a file that never mentions gateway/south leaves the node on the auto preset"
     );
 
     for (path, wz_says) in &claims {
