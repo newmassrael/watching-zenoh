@@ -18,32 +18,50 @@
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
+// The three imports below serve the frame writers, which a build has when it has a heap or a
+// link kind to send over for a message kind (the gate of [`frame_flags`], [`begin_frame`] and
+// [`encode_frame_envelope_into`]).
 #[cfg(any(
     feature = "alloc",
-    feature = "codec-push",
-    feature = "codec-request",
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "codec-declare",
+    all(
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "codec-declare",
+        ),
+        any(feature = "session-unicast", feature = "session-multicast")
+    )
 ))]
 use sce_forge_runtime::codec::{CodecError, SceSink};
 #[cfg(any(
     feature = "alloc",
-    feature = "codec-push",
-    feature = "codec-request",
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "codec-declare",
+    all(
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "codec-declare",
+        ),
+        any(feature = "session-unicast", feature = "session-multicast")
+    )
 ))]
 use wz_codecs::wire_const;
 
 #[cfg(any(
     feature = "alloc",
-    feature = "codec-push",
-    feature = "codec-request",
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "codec-declare",
+    all(
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "codec-declare",
+        ),
+        any(feature = "session-unicast", feature = "session-multicast")
+    )
 ))]
 use crate::qos::Priority;
 // `TxBuf` is needed for the method calls only when `EncodeBuf` is a concrete
@@ -89,13 +107,21 @@ use wz_codecs::response_final::ResponseFinalOwned;
 /// (0x80, Frame-level transport extensions) is never set — the MVP data
 /// path has no Frame-level ext chain (see `ExtChainRole` for the
 /// handshake chains).
+// The union of its callers: the heap encoders of this module (`alloc`), and the unicast and
+// multicast transmit paths for a message kind this build has. A build with neither link kind and
+// no heap writes no frame, so the function is not compiled into it.
 #[cfg(any(
     feature = "alloc",
-    feature = "codec-push",
-    feature = "codec-request",
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "codec-declare",
+    all(
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "codec-declare",
+        ),
+        any(feature = "session-unicast", feature = "session-multicast")
+    )
 ))]
 pub(crate) fn frame_flags(reliable: bool) -> u8 {
     if reliable {
@@ -175,13 +201,19 @@ fn write_qos_ext(
 /// The destination is any [`TxBuf`]: a heap `Vec` never refuses, a fixed buffer
 /// (a pool slot's storage) returns [`CodecError::BufferOverflow`] if even the
 /// prefix, at most 13 bytes, does not fit.
+// The union of its callers: see [`frame_flags`].
 #[cfg(any(
     feature = "alloc",
-    feature = "codec-push",
-    feature = "codec-request",
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "codec-declare",
+    all(
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "codec-declare",
+        ),
+        any(feature = "session-unicast", feature = "session-multicast")
+    )
 ))]
 pub(crate) fn begin_frame(
     buf: &mut EncodeBuf<'_>,
@@ -283,13 +315,19 @@ where
 /// not fit is an `Err(CodecError::BufferOverflow)` and not a panic; the bytes
 /// already written stay in the buffer, so the caller rolls back with
 /// [`TxBuf::truncate`] to the length it saw before the call.
+// The union of its callers: see [`frame_flags`].
 #[cfg(any(
     feature = "alloc",
-    feature = "codec-push",
-    feature = "codec-request",
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "codec-declare",
+    all(
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "codec-declare",
+        ),
+        any(feature = "session-unicast", feature = "session-multicast")
+    )
 ))]
 pub(crate) fn encode_frame_envelope_into<P>(
     buf: &mut EncodeBuf<'_>,

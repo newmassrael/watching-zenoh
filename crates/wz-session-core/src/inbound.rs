@@ -49,9 +49,23 @@ use crate::link::RxBytes;
 // `CodecError` is named only by the `Frame` arm, which is `codec-frame`'s.
 #[cfg(all(feature = "alloc", feature = "codec-frame"))]
 use sce_forge_runtime::codec::CodecError;
-// Named by the owned `Oam`/`Frame` decode (`alloc`) and by the frame-head readers
-// (`codec-frame`); a slot profile with neither has no cursor to name.
-#[cfg(any(feature = "alloc", feature = "codec-frame"))]
+// Named by the owned `Oam`/`Frame` decode (`alloc`), by the handshake arms, and by the
+// frame-head readers of the in-place receive path; a slot profile with none of them has no
+// cursor to name.
+#[cfg(any(
+    feature = "alloc",
+    feature = "codec-init-body",
+    feature = "codec-open-body",
+    feature = "codec-close",
+    all(
+        feature = "codec-frame",
+        feature = "storage-profile",
+        any(
+            feature = "session-unicast",
+            all(feature = "session-multicast", not(feature = "alloc"))
+        )
+    )
+))]
 use sce_forge_runtime::codec::SceCursor;
 // Named by the heap variants and by `judge`, which the handshake arms call.
 #[cfg(any(
@@ -63,14 +77,22 @@ use sce_forge_runtime::codec::SceCursor;
 ))]
 use wz_codecs::ext_entry::ExtEntryOwned;
 // The MID and flag constants: named by the heap `Oam` arm (`alloc`), by each
-// handshake arm of `ext_admission`, by `is_init_syn` and by the frame-head readers.
+// handshake arm of `ext_admission`, by `is_init_syn` and by the frame-head readers of the
+// in-place receive path.
 #[cfg(any(
     feature = "alloc",
     feature = "codec-init-body",
     feature = "codec-open-body",
     feature = "codec-close",
     feature = "codec-keep-alive",
-    feature = "codec-frame"
+    all(
+        feature = "codec-frame",
+        feature = "storage-profile",
+        any(
+            feature = "session-unicast",
+            all(feature = "session-multicast", not(feature = "alloc"))
+        )
+    )
 ))]
 use wz_codecs::wire_const;
 
@@ -566,7 +588,20 @@ fn ext_qos_priority(extensions: &[ExtEntryOwned]) -> crate::qos::Priority {
 /// Over [`ExtEntryView`](crate::ext_view::ExtEntryView) so the owned chain and
 /// one read where its message lies ([`InPlaceExtChain`]) answer by the same
 /// rule.
-#[cfg(feature = "codec-frame")]
+// The union of its callers: the owned walk (`alloc`) and the in-place receive path.
+#[cfg(all(
+    feature = "codec-frame",
+    any(
+        feature = "alloc",
+        all(
+            feature = "storage-profile",
+            any(
+                feature = "session-unicast",
+                all(feature = "session-multicast", not(feature = "alloc"))
+            )
+        )
+    )
+))]
 fn qos_priority_of_entry<E: crate::ext_view::ExtEntryView>(
     ext: &E,
 ) -> Option<crate::qos::Priority> {
@@ -804,7 +839,20 @@ pub fn parse_inbound_consuming_in_into(
 /// [`InboundFrame::Frame`] that are not the payload, with its own extension
 /// chain as `C`: the owned entries the decoded `Frame` reports, or the
 /// [`InPlaceExtChain`] a frame read where it lies keeps.
-#[cfg(feature = "codec-frame")]
+// Built by [`decode_frame_head`], so gated as it is.
+#[cfg(all(
+    feature = "codec-frame",
+    any(
+        feature = "alloc",
+        all(
+            feature = "storage-profile",
+            any(
+                feature = "session-unicast",
+                all(feature = "session-multicast", not(feature = "alloc"))
+            )
+        )
+    )
+))]
 #[derive(Debug)]
 pub(crate) struct FrameHead<C> {
     pub(crate) reliable: bool,
@@ -848,7 +896,20 @@ impl FrameHead<InPlaceExtChain> {
 /// The one decode of a frame's head, shared by [`parse_inbound_consuming_in`]'s
 /// `Frame` arm (owned chain; the payload taken as a range or a copy) and
 /// `parse_frame_in_place` (chain read in place; the payload left where it is).
-#[cfg(feature = "codec-frame")]
+// The union of those two callers.
+#[cfg(all(
+    feature = "codec-frame",
+    any(
+        feature = "alloc",
+        all(
+            feature = "storage-profile",
+            any(
+                feature = "session-unicast",
+                all(feature = "session-multicast", not(feature = "alloc"))
+            )
+        )
+    )
+))]
 fn decode_frame_head<C>(
     flags: u8,
     has_ext: bool,
