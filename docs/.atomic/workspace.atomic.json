@@ -300144,6 +300144,44 @@
         "None."
       ]
     },
+    "Round 3961": {
+      "decision_summary": "The board hooks (`deploy/zephyr-common/wz_board_hooks.c`) already answered one of the Arm EABI's zeroing calls (`__aeabi_memclr`) with the libc `memset`; this round answers the rest the images call: `__aeabi_memclr4`, `__aeabi_memclr8` and `__aeabi_memset8`, and `__aeabi_memset` and `__aeabi_memset4` with them (a variant that no image calls is not linked). The compiler runtime's copies were three loops of 174, 174 and 184 bytes that do what `memset` does; they are stubs of 8, 8 and 10 bytes now. The text of the three kit images falls 504 bytes each (144,220; 147,412; 162,924), the stack, the bound and the runs unmoved, every gate holding.\n\nIt is not a gain against zenoh-pico, and the first reading of it said it would be: the zenoh-pico compare image links the same board hooks and calls the same variants (GCC emits them for a cleared object), so its text fell by the same 504 bytes in the matrix of 12 boots (run 20261030T193533: 145,364 to 144,860). The fixed client's graded compare build reads 145,312 against 144,860, 1.0031, the ratio of the matrix before the change (145,816 against 145,364); flash 1.0024; stack_used 6,196 against 6,060 (1.0224) LOSS; ram, heap, stack_reserved and turnaround (0.1900 against 0.1984 ms, 0.9579, interval 0.9437 to 0.9697) WIN: four of seven, as before. Both images are 504 bytes smaller; the gap, about 450 bytes, is what it was. The reference figure of the next matrix is 144,860, not 145,364.",
+      "changes_bullets": [
+        "deploy/zephyr-common/wz_board_hooks.c: __aeabi_memclr4, __aeabi_memclr8, __aeabi_memset, __aeabi_memset4, __aeabi_memset8 call the libc memset.",
+        "deploy/text_budget.json: the text and owners of the three rows (144,220; 147,412; 162,924) and their reasons.",
+        "docs/text-ownership.md: the entry, with the pico image's fall stated."
+      ],
+      "verification_bullets": [
+        "On the kit lane (this tree): the fixed, batching and get images were built and run, each with the stack chain, the stack bound and the text gate holding at the new figures and the run inside its row of the resource budget; `nm` of the fixed image has the three runtime loops replaced by stubs of 8, 8 and 10 bytes. The matrix of 12 boots (run 20261030T193533): the reference image, the multi-thread pico image and the heap client were built as well, and the pico images fell 504 bytes with the wz ones (see the decision).",
+        "The static gates the pre-push hook defers: 121 run, none failed.",
+        "Not run: the tests of the crates, the hosted lanes."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The text of the answering client at this tree is 144,220 bytes on the kit-lane build; its graded compare build is 145,312 against the single-thread zenoh-pico image's 144,860 (1.0031, 452 bytes over; the pico image fell with it). The cells lost are text, flash (1.0024) and stack_used (6,196 against 6,060). What is left on the wz side: the text tail (the node's loop 3.9 KB, the pump task 2.4 KB, the connect manager 2.6 KB, lend_request, decide_unit_in) read by line first, and the frames of the dial path (reconcile 448, the loop 392, the binding's action 288, the manager's drive 264, dial_expecting 232) for the kit's peak, which has to fall about 137 bytes; the SCE side is the core's enter_states frame."
+      ],
+      "publishable_decision_summary": "The board hooks (`deploy/zephyr-common/wz_board_hooks.c`) already answered one of the Arm EABI's zeroing calls (`__aeabi_memclr`) with the libc `memset`; this round answers the rest the images call: `__aeabi_memclr4`, `__aeabi_memclr8` and `__aeabi_memset8`, and `__aeabi_memset` and `__aeabi_memset4` with them (a variant that no image calls is not linked). The compiler runtime's copies were three loops of 174, 174 and 184 bytes that do what `memset` does; they are stubs of 8, 8 and 10 bytes now. The text of the three kit images falls 504 bytes each (144,220; 147,412; 162,924), the stack, the bound and the runs unmoved, every gate holding.\n\nIt is not a gain against zenoh-pico, and the first reading of it said it would be: the zenoh-pico compare image links the same board hooks and calls the same variants (GCC emits them for a cleared object), so its text fell by the same 504 bytes in the matrix of 12 boots (run 20261030T193533: 145,364 to 144,860). The fixed client's graded compare build reads 145,312 against 144,860, 1.0031, the ratio of the matrix before the change (145,816 against 145,364); flash 1.0024; stack_used 6,196 against 6,060 (1.0224) LOSS; ram, heap, stack_reserved and turnaround (0.1900 against 0.1984 ms, 0.9579, interval 0.9437 to 0.9697) WIN: four of seven, as before. Both images are 504 bytes smaller; the gap, about 450 bytes, is what it was. The reference figure of the next matrix is 144,860, not 145,364.",
+      "publishable_changes_bullets": [
+        "deploy/zephyr-common/wz_board_hooks.c: __aeabi_memclr4, __aeabi_memclr8, __aeabi_memset, __aeabi_memset4, __aeabi_memset8 call the libc memset.",
+        "deploy/text_budget.json: the text and owners of the three rows (144,220; 147,412; 162,924) and their reasons.",
+        "docs/text-ownership.md: the entry, with the pico image's fall stated."
+      ],
+      "publishable_verification_bullets": [
+        "On the kit lane (this tree): the fixed, batching and get images were built and run, each with the stack chain, the stack bound and the text gate holding at the new figures and the run inside its row of the resource budget; `nm` of the fixed image has the three runtime loops replaced by stubs of 8, 8 and 10 bytes. The matrix of 12 boots (run 20261030T193533): the reference image, the multi-thread pico image and the heap client were built as well, and the pico images fell 504 bytes with the wz ones (see the decision).",
+        "The static gates the pre-push hook defers: 121 run, none failed.",
+        "Not run: the tests of the crates, the hosted lanes."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The text of the answering client at this tree is 144,220 bytes on the kit-lane build; its graded compare build is 145,312 against the single-thread zenoh-pico image's 144,860 (1.0031, 452 bytes over; the pico image fell with it). The cells lost are text, flash (1.0024) and stack_used (6,196 against 6,060). What is left on the wz side: the text tail (the node's loop 3.9 KB, the pump task 2.4 KB, the connect manager 2.6 KB, lend_request, decide_unit_in) read by line first, and the frames of the dial path (reconcile 448, the loop 392, the binding's action 288, the manager's drive 264, dial_expecting 232) for the kit's peak, which has to fall about 137 bytes; the SCE side is the core's enter_states frame."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
