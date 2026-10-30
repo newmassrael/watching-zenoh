@@ -1040,8 +1040,18 @@ declare -A BASELINE_MC_TEXT=(
     # 68716 / 68804, inside the band. The figures here are this host's; the next hosted read
     # corrects them if it differs by more than the usual spread. data is 4 and bss 270120 on both.
     # Old: 70172/70304.
-    ["thumbv7m-none-eabi"]=68712
-    ["thumbv7em-none-eabihf"]=68772
+    #
+    # 2026-10-30 -- thumbv7m 68712 -> 68952, thumbv7em-hf 68772 -> 69000, read by Layer Q on one
+    # build host (rustc 1.97.0 / gcc 13.2.1) on the tree of round 3932. The hosted runs read
+    # thumbv7em-hf 69036 from round 3908 (`078dd714a`) on and 69032 at `017e3c711`, +264 / +260,
+    # past the band, while this host read +228 on the same code: the hosted toolchain's usual
+    # +32 to +40 over this host is what took it out. The growth arrived with the code of
+    # 2026-10-28 and 2026-10-29 that every session build links (the resource snapshot's message
+    # spacing in each session, the received chain and the session bundle written in place) and
+    # is not attributed to one commit; it is code this image reaches, not a leak. data is 4 and
+    # bss 270120 on both. Old: 68712/68772.
+    ["thumbv7m-none-eabi"]=68952
+    ["thumbv7em-none-eabihf"]=69000
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck
