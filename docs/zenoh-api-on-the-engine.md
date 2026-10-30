@@ -865,10 +865,15 @@ Each lands whole with its surface lines, tests and faults in one round.
   shared-memory one (`Session::enable_shm`; the stamp is made once, because a group negotiates
   nothing a reconnect could lower) is sent ONE descriptor for every member
   (`publish_shm_on_group`). The promotion is made by this crate before the engine, not at the
-  link, and per session and not per peer. **Owed:** a query value and a reply in shared memory
-  (and the `query` and `reply` lists of the optimisation), the extension of a group's Join that
-  announces shared memory, a differential of a `ZShm` over a link and a group to an upstream
-  node, and a unit test of a group's descriptor in the engine (the upstream file is its test).
+  link, and per session and not per peer. **Not a gap:** the extension of a group's Join that
+  would announce shared memory (upstream builds its Join with `ext_shm: None`,
+  `io/zenoh-transport/src/multicast/link.rs` @ `ext_shm: None,`, and reads a member's as
+  `join.ext_shm.is_some()` only for the report of its transports; the descriptor of a group is
+  read by any member that holds a reader, announced or not), so a Join that announced it would
+  differ from upstream's. **Owed:** a query value and a reply in shared memory (and the `query`
+  and `reply` lists of the optimisation), a differential of a `ZShm` over a link and a group to
+  an upstream node, and a unit test of a group's descriptor in the engine (the upstream file is
+  its test).
 - **Z8. The graph.** Upstream's tests and examples and `zenoh-ext` built and run against the
   patched graph, on Linux and on Windows. A test that cannot pass is a recorded difference with its
   reason, never a deleted test.
