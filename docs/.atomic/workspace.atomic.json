@@ -301002,6 +301002,36 @@
         "E17 stats golden differs on hosted only (cause unread, the diff now prints), Z8 shm ENOMEM and hang (the runner facts now print), C1cn two unclaimed zenoh-protocol endpoint tests whose names are no longer in the tree."
       ]
     },
+    "Round 3985": {
+      "decision_summary": "The reason of the atom session-close-ingress is brought up to date. It stopped at Round 3613, while the nodes held by zid in the connect manager, the open verb on the fixed-memory images, the lifecycle-transport axis and step 8 (every verb behind one function, in band and out of band on the fixed node) landed after it, so the grade read as if residuals (6), (7) and the verbs of (5) were open. The residuals were counted against the code and the design note: (1) to (5) and (7) are built, and three things remain: the Hello source of the locator directory on the fixed-memory profile, a witness on a built image of an open by zid, and a Zephyr image that binds the verbs with a decision of who may use them. The atom stays PARTIAL for those, the count of remaining work stays 2, and nothing is regraded. The text also records the legs run for this (26, 10 and 4 passed) and one case no lane runs: a hold by zid over a verified secure channel, then a close and a reset.",
+      "changes_bullets": [
+        "The inventory entry session-close-ingress: one paragraph appended to its reason through set_inventory_status; status, source and section reference unchanged."
+      ],
+      "verification_bullets": [
+        "After the mutation, validate-workspace reports 14 T1 orphans, none new; the catalog audit passes with REMAINING WORK still 2 (api-compat-rust, session-close-ingress); the store reason citation gate and the upstream citation anchor gate pass. The paragraph cites no file or upstream line, so no pin moved. The claims in it were checked against the design note and the code, and the three lifecycle legs it mentions were run on a build host with a room for two peers."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "An image that takes declared peers when it starts would let a test hold a peer by zid over a verified secure channel and then close and reset it; no lane runs that case today. Read the hosted run of the current tree: the Layer Z legs ran on a built zenohd only in the last rounds."
+      ],
+      "publishable_decision_summary": "The reason of the atom session-close-ingress is brought up to date. It stopped at Round 3613, while the nodes held by zid in the connect manager, the open verb on the fixed-memory images, the lifecycle-transport axis and step 8 (every verb behind one function, in band and out of band on the fixed node) landed after it, so the grade read as if residuals (6), (7) and the verbs of (5) were open. The residuals were counted against the code and the design note: (1) to (5) and (7) are built, and three things remain: the Hello source of the locator directory on the fixed-memory profile, a witness on a built image of an open by zid, and a Zephyr image that binds the verbs with a decision of who may use them. The atom stays PARTIAL for those, the count of remaining work stays 2, and nothing is regraded. The text also records the legs run for this (26, 10 and 4 passed) and one case no lane runs: a hold by zid over a verified secure channel, then a close and a reset.",
+      "publishable_changes_bullets": [
+        "The inventory entry session-close-ingress: one paragraph appended to its reason through set_inventory_status; status, source and section reference unchanged."
+      ],
+      "publishable_verification_bullets": [
+        "After the mutation, validate-workspace reports 14 T1 orphans, none new; the catalog audit passes with REMAINING WORK still 2 (api-compat-rust, session-close-ingress); the store reason citation gate and the upstream citation anchor gate pass. The paragraph cites no file or upstream line, so no pin moved. The claims in it were checked against the design note and the code, and the three lifecycle legs it mentions were run on a build host with a room for two peers."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "An image that takes declared peers when it starts would let a test hold a peer by zid over a verified secure channel and then close and reset it; no lane runs that case today. Read the hosted run of the current tree: the Layer Z legs ran on a built zenohd only in the last rounds."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
