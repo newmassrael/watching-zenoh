@@ -300044,6 +300044,34 @@
         "Owed: the tracing-span seam for upstream's regions tests, the move of the pin to 1.10.2, and the client node role for regions scenario 1; each needs the owner's call. The remaining regions timeouts and the duplicate samples of scenario 7 are held by the other session."
       ]
     },
+    "Round 3958": {
+      "decision_summary": "Hosted run 41008974420 (head c7f635944) was read per job and each red was re-measured at the tip. Already repaired by others at the tip: the gate-provenance header of image_top_report.py, the pico-client-udp budget. Paid here: shellcheck on the Z8 lane directive, the zenoh-c ABI pin 7 to 8, nine cooperative text budgets to the hosted reading (not attributed to one commit), eight Result unwraps in two lwip slot test files, the zenoh crate under --no-default-features, one private doc link in capi-core, five guard counts (C1AM 51, C1y 19, C1q 13, C1m 58, C1co per door), and three lanes peeled from the NEG job at 97% of its budget.",
+      "changes_bullets": [
+        "run-ci.sh, abi_stamp_gate.py, capability_cost_gate.py, ci.yml; lwip tests, wz-zenoh callback.rs and session.rs imports, capi-core drive.rs doc link."
+      ],
+      "verification_bullets": [
+        "On pc2: clippy of zenoh passes with and without default features, wz-session-lwip tests compile with and without rx-in-place, and the four count commands print 51, 58, 19 and 13. shellcheck, actionlint and the workflow-reading gates pass. Hosted lanes judge the rest."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Layer Z8 reds are not paid: session expected pass measured fail (Elapsed), shm timed out, routing three_node_combination ignored; they are the api-compat session's rows. The nine coop text budgets follow the reading, attribution to a commit is open. C1cn shard 0 and validate+verify+test logs were gone."
+      ],
+      "publishable_decision_summary": "Hosted run 41008974420 (head c7f635944) was read per job and each red was re-measured at the tip. Already repaired by others at the tip: the gate-provenance header of image_top_report.py, the pico-client-udp budget. Paid here: shellcheck on the Z8 lane directive, the zenoh-c ABI pin 7 to 8, nine cooperative text budgets to the hosted reading (not attributed to one commit), eight Result unwraps in two lwip slot test files, the zenoh crate under --no-default-features, one private doc link in capi-core, five guard counts (C1AM 51, C1y 19, C1q 13, C1m 58, C1co per door), and three lanes peeled from the NEG job at 97% of its budget.",
+      "publishable_changes_bullets": [
+        "run-ci.sh, abi_stamp_gate.py, capability_cost_gate.py, ci.yml; lwip tests, wz-zenoh callback.rs and session.rs imports, capi-core drive.rs doc link."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2: clippy of zenoh passes with and without default features, wz-session-lwip tests compile with and without rx-in-place, and the four count commands print 51, 58, 19 and 13. shellcheck, actionlint and the workflow-reading gates pass. Hosted lanes judge the rest."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Layer Z8 reds are not paid: session expected pass measured fail (Elapsed), shm timed out, routing three_node_combination ignored; they are the api-compat session's rows. The nine coop text budgets follow the reading, attribution to a commit is open. C1cn shard 0 and validate+verify+test logs were gone."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
