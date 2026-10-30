@@ -3632,13 +3632,31 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `at` is valid for writes of the chain's mutex and holds no live value.
     #[inline(never)]
     unsafe fn init_ext_chain(at: *mut R::Mutex<ExtChainBuf>, patch: bool) {
-        // SAFETY: the caller's contract.
-        unsafe { at.write(R::new_mutex(ExtChainBuf::default())) };
-        if patch {
-            // SAFETY: written just above.
-            R::with_mutex_mut(unsafe { &*at }, |chain| {
-                chain.push(default_init_patch_ext_entry());
-            });
+        // The growable chain holds exactly what it starts with: a push onto an empty `Vec`
+        // reserves room for four entries, and the two Init chains of the slim heap profile's
+        // acceptor then took a few hundred bytes more of its 4 KB heap than they need, which
+        // ran it out mid-handshake (Layer Q's microbit leg, from `47d33579d`). Built by value,
+        // as it is three words on the stack.
+        #[cfg(not(feature = "session-slot"))]
+        {
+            let chain = if patch {
+                alloc::vec![default_init_patch_ext_entry()]
+            } else {
+                ExtChainBuf::new()
+            };
+            // SAFETY: the caller's contract.
+            unsafe { at.write(R::new_mutex(chain)) };
+        }
+        #[cfg(feature = "session-slot")]
+        {
+            // SAFETY: the caller's contract.
+            unsafe { at.write(R::new_mutex(ExtChainBuf::default())) };
+            if patch {
+                // SAFETY: written just above.
+                R::with_mutex_mut(unsafe { &*at }, |chain| {
+                    chain.push(default_init_patch_ext_entry());
+                });
+            }
         }
     }
 
