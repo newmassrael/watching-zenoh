@@ -620,7 +620,8 @@ pub struct OpenPlan {
     pub namespace: Option<String>,
     /// How the node keeps its south apart: the subregions of `gateway/south`, or the preset that
     /// places a remote by its role alone. Carried out by a node that forwards between its faces
-    /// ([`OpenArguments::run_node`]); the registry of faces has no south to partition.
+    /// (`OpenArguments::run_node`, which the `router-node` build has); the registry of faces has
+    /// no south to partition.
     pub gateway_south: SouthPartition,
     /// The certificate material for the `tls/` and `quic/` links.
     pub tls: CapiTlsConfig,

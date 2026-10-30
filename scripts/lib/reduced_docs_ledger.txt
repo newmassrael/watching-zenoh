@@ -418,8 +418,6 @@ wz-session-core	wz-session-core/src/lease.rs	1	error: unresolved link to `crate:
 wz-session-core	wz-session-core/src/lib.rs	1	error: unresolved link to `reassembly_slot`: no item named `reassembly_slot` in scope
 wz-session-core	wz-session-core/src/lib.rs	1	error: unresolved link to `session_fsm_unicast`: no item named `session_fsm_unicast` in scope
 wz-session-core	wz-session-core/src/lib.rs	1	refused: wz-session-core: `session-close-ingress` (the session lifecycle verbs) needs `secure-channel`, a link that proves its peer's key inside a protected channel (decision D2 of docs/session-lifecycle-intent.md). On AP enable `transport-link-tls` or `transport-link-quic`; the fixed-memory profile has no such channel yet.
-wz-session-core	wz-session-core/src/lifecycle_contract.rs	3	error: redundant explicit link target: explicit target is redundant
-wz-session-core	wz-session-core/src/lifecycle_node.rs	3	error: redundant explicit link target: explicit target is redundant
 wz-session-core	wz-session-core/src/lifecycle_wire.rs	1	error: unresolved link to `crate::peer_connection::PeerConnectionState::in_intent`: no item named `peer_connection` in module `wz_session_core`
 wz-session-core	wz-session-core/src/lifecycle_wire.rs	1	error: unresolved link to `crate::peer_table::StateWords`: no item named `peer_table` in module `wz_session_core`
 wz-session-core	wz-session-core/src/link.rs	1	error: unresolved link to `Self::ActionsHandle`: the trait `SessionRuntime` has no associated item named `ActionsHandle`
