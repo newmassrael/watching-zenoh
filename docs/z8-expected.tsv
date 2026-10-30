@@ -27,7 +27,7 @@ qos	pass	2	yes	all of it
 qos_overwrite	pass	10	yes	all of it
 queryable	pass	3	yes	all of it
 regions	fail	10	no	needs the client node and the group peer as nodes, and counts the steps of upstream's routing by tracing span; each failing test waits out a minute, so a person runs it
-routing	fail	5	yes	gossip_regression_1 and _2 (the linkstate reply of a peer node carries a peer two links away); three_node_combination loses a query about one run in four
+routing	fail	5	yes	gossip_regression_1 and _2 (the linkstate reply of a peer node carries a peer two links away); three_node_combination loses one recipe of its publishers and subscribers in about one run in four, a different one each time (the queries it lost are ended with their face since round 3935)
 scouting	pass	3	yes	all of it
 session	pass	5	yes	all of it
 shm	pass	10	yes	all of it
