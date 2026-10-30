@@ -300222,6 +300222,40 @@
         "The cells the matrix loses are text (145,312 against 144,860, 1.0031), flash (1.0024) and stack_used (6,196 against 6,060, 1.0224); the kit's peak, 2,912, has to fall about 137 bytes for the last, and the SCE owner has nothing left in the entry walk, so it is the node's frames: the connect manager's `reconcile` (448 bytes, a key list and several closures in one frame), the loop (392) and the binding's action (288). Next: read the frame of `reconcile` by line, and find what sets the reading of the peak before cutting a frame that is not on it."
       ]
     },
+    "Round 3963": {
+      "decision_summary": "The network-namespace witnesses skipped on every build machine, which have no sudo, and the carry named that a limit of the host. It was the probe's mechanism: a namespace needs CAP_NET_ADMIN, and the build machines give it to bwrap through the AppArmor profile the facility oracle already stands on. MEASURED on a build machine: inside bwrap a namespace, a veth pair, addressing and a ping across it all work with no sudo. netns_priv (shell) and netns_privileged (Rust) now hold the privilege in one place, either sudo or the sandbox, and netns_topology_probe answers 3 for available only inside the sandbox. The sandbox gives itself a host's shape first, one multicast interface with a default route, which the scout fan-out leg needs as its premise. Lanes M, Z and C1cc wrap their namespace legs in scripts/lib/netns-sandbox.sh.",
+      "changes_bullets": [
+        "scripts/lib/netns-topology.sh: netns_priv, netns_sandbox_exec, netns_sandbox_probe, the sandbox's own default-route interface, probe answer 3, a selftest for both ways (its failure branch never ran before: rc was read after the if).",
+        "scripts/lib/netns-sandbox.sh: the prefix a lane puts before a witness that builds a namespace.",
+        "scripts/run-ci.sh: Layers M, Z and C1cc take answer 3 and run their namespace legs under the sandbox.",
+        "crates/wz-integration-tests: netns_privileged beside NetnsPair, used by its exec, its teardown and the carrier-loss leg."
+      ],
+      "verification_bullets": [
+        "On a build machine with no sudo: the selftest passes inside the sandbox, and Layer M passes with its namespace legs run and not skipped (the #join= leg across a namespace, the scout fan-out, the two carrier-loss legs, the ttl witnesses). The fan-out leg first failed on a premise the bare sandbox did not hold, no default route, and passes with the interface the sandbox now makes. The 121 static gates and the guarded-count gate pass. The Layer Z and C1cc call sites are the same pattern and were syntax-checked, not run to their legs: Layer Z stopped earlier at a rust-api-surface difference for zenoh-shm that is not in this change."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Layer Z on a build machine stops at rust-api-surface, which re-emits zenoh-shm with fn dec_ref_count that the committed surface lacks, and the upstream source of that function is private on both the local and the build machine checkouts; cause not found. The pico raweth scenario still skips for want of sudo, though the sandbox grants CAP_NET_RAW. The Layer Z and C1cc namespace legs have not been run through the sandbox."
+      ],
+      "publishable_decision_summary": "The network-namespace witnesses skipped on every build machine, which have no sudo, and the carry named that a limit of the host. It was the probe's mechanism: a namespace needs CAP_NET_ADMIN, and the build machines give it to bwrap through the AppArmor profile the facility oracle already stands on. MEASURED on a build machine: inside bwrap a namespace, a veth pair, addressing and a ping across it all work with no sudo. netns_priv (shell) and netns_privileged (Rust) now hold the privilege in one place, either sudo or the sandbox, and netns_topology_probe answers 3 for available only inside the sandbox. The sandbox gives itself a host's shape first, one multicast interface with a default route, which the scout fan-out leg needs as its premise. Lanes M, Z and C1cc wrap their namespace legs in scripts/lib/netns-sandbox.sh.",
+      "publishable_changes_bullets": [
+        "scripts/lib/netns-topology.sh: netns_priv, netns_sandbox_exec, netns_sandbox_probe, the sandbox's own default-route interface, probe answer 3, a selftest for both ways (its failure branch never ran before: rc was read after the if).",
+        "scripts/lib/netns-sandbox.sh: the prefix a lane puts before a witness that builds a namespace.",
+        "scripts/run-ci.sh: Layers M, Z and C1cc take answer 3 and run their namespace legs under the sandbox.",
+        "crates/wz-integration-tests: netns_privileged beside NetnsPair, used by its exec, its teardown and the carrier-loss leg."
+      ],
+      "publishable_verification_bullets": [
+        "On a build machine with no sudo: the selftest passes inside the sandbox, and Layer M passes with its namespace legs run and not skipped (the #join= leg across a namespace, the scout fan-out, the two carrier-loss legs, the ttl witnesses). The fan-out leg first failed on a premise the bare sandbox did not hold, no default route, and passes with the interface the sandbox now makes. The 121 static gates and the guarded-count gate pass. The Layer Z and C1cc call sites are the same pattern and were syntax-checked, not run to their legs: Layer Z stopped earlier at a rust-api-surface difference for zenoh-shm that is not in this change."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Layer Z on a build machine stops at rust-api-surface, which re-emits zenoh-shm with fn dec_ref_count that the committed surface lacks, and the upstream source of that function is private on both the local and the build machine checkouts; cause not found. The pico raweth scenario still skips for want of sudo, though the sandbox grants CAP_NET_RAW. The Layer Z and C1cc namespace legs have not been run through the sandbox."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
