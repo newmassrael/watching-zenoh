@@ -2461,7 +2461,11 @@ pub async fn dial_locator(locator: AnyLocator, cfg: &DialConfig) -> io::Result<D
                                 format!("tls dial: {host:?} is not a valid TLS server name: {e}"),
                             )
                         })?;
-                        let addrs = resolve_locator_addrs(&host, port).await?;
+                        // R3976 — the unicast ones only, as zenoh 1.10.2's `tls` dial takes
+                        // them (`get_tcp_addrs`, see [`crate::link_pipeline::only_unicast`]).
+                        let addrs = crate::link_pipeline::only_unicast(
+                            resolve_locator_addrs(&host, port).await?,
+                        )?;
                         let link_socket = &cfg.link_socket(named_options(&socket), proto).await?;
                         Ok(DialedLink::Tls(
                             Box::new(

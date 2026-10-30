@@ -13,7 +13,7 @@
 //! differences are observable, so [`crate::link_socket::LinkSocket::resolve`] is a table rather than
 //! one rule. Each row below is what that link's own config reader does:
 //!
-//! | link | side | `iface` + `bind` | `bind` resolved | `bind` used | `dscp` | `so_sndbuf`, `so_rcvbuf` | `initial_mtu`, `mtu_discovery_interval_secs` |
+//! | link | side | `iface` + `bind` | `bind` resolved | `bind` used | `dscp` | `so_sndbuf`, `so_rcvbuf` | `initial_mtu`, `mtu_discovery_interval_secs`, `segmentation_offload` |
 //! |---|---|---|---|---|---|---|---|
 //! | tcp | dial | refused | first non-multicast, else unbound | yes | yes | yes | no |
 //! | tcp | listen | accepted | same, then ignored | no | yes | yes | no |
@@ -23,6 +23,9 @@
 //! | udp | listen | accepted | not read | no | yes | no | no |
 //! | quic, quic-datagram, udp `rel=1` | both | refused | first, else an error | dial only | yes | no | yes |
 //! | ws | both | accepted | not read | no | no | no | no |
+//!
+//! R3976 put a third key in that column, `segmentation_offload`, which zenoh 1.10.2 added to the
+//! same commons `quic` module and which follows the two exactly.
 //!
 //! R2598 added the last column, and it is the first one that is NOT a socket
 //! option: `initial_mtu` and `mtu_discovery_interval_secs` configure quinn's
@@ -198,6 +201,7 @@ pub struct LinkSocket<'a> {
     so_rcvbuf: Option<u32>,
     initial_mtu: Option<u16>,
     mtu_discovery_interval_secs: Option<u64>,
+    segmentation_offload: Option<bool>,
 }
 
 /// How a scheme turns a `bind` string into an address.
@@ -289,6 +293,7 @@ impl<'a> LinkSocket<'a> {
         so_rcvbuf: None,
         initial_mtu: None,
         mtu_discovery_interval_secs: None,
+        segmentation_offload: None,
     };
 
     /// Run `proto`'s reader for `side` over the locator's `options` layered on
@@ -356,6 +361,11 @@ impl<'a> LinkSocket<'a> {
             mtu_discovery_interval_secs: options
                 .mtu_discovery_interval_secs
                 .filter(|_| reader.reads_quic_mtu),
+            // R3976 — the same: the locator alone, and the QUIC family's alone, because the key
+            // is declared by the commons `quic` module (see the table above).
+            segmentation_offload: options
+                .segmentation_offload
+                .filter(|_| reader.reads_quic_mtu),
         })
     }
 
@@ -396,6 +406,12 @@ impl<'a> LinkSocket<'a> {
         self.mtu_discovery_interval_secs
     }
 
+    /// R3976 — whether this side sends with UDP generic segmentation offload, if the locator
+    /// said and this scheme reads the key.
+    pub fn segmentation_offload(&self) -> Option<bool> {
+        self.segmentation_offload
+    }
+
     /// R2598 — write this locator's quinn transport keys onto `transport`, the
     /// SINGLE seam both QUIC endpoint constructors go through.
     ///
@@ -426,6 +442,12 @@ impl<'a> LinkSocket<'a> {
             let mut discovery = quinn::MtuDiscoveryConfig::default();
             discovery.interval(std::time::Duration::from_secs(interval));
             transport.mtu_discovery_config(Some(discovery));
+        }
+        // R3976 — upstream applies it beside the MTU keys, on both builders
+        // (`io/zenoh-link-commons/src/quic/utils.rs` @ `self.0.enable_segmentation_offload(enabled);`),
+        // and only when the locator names it, so quinn's own default (on) stands otherwise.
+        if let Some(enabled) = self.segmentation_offload {
+            transport.enable_segmentation_offload(enabled);
         }
     }
 
@@ -814,6 +836,8 @@ mod tests {
         let opts = LinkSocketOptions {
             initial_mtu: Some(1400),
             mtu_discovery_interval_secs: Some(30),
+            // R3976 — the third key of the module rides with the two.
+            segmentation_offload: Some(false),
             ..LinkSocketOptions::NONE
         };
         for proto in ALL {
@@ -833,6 +857,11 @@ mod tests {
                     quic.then_some(30),
                     "{proto:?} {side:?}"
                 );
+                assert_eq!(
+                    socket.segmentation_offload(),
+                    quic.then_some(false),
+                    "{proto:?} {side:?}"
+                );
             }
         }
     }
@@ -850,6 +879,7 @@ mod tests {
         let planted = LinkSocketOptions {
             initial_mtu: Some(9000),
             mtu_discovery_interval_secs: Some(7),
+            segmentation_offload: Some(false),
             ..LinkSocketOptions::NONE
         };
         for proto in [Proto::Quic, Proto::QuicDatagram, Proto::UdpReliable] {
@@ -859,6 +889,7 @@ mod tests {
                     .unwrap();
             assert_eq!(socket.initial_mtu(), None, "{proto:?}");
             assert_eq!(socket.mtu_discovery_interval_secs(), None, "{proto:?}");
+            assert_eq!(socket.segmentation_offload(), None, "{proto:?}");
         }
     }
 

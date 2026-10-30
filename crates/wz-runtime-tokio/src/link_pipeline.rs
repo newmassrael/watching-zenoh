@@ -359,8 +359,30 @@ pub async fn dial_tcp_host(host: &str, link_socket: &LinkSocket<'_>) -> io::Resu
     // does not answer RST the way a dead port does, so `connect` waits out the
     // kernel's retransmit schedule — about two minutes on Linux — before the
     // reachable address behind it is tried.
-    let addrs: Vec<SocketAddr> = lookup_host(host).await?.collect();
+    let addrs = only_unicast(lookup_host(host).await?.collect())?;
     dial_tcp_candidates(addrs, host, link_socket).await
+}
+
+/// The candidates of a `tcp` or `tls` name that a link can be made to: the unicast ones.
+///
+/// zenoh 1.10.2 drops the multicast addresses a `tcp` or `tls` name resolves to before it
+/// dials, listens or binds, and a name left with none is an error
+/// (`io/zenoh-link-commons/src/tcp.rs` @ `.filter(|x| !x.ip().is_multicast()))`, and
+/// `io/zenoh-link-commons/src/tcp.rs` @ `errs.push(zerror!("No unicast addresses available").into());`).
+/// The error is [`io::ErrorKind::AddrNotAvailable`], the kind [`resolve_locator_addrs`] gives a
+/// name that resolves to nothing, and it carries upstream's words.
+pub fn only_unicast(addrs: Vec<SocketAddr>) -> io::Result<Vec<SocketAddr>> {
+    let unicast: Vec<SocketAddr> = addrs
+        .into_iter()
+        .filter(|addr| !addr.ip().is_multicast())
+        .collect();
+    if unicast.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            "No unicast addresses available",
+        ));
+    }
+    Ok(unicast)
 }
 
 /// The walk half of [`dial_tcp_host`], split from the resolve so a test can
@@ -401,7 +423,9 @@ pub async fn bind_tcp(addr: SocketAddr, link_socket: &LinkSocket<'_>) -> io::Res
 /// numeric path skips is hand-rolled here.)
 pub async fn bind_tcp_host(host: &str, link_socket: &LinkSocket<'_>) -> io::Result<TcpListener> {
     let mut last_err: Option<io::Error> = None;
-    for addr in lookup_host(host).await? {
+    // R3976 — the unicast addresses only, as zenoh 1.10.2's `tcp` listener takes them
+    // (see [`only_unicast`]).
+    for addr in only_unicast(lookup_host(host).await?.collect())? {
         match bind_listener(addr, link_socket) {
             Ok(listener) => return Ok(listener),
             Err(e) => last_err = Some(e),
@@ -426,7 +450,7 @@ pub async fn bind_tcp_host(host: &str, link_socket: &LinkSocket<'_>) -> io::Resu
 ///
 /// ## Divergence from zenoh, stated because it is deliberate
 ///
-/// zenoh resolves the same addresses with `lookup_host(..).next()` and uses the
+/// zenoh 1.10.1 resolved the same addresses with `lookup_host(..).next()` and used the
 /// FIRST result only — `get_tls_addr` (`io/zenoh-links/zenoh-link-tls/src/utils.rs:590`),
 /// `get_ws_addr` (`io/zenoh-links/zenoh-link-ws/src/lib.rs:79`), `get_quic_addr`
 /// (`io/zenoh-link-commons/src/quic/utils.rs` @ `pub async fn get_quic_addr`;
@@ -438,6 +462,17 @@ pub async fn bind_tcp_host(host: &str, link_socket: &LinkSocket<'_>) -> io::Resu
 /// identical, and on a dual-stack name whose first record is unreachable zenoh
 /// fails where wz succeeds. It can never make wz fail where zenoh succeeds,
 /// which is the property that makes the divergence safe to keep.
+///
+/// R3976 — zenoh 1.10.2 closed the divergence for three of the four schemes. `tcp` and `tls`
+/// now dial every resolved address in order, after dropping the multicast ones
+/// (`io/zenoh-link-commons/src/tcp.rs` @ `pub async fn new_link_first_reachable(`, and
+/// `io/zenoh-link-commons/src/tcp.rs` @ `pub async fn get_tcp_addrs(`), and `ws` hands the host
+/// name to tokio-tungstenite (`io/zenoh-links/zenoh-link-ws/src/lib.rs` @
+/// `// Keep the hostname: tokio-tungstenite resolves it and tries every address.`), which tries
+/// every address itself. `quic` still takes the first result (`get_quic_addr`, above), so for it
+/// the paragraph stands as written. The multicast addresses a `tcp` or `tls` name resolves to
+/// are dropped here as upstream drops them ([`only_unicast`]), so a name left with none is
+/// refused with upstream's `No unicast addresses available`.
 ///
 /// ⚠ R2606 (open-debt 732) — THAT LAST SENTENCE IS TRUE ABOUT OUTCOMES AND WAS
 /// FALSE ABOUT TIME, which is why the bound on [`first_reachable`] exists. On
@@ -537,8 +572,9 @@ pub const CANDIDATE_DIAL_TIMEOUT: std::time::Duration = std::time::Duration::fro
 ///   `ConnectionRefused`. A walk over several returns an error of the LAST
 ///   attempt's kind (the one a caller can act on) whose message lists every
 ///   candidate and what became of it, as upstream's own walk does
-///   (`io/zenoh-links/zenoh-link-tcp/src/unicast.rs` @
-///   `"Can not create a new TCP link bound to {}: {:?}",`).
+///   (`io/zenoh-link-commons/src/tcp.rs` @ `bail!("{:?}", errs)`, which
+///   `io/zenoh-links/zenoh-link-tcp/src/unicast.rs` @
+///   `"Can not create a new TCP link bound to {}: {}"` wraps).
 ///
 /// `addrs` is never empty by [`resolve_locator_addrs`]'s contract; the
 /// `AddrNotAvailable` fallback exists only so a hand-built empty vector cannot
@@ -898,6 +934,54 @@ mod tests {
         .await
         .expect("a dial to a held, non-listening port is refused within the bound");
         assert!(dialled.is_err(), "dial to closed port errors");
+    }
+
+    /// A `tcp` or `tls` name keeps the unicast addresses it resolves to and drops the
+    /// multicast ones, in the order given, as zenoh 1.10.2 does; a name left with none is
+    /// `AddrNotAvailable` carrying upstream's words, not an empty walk.
+    #[test]
+    fn only_unicast_drops_the_multicast_addresses_and_refuses_an_empty_remainder() {
+        let unicast_v4: SocketAddr = "127.0.0.1:7447".parse().expect("unicast v4");
+        let unicast_v6: SocketAddr = "[::1]:7447".parse().expect("unicast v6");
+        let multicast_v4: SocketAddr = "224.0.0.1:7447".parse().expect("multicast v4");
+        let multicast_v6: SocketAddr = "[ff02::1]:7447".parse().expect("multicast v6");
+
+        let kept = only_unicast(vec![multicast_v4, unicast_v6, multicast_v6, unicast_v4])
+            .expect("a name with unicast addresses keeps them");
+        assert_eq!(
+            kept,
+            vec![unicast_v6, unicast_v4],
+            "order is the resolver's"
+        );
+
+        for none_left in [vec![], vec![multicast_v4, multicast_v6]] {
+            let refused = only_unicast(none_left).expect_err("nothing to dial");
+            assert_eq!(refused.kind(), io::ErrorKind::AddrNotAvailable);
+            assert!(
+                refused
+                    .to_string()
+                    .contains("No unicast addresses available"),
+                "{refused}"
+            );
+        }
+    }
+
+    /// The named `tcp` dial refuses a name that resolves to multicast alone before it opens
+    /// a socket: the error comes back at once and is the unicast one, not a connect error.
+    #[tokio::test]
+    async fn dial_tcp_host_refuses_a_multicast_only_name() {
+        let refused = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            dial_tcp_host("224.0.0.1:7447", &LinkSocket::NONE),
+        )
+        .await
+        .expect("nothing is dialled, so nothing waits");
+        let err = refused.expect_err("a multicast address is not dialled");
+        assert_eq!(err.kind(), io::ErrorKind::AddrNotAvailable);
+        assert!(
+            err.to_string().contains("No unicast addresses available"),
+            "{err}"
+        );
     }
 
     /// `dial_tcp` surfaces a connect error, at once and on every host, for a destination

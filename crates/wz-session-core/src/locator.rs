@@ -332,6 +332,11 @@ pub struct LinkSocketOptions {
     /// upstream parses it; quinn stores it unchecked, so zero is accepted here
     /// exactly as upstream accepts it.
     pub mtu_discovery_interval_secs: Option<u64>,
+    /// R3976 — `#segmentation_offload=<bool>` (zenoh `QUIC_SEGMENTATION_OFFLOAD`, new in
+    /// 1.10.2): whether quinn sends with UDP generic segmentation offload (GSO), which it does
+    /// unless told not to. It affects only what THIS side sends. Parsed as a `bool`, as
+    /// upstream parses it: only `true` and `false` are accepted.
+    pub segmentation_offload: Option<bool>,
 }
 
 impl LinkSocketOptions {
@@ -344,6 +349,7 @@ impl LinkSocketOptions {
         so_rcvbuf: None,
         initial_mtu: None,
         mtu_discovery_interval_secs: None,
+        segmentation_offload: None,
     };
 
     /// R2592 — the socket options a bare `key=value;...` span names, read
@@ -729,6 +735,10 @@ const LOCATOR_QUIC_INITIAL_MTU_KEY: &str = "initial_mtu";
 /// (`io/zenoh-link-commons/src/quic/utils.rs` @ `pub const QUIC_MTU_DISCOVERY_INTERVAL: &str = "mtu_discovery_interval_secs";`).
 const LOCATOR_QUIC_MTU_DISCOVERY_INTERVAL_KEY: &str = "mtu_discovery_interval_secs";
 
+/// R3976 — zenoh `QUIC_SEGMENTATION_OFFLOAD` config key
+/// (`io/zenoh-link-commons/src/quic/utils.rs` @ `pub const QUIC_SEGMENTATION_OFFLOAD: &str = "segmentation_offload";`).
+const LOCATOR_QUIC_SEGMENTATION_OFFLOAD_KEY: &str = "segmentation_offload";
+
 /// R2599 — the five TLS MATERIAL values zenoh reads off a locator's
 /// `#`-config tail, each in the three spellings upstream accepts. The
 /// vocabulary is `zenoh-link-commons`'s `tls` module, read by the tls link and
@@ -1032,6 +1042,22 @@ fn parse_socket_options(config: &str) -> Result<Option<Box<LinkSocketOptions>>, 
                 )
             }
         };
+    // R3976 — upstream parses the value with `bool::from_str` and refuses what it refuses
+    // (`io/zenoh-link-commons/src/quic/utils.rs` @ `enabled = Some(v.parse::<bool>().map_err(|err| {`),
+    // so `true` and `false` are the whole accepted set: `0`, `1` and an empty value are errors.
+    let segmentation_offload = match lookup_param(config, LOCATOR_QUIC_SEGMENTATION_OFFLOAD_KEY) {
+        None => None,
+        Some(value) => {
+            Some(
+                value
+                    .parse::<bool>()
+                    .map_err(|_| LocatorParseError::BadConfigValue {
+                        key: LOCATOR_QUIC_SEGMENTATION_OFFLOAD_KEY,
+                        value: value.to_string(),
+                    })?,
+            )
+        }
+    };
     let options = LinkSocketOptions {
         iface,
         bind,
@@ -1040,6 +1066,7 @@ fn parse_socket_options(config: &str) -> Result<Option<Box<LinkSocketOptions>>, 
         so_rcvbuf,
         initial_mtu,
         mtu_discovery_interval_secs,
+        segmentation_offload,
     };
     if options == LinkSocketOptions::NONE {
         return Ok(None);
@@ -2639,6 +2666,23 @@ mod tests {
                 "quic/1.2.3.4:7447#mtu_discovery_interval_secs=-1",
                 "mtu_discovery_interval_secs",
             ),
+            // R3976 — upstream's `bool` parse accepts `true` and `false` and nothing else.
+            (
+                "quic/1.2.3.4:7447#segmentation_offload=",
+                "segmentation_offload",
+            ),
+            (
+                "quic/1.2.3.4:7447#segmentation_offload=0",
+                "segmentation_offload",
+            ),
+            (
+                "quic/1.2.3.4:7447#segmentation_offload=1",
+                "segmentation_offload",
+            ),
+            (
+                "quic/1.2.3.4:7447#segmentation_offload=True",
+                "segmentation_offload",
+            ),
         ] {
             match parse_locator(locator) {
                 Err(LocatorParseError::BadConfigValue { key: got, .. }) => {
@@ -2684,6 +2728,21 @@ mod tests {
         let silent = parse_locator("quic/1.2.3.4:7447#dscp=46").expect("valid");
         assert_eq!(silent.socket().initial_mtu, None);
         assert_eq!(silent.socket().mtu_discovery_interval_secs, None);
+        assert_eq!(silent.socket().segmentation_offload, None);
+    }
+
+    /// R3976 — `segmentation_offload` parses to the value written, `true` and `false` alike,
+    /// and a locator that does not name it carries none, so quinn keeps GSO on.
+    #[test]
+    fn the_segmentation_offload_key_parses_both_values() {
+        for (locator, want) in [
+            ("quic/1.2.3.4:7447#segmentation_offload=false", Some(false)),
+            ("quic/1.2.3.4:7447#segmentation_offload=true", Some(true)),
+            ("quic/1.2.3.4:7447#dscp=46", None),
+        ] {
+            let got = parse_locator(locator).expect(locator);
+            assert_eq!(got.socket().segmentation_offload, want, "{locator}");
+        }
     }
 
     /// R2590 — a DNS-named endpoint carries the same options, parsed the same way.
