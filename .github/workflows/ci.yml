@@ -2181,6 +2181,18 @@ jobs:
       - name: Layer Z8 — upstream's own tests against the patched graph
         run: bash scripts/run-ci.sh --layer Z8
 
+      # The report names a file's outcome and, at most, its first failing line: a `timeout` or
+      # an `Elapsed` says nothing of which test waited on what. The per-file logs are what
+      # tell a hosted-only red from a defect, so a red run keeps them.
+      - name: Keep the per-file logs of the suite
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: z8-suite-report
+          path: target/z8-suite/report
+          retention-days: 7
+          if-no-files-found: ignore
+
   # ─────────────────────────────────────────────────────────────────
   # R2165 — the PASSIVE-DISSECTION job, peeled off `feature-gates` when that
   # job's margin step fired at 97% of 2700s on run 33087340444.
