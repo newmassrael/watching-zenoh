@@ -125,7 +125,9 @@ use crate::session_fsm_multicast::{
     SessionFsmMulticastState,
 };
 use crate::sn;
+use core::mem::MaybeUninit;
 use core::net::SocketAddr;
+use core::ptr::addr_of_mut;
 use sce_rust_runtime::Engine;
 
 /// The ids the multicast machines are built under (SCE ADR 0045: the host gives a machine its
@@ -582,38 +584,102 @@ struct PeerSlot {
 }
 
 impl PeerSlot {
-    fn new() -> Self {
-        let mut engine = Engine::new(built_under_constant_id(
-            MulticastPeerPolicy::new_with_session_id(
-                MULTICAST_PEER_SESSION_ID,
-                PeerBinding::default(),
-            ),
-            "the multicast peer session id",
-        ));
-        // W3C SCXML 3.3: enter the initial `Free` leaf.
-        engine.initialize();
-        Self {
-            engine,
+    /// Build a free slot in `slot`, where the dispatcher keeps it, and enter its machine's
+    /// initial `Free` leaf.
+    ///
+    /// The machine is a kilobyte and the slot more. Built as a value and moved (into the slot,
+    /// the slot into the array, the array into the dispatcher, the dispatcher out of its
+    /// constructor) every one of those was a copy in the frame of a function the construction
+    /// passed through, and the two-session image builds a dispatcher in the frame of the function
+    /// that spawns its tasks. The machine's own `new_in_place` writes it where it will live, and
+    /// so does this for the rest of the slot.
+    fn init_in(slot: &mut MaybeUninit<Self>) -> &mut Self {
+        let at = slot.as_mut_ptr();
+        // SAFETY: `at` points at storage for one slot that holds no value. The machine is built
+        // in its field by `new_in_place`, which writes every field of the engine, and every other
+        // field is written below; `fields_are_written_by_init_in` names each of them, so a field
+        // added to the struct stops that from compiling until it is written here too. With all
+        // written the slot is whole, and it is lent as such.
+        let peer = unsafe {
+            let engine = &mut *addr_of_mut!((*at).engine)
+                .cast::<MaybeUninit<Engine<MulticastPeerPolicy<PeerBinding>>>>();
+            Engine::new_in_place(
+                engine,
+                built_under_constant_id(
+                    MulticastPeerPolicy::new_with_session_id(
+                        MULTICAST_PEER_SESSION_ID,
+                        PeerBinding::default(),
+                    ),
+                    "the multicast peer session id",
+                ),
+            );
             #[cfg(all(feature = "alloc", feature = "codec-declare"))]
-            member: None,
-            src: None,
-            zid: None,
-            last_seen_ms: 0,
-            lease_ms: 0,
-            sn_mask: 0,
-            rx_sn: crate::sn::MulticastRxConduits::default(),
+            addr_of_mut!((*at).member).write(None);
+            addr_of_mut!((*at).src).write(None);
+            addr_of_mut!((*at).zid).write(None);
+            addr_of_mut!((*at).last_seen_ms).write(0);
+            addr_of_mut!((*at).lease_ms).write(0);
+            addr_of_mut!((*at).sn_mask).write(0);
+            addr_of_mut!((*at).rx_sn).write(crate::sn::MulticastRxConduits::default());
             #[cfg(feature = "routing-namespace")]
-            namespace_ingress: None,
+            addr_of_mut!((*at).namespace_ingress).write(None);
             #[cfg(feature = "multicast-declarations")]
-            keyexpr_table: hashbrown::HashMap::new(),
-            whatami: None,
+            addr_of_mut!((*at).keyexpr_table).write(hashbrown::HashMap::new());
+            addr_of_mut!((*at).whatami).write(None);
             #[cfg(feature = "multicast-declarations")]
-            remote_subs: hashbrown::HashMap::new(),
+            addr_of_mut!((*at).remote_subs).write(hashbrown::HashMap::new());
             // R2417 — a slot with no peer has announced nothing; the marker
             // rules stay off until a JOIN says otherwise.
             #[cfg(feature = "reassembly")]
-            patch: crate::extpatch::NO_PATCH,
+            addr_of_mut!((*at).patch).write(crate::extpatch::NO_PATCH);
+            &mut *at
+        };
+        // W3C SCXML 3.3: enter the initial `Free` leaf.
+        peer.engine.initialize();
+        peer
+    }
+
+    /// Make this slot a free one again, in its own cell: what the link going down does to every
+    /// peer. The slot was a value built whole and assigned over the old one; here the old one is
+    /// dropped and the free one written where it stands, so no second slot (nor, for the whole
+    /// table, an array of them) is held by the function that does it.
+    fn reset_in_place(&mut self) {
+        let cell = (self as *mut Self).cast::<MaybeUninit<Self>>();
+        // SAFETY: `self` is a whole slot, so dropping it is sound, and the cell it stands in is
+        // then storage that holds no value, which `init_in` fills with a whole one before it
+        // returns. Nothing between the drop and the write can unwind: `init_in` builds from
+        // constants and the empty collections, none of which can fail.
+        unsafe {
+            core::ptr::drop_in_place(self);
+            Self::init_in(&mut *cell);
         }
+    }
+
+    /// Names every field of the slot, so that [`Self::init_in`], which writes each by its address,
+    /// cannot miss one that is added: this stops compiling until the new field is named here, and
+    /// whoever names it reads it against `init_in`.
+    #[allow(dead_code)]
+    fn fields_are_written_by_init_in(self) {
+        let Self {
+            engine: _,
+            #[cfg(all(feature = "alloc", feature = "codec-declare"))]
+                member: _,
+            src: _,
+            zid: _,
+            last_seen_ms: _,
+            lease_ms: _,
+            sn_mask: _,
+            rx_sn: _,
+            #[cfg(feature = "routing-namespace")]
+                namespace_ingress: _,
+            #[cfg(feature = "multicast-declarations")]
+                keyexpr_table: _,
+            whatami: _,
+            #[cfg(feature = "multicast-declarations")]
+                remote_subs: _,
+            #[cfg(feature = "reassembly")]
+                patch: _,
+        } = self;
     }
 
     /// Store the per-peer state a JOIN advertises: the per-channel RX SN
@@ -829,30 +895,77 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
     /// Build a Router with an Idle session and `MAX_PEERS` free slots over
     /// `config`.
     pub fn new(config: MulticastConfig) -> Self {
-        let mut session = Engine::new(built_under_constant_id(
-            SessionFsmMulticastPolicy::new_with_session_id(
-                MULTICAST_SESSION_ID,
-                SessionBinding::default(),
-            ),
-            "the multicast session id",
-        ));
-        // W3C SCXML 3.3: enter the initial `Idle` leaf.
-        session.initialize();
-        Self {
-            session,
-            peers: core::array::from_fn(|_| PeerSlot::new()),
-            config,
-            running: false,
-            join_refusals: 0,
+        let mut slot = MaybeUninit::uninit();
+        Self::new_in_place(&mut slot, config);
+        // SAFETY: `new_in_place` wrote every field of the dispatcher.
+        unsafe { slot.assume_init() }
+    }
+
+    /// [`Self::new`] built inside `slot`: the same dispatcher, written where it will live, so a
+    /// caller that keeps it in a cell, a box or a task's state never holds all of it (the
+    /// session's machine and `MAX_PEERS` slots, a kilobyte each and more) on its own stack. The
+    /// slot may be uninitialised; whatever it held is not dropped.
+    pub fn new_in_place(slot: &mut MaybeUninit<Self>, config: MulticastConfig) -> &mut Self {
+        let at = slot.as_mut_ptr();
+        // SAFETY: `at` points at storage for one dispatcher that holds no value. Each field is
+        // written by its address and the peer slots one at a time in their cells, so no copy of
+        // the dispatcher or of its array of slots is built; `fields_are_written_by_new_in_place`
+        // names each of them, so a field added to the struct stops that from compiling until it
+        // is written here too. With all written the dispatcher is whole, and it is lent as such.
+        let dispatcher = unsafe {
+            let session = &mut *addr_of_mut!((*at).session)
+                .cast::<MaybeUninit<Engine<SessionFsmMulticastPolicy<SessionBinding>>>>();
+            Engine::new_in_place(
+                session,
+                built_under_constant_id(
+                    SessionFsmMulticastPolicy::new_with_session_id(
+                        MULTICAST_SESSION_ID,
+                        SessionBinding::default(),
+                    ),
+                    "the multicast session id",
+                ),
+            );
+            let peers = addr_of_mut!((*at).peers).cast::<MaybeUninit<PeerSlot>>();
+            for index in 0..MAX_PEERS {
+                PeerSlot::init_in(&mut *peers.add(index));
+            }
+            addr_of_mut!((*at).config).write(config);
+            addr_of_mut!((*at).running).write(false);
+            addr_of_mut!((*at).join_refusals).write(0);
             #[cfg(feature = "routing-namespace")]
-            namespace: None,
+            addr_of_mut!((*at).namespace).write(None);
             #[cfg(feature = "multicast-ingress-gate")]
-            ingress_gate: None,
+            addr_of_mut!((*at).ingress_gate).write(None);
             #[cfg(all(feature = "alloc", feature = "codec-declare"))]
-            member_tags: None,
+            addr_of_mut!((*at).member_tags).write(None);
             #[cfg(all(feature = "alloc", feature = "codec-declare"))]
-            member_retractions: alloc::vec::Vec::new(),
-        }
+            addr_of_mut!((*at).member_retractions).write(alloc::vec::Vec::new());
+            &mut *at
+        };
+        // W3C SCXML 3.3: enter the initial `Idle` leaf.
+        dispatcher.session.initialize();
+        dispatcher
+    }
+
+    /// Names every field of the dispatcher, for the reason
+    /// [`PeerSlot::fields_are_written_by_init_in`] does.
+    #[allow(dead_code)]
+    fn fields_are_written_by_new_in_place(self) {
+        let Self {
+            session: _,
+            peers: _,
+            config: _,
+            running: _,
+            join_refusals: _,
+            #[cfg(feature = "routing-namespace")]
+                namespace: _,
+            #[cfg(feature = "multicast-ingress-gate")]
+                ingress_gate: _,
+            #[cfg(all(feature = "alloc", feature = "codec-declare"))]
+                member_tags: _,
+            #[cfg(all(feature = "alloc", feature = "codec-declare"))]
+                member_retractions: _,
+        } = self;
     }
 
     /// Open-debt item 913 — keep each member's declarations apart for the session's observer
@@ -1406,7 +1519,9 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
             for idx in 0..MAX_PEERS {
                 self.retire_member(idx);
             }
-            self.peers = core::array::from_fn(|_| PeerSlot::new());
+            for peer in &mut self.peers {
+                peer.reset_in_place();
+            }
         }
         MulticastLinkDuties {
             open: duties.has(SessionBinding::OPEN_LINK),
