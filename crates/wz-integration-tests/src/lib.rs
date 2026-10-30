@@ -7879,8 +7879,8 @@ pub mod common {
     }
 
     /// The addresses this host's interfaces hold right now, as `<device>=<address>`: every
-    /// non-loopback IPv4 or IPv6 address of an interface that is up, or `None` where the C
-    /// library cannot list them.
+    /// non-loopback IPv4 or IPv6 address of an interface that is up and running (it has a
+    /// carrier), or `None` where the C library cannot list them.
     ///
     /// A node bound to the wildcard names exactly these in the Hello it answers a Scout with,
     /// and a scout asks once per address of a multicast interface, so a comparison of two
@@ -7906,7 +7906,14 @@ pub mod common {
             let entry = unsafe { &*at };
             at = entry.ifa_next;
             let flags = entry.ifa_flags;
-            if flags & libc::IFF_UP as u32 == 0 || flags & libc::IFF_LOOPBACK as u32 != 0 {
+            // Up AND running, which is the rule both libraries scout by (upstream's
+            // `get_multicast_interfaces` and wz's `multicast_interface_addresses`): an interface
+            // whose carrier drops is not asked on, so a window in which it did is a different
+            // world even while its address stays.
+            if flags & libc::IFF_UP as u32 == 0
+                || flags & libc::IFF_RUNNING as u32 == 0
+                || flags & libc::IFF_LOOPBACK as u32 != 0
+            {
                 continue;
             }
             if entry.ifa_addr.is_null() {
