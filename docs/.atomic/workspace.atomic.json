@@ -300866,6 +300866,46 @@
         "The oracles of the build machine (zenohd, zenoh-c) are at 1.10.1 and the pin is now 1.10.2: they must be provisioned again at the pin before Layers Z, M and C1cc are read there. The scouting legs now tolerate a host whose interface addresses move, by reading again; a host whose addresses never hold still across five reads grades those texts as not graded and says so. The coop engine has no tls link, and whether a redial reached the new node is not observable through the pico ABI."
       ]
     },
+    "Round 3981": {
+      "decision_summary": "The carry said the pico ABI cannot show whether a redial reached the new node, and the restart test left which of two nodes holds the lower zid to a draw because this ABI minted its zids. The second half was a missing feature and not a limit of the ABI: zenoh-pico's z_open reads Z_CONFIG_SESSION_ZID_KEY, and wz did not. It does now, on both engines: the key is a UUID read as pico's _z_uuid_to_bytes reads it (its sixteen bytes in the order written), a text that is not one fails the open with Z_ERR_INVALID and does not fall back to a minted id, and ConfiguredZid::from_wire carries it to the tokio engine as the id the zenoh-c key already names. mutual_dial now states the zids, the restarted node lower on four rounds and higher on four, so each engine decides both ways and neither arm of the admission rule is left to chance. The redial reaching the node is still not an event the ABI emits; the end state is what the test holds.",
+      "changes_bullets": [
+        "crates/wz-capi-pico/src/session.rs: OpenConfig reads the zid key, session_zid and pico_uuid_wire (with unit tests) give the wire bytes or refuse the text, and both engines open on them.",
+        "crates/wz-capi-pico/src/config.rs, scout.rs: Z_CONFIG_SESSION_ZID_KEY moves to config, where the other keys are, and scouting imports it.",
+        "crates/wz-capi-pico/src/device_requires.rs: reads OpenConfig without the new field.",
+        "crates/wz-capi-core/src/drive.rs: ConfiguredZid::from_wire, and the doc that said pico's key was follow-up.",
+        "crates/wz-capi-pico/tests/mutual_dial.rs: the zids are stated per round, and a test of the key and of the texts it refuses.",
+        "scripts/run-ci.sh: the cooperative mutual dial leg counts two tests.",
+        "docs/capi-pico-on-coop-engine.md: the zid is no longer a draw."
+      ],
+      "verification_bullets": [
+        "On a build machine: the mutual_dial test file passes on both engines (tokio default build, 2 tests; cooperative build as the lane runs it, 2 tests, 8 rounds of the restart with the lower id on each side), the two unit tests of the text pass on the cooperative build where wz-capi-core is not linked, and wz-capi-pico with wz-capi-core pass whole (36 targets, 304 tests, none failed). clippy with warnings denied is clean on the default and on the cooperative build of wz-capi-pico. The 121 static gates pass and the guarded-count gate judges the cooperative mutual dial at 2 passed after it said 1 against 2. No example or test of zenoh-pico sets the key, so no upstream program meets the refusal."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Whether the redial reached the new node before the pause ended is not an event the pico ABI emits, so the test holds the end state, one transport on each side naming the other. A cooperative node against a tokio peer that races it is not run: the two keep different rules and a race can close both links until the next redial. The coop engine has no tls link. The pico UUID reader takes only the 36-character shape; pico reads a text of any other shape as whatever its indexes land on, which this refuses."
+      ],
+      "publishable_decision_summary": "The carry said the pico ABI cannot show whether a redial reached the new node, and the restart test left which of two nodes holds the lower zid to a draw because this ABI minted its zids. The second half was a missing feature and not a limit of the ABI: zenoh-pico's z_open reads Z_CONFIG_SESSION_ZID_KEY, and wz did not. It does now, on both engines: the key is a UUID read as pico's _z_uuid_to_bytes reads it (its sixteen bytes in the order written), a text that is not one fails the open with Z_ERR_INVALID and does not fall back to a minted id, and ConfiguredZid::from_wire carries it to the tokio engine as the id the zenoh-c key already names. mutual_dial now states the zids, the restarted node lower on four rounds and higher on four, so each engine decides both ways and neither arm of the admission rule is left to chance. The redial reaching the node is still not an event the ABI emits; the end state is what the test holds.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-pico/src/session.rs: OpenConfig reads the zid key, session_zid and pico_uuid_wire (with unit tests) give the wire bytes or refuse the text, and both engines open on them.",
+        "crates/wz-capi-pico/src/config.rs, scout.rs: Z_CONFIG_SESSION_ZID_KEY moves to config, where the other keys are, and scouting imports it.",
+        "crates/wz-capi-pico/src/device_requires.rs: reads OpenConfig without the new field.",
+        "crates/wz-capi-core/src/drive.rs: ConfiguredZid::from_wire, and the doc that said pico's key was follow-up.",
+        "crates/wz-capi-pico/tests/mutual_dial.rs: the zids are stated per round, and a test of the key and of the texts it refuses.",
+        "scripts/run-ci.sh: the cooperative mutual dial leg counts two tests.",
+        "docs/capi-pico-on-coop-engine.md: the zid is no longer a draw."
+      ],
+      "publishable_verification_bullets": [
+        "On a build machine: the mutual_dial test file passes on both engines (tokio default build, 2 tests; cooperative build as the lane runs it, 2 tests, 8 rounds of the restart with the lower id on each side), the two unit tests of the text pass on the cooperative build where wz-capi-core is not linked, and wz-capi-pico with wz-capi-core pass whole (36 targets, 304 tests, none failed). clippy with warnings denied is clean on the default and on the cooperative build of wz-capi-pico. The 121 static gates pass and the guarded-count gate judges the cooperative mutual dial at 2 passed after it said 1 against 2. No example or test of zenoh-pico sets the key, so no upstream program meets the refusal."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Whether the redial reached the new node before the pause ended is not an event the pico ABI emits, so the test holds the end state, one transport on each side naming the other. A cooperative node against a tokio peer that races it is not run: the two keep different rules and a race can close both links until the next redial. The coop engine has no tls link. The pico UUID reader takes only the 36-character shape; pico reads a text of any other shape as whatever its indexes land on, which this refuses."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
