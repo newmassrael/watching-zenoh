@@ -1222,6 +1222,28 @@ trait DeclPlane {
     fn declare(keyexpr: &str, value: Self::Value) -> Result<DeclareOwned, CodecError>;
     /// The self-sourced retraction.
     fn undeclare(keyexpr: &str) -> Result<DeclareOwned, CodecError>;
+    /// What self has already advertised into `target` for `keyexpr`, given `derived`, the fold
+    /// read before the mutation. For a plane whose fold depends on the held declarations alone,
+    /// the fold read before the mutation is what was advertised, because every earlier change
+    /// was advertised by the same rule; that is the default. A plane whose rule has other
+    /// inputs keeps what it sent.
+    fn advertised<T: std::ops::Deref<Target = Tables>>(
+        _fwd: &OnTables<'_, T>,
+        _target: Region,
+        _keyexpr: &str,
+        derived: Option<Self::Value>,
+    ) -> Option<Self::Value> {
+        derived
+    }
+    /// Record that `value` is now what self advertises into `target` for `keyexpr`: `None` is a
+    /// retraction. Nothing for a plane that does not keep what it sent.
+    fn remember<T: std::ops::Deref<Target = Tables>>(
+        _fwd: &OnTables<'_, T>,
+        _target: Region,
+        _keyexpr: &str,
+        _value: Option<Self::Value>,
+    ) {
+    }
 }
 
 /// The subscriber plane.
@@ -1285,6 +1307,40 @@ impl DeclPlane for TokenPlane {
     }
     fn undeclare(keyexpr: &str) -> Result<DeclareOwned, CodecError> {
         build_undeclare_token_with_keyexpr(keyexpr)
+    }
+    /// Advertised if it was sent (the record) or if the rule says it is held (the fold): a token
+    /// a path advertised without a record is still withdrawn, and a token whose rule has since
+    /// moved is withdrawn as well.
+    fn advertised<T: std::ops::Deref<Target = Tables>>(
+        fwd: &OnTables<'_, T>,
+        target: Region,
+        keyexpr: &str,
+        derived: Option<()>,
+    ) -> Option<()> {
+        let sent = fwd.tables.advertised_tokens.with(|all| {
+            all.get(&target.to_string())
+                .is_some_and(|keys| keys.contains(keyexpr))
+        });
+        (sent || derived.is_some()).then_some(())
+    }
+    fn remember<T: std::ops::Deref<Target = Tables>>(
+        fwd: &OnTables<'_, T>,
+        target: Region,
+        keyexpr: &str,
+        value: Option<()>,
+    ) {
+        fwd.tables.advertised_tokens.with(|all| match value {
+            Some(()) => {
+                all.entry(target.to_string())
+                    .or_default()
+                    .insert(keyexpr.to_owned());
+            }
+            None => {
+                if let Some(keys) = all.get_mut(&target.to_string()) {
+                    keys.remove(keyexpr);
+                }
+            }
+        });
     }
 }
 
@@ -2341,6 +2397,16 @@ pub(crate) struct Tables {
     /// is keyed by declaration id as a client's is. Counts from 1; only the node's own face uses
     /// it, so it cannot meet the id a client chose.
     next_hosted_id: u64,
+    /// The token keys this node has advertised into each mesh region, which is what a retraction
+    /// withdraws. The token plane is the one that is filtered by the pin's inter-region filter,
+    /// whose answer moves with things no declaration changes (which neighbours are gateways of a
+    /// region, and the tree that routes a declaration): a node that advertised a token when it
+    /// was the only gateway it knew of, and then learned of a gateway with a larger zid, would
+    /// find "advertised before" false on the withdrawal if it recomputed it, and would leave its
+    /// copy alive in every node it told. Upstream keeps what it propagated (`local_tokens`) and
+    /// withdraws that; this is the same, by region.
+    #[cfg(feature = "routing-token-tables")]
+    advertised_tokens: PlainMutex<HashMap<String, HashSet<String>>>,
     /// FUTURE-mode subscriber-interest store (R311y146) — which CLIENT faces
     /// declared a FUTURE (`f()`) subscriber `Interest`, and which
     /// `DeclareSubscriber`s wz has pushed back to them (zenoh's per-`FaceState`
@@ -3912,6 +3978,8 @@ impl RouterForwarder {
                 local_queryables: Vec::new(),
                 local_subscribers: Vec::new(),
                 next_hosted_id: 1,
+                #[cfg(feature = "routing-token-tables")]
+                advertised_tokens: PlainMutex::new(HashMap::new()),
                 future_subs: FutureSubStore::new(),
                 future_qabls: FutureQablStore::new(),
                 #[cfg(feature = "routing-token-tables")]
@@ -6889,6 +6957,22 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 }
             }
         }
+        // A peer of a peer region is answered with the tokens this node would also flood to that
+        // region, and not with the others. The flood and its retraction are one decision, made
+        // by the inter-region filter (the pin elects one gateway of a region, the one with the
+        // largest zid, and only it speaks to the region's peers): a token the dump sent that the
+        // flood would not is never retracted, as its withdrawal is the flood's, and the peer
+        // holds it for ever. A node that is not the elected gateway of the region leaves the
+        // answer to the one that is.
+        if let Some(region) = self
+            .tables
+            .faces
+            .get(&inbound)
+            .map(|face| face.tier)
+            .filter(|tier| is_peer_hat(*tier, self.tables.node_mode))
+        {
+            per_ke.retain(|ke, ()| self.self_advertises_token_into(region, ke));
+        }
         // An unrestricted interest cannot aggregate: the aggregate reply is keyed on the
         // interest's own keyexpr, which it does not carry. Upstream never aggregates a token
         // dump (its peer hat emits one `DeclareToken` per match,
@@ -7843,6 +7927,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         }
         let new_children = self.tables.mesh_mut(tier).net.compute_trees();
         self.recomputes.bump();
+        // The tree that routes a token's declaration is an input of the rule that decides what is
+        // advertised of it, and it has just been recomputed.
+        #[cfg(feature = "routing-token-tables")]
+        self.reconcile_token_advertisements();
         if new_children.is_empty() {
             return;
         }
@@ -8268,14 +8356,45 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// per keyexpr.
     fn repropagate<P: DeclPlane>(&self, snapshot: Snapshot<P>) {
         let keyexpr = snapshot.keyexpr.as_str();
-        for (target, before) in snapshot.before {
+        for (target, derived_before) in snapshot.before {
             let after = P::fold_outside(self, target, keyexpr);
+            let before = P::advertised(self, target, keyexpr, derived_before);
+            P::remember(self, target, keyexpr, after);
             if after == before {
                 continue;
             }
             match after {
                 Some(value) => self.flood_self_sourced(target, keyexpr, |ke| P::declare(ke, value)),
                 None => self.flood_self_sourced(target, keyexpr, P::undeclare),
+            }
+        }
+    }
+
+    /// Bring what self advertises of the liveliness tokens into line with what the rule admits
+    /// now: declare what it admits and self has not advertised, retract what self advertised and
+    /// it no longer admits. The rule is the pin's inter-region filter, whose answer moves when a
+    /// neighbour is found to be a gateway of a region or the tree changes, with no declaration
+    /// to take a snapshot around; this runs where such an input can have changed (a topology
+    /// message, a face that came or went), so that the advertisement follows the rule and a
+    /// retraction still withdraws what was sent.
+    #[cfg(feature = "routing-token-tables")]
+    fn reconcile_token_advertisements(&self) {
+        for target in self.mesh_regions() {
+            let desired: HashSet<String> = self
+                .derived_cross_tier_tokens_into(target)
+                .into_iter()
+                .collect();
+            let sent: HashSet<String> = self
+                .tables
+                .advertised_tokens
+                .with(|all| all.get(&target.to_string()).cloned().unwrap_or_default());
+            for keyexpr in desired.difference(&sent) {
+                TokenPlane::remember(self, target, keyexpr, Some(()));
+                self.flood_self_sourced(target, keyexpr, |ke| TokenPlane::declare(ke, ()));
+            }
+            for keyexpr in sent.difference(&desired) {
+                TokenPlane::remember(self, target, keyexpr, None);
+                self.flood_self_sourced(target, keyexpr, TokenPlane::undeclare);
             }
         }
     }
@@ -8730,6 +8849,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             let Ok(declare) = build_declare_token(0, 0, Some(&keyexpr)) else {
                 continue;
             };
+            TokenPlane::remember(self, tier, &keyexpr, Some(()));
             self.flood_delta_tier(tier, self_delta, &declare);
         }
     }
@@ -11122,6 +11242,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             for keyexpr in self.derived_cross_tier_tokens_into(tier) {
                 match build_declare_token(0, 0, Some(&keyexpr)) {
                     Ok(decl) => {
+                        TokenPlane::remember(self, tier, &keyexpr, Some(()));
                         self.send_one_to_face(face, NetworkMessage::Declare(Box::new(decl)));
                         self.face_up_replays.bump();
                     }
@@ -11905,7 +12026,13 @@ impl RouterForwarder {
                     // re-flood the changed nodes onward to the SAME tier, purge the
                     // interest of any detached node, and coalesce that net's
                     // recompute. A Client face has no net, so it carries no topology.
-                    NetworkMessage::Oam(oam) => on.ingest_topology(id, tier, oam),
+                    NetworkMessage::Oam(oam) => {
+                        on.ingest_topology(id, tier, oam);
+                        // What a node is found to be, and where it sits in the tree, are inputs of the
+                        // rule that decides what is advertised of the tokens.
+                        #[cfg(feature = "routing-token-tables")]
+                        on.reconcile_token_advertisements();
+                    }
                     // A declaration: one owner call per plane, whichever hat owns the
                     // face (R2876, step 3e) — the pin's dispatcher registers in
                     // `hats[face.region]` and propagates, and never asks what kind
@@ -11992,11 +12119,18 @@ impl RouterForwarder {
 
 impl FaceForwarder for RouterForwarder {
     fn register(&self, id: FaceId, actions: &Arc<SessionLinkActions>) {
-        self.on_tables_mut().register(id, actions)
+        let mut on = self.on_tables_mut();
+        on.register(id, actions);
+        // A face that joined may be a gateway of a region, which moves what is advertised.
+        #[cfg(feature = "routing-token-tables")]
+        on.reconcile_token_advertisements();
     }
 
     fn deregister(&self, id: FaceId) {
-        self.on_tables_mut().deregister(id)
+        let mut on = self.on_tables_mut();
+        on.deregister(id);
+        #[cfg(feature = "routing-token-tables")]
+        on.reconcile_token_advertisements();
     }
 
     /// `Some(self.trees_delay)`: the router DOES tick — it flushes the coalesced
@@ -20935,6 +21069,92 @@ mod tests {
             run(false),
             (1, 1),
             "control: with R2 no gateway, self advertises to both tree children"
+        );
+    }
+
+    /// A node that advertised a peer's token when no larger gateway of the region was known to it
+    /// withdraws the advertisement when one is found, and does not withdraw it a second time when
+    /// the peer retracts the token. What a retraction withdraws is what was advertised, not what
+    /// the inter-region filter says at that moment: a node that recomputed it would take a token
+    /// it no longer advertises for one it never advertised, and the routers it told would hold its
+    /// copy for ever (upstream's regions scenario 7, two routers to a group).
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn a_token_advertised_before_a_larger_gateway_is_found_is_withdrawn_when_it_is() {
+        let fwd = RouterForwarder::new(zid(0x05));
+        let (a, _sa) = face(zid(0xAA), WIRE_PEER); // the token's source, linked to self and R2
+        let (r, sink_r) = face(zid(0x09), WIRE_ROUTER); // R2, self's router tree child
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &r);
+        advertise_link_back(&fwd, FaceId(1), 0x05, 0x09, 5);
+        // AA links to self and to nobody else that is known: self is the only gateway.
+        advertise_link_back(&fwd, FaceId(0), 0x05, 0xAA, 5);
+        fwd.tick();
+        sink_r.reset();
+        forward_one(&fwd, FaceId(0), declare_token_msg("live/k"));
+        assert_eq!(
+            sink_r.frame_count(),
+            1,
+            "no larger gateway is known, so self advertises the token"
+        );
+        sink_r.reset();
+        // R2 is found to be a gateway of the region, and larger than self: AA's next link state
+        // names it, under a newer sequence number.
+        discover_gateway_via(&fwd, FaceId(0), 0x05, 0xAA, 0x09, 7, 6);
+        fwd.tick();
+        assert_eq!(
+            sink_r.frame_count(),
+            1,
+            "a larger gateway is found: self withdraws what it advertised"
+        );
+        sink_r.reset();
+        forward_one(&fwd, FaceId(0), undeclare_token_msg("live/k"));
+        assert_eq!(
+            sink_r.frame_count(),
+            0,
+            "the peer's retraction finds nothing left to withdraw"
+        );
+    }
+
+    /// The answer to a peer's current interest follows the same election as the advertisement: a
+    /// node that is not the largest gateway of the peer region does not answer the region's peers
+    /// with the tokens of other regions, because it would not retract them (the advertisement and
+    /// its withdrawal are made by the inter-region filter, and so is the answer). The control, with
+    /// no larger gateway, answers with the token and the final.
+    #[cfg(feature = "routing-token-tables")]
+    #[test]
+    fn a_node_that_is_not_the_largest_gateway_does_not_answer_a_peer_with_a_token() {
+        let run = |other_is_gateway: bool| -> usize {
+            let fwd = RouterForwarder::new(zid(0x05));
+            let (a, sink_a) = face(zid(0xAA), WIRE_PEER); // the asking peer
+            let (c, _sc) = face(zid(0xCC), WIRE_ROUTER); // the token's source
+            fwd.register(FaceId(0), &a);
+            fwd.register(FaceId(1), &c);
+            advertise_link_back(&fwd, FaceId(1), 0x05, 0xCC, 5);
+            if other_is_gateway {
+                discover_gateway_via(&fwd, FaceId(0), 0x05, 0xAA, 0x09, 7, 5);
+            } else {
+                discover_via(&fwd, FaceId(0), 0x05, 0xAA, 0x09, 7, 5);
+            }
+            fwd.tick();
+            forward_one(&fwd, FaceId(1), declare_token_msg("live/k"));
+            sink_a.reset();
+            forward_one(
+                &fwd,
+                FaceId(0),
+                token_interest_msg(7, "live/k", true, false, false),
+            );
+            sink_a.frame_count()
+        };
+        assert_eq!(
+            run(true),
+            1,
+            "only the DeclareFinal: the largest gateway of the region answers its peers"
+        );
+        assert_eq!(
+            run(false),
+            2,
+            "control: with no larger gateway, the token and then the DeclareFinal"
         );
     }
 
