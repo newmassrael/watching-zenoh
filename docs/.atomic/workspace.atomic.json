@@ -299572,6 +299572,36 @@
         "What the symbol table names that is left: the Request decoder (`lend_request` 1.7 KB, of which the Put and Del arms of a Request body, which zenoh-pico reads and zenoh 1.10.1 refuses, are about 1.1 KB and need a feature gate on a codec arm in SCE), the second copy of the SCE engine (about 3.5 KB; the SCE session has measured its shared core at two machines and has not yet got below the old size), `canonize_keyexpr_as` (1.0 KB, read: needed), the pump task (2.4 KB, `SessionPump::step` inlined) and `ReplyStage::stage_parts` (0.9 KB)."
       ]
     },
+    "Round 3945": {
+      "decision_summary": "Round 3944's ledger commit (`2244962db0`) moved the `vendor/sce` pointer from b1ede72108 to 6dbfa6a521. The commit before it, `69bc0b0e0b` of another session, had pinned b1ede72108 and regenerated `out/**` there (codecs that may refuse an encode return `Result`); the worktree this session lands from had its submodule checked out at the older pin, and `scripts/land.sh` filed the ledger round with that checkout staged, so origin's main carried the generated code of one pin over the runtime of another and did not build.\n\nThis commit puts the pointer back at b1ede72108. The cause is in how a worktree lands: after the rebase onto commits that moved the pin, the submodule checkout of the worktree is behind the index and the ledger commit takes the checkout. The worktree's submodule is brought to the rebased pin before the round is filed from now on.",
+      "changes_bullets": [
+        "vendor/sce: the pointer back at b1ede72108."
+      ],
+      "verification_bullets": [
+        "The pointer is the one `69bc0b0e0b` recorded, checked out in this worktree's submodule (b1ede72108, a commit of SCE's origin main). The diff of this commit against `69bc0b0e0b`'s tree is empty for `vendor/sce`.",
+        "Not run: a build of the tree and the tests of the other session's change (they are its own round's); the kit lane at this pin (the text, stack bound and resource rows of Round 3944 were measured at 6dbfa6a521 and are re-read next)."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "The kit rows filed in Round 3944 (text 146,204; 149,404; 163,860, chain 2,560, 2,560, 3,372, bound 3,296, 3,296, 4,564) were measured at the SCE pin 6dbfa6a521; at b1ede72108 the generated codecs return `Result` and the three images are re-measured next, with any row that moved."
+      ],
+      "publishable_decision_summary": "Round 3944's ledger commit (`2244962db0`) moved the `vendor/sce` pointer from b1ede72108 to 6dbfa6a521. The commit before it, `69bc0b0e0b` of another session, had pinned b1ede72108 and regenerated `out/**` there (codecs that may refuse an encode return `Result`); the worktree this session lands from had its submodule checked out at the older pin, and `scripts/land.sh` filed the ledger round with that checkout staged, so origin's main carried the generated code of one pin over the runtime of another and did not build.\n\nThis commit puts the pointer back at b1ede72108. The cause is in how a worktree lands: after the rebase onto commits that moved the pin, the submodule checkout of the worktree is behind the index and the ledger commit takes the checkout. The worktree's submodule is brought to the rebased pin before the round is filed from now on.",
+      "publishable_changes_bullets": [
+        "vendor/sce: the pointer back at b1ede72108."
+      ],
+      "publishable_verification_bullets": [
+        "The pointer is the one `69bc0b0e0b` recorded, checked out in this worktree's submodule (b1ede72108, a commit of SCE's origin main). The diff of this commit against `69bc0b0e0b`'s tree is empty for `vendor/sce`.",
+        "Not run: a build of the tree and the tests of the other session's change (they are its own round's); the kit lane at this pin (the text, stack bound and resource rows of Round 3944 were measured at 6dbfa6a521 and are re-read next)."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The kit rows filed in Round 3944 (text 146,204; 149,404; 163,860, chain 2,560, 2,560, 3,372, bound 3,296, 3,296, 4,564) were measured at the SCE pin 6dbfa6a521; at b1ede72108 the generated codecs return `Result` and the three images are re-measured next, with any row that moved."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
