@@ -35,7 +35,7 @@
 //!   6. Wait up to 10s for the initiator's stderr to contain all three
 //!      lines "REMOTE SUBSCRIBER DECLARED id=<auto> keyexpr='demo/sub'",
 //!      "REMOTE QUERYABLE DECLARED id=<auto> keyexpr='demo/q'", and
-//!      "REMOTE TOKEN DECLARED id=0 keyexpr='demo/token'" — proving
+//!      "REMOTE TOKEN DECLARED id=1 keyexpr='demo/token'" — proving
 //!      the full path: TCP → stream envelope → Frame →
 //!      parse_frame_payload → NetworkMessage::Declare →
 //!      Remote*Registry → callback. The <auto> ids are cross-referenced
@@ -48,9 +48,9 @@
 //!      `shutdown_signal()` cancels `drive_session`, the held
 //!      `LivelinessToken` drops, `Declare(UndeclToken)` emits on
 //!      the wire, and the initiator's `LivelinessRegistry`
-//!      callback logs `REMOTE TOKEN UNDECLARED id=0`. Assertion
+//!      callback logs `REMOTE TOKEN UNDECLARED id=1`. Assertion
 //!      9 below gates that flow end-to-end.
-//!   9. Wait for `REMOTE TOKEN UNDECLARED id=0` on initiator
+//!   9. Wait for `REMOTE TOKEN UNDECLARED id=1` on initiator
 //!      stderr (5 s budget) then SIGKILL the initiator.
 //!
 //! Why this consolidated test rather than three per-kind tests:
@@ -187,7 +187,7 @@ fn wz_remote_declare_round_trip_against_wz_initiator() {
     // drops the held `LivelinessToken` BEFORE dropping `actions`.
     // The token's `Drop` impl emits `Declare(UndeclToken)` on the
     // wire; the initiator's `LivelinessRegistry` callback observes
-    // it and logs `REMOTE TOKEN UNDECLARED id=0`. Hard SIGKILL
+    // it and logs `REMOTE TOKEN UNDECLARED id=1`. Hard SIGKILL
     // fallback caps the wait at 2 s so a wedged graceful path does
     // not block the test indefinitely.
     graceful_terminate(acceptor_child.child_mut(), Duration::from_secs(2));
@@ -277,11 +277,12 @@ fn wz_remote_declare_round_trip_against_wz_initiator() {
     );
     // R277 — token id comes from `SessionLinkActions::alloc_next_token_id`, a
     // per-session AtomicU64 counter INDEPENDENT of the subscriber / queryable id
-    // spaces, so it stays 0 even though `--key` / `--queryable` now allocate
-    // their own entity ids first (R311oy).
+    // spaces, so it stays the first id even though `--key` / `--queryable` now
+    // allocate their own entity ids first (R311oy). The first id is 1, as pico's
+    // and upstream's: 0 is the id a router propagates a token under.
     assert!(
         final_text.contains(&format!(
-            "REMOTE TOKEN DECLARED id=0 keyexpr='{token_keyexpr}'"
+            "REMOTE TOKEN DECLARED id=1 keyexpr='{token_keyexpr}'"
         )),
         "initiator stderr missing REMOTE TOKEN DECLARED line — \
          LivelinessRegistry dispatch regressed.\n\
@@ -304,7 +305,7 @@ fn wz_remote_declare_round_trip_against_wz_initiator() {
     // `shutdown_signal()` -> drop(token) sequence under SIGTERM,
     // emitting `Declare(UndeclToken)` on the wire. The initiator's
     // `LivelinessRegistry` observer callback prints
-    // `REMOTE TOKEN UNDECLARED id=0` (the `id=` value matches the
+    // `REMOTE TOKEN UNDECLARED id=1` (the `id=` value matches the
     // R277 auto-allocated token id from the DECLARED side). This
     // assertion is the only end-to-end gate on the R277 RAII
     // contract — the unit-level Drop test in
@@ -325,8 +326,8 @@ fn wz_remote_declare_round_trip_against_wz_initiator() {
         ),
     };
     assert!(
-        undecl_text.contains("REMOTE TOKEN UNDECLARED id=0"),
-        "initiator stderr missing 'REMOTE TOKEN UNDECLARED id=0' — \
+        undecl_text.contains("REMOTE TOKEN UNDECLARED id=1"),
+        "initiator stderr missing 'REMOTE TOKEN UNDECLARED id=1' — \
          R278 LivelinessToken RAII Drop did not fire end-to-end.\n\
          --- initiator stderr ---\n{undecl_text}"
     );
