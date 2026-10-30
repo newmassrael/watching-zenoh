@@ -352,6 +352,11 @@ carries about 6 KB of C library code wz does not, which is why the difference is
   same tree with the arms: -1,488 bytes (fixed, 144,724), -1,488 (batching, 147,916) and -2,096 (get,
   163,428; the Reply's own Put and Del arms stay). Against 49e40c9a72: -1,480, -1,488 and -432. The
   stack chain, the bound and the kit's peak did not move.
+- TAKEN, measured 2026-10-30: the pin `6ba84c3f37` (the entry walk bounded by two steps a level for a
+  document with no `<parallel>`, where it was three): the text did not move (144,724; 147,916;
+  163,428), `run_turn` is 148 bytes where it was 164, the bound of the fixed and batching images 3,588
+  (3,604) and their main stack 4,800 bytes (4,864, 64 bytes of `.bss`). The chain (2,536) and the
+  kit's peak (2,912) did not move.
 - NOT TAKEN, measured 2026-10-30: SCE ADR 0064 (the engine's Appendix D once per program over each
   document's tables, `vendor/sce` 6f72d5975e), on the three images at the same wz tree. Against the
   commit before it (49e40c9a72) the text was +2,444 (fixed), +2,428 (batching) and +2,456 (get), and
