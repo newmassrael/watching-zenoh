@@ -300016,6 +300016,34 @@
         "The text of the answering client at this tree is 144,724 bytes on the kit-lane build and its main stack 4,800 bytes; the graded compare build is about 1,092 above the text, so the gap to the single-thread zenoh-pico image (145,364) is about 450 bytes, which the matrix has not measured on this tree (the last matrix, run 20261030T171033 at SCE f167223931 before the Request arms left, read text 1.0134, stack_used 6,212 against 6,060 LOSS, four of seven cells). The stack_used cell needs the kit's peak (2,912) about 150 bytes lower: the SCE owner works on the core's `enter_states` frame (200 bytes). Then: take the pin, regenerate, measure the three images, run the matrix of 12 boots, and move these rows and the stack with it."
       ]
     },
+    "Round 3957": {
+      "decision_summary": "The roadmap note of the Zenoh API on the engine listed the Join extension for shared memory as a gap in the multicast group. Read against the pinned upstream, it is none: the Join that upstream builds carries ext_shm as None, so a group announces no shared-memory capability and ours need not either. The line is corrected in docs/zenoh-api-on-the-engine.md and the item leaves the carried list. Nothing else moves: no code, no budget and no expectation row changed in this round.",
+      "changes_bullets": [
+        "docs/zenoh-api-on-the-engine.md: the Join extension for shared memory is recorded as no gap, with the upstream reading that shows it."
+      ],
+      "verification_bullets": [
+        "Read against the pinned upstream source: the multicast Join is built with ext_shm as None. Documentation only; no build or test was needed, and the hooks run on the push."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed: the tracing-span seam for upstream's regions tests, the move of the pin to 1.10.2, and the client node role for regions scenario 1; each needs the owner's call. The remaining regions timeouts and the duplicate samples of scenario 7 are held by the other session."
+      ],
+      "publishable_decision_summary": "The roadmap note of the Zenoh API on the engine listed the Join extension for shared memory as a gap in the multicast group. Read against the pinned upstream, it is none: the Join that upstream builds carries ext_shm as None, so a group announces no shared-memory capability and ours need not either. The line is corrected in docs/zenoh-api-on-the-engine.md and the item leaves the carried list. Nothing else moves: no code, no budget and no expectation row changed in this round.",
+      "publishable_changes_bullets": [
+        "docs/zenoh-api-on-the-engine.md: the Join extension for shared memory is recorded as no gap, with the upstream reading that shows it."
+      ],
+      "publishable_verification_bullets": [
+        "Read against the pinned upstream source: the multicast Join is built with ext_shm as None. Documentation only; no build or test was needed, and the hooks run on the push."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed: the tracing-span seam for upstream's regions tests, the move of the pin to 1.10.2, and the client node role for regions scenario 1; each needs the owner's call. The remaining regions timeouts and the duplicate samples of scenario 7 are held by the other session."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
