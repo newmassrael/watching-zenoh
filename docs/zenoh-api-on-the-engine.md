@@ -1049,3 +1049,22 @@ Each lands whole with its surface lines, tests and faults in one round.
   depends on is answered by Z8; until then each difference is a D7 class.
 - **O3. Whether the top crate ever names both engines in one build.** D5 chooses one per build;
   a program that wants both would be two processes.
+- **O4. The pin moved to 1.10.2 (round 3976), and what that release changed that wz does not
+  carry yet.** The family follows upstream's version, so `zenoh`, `zenoh-c` and the reference
+  train are 1.10.2 (zenoh-pico stays at 1.10.1: its own round). Measured by diffing the two
+  releases' trees: the public Rust API grew by two lines, `Hello::locators_iter` and the unstable
+  `Link::interfaces_iter`, both ported with their tests; the C API changed one declaration (the
+  `_options` of `z_open` lost its `const`), which wz's `z_open` accepts as it is; no
+  configuration key moved. Upstream's own suite measured at 1.10.2: `shm` 10 of 10,
+  `liveliness` 46 of 46, and the new `interest_undeclare` 1 of 1. Carried, each read in the
+  1.10.2 source and none built: (a) the QUIC control stream is opened when the first frame is
+  written and not at the open (the wire is the same; wz opens it at once); (b) a multicast group
+  honours `transport/multicast/compression/enabled` (wz lists the key as not read); (c) a
+  companion link of a mixed-reliability pair takes the transport's batch size as its limit; (d)
+  the shared-memory negotiation refuses the link when an offer cannot be honoured, where 1.10.1
+  ran without it; (e) an unresponsive peer's pipelines are disabled at once and its transport is
+  deleted and not closed with a frame; (f) a newer link state restates the role of its node
+  (`crates/wz-routing-graph/src/lib.rs` fills it only while unknown), and an interest that goes
+  away clears the finalised flags of its face; (g) the start conditions of a peer are released
+  by a synchronous call. Taken in the same round: the key `segmentation_offload` of a QUIC
+  locator, and the dropping of multicast addresses from a `tcp` or `tls` name.
