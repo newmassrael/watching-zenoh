@@ -5832,6 +5832,7 @@ mod tests {
     /// refuses the link when it registers it, as a registry does whose other role's face to the
     /// node came up in between: the loop then holds no face, tells nobody it is up, and the
     /// forwarder is asked once.
+    #[cfg(feature = "routing-peer")]
     #[tokio::test]
     async fn a_face_the_forwarder_refuses_at_its_admission_is_not_held() {
         struct RefusesAtAdmission(AtomicUsize);
