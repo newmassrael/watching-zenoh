@@ -300100,6 +300100,50 @@
         "That hosted run measured main at round 3951; rounds after it are unmeasured, so another ledger drift is possible. Most hosted runs on main are cancelled by the next push, so the first complete run after this round is what settles it. A drift is paid as its own round, by dropping fixed lines or fixing the new link, and ledger --write regenerates the file from the shard artifacts."
       ]
     },
+    "Round 3960": {
+      "decision_summary": "The hosted run of 549d294fa7 (run 40988069522) was read job by job to each gate's own line. Rounds 3947 to 3959 of other sessions already paid six of its reds (the zenoh build with default features off, the two doc links that name router-node items, the peer_loop test gate, the C1q count and the shellcheck directive); the three still open are paid here at their cause. C0 subsystem-spawn: the resource snapshot service spawned its sampler on the ambient runtime, which WZ_RUNTIME cannot pace; it now runs on the net subsystem beside the node's other periodic upkeep (the precedent of crate::periodic), and a test whose clock is paused hands its own runtime to spawn_on, since tokio's paused clock belongs to one runtime. The gate also read eight test spawns of wz-zenoh as production, because it recognised only the literal #[cfg(test)] and that module is #[cfg(all(test, feature = \"engine-tokio\"))]; it now reads a cfg by its structure (cfg_requires_test: test, an all() with an argument that requires it, an any() all of whose arguments do; never not() or a feature), inline and for out-of-line modules, and a bodiless test item no longer takes the next block with it. C1cn census: the snapshot service's event-log test asks for event-ring beside resource-snapshot, which the tokio lane row now names. validate + verify + test ran out of disk at Layer C1ch after starting with 105 GB free; it was hidden until now because earlier runs failed at C1 first. The full debug information of the dev and test profiles is the cause, and CI now builds them with line tables only (ci.yml and platform.yml). Backtraces keep file and line, and the gates that read DWARF build the release profile.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/resource_snapshot_host.rs: SnapshotService::spawn runs on WzRuntime::Net through the new spawn_on(runtime, ..); the paused-clock test spawns on its own runtime.",
+        "scripts/lib/subsystem_spawn_gate.py: cfg_requires_test, _test_cfg_attrs and cfg_test_mod_decls replace the literal #[cfg(test)] match in cfg_test_spans and cfg_test_files; a bodiless item ends at its ';'; selftest 20 text cases and 5 file-level cases.",
+        "scripts/lib/nondefault-tests-gate.sh: the wz-runtime-tokio lane row gains event-ring.",
+        ".github/workflows/ci.yml and platform.yml: CARGO_PROFILE_DEV_DEBUG=line-tables-only in the workflow env, beside CARGO_INCREMENTAL, with the measurement in the comment."
+      ],
+      "verification_bullets": [
+        "On a build machine: cargo test -p wz-runtime-tokio --features resource-snapshot,event-ring --lib resource_snapshot_host ran 7 and passed 7 after the rebase onto round 3959.",
+        "On a build machine: cargo test --workspace --no-run wrote 184 GB at the default debug information and 118 GB at line-tables-only (CARGO_INCREMENTAL=0, as CI runs it).",
+        "Static: subsystem_spawn_gate selftest (20 text and 5 file-level cases) and audit (39 named production spawns, 0 ambient), reason_review_pin_gate OK, upstream_citation_anchor_gate OK (FORM), actionlint clean on both workflows, decline_arming_gate, armed_skip_guard and silent_skip_gate OK.",
+        "The hosted jobs of run 40988069522 whose cause another session already paid were read and attributed to those rounds, not repeated here."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "feature-inventory--composable-framework-atomic--preset-catalog/8-sce-feature-gate-mechanism",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions"
+      ],
+      "carry_forward_bullets": [
+        "None."
+      ],
+      "publishable_decision_summary": "The hosted run of 549d294fa7 (run 40988069522) was read job by job to each gate's own line. Rounds 3947 to 3959 of other sessions already paid six of its reds (the zenoh build with default features off, the two doc links that name router-node items, the peer_loop test gate, the C1q count and the shellcheck directive); the three still open are paid here at their cause. C0 subsystem-spawn: the resource snapshot service spawned its sampler on the ambient runtime, which WZ_RUNTIME cannot pace; it now runs on the net subsystem beside the node's other periodic upkeep (the precedent of crate::periodic), and a test whose clock is paused hands its own runtime to spawn_on, since tokio's paused clock belongs to one runtime. The gate also read eight test spawns of wz-zenoh as production, because it recognised only the literal #[cfg(test)] and that module is #[cfg(all(test, feature = \"engine-tokio\"))]; it now reads a cfg by its structure (cfg_requires_test: test, an all() with an argument that requires it, an any() all of whose arguments do; never not() or a feature), inline and for out-of-line modules, and a bodiless test item no longer takes the next block with it. C1cn census: the snapshot service's event-log test asks for event-ring beside resource-snapshot, which the tokio lane row now names. validate + verify + test ran out of disk at Layer C1ch after starting with 105 GB free; it was hidden until now because earlier runs failed at C1 first. The full debug information of the dev and test profiles is the cause, and CI now builds them with line tables only (ci.yml and platform.yml). Backtraces keep file and line, and the gates that read DWARF build the release profile.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/resource_snapshot_host.rs: SnapshotService::spawn runs on WzRuntime::Net through the new spawn_on(runtime, ..); the paused-clock test spawns on its own runtime.",
+        "scripts/lib/subsystem_spawn_gate.py: cfg_requires_test, _test_cfg_attrs and cfg_test_mod_decls replace the literal #[cfg(test)] match in cfg_test_spans and cfg_test_files; a bodiless item ends at its ';'; selftest 20 text cases and 5 file-level cases.",
+        "scripts/lib/nondefault-tests-gate.sh: the wz-runtime-tokio lane row gains event-ring.",
+        ".github/workflows/ci.yml and platform.yml: CARGO_PROFILE_DEV_DEBUG=line-tables-only in the workflow env, beside CARGO_INCREMENTAL, with the measurement in the comment."
+      ],
+      "publishable_verification_bullets": [
+        "On a build machine: cargo test -p wz-runtime-tokio --features resource-snapshot,event-ring --lib resource_snapshot_host ran 7 and passed 7 after the rebase onto round 3959.",
+        "On a build machine: cargo test --workspace --no-run wrote 184 GB at the default debug information and 118 GB at line-tables-only (CARGO_INCREMENTAL=0, as CI runs it).",
+        "Static: subsystem_spawn_gate selftest (20 text and 5 file-level cases) and audit (39 named production spawns, 0 ambient), reason_review_pin_gate OK, upstream_citation_anchor_gate OK (FORM), actionlint clean on both workflows, decline_arming_gate, armed_skip_guard and silent_skip_gate OK.",
+        "The hosted jobs of run 40988069522 whose cause another session already paid were read and attributed to those rounds, not repeated here."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "feature-inventory--composable-framework-atomic--preset-catalog/8-sce-feature-gate-mechanism",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions"
+      ],
+      "publishable_carry_forward_bullets": [
+        "None."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
