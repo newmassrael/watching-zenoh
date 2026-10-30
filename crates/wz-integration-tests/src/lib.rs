@@ -7888,6 +7888,10 @@ pub mod common {
     /// them. It does move on a shared lab host (an interface is given an address for a link
     /// and loses it again), and [`devices_holding_group`] does not see that: the device keeps
     /// its membership while its address comes and goes.
+    ///
+    /// Where the host has no `getifaddrs` (Windows), the answer is `None`: the lanes that ask
+    /// compare scouts on a host that has it.
+    #[cfg(unix)]
     pub fn host_addresses() -> Option<BTreeSet<String>> {
         let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
         // SAFETY: `list` is a live pointer the call fills, and it is freed below on success.
@@ -7930,6 +7934,12 @@ pub mod common {
         // SAFETY: `list` is the list `getifaddrs` returned, freed once.
         unsafe { libc::freeifaddrs(list) };
         Some(addresses)
+    }
+
+    /// [`host_addresses`] where the host has no `getifaddrs`: no list.
+    #[cfg(not(unix))]
+    pub fn host_addresses() -> Option<BTreeSet<String>> {
+        None
     }
 
     /// [`devices_holding_group`] over the text of the table. Each device block starts
