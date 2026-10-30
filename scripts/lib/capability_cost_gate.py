@@ -157,7 +157,7 @@ CASES: tuple[Case, ...] = (
               "(head `f4bdeaee5`, +16,600): the growth is in the code every pico build links "
               "and is not attributed to one commit; the budget moves to that reading. "
               "1,861,801 on hosted CI on 2026-10-29 (head `017e3c711`), and 1,868,097 on a "
-              "build machine on the tree of round 3938, whose readings track the hosted ones "
+              "build machine on the tree of round 3939, whose readings track the hosted ones "
               "(capic-default's note): the budget is that reading and 3,500, to the hundred"),
     Case("pico-client-small", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_528_500,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
@@ -188,7 +188,7 @@ CASES: tuple[Case, ...] = (
               "1,919,305 on hosted CI on 2026-10-29 (head `1ab111232`, 305 over the 1,919,000 "
               "it held): the one of the cases that read the day's clock growth that the budgets "
               "above did not move; the budget moves to that reading plus 3,500, to the hundred. "
-              "1,929,813 on a build machine on the tree of round 3938, the growth "
+              "1,929,813 on a build machine on the tree of round 3939, the growth "
               "pico-client's note states: that reading and 3,500, to the hundred"),
     # The same client on the cooperative engine: the program steps its session, and no runtime
     # thread or tokio is linked. Its links dial UDP in every build, so it is compared with the
@@ -434,7 +434,7 @@ CASES: tuple[Case, ...] = (
               "ends the queries pending on a face with it (1,320 over 4,300,000), the growth "
               "pico-client-small's note states: the budget is that reading and 3,500, rounded "
               "up to the hundred. 4,340,654 on hosted CI on 2026-10-29 (head `017e3c711`) and "
-              "4,343,962 on a build machine on the tree of round 3938: the local readings run "
+              "4,343,962 on a build machine on the tree of round 3939: the local readings run "
               "under the hosted ones (capic-default's note), so the budget is the build "
               "machine's reading and 3,500, to the hundred"),
     Case("capic-client","wz-capi-c", "libwz_capi_c.so", "", 3_000_000,
@@ -514,7 +514,7 @@ CASES: tuple[Case, ...] = (
               "rounded up to the hundred. The local readings above run about 80,000 under "
               "the hosted ones: hosted CI read 9,416,742 at `017e3c711`, whose local reading "
               "was 9,331,648, and a build machine reads the hosted figure within a thousand "
-              "bytes. 9,420,262 on a build machine on the tree of round 3938: the budget is "
+              "bytes. 9,420,262 on a build machine on the tree of round 3939: the budget is "
               "that reading and 3,500, to the hundred"),
 )
 
