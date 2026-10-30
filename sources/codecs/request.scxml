@@ -61,8 +61,8 @@
 
      The Put and Del arms are compiled under the build feature
      `request-put-del` (SCE ADR 0072). Upstream zenoh 1.10.1 accepts
-     only a Query as a request body (zenoh-codec/src/zenoh/mod.rs,
-     RCodec<RequestBody>); zenoh-pico's decoder takes all three. The
+     only a Query as a request body (`commons/zenoh-codec/src/zenoh/mod.rs` @
+     `id::QUERY => RequestBody::Query`); zenoh-pico's decoder takes all three. The
      feature is on by default, the pico preset's contract, and a
      zenoh-preset image leaves it off: a Put or Del tag under
      Z_REQUEST is then refused with CodecError::VariantArmNotBuilt and

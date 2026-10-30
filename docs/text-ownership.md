@@ -343,7 +343,8 @@ carries about 6 KB of C library code wz does not, which is why the difference is
 - TAKEN, measured 2026-10-30: the Request body's Put and Del arms out of the zenoh-preset images
   (`CONFIG_WZ_REQUEST_PUT_DEL=n` in `t2g_client_fixed.conf`, default `y` in Kconfig; `wz-codecs` and
   `wz-session-core` feature `request-put-del`, SCE ADR 0072 at `44e6d3083b`). Pinned zenoh 1.10.1
-  accepts only a Query as a request body (`zenoh-codec/src/zenoh/mod.rs`, `RCodec<RequestBody>`);
+  accepts only a Query as a request body (`commons/zenoh-codec/src/zenoh/mod.rs` @
+  `id::QUERY => RequestBody::Query`);
   zenoh-pico takes all three, and the arms are its contract, so every other build keeps them. The
   decode of a Put or Del tag under a Request is refused (`CodecError::VariantArmNotBuilt`) and
   `MsgPutView`'s and `MsgDelView`'s decoders (the symbols are not in the fixed image), which only the
