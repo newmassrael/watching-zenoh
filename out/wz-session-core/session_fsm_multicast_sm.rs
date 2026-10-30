@@ -138,7 +138,14 @@ pub type SessionFsmMulticastConfiguration = ::sce_rust_runtime::helpers::hierarc
 /// transition, each history's default transition and the document's own
 /// initial transition. A state's children are not listed: the numbering is a
 /// pre-order walk, so they are the state's number plus one and each number past
-/// the subtree (`last_descendant`) of the child before.
+/// the subtree (`last_descendant`) of the child before. A transition holds its
+/// only target itself; `targets` holds only the lists of transitions with more
+/// than one, each its length first (docs/adr/0067).
+///
+/// `history` and `parallel` carry the procedures only a `<history>` or a
+/// `<parallel>` reaches, and are `None` for a document without one, so a
+/// program none of whose documents uses a feature links none of its code
+/// (docs/adr/0066).
 ///
 /// A `const` and not a `static`: `StatePolicy::TABLES` refers to it, and a
 /// constant may refer to a static only from Rust 1.83 on, past the toolchain
@@ -146,8 +153,8 @@ pub type SessionFsmMulticastConfiguration = ::sce_rust_runtime::helpers::hierarc
 /// same.
 pub const SESSION_FSM_MULTICAST_TABLES: ::sce_rust_runtime::DocumentTables = {
     use ::sce_rust_runtime::{
-        DocumentTables, HistoryId, HistoryRow, Span, StateId, StateKind, StateRow, Target,
-        TransitionId, TransitionRow,
+        DocumentTables, HistoryId, HistoryRow, StateId, StateKind, StateRow, Target, TransitionId,
+        TransitionRow,
     };
     DocumentTables {
         states: &[
@@ -164,20 +171,25 @@ pub const SESSION_FSM_MULTICAST_TABLES: ::sce_rust_runtime::DocumentTables = {
         ],
         transitions: &[
             // 0: Idle, transition 0
-            TransitionRow::new(Some(StateId(0)), Span { start: 0, len: 1 }, false, false),
+            TransitionRow::new(Some(StateId(0)), Target::state(StateId(1)), false, false),
             // 1: LinkOpening, transition 0
-            TransitionRow::new(Some(StateId(1)), Span { start: 1, len: 1 }, false, false),
+            TransitionRow::new(Some(StateId(1)), Target::state(StateId(2)), false, false),
             // 2: LinkOpening, transition 1
-            TransitionRow::new(Some(StateId(1)), Span { start: 2, len: 1 }, false, false),
+            TransitionRow::new(Some(StateId(1)), Target::state(StateId(3)), false, false),
             // 3: Running, transition 0
-            TransitionRow::new(Some(StateId(2)), Span { start: 3, len: 1 }, false, false),
+            TransitionRow::new(Some(StateId(2)), Target::state(StateId(3)), false, false),
             // 4: Running, transition 1
-            TransitionRow::new(Some(StateId(2)), Span { start: 4, len: 1 }, false, false),
+            TransitionRow::new(Some(StateId(2)), Target::state(StateId(3)), false, false),
             // 5: the document's initial transition
-            TransitionRow::new(None, Span { start: 5, len: 1 }, false, false),
+            TransitionRow::new(None, Target::state(StateId(0)), false, false),
         ],
-        targets: &[Target::state(StateId(1)), Target::state(StateId(2)), Target::state(StateId(3)), Target::state(StateId(3)), Target::state(StateId(3)), Target::state(StateId(0))],
+        targets: &[],
         initial: TransitionId(5),
+        default_state: ::sce_rust_runtime::StateId(SessionFsmMulticastState::Idle as u16),
+        null_event: ::sce_rust_runtime::EventId(4),
+        error_events: &[],
+        history: None,
+        parallel: None,
     }
 };
 
@@ -323,14 +335,6 @@ impl<A: SessionFsmMulticastActions + 'static> SessionFsmMulticastPolicy<A> {
 }
 
 
-// The two constants `Engine::new_const` builds its engine from: the state it
-// names before it initialises and an empty queue, as `initial_state` and
-// `EventQueue::default()` give them below.
-impl<A: SessionFsmMulticastActions + 'static> sce_rust_runtime::ConstStatePolicy for SessionFsmMulticastPolicy<A> {
-    const INITIAL_STATE: Self::State = SessionFsmMulticastState::Idle;
-    const EMPTY_EVENT_QUEUE: Self::EventQueue = sce_rust_runtime::EventQueueManager::new();
-}
-
 // ======================================================================
 // StatePolicy trait implementation
 // ======================================================================
@@ -358,8 +362,9 @@ impl<A: SessionFsmMulticastActions + 'static> StatePolicy for SessionFsmMulticas
     // as the const consumed below); absent a declared capacity the bare form
     // inherits the runtime default `MAX_EVENT_QUEUE_DEPTH` (the single source of
     // the default). Inert under std (`VecDeque`), so this one emission compiles
-    // on both runtime profiles.
-    type EventQueue = sce_rust_runtime::EventQueueManager<sce_rust_runtime::EventWithMetadata<Self::Event, Self::Payload>>;
+    // on both runtime profiles. The queue holds events as numbers and only the
+    // payloads as this machine's type (docs/adr/0068).
+    type EventQueue = sce_rust_runtime::EventQueue<Self::Payload>;
 
     // W3C SCXML 6.3: the delayed-send scheduler keeps a per-entry `send_id` only
     // so `<cancel sendid>` can find and drop the matching entry; the timer-fire
@@ -439,14 +444,6 @@ impl<A: SessionFsmMulticastActions + 'static> StatePolicy for SessionFsmMulticas
     // ======================================================================
     // Static metadata methods (W3C SCXML document structure)
     // ======================================================================
-
-    fn initial_state() -> Self::State {
-        // The runtime entry state and the type's `Default` derive are one
-        // concept, sourced from one computation (`default_state_id`) so
-        // they can never diverge: `<scxml initial>`, or the first sorted
-        // state when the initial attribute is unset.
-        <Self as sce_rust_runtime::ConstStatePolicy>::INITIAL_STATE
-    }
 
     // The document's structure — each state's parent, kind, subtree and
     // initial transition, and so its children, each history's parent and

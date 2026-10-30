@@ -142,7 +142,14 @@ pub type ReassemblySlotConfiguration = ::sce_rust_runtime::helpers::hierarchy::B
 /// transition, each history's default transition and the document's own
 /// initial transition. A state's children are not listed: the numbering is a
 /// pre-order walk, so they are the state's number plus one and each number past
-/// the subtree (`last_descendant`) of the child before.
+/// the subtree (`last_descendant`) of the child before. A transition holds its
+/// only target itself; `targets` holds only the lists of transitions with more
+/// than one, each its length first (docs/adr/0067).
+///
+/// `history` and `parallel` carry the procedures only a `<history>` or a
+/// `<parallel>` reaches, and are `None` for a document without one, so a
+/// program none of whose documents uses a feature links none of its code
+/// (docs/adr/0066).
 ///
 /// A `const` and not a `static`: `StatePolicy::TABLES` refers to it, and a
 /// constant may refer to a static only from Rust 1.83 on, past the toolchain
@@ -150,8 +157,8 @@ pub type ReassemblySlotConfiguration = ::sce_rust_runtime::helpers::hierarchy::B
 /// same.
 pub const REASSEMBLY_SLOT_TABLES: ::sce_rust_runtime::DocumentTables = {
     use ::sce_rust_runtime::{
-        DocumentTables, HistoryId, HistoryRow, Span, StateId, StateKind, StateRow, Target,
-        TransitionId, TransitionRow,
+        DocumentTables, HistoryId, HistoryRow, StateId, StateKind, StateRow, Target, TransitionId,
+        TransitionRow,
     };
     DocumentTables {
         states: &[
@@ -170,34 +177,39 @@ pub const REASSEMBLY_SLOT_TABLES: ::sce_rust_runtime::DocumentTables = {
         ],
         transitions: &[
             // 0: Empty, transition 0
-            TransitionRow::new(Some(StateId(0)), Span { start: 0, len: 1 }, false, true),
+            TransitionRow::new(Some(StateId(0)), Target::state(StateId(1)), false, true),
             // 1: Empty, transition 1
-            TransitionRow::new(Some(StateId(0)), Span { start: 1, len: 1 }, false, true),
+            TransitionRow::new(Some(StateId(0)), Target::state(StateId(2)), false, true),
             // 2: Receiving, transition 0
-            TransitionRow::new(Some(StateId(1)), Span { start: 2, len: 1 }, false, true),
+            TransitionRow::new(Some(StateId(1)), Target::state(StateId(1)), false, true),
             // 3: Receiving, transition 1
-            TransitionRow::new(Some(StateId(1)), Span { start: 3, len: 1 }, false, true),
+            TransitionRow::new(Some(StateId(1)), Target::state(StateId(2)), false, true),
             // 4: Receiving, transition 2
-            TransitionRow::new(Some(StateId(1)), Span { start: 4, len: 1 }, false, true),
+            TransitionRow::new(Some(StateId(1)), Target::state(StateId(4)), false, true),
             // 5: Receiving, transition 3
-            TransitionRow::new(Some(StateId(1)), Span { start: 5, len: 1 }, false, true),
+            TransitionRow::new(Some(StateId(1)), Target::state(StateId(4)), false, true),
             // 6: Receiving, transition 4
-            TransitionRow::new(Some(StateId(1)), Span { start: 6, len: 1 }, false, true),
+            TransitionRow::new(Some(StateId(1)), Target::state(StateId(4)), false, true),
             // 7: Receiving, transition 5
-            TransitionRow::new(Some(StateId(1)), Span { start: 7, len: 1 }, false, true),
+            TransitionRow::new(Some(StateId(1)), Target::state(StateId(4)), false, true),
             // 8: Receiving, transition 6
-            TransitionRow::new(Some(StateId(1)), Span { start: 8, len: 1 }, false, true),
+            TransitionRow::new(Some(StateId(1)), Target::state(StateId(3)), false, true),
             // 9: Complete, transition 0
-            TransitionRow::new(Some(StateId(2)), Span { start: 9, len: 1 }, false, true),
+            TransitionRow::new(Some(StateId(2)), Target::state(StateId(0)), false, true),
             // 10: TimedOut, transition 0
-            TransitionRow::new(Some(StateId(3)), Span { start: 10, len: 1 }, false, true),
+            TransitionRow::new(Some(StateId(3)), Target::state(StateId(0)), false, true),
             // 11: Aborted, transition 0
-            TransitionRow::new(Some(StateId(4)), Span { start: 11, len: 1 }, false, true),
+            TransitionRow::new(Some(StateId(4)), Target::state(StateId(0)), false, true),
             // 12: the document's initial transition
-            TransitionRow::new(None, Span { start: 12, len: 1 }, false, false),
+            TransitionRow::new(None, Target::state(StateId(0)), false, false),
         ],
-        targets: &[Target::state(StateId(1)), Target::state(StateId(2)), Target::state(StateId(1)), Target::state(StateId(2)), Target::state(StateId(4)), Target::state(StateId(4)), Target::state(StateId(4)), Target::state(StateId(4)), Target::state(StateId(3)), Target::state(StateId(0)), Target::state(StateId(0)), Target::state(StateId(0)), Target::state(StateId(0))],
+        targets: &[],
         initial: TransitionId(12),
+        default_state: ::sce_rust_runtime::StateId(ReassemblySlotState::Empty as u16),
+        null_event: ::sce_rust_runtime::EventId(7),
+        error_events: &[],
+        history: None,
+        parallel: None,
     }
 };
 
@@ -386,8 +398,9 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
     // as the const consumed below); absent a declared capacity the bare form
     // inherits the runtime default `MAX_EVENT_QUEUE_DEPTH` (the single source of
     // the default). Inert under std (`VecDeque`), so this one emission compiles
-    // on both runtime profiles.
-    type EventQueue = sce_rust_runtime::EventQueueManager<sce_rust_runtime::EventWithMetadata<Self::Event, Self::Payload>>;
+    // on both runtime profiles. The queue holds events as numbers and only the
+    // payloads as this machine's type (docs/adr/0068).
+    type EventQueue = sce_rust_runtime::EventQueue<Self::Payload>;
 
     // W3C SCXML 6.3: the delayed-send scheduler keeps a per-entry `send_id` only
     // so `<cancel sendid>` can find and drop the matching entry; the timer-fire
@@ -471,14 +484,6 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
     // ======================================================================
     // Static metadata methods (W3C SCXML document structure)
     // ======================================================================
-
-    fn initial_state() -> Self::State {
-        // The runtime entry state and the type's `Default` derive are one
-        // concept, sourced from one computation (`default_state_id`) so
-        // they can never diverge: `<scxml initial>`, or the first sorted
-        // state when the initial attribute is unset.
-        ReassemblySlotState::Empty
-    }
 
     // The document's structure — each state's parent, kind, subtree and
     // initial transition, and so its children, each history's parent and

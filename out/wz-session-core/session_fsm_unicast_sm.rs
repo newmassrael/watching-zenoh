@@ -181,7 +181,14 @@ pub type SessionFsmUnicastConfiguration = ::sce_rust_runtime::helpers::hierarchy
 /// transition, each history's default transition and the document's own
 /// initial transition. A state's children are not listed: the numbering is a
 /// pre-order walk, so they are the state's number plus one and each number past
-/// the subtree (`last_descendant`) of the child before.
+/// the subtree (`last_descendant`) of the child before. A transition holds its
+/// only target itself; `targets` holds only the lists of transitions with more
+/// than one, each its length first (docs/adr/0067).
+///
+/// `history` and `parallel` carry the procedures only a `<history>` or a
+/// `<parallel>` reaches, and are `None` for a document without one, so a
+/// program none of whose documents uses a feature links none of its code
+/// (docs/adr/0066).
 ///
 /// A `const` and not a `static`: `StatePolicy::TABLES` refers to it, and a
 /// constant may refer to a static only from Rust 1.83 on, past the toolchain
@@ -189,8 +196,8 @@ pub type SessionFsmUnicastConfiguration = ::sce_rust_runtime::helpers::hierarchy
 /// same.
 pub const SESSION_FSM_UNICAST_TABLES: ::sce_rust_runtime::DocumentTables = {
     use ::sce_rust_runtime::{
-        DocumentTables, HistoryId, HistoryRow, Span, StateId, StateKind, StateRow, Target,
-        TransitionId, TransitionRow,
+        DocumentTables, HistoryId, HistoryRow, StateId, StateKind, StateRow, Target, TransitionId,
+        TransitionRow,
     };
     DocumentTables {
         states: &[
@@ -227,101 +234,97 @@ pub const SESSION_FSM_UNICAST_TABLES: ::sce_rust_runtime::DocumentTables = {
         ],
         transitions: &[
             // 0: Init, transition 0
-            TransitionRow::new(Some(StateId(0)), Span { start: 0, len: 1 }, false, false),
+            TransitionRow::new(Some(StateId(0)), Target::state(StateId(1)), false, false),
             // 1: Init, transition 1
-            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(1)), Span { start: 1, len: 1 }, false, false),
-            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(0)), Span { start: 1, len: 1 }, false, false),
-            // 2: LinkOpening, transition 0
-            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(1)), Span { start: 2, len: 1 }, false, true),
-            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(1)), Span { start: 2, len: 1 }, false, false),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(0)), Target::state(StateId(5)), false, false),
+            // 1: LinkOpening, transition 0
+            TransitionRow::new(Some(StateId(1)), Target::state(StateId(2)), false, false),
             // 3: LinkOpening, transition 1
-            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(1)), Span { start: 3, len: 1 }, false, false),
-            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(1)), Span { start: 3, len: 1 }, false, true),
+            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(1)), Target::state(StateId(6)), false, true),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(1)), Target::state(StateId(10)), false, true),
             // 4: LinkOpening, transition 2
-            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(2)), Span { start: 4, len: 1 }, false, true),
-            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(1)), Span { start: 4, len: 1 }, false, false),
-            // 5: Opening, transition 1
-            TransitionRow::new(Some(StateId(2)), Span { start: 5, len: 1 }, false, true),
+            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(1)), Target::state(StateId(7)), false, false),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(1)), Target::state(StateId(11)), false, false),
+            // 5: Opening, transition 0
+            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(2)), Target::state(StateId(6)), false, true),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(2)), Target::state(StateId(10)), false, true),
             // 6: Opening, transition 1
-            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(2)), Span { start: 6, len: 1 }, false, false),
-            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(2)), Span { start: 6, len: 1 }, false, true),
-            // 7: Opening, transition 3
-            TransitionRow::new(Some(StateId(2)), Span { start: 7, len: 1 }, false, false),
+            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(2)), Target::state(StateId(6)), false, true),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(2)), Target::state(StateId(10)), false, true),
+            // 7: Opening, transition 2
+            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(2)), Target::state(StateId(7)), false, false),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(2)), Target::state(StateId(11)), false, false),
             // 8: Opening, transition 3
-            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(3)), Span { start: 8, len: 1 }, false, false),
-            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(2)), Span { start: 8, len: 1 }, false, false),
-            // 9: SentInitSyn, transition 0
-            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(3)), Span { start: 9, len: 1 }, false, true),
-            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(3)), Span { start: 9, len: 1 }, false, false),
+            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(2)), Target::state(StateId(7)), false, false),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(2)), Target::state(StateId(11)), false, false),
+            // 8: SentInitSyn, transition 0
+            TransitionRow::new(Some(StateId(3)), Target::state(StateId(4)), false, false),
             // 10: SentInitSyn, transition 1
-            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(4)), Span { start: 10, len: 1 }, false, false),
-            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(3)), Span { start: 10, len: 1 }, false, true),
+            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(3)), Target::state(StateId(6)), false, true),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(3)), Target::state(StateId(10)), false, true),
             // 11: GotInitAck, transition 0
-            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(4)), Span { start: 11, len: 1 }, false, true),
-            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(4)), Span { start: 11, len: 1 }, false, false),
+            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(4)), Target::state(StateId(5)), false, false),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(4)), Target::state(StateId(9)), false, false),
             // 12: GotInitAck, transition 1
-            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(5)), Span { start: 12, len: 1 }, false, true),
-            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(4)), Span { start: 12, len: 1 }, false, true),
+            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(4)), Target::state(StateId(6)), false, true),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(4)), Target::state(StateId(10)), false, true),
             // 13: Accepting, transition 0
-            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(5)), Span { start: 13, len: 1 }, false, true),
-            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(5)), Span { start: 13, len: 1 }, false, false),
-            // 14: Established, transition 2
-            TransitionRow::new(Some(StateId(5)), Span { start: 14, len: 1 }, false, true),
-            // 15: Established, transition 3
-            TransitionRow::new(Some(StateId(5)), Span { start: 15, len: 1 }, false, true),
-            // 16: Established, transition 4
-            TransitionRow::new(Some(StateId(5)), Span { start: 16, len: 1 }, false, false),
+            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(5)), Target::state(StateId(6)), false, true),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(5)), Target::state(StateId(11)), false, false),
+            // 14: Accepting, transition 1
+            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(5)), Target::state(StateId(6)), false, true),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(5)), Target::state(StateId(10)), false, true),
+            // 15: Accepting, transition 2
+            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(5)), Target::state(StateId(6)), false, true),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(5)), Target::state(StateId(10)), false, true),
+            // 16: Accepting, transition 3
+            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(5)), Target::state(StateId(6)), false, true),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(5)), Target::state(StateId(11)), false, false),
+            // 17: Accepting, transition 4
+            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(5)), Target::state(StateId(7)), false, false),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(5)), Target::state(StateId(11)), false, false),
             // 17: Established, transition 5
-            TransitionRow::new(Some(StateId(5)), Span { start: 17, len: 1 }, false, false),
+            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(5)), Target::state(StateId(7)), false, false),
             // 18: Closing, transition 0
-            TransitionRow::new(Some(StateId(6)), Span { start: 18, len: 1 }, false, false),
+            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(6)), Target::state(StateId(7)), false, false),
+            // 19: Closing, transition 1
+            TransitionRow::new(Some(StateId(6)), Target::state(StateId(7)), false, false),
             // 19: SentInitAck, transition 0
-            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(6)), Span { start: 19, len: 1 }, false, false),
-            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(7)), Span { start: 19, len: 1 }, false, false),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(7)), Target::state(StateId(8)), false, false),
             // 20: SentOpenAck, transition 0
-            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(2)), Span { start: 20, len: 1 }, false, false),
-            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(8)), Span { start: 20, len: 1 }, false, false),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(8)), Target::state(StateId(9)), false, false),
             // 21: Established, transition 0
-            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(None, Span { start: 21, len: 1 }, false, false),
-            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(9)), Span { start: 21, len: 1 }, false, true),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(9)), Target::state(StateId(10)), false, true),
             // 22: Established, transition 1
-            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(9)), Span { start: 22, len: 1 }, false, true),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(9)), Target::state(StateId(10)), false, true),
             // 23: Established, transition 2
-            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(9)), Span { start: 23, len: 1 }, false, true),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(9)), Target::state(StateId(10)), false, true),
             // 24: Established, transition 3
-            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(9)), Span { start: 24, len: 1 }, false, true),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(9)), Target::state(StateId(10)), false, true),
             // 25: Established, transition 4
-            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(9)), Span { start: 25, len: 1 }, false, false),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(9)), Target::state(StateId(11)), false, false),
             // 26: Established, transition 5
-            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(9)), Span { start: 26, len: 1 }, false, false),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(9)), Target::state(StateId(11)), false, false),
             // 27: Closing, transition 0
-            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(10)), Span { start: 27, len: 1 }, false, false),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(10)), Target::state(StateId(11)), false, false),
             // 28: Closing, transition 1
-            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(10)), Span { start: 28, len: 1 }, false, false),
-            // 29: Opening, initial
-            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(2)), Span { start: 29, len: 1 }, false, false),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(10)), Target::state(StateId(11)), false, false),
+            // 20: Opening, initial
+            TransitionRow::new(Some(StateId(2)), Target::state(StateId(3)), false, false),
             // 30: Accepting, initial
-            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(5)), Span { start: 30, len: 1 }, false, false),
-            // 31: the document's initial transition
-            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(None, Span { start: 31, len: 1 }, false, false),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(5)), Target::state(StateId(6)), false, false),
+            // 21: the document's initial transition
+            TransitionRow::new(None, Target::state(StateId(0)), false, false),
         ],
-        targets: &[Target::state(StateId(1)), #[cfg(feature = "session-unicast-accept")] Target::state(StateId(5)), Target::state(StateId(2)), #[cfg(not(feature = "session-unicast-accept"))] Target::state(StateId(6)),
-#[cfg(feature = "session-unicast-accept")] Target::state(StateId(10)), #[cfg(not(feature = "session-unicast-accept"))] Target::state(StateId(7)),
-#[cfg(feature = "session-unicast-accept")] Target::state(StateId(11)), #[cfg(not(feature = "session-unicast-accept"))] Target::state(StateId(6)),
-#[cfg(feature = "session-unicast-accept")] Target::state(StateId(10)), #[cfg(not(feature = "session-unicast-accept"))] Target::state(StateId(6)),
-#[cfg(feature = "session-unicast-accept")] Target::state(StateId(10)), #[cfg(not(feature = "session-unicast-accept"))] Target::state(StateId(7)),
-#[cfg(feature = "session-unicast-accept")] Target::state(StateId(11)), #[cfg(not(feature = "session-unicast-accept"))] Target::state(StateId(7)),
-#[cfg(feature = "session-unicast-accept")] Target::state(StateId(11)), Target::state(StateId(4)), #[cfg(not(feature = "session-unicast-accept"))] Target::state(StateId(6)),
-#[cfg(feature = "session-unicast-accept")] Target::state(StateId(10)), #[cfg(not(feature = "session-unicast-accept"))] Target::state(StateId(5)),
-#[cfg(feature = "session-unicast-accept")] Target::state(StateId(9)), #[cfg(not(feature = "session-unicast-accept"))] Target::state(StateId(6)),
-#[cfg(feature = "session-unicast-accept")] Target::state(StateId(10)), #[cfg(not(feature = "session-unicast-accept"))] Target::state(StateId(6)),
-#[cfg(feature = "session-unicast-accept")] Target::state(StateId(11)), #[cfg(not(feature = "session-unicast-accept"))] Target::state(StateId(6)),
-#[cfg(feature = "session-unicast-accept")] Target::state(StateId(10)), #[cfg(not(feature = "session-unicast-accept"))] Target::state(StateId(6)),
-#[cfg(feature = "session-unicast-accept")] Target::state(StateId(10)), #[cfg(not(feature = "session-unicast-accept"))] Target::state(StateId(6)),
-#[cfg(feature = "session-unicast-accept")] Target::state(StateId(11)), #[cfg(not(feature = "session-unicast-accept"))] Target::state(StateId(7)),
-#[cfg(feature = "session-unicast-accept")] Target::state(StateId(11)), #[cfg(not(feature = "session-unicast-accept"))] Target::state(StateId(7)), #[cfg(not(feature = "session-unicast-accept"))] Target::state(StateId(7)), Target::state(StateId(7)), #[cfg(feature = "session-unicast-accept")] Target::state(StateId(8)), #[cfg(feature = "session-unicast-accept")] Target::state(StateId(9)), #[cfg(feature = "session-unicast-accept")] Target::state(StateId(10)), #[cfg(feature = "session-unicast-accept")] Target::state(StateId(10)), #[cfg(feature = "session-unicast-accept")] Target::state(StateId(10)), #[cfg(feature = "session-unicast-accept")] Target::state(StateId(10)), #[cfg(feature = "session-unicast-accept")] Target::state(StateId(11)), #[cfg(feature = "session-unicast-accept")] Target::state(StateId(11)), #[cfg(feature = "session-unicast-accept")] Target::state(StateId(11)), #[cfg(feature = "session-unicast-accept")] Target::state(StateId(11)), Target::state(StateId(3)), #[cfg(feature = "session-unicast-accept")] Target::state(StateId(6)), Target::state(StateId(0)),],
+        targets: &[],
         #[cfg(not(feature = "session-unicast-accept"))] initial: TransitionId(21),
         #[cfg(feature = "session-unicast-accept")] initial: TransitionId(31),
+        default_state: ::sce_rust_runtime::StateId(SessionFsmUnicastState::Init as u16),
+        #[cfg(not(feature = "session-unicast-accept"))] null_event: ::sce_rust_runtime::EventId(15),
+        #[cfg(feature = "session-unicast-accept")] null_event: ::sce_rust_runtime::EventId(19),
+        error_events: &[],
+        history: None,
+        parallel: None,
     }
 };
 
@@ -497,14 +500,6 @@ impl<A: SessionFsmUnicastActions + 'static> SessionFsmUnicastPolicy<A> {
 }
 
 
-// The two constants `Engine::new_const` builds its engine from: the state it
-// names before it initialises and an empty queue, as `initial_state` and
-// `EventQueue::default()` give them below.
-impl<A: SessionFsmUnicastActions + 'static> sce_rust_runtime::ConstStatePolicy for SessionFsmUnicastPolicy<A> {
-    const INITIAL_STATE: Self::State = SessionFsmUnicastState::Init;
-    const EMPTY_EVENT_QUEUE: Self::EventQueue = sce_rust_runtime::EventQueueManager::new();
-}
-
 // ======================================================================
 // StatePolicy trait implementation
 // ======================================================================
@@ -532,8 +527,9 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
     // as the const consumed below); absent a declared capacity the bare form
     // inherits the runtime default `MAX_EVENT_QUEUE_DEPTH` (the single source of
     // the default). Inert under std (`VecDeque`), so this one emission compiles
-    // on both runtime profiles.
-    type EventQueue = sce_rust_runtime::EventQueueManager<sce_rust_runtime::EventWithMetadata<Self::Event, Self::Payload>>;
+    // on both runtime profiles. The queue holds events as numbers and only the
+    // payloads as this machine's type (docs/adr/0068).
+    type EventQueue = sce_rust_runtime::EventQueue<Self::Payload>;
 
     // W3C SCXML 6.3: the delayed-send scheduler keeps a per-entry `send_id` only
     // so `<cancel sendid>` can find and drop the matching entry; the timer-fire
@@ -638,14 +634,6 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
     // ======================================================================
     // Static metadata methods (W3C SCXML document structure)
     // ======================================================================
-
-    fn initial_state() -> Self::State {
-        // The runtime entry state and the type's `Default` derive are one
-        // concept, sourced from one computation (`default_state_id`) so
-        // they can never diverge: `<scxml initial>`, or the first sorted
-        // state when the initial attribute is unset.
-        <Self as sce_rust_runtime::ConstStatePolicy>::INITIAL_STATE
-    }
 
     // The document's structure — each state's parent, kind, subtree and
     // initial transition, and so its children, each history's parent and

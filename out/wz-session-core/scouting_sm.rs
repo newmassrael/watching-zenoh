@@ -138,7 +138,14 @@ pub type ScoutingConfiguration = ::sce_rust_runtime::helpers::hierarchy::Bounded
 /// transition, each history's default transition and the document's own
 /// initial transition. A state's children are not listed: the numbering is a
 /// pre-order walk, so they are the state's number plus one and each number past
-/// the subtree (`last_descendant`) of the child before.
+/// the subtree (`last_descendant`) of the child before. A transition holds its
+/// only target itself; `targets` holds only the lists of transitions with more
+/// than one, each its length first (docs/adr/0067).
+///
+/// `history` and `parallel` carry the procedures only a `<history>` or a
+/// `<parallel>` reaches, and are `None` for a document without one, so a
+/// program none of whose documents uses a feature links none of its code
+/// (docs/adr/0066).
 ///
 /// A `const` and not a `static`: `StatePolicy::TABLES` refers to it, and a
 /// constant may refer to a static only from Rust 1.83 on, past the toolchain
@@ -146,8 +153,8 @@ pub type ScoutingConfiguration = ::sce_rust_runtime::helpers::hierarchy::Bounded
 /// same.
 pub const SCOUTING_TABLES: ::sce_rust_runtime::DocumentTables = {
     use ::sce_rust_runtime::{
-        DocumentTables, HistoryId, HistoryRow, Span, StateId, StateKind, StateRow, Target,
-        TransitionId, TransitionRow,
+        DocumentTables, HistoryId, HistoryRow, StateId, StateKind, StateRow, Target, TransitionId,
+        TransitionRow,
     };
     DocumentTables {
         states: &[
@@ -162,22 +169,27 @@ pub const SCOUTING_TABLES: ::sce_rust_runtime::DocumentTables = {
         ],
         transitions: &[
             // 0: Idle, transition 0
-            TransitionRow::new(Some(StateId(0)), Span { start: 0, len: 1 }, false, true),
+            TransitionRow::new(Some(StateId(0)), Target::state(StateId(1)), false, true),
             // 1: Sending, transition 0
-            TransitionRow::new(Some(StateId(1)), Span { start: 1, len: 1 }, false, false),
+            TransitionRow::new(Some(StateId(1)), Target::state(StateId(2)), false, false),
             // 2: Sending, transition 1
-            TransitionRow::new(Some(StateId(1)), Span { start: 2, len: 1 }, false, true),
+            TransitionRow::new(Some(StateId(1)), Target::state(StateId(0)), false, true),
             // 3: AwaitingHello, transition 0
-            TransitionRow::new(Some(StateId(2)), Span { start: 3, len: 1 }, false, true),
+            TransitionRow::new(Some(StateId(2)), Target::state(StateId(0)), false, true),
             // 4: AwaitingHello, transition 1
-            TransitionRow::new(Some(StateId(2)), Span { start: 4, len: 1 }, false, true),
+            TransitionRow::new(Some(StateId(2)), Target::state(StateId(2)), false, true),
             // 5: AwaitingHello, transition 2
-            TransitionRow::new(Some(StateId(2)), Span { start: 5, len: 1 }, false, true),
+            TransitionRow::new(Some(StateId(2)), Target::state(StateId(0)), false, true),
             // 6: the document's initial transition
-            TransitionRow::new(None, Span { start: 6, len: 1 }, false, false),
+            TransitionRow::new(None, Target::state(StateId(0)), false, false),
         ],
-        targets: &[Target::state(StateId(1)), Target::state(StateId(2)), Target::state(StateId(0)), Target::state(StateId(0)), Target::state(StateId(2)), Target::state(StateId(0)), Target::state(StateId(0))],
+        targets: &[],
         initial: TransitionId(6),
+        default_state: ::sce_rust_runtime::StateId(ScoutingState::Idle as u16),
+        null_event: ::sce_rust_runtime::EventId(5),
+        error_events: &[],
+        history: None,
+        parallel: None,
     }
 };
 
@@ -359,8 +371,9 @@ impl<A: ScoutingActions + 'static> StatePolicy for ScoutingPolicy<A> {
     // as the const consumed below); absent a declared capacity the bare form
     // inherits the runtime default `MAX_EVENT_QUEUE_DEPTH` (the single source of
     // the default). Inert under std (`VecDeque`), so this one emission compiles
-    // on both runtime profiles.
-    type EventQueue = sce_rust_runtime::EventQueueManager<sce_rust_runtime::EventWithMetadata<Self::Event, Self::Payload>>;
+    // on both runtime profiles. The queue holds events as numbers and only the
+    // payloads as this machine's type (docs/adr/0068).
+    type EventQueue = sce_rust_runtime::EventQueue<Self::Payload>;
 
     // W3C SCXML 6.3: the delayed-send scheduler keeps a per-entry `send_id` only
     // so `<cancel sendid>` can find and drop the matching entry; the timer-fire
@@ -440,14 +453,6 @@ impl<A: ScoutingActions + 'static> StatePolicy for ScoutingPolicy<A> {
     // ======================================================================
     // Static metadata methods (W3C SCXML document structure)
     // ======================================================================
-
-    fn initial_state() -> Self::State {
-        // The runtime entry state and the type's `Default` derive are one
-        // concept, sourced from one computation (`default_state_id`) so
-        // they can never diverge: `<scxml initial>`, or the first sorted
-        // state when the initial attribute is unset.
-        ScoutingState::Idle
-    }
 
     // The document's structure — each state's parent, kind, subtree and
     // initial transition, and so its children, each history's parent and
