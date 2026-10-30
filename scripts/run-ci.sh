@@ -3595,6 +3595,13 @@ layer_c0_test_discipline() {
     # binary beside it, an all-absent population armed and unarmed).
     python3 scripts/lib/oracle_pin_gate.py --selftest || return 1
     python3 scripts/lib/oracle_pin_gate.py --check || return 1
+    # R3961 — the machine's store those oracles are built into and copied from.
+    # The selftest drives publication (refused off the pin), copying, the key that
+    # makes a half copy read as stale, pruning and the source view against a
+    # temporary store; `check` derives this tree's layout and reads no binary, so
+    # it grades the same on a host with no oracle as on one with four.
+    python3 scripts/lib/oracle_store.py selftest || return 1
+    python3 scripts/lib/oracle_store.py check || return 1
     # R2326 (unregistered open-debt item 10) — the gate above judges the four
     # zenohd oracles. It cannot judge the other three roots this tree resolves,
     # because those oracles CANNOT ANSWER: measured 2026-09-04, `strings` finds
@@ -25147,6 +25154,17 @@ layer_qzb_zephyr_board_matrix() {
 
 # ─── dispatch ──────────────────────────────────────────────────────
 overall=0
+# R3961 — the oracles this machine has already built, copied into this checkout
+# before any lane looks for them. It never builds and never reaches the network
+# (`scripts/lib/oracle_store.py`), so a checkout slot or worktree that did not
+# run `build-zenohd.sh` itself still runs its interop lanes against the oracle
+# another one built. A store that holds nothing changes nothing; a store that
+# cannot be read is a failure of this run, not a silent fall back to no oracle.
+if ! python3 scripts/lib/oracle_store.py materialize; then
+    echo "[$(_runci_ts)] ERROR run-ci: the oracle store could not be read or copied (scripts/lib/oracle_store.py)" >&2
+    FAILED_LAYERS+=("oracle store (materialize)")
+    overall=1
+fi
 run_layer 0 layer_0_preflight_lints || overall=1
 run_layer A layer_a_mnemosyne || overall=1
 run_layer A2 layer_a2_audit_mid_values || overall=1

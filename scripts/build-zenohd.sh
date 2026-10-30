@@ -33,16 +33,27 @@
 #
 # Output: target/zenohd/zenohd
 #
+# R3961 — WHERE IT IS BUILT, and why that is not the checkout. A source-tree
+# oracle is built once per MACHINE, in the store `scripts/lib/oracle_store.py`
+# derives (`$WZ_ORACLE_STORE`, else `~/.cache/watching-zenoh/oracles`): the
+# clone, cargo's target dir and the installed product all live there, keyed by
+# version and by this script's digest. `target/zenohd*` is a copy of the
+# product, made by `oracle_store.py materialize`, which run-ci also calls before
+# its lanes. A build machine runs this repository in several checkout slots and
+# a developer's machine in several worktrees; each used to clone and build the
+# same oracle again, or ran its interop lanes with none (the module docstring
+# has the measurement). Only an oracle that answers with the pin is published.
+#
 # Built with the pinned zenoh release's OWN toolchain, to avoid any
-# newer-rustc incompatibility. Re-runs are idempotent: the checkout build is
-# incremental, the crates.io install is a no-op when the version is already
-# installed, and `install -m 0755` overwrites atomically.
+# newer-rustc incompatibility. Re-runs are idempotent: a product the store
+# holds is copied and nothing is built, the build is incremental in the
+# store's target dir, and the crates.io install is a no-op when the version is
+# already installed.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALL_DIR="$ROOT/target/zenohd"
-BUILD_DIR="$ROOT/target/zenohd-build"
 ZENOHD_VERSION="${ZENOHD_VERSION:-1.10.2}"
 
 # R2229 (open-debt item 579) — the toolchain that release pins, DERIVED.
@@ -123,12 +134,10 @@ VARIANT_FEATURE=""
 VARIANT_NAME=""
 if [[ "${ZENOHD_UNIXPIPE:-0}" -eq 1 ]]; then
     INSTALL_DIR="$ROOT/target/zenohd-unixpipe"
-    BUILD_DIR="$ROOT/target/zenohd-unixpipe-build"
     VARIANT_FEATURE="--features zenoh/transport_unixpipe"
     VARIANT_NAME="transport_unixpipe"
 elif [[ "${ZENOHD_VSOCK:-0}" -eq 1 ]]; then
     INSTALL_DIR="$ROOT/target/zenohd-vsock"
-    BUILD_DIR="$ROOT/target/zenohd-vsock-build"
     VARIANT_FEATURE="--features zenoh/transport_vsock"
     VARIANT_NAME="transport_vsock"
 # R311y505 — the SHARED-MEMORY-enabled variant, the same pattern a third time, and
@@ -150,9 +159,39 @@ elif [[ "${ZENOHD_VSOCK:-0}" -eq 1 ]]; then
 # property" trap. This variant is the oracle that HAS the extension.
 elif [[ "${ZENOHD_SHM:-0}" -eq 1 ]]; then
     INSTALL_DIR="$ROOT/target/zenohd-shm"
-    BUILD_DIR="$ROOT/target/zenohd-shm-build"
     VARIANT_FEATURE="--features zenoh/shared-memory"
     VARIANT_NAME="shared-memory"
+fi
+
+# R3961 — the store's paths for this oracle (STORE_LOCK, STORE_SRC, STORE_BUILD,
+# STORE_PRODUCT), derived by the module the readers use, so the two cannot name
+# different places.
+ORACLE_DIR="${INSTALL_DIR#"$ROOT"/}"
+ORACLE_STORE="$ROOT/scripts/lib/oracle_store.py"
+eval "$(python3 "$ORACLE_STORE" paths "$ORACLE_DIR")"
+BUILD_DIR="$STORE_BUILD"
+
+# Copy the store's product when it has one. 0: done; 1: this oracle needs a
+# build; anything else from the store is a failure and stops the script.
+take_from_store() {
+    local rc=0
+    python3 "$ORACLE_STORE" materialize "$ORACLE_DIR" >&2 || rc=$?
+    case "$rc" in
+        0) echo "build-zenohd: $ORACLE_DIR copied from the store; nothing built" >&2; return 0 ;;
+        3) return 1 ;;
+        *) echo "build-zenohd: the oracle store failed (rc=$rc)" >&2; exit 1 ;;
+    esac
+}
+if take_from_store; then
+    exit 0
+fi
+# One build per version at a time on this machine: two checkouts asking for the
+# same oracle at once build it once, and the second copies what the first made.
+mkdir -p "$(dirname "$STORE_LOCK")"
+exec 9>"$STORE_LOCK"
+flock 9
+if take_from_store; then
+    exit 0
 fi
 
 # Source A — locate the zenoh checkout (cargo git cache) that carries the
@@ -222,12 +261,16 @@ if [[ -n "$ZH" ]] && ! zenohd_names_the_pin "$ZH"; then
              "pin is $ZENOHD_VERSION); falling through to the tag clone" >&2
         ZH=""
     else
-        # Refusing here would strand a developer who has no clone and did not ask
-        # for one; the build still works and only the oracle's SELF-DESCRIPTION is
-        # wrong, so this says exactly what will happen rather than failing.
-        echo "build-zenohd: WARNING — $ZH cannot name the pin, so the built" \
-             "zenohd will report a commit sha and oracle_pin_gate will call it" \
-             "STALE. Set ZENOHD_ALLOW_CLONE=1 to build from the pinned tag." >&2
+        # R3961 — refused, where this used to warn and build. The binary would
+        # report a commit sha, `oracle_pin_gate` would call it STALE, and the store
+        # refuses to publish it: eleven minutes for an oracle no lane may use.
+        # The tag clone is made once per machine now, so asking for it costs one
+        # clone, not one per checkout.
+        echo "build-zenohd: $ZH cannot name the pin, so an oracle built from it" \
+             "would report a commit sha and the store would refuse it. Set" \
+             "ZENOHD_ALLOW_CLONE=1 to build from the pinned tag, or point" \
+             "ZENOHD_SRC at a checkout whose \`git describe\` says $ZENOHD_VERSION." >&2
+        exit 1
     fi
 fi
 
@@ -246,13 +289,22 @@ fi
 # same way it validates a checkout, so a mis-tagged tree fails fast rather than silently
 # building a divergent reference router.
 if [[ -z "$ZH" && "${ZENOHD_ALLOW_CLONE:-0}" -eq 1 ]]; then
-    SRC_TREE="$BUILD_DIR/zenoh-src"
-    if [[ ! -d "$SRC_TREE/.git" ]]; then
-        echo "build-zenohd: no cargo git checkout; cloning zenoh $ZENOHD_VERSION" >&2
+    # One clone per version in the store, shared by every oracle variant (they
+    # differ in features, not in source). It is sealed only once it names the
+    # pin, so a clone that died halfway is made again rather than read.
+    SRC_TREE="$STORE_SRC"
+    if [[ ! -f "$SRC_TREE/.oracle-key" ]]; then
+        echo "build-zenohd: cloning zenoh $ZENOHD_VERSION into the store" >&2
         rm -rf "$SRC_TREE"
         mkdir -p "$(dirname "$SRC_TREE")"
         git clone --depth 1 --branch "$ZENOHD_VERSION" \
             https://github.com/eclipse-zenoh/zenoh "$SRC_TREE"
+        if ! zenohd_names_the_pin "$SRC_TREE"; then
+            echo "build-zenohd: the clone of tag $ZENOHD_VERSION does not name it" \
+                 "(git describe says '$(git -C "$SRC_TREE" describe --always --dirty=-modified)')" >&2
+            exit 1
+        fi
+        python3 "$ORACLE_STORE" seal-source
     fi
     ZH="$SRC_TREE"
 fi
@@ -441,7 +493,7 @@ else
     fi
     # Source B — deterministic crates.io install (fresh-clone reproducible).
     # --locked pins to the published Cargo.lock; --root keeps the install tree
-    # inside target/ so it is git-ignored and clean-able like any build output.
+    # in this oracle's build dir in the store, beside the source builds'.
     echo "build-zenohd: no cargo git checkout found (or forced); installing" >&2
     echo "  zenohd@$ZENOHD_VERSION from crates.io (release, +$TOOLCHAIN, --locked) ..." >&2
     cargo "+$TOOLCHAIN" install "zenohd@$ZENOHD_VERSION" --locked \
@@ -463,13 +515,27 @@ else
     ZENOH_MANIFEST_SRC=""
 fi
 
-mkdir -p "$INSTALL_DIR"
-install -m 0755 "$SRC_BIN" "$INSTALL_DIR/zenohd"
-echo "build-zenohd: installed -> $INSTALL_DIR/zenohd" >&2
-"$INSTALL_DIR/zenohd" --version 2>&1 | tail -1 >&2
+# R3961 — a source-tree oracle is installed into a staging directory of the
+# store and published from there; the checkout gets a copy of the product. A
+# crates.io oracle is NOT published: it has neither plugin nor example, and a
+# store entry of it would hand every other checkout of this machine the partial
+# oracle under the key of the full one. It goes straight to the checkout, with
+# no key file, so the next materialize replaces it once the store has the full
+# one.
+if [[ -n "$ZH" ]]; then
+    DEST="$(python3 "$ORACLE_STORE" stage "$ORACLE_DIR")"
+    trap 'rm -rf "$DEST"' EXIT
+else
+    DEST="$INSTALL_DIR"
+    rm -f "$DEST/.oracle-key"
+fi
+mkdir -p "$DEST"
+install -m 0755 "$SRC_BIN" "$DEST/zenohd"
+echo "build-zenohd: installed -> $DEST/zenohd" >&2
+"$DEST/zenohd" --version 2>&1 | tail -1 >&2
 if [[ -n "$SO_SRC" && -f "$SO_SRC" ]]; then
-    install -m 0755 "$SO_SRC" "$INSTALL_DIR/libzenoh_plugin_storage_manager.so"
-    echo "build-zenohd: installed -> $INSTALL_DIR/libzenoh_plugin_storage_manager.so" >&2
+    install -m 0755 "$SO_SRC" "$DEST/libzenoh_plugin_storage_manager.so"
+    echo "build-zenohd: installed -> $DEST/libzenoh_plugin_storage_manager.so" >&2
 else
     echo "build-zenohd: storage-manager plugin NOT provisioned (source B / crates.io);" >&2
     echo "  the wz<->zenohd storage replication interop test will SKIP." >&2
@@ -483,16 +549,16 @@ fi
 # the "Library file 'libzenoh_plugin_rest.so' not found" the build comment above
 # warns about. The lint was pointing at the defect, not at style.
 if [[ -n "$REST_SO_SRC" && -f "$REST_SO_SRC" ]]; then
-    install -m 0755 "$REST_SO_SRC" "$INSTALL_DIR/libzenoh_plugin_rest.so"
-    echo "build-zenohd: installed -> $INSTALL_DIR/libzenoh_plugin_rest.so" >&2
+    install -m 0755 "$REST_SO_SRC" "$DEST/libzenoh_plugin_rest.so"
+    echo "build-zenohd: installed -> $DEST/libzenoh_plugin_rest.so" >&2
 else
     echo "build-zenohd: REST plugin NOT provisioned (variant / source B);" >&2
     echo "  a zenohd started with --rest-http-port will fail to load it." >&2
 fi
 if [[ -n "$EXT_EXAMPLES_SRC" ]]; then
     for ex in z_advanced_pub z_advanced_sub z_view_size; do
-        install -m 0755 "$EXT_EXAMPLES_SRC/$ex" "$INSTALL_DIR/$ex"
-        echo "build-zenohd: installed -> $INSTALL_DIR/$ex" >&2
+        install -m 0755 "$EXT_EXAMPLES_SRC/$ex" "$DEST/$ex"
+        echo "build-zenohd: installed -> $DEST/$ex" >&2
     done
 else
     echo "build-zenohd: zenoh-ext examples NOT provisioned (variant or source B);" >&2
@@ -500,8 +566,8 @@ else
 fi
 if [[ -n "${SHM_EXAMPLES_SRC:-}" ]]; then
     for ex in z_pub_shm z_sub_shm z_queryable_shm z_get_shm; do
-        install -m 0755 "$SHM_EXAMPLES_SRC/$ex" "$INSTALL_DIR/$ex"
-        echo "build-zenohd: installed -> $INSTALL_DIR/$ex" >&2
+        install -m 0755 "$SHM_EXAMPLES_SRC/$ex" "$DEST/$ex"
+        echo "build-zenohd: installed -> $DEST/$ex" >&2
     done
 elif [[ "${VARIANT_NAME:-}" == "shared-memory" ]]; then
     echo "build-zenohd: zenoh SHM examples NOT provisioned;" >&2
@@ -510,8 +576,8 @@ fi
 if [[ -n "$DEFAULT_CONFIG_SRC" && -f "$DEFAULT_CONFIG_SRC" ]]; then
     # 0644, not 0755: this one is a document, and the only reader is a test that
     # parses it.
-    install -m 0644 "$DEFAULT_CONFIG_SRC" "$INSTALL_DIR/DEFAULT_CONFIG.json5"
-    echo "build-zenohd: installed -> $INSTALL_DIR/DEFAULT_CONFIG.json5" >&2
+    install -m 0644 "$DEFAULT_CONFIG_SRC" "$DEST/DEFAULT_CONFIG.json5"
+    echo "build-zenohd: installed -> $DEST/DEFAULT_CONFIG.json5" >&2
 else
     echo "build-zenohd: DEFAULT_CONFIG.json5 NOT provisioned (source B / crates.io);" >&2
     echo "  the wz leg that grades an unstated \`mode\` against upstream cannot run." >&2
@@ -526,14 +592,14 @@ if [[ -n "$ZENOH_MANIFEST_SRC" && -f "$ZENOH_MANIFEST_SRC" ]]; then
     # source tree it is derived from.
     if cargo "+$TOOLCHAIN" metadata --format-version=1 --no-deps \
         --manifest-path "$ZENOH_MANIFEST_SRC" \
-        > "$INSTALL_DIR/zenoh-cargo-metadata.json"; then
-        chmod 0644 "$INSTALL_DIR/zenoh-cargo-metadata.json"
-        echo "build-zenohd: installed -> $INSTALL_DIR/zenoh-cargo-metadata.json" >&2
+        > "$DEST/zenoh-cargo-metadata.json"; then
+        chmod 0644 "$DEST/zenoh-cargo-metadata.json"
+        echo "build-zenohd: installed -> $DEST/zenoh-cargo-metadata.json" >&2
     else
         # A partial file would be read as a denominator. Refuse loudly instead:
         # this script's whole job is provisioning, and half-provisioning is the
         # state every gate downstream is worst at noticing.
-        rm -f "$INSTALL_DIR/zenoh-cargo-metadata.json"
+        rm -f "$DEST/zenoh-cargo-metadata.json"
         echo "build-zenohd: \`cargo metadata\` on $ZENOH_MANIFEST_SRC FAILED;" >&2
         echo "  refusing to install a partial capability denominator." >&2
         exit 1
@@ -545,10 +611,20 @@ else
 fi
 if [[ -n "$CORE_EXAMPLES_SRC" ]]; then
     for ex in z_queryable z_get z_pub z_sub_liveliness z_get_liveliness; do
-        install -m 0755 "$CORE_EXAMPLES_SRC/$ex" "$INSTALL_DIR/zenoh_$ex"
-        echo "build-zenohd: installed -> $INSTALL_DIR/zenoh_$ex" >&2
+        install -m 0755 "$CORE_EXAMPLES_SRC/$ex" "$DEST/zenoh_$ex"
+        echo "build-zenohd: installed -> $DEST/zenoh_$ex" >&2
     done
 else
     echo "build-zenohd: zenoh core examples NOT provisioned (variant or source B);" >&2
     echo "  the wz<->zenoh QueryTarget interop legs cannot run." >&2
+fi
+
+# Publish the staged oracle (refused unless it answers with the pin), then copy
+# it into this checkout the way every other checkout of this machine gets it.
+if [[ "$DEST" != "$INSTALL_DIR" ]]; then
+    python3 "$ORACLE_STORE" publish "$ORACLE_DIR" "$DEST"
+    if ! take_from_store; then
+        echo "build-zenohd: $ORACLE_DIR was published but the store has no product for it" >&2
+        exit 1
+    fi
 fi

@@ -118,6 +118,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 
+import oracle_store  # noqa: E402
 import upstream_release_distance as urd  # noqa: E402
 
 WORKSPACE_MANIFEST = ROOT / "crates" / "Cargo.toml"
@@ -365,6 +366,10 @@ def upstream_anchors() -> list[tuple[str, Path]]:
             ROOT / "target" / "zenohd-build" / "zenoh-src" / "zenoh" / "Cargo.toml",
         )
     )
+    # R3961 -- the same clone where build-zenohd.sh makes it, in the machine's
+    # oracle store, for a checkout that has not had it copied in yet. The path
+    # is the store module's, not spelled a second time here.
+    out.append(("manifest", oracle_store.source_dir(UPSTREAM_VERSION) / "zenoh" / "Cargo.toml"))
     # Source A: the cargo git checkout, hash-named, hence the glob.
     home = Path(os.environ.get("HOME", "~")).expanduser()
     out.extend(
