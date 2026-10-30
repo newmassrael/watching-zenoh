@@ -177,12 +177,13 @@ take_from_store() {
     local rc=0
     python3 "$ORACLE_STORE" materialize "$ORACLE_DIR" >&2 || rc=$?
     case "$rc" in
-        0) echo "build-zenohd: $ORACLE_DIR copied from the store; nothing built" >&2; return 0 ;;
+        0) return 0 ;;
         3) return 1 ;;
         *) echo "build-zenohd: the oracle store failed (rc=$rc)" >&2; exit 1 ;;
     esac
 }
 if take_from_store; then
+    echo "build-zenohd: $ORACLE_DIR copied from the store; nothing built" >&2
     exit 0
 fi
 # One build per version at a time on this machine: two checkouts asking for the
@@ -191,6 +192,7 @@ mkdir -p "$(dirname "$STORE_LOCK")"
 exec 9>"$STORE_LOCK"
 flock 9
 if take_from_store; then
+    echo "build-zenohd: $ORACLE_DIR copied from the store; another build made it" >&2
     exit 0
 fi
 
