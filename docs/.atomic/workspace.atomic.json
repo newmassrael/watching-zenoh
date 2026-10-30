@@ -299680,6 +299680,40 @@
         "Open: the cooperative engine does not host the instruments' test yet although the module is its to use; the host source on platforms without /proc; the C11 emit of the deadline documents; rustdoc and the wide nondefault legs for these features; the zenoh-c C drop-in lane has no program that calls the new doors; Layer Q and the kit were not read at the SCE pin; hosted CI per job for these pushes."
       ]
     },
+    "Round 3948": {
+      "decision_summary": "The comments that named the single-net LinkstateForwarder, deleted at item 751 step 7c-2, are rewritten in 27 source files. A mention that described what the code does now names RouterForwarder, which is the peer node's forwarder too; a mention that was a twin or mirror of a method that no longer exists loses the twin and keeps the description; a mention that is history says the type is retired. The intra-doc links to its methods, which no longer resolved, are gone. Five mentions remain on purpose, each saying the type is retired. The module linkstate_forward keeps its name: what it holds is still the forwarding cores over a link-state net, and wz::runtime_tokio::linkstate_forward is the path a deploy names its policy and configuration by, so a rename would move a public path for a word; the module doc and the design note say so. Comments and docs only; no code changed.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward.rs: about 50 mentions rewritten, the twin and counterpart links removed.",
+        "crates/wz-runtime-tokio, wz-session-core, wz-ap-demo and wz-integration-tests: the remaining mentions in comments, doc comments and test file headers.",
+        "crates/wz-runtime-tokio/src/linkstate_forward.rs and docs/peer-region-hats.md: the decision to keep the module name, with its reason."
+      ],
+      "verification_bullets": [
+        "Clippy -D warnings over all targets is clean for wz-runtime-tokio with routing-router-hat, and for wz-session-core and wz-ap-demo. The upstream citation anchor gate and the store reason citation gate pass. Comments only, so no test was run. Mentions left outside the crates, in gate docstrings and run-ci comments, are history and were not touched."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted run of the current tree: the Layer Z legs ran on a built zenohd for the first time in the previous round, and other legs outside the two files run there may hold unchecked keys. The Layer C1bzr failures of the last completed hosted run are being fixed by the ci-red session. Two comments in scripts/run-ci.sh and three in gate docstrings still name the retired LinkstateForwarder as history."
+      ],
+      "publishable_decision_summary": "The comments that named the single-net LinkstateForwarder, deleted at item 751 step 7c-2, are rewritten in 27 source files. A mention that described what the code does now names RouterForwarder, which is the peer node's forwarder too; a mention that was a twin or mirror of a method that no longer exists loses the twin and keeps the description; a mention that is history says the type is retired. The intra-doc links to its methods, which no longer resolved, are gone. Five mentions remain on purpose, each saying the type is retired. The module linkstate_forward keeps its name: what it holds is still the forwarding cores over a link-state net, and wz::runtime_tokio::linkstate_forward is the path a deploy names its policy and configuration by, so a rename would move a public path for a word; the module doc and the design note say so. Comments and docs only; no code changed.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/router_forward.rs: about 50 mentions rewritten, the twin and counterpart links removed.",
+        "crates/wz-runtime-tokio, wz-session-core, wz-ap-demo and wz-integration-tests: the remaining mentions in comments, doc comments and test file headers.",
+        "crates/wz-runtime-tokio/src/linkstate_forward.rs and docs/peer-region-hats.md: the decision to keep the module name, with its reason."
+      ],
+      "publishable_verification_bullets": [
+        "Clippy -D warnings over all targets is clean for wz-runtime-tokio with routing-router-hat, and for wz-session-core and wz-ap-demo. The upstream citation anchor gate and the store reason citation gate pass. Comments only, so no test was run. Mentions left outside the crates, in gate docstrings and run-ci comments, are history and were not touched."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted run of the current tree: the Layer Z legs ran on a built zenohd for the first time in the previous round, and other legs outside the two files run there may hold unchecked keys. The Layer C1bzr failures of the last completed hosted run are being fixed by the ci-red session. Two comments in scripts/run-ci.sh and three in gate docstrings still name the retired LinkstateForwarder as history."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
