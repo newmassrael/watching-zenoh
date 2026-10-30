@@ -188,8 +188,11 @@ class Image:
 
 # What `west build` passes the Zephyr staticlibs from Kconfig. The census builds
 # them with stand-in values: they set constants (a clock rate, an address) and
-# decide nothing about what the crates allocate.
+# decide nothing about whether the crates allocate. The batch is the one that sets a
+# size, which a slot's bytes follow, so it is `CONFIG_WZ_BATCH_BYTES`' default
+# (deploy/zephyr-admin-node/Kconfig) and not a stand-in.
 ZEPHYR_BUILD_VALUES: tuple[tuple[str, str], ...] = (
+    ("WZ_BATCH_BYTES", "1472"),
     ("WZ_TICKS_PER_SEC", "1000"),
     ("WZ_CORE_CLOCK_HZ", "350000000"),
     ("WZ_STATIC_IPV4", "192.0.2.10"),

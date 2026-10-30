@@ -1063,8 +1063,14 @@ declare -A BASELINE_MC_TEXT=(
     # over the policy, which took about 4 KB out. The largest symbols that grew are
     # `multicast_tx_emit` (2938 -> 3734 at the first pin) and the two `MsgPut::write_source`
     # (782 and 608). data is 4 and bss 270120 on both. Old: 68952/69000.
-    ["thumbv7m-none-eabi"]=72852
-    ["thumbv7em-none-eabihf"]=72900
+    #
+    # 2026-10-31 -- thumbv7m 72852 -> 71812, thumbv7em-hf 72900 -> 71828 (-1040 / -1072), read by
+    # Layer Q on one build host (rustc 1.97.0 / gcc 13.2.1) at main's 09b20b7ff4, whose SCE pin is
+    # b2ff4da1cb (6ba84c3f37 before it). The fall is between those two readings and is not
+    # separated further: the commits between them are the pin move and the kit's, and the kit's
+    # code is not linked into this image. data is 4 and bss 270120 on both. Old: 72852/72900.
+    ["thumbv7m-none-eabi"]=71812
+    ["thumbv7em-none-eabihf"]=71828
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck
