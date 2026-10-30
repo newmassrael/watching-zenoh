@@ -113,7 +113,6 @@ use crate::multicast_peer::{
 // where they live BECAUSE of this line: `driver_loop` is alloc-gated and this
 // module is not, so the original import through it was an E0432 on the
 // no-alloc MCU profile (run-ci Layer G.12).
-use crate::constant_session_id::built_under_constant_id;
 use crate::duty_outbox::{Duties, DutyOutbox};
 use crate::multicast_peer_lost::{MulticastPeerId, MulticastPeerLost, MulticastPeerLostReason};
 #[cfg(all(feature = "reassembly", feature = "storage-profile"))]
@@ -128,13 +127,14 @@ use crate::sn;
 use core::mem::MaybeUninit;
 use core::net::SocketAddr;
 use core::ptr::addr_of_mut;
+use sce_rust_runtime::helpers::session_id::SessionId;
 use sce_rust_runtime::Engine;
 
 /// The ids the multicast machines are built under (SCE ADR 0045: the host gives a machine its
 /// id, and the generated constructor refuses a text that is not an XML Nmtoken). Constants, so
 /// that refusal is never met.
-const MULTICAST_PEER_SESSION_ID: &str = "wz-multicast-peer";
-const MULTICAST_SESSION_ID: &str = "wz-session-multicast";
+const MULTICAST_PEER_SESSION_ID: SessionId = sce_rust_runtime::session_id!("wz-multicast-peer");
+const MULTICAST_SESSION_ID: SessionId = sce_rust_runtime::session_id!("wz-session-multicast");
 // §5.21 routing-namespace — the per-session egress prefix + the per-PEER stateful
 // ingress decorator live ON the dispatcher (the only always-`&mut` per-session
 // multicast handle, the multicast mirror of the unicast `SessionLinkActions`
@@ -605,12 +605,9 @@ impl PeerSlot {
                 .cast::<MaybeUninit<Engine<MulticastPeerPolicy<PeerBinding>>>>();
             Engine::new_in_place(
                 engine,
-                built_under_constant_id(
-                    MulticastPeerPolicy::new_with_session_id(
-                        MULTICAST_PEER_SESSION_ID,
-                        PeerBinding::default(),
-                    ),
-                    "the multicast peer session id",
+                MulticastPeerPolicy::new_with_checked_session_id(
+                    MULTICAST_PEER_SESSION_ID,
+                    PeerBinding::default(),
                 ),
             );
             #[cfg(all(feature = "alloc", feature = "codec-declare"))]
@@ -917,12 +914,9 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
                 .cast::<MaybeUninit<Engine<SessionFsmMulticastPolicy<SessionBinding>>>>();
             Engine::new_in_place(
                 session,
-                built_under_constant_id(
-                    SessionFsmMulticastPolicy::new_with_session_id(
-                        MULTICAST_SESSION_ID,
-                        SessionBinding::default(),
-                    ),
-                    "the multicast session id",
+                SessionFsmMulticastPolicy::new_with_checked_session_id(
+                    MULTICAST_SESSION_ID,
+                    SessionBinding::default(),
                 ),
             );
             let peers = addr_of_mut!((*at).peers).cast::<MaybeUninit<PeerSlot>>();

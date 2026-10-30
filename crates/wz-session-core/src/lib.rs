@@ -251,19 +251,6 @@ pub mod codec_owned;
 // enums the R311hd..hg fan-out minted.
 pub mod registry_error;
 
-/// A state machine built under a session id that is a constant of this tree. Gated on
-/// the features that bring the SCE runtime in (`dep:sce-rust-runtime`), which are also
-/// the ones whose modules build such a machine.
-#[cfg(any(
-    feature = "reassembly",
-    feature = "scouting-active",
-    feature = "session-unicast",
-    feature = "session-multicast",
-    feature = "clock-quality",
-    feature = "supervision"
-))]
-pub mod constant_session_id;
-
 // R311gb — sample-delivery seam (`SampleView` accessor contract +
 // `SampleSink` DIP trait + the `alloc`-only `BoxedSink` closure
 // adapter). Unconditional — the traits exist in every profile so

@@ -96,19 +96,19 @@
 //! `sce-rust-runtime`.
 
 use crate::chain_staging::{BuildsOwnStorage, ChainStaging, HeapStaging};
-use crate::constant_session_id::built_under_constant_id;
 use crate::qos::Priority;
 use crate::reassembly_slot::{
     ReassemblySlotActions, ReassemblySlotEvent, ReassemblySlotFragmentChunkPayload,
     ReassemblySlotInject, ReassemblySlotPolicy,
 };
 use core::sync::atomic::{AtomicU8, Ordering};
+use sce_rust_runtime::helpers::session_id::SessionId;
 use sce_rust_runtime::Engine;
 
 /// The id every reassembly slot machine is built under (SCE ADR 0045: the host gives a machine
 /// its id, and the generated constructor refuses a text that is not an XML Nmtoken). A constant,
 /// so that refusal is never met.
-const REASSEMBLY_SLOT_SESSION_ID: &str = "wz-reassembly-slot";
+const REASSEMBLY_SLOT_SESSION_ID: SessionId = sce_rust_runtime::session_id!("wz-reassembly-slot");
 // R311mh — `sweep_reporting` (below) raises an IterationEvent on a timed-out
 // chain; the event surface is the `driver_loop` module's, which a storage profile
 // (heap or per-session slot) compiles, so the reporting wrapper is gated on that
@@ -560,12 +560,9 @@ struct Slot<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> {
 
 impl<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> Slot<SLOTS, CAP, S> {
     fn new() -> Self {
-        let mut engine = Engine::new(built_under_constant_id(
-            ReassemblySlotPolicy::new_with_session_id(
-                REASSEMBLY_SLOT_SESSION_ID,
-                SlotBinding::default(),
-            ),
-            "the reassembly slot session id",
+        let mut engine = Engine::new(ReassemblySlotPolicy::new_with_checked_session_id(
+            REASSEMBLY_SLOT_SESSION_ID,
+            SlotBinding::default(),
         ));
         // W3C SCXML 3.3: enter the initial `Empty` leaf.
         engine.initialize();

@@ -345,16 +345,17 @@ pub fn new_scouting_engine<R: Runtime>(actions: &Arc<ScoutingActions<R>>) -> Sco
     let binding = ScoutActionsBinding {
         inner: actions.clone(),
     };
-    Engine::new(crate::constant_session_id::built_under_constant_id(
-        ScoutingPolicy::new_with_session_id(SCOUTING_SESSION_ID, binding),
-        "the scouting session id",
+    Engine::new(ScoutingPolicy::new_with_checked_session_id(
+        SCOUTING_SESSION_ID,
+        binding,
     ))
 }
 
 /// The id the scouting machine is built under (the host gives a machine its id, and the generated
 /// constructor refuses a text that is not an XML Nmtoken). A constant, so that refusal is never
 /// met.
-const SCOUTING_SESSION_ID: &str = "wz-scouting";
+const SCOUTING_SESSION_ID: sce_rust_runtime::helpers::session_id::SessionId =
+    sce_rust_runtime::session_id!("wz-scouting");
 
 /// zenoh's default scouting multicast locator.
 pub const MULTICAST_LOCATOR_DEFAULT: &str = "udp/224.0.0.224:7446";

@@ -21,12 +21,12 @@ use sce_rust_runtime::Engine;
 use crate::clock_quality::{
     ClockQualityActions, ClockQualityEvent, ClockQualityPolicy, ClockQualityState,
 };
-use crate::constant_session_id::built_under_constant_id;
 use crate::duty_outbox::DutyOutbox;
+use sce_rust_runtime::helpers::session_id::SessionId;
 
 /// The id the machine is built under (SCE ADR 0045: the host gives a machine its id). A
 /// constant, so the generated constructor never refuses it.
-const CLOCK_QUALITY_SESSION_ID: &str = "wz-clock-quality";
+const CLOCK_QUALITY_SESSION_ID: SessionId = sce_rust_runtime::session_id!("wz-clock-quality");
 
 #[derive(Default)]
 struct QualityBinding {
@@ -61,12 +61,9 @@ impl Default for ClockStanding {
 impl ClockStanding {
     /// A clock no reference has been acquired for: `Unsynchronized`.
     pub fn new() -> Self {
-        let mut engine = Engine::new(built_under_constant_id(
-            ClockQualityPolicy::new_with_session_id(
-                CLOCK_QUALITY_SESSION_ID,
-                QualityBinding::default(),
-            ),
-            "the clock quality session id",
+        let mut engine = Engine::new(ClockQualityPolicy::new_with_checked_session_id(
+            CLOCK_QUALITY_SESSION_ID,
+            QualityBinding::default(),
         ));
         // W3C SCXML 3.3: enter the initial `Unsynchronized` leaf. Entering it is the start, not a
         // change, so the duty it recorded is dropped.

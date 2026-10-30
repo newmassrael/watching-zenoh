@@ -18,7 +18,6 @@
 //! from `actions.inbound_peer_zid` through `R::with_mutex_mut` (the AP
 //! `std::sync::Mutex` and the MCU `critical_section` mutex behind one seam).
 
-use crate::constant_session_id::built_under_constant_id;
 use sce_rust_runtime::Engine;
 
 use wz_runtime_core::TimeSource;
@@ -3086,25 +3085,20 @@ trait BuildSessionPolicy<A: SessionFsmUnicastActions + 'static> {
 }
 
 /// The id the unicast session machine is built under (SCE ADR 0045: a machine takes the id its
-/// host gives, and the generated constructor refuses a text that is not an XML Nmtoken). One
-/// constant, so the refusal below can never be met.
-const UNICAST_SESSION_ID: &str = "wz-session-unicast";
+/// host gives, and the constructor takes an id proven to be an XML Nmtoken when it is compiled,
+/// SCE ADR 0073). One constant, so a bad text is a compile error and the check is not in the image.
+const UNICAST_SESSION_ID: sce_rust_runtime::helpers::session_id::SessionId =
+    sce_rust_runtime::session_id!("wz-session-unicast");
 
 impl<A: SessionFsmUnicastActions + 'static> BuildSessionPolicy<A> for PolicyConstructor<true> {
     fn build(self, actions: A) -> SessionFsmUnicastPolicy<A> {
-        built_under_constant_id(
-            SessionFsmUnicastPolicy::new_with_session_id(UNICAST_SESSION_ID, actions),
-            "the unicast session id",
-        )
+        SessionFsmUnicastPolicy::new_with_checked_session_id(UNICAST_SESSION_ID, actions)
     }
 }
 
 impl<A: SessionFsmUnicastActions + 'static> BuildSessionPolicy<A> for PolicyConstructor<false> {
     fn build(self, actions: A) -> SessionFsmUnicastPolicy<A> {
-        built_under_constant_id(
-            SessionFsmUnicastPolicy::new_simulated_with_session_id(UNICAST_SESSION_ID, actions),
-            "the unicast session id",
-        )
+        SessionFsmUnicastPolicy::new_simulated_with_checked_session_id(UNICAST_SESSION_ID, actions)
     }
 }
 

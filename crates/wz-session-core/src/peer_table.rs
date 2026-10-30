@@ -31,15 +31,15 @@ use core::ptr::addr_of_mut;
 
 use sce_rust_runtime::Engine;
 
-use crate::constant_session_id::built_under_constant_id;
 use crate::duty_outbox::{Duties, DutyOutbox};
 use crate::peer_connection::{
     PeerConnectionActions, PeerConnectionEvent, PeerConnectionPolicy, PeerConnectionState,
 };
+use sce_rust_runtime::helpers::session_id::SessionId;
 
 /// The id every peer machine is built under (SCE ADR 0045: the host gives a
 /// machine its id). A constant, so the generated constructor never refuses it.
-const PEER_CONNECTION_SESSION_ID: &str = "wz-peer-connection";
+const PEER_CONNECTION_SESSION_ID: SessionId = sce_rust_runtime::session_id!("wz-peer-connection");
 
 /// What the host is asked to do for a peer after an event. The default asks
 /// for nothing.
@@ -213,12 +213,9 @@ impl<K> PeerEntry<K> {
                 .cast::<MaybeUninit<Engine<PeerConnectionPolicy<PeerBinding>>>>();
             Engine::new_in_place(
                 engine,
-                built_under_constant_id(
-                    PeerConnectionPolicy::new_with_session_id(
-                        PEER_CONNECTION_SESSION_ID,
-                        PeerBinding::default(),
-                    ),
-                    "the peer connection session id",
+                PeerConnectionPolicy::new_with_checked_session_id(
+                    PEER_CONNECTION_SESSION_ID,
+                    PeerBinding::default(),
                 ),
             );
             &mut *at

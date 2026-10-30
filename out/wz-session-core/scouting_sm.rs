@@ -306,11 +306,14 @@ impl<A: ScoutingActions + 'static> ScoutingPolicy<A> {
     /// name for the machine, say, or a fixed id a test holds a saved text to
     /// (docs/adr/0045, "Questions the owner answered" 2). `_sessionid` is bound
     /// here and kept until the session ends; a restore binds the saved id in
-    /// its place, since the session carries on. A host whose
-    /// `REALIZATION` is `Simulates` does not compile here.    ///
-    /// The one way this machine is built: a `no_std` target has no source of
-    /// randomness the runtime reads, and takes the id from its host as it
-    /// takes the time. The id is held, not copied.
+    /// its place, since the session carries on.
+    /// A host whose `REALIZATION` is `Simulates` does not compile here.
+    ///
+    /// A `no_std` target has no source of randomness the runtime reads, and
+    /// takes the id from its host as it takes the time: here, or already
+    /// proven through
+    /// [`new_with_checked_session_id`](Self::new_with_checked_session_id). The
+    /// id is held, not copied.
     ///
     /// # Errors
     ///
@@ -330,6 +333,23 @@ impl<A: ScoutingActions + 'static> ScoutingPolicy<A> {
     /// As [`new_with_session_id`](Self::new_with_session_id).
     pub fn new_simulated_with_session_id(session_id: &'static str, actions: A) -> Result<Self, ::sce_rust_runtime::helpers::session_id::SessionIdRefusal> {
         Ok(Self::build(::sce_rust_runtime::helpers::session_id::checked(session_id)?, actions))
+    }
+
+    /// [`new_with_session_id`](Self::new_with_session_id) under an id already
+    /// proven to be an XML Nmtoken (docs/adr/0073), so nothing is refused. With
+    /// the id written as `sce_rust_runtime::session_id!("...")`, a bad one is a
+    /// compile error and the program carries no run-time check of it.
+    /// A host whose `REALIZATION` is `Simulates` does not compile here.
+    pub fn new_with_checked_session_id(session_id: ::sce_rust_runtime::helpers::session_id::SessionId, actions: A) -> Self {
+        let () = Self::HOST_PERFORMS_DUTIES;
+        Self::build(session_id.as_str(), actions)
+    }
+
+    /// [`new_with_checked_session_id`](Self::new_with_checked_session_id) with a
+    /// host that only simulates its duties — a recorder, a test double — as the
+    /// caller's statement that it means to.
+    pub fn new_simulated_with_checked_session_id(session_id: ::sce_rust_runtime::helpers::session_id::SessionId, actions: A) -> Self {
+        Self::build(session_id.as_str(), actions)
     }
 
     /// W3C SCXML G.7: the host the `<sce:action>` operations are dispatched

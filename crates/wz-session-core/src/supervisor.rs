@@ -35,15 +35,15 @@
 
 use sce_rust_runtime::Engine;
 
-use crate::constant_session_id::built_under_constant_id;
 use crate::duty_outbox::{Duties, DutyOutbox};
 use crate::supervision::{
     SupervisionActions, SupervisionEvent, SupervisionPolicy, SupervisionState,
 };
+use sce_rust_runtime::helpers::session_id::SessionId;
 
 /// The id every checkpoint's machine is built under (SCE ADR 0045: the host gives a machine its
 /// id). A constant, so the generated constructor never refuses it.
-const SUPERVISION_SESSION_ID: &str = "wz-supervision";
+const SUPERVISION_SESSION_ID: SessionId = sce_rust_runtime::session_id!("wz-supervision");
 
 // The deadline comparison is the one the resource sampler also asks, so it lives in
 // `wrapping_ticks`; these are the names it has always had here.
@@ -138,14 +138,11 @@ struct Checkpoint {
 
 impl Checkpoint {
     fn new() -> Self {
-        let mut engine = Engine::new(built_under_constant_id(
-            SupervisionPolicy::new_with_session_id(
-                SUPERVISION_SESSION_ID,
-                DeadlineBinding {
-                    duties: DutyOutbox::default(),
-                },
-            ),
-            "the supervision session id",
+        let mut engine = Engine::new(SupervisionPolicy::new_with_checked_session_id(
+            SUPERVISION_SESSION_ID,
+            DeadlineBinding {
+                duties: DutyOutbox::default(),
+            },
         ));
         // W3C SCXML 3.3: enter the initial `Disarmed` leaf. Entering it is the start and asks for
         // nothing, so the duty it recorded is dropped.

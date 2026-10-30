@@ -5,7 +5,7 @@
     "^core::str::slice_error_fail"
   ],
   "site_pins": {
-    "engine-host": {"zephyr-client-fixed": 42, "zephyr-client-fixed-batching": 42, "zephyr-client-fixed-get": 42},
+    "engine-host": {"zephyr-client-fixed": 39, "zephyr-client-fixed-batching": 39, "zephyr-client-fixed-get": 39},
     "tx-encoder": {"zephyr-client-fixed": 1, "zephyr-client-fixed-batching": 3, "zephyr-client-fixed-get": 1},
     "walk-entry-tables": {"zephyr-client-fixed": 4, "zephyr-client-fixed-batching": 4, "zephyr-client-fixed-get": 4},
     "engine-behaviour": {"zephyr-client-fixed": 13, "zephyr-client-fixed-batching": 13, "zephyr-client-fixed-get": 13},
@@ -133,7 +133,7 @@
     },
     {
       "id": "entropy-draw",
-      "where": {"file": "session_actions.rs", "line": 6145},
+      "where": {"file": "session_actions.rs", "line": 6143},
       "callees": "EntropySource>::try_next_u64$",
       "why": "the draw of the session's initial value"
     },
