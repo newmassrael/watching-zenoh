@@ -102,6 +102,16 @@ env:
   # incremental's edit-rebuild benefit). A/B: compare the next run's
   # `validate + verify + test` job wall-clock against the ~14m49s baseline.
   CARGO_INCREMENTAL: "0"
+  # The dev and test profiles keep line tables and drop the rest of the debug
+  # information, on CI only (local dev keeps its debugger). The full debug
+  # information is what filled the runner: `validate + verify + test` began
+  # with 105 GB free and stopped at Layer C1ch with "No space left on device"
+  # (run 40988069522). Measured on a build machine, `cargo test --workspace
+  # --no-run` writes 184 GB at the default and 118 GB at line-tables-only.
+  # Backtraces keep their file and line, which is what RUST_BACKTRACE below and
+  # the allocation-site tests of wz-session-lwip read; no gate reads the dev
+  # profile's DWARF (stack_bound_gate and no_allocator_link_gate build release).
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
   # The vendored SCE submodule + zenoh-pico submodule both need fetch.
   # checkout v4's submodule support honors .gitmodules per the
   # `submodules: recursive` flag below.

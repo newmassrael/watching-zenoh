@@ -119,6 +119,8 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
+  # Line tables only, as in ci.yml (whose comment carries the measurement).
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
   RUST_BACKTRACE: 1
 
 jobs:
