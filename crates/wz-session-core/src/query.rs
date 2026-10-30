@@ -3393,11 +3393,13 @@ mod tests {
     // which now takes the lifetime-free `*Owned` mirrors.
     use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
     use wz_codecs::ext_zbuf::ExtZbuf;
+    #[cfg(feature = "request-put-del")]
     use wz_codecs::msg_put::MsgPut;
     use wz_codecs::query::Query;
     use wz_codecs::request::{Request, RequestVariant};
     use wz_codecs::wireexpr::Wireexpr;
     use wz_codecs::wireexpr_local::WireexprLocal;
+    #[cfg(feature = "request-put-del")]
     use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
 
     fn request_query(rid: u64, mapping_id: u64, suffix: Option<&str>) -> RequestOwned {
@@ -3483,6 +3485,7 @@ mod tests {
         request
     }
 
+    #[cfg(feature = "request-put-del")]
     fn request_put(rid: u64, suffix: &str) -> RequestOwned {
         let keyexpr = Wireexpr {
             body: wz_codecs::wireexpr::WireexprVariant::WireexprNonlocal(WireexprNonlocal {
@@ -3950,6 +3953,7 @@ mod tests {
         assert_eq!(si.sn, 42);
     }
 
+    #[cfg(feature = "request-put-del")]
     #[test]
     fn dispatch_ignores_non_query_request_body_arms() {
         let mut reg = QueryableRegistry::new();
@@ -5288,6 +5292,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "request-put-del")]
     #[test]
     fn dispatch_messages_skips_final_when_request_body_is_not_a_query() {
         // R311y338 — the second `DispatchOutcome::NOT_DISPATCHED` arm, given its
@@ -5328,6 +5333,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "request-put-del")]
     #[test]
     fn dispatch_messages_ignores_push_response_declare_variants() {
         let mut reg = QueryableRegistry::new();

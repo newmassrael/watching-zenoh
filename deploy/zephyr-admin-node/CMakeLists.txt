@@ -50,6 +50,11 @@ if(CONFIG_WZ_NET_BACKEND_ZEPHYR_SOCKETS)
     list(APPEND backend_feature single-context)
   endif()
 
+  # A Request may carry a Put or a Del, as zenoh-pico's decoder takes it (CONFIG_WZ_REQUEST_PUT_DEL).
+  if(CONFIG_WZ_REQUEST_PUT_DEL)
+    list(APPEND backend_feature request-put-del)
+  endif()
+
   # The Open body's initial sequence number as a compact function of the two zids
   # (CONFIG_WZ_INITIAL_SN_COMPACT), without the Keccak permutation of zenoh's own derivation.
   if(CONFIG_WZ_INITIAL_SN_COMPACT)

@@ -340,6 +340,17 @@ carries about 6 KB of C library code wz does not, which is why the difference is
   `engine-host` and `engine-behaviour` rules now claim 42 and 17 sites. What is left of the cost is
   the core's `enter_states` frame (200 bytes, copies of the entry set's handles) and the two
   machines' own tables; SCE works on the first.
+- TAKEN, measured 2026-10-30: the Request body's Put and Del arms out of the zenoh-preset images
+  (`CONFIG_WZ_REQUEST_PUT_DEL=n` in `t2g_client_fixed.conf`, default `y` in Kconfig; `wz-codecs` and
+  `wz-session-core` feature `request-put-del`, SCE ADR 0072 at `44e6d3083b`). Pinned zenoh 1.10.1
+  accepts only a Query as a request body (`zenoh-codec/src/zenoh/mod.rs`, `RCodec<RequestBody>`);
+  zenoh-pico takes all three, and the arms are its contract, so every other build keeps them. The
+  decode of a Put or Del tag under a Request is refused (`CodecError::VariantArmNotBuilt`) and
+  `MsgPutView`'s and `MsgDelView`'s decoders (the symbols are not in the fixed image), which only the
+  Request reached, are not linked, nor is the code that judges their extension chains. Against the
+  same tree with the arms: -1,488 bytes (fixed, 144,724), -1,488 (batching, 147,916) and -2,096 (get,
+  163,428; the Reply's own Put and Del arms stay). Against 49e40c9a72: -1,480, -1,488 and -432. The
+  stack chain, the bound and the kit's peak did not move.
 - NOT TAKEN, measured 2026-10-30: SCE ADR 0064 (the engine's Appendix D once per program over each
   document's tables, `vendor/sce` 6f72d5975e), on the three images at the same wz tree. Against the
   commit before it (49e40c9a72) the text was +2,444 (fixed), +2,428 (batching) and +2,456 (get), and

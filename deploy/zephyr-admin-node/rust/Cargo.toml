@@ -96,6 +96,10 @@ rx-in-place = ["dep:wz-runtime-coop", "wz-runtime-coop/rx-in-place"]
 # `CONFIG_WZ_SINGLE_CONTEXT`): for an image whose node thread is the only code that calls into the
 # runtime or a session. The crate is named directly only to turn the selector on.
 single-context = ["dep:wz-runtime-coop", "wz-runtime-coop/single-context"]
+# A Request may carry a Put or a Del as its body, as zenoh-pico's decoder takes it
+# (`wz-session-core`'s `request-put-del`, `CONFIG_WZ_REQUEST_PUT_DEL`, on by default in Kconfig). Off, the
+# decoder takes the Query alone, as zenoh 1.10.1's does, and the two body decoders are not linked.
+request-put-del = ["wz-session-core/request-put-del"]
 # The Open body's `initial_sn` as a compact pure function of the two zids in place of zenoh's
 # SHAKE128 (`wz-session-core`'s `initial-sn-compact`, `CONFIG_WZ_INITIAL_SN_COMPACT`): the Keccak
 # permutation, 2.2 KB, is not in the image.

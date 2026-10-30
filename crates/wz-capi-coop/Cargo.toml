@@ -138,6 +138,7 @@ queryable = [
     "wz-session-core/query-selector-parameters",
     "wz-session-core/query-value",
     "wz-session-core/codec-request",
+    "wz-session-core/request-put-del",
     "wz-session-core/codec-response",
     "wz-session-core/codec-response-final",
 ]
@@ -192,6 +193,7 @@ query = [
     "wz-session-core/query-source-info",
     "wz-session-core/query-value",
     "wz-session-core/codec-request",
+    "wz-session-core/request-put-del",
     "wz-session-core/codec-response",
     "wz-session-core/codec-response-final",
 ]
@@ -209,6 +211,7 @@ wz-ext-pubsub = { path = "../wz-ext-pubsub", features = ["engine-host"] }
 wz-session-core = { path = "../wz-session-core", default-features = false, features = [
     "session-unicast-accept",
     "query-queryable",
+    "request-put-del",
 ] }
 
 [lints]

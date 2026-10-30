@@ -200,6 +200,20 @@ config WZ_SINGLE_CONTEXT
 	  wakes or feeds the loop from an interrupt through the runtime's own cells leaves it
 	  off, which is the default: a race there is a corrupted cell and no message.
 
+config WZ_REQUEST_PUT_DEL
+	bool "Take a Put or a Del as the body of a Request (zenoh-pico's decoder does)"
+	default y
+	help
+	  zenoh-pico's Request decoder takes three bodies: a Query, a Put and a Del. zenoh 1.10.1
+	  takes the Query alone (its RequestBody has no other variant), and the node of this
+	  repository only answers a Query. Selected, the decoder keeps the two other arms, which
+	  is the pico preset's contract and the default. Not selected, a Put or Del tag under a
+	  Request is refused with a codec error (the same refusal as any tag a decoder does not
+	  build), the two body decoders and the code that judges their extension chains are not
+	  linked, and the image is the zenoh preset's. About a kilobyte of text.
+
+	  The images graded against zenoh-pico's own are zenoh-preset images and turn it off.
+
 config WZ_INITIAL_SN_COMPACT
 	bool "Derive the Open body's initial sequence number with a compact function"
 	help

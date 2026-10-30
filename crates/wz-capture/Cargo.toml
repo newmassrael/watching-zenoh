@@ -169,6 +169,9 @@ filter-regex = ["dep:regex-automata"]
 network-codecs = [
     "wz-session-core/codec-push",
     "wz-session-core/codec-request",
+    # A capture reads what is on the wire, and a Request with a Put or Del body is on the wire of a
+    # zenoh-pico peer (`agg` and the dissector name the variants).
+    "wz-session-core/request-put-del",
     "wz-session-core/codec-response",
     "wz-session-core/codec-response-final",
     "wz-session-core/codec-declare",
@@ -344,6 +347,7 @@ features = [
     # it missing.
     "codec-push",
     "codec-request",
+    "request-put-del",
     "codec-response",
     "codec-response-final",
     "codec-declare",

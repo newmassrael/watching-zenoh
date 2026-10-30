@@ -52,7 +52,14 @@ default = [
     "keyexpr-wildcard-double",
     "keyexpr-dollar-star",
     "keyexpr-includes",
+    "request-put-del",
 ]
+# The Put and Del bodies of a Request, which zenoh-pico's decoder takes and zenoh 1.10.1's does not
+# (its `RequestBody` has the Query alone): the arms of `wz-codecs/request-put-del` and the code that
+# judges their extension chains. On by default and named by every dependent that must stay
+# pico-compatible; an image of the zenoh preset leaves it off, and a Put or Del tag under a Request
+# is then refused by the decoder (SCE ADR 0072).
+request-put-del = ["wz-codecs/request-put-del"]
 # `alloc` brings `Box`/`Vec`/`String` into scope so the session machinery
 # (HashMap-backed mapping tables, Vec-backed ext chains, owned codec
 # byte buffers) can compose. R311di-2+ will gate the alloc-bound surface

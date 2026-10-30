@@ -441,11 +441,20 @@ impl NetworkMessage {
             Self::Request(request) => {
                 use wz_codecs::request::RequestOwnedVariant as B;
                 let body = match &request.body {
+                    #[cfg(feature = "request-put-del")]
                     B::CodecZenohMsgPut(put) => RequestBodyChain::Put(put.extensions.as_deref()),
+                    #[cfg(feature = "request-put-del")]
                     B::CodecZenohMsgDel(del) => RequestBodyChain::Del(del.extensions.as_deref()),
                     B::CodecZenohQuery(query) | B::Default { body: query, .. } => {
                         RequestBodyChain::Query(query.extensions.as_deref())
                     }
+                    // This build does not name a Put or a Del body, so it has no space to judge
+                    // one against. The codec may still build the arms (another crate of the
+                    // graph asked for `wz-codecs/request-put-del`); without them this is
+                    // unreachable.
+                    #[cfg(not(feature = "request-put-del"))]
+                    #[allow(unreachable_patterns)]
+                    _ => return ExtAdmission::Unjudged,
                 };
                 judge_request_chains(request.extensions.as_deref(), body)
             }
@@ -671,11 +680,23 @@ fn push_view_admission(push: &wz_codecs::push::Push<'_>) -> crate::ext_admit::Ex
 /// The chain a Request's body carries, for [`judge_request_chains`]: a Put's or a
 /// Del's (generic entries, `E`) or a Query's (the Query's own entries, `Q`). The owned message's;
 /// the Request read where its frame lies walks its chains (`request_view_admission`).
+///
+/// The Put and Del are the arms of the `request-put-del` feature (zenoh takes only a Query as a
+/// request body, zenoh-pico all three). Without it the generic `E` would name no field, so
+/// `Never` holds it; it cannot be built, because it holds an `Infallible`.
 #[cfg(all(feature = "alloc", feature = "codec-request"))]
 enum RequestBodyChain<'c, E, Q> {
+    #[cfg(feature = "request-put-del")]
     Put(Option<&'c [E]>),
+    #[cfg(feature = "request-put-del")]
     Del(Option<&'c [E]>),
     Query(Option<&'c [Q]>),
+    #[cfg(not(feature = "request-put-del"))]
+    #[allow(dead_code)]
+    Never(
+        core::marker::PhantomData<&'c [E]>,
+        core::convert::Infallible,
+    ),
 }
 
 /// The verdict on a Request: its own chain, then its body's. The same order
@@ -688,9 +709,13 @@ fn judge_request_chains<E: crate::ext_view::ExtEntryView, Q: crate::ext_view::Ex
 ) -> crate::ext_admit::ExtAdmission {
     use crate::ext_admit::{ExtCarrier as C, NetworkEnvelope as N, ZenohBody as Z};
     then_judge(judge_chain(C::Network(N::Request), outer), || match body {
+        #[cfg(feature = "request-put-del")]
         RequestBodyChain::Put(chain) => judge_chain(C::Zenoh(Z::Put), chain),
+        #[cfg(feature = "request-put-del")]
         RequestBodyChain::Del(chain) => judge_chain(C::Zenoh(Z::Del), chain),
         RequestBodyChain::Query(chain) => judge_chain(C::Zenoh(Z::Query), chain),
+        #[cfg(not(feature = "request-put-del"))]
+        RequestBodyChain::Never(_, never) => match never {},
     })
 }
 
@@ -780,12 +805,14 @@ fn request_view_admission(
                 .map(|chain| walked(Some(chain)).map(|e| e.header)),
         ),
         || match &request.body {
+            #[cfg(feature = "request-put-del")]
             B::CodecZenohMsgPut(put) => judge_headers(
                 C::Zenoh(Z::Put),
                 put.extensions
                     .as_ref()
                     .map(|chain| walked(Some(chain)).map(|e| e.header)),
             ),
+            #[cfg(feature = "request-put-del")]
             B::CodecZenohMsgDel(del) => judge_headers(
                 C::Zenoh(Z::Del),
                 del.extensions
@@ -799,6 +826,10 @@ fn request_view_admission(
                     .as_ref()
                     .map(|chain| walked(Some(chain)).map(|e| e.header)),
             ),
+            // As in `ext_admission`: a Put or Del body this build does not name is not judged.
+            #[cfg(not(feature = "request-put-del"))]
+            #[allow(unreachable_patterns)]
+            _ => crate::ext_admit::ExtAdmission::Unjudged,
         },
     )
 }

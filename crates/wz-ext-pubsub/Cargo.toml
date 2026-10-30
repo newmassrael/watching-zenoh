@@ -108,6 +108,7 @@ log = "0.4"
 wz-session-core = { path = "../wz-session-core", default-features = false, features = [
     "alloc",
     "codec-request",
+    "request-put-del",
     "rx-shared-bytes",
 ] }
 
