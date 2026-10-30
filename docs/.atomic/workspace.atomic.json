@@ -299414,6 +299414,44 @@
         "None: both carries of round 3939 are paid in this round."
       ]
     },
+    "Round 3941": {
+      "decision_summary": "The symbol table of the graded answering client named `__aeabi_memclr` (208 bytes) among the 13 C-named symbols the wz image carries and the single-thread zenoh-pico image does not. The Rust code generator calls it for every cleared struct and array; the image's libc has no such symbol, so the link took the compiler runtime's weak copy, a second byte loop beside the `memset` the image already links. `deploy/zephyr-common/wz_board_hooks.c` now defines it as `memset(dest, 0, n)` on the Arm EABI; the runtime's `__aeabi_memclr4` and `__aeabi_memclr8` stay (the pico image carries the same two).\n\nThe text fell 216 bytes on the fixed image (147,772 to 147,556), 376 on the batching (152,060 to 151,684) and 208 on the get image (165,372 to 165,164). The three images were built and run on the kit: each holds its stack chain, stack bound and text gate, and the runs are inside their rows. The text rows are not moved: the change is within the tolerance.\n\nThe same round measured SCE ADR 0064 (`vendor/sce` 6f72d5975e, the engine's Appendix D once per program) on the three images and did not take it: the text rose 2,444, 2,428 and 2,456 bytes against the commit before it and the kit's stack peak rose from 2,696 to 3,040 bytes. The pin stays at 6dbfa6a521; the SCE session works on the shells and the core, and sends a commit when its probe shows two machines below the old size. The figures and the symbol lists are in docs/text-ownership.md.",
+      "changes_bullets": [
+        "deploy/zephyr-common/wz_board_hooks.c: `__aeabi_memclr` defined as `memset(dest, 0, n)` on the Arm EABI.",
+        "docs/text-ownership.md: the entry for the change and the measured entry for SCE ADR 0064."
+      ],
+      "verification_bullets": [
+        "On the bench host (the tree of this round, `vendor/sce` at its pin 6dbfa6a521): the fixed, batching and get images were built and run on the kit, each with the stack chain, the stack bound and the text gate holding and the run inside its row of the resource budget (2,000 queries of each of the two documents answered by the first two, the getter's line after the reset on the third); the heap image, the fixed image with TLS and the TLS fit image were built, and none has a duplicate or an undefined symbol. The text of the three gated images, 147,556, 151,684 and 165,164, is within the tolerance of their rows.",
+        "Not run: the host tests (the change is a C file linked into Zephyr images only), the 12-boot parity matrix on this tree, the hosted lanes. The static gates the pre-push hook defers were not run by hand for a change that touches no gated source.",
+        "The measurement of SCE ADR 0064 behind the second part was taken with `vendor/sce` at 6f72d5975e and the generated code regenerated; both were put back to the committed pin and the committed `out/**` before this commit (the tree holds neither)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Correction to Round 3920's carry: it states the fixed image at 1.0166 of the single-thread pico image. That compared the kit-lane text (147,772) against the pico image's 145,364; the graded figure is the compare build of the same tree, 148,864 in the 12-boot matrix of run 20261029T221939, which is 1.0241 of the pico image and 3,500 bytes over it. In that run text and flash were the two losses (flash 1.0232) and ram, heap, stack_used, stack_reserved and turnaround were wins (turnaround 0.1910 against 0.1972 ms).",
+        "What remains in wz's own tree is small and named: the Request decoder (1.7 KB), the pump task with what it inlines (2.4 KB), the observer's dispatch among its sinks (0.8 KB), `canonize_keyexpr_as` (1.0 KB, read: the fast path, the `$*` collapse and the chunk join are all needed), `ReplyStage::stage_parts` (0.9 KB) and `RetryPeriod::next_ms` (0.5 KB, the integer growth inlined). The second copy of the SCE engine (the connect machine, 3,586 bytes) is the larger part of the gap, and its owner's repair is in progress. The matrix has not been run on this tree."
+      ],
+      "publishable_decision_summary": "The symbol table of the graded answering client named `__aeabi_memclr` (208 bytes) among the 13 C-named symbols the wz image carries and the single-thread zenoh-pico image does not. The Rust code generator calls it for every cleared struct and array; the image's libc has no such symbol, so the link took the compiler runtime's weak copy, a second byte loop beside the `memset` the image already links. `deploy/zephyr-common/wz_board_hooks.c` now defines it as `memset(dest, 0, n)` on the Arm EABI; the runtime's `__aeabi_memclr4` and `__aeabi_memclr8` stay (the pico image carries the same two).\n\nThe text fell 216 bytes on the fixed image (147,772 to 147,556), 376 on the batching (152,060 to 151,684) and 208 on the get image (165,372 to 165,164). The three images were built and run on the kit: each holds its stack chain, stack bound and text gate, and the runs are inside their rows. The text rows are not moved: the change is within the tolerance.\n\nThe same round measured SCE ADR 0064 (`vendor/sce` 6f72d5975e, the engine's Appendix D once per program) on the three images and did not take it: the text rose 2,444, 2,428 and 2,456 bytes against the commit before it and the kit's stack peak rose from 2,696 to 3,040 bytes. The pin stays at 6dbfa6a521; the SCE session works on the shells and the core, and sends a commit when its probe shows two machines below the old size. The figures and the symbol lists are in docs/text-ownership.md.",
+      "publishable_changes_bullets": [
+        "deploy/zephyr-common/wz_board_hooks.c: `__aeabi_memclr` defined as `memset(dest, 0, n)` on the Arm EABI.",
+        "docs/text-ownership.md: the entry for the change and the measured entry for SCE ADR 0064."
+      ],
+      "publishable_verification_bullets": [
+        "On the bench host (the tree of this round, `vendor/sce` at its pin 6dbfa6a521): the fixed, batching and get images were built and run on the kit, each with the stack chain, the stack bound and the text gate holding and the run inside its row of the resource budget (2,000 queries of each of the two documents answered by the first two, the getter's line after the reset on the third); the heap image, the fixed image with TLS and the TLS fit image were built, and none has a duplicate or an undefined symbol. The text of the three gated images, 147,556, 151,684 and 165,164, is within the tolerance of their rows.",
+        "Not run: the host tests (the change is a C file linked into Zephyr images only), the 12-boot parity matrix on this tree, the hosted lanes. The static gates the pre-push hook defers were not run by hand for a change that touches no gated source.",
+        "The measurement of SCE ADR 0064 behind the second part was taken with `vendor/sce` at 6f72d5975e and the generated code regenerated; both were put back to the committed pin and the committed `out/**` before this commit (the tree holds neither)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Correction to Round 3920's carry: it states the fixed image at 1.0166 of the single-thread pico image. That compared the kit-lane text (147,772) against the pico image's 145,364; the graded figure is the compare build of the same tree, 148,864 in the 12-boot matrix of run 20261029T221939, which is 1.0241 of the pico image and 3,500 bytes over it. In that run text and flash were the two losses (flash 1.0232) and ram, heap, stack_used, stack_reserved and turnaround were wins (turnaround 0.1910 against 0.1972 ms).",
+        "What remains in wz's own tree is small and named: the Request decoder (1.7 KB), the pump task with what it inlines (2.4 KB), the observer's dispatch among its sinks (0.8 KB), `canonize_keyexpr_as` (1.0 KB, read: the fast path, the `$*` collapse and the chunk join are all needed), `ReplyStage::stage_parts` (0.9 KB) and `RetryPeriod::next_ms` (0.5 KB, the integer growth inlined). The second copy of the SCE engine (the connect machine, 3,586 bytes) is the larger part of the gap, and its owner's repair is in progress. The matrix has not been run on this tree."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
