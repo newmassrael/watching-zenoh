@@ -301066,6 +301066,52 @@
         "Open: the codecs that hold a wireexpr or a chain (push, request, and the rest) keep their pre-count until SCE's R2 and R4 land, and MsgPut's counting copy is still 770 bytes; hosted CI per job is unread."
       ]
     },
+    "Round 3987": {
+      "decision_summary": "The zenoh-pico submodule moves from 1.10.1 to 1.10.2 and FreeRTOS-Kernel from V11.3.2 to V11.3.3, which upstream published after the pin; both distance rows return to 0, and the release-distance gate that named FreeRTOS passes again. Both diffs were read first. Pico's core changes are three fixes (a ZID length bound in the timestamp decode, a mistyped variable in the queryable undeclare path, an unset executor index), a C++ z_clone overload and a Zephyr module rebuilt on Kconfig; FreeRTOS changed only version text and the queue set select functions, which no wz code calls. Pico moved its switch definitions to cmake/feature_config.cmake, so the switch map reads both files, and the Zephyr comparison image states pico's own default switches in Kconfig because the module's Kconfig has no default for a switch. The timestamp ZID bound is carried by name in docs/zenoh-api-on-the-engine.md, O4 (h).",
+      "changes_bullets": [
+        "vendor/zenoh-pico and vendor/freertos-kernel: the submodule pointers are at the tags 1.10.2 and V11.3.3.",
+        "scripts/lib/upstream_release_distance.py: the zenoh-pico and FreeRTOS-Kernel rows return to 0, with the measured diffs written beside the table.",
+        "scripts/lib/upstream_switch_map.py: the zenoh-pico switch definitions and value defaults are read from cmake/feature_config.cmake and CMakeLists.txt together, with a selftest case for the split layout.",
+        "deploy/zephyr-pico-compare: the image no longer runs a configure-only pass of pico's CMake on the host, since the module makes its own config header; prj.conf states the twelve switches pico's default build has on.",
+        "docs/zenoh-api-on-the-engine.md: O4 records the pico and FreeRTOS moves and carries (h), the timestamp ZID bound."
+      ],
+      "verification_bullets": [
+        "Locally: the pin gates (the switch map, the citation anchors with resolution and the store reason gates among them) pass, and the release-distance gate reads all nine repositories at 0. The pico CLI oracles build from the 1.10.2 tree, the arm headers agree with the defconfig, the pico drop-in programs pass, and the Zephyr comparison image builds in both arms (text 143864 and 151896 bytes) with the same 36 feature switches as before.",
+        "FreeRTOS V11.3.3: the thumbv7m cross builds of freertos-sys and wz-runtime-freertos pass, and the mps2-an385 image boots with the session established.",
+        "The demo sweep linked with GNU ld ran with one failure, the zenoh-c census leg against this machine's 1.10.1 oracle and a stale library; the same leg passes at the 1.10.2 oracle with the arm's features (ran 1 of 1 each). mold 2.30.0 on this machine aborts linking the test wz_storage_complete_flag_pico_codec against the 1.10.2 pico library (\"ConcurrentMap is full\"); it links at 1.10.1 and under GNU ld, which the hosted lanes use, and the test passes there.",
+        "Not run: the hosted lanes, the cooperative and MCU lanes, and the kit hardware measurement of the comparison image."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Owed: the timestamp ZID bound, docs/zenoh-api-on-the-engine.md O4 (h): the view decode of the Timestamp codec does not refuse a ZID length over 16 where zenoh and pico 1.10.2 do; the repair is in the generator's decode of a bounded length-ref field.",
+        "Owed: the kit measurement of the Zephyr comparison image at 1.10.2 (the numbers on record are 1.10.1); the O4 (a) to (g) list of the zenoh 1.10.2 release.",
+        "Open, outside the repository: mold 2.30.0 aborts that one link on this machine; a newer mold or a link with GNU ld is the owner's choice of the global cargo configuration."
+      ],
+      "publishable_decision_summary": "The zenoh-pico submodule moves from 1.10.1 to 1.10.2 and FreeRTOS-Kernel from V11.3.2 to V11.3.3, which upstream published after the pin; both distance rows return to 0, and the release-distance gate that named FreeRTOS passes again. Both diffs were read first. Pico's core changes are three fixes (a ZID length bound in the timestamp decode, a mistyped variable in the queryable undeclare path, an unset executor index), a C++ z_clone overload and a Zephyr module rebuilt on Kconfig; FreeRTOS changed only version text and the queue set select functions, which no wz code calls. Pico moved its switch definitions to cmake/feature_config.cmake, so the switch map reads both files, and the Zephyr comparison image states pico's own default switches in Kconfig because the module's Kconfig has no default for a switch. The timestamp ZID bound is carried by name in docs/zenoh-api-on-the-engine.md, O4 (h).",
+      "publishable_changes_bullets": [
+        "vendor/zenoh-pico and vendor/freertos-kernel: the submodule pointers are at the tags 1.10.2 and V11.3.3.",
+        "scripts/lib/upstream_release_distance.py: the zenoh-pico and FreeRTOS-Kernel rows return to 0, with the measured diffs written beside the table.",
+        "scripts/lib/upstream_switch_map.py: the zenoh-pico switch definitions and value defaults are read from cmake/feature_config.cmake and CMakeLists.txt together, with a selftest case for the split layout.",
+        "deploy/zephyr-pico-compare: the image no longer runs a configure-only pass of pico's CMake on the host, since the module makes its own config header; prj.conf states the twelve switches pico's default build has on.",
+        "docs/zenoh-api-on-the-engine.md: O4 records the pico and FreeRTOS moves and carries (h), the timestamp ZID bound."
+      ],
+      "publishable_verification_bullets": [
+        "Locally: the pin gates (the switch map, the citation anchors with resolution and the store reason gates among them) pass, and the release-distance gate reads all nine repositories at 0. The pico CLI oracles build from the 1.10.2 tree, the arm headers agree with the defconfig, the pico drop-in programs pass, and the Zephyr comparison image builds in both arms (text 143864 and 151896 bytes) with the same 36 feature switches as before.",
+        "FreeRTOS V11.3.3: the thumbv7m cross builds of freertos-sys and wz-runtime-freertos pass, and the mps2-an385 image boots with the session established.",
+        "The demo sweep linked with GNU ld ran with one failure, the zenoh-c census leg against this machine's 1.10.1 oracle and a stale library; the same leg passes at the 1.10.2 oracle with the arm's features (ran 1 of 1 each). mold 2.30.0 on this machine aborts linking the test wz_storage_complete_flag_pico_codec against the 1.10.2 pico library (\"ConcurrentMap is full\"); it links at 1.10.1 and under GNU ld, which the hosted lanes use, and the test passes there.",
+        "Not run: the hosted lanes, the cooperative and MCU lanes, and the kit hardware measurement of the comparison image."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owed: the timestamp ZID bound, docs/zenoh-api-on-the-engine.md O4 (h): the view decode of the Timestamp codec does not refuse a ZID length over 16 where zenoh and pico 1.10.2 do; the repair is in the generator's decode of a bounded length-ref field.",
+        "Owed: the kit measurement of the Zephyr comparison image at 1.10.2 (the numbers on record are 1.10.1); the O4 (a) to (g) list of the zenoh 1.10.2 release.",
+        "Open, outside the repository: mold 2.30.0 aborts that one link on this machine; a newer mold or a link with GNU ld is the owner's choice of the global cargo configuration."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
