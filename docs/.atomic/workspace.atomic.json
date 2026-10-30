@@ -300802,6 +300802,36 @@
         "None."
       ]
     },
+    "Round 3979": {
+      "decision_summary": "Layer Q at main's 09b20b7ff4 had two reds, both repaid here. The slot-bytes probe builds the Zephyr node with stand-in build values, and the node began reading WZ_BATCH_BYTES at the kit's change of the client's memory, so the probe failed to compile; the value is now in the stand-ins at CONFIG_WZ_BATCH_BYTES' default. The multicast image's text fell 1040 and 1072 bytes below its baseline between the pins 6ba84c3f37 and b2ff4da1cb, and the baseline follows the measured reading, which is a gain that is applied.",
+      "changes_bullets": [
+        "`scripts/lib/no_allocator_link_gate.py`: ZEPHYR_BUILD_VALUES gains WZ_BATCH_BYTES = 1472, and the comment says why this one is a default and not a stand-in.",
+        "`scripts/check-footprint.sh`: multicast-e2e text baselines 72852/72900 to 71812/71828, with the attribution."
+      ],
+      "verification_bullets": [
+        "Layer Q ran whole on a build host before the change (two reds: the probe build, the multicast text) and after it (pass, 498 s): the zephyr-admin-node slot reads 36840 bytes equal to the record, multicast-e2e text 71812 and 71824 against the new baselines, the two-session frame 16208 of 16384. Not run: the hosted layers."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "Open: the cause of the 1040-byte fall is not separated between the pin move and the kit commits; the two-session spawn frame still holds three sessions' states by value (16208 of 16384); hosted CI is cancelled by each push, so no per-job verdict has been read since 1d234b06ba."
+      ],
+      "publishable_decision_summary": "Layer Q at main's 09b20b7ff4 had two reds, both repaid here. The slot-bytes probe builds the Zephyr node with stand-in build values, and the node began reading WZ_BATCH_BYTES at the kit's change of the client's memory, so the probe failed to compile; the value is now in the stand-ins at CONFIG_WZ_BATCH_BYTES' default. The multicast image's text fell 1040 and 1072 bytes below its baseline between the pins 6ba84c3f37 and b2ff4da1cb, and the baseline follows the measured reading, which is a gain that is applied.",
+      "publishable_changes_bullets": [
+        "`scripts/lib/no_allocator_link_gate.py`: ZEPHYR_BUILD_VALUES gains WZ_BATCH_BYTES = 1472, and the comment says why this one is a default and not a stand-in.",
+        "`scripts/check-footprint.sh`: multicast-e2e text baselines 72852/72900 to 71812/71828, with the attribution."
+      ],
+      "publishable_verification_bullets": [
+        "Layer Q ran whole on a build host before the change (two reds: the probe build, the multicast text) and after it (pass, 498 s): the zephyr-admin-node slot reads 36840 bytes equal to the record, multicast-e2e text 71812 and 71824 against the new baselines, the two-session frame 16208 of 16384. Not run: the hosted layers."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open: the cause of the 1040-byte fall is not separated between the pin move and the kit commits; the two-session spawn frame still holds three sessions' states by value (16208 of 16384); hosted CI is cancelled by each push, so no per-job verdict has been read since 1d234b06ba."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
