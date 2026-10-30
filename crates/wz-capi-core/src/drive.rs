@@ -4065,7 +4065,7 @@ pub struct OpenStance {
     /// and an open that is handed a prefix it cannot install fails ([`OpenError::DriveFailed`]).
     pub namespace: Option<String>,
     /// How the node keeps its south apart (`gateway/south`). Only a node that forwards between
-    /// its faces has a south to partition ([`router_node`]); the registry of faces holds the
+    /// its faces has a south to partition (`router_node`); the registry of faces holds the
     /// value and places nothing by it.
     pub gateway_south: wz_session_core::region_partition::SouthPartition,
     /// Open-debt item 913 — the multicast groups the session joins, each one face to every
