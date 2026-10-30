@@ -61,18 +61,18 @@ the atom on. The C ABI's `router-node` is the second kind: it lists
 production attach is gated on `router-node` alone. Asking for the atom's name in
 that file would be a second cfg that restates the first, and a feature that
 forwards the atom is exactly as unable to reach the plane with the atom off. The
-names a crate turns on are read from its own `Cargo.toml`, by closure, so a
+names a crate turns on are read from cargo's metadata for its package, by closure, so a
 feature that forwards one that forwards the atom counts too.
 """
 
 from __future__ import annotations
 
+import json
 import pathlib
 import re
 import subprocess
 import sys
 import tempfile
-import tomllib
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -125,18 +125,38 @@ def atom_features(features: dict[str, list[str]]) -> set[str]:
     return names
 
 
-def crate_atom_features(root: pathlib.Path, rel: str) -> set[str]:
+def workspace_features(root: pathlib.Path) -> dict[pathlib.Path, dict[str, list[str]]]:
+    """Package directory -> its `[features]` table, from cargo's own metadata.
+
+    `tomllib` is stdlib only from python 3.11 and the hosted floor is 3.10, so reading the
+    manifests here died on the runner and stayed green on a newer workstation. Cargo knows what
+    a package declares, and asking it leaves one reading of the manifest format
+    (`scripts/lib/facade_forward_gate.py` asks the same way). `--no-deps` keeps this to the
+    workspace members, which hold every call of the entry point.
+    """
+    try:
+        out = subprocess.run(
+            ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+            cwd=str(root / "crates"), capture_output=True, text=True, check=True,
+        ).stdout
+        packages = json.loads(out).get("packages", [])
+    except (OSError, subprocess.CalledProcessError, ValueError) as exc:
+        raise InputError(f"cargo metadata cannot list the packages ({exc})") from exc
+    return {
+        pathlib.Path(p["manifest_path"]).resolve().parent: dict(p.get("features") or {})
+        for p in packages
+    }
+
+
+def crate_atom_features(
+    root: pathlib.Path, rel: str, packages: dict[pathlib.Path, dict[str, list[str]]]
+) -> set[str]:
     """`atom_features` of the crate that owns the tracked file `rel`."""
-    directory = (root / rel).parent
+    directory = (root / rel).resolve().parent
     while directory != root.parent:
-        manifest = directory / "Cargo.toml"
-        if manifest.is_file():
-            try:
-                doc = tomllib.loads(manifest.read_text(encoding="utf-8"))
-            except (OSError, tomllib.TOMLDecodeError) as exc:
-                raise InputError(f"{manifest} is not readable ({exc})") from exc
-            if "package" in doc:
-                return atom_features(doc.get("features", {}))
+        features = packages.get(directory)
+        if features is not None:
+            return atom_features(features)
         directory = directory.parent
     return {ATOM_FEATURE}
 
@@ -279,6 +299,7 @@ def audit(root: pathlib.Path) -> tuple[list[str], list[str], list[str]]:
     prod: list[str] = []
     defs: list[tuple[str, str]] = []
     population = 0
+    packages = workspace_features(root)
 
     for path in tracked_rust(root):
         rel = path.relative_to(root).as_posix()
@@ -288,7 +309,7 @@ def audit(root: pathlib.Path) -> tuple[list[str], list[str], list[str]]:
             raise InputError(f"{path} is not readable ({exc})") from exc
         if ENTRY_POINT not in text:
             continue
-        atom_names = crate_atom_features(root, rel)
+        atom_names = crate_atom_features(root, rel, packages)
         declared = declared_cfgs(root, rel)
         for line, scope, cfgs in call_sites(rel, text):
             population += 1
