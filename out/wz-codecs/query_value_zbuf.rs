@@ -137,61 +137,216 @@ impl<'a> QueryValueZbuf<'a> {
     /// caller-owned `SliceSink` allocations.
     pub const MAX_ENCODED_BYTES: usize = 1382;
 
-    /// Encode `self` into the caller-owned sink. Returns
-    /// `CodecError::BufferOverflow` from a bounded sink when the
-    /// destination has insufficient remaining capacity; growable
-    /// sinks (e.g. `VecSink`) are effectively infallible.
-    pub fn encode<S: SceSink>(&self, w: &mut S, after_shm: u8) -> Result<(), CodecError> {
-        // Declared-but-unconsumed flag inputs: see `decode` — same suppress per
-        // declared `<sce:flag-input>`.
-        let _ = after_shm;
-        // Streaming cursor encode (SSOT selection: `needs_streaming`).
-        // Mirrors the streaming decode: every field appends its own bytes
-        // in declaration order through the per-field encode blocks, so a
-        // gated field skips its append when absent, and a fixed field after
-        // a variable-length payload lands after the payload (the positional
-        // path appends variable fields last, placing it ahead on the wire).
-        // Per-field `is_repeat` / `is_tlv_chain` / `is_embed` route to their
-        // dedicated helpers; everything else uses `present_if_encode_block`
-        // (its non-gated arm covers plain fixed / tail / length-ref / VLE).
-        w.write_vle_u64(self.value_len)?;
-        if let Some(_v) = &self.value {
-            w.write_bytes(_v)?;
-        }
-        if let Some(_v) = &self.encoding {
-            _v.encode(w)?;
-        }
-        if let Some(_v) = self.slice_count {
-        w.write_vle_u32(_v)?;
-        }
-        if let Some(_list) = &self.slices {
-            for _e in _list {
-                _e.encode(w)?;
-            }
-        }
-        Ok(())
+    /// Encode `self` into the caller-owned sink. Returns the value's refusal
+    /// when the encoding cannot carry it (a length past its type, a list past
+    /// its bound, a gate that disagrees with a presence; the document declares
+    /// `sce:encode-may-fail`), or the sink's own error:
+    /// `CodecError::BufferOverflow` from a bounded sink when the destination
+    /// has insufficient remaining capacity.
+    pub fn encode<S: SceSink>(&self, w: &mut S, after_shm: u8) -> Result<(), CodecError> where CodecError: From<S::Error> {
+        Self::encode_source(self, w, after_shm)
     }
 
     /// Heap-backed convenience facade. Pre-reserves
     /// `MAX_ENCODED_BYTES` so the worst-case write path performs at
     /// most one allocation, then delegates to `encode` over a
-    /// `VecSink`. Returns the freshly-encoded byte vector. Callers
-    /// targeting zero-alloc hot paths should call `encode` directly
-    /// against a caller-owned sink.
+    /// `VecSink`. Returns the freshly-encoded byte vector, or the error
+    /// `encode` refuses a value with: one the encoding cannot carry (a
+    /// length past its type, a list past its bound) or one a gate
+    /// disagrees with. Callers targeting zero-alloc hot paths should call
+    /// `encode` directly against a caller-owned sink.
     ///
     /// Gated on the `alloc` feature — `VecSink` lives behind the
     /// same gate (see `backends/rust/forge-runtime/src/codec.rs`). MCU /
     /// `no_std` builds without `alloc` only see the sink-based
     /// primary `encode`.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self, after_shm: u8) -> Vec<u8> {
+    pub fn encode_to_vec(&self, after_shm: u8) -> Result<Vec<u8>, CodecError> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
         let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink, after_shm)
-            .expect("VecSink is infallible");
-        _sce_v
+        self.encode(&mut _sce_sink, after_shm)?;
+        Ok(_sce_v)
     }
 }
+
+// ── Source (ADR 0058) ────────────────────────────────────────────────
+/// What a value of `QueryValueZbuf` says: its presented fields. A length, a count
+/// or the flag a gated field is announced by is not among them; `QueryValueZbuf`
+/// computes those from what is ([`QueryValueZbuf::encode_source`]).
+pub trait QueryValueZbufSource {
+    /// The `value_len` field.
+    fn value_len(&self) -> Option<u64>;
+    /// The `value` field.
+    fn value(&self) -> Option<&[u8]>;
+    /// The `encoding` field.
+    fn encoding(&self) -> Option<&impl super::encoding::EncodingSource>;
+    /// The `slices` field.
+    fn slices(&self) -> Option<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone>;
+}
+
+impl<T: QueryValueZbufSource + ?Sized> QueryValueZbufSource for &T {
+    fn value_len(&self) -> Option<u64> {
+        (**self).value_len()
+    }
+    fn value(&self) -> Option<&[u8]> {
+        (**self).value()
+    }
+    fn encoding(&self) -> Option<&impl super::encoding::EncodingSource> {
+        (**self).encoding()
+    }
+    fn slices(&self) -> Option<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone> {
+        (**self).slices()
+    }
+}
+
+/// A value of `QueryValueZbuf` held in the types a caller already has: a source
+/// ([`QueryValueZbufSource`]) whose lists are slices and whose bodies are references.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub struct QueryValueZbufParts<'a> {
+    /// The `value_len` field.
+    pub value_len: Option<u64>,
+    /// The `value` field.
+    pub value: Option<&'a [u8]>,
+    /// The `encoding` field.
+    pub encoding: Option<&'a super::encoding::EncodingParts<'a>>,
+    /// The `slices` field.
+    pub slices: Option<&'a [super::zbuf_slice::ZbufSliceParts<'a>]>,
+}
+
+impl<'a> QueryValueZbufSource for QueryValueZbufParts<'a> {
+    fn value_len(&self) -> Option<u64> {
+        self.value_len
+    }
+    fn value(&self) -> Option<&[u8]> {
+        self.value
+    }
+    fn encoding(&self) -> Option<&impl super::encoding::EncodingSource> {
+        self.encoding
+    }
+    fn slices(&self) -> Option<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone> {
+        self.slices.map(<[_]>::iter)
+    }
+}
+
+impl<'a> QueryValueZbufSource for QueryValueZbuf<'a> {
+    fn value_len(&self) -> Option<u64> {
+        if self.value.is_none() { Some(self.value_len) } else { None }
+    }
+    fn value(&self) -> Option<&[u8]> {
+        self.value
+    }
+    fn encoding(&self) -> Option<&impl super::encoding::EncodingSource> {
+        self.encoding.as_ref()
+    }
+    fn slices(&self) -> Option<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone> {
+        self.slices.as_ref().map(|_l| _l.iter())
+    }
+}
+
+impl<'a> QueryValueZbufSource for QueryValueZbufView<'a> {
+    fn value_len(&self) -> Option<u64> {
+        if self.value.is_none() { Some(self.value_len) } else { None }
+    }
+    fn value(&self) -> Option<&[u8]> {
+        self.value
+    }
+    fn encoding(&self) -> Option<&impl super::encoding::EncodingSource> {
+        self.encoding.as_ref()
+    }
+    fn slices(&self) -> Option<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone> {
+        self.slices.as_ref().map(|_l| _l.iter())
+    }
+}
+
+impl<S: ::sce_forge_runtime::codec::CodecStorage> QueryValueZbufSource for QueryValueZbufOwned<S> {
+    fn value_len(&self) -> Option<u64> {
+        if self.value.is_none() { Some(self.value_len) } else { None }
+    }
+    fn value(&self) -> Option<&[u8]> {
+        self.value.as_ref().map(::sce_forge_runtime::codec::SceByteBuf::as_slice)
+    }
+    fn encoding(&self) -> Option<&impl super::encoding::EncodingSource> {
+        self.encoding.as_ref()
+    }
+    fn slices(&self) -> Option<impl Iterator<Item = impl super::zbuf_slice::ZbufSliceSource> + Clone> {
+        self.slices.as_ref().map(|_l| ::sce_forge_runtime::codec::SceList::as_slice(_l).iter())
+    }
+}
+
+#[allow(dead_code)]
+impl<'a> QueryValueZbuf<'a> {
+    /// Encode what `src` says into the caller-owned sink: the bytes
+    /// [`Self::encode`] writes for the value it holds, read through
+    /// [`QueryValueZbufSource`]. A length, a count or a gate flag is computed from what
+    /// `src` presents, and a value the encoding cannot carry is refused
+    /// before the first byte is written.
+    pub fn encode_source<S: QueryValueZbufSource + ?Sized, K: SceSink>(src: &S, w: &mut K, after_shm: u8) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        Self::write_source(src, w, after_shm)
+    }
+
+    /// [`Self::encode_source`] without the guard a parent has already made.
+    #[doc(hidden)]
+    pub fn write_source<S: QueryValueZbufSource + ?Sized, K: SceSink>(src: &S, w: &mut K, after_shm: u8) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        let _k_slices: usize = src.slices().map_or(0, |_l| _l.count());
+        if _k_slices > 4 {
+            return Err(CodecError::TooManyElements);
+        }
+        let _n_d_value_len_0: usize = match src.value() {
+            Some(_v) => _v.len(),
+            None => 0,
+        };
+        let _f_d_value_len: Option<usize> = if src.value().is_some() { Some(_n_d_value_len_0) } else { None };
+        let _d_value_len: u64 = match _f_d_value_len {
+            Some(_n) => {
+                let _d = ::sce_forge_runtime::codec::widen_usize(_n);
+                if src.value_len().is_some_and(|_s| _s != _d) {
+                    return Err(CodecError::InconsistentSource);
+                }
+                _d
+            }
+            None => src.value_len().unwrap_or_default(),
+        };
+        let _f_d_slice_count: Option<usize> = if src.slices().is_some() { Some(_k_slices) } else { None };
+        let _d_slice_count: u32 = _f_d_slice_count.unwrap_or(0) as u32;
+        if ((after_shm & 0x1) == 0) != src.value().is_some() {
+            return Err(CodecError::PresentIfMismatch);
+        }
+        if ((after_shm & 0x1) != 0) != src.encoding().is_some() {
+            return Err(CodecError::PresentIfMismatch);
+        }
+        if ((after_shm & 0x1) != 0) != src.slices().is_some() {
+            return Err(CodecError::PresentIfMismatch);
+        }
+        let _ = after_shm;
+        w.write_vle_u64(_d_value_len)?;
+        if let Some(_v) = src.value() {
+            w.write_bytes(_v)?;
+        }
+        if let Some(_v) = src.encoding() {
+            Encoding::write_source(_v, w)?;
+        }
+        if (after_shm & 0x1) != 0 {
+            w.write_vle_u32(_d_slice_count)?;
+        }
+        if let Some(_v) = src.slices() {
+            for _e in _v {
+                ZbufSlice::write_source(&_e, w)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The bytes [`Self::write_source`] writes for `src`, counted with
+    /// nothing written.
+    #[doc(hidden)]
+    pub fn count_source<S: QueryValueZbufSource + ?Sized>(src: &S, after_shm: u8) -> Result<usize, CodecError> {
+        let mut _c = ::sce_forge_runtime::codec::CountSink::new();
+        Self::write_source(src, &mut _c, after_shm)?;
+        Ok(_c.len())
+    }
+}
+
 
 // ── View (ADR 0049) ──────────────────────────────────────────────────
 // `QueryValueZbufView` is what a decode of `QueryValueZbuf` learned, not a
@@ -345,45 +500,18 @@ impl<'a> QueryValueZbufView<'a> {
     /// builder. It writes the canonical wire, not the frame the view was decoded
     /// from, so a frame `decode` accepted in a form that is not canonical is
     /// not passed on as it came.
-    pub fn encode<S: SceSink>(&self, w: &mut S, after_shm: u8) -> Result<(), CodecError> {
-        // Declared-but-unconsumed flag inputs: see `decode` — same suppress per
-        // declared `<sce:flag-input>`.
-        let _ = after_shm;
-        // Streaming cursor encode (SSOT selection: `needs_streaming`).
-        // Mirrors the streaming decode: every field appends its own bytes
-        // in declaration order through the per-field encode blocks, so a
-        // gated field skips its append when absent, and a fixed field after
-        // a variable-length payload lands after the payload (the positional
-        // path appends variable fields last, placing it ahead on the wire).
-        // Per-field `is_repeat` / `is_tlv_chain` / `is_embed` route to their
-        // dedicated helpers; everything else uses `present_if_encode_block`
-        // (its non-gated arm covers plain fixed / tail / length-ref / VLE).
-        w.write_vle_u64(self.value_len)?;
-        if let Some(_v) = &self.value {
-            w.write_bytes(_v)?;
-        }
-        if let Some(_v) = &self.encoding {
-            _v.encode(w)?;
-        }
-        if let Some(_v) = self.slice_count {
-        w.write_vle_u32(_v)?;
-        }
-        if let Some(_list) = &self.slices {
-            for _e in _list.iter() {
-                _e.encode(w)?;
-            }
-        }
-        Ok(())
+    pub fn encode<S: SceSink>(&self, w: &mut S, after_shm: u8) -> Result<(), CodecError> where CodecError: From<S::Error> {
+        QueryValueZbuf::encode_source(self, w, after_shm)
     }
 
-    /// Heap-backed convenience facade over [`Self::encode`].
+    /// Heap-backed convenience facade over [`Self::encode`], which refuses a
+    /// value it cannot carry.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self, after_shm: u8) -> Vec<u8> {
+    pub fn encode_to_vec(&self, after_shm: u8) -> Result<Vec<u8>, CodecError> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
         let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink, after_shm)
-            .expect("VecSink is infallible");
-        _sce_v
+        self.encode(&mut _sce_sink, after_shm)?;
+        Ok(_sce_v)
     }
 }
 
@@ -526,45 +654,18 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> QueryValueZbufOwned<S> {
     ///
     /// The projection builds the whole borrowed record (every list and
     /// embedded body in it, by value) only for `encode` to read it once. A
-    /// sender that holds an owned value encodes it from here. The same
-    /// refusals as the projection's: a list longer than the borrowed view
-    /// declares raises `CodecError::TooManyElements`, so an owned value the
+    /// sender that holds an owned value encodes it from here.
+    /// The same refusals as the projection's: a list longer than the borrowed
+    /// view declares raises `CodecError::TooManyElements`, so an owned value the
     /// borrowed form could not carry is an error and never a frame its own
     /// decoder would reject.
-    pub fn encode<K: SceSink>(&self, w: &mut K, after_shm: u8) -> Result<(), CodecError> {
-        // Declared-but-unconsumed flag inputs: see `decode` — same suppress per
-        // declared `<sce:flag-input>`.
-        let _ = after_shm;
-        // Streaming cursor encode (SSOT selection: `needs_streaming`).
-        // Mirrors the streaming decode: every field appends its own bytes
-        // in declaration order through the per-field encode blocks, so a
-        // gated field skips its append when absent, and a fixed field after
-        // a variable-length payload lands after the payload (the positional
-        // path appends variable fields last, placing it ahead on the wire).
-        // Per-field `is_repeat` / `is_tlv_chain` / `is_embed` route to their
-        // dedicated helpers; everything else uses `present_if_encode_block`
-        // (its non-gated arm covers plain fixed / tail / length-ref / VLE).
-        w.write_vle_u64(self.value_len)?;
-        if let Some(_v) = &self.value {
-            w.write_bytes(::sce_forge_runtime::codec::SceByteBuf::as_slice(_v))?;
-        }
-        if let Some(_v) = &self.encoding {
-            _v.encode(w)?;
-        }
-        if let Some(_v) = self.slice_count {
-        w.write_vle_u32(_v)?;
-        }
-        if let Some(_list) = &self.slices {
-            for _e in ::sce_forge_runtime::codec::bounded_entries::<_, _, 4>(_list)? {
-                _e.encode(w)?;
-            }
-        }
-        Ok(())
+    pub fn encode<K: SceSink>(&self, w: &mut K, after_shm: u8) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        QueryValueZbuf::encode_source(self, w, after_shm)
     }
 
     /// Heap-backed convenience facade over [`Self::encode`]. Fallible: a list
-    /// past the bound the borrowed view declares is refused, and so is a
-    /// presence the chain predicates disagree with.
+    /// past the bound the borrowed view declares is refused, as is any value
+    /// the encoding cannot carry.
     #[cfg(feature = "alloc")]
     pub fn encode_to_vec(&self, after_shm: u8) -> Result<Vec<u8>, CodecError> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(QueryValueZbuf::MAX_ENCODED_BYTES);

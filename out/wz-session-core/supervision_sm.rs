@@ -16,8 +16,8 @@
 // SCE Protocol-Synthesis RFC §synth-5-J-2: no_std variant of the statechart
 // emitter. It compiles against `sce-rust-runtime` with or without that
 // crate's `std` feature, and the generated crate omits `std::*` paths — Duration comes from
-// `core::time`, the configuration and history records are the runtime's
-// capacity-bounded `BoundedVec`, sized to this document's state tree, and the
+// `core::time`, the configuration and history records are kept by the engine
+// in a run store sized to this document's state tree, and the
 // parent-event queue field is elided
 // (SCXML `<invoke>` is rejected at codegen time under `--no-std` per the
 // `codegen/no-std-invoke-not-supported` diagnostic).
@@ -80,43 +80,112 @@ use sce_rust_runtime::{Engine, StatePolicy};
 // State enum (W3C SCXML 3.3)
 // ======================================================================
 
+/// The document's states, declared in document order. Each variant's
+/// discriminant is its position in that order, which is the number the
+/// runtime's tables know the state by (docs/adr/0064), so a state is its number
+/// at no cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[repr(u16)]
 pub enum SupervisionState {
-    Armed,
     // W3C SCXML 3.2: `<scxml initial>` state — the machine's `Default`.
     #[default]
-    Disarmed,
-    Expired,
-    Expiring,
+    Disarmed = 0,
+    Armed = 1,
+    Expiring = 2,
+    Expired = 3,
 }
 
 // ======================================================================
 // Event enum (W3C SCXML 3.12)
 // ======================================================================
 
+/// The events the document names, and the null event. Each variant's
+/// discriminant is the number the runtime knows the event by, its position in
+/// `StatePolicy::EVENTS`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u16)]
 pub enum SupervisionEvent {
-    DeadlineExpired,
-    HookDone,
-    SupervisionFeed,
-    SupervisionRearm,
-    SupervisionStart,
-    SupervisionStop,
+    DeadlineExpired = 0,
+    HookDone = 1,
+    SupervisionFeed = 2,
+    SupervisionRearm = 3,
+    SupervisionStart = 4,
+    SupervisionStop = 5,
     /// W3C SCXML 3.13: Sentinel for eventless transition dispatch
-    Null,
+    Null = 6,
 }
 
 // ======================================================================
 // What this document's state tree bounds (W3C SCXML 3.4)
 // ======================================================================
 
-/// A set of this machine's states that are, or are about to be, in one
-/// configuration: the configuration a host observes, and what the runtime's
-/// microstep builds from it (an exit set, an entry set, a history's record).
-/// Its capacity, 1, is the most states one configuration of this document holds,
-/// read from its state tree; the runtime names no size of its own. A `Vec` under
-/// std, where the capacity is not read.
+/// A configuration of this machine, in its own states: what
+/// `Engine::get_active_states` returns and a host observes. The engine keeps
+/// the configuration itself as numbers (docs/adr/0064). Its capacity, 1, is
+/// the most states one configuration of this document holds, read from its
+/// state tree; the runtime names no size of its own. A `Vec` under std, where
+/// the capacity is not read.
 pub type SupervisionConfiguration = ::sce_rust_runtime::helpers::hierarchy::BoundedVec<SupervisionState, 1>;
+
+// ======================================================================
+// The document's tables (docs/adr/0064)
+// ======================================================================
+
+/// This document's state tree as the runtime's Appendix D procedures read it.
+/// Those procedures are compiled once for a program, whatever machines it
+/// holds, so they read a document as numbers: each state by its position in
+/// document order (the discriminant of `SupervisionState`), each `<history>` by
+/// the discriminant of its variant, and each transition by its row here — the
+/// written ones grouped by source state, then each compound state's initial
+/// transition, each history's default transition and the document's own
+/// initial transition. A state's children are not listed: the numbering is a
+/// pre-order walk, so they are the state's number plus one and each number past
+/// the subtree (`last_descendant`) of the child before.
+///
+/// A `const` and not a `static`: `StatePolicy::TABLES` refers to it, and a
+/// constant may refer to a static only from Rust 1.83 on, past the toolchain
+/// the runtime supports. The reference is to one constant allocation all the
+/// same.
+pub const SUPERVISION_TABLES: ::sce_rust_runtime::DocumentTables = {
+    use ::sce_rust_runtime::{
+        DocumentTables, HistoryId, HistoryRow, Span, StateId, StateKind, StateRow, Target,
+        TransitionId, TransitionRow,
+    };
+    DocumentTables {
+        states: &[
+            // 0: Disarmed
+            StateRow::new(None, StateKind::Atomic, StateId(0), None),
+            // 1: Armed
+            StateRow::new(None, StateKind::Atomic, StateId(1), None),
+            // 2: Expiring
+            StateRow::new(None, StateKind::Atomic, StateId(2), None),
+            // 3: Expired
+            StateRow::new(None, StateKind::Atomic, StateId(3), None),
+        ],
+        histories: &[
+        ],
+        transitions: &[
+            // 0: Disarmed, transition 0
+            TransitionRow::new(Some(StateId(0)), Span { start: 0, len: 1 }, false, false),
+            // 1: Armed, transition 0
+            TransitionRow::new(Some(StateId(1)), Span { start: 1, len: 1 }, false, false),
+            // 2: Armed, transition 1
+            TransitionRow::new(Some(StateId(1)), Span { start: 2, len: 1 }, false, false),
+            // 3: Armed, transition 2
+            TransitionRow::new(Some(StateId(1)), Span { start: 3, len: 1 }, false, false),
+            // 4: Expiring, transition 0
+            TransitionRow::new(Some(StateId(2)), Span { start: 4, len: 1 }, false, false),
+            // 5: Expired, transition 0
+            TransitionRow::new(Some(StateId(3)), Span { start: 5, len: 1 }, false, false),
+            // 6: Expired, transition 1
+            TransitionRow::new(Some(StateId(3)), Span { start: 6, len: 1 }, false, false),
+            // 7: the document's initial transition
+            TransitionRow::new(None, Span { start: 7, len: 1 }, false, false),
+        ],
+        targets: &[Target::state(StateId(1)), Target::state(StateId(1)), Target::state(StateId(2)), Target::state(StateId(0)), Target::state(StateId(3)), Target::state(StateId(1)), Target::state(StateId(0)), Target::state(StateId(0))],
+        initial: TransitionId(7),
+    }
+};
 
 // ======================================================================
 // Externally-drivable event surface (W3C SCXML 3.12 / 5.10)
@@ -311,23 +380,59 @@ impl<A: SupervisionActions + 'static> StatePolicy for SupervisionPolicy<A> {
     // EventQueue per-machine sizing lever above.
     type ScheduledSendId = sce_rust_runtime::ElidedSendId;
 
+    // docs/adr/0064: the document as the runtime's Appendix D procedures read
+    // it, which are compiled once for a program: its tables, and its states,
+    // histories and events by the numbers the tables know them by. Each of the
+    // three lists is in the order of those numbers, so it is the inverse of the
+    // enum's discriminant.
+    const TABLES: &'static ::sce_rust_runtime::DocumentTables = &SUPERVISION_TABLES;
+    const STATES: &'static [Self::State] = &[
+        SupervisionState::Disarmed,
+        SupervisionState::Armed,
+        SupervisionState::Expiring,
+        SupervisionState::Expired,
+    ];
+    const HISTORIES: &'static [Self::History] = &[];
+    const EVENTS: &'static [Self::Event] = &[
+        SupervisionEvent::DeadlineExpired,
+        SupervisionEvent::HookDone,
+        SupervisionEvent::SupervisionFeed,
+        SupervisionEvent::SupervisionRearm,
+        SupervisionEvent::SupervisionStart,
+        SupervisionEvent::SupervisionStop,
+        SupervisionEvent::Null,
+    ];
+
+    fn state_id(state: Self::State) -> ::sce_rust_runtime::StateId {
+        ::sce_rust_runtime::StateId(state as u16)
+    }
+
+    fn history_id(history: Self::History) -> ::sce_rust_runtime::HistoryId {
+        // No `<history>`, so no value of the type to number.
+        match history {}
+    }
+
+    fn event_id(event: Self::Event) -> ::sce_rust_runtime::EventId {
+        ::sce_rust_runtime::EventId(event as u16)
+    }
+
     // W3C SCXML 3.4: what this document's state tree bounds, read by the
     // generator and written here so every buffer of the runtime's microstep is
-    // this document's size and no larger. A configuration holds 1 state(s) at
-    // most; a selection enables 1 transition(s) at most, one from each atomic state
-    // of one; the deepest state sits 1 level(s) down. Under std the buffers
-    // are `Vec`s and the capacities are not read.
+    // this document's size and no larger, in both profiles. Every set of states
+    // the runtime keeps is a bit vector of this document's 4 state(s); a
+    // configuration holds 1 state(s) at most, the capacity of the
+    // `Configuration` a host reads; a selection enables 1 transition(s) at most, one from each atomic state
+    // of one configuration; a microstep owes 0 history default(s) at most;
+    // and Appendix D's entry procedures, the effective targets and the
+    // completion check are run over a stack of steps and not by recursion, so a
+    // call needs no depth the program has to assume: 6 step(s) at most, three
+    // for each level of the tree, one for each `<history>` and three of
+    // headroom. The workspace is a local of the call that runs a macrostep; the
+    // run store, the configuration and what each of the 0 `<history>`
+    // element(s) recorded, one such set each, is the engine's.
+    type Workspace = ::sce_rust_runtime::Workspace<{ ::sce_rust_runtime::state_scratch(4) }, 1, 6, 0>;
+    type RunStore = ::sce_rust_runtime::RunStore<{ ::sce_rust_runtime::state_words(4) }, { ::sce_rust_runtime::record_words(4, 0) }, 0>;
     type Configuration = SupervisionConfiguration;
-    type EnabledSet = ::sce_rust_runtime::helpers::hierarchy::BoundedVec<::sce_rust_runtime::EnabledTransition<Self::State, Self::History>, 1>;
-    type HistoryDefaults = ::sce_rust_runtime::helpers::hierarchy::BoundedVec<(Self::State, Self::History), 0>;
-    // Appendix D's entry procedures, the effective targets and the completion
-    // check are run over a stack of steps and not by recursion, so a call needs
-    // no depth the program has to assume: 6 step(s) at most, three for each level
-    // of the tree, one for each `<history>` and three of headroom.
-    type EntryWalk = ::sce_rust_runtime::helpers::hierarchy::BoundedVec<::sce_rust_runtime::helpers::microstep::WalkStep<Self::State, Self::History>, 6>;
-    const MAX_CONFIGURATION: usize = 1;
-    const MAX_ENABLED: usize = 1;
-    const MAX_DEPTH: usize = 1;
 
     // W3C SCXML feature flags
     const HAS_PARALLEL_STATES: bool = false;
@@ -353,68 +458,10 @@ impl<A: SupervisionActions + 'static> StatePolicy for SupervisionPolicy<A> {
         <Self as sce_rust_runtime::ConstStatePolicy>::INITIAL_STATE
     }
 
-    fn is_final_state(state: Self::State) -> bool {
-        match state {
-            _ => false,
-        }
-    }
-
-    fn get_parent(state: Self::State) -> Option<Self::State> {
-        match state {
-            _ => None,
-        }
-    }
-
-    // W3C SCXML 3.3: a <state> with child states — exactly the states that have
-    // an initial transition. A <parallel> is not compound.
-    fn is_compound_state(state: Self::State) -> bool {
-        match state {
-            _ => false,
-        }
-    }
-
-
-    // §scxml-D-getChildStates: a state's <state>, <parallel> and <final>
-    // children, in document order — for a <parallel>, its regions.
-    fn get_child_states(state: Self::State) -> &'static [Self::State] {
-        match state {
-            _ => &[],
-        }
-    }
-
-    // §scxml-3.3: a compound state's initial transition target, as written —
-    // the engine's entry procedures dereference a <history> among them.
-    fn get_initial_targets(state: Self::State) -> &'static [::sce_rust_runtime::EntryTarget<Self::State, Self::History>] {
-        match state {
-            _ => &[],
-        }
-    }
-
-    // §scxml-3.2: the target of the document's own initial transition, as written.
-    fn get_document_initial_targets() -> &'static [::sce_rust_runtime::EntryTarget<Self::State, Self::History>] {
-        &[::sce_rust_runtime::EntryTarget::State(SupervisionState::Disarmed)]
-    }
-
-    // §scxml-3.10: the state a <history> is declared in.
-    fn get_history_parent(history: Self::History) -> Self::State {
-        match history {
-        }
-    }
-
-    // §scxml-3.10.2: a <history>'s default transition target, as written.
-    fn get_history_default_targets(history: Self::History) -> &'static [::sce_rust_runtime::EntryTarget<Self::State, Self::History>] {
-        match history {
-        }
-    }
-
-    fn get_document_order(state: Self::State) -> u32 {
-        match state {
-            SupervisionState::Armed => 1,
-            SupervisionState::Disarmed => 0,
-            SupervisionState::Expired => 3,
-            SupervisionState::Expiring => 2,
-        }
-    }
+    // The document's structure — each state's parent, kind, subtree and
+    // initial transition, and so its children, each history's parent and
+    // default, document order — is read from `TABLES` by the trait's own
+    // methods (docs/adr/0064), so none of it is written here a second time.
 
     fn get_event_name(event: Self::Event) -> &'static str {
         match event {
@@ -465,18 +512,6 @@ impl<A: SupervisionActions + 'static> StatePolicy for SupervisionPolicy<A> {
     fn null_event() -> Self::Event {
         SupervisionEvent::Null
     }
-
-    // ======================================================================
-    // Run-time state the entry procedures read
-    // ======================================================================
-
-    // §scxml-3.10: what a <history> recorded when its parent was last exited;
-    // None before that ever happened.
-    fn history_value(&self, history: Self::History) -> Option<&[Self::State]> {
-        match history {
-        }
-    }
-
 
 
     // ======================================================================
@@ -537,11 +572,12 @@ impl<A: SupervisionActions + 'static> StatePolicy for SupervisionPolicy<A> {
         &mut self,
         state: Self::State,
         engine: &mut sce_rust_runtime::Engine<Self>,
-        configuration_before_exit: &[Self::State],
     ) {
         // §scxml-D-exitStates orders one state's exit as onexit, then
         // cancelInvoke, then configuration.delete(s), so `In(s)` inside s's
-        // own handler is true: the deactivation is the LAST step here.
+        // own handler is true. The engine recorded every history this exit
+        // set records before its first exit (W3C SCXML 3.10), and removes
+        // `state` from the configuration after this returns.
     }
 
 
@@ -550,8 +586,9 @@ impl<A: SupervisionActions + 'static> StatePolicy for SupervisionPolicy<A> {
 
     // Appendix D selectTransitions, the half only this document can answer:
     // the first of `state`'s own transitions, in document order, that `event`
-    // enables. The engine walks the atomic states and their ancestors and
-    // keeps the ordered set. `Event::Null` asks for eventless transitions.
+    // enables, as its row of the tables, which holds its targets and its
+    // type. The engine walks the atomic states and their ancestors and keeps
+    // the ordered set. `Event::Null` asks for eventless transitions.
     #[doc = "SCE-MAP: supervision.scxml:50 :: _machine"]
 // SCE-MAP: supervision.scxml:50 :: _machine
     fn first_enabled_transition(
@@ -559,40 +596,25 @@ impl<A: SupervisionActions + 'static> StatePolicy for SupervisionPolicy<A> {
         state: Self::State,
         event: Self::Event,
         engine: &mut sce_rust_runtime::Engine<Self>,
-    ) -> Option<::sce_rust_runtime::EnabledTransition<Self::State, Self::History>> {
+    ) -> Option<::sce_rust_runtime::TransitionId> {
         match state {
             SupervisionState::Armed => {
                 if event == SupervisionEvent::SupervisionFeed {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SupervisionState::Armed)],
-                            transition_index: 0,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // Armed, transition 0
+                        return Some(::sce_rust_runtime::TransitionId(1));
                     }
                 }
                 if event == SupervisionEvent::DeadlineExpired {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SupervisionState::Expiring)],
-                            transition_index: 1,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // Armed, transition 1
+                        return Some(::sce_rust_runtime::TransitionId(2));
                     }
                 }
                 if event == SupervisionEvent::SupervisionStop {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SupervisionState::Disarmed)],
-                            transition_index: 2,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // Armed, transition 2
+                        return Some(::sce_rust_runtime::TransitionId(3));
                     }
                 }
                 None
@@ -600,13 +622,8 @@ impl<A: SupervisionActions + 'static> StatePolicy for SupervisionPolicy<A> {
             SupervisionState::Disarmed => {
                 if event == SupervisionEvent::SupervisionStart {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SupervisionState::Armed)],
-                            transition_index: 0,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // Disarmed, transition 0
+                        return Some(::sce_rust_runtime::TransitionId(0));
                     }
                 }
                 None
@@ -614,24 +631,14 @@ impl<A: SupervisionActions + 'static> StatePolicy for SupervisionPolicy<A> {
             SupervisionState::Expired => {
                 if event == SupervisionEvent::SupervisionRearm {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SupervisionState::Armed)],
-                            transition_index: 0,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // Expired, transition 0
+                        return Some(::sce_rust_runtime::TransitionId(5));
                     }
                 }
                 if event == SupervisionEvent::SupervisionStop {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SupervisionState::Disarmed)],
-                            transition_index: 1,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // Expired, transition 1
+                        return Some(::sce_rust_runtime::TransitionId(6));
                     }
                 }
                 None
@@ -639,13 +646,8 @@ impl<A: SupervisionActions + 'static> StatePolicy for SupervisionPolicy<A> {
             SupervisionState::Expiring => {
                 if event == SupervisionEvent::HookDone {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SupervisionState::Expired)],
-                            transition_index: 0,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // Expiring, transition 0
+                        return Some(::sce_rust_runtime::TransitionId(4));
                     }
                 }
                 None
@@ -655,17 +657,17 @@ impl<A: SupervisionActions + 'static> StatePolicy for SupervisionPolicy<A> {
     }
 
     // W3C SCXML 3.13: a transition's executable content, run by the engine
-    // between the microstep's exits and its entries.
+    // between the microstep's exits and its entries. `transition` is a
+    // written transition's row, one whose row says it has content.
     #[doc = "SCE-MAP: supervision.scxml:50 :: _machine"]
 // SCE-MAP: supervision.scxml:50 :: _machine
     fn execute_transition_content(
         &mut self,
-        source: Self::State,
-        transition_index: usize,
+        transition: ::sce_rust_runtime::TransitionId,
         engine: &mut sce_rust_runtime::Engine<Self>,
     ) {
         // W3C SCXML 3.13: no transition in this document has content.
-        let _ = (source, transition_index, engine);
+        let _ = (transition, engine);
     }
 
 

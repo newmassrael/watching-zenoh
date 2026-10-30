@@ -16,8 +16,8 @@
 // SCE Protocol-Synthesis RFC §synth-5-J-2: no_std variant of the statechart
 // emitter. It compiles against `sce-rust-runtime` with or without that
 // crate's `std` feature, and the generated crate omits `std::*` paths — Duration comes from
-// `core::time`, the configuration and history records are the runtime's
-// capacity-bounded `BoundedVec`, sized to this document's state tree, and the
+// `core::time`, the configuration and history records are kept by the engine
+// in a run store sized to this document's state tree, and the
 // parent-event queue field is elided
 // (SCXML `<invoke>` is rejected at codegen time under `--no-std` per the
 // `codegen/no-std-invoke-not-supported` diagnostic).
@@ -80,64 +80,250 @@ use sce_rust_runtime::{Engine, StatePolicy};
 // State enum (W3C SCXML 3.3)
 // ======================================================================
 
+/// The document's states, declared in document order. Each variant's
+/// discriminant is its position in that order, which is the number the
+/// runtime's tables know the state by (docs/adr/0064), so a state is its number
+/// at no cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[repr(u16)]
 pub enum SessionFsmUnicastState {
-    #[cfg(feature = "session-unicast-accept")] Accepting,
-    #[cfg(feature = "session-unicast-accept")] AwaitingInitSyn,
-    Closed,
-    Closing,
-    Established,
-    GotInitAck,
     // W3C SCXML 3.2: `<scxml initial>` state — the machine's `Default`.
     #[default]
-    Init,
-    LinkOpening,
-    Opening,
-    #[cfg(feature = "session-unicast-accept")] SentInitAck,
-    SentInitSyn,
-    #[cfg(feature = "session-unicast-accept")] SentOpenAck,
+    Init = 0,
+    LinkOpening = 1,
+    Opening = 2,
+    SentInitSyn = 3,
+    GotInitAck = 4,
+    #[cfg(not(feature = "session-unicast-accept"))] Established = 5,
+    #[cfg(not(feature = "session-unicast-accept"))] Closing = 6,
+    #[cfg(not(feature = "session-unicast-accept"))] Closed = 7,
+    #[cfg(feature = "session-unicast-accept")] Accepting = 5,
+    #[cfg(feature = "session-unicast-accept")] AwaitingInitSyn = 6,
+    #[cfg(feature = "session-unicast-accept")] SentInitAck = 7,
+    #[cfg(feature = "session-unicast-accept")] SentOpenAck = 8,
+    #[cfg(feature = "session-unicast-accept")] Established = 9,
+    #[cfg(feature = "session-unicast-accept")] Closing = 10,
+    #[cfg(feature = "session-unicast-accept")] Closed = 11,
 }
 
 // ======================================================================
 // Event enum (W3C SCXML 3.12)
 // ======================================================================
 
+/// The events the document names, and the null event. Each variant's
+/// discriminant is the number the runtime knows the event by, its position in
+/// `StatePolicy::EVENTS`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u16)]
 pub enum SessionFsmUnicastEvent {
-    #[cfg(feature = "session-unicast-accept")] AcceptingInactivityTimeout,
-    ClosingTimeout,
-    EstablishmentExtRejected,
-    FramingError,
-    #[cfg(feature = "session-unicast-accept")] InboundStart,
-    InitAckReceived,
-    InitAckTimeout,
-    #[cfg(feature = "session-unicast-accept")] InitSynReceived,
-    LeaseExpired,
-    LinkLost,
-    LinkOpenTimeout,
-    LinkOpened,
-    OpenAckReceived,
-    OpenAckTimeout,
-    #[cfg(feature = "session-unicast-accept")] OpenSynReceived,
-    OutboundStart,
-    PeerClose,
-    SessionClose,
-    TxCongestionExhaust,
-    /// W3C SCXML 3.13: Sentinel for eventless transition dispatch
-    Null,
+    #[cfg(not(feature = "session-unicast-accept"))] ClosingTimeout = 0,
+    #[cfg(not(feature = "session-unicast-accept"))] EstablishmentExtRejected = 1,
+    #[cfg(not(feature = "session-unicast-accept"))] FramingError = 2,
+    #[cfg(not(feature = "session-unicast-accept"))] InitAckReceived = 3,
+    #[cfg(not(feature = "session-unicast-accept"))] InitAckTimeout = 4,
+    #[cfg(not(feature = "session-unicast-accept"))] LeaseExpired = 5,
+    #[cfg(not(feature = "session-unicast-accept"))] LinkLost = 6,
+    #[cfg(not(feature = "session-unicast-accept"))] LinkOpenTimeout = 7,
+    #[cfg(not(feature = "session-unicast-accept"))] LinkOpened = 8,
+    #[cfg(not(feature = "session-unicast-accept"))] OpenAckReceived = 9,
+    #[cfg(not(feature = "session-unicast-accept"))] OpenAckTimeout = 10,
+    #[cfg(not(feature = "session-unicast-accept"))] OutboundStart = 11,
+    #[cfg(not(feature = "session-unicast-accept"))] PeerClose = 12,
+    #[cfg(not(feature = "session-unicast-accept"))] SessionClose = 13,
+    #[cfg(not(feature = "session-unicast-accept"))] TxCongestionExhaust = 14,
+    #[cfg(not(feature = "session-unicast-accept"))] /// W3C SCXML 3.13: Sentinel for eventless transition dispatch
+    Null = 15,
+    #[cfg(feature = "session-unicast-accept")] AcceptingInactivityTimeout = 0,
+    #[cfg(feature = "session-unicast-accept")] ClosingTimeout = 1,
+    #[cfg(feature = "session-unicast-accept")] EstablishmentExtRejected = 2,
+    #[cfg(feature = "session-unicast-accept")] FramingError = 3,
+    #[cfg(feature = "session-unicast-accept")] InboundStart = 4,
+    #[cfg(feature = "session-unicast-accept")] InitAckReceived = 5,
+    #[cfg(feature = "session-unicast-accept")] InitAckTimeout = 6,
+    #[cfg(feature = "session-unicast-accept")] InitSynReceived = 7,
+    #[cfg(feature = "session-unicast-accept")] LeaseExpired = 8,
+    #[cfg(feature = "session-unicast-accept")] LinkLost = 9,
+    #[cfg(feature = "session-unicast-accept")] LinkOpenTimeout = 10,
+    #[cfg(feature = "session-unicast-accept")] LinkOpened = 11,
+    #[cfg(feature = "session-unicast-accept")] OpenAckReceived = 12,
+    #[cfg(feature = "session-unicast-accept")] OpenAckTimeout = 13,
+    #[cfg(feature = "session-unicast-accept")] OpenSynReceived = 14,
+    #[cfg(feature = "session-unicast-accept")] OutboundStart = 15,
+    #[cfg(feature = "session-unicast-accept")] PeerClose = 16,
+    #[cfg(feature = "session-unicast-accept")] SessionClose = 17,
+    #[cfg(feature = "session-unicast-accept")] TxCongestionExhaust = 18,
+    #[cfg(feature = "session-unicast-accept")] /// W3C SCXML 3.13: Sentinel for eventless transition dispatch
+    Null = 19,
 }
 
 // ======================================================================
 // What this document's state tree bounds (W3C SCXML 3.4)
 // ======================================================================
 
-/// A set of this machine's states that are, or are about to be, in one
-/// configuration: the configuration a host observes, and what the runtime's
-/// microstep builds from it (an exit set, an entry set, a history's record).
-/// Its capacity, 2, is the most states one configuration of this document holds,
-/// read from its state tree; the runtime names no size of its own. A `Vec` under
-/// std, where the capacity is not read.
+/// A configuration of this machine, in its own states: what
+/// `Engine::get_active_states` returns and a host observes. The engine keeps
+/// the configuration itself as numbers (docs/adr/0064). Its capacity, 2, is
+/// the most states one configuration of this document holds, read from its
+/// state tree; the runtime names no size of its own. A `Vec` under std, where
+/// the capacity is not read.
 pub type SessionFsmUnicastConfiguration = ::sce_rust_runtime::helpers::hierarchy::BoundedVec<SessionFsmUnicastState, 2>;
+
+// ======================================================================
+// The document's tables (docs/adr/0064)
+// ======================================================================
+
+/// This document's state tree as the runtime's Appendix D procedures read it.
+/// Those procedures are compiled once for a program, whatever machines it
+/// holds, so they read a document as numbers: each state by its position in
+/// document order (the discriminant of `SessionFsmUnicastState`), each `<history>` by
+/// the discriminant of its variant, and each transition by its row here — the
+/// written ones grouped by source state, then each compound state's initial
+/// transition, each history's default transition and the document's own
+/// initial transition. A state's children are not listed: the numbering is a
+/// pre-order walk, so they are the state's number plus one and each number past
+/// the subtree (`last_descendant`) of the child before.
+///
+/// A `const` and not a `static`: `StatePolicy::TABLES` refers to it, and a
+/// constant may refer to a static only from Rust 1.83 on, past the toolchain
+/// the runtime supports. The reference is to one constant allocation all the
+/// same.
+pub const SESSION_FSM_UNICAST_TABLES: ::sce_rust_runtime::DocumentTables = {
+    use ::sce_rust_runtime::{
+        DocumentTables, HistoryId, HistoryRow, Span, StateId, StateKind, StateRow, Target,
+        TransitionId, TransitionRow,
+    };
+    DocumentTables {
+        states: &[
+            // 0: Init
+            StateRow::new(None, StateKind::Atomic, StateId(0), None),
+            // 1: LinkOpening
+            StateRow::new(None, StateKind::Atomic, StateId(1), None),
+            // 2: Opening
+            #[cfg(not(feature = "session-unicast-accept"))] StateRow::new(None, StateKind::Compound, StateId(4), Some(TransitionId(20))),
+            #[cfg(feature = "session-unicast-accept")] StateRow::new(None, StateKind::Compound, StateId(4), Some(TransitionId(29))),
+            // 3: SentInitSyn
+            StateRow::new(Some(StateId(2)), StateKind::Atomic, StateId(3), None),
+            // 4: GotInitAck
+            StateRow::new(Some(StateId(2)), StateKind::Atomic, StateId(4), None),
+            // 5: Accepting
+            #[cfg(not(feature = "session-unicast-accept"))] StateRow::new(None, StateKind::Atomic, StateId(5), None),
+            #[cfg(feature = "session-unicast-accept")] StateRow::new(None, StateKind::Compound, StateId(8), Some(TransitionId(30))),
+            // 6: AwaitingInitSyn
+            #[cfg(not(feature = "session-unicast-accept"))] StateRow::new(None, StateKind::Atomic, StateId(6), None),
+            #[cfg(feature = "session-unicast-accept")] StateRow::new(Some(StateId(5)), StateKind::Atomic, StateId(6), None),
+            // 7: SentInitAck
+            #[cfg(not(feature = "session-unicast-accept"))] StateRow::new(None, StateKind::Final, StateId(7), None),
+            #[cfg(feature = "session-unicast-accept")] StateRow::new(Some(StateId(5)), StateKind::Atomic, StateId(7), None),
+            // 8: SentOpenAck
+            #[cfg(feature = "session-unicast-accept")] StateRow::new(Some(StateId(5)), StateKind::Atomic, StateId(8), None),
+            // 9: Established
+            #[cfg(feature = "session-unicast-accept")] StateRow::new(None, StateKind::Atomic, StateId(9), None),
+            // 10: Closing
+            #[cfg(feature = "session-unicast-accept")] StateRow::new(None, StateKind::Atomic, StateId(10), None),
+            // 11: Closed
+            #[cfg(feature = "session-unicast-accept")] StateRow::new(None, StateKind::Final, StateId(11), None),
+        ],
+        histories: &[
+        ],
+        transitions: &[
+            // 0: Init, transition 0
+            TransitionRow::new(Some(StateId(0)), Span { start: 0, len: 1 }, false, false),
+            // 1: Init, transition 1
+            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(1)), Span { start: 1, len: 1 }, false, false),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(0)), Span { start: 1, len: 1 }, false, false),
+            // 2: LinkOpening, transition 0
+            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(1)), Span { start: 2, len: 1 }, false, true),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(1)), Span { start: 2, len: 1 }, false, false),
+            // 3: LinkOpening, transition 1
+            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(1)), Span { start: 3, len: 1 }, false, false),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(1)), Span { start: 3, len: 1 }, false, true),
+            // 4: LinkOpening, transition 2
+            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(2)), Span { start: 4, len: 1 }, false, true),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(1)), Span { start: 4, len: 1 }, false, false),
+            // 5: Opening, transition 1
+            TransitionRow::new(Some(StateId(2)), Span { start: 5, len: 1 }, false, true),
+            // 6: Opening, transition 1
+            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(2)), Span { start: 6, len: 1 }, false, false),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(2)), Span { start: 6, len: 1 }, false, true),
+            // 7: Opening, transition 3
+            TransitionRow::new(Some(StateId(2)), Span { start: 7, len: 1 }, false, false),
+            // 8: Opening, transition 3
+            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(3)), Span { start: 8, len: 1 }, false, false),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(2)), Span { start: 8, len: 1 }, false, false),
+            // 9: SentInitSyn, transition 0
+            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(3)), Span { start: 9, len: 1 }, false, true),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(3)), Span { start: 9, len: 1 }, false, false),
+            // 10: SentInitSyn, transition 1
+            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(4)), Span { start: 10, len: 1 }, false, false),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(3)), Span { start: 10, len: 1 }, false, true),
+            // 11: GotInitAck, transition 0
+            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(4)), Span { start: 11, len: 1 }, false, true),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(4)), Span { start: 11, len: 1 }, false, false),
+            // 12: GotInitAck, transition 1
+            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(5)), Span { start: 12, len: 1 }, false, true),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(4)), Span { start: 12, len: 1 }, false, true),
+            // 13: Accepting, transition 0
+            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(5)), Span { start: 13, len: 1 }, false, true),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(5)), Span { start: 13, len: 1 }, false, false),
+            // 14: Established, transition 2
+            TransitionRow::new(Some(StateId(5)), Span { start: 14, len: 1 }, false, true),
+            // 15: Established, transition 3
+            TransitionRow::new(Some(StateId(5)), Span { start: 15, len: 1 }, false, true),
+            // 16: Established, transition 4
+            TransitionRow::new(Some(StateId(5)), Span { start: 16, len: 1 }, false, false),
+            // 17: Established, transition 5
+            TransitionRow::new(Some(StateId(5)), Span { start: 17, len: 1 }, false, false),
+            // 18: Closing, transition 0
+            TransitionRow::new(Some(StateId(6)), Span { start: 18, len: 1 }, false, false),
+            // 19: SentInitAck, transition 0
+            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(6)), Span { start: 19, len: 1 }, false, false),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(7)), Span { start: 19, len: 1 }, false, false),
+            // 20: SentOpenAck, transition 0
+            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(Some(StateId(2)), Span { start: 20, len: 1 }, false, false),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(8)), Span { start: 20, len: 1 }, false, false),
+            // 21: Established, transition 0
+            #[cfg(not(feature = "session-unicast-accept"))] TransitionRow::new(None, Span { start: 21, len: 1 }, false, false),
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(9)), Span { start: 21, len: 1 }, false, true),
+            // 22: Established, transition 1
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(9)), Span { start: 22, len: 1 }, false, true),
+            // 23: Established, transition 2
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(9)), Span { start: 23, len: 1 }, false, true),
+            // 24: Established, transition 3
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(9)), Span { start: 24, len: 1 }, false, true),
+            // 25: Established, transition 4
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(9)), Span { start: 25, len: 1 }, false, false),
+            // 26: Established, transition 5
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(9)), Span { start: 26, len: 1 }, false, false),
+            // 27: Closing, transition 0
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(10)), Span { start: 27, len: 1 }, false, false),
+            // 28: Closing, transition 1
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(10)), Span { start: 28, len: 1 }, false, false),
+            // 29: Opening, initial
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(2)), Span { start: 29, len: 1 }, false, false),
+            // 30: Accepting, initial
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(Some(StateId(5)), Span { start: 30, len: 1 }, false, false),
+            // 31: the document's initial transition
+            #[cfg(feature = "session-unicast-accept")] TransitionRow::new(None, Span { start: 31, len: 1 }, false, false),
+        ],
+        targets: &[Target::state(StateId(1)), #[cfg(feature = "session-unicast-accept")] Target::state(StateId(5)), Target::state(StateId(2)), #[cfg(not(feature = "session-unicast-accept"))] Target::state(StateId(6)),
+#[cfg(feature = "session-unicast-accept")] Target::state(StateId(10)), #[cfg(not(feature = "session-unicast-accept"))] Target::state(StateId(7)),
+#[cfg(feature = "session-unicast-accept")] Target::state(StateId(11)), #[cfg(not(feature = "session-unicast-accept"))] Target::state(StateId(6)),
+#[cfg(feature = "session-unicast-accept")] Target::state(StateId(10)), #[cfg(not(feature = "session-unicast-accept"))] Target::state(StateId(6)),
+#[cfg(feature = "session-unicast-accept")] Target::state(StateId(10)), #[cfg(not(feature = "session-unicast-accept"))] Target::state(StateId(7)),
+#[cfg(feature = "session-unicast-accept")] Target::state(StateId(11)), #[cfg(not(feature = "session-unicast-accept"))] Target::state(StateId(7)),
+#[cfg(feature = "session-unicast-accept")] Target::state(StateId(11)), Target::state(StateId(4)), #[cfg(not(feature = "session-unicast-accept"))] Target::state(StateId(6)),
+#[cfg(feature = "session-unicast-accept")] Target::state(StateId(10)), #[cfg(not(feature = "session-unicast-accept"))] Target::state(StateId(5)),
+#[cfg(feature = "session-unicast-accept")] Target::state(StateId(9)), #[cfg(not(feature = "session-unicast-accept"))] Target::state(StateId(6)),
+#[cfg(feature = "session-unicast-accept")] Target::state(StateId(10)), #[cfg(not(feature = "session-unicast-accept"))] Target::state(StateId(6)),
+#[cfg(feature = "session-unicast-accept")] Target::state(StateId(11)), #[cfg(not(feature = "session-unicast-accept"))] Target::state(StateId(6)),
+#[cfg(feature = "session-unicast-accept")] Target::state(StateId(10)), #[cfg(not(feature = "session-unicast-accept"))] Target::state(StateId(6)),
+#[cfg(feature = "session-unicast-accept")] Target::state(StateId(10)), #[cfg(not(feature = "session-unicast-accept"))] Target::state(StateId(6)),
+#[cfg(feature = "session-unicast-accept")] Target::state(StateId(11)), #[cfg(not(feature = "session-unicast-accept"))] Target::state(StateId(7)),
+#[cfg(feature = "session-unicast-accept")] Target::state(StateId(11)), #[cfg(not(feature = "session-unicast-accept"))] Target::state(StateId(7)), #[cfg(not(feature = "session-unicast-accept"))] Target::state(StateId(7)), Target::state(StateId(7)), #[cfg(feature = "session-unicast-accept")] Target::state(StateId(8)), #[cfg(feature = "session-unicast-accept")] Target::state(StateId(9)), #[cfg(feature = "session-unicast-accept")] Target::state(StateId(10)), #[cfg(feature = "session-unicast-accept")] Target::state(StateId(10)), #[cfg(feature = "session-unicast-accept")] Target::state(StateId(10)), #[cfg(feature = "session-unicast-accept")] Target::state(StateId(10)), #[cfg(feature = "session-unicast-accept")] Target::state(StateId(11)), #[cfg(feature = "session-unicast-accept")] Target::state(StateId(11)), #[cfg(feature = "session-unicast-accept")] Target::state(StateId(11)), #[cfg(feature = "session-unicast-accept")] Target::state(StateId(11)), Target::state(StateId(3)), #[cfg(feature = "session-unicast-accept")] Target::state(StateId(6)), Target::state(StateId(0)),],
+        #[cfg(not(feature = "session-unicast-accept"))] initial: TransitionId(21),
+        #[cfg(feature = "session-unicast-accept")] initial: TransitionId(31),
+    }
+};
 
 // ======================================================================
 // Externally-drivable event surface (W3C SCXML 3.12 / 5.10)
@@ -360,23 +546,82 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
     // EventQueue per-machine sizing lever above.
     type ScheduledSendId = sce_rust_runtime::ElidedSendId;
 
+    // docs/adr/0064: the document as the runtime's Appendix D procedures read
+    // it, which are compiled once for a program: its tables, and its states,
+    // histories and events by the numbers the tables know them by. Each of the
+    // three lists is in the order of those numbers, so it is the inverse of the
+    // enum's discriminant.
+    const TABLES: &'static ::sce_rust_runtime::DocumentTables = &SESSION_FSM_UNICAST_TABLES;
+    const STATES: &'static [Self::State] = &[
+        SessionFsmUnicastState::Init,
+        SessionFsmUnicastState::LinkOpening,
+        SessionFsmUnicastState::Opening,
+        SessionFsmUnicastState::SentInitSyn,
+        SessionFsmUnicastState::GotInitAck,
+        #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::Accepting,
+        #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::AwaitingInitSyn,
+        #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::SentInitAck,
+        #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::SentOpenAck,
+        SessionFsmUnicastState::Established,
+        SessionFsmUnicastState::Closing,
+        SessionFsmUnicastState::Closed,
+    ];
+    const HISTORIES: &'static [Self::History] = &[];
+    const EVENTS: &'static [Self::Event] = &[
+        #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastEvent::AcceptingInactivityTimeout,
+        SessionFsmUnicastEvent::ClosingTimeout,
+        SessionFsmUnicastEvent::EstablishmentExtRejected,
+        SessionFsmUnicastEvent::FramingError,
+        #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastEvent::InboundStart,
+        SessionFsmUnicastEvent::InitAckReceived,
+        SessionFsmUnicastEvent::InitAckTimeout,
+        #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastEvent::InitSynReceived,
+        SessionFsmUnicastEvent::LeaseExpired,
+        SessionFsmUnicastEvent::LinkLost,
+        SessionFsmUnicastEvent::LinkOpenTimeout,
+        SessionFsmUnicastEvent::LinkOpened,
+        SessionFsmUnicastEvent::OpenAckReceived,
+        SessionFsmUnicastEvent::OpenAckTimeout,
+        #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastEvent::OpenSynReceived,
+        SessionFsmUnicastEvent::OutboundStart,
+        SessionFsmUnicastEvent::PeerClose,
+        SessionFsmUnicastEvent::SessionClose,
+        SessionFsmUnicastEvent::TxCongestionExhaust,
+        SessionFsmUnicastEvent::Null,
+    ];
+
+    fn state_id(state: Self::State) -> ::sce_rust_runtime::StateId {
+        ::sce_rust_runtime::StateId(state as u16)
+    }
+
+    fn history_id(history: Self::History) -> ::sce_rust_runtime::HistoryId {
+        // No `<history>`, so no value of the type to number.
+        match history {}
+    }
+
+    fn event_id(event: Self::Event) -> ::sce_rust_runtime::EventId {
+        ::sce_rust_runtime::EventId(event as u16)
+    }
+
     // W3C SCXML 3.4: what this document's state tree bounds, read by the
     // generator and written here so every buffer of the runtime's microstep is
-    // this document's size and no larger. A configuration holds 2 state(s) at
-    // most; a selection enables 1 transition(s) at most, one from each atomic state
-    // of one; the deepest state sits 2 level(s) down. Under std the buffers
-    // are `Vec`s and the capacities are not read.
+    // this document's size and no larger, in both profiles. Every set of states
+    // the runtime keeps is a bit vector of this document's 12 state(s); a
+    // configuration holds 2 state(s) at most, the capacity of the
+    // `Configuration` a host reads; a selection enables 1 transition(s) at most, one from each atomic state
+    // of one configuration; a microstep owes 0 history default(s) at most;
+    // and Appendix D's entry procedures, the effective targets and the
+    // completion check are run over a stack of steps and not by recursion, so a
+    // call needs no depth the program has to assume: 9 step(s) at most, three
+    // for each level of the tree, one for each `<history>` and three of
+    // headroom. The workspace is a local of the call that runs a macrostep; the
+    // run store, the configuration and what each of the 0 `<history>`
+    // element(s) recorded, one such set each, is the engine's.
+    #[cfg(not(feature = "session-unicast-accept"))] type Workspace = ::sce_rust_runtime::Workspace<{ ::sce_rust_runtime::state_scratch(8) }, 1, 9, 0>;
+    #[cfg(feature = "session-unicast-accept")] type Workspace = ::sce_rust_runtime::Workspace<{ ::sce_rust_runtime::state_scratch(12) }, 1, 9, 0>;
+    #[cfg(not(feature = "session-unicast-accept"))] type RunStore = ::sce_rust_runtime::RunStore<{ ::sce_rust_runtime::state_words(8) }, { ::sce_rust_runtime::record_words(8, 0) }, 0>;
+    #[cfg(feature = "session-unicast-accept")] type RunStore = ::sce_rust_runtime::RunStore<{ ::sce_rust_runtime::state_words(12) }, { ::sce_rust_runtime::record_words(12, 0) }, 0>;
     type Configuration = SessionFsmUnicastConfiguration;
-    type EnabledSet = ::sce_rust_runtime::helpers::hierarchy::BoundedVec<::sce_rust_runtime::EnabledTransition<Self::State, Self::History>, 1>;
-    type HistoryDefaults = ::sce_rust_runtime::helpers::hierarchy::BoundedVec<(Self::State, Self::History), 0>;
-    // Appendix D's entry procedures, the effective targets and the completion
-    // check are run over a stack of steps and not by recursion, so a call needs
-    // no depth the program has to assume: 9 step(s) at most, three for each level
-    // of the tree, one for each `<history>` and three of headroom.
-    type EntryWalk = ::sce_rust_runtime::helpers::hierarchy::BoundedVec<::sce_rust_runtime::helpers::microstep::WalkStep<Self::State, Self::History>, 9>;
-    const MAX_CONFIGURATION: usize = 2;
-    const MAX_ENABLED: usize = 1;
-    const MAX_DEPTH: usize = 2;
 
     // W3C SCXML feature flags
     const HAS_PARALLEL_STATES: bool = false;
@@ -402,88 +647,10 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
         <Self as sce_rust_runtime::ConstStatePolicy>::INITIAL_STATE
     }
 
-    fn is_final_state(state: Self::State) -> bool {
-        match state {
-            SessionFsmUnicastState::Closed => true,
-            _ => false,
-        }
-    }
-
-    fn get_parent(state: Self::State) -> Option<Self::State> {
-        match state {
-            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::AwaitingInitSyn => Some(SessionFsmUnicastState::Accepting),
-            SessionFsmUnicastState::GotInitAck => Some(SessionFsmUnicastState::Opening),
-            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::SentInitAck => Some(SessionFsmUnicastState::Accepting),
-            SessionFsmUnicastState::SentInitSyn => Some(SessionFsmUnicastState::Opening),
-            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::SentOpenAck => Some(SessionFsmUnicastState::Accepting),
-            _ => None,
-        }
-    }
-
-    // W3C SCXML 3.3: a <state> with child states — exactly the states that have
-    // an initial transition. A <parallel> is not compound.
-    fn is_compound_state(state: Self::State) -> bool {
-        match state {
-            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::Accepting => true,
-            SessionFsmUnicastState::Opening => true,
-            _ => false,
-        }
-    }
-
-
-    // §scxml-D-getChildStates: a state's <state>, <parallel> and <final>
-    // children, in document order — for a <parallel>, its regions.
-    fn get_child_states(state: Self::State) -> &'static [Self::State] {
-        match state {
-            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::Accepting => &[SessionFsmUnicastState::AwaitingInitSyn, SessionFsmUnicastState::SentInitAck, SessionFsmUnicastState::SentOpenAck],
-            SessionFsmUnicastState::Opening => &[SessionFsmUnicastState::SentInitSyn, SessionFsmUnicastState::GotInitAck],
-            _ => &[],
-        }
-    }
-
-    // §scxml-3.3: a compound state's initial transition target, as written —
-    // the engine's entry procedures dereference a <history> among them.
-    fn get_initial_targets(state: Self::State) -> &'static [::sce_rust_runtime::EntryTarget<Self::State, Self::History>] {
-        match state {
-            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::Accepting => &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::AwaitingInitSyn)],
-            SessionFsmUnicastState::Opening => &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::SentInitSyn)],
-            _ => &[],
-        }
-    }
-
-    // §scxml-3.2: the target of the document's own initial transition, as written.
-    fn get_document_initial_targets() -> &'static [::sce_rust_runtime::EntryTarget<Self::State, Self::History>] {
-        &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::Init)]
-    }
-
-    // §scxml-3.10: the state a <history> is declared in.
-    fn get_history_parent(history: Self::History) -> Self::State {
-        match history {
-        }
-    }
-
-    // §scxml-3.10.2: a <history>'s default transition target, as written.
-    fn get_history_default_targets(history: Self::History) -> &'static [::sce_rust_runtime::EntryTarget<Self::State, Self::History>] {
-        match history {
-        }
-    }
-
-    fn get_document_order(state: Self::State) -> u32 {
-        match state {
-            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::Accepting => 5,
-            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::AwaitingInitSyn => 6,
-            SessionFsmUnicastState::Closed => 11,
-            SessionFsmUnicastState::Closing => 10,
-            SessionFsmUnicastState::Established => 9,
-            SessionFsmUnicastState::GotInitAck => 4,
-            SessionFsmUnicastState::Init => 0,
-            SessionFsmUnicastState::LinkOpening => 1,
-            SessionFsmUnicastState::Opening => 2,
-            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::SentInitAck => 7,
-            SessionFsmUnicastState::SentInitSyn => 3,
-            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::SentOpenAck => 8,
-        }
-    }
+    // The document's structure — each state's parent, kind, subtree and
+    // initial transition, and so its children, each history's parent and
+    // default, document order — is read from `TABLES` by the trait's own
+    // methods (docs/adr/0064), so none of it is written here a second time.
 
     fn get_event_name(event: Self::Event) -> &'static str {
         match event {
@@ -576,18 +743,6 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
     fn null_event() -> Self::Event {
         SessionFsmUnicastEvent::Null
     }
-
-    // ======================================================================
-    // Run-time state the entry procedures read
-    // ======================================================================
-
-    // §scxml-3.10: what a <history> recorded when its parent was last exited;
-    // None before that ever happened.
-    fn history_value(&self, history: Self::History) -> Option<&[Self::State]> {
-        match history {
-        }
-    }
-
 
 
     // ======================================================================
@@ -710,11 +865,12 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
         &mut self,
         state: Self::State,
         engine: &mut sce_rust_runtime::Engine<Self>,
-        configuration_before_exit: &[Self::State],
     ) {
         // §scxml-D-exitStates orders one state's exit as onexit, then
         // cancelInvoke, then configuration.delete(s), so `In(s)` inside s's
-        // own handler is true: the deactivation is the LAST step here.
+        // own handler is true. The engine recorded every history this exit
+        // set records before its first exit (W3C SCXML 3.10), and removes
+        // `state` from the configuration after this returns.
         match state {
             SessionFsmUnicastState::Established => {
                 // SCE-MAP: session_fsm_unicast.scxml:200 :: Established :: _state_body
@@ -739,8 +895,9 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
 
     // Appendix D selectTransitions, the half only this document can answer:
     // the first of `state`'s own transitions, in document order, that `event`
-    // enables. The engine walks the atomic states and their ancestors and
-    // keeps the ordered set. `Event::Null` asks for eventless transitions.
+    // enables, as its row of the tables, which holds its targets and its
+    // type. The engine walks the atomic states and their ancestors and keeps
+    // the ordered set. `Event::Null` asks for eventless transitions.
     #[doc = "SCE-MAP: session_fsm_unicast.scxml:102 :: _machine"]
 // SCE-MAP: session_fsm_unicast.scxml:102 :: _machine
     fn first_enabled_transition(
@@ -748,62 +905,37 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
         state: Self::State,
         event: Self::Event,
         engine: &mut sce_rust_runtime::Engine<Self>,
-    ) -> Option<::sce_rust_runtime::EnabledTransition<Self::State, Self::History>> {
+    ) -> Option<::sce_rust_runtime::TransitionId> {
         match state {
             #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::Accepting => {
                 if event == SessionFsmUnicastEvent::AcceptingInactivityTimeout {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::Closed)],
-                            transition_index: 0,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // Accepting, transition 0
+                        return Some(::sce_rust_runtime::TransitionId(13));
                     }
                 }
                 if event == SessionFsmUnicastEvent::FramingError {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::Closing)],
-                            transition_index: 1,
-                            has_actions: true,
-                            is_internal: false,
-                        });
+                        // Accepting, transition 1
+                        return Some(::sce_rust_runtime::TransitionId(14));
                     }
                 }
                 if event == SessionFsmUnicastEvent::EstablishmentExtRejected {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::Closing)],
-                            transition_index: 2,
-                            has_actions: true,
-                            is_internal: false,
-                        });
+                        // Accepting, transition 2
+                        return Some(::sce_rust_runtime::TransitionId(15));
                     }
                 }
                 if event == SessionFsmUnicastEvent::PeerClose {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::Closed)],
-                            transition_index: 3,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // Accepting, transition 3
+                        return Some(::sce_rust_runtime::TransitionId(16));
                     }
                 }
                 if event == SessionFsmUnicastEvent::LinkLost {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::Closed)],
-                            transition_index: 4,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // Accepting, transition 4
+                        return Some(::sce_rust_runtime::TransitionId(17));
                     }
                 }
                 None
@@ -811,13 +943,8 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::AwaitingInitSyn => {
                 if event == SessionFsmUnicastEvent::InitSynReceived {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::SentInitAck)],
-                            transition_index: 0,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // AwaitingInitSyn, transition 0
+                        return Some(::sce_rust_runtime::TransitionId(18));
                     }
                 }
                 None
@@ -825,24 +952,16 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             SessionFsmUnicastState::Closing => {
                 if event == SessionFsmUnicastEvent::ClosingTimeout {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::Closed)],
-                            transition_index: 0,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // Closing, transition 0
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(18));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(27));
                     }
                 }
                 if event == SessionFsmUnicastEvent::LinkLost {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::Closed)],
-                            transition_index: 1,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // Closing, transition 1
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(19));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(28));
                     }
                 }
                 None
@@ -850,68 +969,44 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             SessionFsmUnicastState::Established => {
                 if event == SessionFsmUnicastEvent::SessionClose {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::Closing)],
-                            transition_index: 0,
-                            has_actions: true,
-                            is_internal: false,
-                        });
+                        // Established, transition 0
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(12));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(21));
                     }
                 }
                 if event == SessionFsmUnicastEvent::LeaseExpired {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::Closing)],
-                            transition_index: 1,
-                            has_actions: true,
-                            is_internal: false,
-                        });
+                        // Established, transition 1
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(13));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(22));
                     }
                 }
                 if event == SessionFsmUnicastEvent::FramingError {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::Closing)],
-                            transition_index: 2,
-                            has_actions: true,
-                            is_internal: false,
-                        });
+                        // Established, transition 2
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(14));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(23));
                     }
                 }
                 if event == SessionFsmUnicastEvent::TxCongestionExhaust {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::Closing)],
-                            transition_index: 3,
-                            has_actions: true,
-                            is_internal: false,
-                        });
+                        // Established, transition 3
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(15));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(24));
                     }
                 }
                 if event == SessionFsmUnicastEvent::PeerClose {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::Closed)],
-                            transition_index: 4,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // Established, transition 4
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(16));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(25));
                     }
                 }
                 if event == SessionFsmUnicastEvent::LinkLost {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::Closed)],
-                            transition_index: 5,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // Established, transition 5
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(17));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(26));
                     }
                 }
                 None
@@ -919,24 +1014,16 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             SessionFsmUnicastState::GotInitAck => {
                 if event == SessionFsmUnicastEvent::OpenAckReceived {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::Established)],
-                            transition_index: 0,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // GotInitAck, transition 0
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(10));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(11));
                     }
                 }
                 if event == SessionFsmUnicastEvent::OpenAckTimeout {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::Closing)],
-                            transition_index: 1,
-                            has_actions: true,
-                            is_internal: false,
-                        });
+                        // GotInitAck, transition 1
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(11));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(12));
                     }
                 }
                 None
@@ -944,24 +1031,14 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             SessionFsmUnicastState::Init => {
                 if event == SessionFsmUnicastEvent::OutboundStart {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::LinkOpening)],
-                            transition_index: 0,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // Init, transition 0
+                        return Some(::sce_rust_runtime::TransitionId(0));
                     }
                 }
                 #[cfg(feature = "session-unicast-accept")] if event == SessionFsmUnicastEvent::InboundStart {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::Accepting)],
-                            transition_index: 1,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // Init, transition 1
+                        return Some(::sce_rust_runtime::TransitionId(1));
                     }
                 }
                 None
@@ -969,35 +1046,23 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             SessionFsmUnicastState::LinkOpening => {
                 if event == SessionFsmUnicastEvent::LinkOpened {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::Opening)],
-                            transition_index: 0,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // LinkOpening, transition 0
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(1));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(2));
                     }
                 }
                 if event == SessionFsmUnicastEvent::LinkOpenTimeout {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::Closing)],
-                            transition_index: 1,
-                            has_actions: true,
-                            is_internal: false,
-                        });
+                        // LinkOpening, transition 1
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(2));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(3));
                     }
                 }
                 if event == SessionFsmUnicastEvent::LinkLost {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::Closed)],
-                            transition_index: 2,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // LinkOpening, transition 2
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(3));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(4));
                     }
                 }
                 None
@@ -1005,46 +1070,30 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             SessionFsmUnicastState::Opening => {
                 if event == SessionFsmUnicastEvent::FramingError {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::Closing)],
-                            transition_index: 0,
-                            has_actions: true,
-                            is_internal: false,
-                        });
+                        // Opening, transition 0
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(4));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(5));
                     }
                 }
                 if event == SessionFsmUnicastEvent::EstablishmentExtRejected {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::Closing)],
-                            transition_index: 1,
-                            has_actions: true,
-                            is_internal: false,
-                        });
+                        // Opening, transition 1
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(5));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(6));
                     }
                 }
                 if event == SessionFsmUnicastEvent::PeerClose {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::Closed)],
-                            transition_index: 2,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // Opening, transition 2
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(6));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(7));
                     }
                 }
                 if event == SessionFsmUnicastEvent::LinkLost {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::Closed)],
-                            transition_index: 3,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // Opening, transition 3
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(7));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(8));
                     }
                 }
                 None
@@ -1052,13 +1101,8 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::SentInitAck => {
                 if event == SessionFsmUnicastEvent::OpenSynReceived {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::SentOpenAck)],
-                            transition_index: 0,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // SentInitAck, transition 0
+                        return Some(::sce_rust_runtime::TransitionId(19));
                     }
                 }
                 None
@@ -1066,24 +1110,16 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             SessionFsmUnicastState::SentInitSyn => {
                 if event == SessionFsmUnicastEvent::InitAckReceived {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::GotInitAck)],
-                            transition_index: 0,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // SentInitSyn, transition 0
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(8));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(9));
                     }
                 }
                 if event == SessionFsmUnicastEvent::InitAckTimeout {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::Closing)],
-                            transition_index: 1,
-                            has_actions: true,
-                            is_internal: false,
-                        });
+                        // SentInitSyn, transition 1
+                        #[cfg(not(feature = "session-unicast-accept"))] return Some(::sce_rust_runtime::TransitionId(9));
+                        #[cfg(feature = "session-unicast-accept")] return Some(::sce_rust_runtime::TransitionId(10));
                     }
                 }
                 None
@@ -1091,13 +1127,8 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
             #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::SentOpenAck => {
                 if event == SessionFsmUnicastEvent::Null {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(SessionFsmUnicastState::Established)],
-                            transition_index: 0,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // SentOpenAck, transition 0
+                        return Some(::sce_rust_runtime::TransitionId(20));
                     }
                 }
                 None
@@ -1107,154 +1138,207 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
     }
 
     // W3C SCXML 3.13: a transition's executable content, run by the engine
-    // between the microstep's exits and its entries.
+    // between the microstep's exits and its entries. `transition` is a
+    // written transition's row, one whose row says it has content.
     #[doc = "SCE-MAP: session_fsm_unicast.scxml:102 :: _machine"]
 // SCE-MAP: session_fsm_unicast.scxml:102 :: _machine
     fn execute_transition_content(
         &mut self,
-        source: Self::State,
-        transition_index: usize,
+        transition: ::sce_rust_runtime::TransitionId,
         engine: &mut sce_rust_runtime::Engine<Self>,
     ) {
-        match source {
-            #[cfg(feature = "session-unicast-accept")] SessionFsmUnicastState::Accepting => {
-                match transition_index {
-                    1 => {
-                        // SCE-MAP: session_fsm_unicast.scxml:190 :: Accepting :: _transition_1
-                        // W3C SCXML 3.13: Transition 1 actions
-                        // W3C SCXML 4.9: a transition's content is one block; an error ends it.
-                        'action_block: {
-
-            // W3C SCXML G.7: <sce:action name="set_close_reason_invalid">
-            self.actions.set_close_reason_invalid();
-                        }
-                    }
-                    2 => {
-                        // SCE-MAP: session_fsm_unicast.scxml:193 :: Accepting :: _transition_2
-                        // W3C SCXML 3.13: Transition 2 actions
-                        // W3C SCXML 4.9: a transition's content is one block; an error ends it.
-                        'action_block: {
+        match transition.0 {
+            // Established, transition 0
+            #[cfg(not(feature = "session-unicast-accept"))] 12 => {
+                // SCE-MAP: session_fsm_unicast.scxml:211 :: Established :: _transition_0
+                // W3C SCXML 3.13: Transition 0 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
 
             // W3C SCXML G.7: <sce:action name="set_close_reason_generic">
             self.actions.set_close_reason_generic();
-                        }
-                    }
-                    _ => {}
                 }
             },
-            SessionFsmUnicastState::Established => {
-                match transition_index {
-                    0 => {
-                        // SCE-MAP: session_fsm_unicast.scxml:211 :: Established :: _transition_0
-                        // W3C SCXML 3.13: Transition 0 actions
-                        // W3C SCXML 4.9: a transition's content is one block; an error ends it.
-                        'action_block: {
-
-            // W3C SCXML G.7: <sce:action name="set_close_reason_generic">
-            self.actions.set_close_reason_generic();
-                        }
-                    }
-                    1 => {
-                        // SCE-MAP: session_fsm_unicast.scxml:214 :: Established :: _transition_1
-                        // W3C SCXML 3.13: Transition 1 actions
-                        // W3C SCXML 4.9: a transition's content is one block; an error ends it.
-                        'action_block: {
+            // Established, transition 1
+            #[cfg(not(feature = "session-unicast-accept"))] 13 => {
+                // SCE-MAP: session_fsm_unicast.scxml:214 :: Established :: _transition_1
+                // W3C SCXML 3.13: Transition 1 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
 
             // W3C SCXML G.7: <sce:action name="set_close_reason_expired">
             self.actions.set_close_reason_expired();
-                        }
-                    }
-                    2 => {
-                        // SCE-MAP: session_fsm_unicast.scxml:217 :: Established :: _transition_2
-                        // W3C SCXML 3.13: Transition 2 actions
-                        // W3C SCXML 4.9: a transition's content is one block; an error ends it.
-                        'action_block: {
+                }
+            },
+            // Established, transition 2
+            14 => {
+                // SCE-MAP: session_fsm_unicast.scxml:217 :: Established :: _transition_2
+                // W3C SCXML 3.13: Transition 2 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
 
             // W3C SCXML G.7: <sce:action name="set_close_reason_invalid">
             self.actions.set_close_reason_invalid();
-                        }
-                    }
-                    3 => {
-                        // SCE-MAP: session_fsm_unicast.scxml:220 :: Established :: _transition_3
-                        // W3C SCXML 3.13: Transition 3 actions
-                        // W3C SCXML 4.9: a transition's content is one block; an error ends it.
-                        'action_block: {
+                }
+            },
+            // Accepting, transition 2
+            15 => {
+                // SCE-MAP: session_fsm_unicast.scxml:193 :: Accepting :: _transition_2
+                // W3C SCXML 3.13: Transition 2 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
+
+            // W3C SCXML G.7: <sce:action name="set_close_reason_unresponsive">
+            #[cfg(not(feature = "session-unicast-accept"))] self.actions.set_close_reason_unresponsive();
+
+            // W3C SCXML G.7: <sce:action name="set_close_reason_generic">
+            #[cfg(feature = "session-unicast-accept")] self.actions.set_close_reason_generic();
+                }
+            },
+            // GotInitAck, transition 1
+            #[cfg(not(feature = "session-unicast-accept"))] 11 => {
+                // SCE-MAP: session_fsm_unicast.scxml:151 :: GotInitAck :: _transition_1
+                // W3C SCXML 3.13: Transition 1 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
+
+            // W3C SCXML G.7: <sce:action name="set_close_reason_generic">
+            self.actions.set_close_reason_generic();
+                }
+            },
+            // LinkOpening, transition 1
+            #[cfg(not(feature = "session-unicast-accept"))] 2 => {
+                // SCE-MAP: session_fsm_unicast.scxml:124 :: LinkOpening :: _transition_1
+                // W3C SCXML 3.13: Transition 1 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
+
+            // W3C SCXML G.7: <sce:action name="set_close_reason_generic">
+            self.actions.set_close_reason_generic();
+                }
+            },
+            // Opening, transition 0
+            #[cfg(not(feature = "session-unicast-accept"))] 4 => {
+                // SCE-MAP: session_fsm_unicast.scxml:155 :: Opening :: _transition_0
+                // W3C SCXML 3.13: Transition 0 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
+
+            // W3C SCXML G.7: <sce:action name="set_close_reason_invalid">
+            self.actions.set_close_reason_invalid();
+                }
+            },
+            // Established, transition 0
+            #[cfg(feature = "session-unicast-accept")] 21 => {
+                // SCE-MAP: session_fsm_unicast.scxml:211 :: Established :: _transition_0
+                // W3C SCXML 3.13: Transition 0 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
+
+            // W3C SCXML G.7: <sce:action name="set_close_reason_generic">
+            self.actions.set_close_reason_generic();
+                }
+            },
+            // Established, transition 1
+            #[cfg(feature = "session-unicast-accept")] 22 => {
+                // SCE-MAP: session_fsm_unicast.scxml:214 :: Established :: _transition_1
+                // W3C SCXML 3.13: Transition 1 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
+
+            // W3C SCXML G.7: <sce:action name="set_close_reason_expired">
+            self.actions.set_close_reason_expired();
+                }
+            },
+            // Established, transition 2
+            #[cfg(feature = "session-unicast-accept")] 23 => {
+                // SCE-MAP: session_fsm_unicast.scxml:217 :: Established :: _transition_2
+                // W3C SCXML 3.13: Transition 2 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
+
+            // W3C SCXML G.7: <sce:action name="set_close_reason_invalid">
+            self.actions.set_close_reason_invalid();
+                }
+            },
+            // Established, transition 3
+            #[cfg(feature = "session-unicast-accept")] 24 => {
+                // SCE-MAP: session_fsm_unicast.scxml:220 :: Established :: _transition_3
+                // W3C SCXML 3.13: Transition 3 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
 
             // W3C SCXML G.7: <sce:action name="set_close_reason_unresponsive">
             self.actions.set_close_reason_unresponsive();
-                        }
-                    }
-                    _ => {}
                 }
             },
-            SessionFsmUnicastState::GotInitAck => {
-                match transition_index {
-                    1 => {
-                        // SCE-MAP: session_fsm_unicast.scxml:151 :: GotInitAck :: _transition_1
-                        // W3C SCXML 3.13: Transition 1 actions
-                        // W3C SCXML 4.9: a transition's content is one block; an error ends it.
-                        'action_block: {
+            // GotInitAck, transition 1
+            #[cfg(feature = "session-unicast-accept")] 12 => {
+                // SCE-MAP: session_fsm_unicast.scxml:151 :: GotInitAck :: _transition_1
+                // W3C SCXML 3.13: Transition 1 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
 
             // W3C SCXML G.7: <sce:action name="set_close_reason_generic">
             self.actions.set_close_reason_generic();
-                        }
-                    }
-                    _ => {}
                 }
             },
-            SessionFsmUnicastState::LinkOpening => {
-                match transition_index {
-                    1 => {
-                        // SCE-MAP: session_fsm_unicast.scxml:124 :: LinkOpening :: _transition_1
-                        // W3C SCXML 3.13: Transition 1 actions
-                        // W3C SCXML 4.9: a transition's content is one block; an error ends it.
-                        'action_block: {
+            // LinkOpening, transition 1
+            #[cfg(feature = "session-unicast-accept")] 3 => {
+                // SCE-MAP: session_fsm_unicast.scxml:124 :: LinkOpening :: _transition_1
+                // W3C SCXML 3.13: Transition 1 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
 
             // W3C SCXML G.7: <sce:action name="set_close_reason_generic">
             self.actions.set_close_reason_generic();
-                        }
-                    }
-                    _ => {}
                 }
             },
-            SessionFsmUnicastState::Opening => {
-                match transition_index {
-                    0 => {
-                        // SCE-MAP: session_fsm_unicast.scxml:155 :: Opening :: _transition_0
-                        // W3C SCXML 3.13: Transition 0 actions
-                        // W3C SCXML 4.9: a transition's content is one block; an error ends it.
-                        'action_block: {
+            // Opening, transition 0
+            5 => {
+                // SCE-MAP: session_fsm_unicast.scxml:155 :: Opening :: _transition_0
+                // W3C SCXML 3.13: Transition 0 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
+
+            // W3C SCXML G.7: <sce:action name="set_close_reason_generic">
+            #[cfg(not(feature = "session-unicast-accept"))] self.actions.set_close_reason_generic();
 
             // W3C SCXML G.7: <sce:action name="set_close_reason_invalid">
-            self.actions.set_close_reason_invalid();
-                        }
-                    }
-                    1 => {
-                        // SCE-MAP: session_fsm_unicast.scxml:158 :: Opening :: _transition_1
-                        // W3C SCXML 3.13: Transition 1 actions
-                        // W3C SCXML 4.9: a transition's content is one block; an error ends it.
-                        'action_block: {
-
-            // W3C SCXML G.7: <sce:action name="set_close_reason_generic">
-            self.actions.set_close_reason_generic();
-                        }
-                    }
-                    _ => {}
+            #[cfg(feature = "session-unicast-accept")] self.actions.set_close_reason_invalid();
                 }
             },
-            SessionFsmUnicastState::SentInitSyn => {
-                match transition_index {
-                    1 => {
-                        // SCE-MAP: session_fsm_unicast.scxml:142 :: SentInitSyn :: _transition_1
-                        // W3C SCXML 3.13: Transition 1 actions
-                        // W3C SCXML 4.9: a transition's content is one block; an error ends it.
-                        'action_block: {
+            // SentInitSyn, transition 1
+            #[cfg(not(feature = "session-unicast-accept"))] 9 => {
+                // SCE-MAP: session_fsm_unicast.scxml:142 :: SentInitSyn :: _transition_1
+                // W3C SCXML 3.13: Transition 1 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
 
             // W3C SCXML G.7: <sce:action name="set_close_reason_generic">
             self.actions.set_close_reason_generic();
-                        }
-                    }
-                    _ => {}
+                }
+            },
+            // Opening, transition 1
+            #[cfg(feature = "session-unicast-accept")] 6 => {
+                // SCE-MAP: session_fsm_unicast.scxml:158 :: Opening :: _transition_1
+                // W3C SCXML 3.13: Transition 1 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
+
+            // W3C SCXML G.7: <sce:action name="set_close_reason_generic">
+            self.actions.set_close_reason_generic();
+                }
+            },
+            // SentInitSyn, transition 1
+            #[cfg(feature = "session-unicast-accept")] 10 => {
+                // SCE-MAP: session_fsm_unicast.scxml:142 :: SentInitSyn :: _transition_1
+                // W3C SCXML 3.13: Transition 1 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
+
+            // W3C SCXML G.7: <sce:action name="set_close_reason_generic">
+            self.actions.set_close_reason_generic();
                 }
             },
             _ => {},

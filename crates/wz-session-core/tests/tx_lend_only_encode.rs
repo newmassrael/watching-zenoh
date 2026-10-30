@@ -84,7 +84,10 @@ fn chain() -> Vec<ExtEntryOwned> {
 fn oracle_chain(entries: &[ExtEntryOwned]) -> Vec<u8> {
     let mut out = Vec::new();
     for (i, entry) in entries.iter().enumerate() {
-        let mut bytes = entry.as_borrowed().encode_to_vec();
+        let mut bytes = entry
+            .as_borrowed()
+            .encode_to_vec()
+            .expect("an oracle entry encodes");
         if i + 1 == entries.len() {
             bytes[0] &= !0x80;
         } else {
@@ -121,7 +124,11 @@ fn oracle_init(
         cookie,
     };
     let mut out = vec![flags | wire_const::T_MID_INIT];
-    out.extend_from_slice(&body.encode_to_vec((flags >> 6) & 1, (flags >> 5) & 1));
+    out.extend_from_slice(
+        &body
+            .encode_to_vec((flags >> 6) & 1, (flags >> 5) & 1)
+            .expect("an oracle init body encodes"),
+    );
     out.extend_from_slice(&oracle_chain(entries));
     out
 }
@@ -157,7 +164,11 @@ fn oracle_open(
         cookie: (!is_ack).then_some(cookie),
     };
     let mut out = vec![flags | wire_const::T_MID_OPEN];
-    out.extend_from_slice(&body.encode_to_vec((flags >> 5) & 1));
+    out.extend_from_slice(
+        &body
+            .encode_to_vec((flags >> 5) & 1)
+            .expect("an oracle open body encodes"),
+    );
     out.extend_from_slice(&oracle_chain(entries));
     out
 }

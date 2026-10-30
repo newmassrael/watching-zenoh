@@ -83,7 +83,9 @@ fn layer3_response_default_byte_equivalent() {
             put.payload = Some(&[]);
         }
     }
-    let wz = response.encode_to_vec();
+    let wz = response
+        .encode_to_vec()
+        .expect("a default Response encodes");
     let pico = zenoh_pico_encode_response_default();
     assert_eq!(
         wz, pico,
@@ -171,7 +173,8 @@ fn layer3_response_err_byte_equivalent() {
         let wz = owned
             .try_as_borrowed()
             .expect("borrow the owned response")
-            .encode_to_vec();
+            .encode_to_vec()
+            .expect("the err response encodes");
         let pico = zenoh_pico_encode_response_err(payload, None, None);
         assert_ne!(
             pico,
@@ -220,7 +223,8 @@ fn layer3_response_err_with_encoding_byte_equivalent() {
     let wz = owned
         .try_as_borrowed()
         .expect("borrow the owned response")
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("the err response with an encoding encodes");
     let pico = zenoh_pico_encode_response_err(PAYLOAD, Some(ENCODING_ID as u16), Some(KEYEXPR));
     assert_ne!(
         pico,

@@ -2844,6 +2844,7 @@ pub(crate) mod tests {
             ..Default::default()
         }
         .encode_to_vec()
+        .expect("a fixture Push is encodable")
     }
 
     /// `DeclKexpr`: bind `id` to the literal `suffix` in the SENDER's space.
@@ -2861,9 +2862,10 @@ pub(crate) mod tests {
             ..Default::default()
         }
         .encode_to_vec()
+        .expect("a fixture Declare is encodable")
     }
 
-    /// R2385 — a `DeclKexpr` binding `id` to `scope` + `suffix`, as a decoded
+    /// R2385— a `DeclKexpr` binding `id` to `scope` + `suffix`, as a decoded
     /// message rather than as bytes, so a `KeyexprSpaces` can absorb it
     /// directly.
     ///
@@ -2963,6 +2965,7 @@ pub(crate) mod tests {
             ..Default::default()
         }
         .encode_to_vec()
+        .expect("a fixture Declare is encodable")
     }
 
     /// R311y640 (§1.1w) — the ext body zenoh actually puts on the wire for a
@@ -3146,7 +3149,8 @@ pub(crate) mod tests {
             body: wz_codecs::request::RequestVariant::CodecZenohQuery(query),
             ..Default::default()
         }
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("a fixture Request is encodable");
         encoded
     }
 
@@ -3443,7 +3447,8 @@ pub(crate) mod tests {
                 body: wz_codecs::push::PushVariant::CodecZenohMsgPut(put),
                 ..Default::default()
             }
-            .encode_to_vec(),
+            .encode_to_vec()
+            .expect("a fixture Push is encodable"),
             Carrier::Request => wz_codecs::request::Request {
                 header: wz_codecs::request::Request::default().header | FLAG_N_N,
                 rid: 11,
@@ -3451,7 +3456,8 @@ pub(crate) mod tests {
                 body: wz_codecs::request::RequestVariant::CodecZenohMsgPut(put),
                 ..Default::default()
             }
-            .encode_to_vec(),
+            .encode_to_vec()
+            .expect("a fixture Request is encodable"),
             Carrier::Reply => wz_codecs::response::Response {
                 header: wz_codecs::response::Response::default().header | FLAG_N_N,
                 request_id: 11,
@@ -3464,7 +3470,8 @@ pub(crate) mod tests {
                 ),
                 ..Default::default()
             }
-            .encode_to_vec(),
+            .encode_to_vec()
+            .expect("a fixture Response is encodable"),
             // The ERR carrier does NOT wrap a Put: it declares `encoding` and
             // `payload` as its own fields, and its own shm ext beside them.
             Carrier::Err => {
@@ -3485,6 +3492,7 @@ pub(crate) mod tests {
                     ..Default::default()
                 }
                 .encode_to_vec()
+                .expect("a fixture Response is encodable")
             }
         }
     }
@@ -4153,7 +4161,12 @@ pub(crate) mod tests {
         };
         let table = aggregate_datagrams(&[
             (true, declare_kexpr(1, "parent")),
-            (true, chained.encode_to_vec()),
+            (
+                true,
+                chained
+                    .encode_to_vec()
+                    .expect("a fixture Declare is encodable"),
+            ),
             (true, push(sender_space(2, None), &[0u8; 6])),
         ]);
         let row = table.row("parent/child").expect("the chain composed");
@@ -4554,9 +4567,15 @@ pub(crate) mod tests {
                     request_id: 1,
                     ..Default::default()
                 }
-                .encode_to_vec(),
+                .encode_to_vec()
+                .expect("a fixture ResponseFinal is encodable"),
             ),
-            (true, wz_codecs::oam::Oam::default().encode_to_vec()),
+            (
+                true,
+                wz_codecs::oam::Oam::default()
+                    .encode_to_vec()
+                    .expect("a default Oam is encodable"),
+            ),
             (
                 true,
                 wz_codecs::interest::Interest {
@@ -4564,7 +4583,8 @@ pub(crate) mod tests {
                     body: None,
                     ..Default::default()
                 }
-                .encode_to_vec(),
+                .encode_to_vec()
+                .expect("a fixture Interest is encodable"),
             ),
         ]);
 
@@ -4595,7 +4615,12 @@ pub(crate) mod tests {
             (true, declare_kexpr(1, "accounted/topic")),
             (true, push(sender_space(1, None), &[0u8; 4])),
             (true, undeclare_kexpr(1)),
-            (true, wz_codecs::oam::Oam::default().encode_to_vec()),
+            (
+                true,
+                wz_codecs::oam::Oam::default()
+                    .encode_to_vec()
+                    .expect("a default Oam is encodable"),
+            ),
         ]);
 
         let (declared, undeclared) = table.declarations();

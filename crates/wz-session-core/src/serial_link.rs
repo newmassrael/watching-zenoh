@@ -633,7 +633,9 @@ mod tests {
             payload: &[0xAB, 0xCD, 0xEF],
             crc32: crc32(&[0xAB, 0xCD, 0xEF]),
         };
-        let mut pre_cobs = env.encode_to_vec();
+        let mut pre_cobs = env
+            .encode_to_vec()
+            .expect("a fixture envelope is encodable");
         pre_cobs.push(0x99); // trailing garbage after crc32
         let cobs = cobs_encode(&pre_cobs).expect("cobs");
         let mut wire = cobs.as_slice().to_vec();

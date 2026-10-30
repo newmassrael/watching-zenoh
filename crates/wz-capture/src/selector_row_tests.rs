@@ -45,6 +45,7 @@ fn declare(suffix: &'static str) -> Vec<u8> {
         ..Default::default()
     }
     .encode_to_vec()
+    .expect("a fixture Declare is encodable")
 }
 
 /// A capture of three one-record frames on one UDP flow between 10.0.0.1:43210

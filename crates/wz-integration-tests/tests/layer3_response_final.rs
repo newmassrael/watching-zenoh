@@ -60,7 +60,9 @@ fn zenoh_pico_encode_response_final(request_id: u64) -> Vec<u8> {
 // wz-proves: codec-response-final codec-parity partial
 #[test]
 fn layer3_response_final_default_byte_equivalent() {
-    let wz = ResponseFinal::default().encode_to_vec();
+    let wz = ResponseFinal::default()
+        .encode_to_vec()
+        .expect("a default ResponseFinal encodes");
     let pico = zenoh_pico_encode_response_final(0);
     assert_eq!(
         wz, pico,
@@ -81,7 +83,8 @@ fn layer3_response_final_nonzero_rid_byte_equivalent() {
         request_id: rid,
         ..ResponseFinal::default()
     }
-    .encode_to_vec();
+    .encode_to_vec()
+    .expect("a ResponseFinal encodes");
     let pico = zenoh_pico_encode_response_final(rid);
     assert_eq!(
         wz, pico,
@@ -102,7 +105,8 @@ fn layer3_response_final_multibyte_vle_rid_byte_equivalent() {
         request_id: rid,
         ..ResponseFinal::default()
     }
-    .encode_to_vec();
+    .encode_to_vec()
+    .expect("a ResponseFinal encodes");
     let pico = zenoh_pico_encode_response_final(rid);
     assert_eq!(
         wz, pico,

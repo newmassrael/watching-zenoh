@@ -27,7 +27,7 @@
      byte-compare against `_z_decl_kexpr_encode` (R110e). -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
-       sce:kind="codec" sce:default-endian="big" name="decl_kexpr">
+       sce:kind="codec" sce:encode-may-fail="true" sce:default-endian="big" name="decl_kexpr">
   <!-- R121h-pre: B5-ν ownership invert (SCE pin e10619d3).
        Deliberately NO `<sce:variant-dispatch>` child — DeclKexpr.header
        has only `_Z_DECL_KEXPR_FLAG_N (0x20)` at bit 5 (zenoh-pico

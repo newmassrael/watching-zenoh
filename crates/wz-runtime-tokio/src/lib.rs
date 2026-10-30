@@ -3125,7 +3125,10 @@ impl LinkDriver for TcpDriver {
             payload_len,
             payload: frame.bytes,
         };
-        let wire = envelope.encode_to_vec();
+        // `payload_len` came from a checked `u16` conversion above, so the codec has no refusal.
+        let wire = envelope
+            .encode_to_vec()
+            .expect("a frame within the u16 prefix encodes");
         stream.write_all(&wire).await?;
         stream.flush().await?;
         Ok(())
@@ -3913,7 +3916,8 @@ mod poll_framed_lowlatency_tests {
             payload_len: 3,
             payload: &[0x01, 0x02, 0x03],
         }
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("a three-byte payload fits the u16 stream envelope");
 
         // An empty batch is the two prefix bytes and nothing else.
         let mut wire = vec![0x00u8, 0x00];
@@ -4264,7 +4268,8 @@ mod poll_framed_lowlatency_tests {
                 payload_len: payload.len() as u16,
                 payload: &payload,
             }
-            .encode_to_vec();
+            .encode_to_vec()
+            .expect("a payload of at most 258 bytes fits the u16 stream envelope");
             let mut src: &[u8] = &wire;
             let mut st = ReadState::Idle;
             match poll_framed(&mut st, &mut src, false, &mut HeapArena).await {

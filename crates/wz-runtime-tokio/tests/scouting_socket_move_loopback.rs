@@ -159,7 +159,7 @@ fn scout_datagram(what: u8) -> Vec<u8> {
     let mut scout = Scout::new();
     scout.version = 0x09;
     scout.set_what(what);
-    let body = scout.encode_to_vec();
+    let body = scout.encode_to_vec().expect("a fixture Scout encodes");
     let mut wire = vec![wire_const::S_MID_SCOUT];
     wire.extend_from_slice(&body);
     wire

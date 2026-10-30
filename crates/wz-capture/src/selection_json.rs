@@ -667,6 +667,7 @@ pub(crate) mod tests {
             ..Default::default()
         }
         .encode_to_vec()
+        .expect("a fixture Push is encodable")
     }
 
     /// A `Response` whose `Reply` carries a `MsgDel` rather than a put.
@@ -685,6 +686,7 @@ pub(crate) mod tests {
             ..Default::default()
         }
         .encode_to_vec()
+        .expect("a fixture Response is encodable")
     }
 
     /// The transport `Close`, bare.
@@ -1324,6 +1326,7 @@ pub(crate) mod tests {
             ..Default::default()
         }
         .encode_to_vec()
+        .expect("a fixture Request is encodable")
     }
 
     /// What a generated packet is to the exchange plane.

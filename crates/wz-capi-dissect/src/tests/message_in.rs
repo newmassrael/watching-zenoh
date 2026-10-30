@@ -81,6 +81,7 @@ fn declare_message() -> Vec<u8> {
         .try_as_borrowed()
         .expect("borrow")
         .encode_to_vec()
+        .expect("a fixture Declare is encodable")
 }
 
 fn push_message(payload: &[u8]) -> Vec<u8> {
@@ -95,6 +96,7 @@ fn push_message(payload: &[u8]) -> Vec<u8> {
         ..Default::default()
     }
     .encode_to_vec()
+    .expect("a fixture Push is encodable")
 }
 
 fn request_message() -> Vec<u8> {
@@ -108,6 +110,7 @@ fn request_message() -> Vec<u8> {
         ..Default::default()
     }
     .encode_to_vec()
+    .expect("a fixture Request is encodable")
 }
 
 fn response_final_message() -> Vec<u8> {
@@ -116,6 +119,7 @@ fn response_final_message() -> Vec<u8> {
         ..Default::default()
     }
     .encode_to_vec()
+    .expect("a fixture ResponseFinal is encodable")
 }
 
 /// Init, InitAck, OpenSyn, OpenAck, laid out byte by byte from the transport

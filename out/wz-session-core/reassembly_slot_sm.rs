@@ -16,8 +16,8 @@
 // SCE Protocol-Synthesis RFC §synth-5-J-2: no_std variant of the statechart
 // emitter. It compiles against `sce-rust-runtime` with or without that
 // crate's `std` feature, and the generated crate omits `std::*` paths — Duration comes from
-// `core::time`, the configuration and history records are the runtime's
-// capacity-bounded `BoundedVec`, sized to this document's state tree, and the
+// `core::time`, the configuration and history records are kept by the engine
+// in a run store sized to this document's state tree, and the
 // parent-event queue field is elided
 // (SCXML `<invoke>` is rejected at codegen time under `--no-std` per the
 // `codegen/no-std-invoke-not-supported` diagnostic).
@@ -80,45 +80,126 @@ use sce_rust_runtime::{Engine, StatePolicy};
 // State enum (W3C SCXML 3.3)
 // ======================================================================
 
+/// The document's states, declared in document order. Each variant's
+/// discriminant is its position in that order, which is the number the
+/// runtime's tables know the state by (docs/adr/0064), so a state is its number
+/// at no cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[repr(u16)]
 pub enum ReassemblySlotState {
-    Aborted,
-    Complete,
     // W3C SCXML 3.2: `<scxml initial>` state — the machine's `Default`.
     #[default]
-    Empty,
-    Receiving,
-    TimedOut,
+    Empty = 0,
+    Receiving = 1,
+    Complete = 2,
+    TimedOut = 3,
+    Aborted = 4,
 }
 
 // ======================================================================
 // Event enum (W3C SCXML 3.12)
 // ======================================================================
 
+/// The events the document names, and the null event. Each variant's
+/// discriminant is the number the runtime knows the event by, its position in
+/// `StatePolicy::EVENTS`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u16)]
 pub enum ReassemblySlotEvent {
-    CodecError,
-    FragmentChunk,
-    FragmentDrop,
-    FragmentOoo,
-    ReassemblyTimeout,
-    SlotEvict,
-    SlotRelease,
+    CodecError = 0,
+    FragmentChunk = 1,
+    FragmentDrop = 2,
+    FragmentOoo = 3,
+    ReassemblyTimeout = 4,
+    SlotEvict = 5,
+    SlotRelease = 6,
     /// W3C SCXML 3.13: Sentinel for eventless transition dispatch
-    Null,
+    Null = 7,
 }
 
 // ======================================================================
 // What this document's state tree bounds (W3C SCXML 3.4)
 // ======================================================================
 
-/// A set of this machine's states that are, or are about to be, in one
-/// configuration: the configuration a host observes, and what the runtime's
-/// microstep builds from it (an exit set, an entry set, a history's record).
-/// Its capacity, 1, is the most states one configuration of this document holds,
-/// read from its state tree; the runtime names no size of its own. A `Vec` under
-/// std, where the capacity is not read.
+/// A configuration of this machine, in its own states: what
+/// `Engine::get_active_states` returns and a host observes. The engine keeps
+/// the configuration itself as numbers (docs/adr/0064). Its capacity, 1, is
+/// the most states one configuration of this document holds, read from its
+/// state tree; the runtime names no size of its own. A `Vec` under std, where
+/// the capacity is not read.
 pub type ReassemblySlotConfiguration = ::sce_rust_runtime::helpers::hierarchy::BoundedVec<ReassemblySlotState, 1>;
+
+// ======================================================================
+// The document's tables (docs/adr/0064)
+// ======================================================================
+
+/// This document's state tree as the runtime's Appendix D procedures read it.
+/// Those procedures are compiled once for a program, whatever machines it
+/// holds, so they read a document as numbers: each state by its position in
+/// document order (the discriminant of `ReassemblySlotState`), each `<history>` by
+/// the discriminant of its variant, and each transition by its row here — the
+/// written ones grouped by source state, then each compound state's initial
+/// transition, each history's default transition and the document's own
+/// initial transition. A state's children are not listed: the numbering is a
+/// pre-order walk, so they are the state's number plus one and each number past
+/// the subtree (`last_descendant`) of the child before.
+///
+/// A `const` and not a `static`: `StatePolicy::TABLES` refers to it, and a
+/// constant may refer to a static only from Rust 1.83 on, past the toolchain
+/// the runtime supports. The reference is to one constant allocation all the
+/// same.
+pub const REASSEMBLY_SLOT_TABLES: ::sce_rust_runtime::DocumentTables = {
+    use ::sce_rust_runtime::{
+        DocumentTables, HistoryId, HistoryRow, Span, StateId, StateKind, StateRow, Target,
+        TransitionId, TransitionRow,
+    };
+    DocumentTables {
+        states: &[
+            // 0: Empty
+            StateRow::new(None, StateKind::Atomic, StateId(0), None),
+            // 1: Receiving
+            StateRow::new(None, StateKind::Atomic, StateId(1), None),
+            // 2: Complete
+            StateRow::new(None, StateKind::Atomic, StateId(2), None),
+            // 3: TimedOut
+            StateRow::new(None, StateKind::Atomic, StateId(3), None),
+            // 4: Aborted
+            StateRow::new(None, StateKind::Atomic, StateId(4), None),
+        ],
+        histories: &[
+        ],
+        transitions: &[
+            // 0: Empty, transition 0
+            TransitionRow::new(Some(StateId(0)), Span { start: 0, len: 1 }, false, true),
+            // 1: Empty, transition 1
+            TransitionRow::new(Some(StateId(0)), Span { start: 1, len: 1 }, false, true),
+            // 2: Receiving, transition 0
+            TransitionRow::new(Some(StateId(1)), Span { start: 2, len: 1 }, false, true),
+            // 3: Receiving, transition 1
+            TransitionRow::new(Some(StateId(1)), Span { start: 3, len: 1 }, false, true),
+            // 4: Receiving, transition 2
+            TransitionRow::new(Some(StateId(1)), Span { start: 4, len: 1 }, false, true),
+            // 5: Receiving, transition 3
+            TransitionRow::new(Some(StateId(1)), Span { start: 5, len: 1 }, false, true),
+            // 6: Receiving, transition 4
+            TransitionRow::new(Some(StateId(1)), Span { start: 6, len: 1 }, false, true),
+            // 7: Receiving, transition 5
+            TransitionRow::new(Some(StateId(1)), Span { start: 7, len: 1 }, false, true),
+            // 8: Receiving, transition 6
+            TransitionRow::new(Some(StateId(1)), Span { start: 8, len: 1 }, false, true),
+            // 9: Complete, transition 0
+            TransitionRow::new(Some(StateId(2)), Span { start: 9, len: 1 }, false, true),
+            // 10: TimedOut, transition 0
+            TransitionRow::new(Some(StateId(3)), Span { start: 10, len: 1 }, false, true),
+            // 11: Aborted, transition 0
+            TransitionRow::new(Some(StateId(4)), Span { start: 11, len: 1 }, false, true),
+            // 12: the document's initial transition
+            TransitionRow::new(None, Span { start: 12, len: 1 }, false, false),
+        ],
+        targets: &[Target::state(StateId(1)), Target::state(StateId(2)), Target::state(StateId(1)), Target::state(StateId(2)), Target::state(StateId(4)), Target::state(StateId(4)), Target::state(StateId(4)), Target::state(StateId(4)), Target::state(StateId(3)), Target::state(StateId(0)), Target::state(StateId(0)), Target::state(StateId(0)), Target::state(StateId(0))],
+        initial: TransitionId(12),
+    }
+};
 
 // ======================================================================
 // Externally-drivable event surface (W3C SCXML 3.12 / 5.10)
@@ -319,23 +400,61 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
     // EventQueue per-machine sizing lever above.
     type ScheduledSendId = sce_rust_runtime::ElidedSendId;
 
+    // docs/adr/0064: the document as the runtime's Appendix D procedures read
+    // it, which are compiled once for a program: its tables, and its states,
+    // histories and events by the numbers the tables know them by. Each of the
+    // three lists is in the order of those numbers, so it is the inverse of the
+    // enum's discriminant.
+    const TABLES: &'static ::sce_rust_runtime::DocumentTables = &REASSEMBLY_SLOT_TABLES;
+    const STATES: &'static [Self::State] = &[
+        ReassemblySlotState::Empty,
+        ReassemblySlotState::Receiving,
+        ReassemblySlotState::Complete,
+        ReassemblySlotState::TimedOut,
+        ReassemblySlotState::Aborted,
+    ];
+    const HISTORIES: &'static [Self::History] = &[];
+    const EVENTS: &'static [Self::Event] = &[
+        ReassemblySlotEvent::CodecError,
+        ReassemblySlotEvent::FragmentChunk,
+        ReassemblySlotEvent::FragmentDrop,
+        ReassemblySlotEvent::FragmentOoo,
+        ReassemblySlotEvent::ReassemblyTimeout,
+        ReassemblySlotEvent::SlotEvict,
+        ReassemblySlotEvent::SlotRelease,
+        ReassemblySlotEvent::Null,
+    ];
+
+    fn state_id(state: Self::State) -> ::sce_rust_runtime::StateId {
+        ::sce_rust_runtime::StateId(state as u16)
+    }
+
+    fn history_id(history: Self::History) -> ::sce_rust_runtime::HistoryId {
+        // No `<history>`, so no value of the type to number.
+        match history {}
+    }
+
+    fn event_id(event: Self::Event) -> ::sce_rust_runtime::EventId {
+        ::sce_rust_runtime::EventId(event as u16)
+    }
+
     // W3C SCXML 3.4: what this document's state tree bounds, read by the
     // generator and written here so every buffer of the runtime's microstep is
-    // this document's size and no larger. A configuration holds 1 state(s) at
-    // most; a selection enables 1 transition(s) at most, one from each atomic state
-    // of one; the deepest state sits 1 level(s) down. Under std the buffers
-    // are `Vec`s and the capacities are not read.
+    // this document's size and no larger, in both profiles. Every set of states
+    // the runtime keeps is a bit vector of this document's 5 state(s); a
+    // configuration holds 1 state(s) at most, the capacity of the
+    // `Configuration` a host reads; a selection enables 1 transition(s) at most, one from each atomic state
+    // of one configuration; a microstep owes 0 history default(s) at most;
+    // and Appendix D's entry procedures, the effective targets and the
+    // completion check are run over a stack of steps and not by recursion, so a
+    // call needs no depth the program has to assume: 6 step(s) at most, three
+    // for each level of the tree, one for each `<history>` and three of
+    // headroom. The workspace is a local of the call that runs a macrostep; the
+    // run store, the configuration and what each of the 0 `<history>`
+    // element(s) recorded, one such set each, is the engine's.
+    type Workspace = ::sce_rust_runtime::Workspace<{ ::sce_rust_runtime::state_scratch(5) }, 1, 6, 0>;
+    type RunStore = ::sce_rust_runtime::RunStore<{ ::sce_rust_runtime::state_words(5) }, { ::sce_rust_runtime::record_words(5, 0) }, 0>;
     type Configuration = ReassemblySlotConfiguration;
-    type EnabledSet = ::sce_rust_runtime::helpers::hierarchy::BoundedVec<::sce_rust_runtime::EnabledTransition<Self::State, Self::History>, 1>;
-    type HistoryDefaults = ::sce_rust_runtime::helpers::hierarchy::BoundedVec<(Self::State, Self::History), 0>;
-    // Appendix D's entry procedures, the effective targets and the completion
-    // check are run over a stack of steps and not by recursion, so a call needs
-    // no depth the program has to assume: 6 step(s) at most, three for each level
-    // of the tree, one for each `<history>` and three of headroom.
-    type EntryWalk = ::sce_rust_runtime::helpers::hierarchy::BoundedVec<::sce_rust_runtime::helpers::microstep::WalkStep<Self::State, Self::History>, 6>;
-    const MAX_CONFIGURATION: usize = 1;
-    const MAX_ENABLED: usize = 1;
-    const MAX_DEPTH: usize = 1;
 
     // W3C SCXML feature flags
     const HAS_PARALLEL_STATES: bool = false;
@@ -361,69 +480,10 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
         ReassemblySlotState::Empty
     }
 
-    fn is_final_state(state: Self::State) -> bool {
-        match state {
-            _ => false,
-        }
-    }
-
-    fn get_parent(state: Self::State) -> Option<Self::State> {
-        match state {
-            _ => None,
-        }
-    }
-
-    // W3C SCXML 3.3: a <state> with child states — exactly the states that have
-    // an initial transition. A <parallel> is not compound.
-    fn is_compound_state(state: Self::State) -> bool {
-        match state {
-            _ => false,
-        }
-    }
-
-
-    // §scxml-D-getChildStates: a state's <state>, <parallel> and <final>
-    // children, in document order — for a <parallel>, its regions.
-    fn get_child_states(state: Self::State) -> &'static [Self::State] {
-        match state {
-            _ => &[],
-        }
-    }
-
-    // §scxml-3.3: a compound state's initial transition target, as written —
-    // the engine's entry procedures dereference a <history> among them.
-    fn get_initial_targets(state: Self::State) -> &'static [::sce_rust_runtime::EntryTarget<Self::State, Self::History>] {
-        match state {
-            _ => &[],
-        }
-    }
-
-    // §scxml-3.2: the target of the document's own initial transition, as written.
-    fn get_document_initial_targets() -> &'static [::sce_rust_runtime::EntryTarget<Self::State, Self::History>] {
-        &[::sce_rust_runtime::EntryTarget::State(ReassemblySlotState::Empty)]
-    }
-
-    // §scxml-3.10: the state a <history> is declared in.
-    fn get_history_parent(history: Self::History) -> Self::State {
-        match history {
-        }
-    }
-
-    // §scxml-3.10.2: a <history>'s default transition target, as written.
-    fn get_history_default_targets(history: Self::History) -> &'static [::sce_rust_runtime::EntryTarget<Self::State, Self::History>] {
-        match history {
-        }
-    }
-
-    fn get_document_order(state: Self::State) -> u32 {
-        match state {
-            ReassemblySlotState::Aborted => 4,
-            ReassemblySlotState::Complete => 2,
-            ReassemblySlotState::Empty => 0,
-            ReassemblySlotState::Receiving => 1,
-            ReassemblySlotState::TimedOut => 3,
-        }
-    }
+    // The document's structure — each state's parent, kind, subtree and
+    // initial transition, and so its children, each history's parent and
+    // default, document order — is read from `TABLES` by the trait's own
+    // methods (docs/adr/0064), so none of it is written here a second time.
 
     fn get_event_name(event: Self::Event) -> &'static str {
         match event {
@@ -479,18 +539,6 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
         ReassemblySlotEvent::Null
     }
 
-    // ======================================================================
-    // Run-time state the entry procedures read
-    // ======================================================================
-
-    // §scxml-3.10: what a <history> recorded when its parent was last exited;
-    // None before that ever happened.
-    fn history_value(&self, history: Self::History) -> Option<&[Self::State]> {
-        match history {
-        }
-    }
-
-
     // NL→IR Item C1 Path A: store the current event's typed `_event.data`
     // payload so native transition guards can read it without a script
     // engine. Called by the engine's pop loop for every dequeued event;
@@ -525,11 +573,12 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
         &mut self,
         state: Self::State,
         engine: &mut sce_rust_runtime::Engine<Self>,
-        configuration_before_exit: &[Self::State],
     ) {
         // §scxml-D-exitStates orders one state's exit as onexit, then
         // cancelInvoke, then configuration.delete(s), so `In(s)` inside s's
-        // own handler is true: the deactivation is the LAST step here.
+        // own handler is true. The engine recorded every history this exit
+        // set records before its first exit (W3C SCXML 3.10), and removes
+        // `state` from the configuration after this returns.
     }
 
 
@@ -538,8 +587,9 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
 
     // Appendix D selectTransitions, the half only this document can answer:
     // the first of `state`'s own transitions, in document order, that `event`
-    // enables. The engine walks the atomic states and their ancestors and
-    // keeps the ordered set. `Event::Null` asks for eventless transitions.
+    // enables, as its row of the tables, which holds its targets and its
+    // type. The engine walks the atomic states and their ancestors and keeps
+    // the ordered set. `Event::Null` asks for eventless transitions.
     #[doc = "SCE-MAP: reassembly_slot.scxml:82 :: _machine"]
 // SCE-MAP: reassembly_slot.scxml:82 :: _machine
     fn first_enabled_transition(
@@ -547,18 +597,13 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
         state: Self::State,
         event: Self::Event,
         engine: &mut sce_rust_runtime::Engine<Self>,
-    ) -> Option<::sce_rust_runtime::EnabledTransition<Self::State, Self::History>> {
+    ) -> Option<::sce_rust_runtime::TransitionId> {
         match state {
             ReassemblySlotState::Aborted => {
                 if event == ReassemblySlotEvent::SlotRelease {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(ReassemblySlotState::Empty)],
-                            transition_index: 0,
-                            has_actions: true,
-                            is_internal: false,
-                        });
+                        // Aborted, transition 0
+                        return Some(::sce_rust_runtime::TransitionId(11));
                     }
                 }
                 None
@@ -566,13 +611,8 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
             ReassemblySlotState::Complete => {
                 if event == ReassemblySlotEvent::SlotRelease {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(ReassemblySlotState::Empty)],
-                            transition_index: 0,
-                            has_actions: true,
-                            is_internal: false,
-                        });
+                        // Complete, transition 0
+                        return Some(::sce_rust_runtime::TransitionId(9));
                     }
                 }
                 None
@@ -580,24 +620,14 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
             ReassemblySlotState::Empty => {
                 if event == ReassemblySlotEvent::FragmentChunk {
                     if matches!(&self.pending_payload, ReassemblySlotPayload::FragmentChunk(ev) if ev.more != 0) {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(ReassemblySlotState::Receiving)],
-                            transition_index: 0,
-                            has_actions: true,
-                            is_internal: false,
-                        });
+                        // Empty, transition 0
+                        return Some(::sce_rust_runtime::TransitionId(0));
                     }
                 }
                 if event == ReassemblySlotEvent::FragmentChunk {
                     if matches!(&self.pending_payload, ReassemblySlotPayload::FragmentChunk(ev) if ev.more == 0) {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(ReassemblySlotState::Complete)],
-                            transition_index: 1,
-                            has_actions: true,
-                            is_internal: false,
-                        });
+                        // Empty, transition 1
+                        return Some(::sce_rust_runtime::TransitionId(1));
                     }
                 }
                 None
@@ -605,79 +635,44 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
             ReassemblySlotState::Receiving => {
                 if event == ReassemblySlotEvent::FragmentChunk {
                     if matches!(&self.pending_payload, ReassemblySlotPayload::FragmentChunk(ev) if ev.more != 0) {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(ReassemblySlotState::Receiving)],
-                            transition_index: 0,
-                            has_actions: true,
-                            is_internal: false,
-                        });
+                        // Receiving, transition 0
+                        return Some(::sce_rust_runtime::TransitionId(2));
                     }
                 }
                 if event == ReassemblySlotEvent::FragmentChunk {
                     if matches!(&self.pending_payload, ReassemblySlotPayload::FragmentChunk(ev) if ev.more == 0) {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(ReassemblySlotState::Complete)],
-                            transition_index: 1,
-                            has_actions: true,
-                            is_internal: false,
-                        });
+                        // Receiving, transition 1
+                        return Some(::sce_rust_runtime::TransitionId(3));
                     }
                 }
                 if event == ReassemblySlotEvent::FragmentOoo {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(ReassemblySlotState::Aborted)],
-                            transition_index: 2,
-                            has_actions: true,
-                            is_internal: false,
-                        });
+                        // Receiving, transition 2
+                        return Some(::sce_rust_runtime::TransitionId(4));
                     }
                 }
                 if event == ReassemblySlotEvent::FragmentDrop {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(ReassemblySlotState::Aborted)],
-                            transition_index: 3,
-                            has_actions: true,
-                            is_internal: false,
-                        });
+                        // Receiving, transition 3
+                        return Some(::sce_rust_runtime::TransitionId(5));
                     }
                 }
                 if event == ReassemblySlotEvent::SlotEvict {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(ReassemblySlotState::Aborted)],
-                            transition_index: 4,
-                            has_actions: true,
-                            is_internal: false,
-                        });
+                        // Receiving, transition 4
+                        return Some(::sce_rust_runtime::TransitionId(6));
                     }
                 }
                 if event == ReassemblySlotEvent::CodecError {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(ReassemblySlotState::Aborted)],
-                            transition_index: 5,
-                            has_actions: true,
-                            is_internal: false,
-                        });
+                        // Receiving, transition 5
+                        return Some(::sce_rust_runtime::TransitionId(7));
                     }
                 }
                 if event == ReassemblySlotEvent::ReassemblyTimeout {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(ReassemblySlotState::TimedOut)],
-                            transition_index: 6,
-                            has_actions: true,
-                            is_internal: false,
-                        });
+                        // Receiving, transition 6
+                        return Some(::sce_rust_runtime::TransitionId(8));
                     }
                 }
                 None
@@ -685,13 +680,8 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
             ReassemblySlotState::TimedOut => {
                 if event == ReassemblySlotEvent::SlotRelease {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(ReassemblySlotState::Empty)],
-                            transition_index: 0,
-                            has_actions: true,
-                            is_internal: false,
-                        });
+                        // TimedOut, transition 0
+                        return Some(::sce_rust_runtime::TransitionId(10));
                     }
                 }
                 None
@@ -701,162 +691,149 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
     }
 
     // W3C SCXML 3.13: a transition's executable content, run by the engine
-    // between the microstep's exits and its entries.
+    // between the microstep's exits and its entries. `transition` is a
+    // written transition's row, one whose row says it has content.
     #[doc = "SCE-MAP: reassembly_slot.scxml:82 :: _machine"]
 // SCE-MAP: reassembly_slot.scxml:82 :: _machine
     fn execute_transition_content(
         &mut self,
-        source: Self::State,
-        transition_index: usize,
+        transition: ::sce_rust_runtime::TransitionId,
         engine: &mut sce_rust_runtime::Engine<Self>,
     ) {
-        match source {
-            ReassemblySlotState::Aborted => {
-                match transition_index {
-                    0 => {
-                        // SCE-MAP: reassembly_slot.scxml:170 :: Aborted :: _transition_0
-                        // W3C SCXML 3.13: Transition 0 actions
-                        // W3C SCXML 4.9: a transition's content is one block; an error ends it.
-                        'action_block: {
+        match transition.0 {
+            // Aborted, transition 0
+            11 => {
+                // SCE-MAP: reassembly_slot.scxml:170 :: Aborted :: _transition_0
+                // W3C SCXML 3.13: Transition 0 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
 
             // W3C SCXML G.7: <sce:action name="reset_slot">
             self.actions.reset_slot();
-                        }
-                    }
-                    _ => {}
                 }
             }
-            ReassemblySlotState::Complete => {
-                match transition_index {
-                    0 => {
-                        // SCE-MAP: reassembly_slot.scxml:155 :: Complete :: _transition_0
-                        // W3C SCXML 3.13: Transition 0 actions
-                        // W3C SCXML 4.9: a transition's content is one block; an error ends it.
-                        'action_block: {
+            // Complete, transition 0
+            9 => {
+                // SCE-MAP: reassembly_slot.scxml:155 :: Complete :: _transition_0
+                // W3C SCXML 3.13: Transition 0 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
 
             // W3C SCXML G.7: <sce:action name="reset_slot">
             self.actions.reset_slot();
-                        }
-                    }
-                    _ => {}
                 }
             }
-            ReassemblySlotState::Empty => {
-                match transition_index {
-                    0 => {
-                        // SCE-MAP: reassembly_slot.scxml:115 :: Empty :: _transition_0
-                        // W3C SCXML 3.13: Transition 0 actions
-                        // W3C SCXML 4.9: a transition's content is one block; an error ends it.
-                        'action_block: {
+            // Empty, transition 0
+            0 => {
+                // SCE-MAP: reassembly_slot.scxml:115 :: Empty :: _transition_0
+                // W3C SCXML 3.13: Transition 0 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
 
             // W3C SCXML G.7: <sce:action name="begin_chain">
             self.actions.begin_chain();
-                        }
-                    }
-                    1 => {
-                        // SCE-MAP: reassembly_slot.scxml:118 :: Empty :: _transition_1
-                        // W3C SCXML 3.13: Transition 1 actions
-                        // W3C SCXML 4.9: a transition's content is one block; an error ends it.
-                        'action_block: {
+                }
+            }
+            // Empty, transition 1
+            1 => {
+                // SCE-MAP: reassembly_slot.scxml:118 :: Empty :: _transition_1
+                // W3C SCXML 3.13: Transition 1 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
 
             // W3C SCXML G.7: <sce:action name="begin_chain">
             self.actions.begin_chain();
 
             // W3C SCXML G.7: <sce:action name="finalize_message">
             self.actions.finalize_message();
-                        }
-                    }
-                    _ => {}
                 }
             }
-            ReassemblySlotState::Receiving => {
-                match transition_index {
-                    0 => {
-                        // SCE-MAP: reassembly_slot.scxml:129 :: Receiving :: _transition_0
-                        // W3C SCXML 3.13: Transition 0 actions
-                        // W3C SCXML 4.9: a transition's content is one block; an error ends it.
-                        'action_block: {
+            // Receiving, transition 0
+            2 => {
+                // SCE-MAP: reassembly_slot.scxml:129 :: Receiving :: _transition_0
+                // W3C SCXML 3.13: Transition 0 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
 
             // W3C SCXML G.7: <sce:action name="append_fragment_payload">
             self.actions.append_fragment_payload();
-                        }
-                    }
-                    1 => {
-                        // SCE-MAP: reassembly_slot.scxml:132 :: Receiving :: _transition_1
-                        // W3C SCXML 3.13: Transition 1 actions
-                        // W3C SCXML 4.9: a transition's content is one block; an error ends it.
-                        'action_block: {
+                }
+            }
+            // Receiving, transition 1
+            3 => {
+                // SCE-MAP: reassembly_slot.scxml:132 :: Receiving :: _transition_1
+                // W3C SCXML 3.13: Transition 1 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
 
             // W3C SCXML G.7: <sce:action name="finalize_message">
             self.actions.finalize_message();
-                        }
-                    }
-                    2 => {
-                        // SCE-MAP: reassembly_slot.scxml:135 :: Receiving :: _transition_2
-                        // W3C SCXML 3.13: Transition 2 actions
-                        // W3C SCXML 4.9: a transition's content is one block; an error ends it.
-                        'action_block: {
+                }
+            }
+            // Receiving, transition 2
+            4 => {
+                // SCE-MAP: reassembly_slot.scxml:135 :: Receiving :: _transition_2
+                // W3C SCXML 3.13: Transition 2 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
 
             // W3C SCXML G.7: <sce:action name="abort_ooo">
             self.actions.abort_ooo();
-                        }
-                    }
-                    3 => {
-                        // SCE-MAP: reassembly_slot.scxml:138 :: Receiving :: _transition_3
-                        // W3C SCXML 3.13: Transition 3 actions
-                        // W3C SCXML 4.9: a transition's content is one block; an error ends it.
-                        'action_block: {
+                }
+            }
+            // Receiving, transition 3
+            5 => {
+                // SCE-MAP: reassembly_slot.scxml:138 :: Receiving :: _transition_3
+                // W3C SCXML 3.13: Transition 3 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
 
             // W3C SCXML G.7: <sce:action name="abort_peer_drop">
             self.actions.abort_peer_drop();
-                        }
-                    }
-                    4 => {
-                        // SCE-MAP: reassembly_slot.scxml:141 :: Receiving :: _transition_4
-                        // W3C SCXML 3.13: Transition 4 actions
-                        // W3C SCXML 4.9: a transition's content is one block; an error ends it.
-                        'action_block: {
+                }
+            }
+            // Receiving, transition 4
+            6 => {
+                // SCE-MAP: reassembly_slot.scxml:141 :: Receiving :: _transition_4
+                // W3C SCXML 3.13: Transition 4 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
 
             // W3C SCXML G.7: <sce:action name="abort_evicted">
             self.actions.abort_evicted();
-                        }
-                    }
-                    5 => {
-                        // SCE-MAP: reassembly_slot.scxml:144 :: Receiving :: _transition_5
-                        // W3C SCXML 3.13: Transition 5 actions
-                        // W3C SCXML 4.9: a transition's content is one block; an error ends it.
-                        'action_block: {
+                }
+            }
+            // Receiving, transition 5
+            7 => {
+                // SCE-MAP: reassembly_slot.scxml:144 :: Receiving :: _transition_5
+                // W3C SCXML 3.13: Transition 5 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
 
             // W3C SCXML G.7: <sce:action name="abort_codec">
             self.actions.abort_codec();
-                        }
-                    }
-                    6 => {
-                        // SCE-MAP: reassembly_slot.scxml:147 :: Receiving :: _transition_6
-                        // W3C SCXML 3.13: Transition 6 actions
-                        // W3C SCXML 4.9: a transition's content is one block; an error ends it.
-                        'action_block: {
+                }
+            }
+            // Receiving, transition 6
+            8 => {
+                // SCE-MAP: reassembly_slot.scxml:147 :: Receiving :: _transition_6
+                // W3C SCXML 3.13: Transition 6 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
 
             // W3C SCXML G.7: <sce:action name="record_timeout">
             self.actions.record_timeout();
-                        }
-                    }
-                    _ => {}
                 }
             }
-            ReassemblySlotState::TimedOut => {
-                match transition_index {
-                    0 => {
-                        // SCE-MAP: reassembly_slot.scxml:162 :: TimedOut :: _transition_0
-                        // W3C SCXML 3.13: Transition 0 actions
-                        // W3C SCXML 4.9: a transition's content is one block; an error ends it.
-                        'action_block: {
+            // TimedOut, transition 0
+            10 => {
+                // SCE-MAP: reassembly_slot.scxml:162 :: TimedOut :: _transition_0
+                // W3C SCXML 3.13: Transition 0 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
 
             // W3C SCXML G.7: <sce:action name="reset_slot">
             self.actions.reset_slot();
-                        }
-                    }
-                    _ => {}
                 }
             }
             _ => {}

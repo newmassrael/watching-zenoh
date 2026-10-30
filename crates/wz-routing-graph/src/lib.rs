@@ -5144,7 +5144,8 @@ mod tests {
             .build_linkstate_list()
             .try_as_borrowed()
             .expect("re-borrow A's list for encode")
-            .encode_to_vec();
+            .encode_to_vec()
+            .expect("A's list is encodable");
 
         // RX: decode the bytes back (the real peer path), then ingest on B.
         let mut cursor = SceCursor::new(&wire);
@@ -5198,7 +5199,8 @@ mod tests {
             .build_linkstate_list()
             .try_as_borrowed()
             .expect("borrow built list")
-            .encode_to_vec();
+            .encode_to_vec()
+            .expect("the built list is encodable");
         let decoded = LinkstateList::decode(&mut SceCursor::new(&wire))
             .expect("decode list wire")
             .try_into_owned()
@@ -5446,7 +5448,8 @@ mod tests {
             .build_linkstate_list()
             .try_as_borrowed()
             .expect("borrow built list")
-            .encode_to_vec();
+            .encode_to_vec()
+            .expect("the built list is encodable");
 
         let decoded = LinkstateList::decode(&mut SceCursor::new(&wire))
             .expect("decode list wire")

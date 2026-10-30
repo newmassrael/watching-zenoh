@@ -104,7 +104,9 @@ pub trait AcceptState: Sized {
     /// A fixed-capacity sink reports `CodecError::BufferOverflow` here rather
     /// than growing, which is the error a caller assembling a cookie for the
     /// Inline profile has to be able to see.
-    fn encode<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError>;
+    fn encode<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError>
+    where
+        CodecError: From<S::Error>;
 
     /// Read this state from `cursor`, advancing it past the bytes consumed.
     ///
@@ -151,11 +153,14 @@ impl PatchAcceptState {
 impl AcceptState for PatchAcceptState {
     const WIDTH: usize = 2;
 
-    fn encode<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError> {
+    fn encode<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError>
+    where
+        CodecError: From<S::Error>,
+    {
         match self.0 {
             Some(level) => {
                 sink.write_u8(Self::PRESENT)?;
-                sink.write_u8(level)
+                Ok(sink.write_u8(level)?)
             }
             // The second byte is written even when absent, so the state's
             // width does not depend on its content: a fixed width is what
@@ -163,7 +168,7 @@ impl AcceptState for PatchAcceptState {
             // length prefix.
             None => {
                 sink.write_u8(Self::ABSENT)?;
-                sink.write_u8(0)
+                Ok(sink.write_u8(0)?)
             }
         }
     }
@@ -212,8 +217,11 @@ macro_rules! flag_accept_state {
         impl AcceptState for $name {
             const WIDTH: usize = 1;
 
-            fn encode<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError> {
-                sink.write_u8(u8::from(self.0))
+            fn encode<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError>
+    where
+        CodecError: From<S::Error>,
+    {
+                Ok(sink.write_u8(u8::from(self.0))?)
             }
 
             fn decode(cursor: &mut SceCursor<'_>) -> Result<Self, CodecError> {
@@ -289,7 +297,10 @@ impl AcceptState for QosAcceptState {
     /// Tag, band presence, band start, band end, class presence, class.
     const WIDTH: usize = 6;
 
-    fn encode<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError> {
+    fn encode<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError>
+    where
+        CodecError: From<S::Error>,
+    {
         // Every byte is written whatever the arm, so the width does not
         // depend on the content -- the rule `PatchAcceptState::encode` states.
         let (tag, priorities, reliability) = match *self {
@@ -315,11 +326,11 @@ impl AcceptState for QosAcceptState {
         match reliability {
             Some(class) => {
                 sink.write_u8(1)?;
-                sink.write_u8(class as u8)
+                Ok(sink.write_u8(class as u8)?)
             }
             None => {
                 sink.write_u8(0)?;
-                sink.write_u8(0)
+                Ok(sink.write_u8(0)?)
             }
         }
     }
@@ -406,7 +417,10 @@ impl AuthAcceptState {
     /// Presence byte then eight little-endian bytes, the shape
     /// `PatchAcceptState` has and for its reason: every `u64` is a possible
     /// challenge, so no value is left over to mean "none".
-    fn encode_slot<S: SceSink>(slot: Option<u64>, sink: &mut S) -> Result<(), CodecError> {
+    fn encode_slot<S: SceSink>(slot: Option<u64>, sink: &mut S) -> Result<(), CodecError>
+    where
+        CodecError: From<S::Error>,
+    {
         let (present, value) = match slot {
             Some(v) => (1u8, v),
             None => (0u8, 0),
@@ -432,7 +446,10 @@ impl AcceptState for AuthAcceptState {
     /// Two slots of a presence byte and a `u64`.
     const WIDTH: usize = 2 * Self::SLOT;
 
-    fn encode<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError> {
+    fn encode<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError>
+    where
+        CodecError: From<S::Error>,
+    {
         Self::encode_slot(self.pubkey, sink)?;
         Self::encode_slot(self.usrpwd, sink)
     }
@@ -504,7 +521,10 @@ impl AcceptState for RegionAcceptState {
     /// admits, so the width does not depend on the name.
     const WIDTH: usize = 1 + MAX_REGION_NAME_LEN;
 
-    fn encode<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError> {
+    fn encode<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError>
+    where
+        CodecError: From<S::Error>,
+    {
         sink.write_u8(self.len)?;
         for b in self.bytes {
             sink.write_u8(b)?;
@@ -589,7 +609,10 @@ impl AcceptState for NegotiatedExtensions {
         + PatchAcceptState::WIDTH
         + RegionAcceptState::WIDTH;
 
-    fn encode<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError> {
+    fn encode<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError>
+    where
+        CodecError: From<S::Error>,
+    {
         self.qos.encode(sink)?;
         self.shm.encode(sink)?;
         self.auth.encode(sink)?;

@@ -75,7 +75,7 @@ fn scout_datagram(what: u8) -> Vec<u8> {
     // No zid — this is zenoh's own shape (`orchestrator.rs:840` sends
     // `zid: None`), so the test's asker is indistinguishable from a stock one
     // and the self-echo gate is not what is under test here.
-    let body = scout.encode_to_vec();
+    let body = scout.encode_to_vec().expect("a fixture Scout encodes");
     let mut wire = vec![wire_const::S_MID_SCOUT];
     wire.extend_from_slice(&body);
     wire

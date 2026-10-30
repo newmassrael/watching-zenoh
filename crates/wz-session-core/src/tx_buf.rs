@@ -310,6 +310,10 @@ impl<'a, B: TxBuf + ?Sized> TxSink<'a, B> {
 }
 
 impl<B: TxBuf + ?Sized> SceSink for TxSink<'_, B> {
+    /// A write the buffer refuses is the sink's error, and it is the codec's own: a codec that can
+    /// refuse a value takes `CodecError: From<Self::Error>`, which this type meets by being it.
+    type Error = CodecError;
+
     fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), CodecError> {
         self.buf.append(bytes)
     }

@@ -55,7 +55,7 @@
 
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
-       sce:kind="codec" sce:default-endian="little" name="join">
+       sce:kind="codec" sce:encode-may-fail="true" sce:default-endian="little" name="join">
   <sce:flag-inputs>
     <sce:flag-input name="S" width="1"/>
   </sce:flag-inputs>

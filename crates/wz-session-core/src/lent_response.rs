@@ -315,7 +315,10 @@ impl<'a> ResponseWriter<'a> {
 
     /// Encode the `Response` into any sink, through the codec's own encoder. A transmit sink is
     /// written through [`Self::encode_tx`], which stores a plain reply in one window.
-    pub fn encode<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError> {
+    pub fn encode<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError>
+    where
+        CodecError: From<S::Error>,
+    {
         self.encode_generic(sink)
     }
 
@@ -524,7 +527,10 @@ impl<'a> ResponseWriter<'a> {
     /// levels, a frame of over two kilobytes, and inlined into the closure that encodes a reply
     /// it set the frame of every reply, the plain ones too, which never enter it.
     #[inline(never)]
-    pub(crate) fn encode_generic<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError> {
+    pub(crate) fn encode_generic<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError>
+    where
+        CodecError: From<S::Error>,
+    {
         let parts = &self.parts;
         // The envelope's extensions: the QoS unless it is the default, then the
         // responder.
@@ -744,6 +750,7 @@ mod tests {
             .expect("the owned response is built");
         let view = response.try_as_borrowed().expect("a view");
         view.encode_to_vec()
+            .expect("the response view is encodable")
     }
 
     /// The bytes the writer writes for `parts`.

@@ -126,8 +126,8 @@ const fn bound_of<T, const N: usize>(
 /// `list.try_as_borrowed()?`, and the same refusals: every entry is projected
 /// first, in order, and an entry past [`LINK_STATES_CAP`] is
 /// `TooManyElements` (`sce_forge_runtime::codec::try_project_bounded`). An
-/// entry the generated encode refuses is an `Err` here, where the generated
-/// `encode_to_vec` panics.
+/// entry the generated encode refuses is the same `Err` here, which the
+/// generated `encode_to_vec` returns too since the codec declares it may fail.
 fn encode_linkstate_list(list: &LinkstateListOwned) -> Result<Vec<u8>, CodecError> {
     for (index, entry) in list.link_states.iter().enumerate() {
         entry.try_as_borrowed()?;
@@ -180,9 +180,9 @@ fn decode_linkstate_list_owned(
 /// separately. Owned input (the topology graph in step c2 holds owned
 /// link-state records); `alloc`-only, like the sibling builders.
 pub fn build_linkstate_oam(list: &LinkstateListOwned) -> Result<Vec<u8>, CodecError> {
-    Ok(build_linkstate_oam_owned(list)?
+    build_linkstate_oam_owned(list)?
         .try_as_borrowed()?
-        .encode_to_vec())
+        .encode_to_vec()
 }
 
 /// Build the OAM-LINKSTATE carrier as an OWNED message — the send-path form.
@@ -358,7 +358,11 @@ mod tests {
         match try_parse_linkstate_oam(&oam) {
             LinkstateOam::Decoded(parsed) => {
                 assert_eq!(
-                    parsed.try_as_borrowed().unwrap().encode_to_vec(),
+                    parsed
+                        .try_as_borrowed()
+                        .unwrap()
+                        .encode_to_vec()
+                        .expect("a parsed list is encodable"),
                     list_wire,
                     "round-trip must reproduce the inner list bytes"
                 );
@@ -381,7 +385,13 @@ mod tests {
         let oam = decode_oam_owned(&OAM_WIRE);
         match try_parse_linkstate_oam(&oam) {
             LinkstateOam::Decoded(list) => {
-                assert_eq!(list.try_as_borrowed().unwrap().encode_to_vec(), LIST_WIRE);
+                assert_eq!(
+                    list.try_as_borrowed()
+                        .unwrap()
+                        .encode_to_vec()
+                        .expect("a parsed list is encodable"),
+                    LIST_WIRE
+                );
                 assert_eq!(list.num_link_states, 1);
                 assert_eq!(list.link_states.len(), 1);
                 assert_eq!(list.link_states[0].psid, 1);
@@ -573,7 +583,11 @@ mod tests {
                 minimal_list_wire(64),
             ] {
                 let list = decode_list_owned(&wire);
-                let by_codec = list.try_as_borrowed().expect("in bound").encode_to_vec();
+                let by_codec = list
+                    .try_as_borrowed()
+                    .expect("in bound")
+                    .encode_to_vec()
+                    .expect("a list in bound is encodable");
                 assert_eq!(encode_linkstate_list(&list), Ok(by_codec.clone()));
                 assert_eq!(by_codec, wire);
             }

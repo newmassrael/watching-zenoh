@@ -108,7 +108,7 @@ fn serial_envelope_matches_pico_pre_cobs_frame() {
             payload,
             crc32: crc32(payload),
         };
-        let wire = env.encode_to_vec();
+        let wire = env.encode_to_vec().expect("serial_envelope encode");
         assert_eq!(
             &wire[..],
             expected,
@@ -198,7 +198,7 @@ fn serial_frame_full_pipeline_round_trip() {
         payload,
         crc32: crc32(payload),
     };
-    let frame = env.encode_to_vec();
+    let frame = env.encode_to_vec().expect("serial_envelope encode");
     assert_eq!(
         &frame[..],
         &[0x00, 0x03, 0x00, 0xAB, 0xCD, 0xEF, 0x77, 0x20, 0xA7, 0xFB]

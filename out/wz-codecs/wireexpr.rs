@@ -130,51 +130,151 @@ impl<'a> Wireexpr<'a> {
     /// caller-owned `SliceSink` allocations.
     pub const MAX_ENCODED_BYTES: usize = 146;
 
-    /// Encode `self` into the caller-owned sink. Returns
-    /// `CodecError::BufferOverflow` from a bounded sink when the
-    /// destination has insufficient remaining capacity; growable
-    /// sinks (e.g. `VecSink`) are effectively infallible.
-    pub fn encode<S: SceSink>(&self, w: &mut S, n: u8) -> Result<(), CodecError> {
-        // Declared-but-unconsumed flag inputs: see `decode` — same suppress per
-        // declared `<sce:flag-input>`.
-        let _ = n;
-        // Encode fixed prefix (tag field is part of the prefix). The
-        // tag value is read from the struct field, NOT derived from
-        // the body discriminant — keeping author-set msg_id / body in
-        // sync is the caller's responsibility (v1 keeps the layout
-        // simple; future extensions may auto-sync via a typed setter).
-        // Append the active arm's encoded bytes.
-        match &self.body {
-            WireexprVariant::WireexprNonlocal(b) => {
-                b.encode(w, n)?;
-            }
-            WireexprVariant::WireexprLocal(b) => {
-                b.encode(w, n)?;
-            }
-        }
-        Ok(())
+    /// Encode `self` into the caller-owned sink. Returns the value's refusal
+    /// when the encoding cannot carry it (a length past its type, a list past
+    /// its bound, a gate that disagrees with a presence; the document declares
+    /// `sce:encode-may-fail`), or the sink's own error:
+    /// `CodecError::BufferOverflow` from a bounded sink when the destination
+    /// has insufficient remaining capacity.
+    pub fn encode<S: SceSink>(&self, w: &mut S, n: u8) -> Result<(), CodecError> where CodecError: From<S::Error> {
+        Self::encode_source(self, w, n)
     }
 
     /// Heap-backed convenience facade. Pre-reserves
     /// `MAX_ENCODED_BYTES` so the worst-case write path performs at
     /// most one allocation, then delegates to `encode` over a
-    /// `VecSink`. Returns the freshly-encoded byte vector. Callers
-    /// targeting zero-alloc hot paths should call `encode` directly
-    /// against a caller-owned sink.
+    /// `VecSink`. Returns the freshly-encoded byte vector, or the error
+    /// `encode` refuses a value with: one the encoding cannot carry (a
+    /// length past its type, a list past its bound) or one a gate
+    /// disagrees with. Callers targeting zero-alloc hot paths should call
+    /// `encode` directly against a caller-owned sink.
     ///
     /// Gated on the `alloc` feature — `VecSink` lives behind the
     /// same gate (see `backends/rust/forge-runtime/src/codec.rs`). MCU /
     /// `no_std` builds without `alloc` only see the sink-based
     /// primary `encode`.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self, n: u8) -> Vec<u8> {
+    pub fn encode_to_vec(&self, n: u8) -> Result<Vec<u8>, CodecError> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
         let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink, n)
-            .expect("VecSink is infallible");
-        _sce_v
+        self.encode(&mut _sce_sink, n)?;
+        Ok(_sce_v)
     }
 }
+
+/// The arm of `Wireexpr`'s variant a value holds, each arm's body as the
+/// source it says. The tag is not among them: `Wireexpr` derives it from
+/// the arm, as it derives a length, and a default arm presents the tag
+/// it could not name.
+// A default arm's tag is read by the codec that embeds this one and
+// derives its own carrier bits from the arm, which not every build uses.
+#[allow(dead_code)]
+pub enum WireexprVariantSource<'s, A0: ?Sized, A1: ?Sized> {
+    WireexprNonlocal(&'s A0),
+    WireexprLocal(&'s A1),
+}
+
+// ── Source (ADR 0058) ────────────────────────────────────────────────
+/// What a value of `Wireexpr` says: its presented fields. A length, a count
+/// or the flag a gated field is announced by is not among them; `Wireexpr`
+/// computes those from what is ([`Wireexpr::encode_source`]).
+pub trait WireexprSource {
+    /// The arm of the variant this value holds.
+    fn body(&self) -> WireexprVariantSource<'_, impl super::wireexpr_nonlocal::WireexprNonlocalSource, impl super::wireexpr_local::WireexprLocalSource>;
+}
+
+impl<T: WireexprSource + ?Sized> WireexprSource for &T {
+    fn body(&self) -> WireexprVariantSource<'_, impl super::wireexpr_nonlocal::WireexprNonlocalSource, impl super::wireexpr_local::WireexprLocalSource> {
+        (**self).body()
+    }
+}
+
+/// The arm of `Wireexpr`'s variant that WireexprParts holds.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub enum WireexprPartsBody<'a> {
+    WireexprNonlocal(&'a super::wireexpr_nonlocal::WireexprNonlocalParts<'a>),
+    WireexprLocal(&'a super::wireexpr_local::WireexprLocalParts<'a>),
+}
+
+/// A value of `Wireexpr` held in the types a caller already has: a source
+/// ([`WireexprSource`]) whose lists are slices and whose bodies are references.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub struct WireexprParts<'a> {
+    /// The arm of the variant this value holds.
+    pub body: WireexprPartsBody<'a>,
+}
+
+impl<'a> WireexprSource for WireexprParts<'a> {
+    fn body(&self) -> WireexprVariantSource<'_, impl super::wireexpr_nonlocal::WireexprNonlocalSource, impl super::wireexpr_local::WireexprLocalSource> {
+        match &self.body {
+            WireexprPartsBody::WireexprNonlocal(_b) => WireexprVariantSource::WireexprNonlocal(*_b),
+            WireexprPartsBody::WireexprLocal(_b) => WireexprVariantSource::WireexprLocal(*_b),
+        }
+    }
+}
+
+impl<'a> WireexprSource for Wireexpr<'a> {
+    fn body(&self) -> WireexprVariantSource<'_, impl super::wireexpr_nonlocal::WireexprNonlocalSource, impl super::wireexpr_local::WireexprLocalSource> {
+        match &self.body {
+            WireexprVariant::WireexprNonlocal(_b) => WireexprVariantSource::WireexprNonlocal(_b),
+            WireexprVariant::WireexprLocal(_b) => WireexprVariantSource::WireexprLocal(_b),
+        }
+    }
+}
+
+impl<'a> WireexprSource for WireexprView<'a> {
+    fn body(&self) -> WireexprVariantSource<'_, impl super::wireexpr_nonlocal::WireexprNonlocalSource, impl super::wireexpr_local::WireexprLocalSource> {
+        match &self.body {
+            WireexprViewVariant::WireexprNonlocal(_b) => WireexprVariantSource::WireexprNonlocal(_b),
+            WireexprViewVariant::WireexprLocal(_b) => WireexprVariantSource::WireexprLocal(_b),
+        }
+    }
+}
+
+impl<S: ::sce_forge_runtime::codec::CodecStorage> WireexprSource for WireexprOwned<S> {
+    fn body(&self) -> WireexprVariantSource<'_, impl super::wireexpr_nonlocal::WireexprNonlocalSource, impl super::wireexpr_local::WireexprLocalSource> {
+        match &self.body {
+            WireexprOwnedVariant::WireexprNonlocal(_b) => WireexprVariantSource::WireexprNonlocal(_b),
+            WireexprOwnedVariant::WireexprLocal(_b) => WireexprVariantSource::WireexprLocal(_b),
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl<'a> Wireexpr<'a> {
+    /// Encode what `src` says into the caller-owned sink: the bytes
+    /// [`Self::encode`] writes for the value it holds, read through
+    /// [`WireexprSource`]. A length, a count or a gate flag is computed from what
+    /// `src` presents, and a value the encoding cannot carry is refused
+    /// before the first byte is written.
+    pub fn encode_source<S: WireexprSource + ?Sized, K: SceSink>(src: &S, w: &mut K, n: u8) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        Self::count_source(src, n)?;
+        Self::write_source(src, w, n)
+    }
+
+    /// [`Self::encode_source`] without the guard a parent has already made.
+    #[doc(hidden)]
+    pub fn write_source<S: WireexprSource + ?Sized, K: SceSink>(src: &S, w: &mut K, n: u8) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        let _ = n;
+        match src.body() {
+            WireexprVariantSource::WireexprNonlocal(_b) => WireexprNonlocal::write_source(_b, w, n)?,
+            WireexprVariantSource::WireexprLocal(_b) => WireexprLocal::write_source(_b, w, n)?,
+        }
+        Ok(())
+    }
+
+    /// The bytes [`Self::write_source`] writes for `src`, counted with
+    /// nothing written.
+    #[doc(hidden)]
+    pub fn count_source<S: WireexprSource + ?Sized>(src: &S, n: u8) -> Result<usize, CodecError> {
+        let mut _c = ::sce_forge_runtime::codec::CountSink::new();
+        Self::write_source(src, &mut _c, n)?;
+        Ok(_c.len())
+    }
+}
+
 
 // ── View (ADR 0049) ──────────────────────────────────────────────────
 // `WireexprView` is what a decode of `Wireexpr` learned, not a
@@ -295,35 +395,18 @@ impl<'a> WireexprView<'a> {
     /// builder. It writes the canonical wire, not the frame the view was decoded
     /// from, so a frame `decode` accepted in a form that is not canonical is
     /// not passed on as it came.
-    pub fn encode<S: SceSink>(&self, w: &mut S, n: u8) -> Result<(), CodecError> {
-        // Declared-but-unconsumed flag inputs: see `decode` — same suppress per
-        // declared `<sce:flag-input>`.
-        let _ = n;
-        // Encode fixed prefix (tag field is part of the prefix). The
-        // tag value is read from the struct field, NOT derived from
-        // the body discriminant — keeping author-set msg_id / body in
-        // sync is the caller's responsibility (v1 keeps the layout
-        // simple; future extensions may auto-sync via a typed setter).
-        // Append the active arm's encoded bytes.
-        match &self.body {
-            WireexprViewVariant::WireexprNonlocal(b) => {
-                b.encode(w, n)?;
-            }
-            WireexprViewVariant::WireexprLocal(b) => {
-                b.encode(w, n)?;
-            }
-        }
-        Ok(())
+    pub fn encode<S: SceSink>(&self, w: &mut S, n: u8) -> Result<(), CodecError> where CodecError: From<S::Error> {
+        Wireexpr::encode_source(self, w, n)
     }
 
-    /// Heap-backed convenience facade over [`Self::encode`].
+    /// Heap-backed convenience facade over [`Self::encode`], which refuses a
+    /// value it cannot carry.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self, n: u8) -> Vec<u8> {
+    pub fn encode_to_vec(&self, n: u8) -> Result<Vec<u8>, CodecError> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
         let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink, n)
-            .expect("VecSink is infallible");
-        _sce_v
+        self.encode(&mut _sce_sink, n)?;
+        Ok(_sce_v)
     }
 }
 
@@ -517,40 +600,24 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> WireexprOwned<S> {
     ///
     /// The projection builds the whole borrowed record (every list and
     /// embedded body in it, by value) only for `encode` to read it once. A
-    /// sender that holds an owned value encodes it from here. The same
-    /// refusals as the projection's: a list longer than the borrowed view
-    /// declares raises `CodecError::TooManyElements`, so an owned value the
+    /// sender that holds an owned value encodes it from here.
+    /// The same refusals as the projection's: a list longer than the borrowed
+    /// view declares raises `CodecError::TooManyElements`, so an owned value the
     /// borrowed form could not carry is an error and never a frame its own
     /// decoder would reject.
-    pub fn encode<K: SceSink>(&self, w: &mut K, n: u8) -> Result<(), CodecError> {
-        // Declared-but-unconsumed flag inputs: see `decode` — same suppress per
-        // declared `<sce:flag-input>`.
-        let _ = n;
-        // Encode fixed prefix (tag field is part of the prefix). The
-        // tag value is read from the struct field, NOT derived from
-        // the body discriminant — keeping author-set msg_id / body in
-        // sync is the caller's responsibility (v1 keeps the layout
-        // simple; future extensions may auto-sync via a typed setter).
-        // Append the active arm's encoded bytes.
-        match &self.body {
-            WireexprOwnedVariant::WireexprNonlocal(b) => {
-                b.encode(w, n)?;
-            }
-            WireexprOwnedVariant::WireexprLocal(b) => {
-                b.encode(w, n)?;
-            }
-        }
-        Ok(())
+    pub fn encode<K: SceSink>(&self, w: &mut K, n: u8) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        Wireexpr::encode_source(self, w, n)
     }
 
-    /// Heap-backed convenience facade over [`Self::encode`].
+    /// Heap-backed convenience facade over [`Self::encode`]. Fallible: a list
+    /// past the bound the borrowed view declares is refused, as is any value
+    /// the encoding cannot carry.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self, n: u8) -> Vec<u8> {
+    pub fn encode_to_vec(&self, n: u8) -> Result<Vec<u8>, CodecError> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Wireexpr::MAX_ENCODED_BYTES);
         let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink, n)
-            .expect("VecSink is infallible");
-        _sce_v
+        self.encode(&mut _sce_sink, n)?;
+        Ok(_sce_v)
     }
 }
 

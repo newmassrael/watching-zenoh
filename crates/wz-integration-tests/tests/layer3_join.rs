@@ -126,7 +126,8 @@ fn layer3_join_s0_basic() {
         next_sn_reliable: input.next_sn_reliable,
         next_sn_best_effort: input.next_sn_best_effort,
     }
-    .encode_to_vec(((input.parent_flags) >> 6) & 1);
+    .encode_to_vec(((input.parent_flags) >> 6) & 1)
+    .expect("the Join encodes");
     let pico = zenoh_pico_encode_join(&input);
     assert_eq!(wz, pico);
 }
@@ -158,7 +159,8 @@ fn layer3_join_s1_with_size_negotiation() {
         next_sn_reliable: input.next_sn_reliable,
         next_sn_best_effort: input.next_sn_best_effort,
     }
-    .encode_to_vec(((input.parent_flags) >> 6) & 1);
+    .encode_to_vec(((input.parent_flags) >> 6) & 1)
+    .expect("the Join encodes");
     let pico = zenoh_pico_encode_join(&input);
     assert_eq!(wz, pico);
 }
@@ -197,7 +199,8 @@ fn layer3_join_t_flag_lease_in_seconds() {
         next_sn_reliable: input.next_sn_reliable,
         next_sn_best_effort: input.next_sn_best_effort,
     }
-    .encode_to_vec(((input.parent_flags) >> 6) & 1);
+    .encode_to_vec(((input.parent_flags) >> 6) & 1)
+    .expect("the Join encodes");
     let pico = zenoh_pico_encode_join(&input);
     assert_eq!(wz, pico);
 }
@@ -240,7 +243,8 @@ fn layer3_join_vle_boundaries_on_sn() {
             next_sn_reliable: sn_r,
             next_sn_best_effort: sn_be,
         }
-        .encode_to_vec(((input.parent_flags) >> 6) & 1);
+        .encode_to_vec(((input.parent_flags) >> 6) & 1)
+        .expect("the Join encodes");
         let pico = zenoh_pico_encode_join(&input);
         assert_eq!(
             wz, pico,

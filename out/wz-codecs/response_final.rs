@@ -168,50 +168,192 @@ impl<'a> ResponseFinal<'a> {
     /// caller-owned `SliceSink` allocations.
     pub const MAX_ENCODED_BYTES: usize = 346;
 
-    /// Encode `self` into the caller-owned sink. Returns
-    /// `CodecError::BufferOverflow` from a bounded sink when the
-    /// destination has insufficient remaining capacity; growable
-    /// sinks (e.g. `VecSink`) are effectively infallible.
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> {
-        // Streaming cursor encode (SSOT selection: `needs_streaming`).
-        // Mirrors the streaming decode: every field appends its own bytes
-        // in declaration order through the per-field encode blocks, so a
-        // gated field skips its append when absent, and a fixed field after
-        // a variable-length payload lands after the payload (the positional
-        // path appends variable fields last, placing it ahead on the wire).
-        // Per-field `is_repeat` / `is_tlv_chain` / `is_embed` route to their
-        // dedicated helpers; everything else uses `present_if_encode_block`
-        // (its non-gated arm covers plain fixed / tail / length-ref / VLE).
-        w.write_u8(self.header)?;
-        w.write_vle_u64(self.request_id)?;
-        if let Some(_list) = &self.extensions {
-            for _e in _list {
-                _e.encode(w)?;
-            }
-        }
-        Ok(())
+    /// Encode `self` into the caller-owned sink. Returns the value's refusal
+    /// when the encoding cannot carry it (a length past its type, a list past
+    /// its bound, a gate that disagrees with a presence; the document declares
+    /// `sce:encode-may-fail`), or the sink's own error:
+    /// `CodecError::BufferOverflow` from a bounded sink when the destination
+    /// has insufficient remaining capacity.
+    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> where CodecError: From<S::Error> {
+        Self::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. Pre-reserves
     /// `MAX_ENCODED_BYTES` so the worst-case write path performs at
     /// most one allocation, then delegates to `encode` over a
-    /// `VecSink`. Returns the freshly-encoded byte vector. Callers
-    /// targeting zero-alloc hot paths should call `encode` directly
-    /// against a caller-owned sink.
+    /// `VecSink`. Returns the freshly-encoded byte vector, or the error
+    /// `encode` refuses a value with: one the encoding cannot carry (a
+    /// length past its type, a list past its bound) or one a gate
+    /// disagrees with. Callers targeting zero-alloc hot paths should call
+    /// `encode` directly against a caller-owned sink.
     ///
     /// Gated on the `alloc` feature — `VecSink` lives behind the
     /// same gate (see `backends/rust/forge-runtime/src/codec.rs`). MCU /
     /// `no_std` builds without `alloc` only see the sink-based
     /// primary `encode`.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Vec<u8> {
+    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
         let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)
-            .expect("VecSink is infallible");
-        _sce_v
+        self.encode(&mut _sce_sink)?;
+        Ok(_sce_v)
     }
 }
+
+// ── Source (ADR 0058) ────────────────────────────────────────────────
+/// What a value of `ResponseFinal` says: its presented fields. A length, a count
+/// or the flag a gated field is announced by is not among them; `ResponseFinal`
+/// computes those from what is ([`ResponseFinal::encode_source`]).
+pub trait ResponseFinalSource {
+    /// The `header` field.
+    fn header(&self) -> u8;
+    /// The `request_id` field.
+    fn request_id(&self) -> u64;
+    /// The `extensions` field.
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone>;
+}
+
+impl<T: ResponseFinalSource + ?Sized> ResponseFinalSource for &T {
+    fn header(&self) -> u8 {
+        (**self).header()
+    }
+    fn request_id(&self) -> u64 {
+        (**self).request_id()
+    }
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+        (**self).extensions()
+    }
+}
+
+/// A value of `ResponseFinal` held in the types a caller already has: a source
+/// ([`ResponseFinalSource`]) whose lists are slices and whose bodies are references.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub struct ResponseFinalParts<'a> {
+    /// The `header` field.
+    pub header: u8,
+    /// The `request_id` field.
+    pub request_id: u64,
+    /// The `extensions` field.
+    pub extensions: Option<&'a [super::ext_entry::ExtEntryParts<'a>]>,
+}
+
+impl<'a> ResponseFinalSource for ResponseFinalParts<'a> {
+    fn header(&self) -> u8 {
+        self.header
+    }
+    fn request_id(&self) -> u64 {
+        self.request_id
+    }
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+        self.extensions.map(<[_]>::iter)
+    }
+}
+
+impl<'a> ResponseFinalSource for ResponseFinal<'a> {
+    fn header(&self) -> u8 {
+        self.header
+    }
+    fn request_id(&self) -> u64 {
+        self.request_id
+    }
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+        self.extensions.as_ref().map(|_l| _l.iter())
+    }
+}
+
+impl<'a> ResponseFinalSource for ResponseFinalView<'a> {
+    fn header(&self) -> u8 {
+        self.header
+    }
+    fn request_id(&self) -> u64 {
+        self.request_id
+    }
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+        self.extensions.as_ref().map(|_l| _l.iter())
+    }
+}
+
+impl<S: ::sce_forge_runtime::codec::CodecStorage> ResponseFinalSource for ResponseFinalOwned<S> {
+    fn header(&self) -> u8 {
+        self.header
+    }
+    fn request_id(&self) -> u64 {
+        self.request_id
+    }
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+        self.extensions.as_ref().map(|_l| ::sce_forge_runtime::codec::SceList::as_slice(_l).iter())
+    }
+}
+
+#[allow(dead_code)]
+impl<'a> ResponseFinal<'a> {
+    /// Encode what `src` says into the caller-owned sink: the bytes
+    /// [`Self::encode`] writes for the value it holds, read through
+    /// [`ResponseFinalSource`]. A length, a count or a gate flag is computed from what
+    /// `src` presents, and a value the encoding cannot carry is refused
+    /// before the first byte is written.
+    pub fn encode_source<S: ResponseFinalSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        Self::count_source(src)?;
+        Self::write_source(src, w)
+    }
+
+    /// [`Self::encode_source`] without the guard a parent has already made.
+    #[doc(hidden)]
+    pub fn write_source<S: ResponseFinalSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        let _k_extensions: usize = src.extensions().map_or(0, |_l| _l.count());
+        if _k_extensions > 8 {
+            return Err(CodecError::TlvChainOverflow);
+        }
+        let _p_header_z_0: bool = src.extensions().is_some();
+        let _c_header: u8 = (src.header() & !0x80) | (u8::from(_p_header_z_0) << 7);
+        w.write_u8(_c_header)?;
+        w.write_vle_u64(src.request_id())?;
+        if let Some(_v) = src.extensions() {
+            for (_i, _e) in _v.enumerate() {
+                ExtEntry::write_source_in(&_e, w, &super::ext_entry::ExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The bytes [`Self::write_source`] writes for `src`, counted with
+    /// nothing written.
+    #[doc(hidden)]
+    pub fn count_source<S: ResponseFinalSource + ?Sized>(src: &S) -> Result<usize, CodecError> {
+        let mut _c = ::sce_forge_runtime::codec::CountSink::new();
+        Self::write_source(src, &mut _c)?;
+        Ok(_c.len())
+    }
+}
+
+impl<'a, S: ResponseFinalSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for ResponseFinal<'a> {
+    type Error<E> = CodecError;
+
+    fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        Self::write_source(src, w)
+    }
+}
+
+#[allow(dead_code)]
+impl<'a> ResponseFinal<'a> {
+    /// The size of the frame [`Self::encode_source`] writes for `src`, found
+    /// with nothing written, or the refusal that encode would give. The result
+    /// writes the frame into a window of exactly that size and cannot fail.
+    pub fn measure<S: ResponseFinalSource + ?Sized>(src: &S) -> Result<::sce_forge_runtime::codec::Measured<'_, Self, S>, CodecError> {
+        ::sce_forge_runtime::codec::measure(src)
+    }
+
+    /// Write `src` into `window` in one pass and return the bytes it is, for a
+    /// window as large as the caller can spare. On an error the window holds a
+    /// prefix to discard; see [`::sce_forge_runtime::codec::write_window`].
+    pub fn write_window<S: ResponseFinalSource + ?Sized>(src: &S, window: &mut [u8]) -> Result<usize, CodecError> {
+        let mut sink = ::sce_forge_runtime::codec::SliceSink::new(window);
+        Self::write_source(src, &mut sink)?;
+        Ok(sink.position())
+    }
+}
+
 
 // ── View (ADR 0049) ──────────────────────────────────────────────────
 // `ResponseFinalView` is what a decode of `ResponseFinal` learned, not a
@@ -354,34 +496,18 @@ impl<'a> ResponseFinalView<'a> {
     /// builder. It writes the canonical wire, not the frame the view was decoded
     /// from, so a frame `decode` accepted in a form that is not canonical is
     /// not passed on as it came.
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> {
-        // Streaming cursor encode (SSOT selection: `needs_streaming`).
-        // Mirrors the streaming decode: every field appends its own bytes
-        // in declaration order through the per-field encode blocks, so a
-        // gated field skips its append when absent, and a fixed field after
-        // a variable-length payload lands after the payload (the positional
-        // path appends variable fields last, placing it ahead on the wire).
-        // Per-field `is_repeat` / `is_tlv_chain` / `is_embed` route to their
-        // dedicated helpers; everything else uses `present_if_encode_block`
-        // (its non-gated arm covers plain fixed / tail / length-ref / VLE).
-        w.write_u8(self.header)?;
-        w.write_vle_u64(self.request_id)?;
-        if let Some(_list) = &self.extensions {
-            for _e in _list.iter() {
-                _e.encode(w)?;
-            }
-        }
-        Ok(())
+    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> where CodecError: From<S::Error> {
+        ResponseFinal::encode_source(self, w)
     }
 
-    /// Heap-backed convenience facade over [`Self::encode`].
+    /// Heap-backed convenience facade over [`Self::encode`], which refuses a
+    /// value it cannot carry.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Vec<u8> {
+    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
         let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)
-            .expect("VecSink is infallible");
-        _sce_v
+        self.encode(&mut _sce_sink)?;
+        Ok(_sce_v)
     }
 
     pub fn mid(&self) -> u8 {
@@ -540,34 +666,18 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> ResponseFinalOwned<S> {
     ///
     /// The projection builds the whole borrowed record (every list and
     /// embedded body in it, by value) only for `encode` to read it once. A
-    /// sender that holds an owned value encodes it from here. The same
-    /// refusals as the projection's: a list longer than the borrowed view
-    /// declares raises `CodecError::TooManyElements`, so an owned value the
+    /// sender that holds an owned value encodes it from here.
+    /// The same refusals as the projection's: a list longer than the borrowed
+    /// view declares raises `CodecError::TooManyElements`, so an owned value the
     /// borrowed form could not carry is an error and never a frame its own
     /// decoder would reject.
-    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), CodecError> {
-        // Streaming cursor encode (SSOT selection: `needs_streaming`).
-        // Mirrors the streaming decode: every field appends its own bytes
-        // in declaration order through the per-field encode blocks, so a
-        // gated field skips its append when absent, and a fixed field after
-        // a variable-length payload lands after the payload (the positional
-        // path appends variable fields last, placing it ahead on the wire).
-        // Per-field `is_repeat` / `is_tlv_chain` / `is_embed` route to their
-        // dedicated helpers; everything else uses `present_if_encode_block`
-        // (its non-gated arm covers plain fixed / tail / length-ref / VLE).
-        w.write_u8(self.header)?;
-        w.write_vle_u64(self.request_id)?;
-        if let Some(_list) = &self.extensions {
-            for _e in ::sce_forge_runtime::codec::bounded_entries::<_, _, 8>(_list)? {
-                _e.encode(w)?;
-            }
-        }
-        Ok(())
+    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        ResponseFinal::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade over [`Self::encode`]. Fallible: a list
-    /// past the bound the borrowed view declares is refused, and so is a
-    /// presence the chain predicates disagree with.
+    /// past the bound the borrowed view declares is refused, as is any value
+    /// the encoding cannot carry.
     #[cfg(feature = "alloc")]
     pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(ResponseFinal::MAX_ENCODED_BYTES);

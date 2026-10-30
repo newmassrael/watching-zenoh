@@ -147,11 +147,24 @@ fn declare_kexpr(id: u64, suffix: &'static str) -> Vec<u8> {
         ..Default::default()
     }
     .encode_to_vec()
+    .expect("a fixture declaration is encodable")
 }
 
 /// A `Push` under `keyexpr` carrying `payload`.
 fn push(keyexpr: Wireexpr<'static>, payload: &'static [u8]) -> Vec<u8> {
+    // The header's `N` flag says the key carries a suffix; the encoder refuses a suffix the
+    // header does not announce.
+    let named = matches!(
+        &keyexpr.body,
+        WireexprVariant::WireexprLocal(local) if local.suffix.is_some()
+    );
     wz_codecs::push::Push {
+        header: wz_codecs::push::Push::default().header
+            | if named {
+                wz_session_core::wire_const::FLAG_N_N
+            } else {
+                0
+            },
         keyexpr,
         body: wz_codecs::push::PushVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPut {
             payload_len: Some(payload.len() as u64),
@@ -161,6 +174,7 @@ fn push(keyexpr: Wireexpr<'static>, payload: &'static [u8]) -> Vec<u8> {
         ..Default::default()
     }
     .encode_to_vec()
+    .expect("a fixture push is encodable")
 }
 
 /// A two-sided handshake on one link, which is what makes it a LINK: A names
@@ -560,7 +574,11 @@ fn full_handshake() -> Vec<(bool, Vec<u8>)> {
             cookie_len: if is_ack { Some(0) } else { None },
             cookie: if is_ack { Some(&[]) } else { None },
         };
-        wire.extend_from_slice(&body.encode_to_vec(0, u8::from(is_ack)));
+        wire.extend_from_slice(
+            &body
+                .encode_to_vec(0, u8::from(is_ack))
+                .expect("a fixture init body is encodable"),
+        );
         wire
     };
     let open = |is_ack: bool| {
@@ -577,7 +595,8 @@ fn full_handshake() -> Vec<(bool, Vec<u8>)> {
                 cookie_len: if is_ack { None } else { Some(0) },
                 cookie: if is_ack { None } else { Some(&[]) },
             }
-            .encode_to_vec(u8::from(is_ack)),
+            .encode_to_vec(u8::from(is_ack))
+            .expect("a fixture open body is encodable"),
         );
         wire
     };

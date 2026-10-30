@@ -245,62 +245,258 @@ impl<'a> Reply<'a> {
     /// caller-owned `SliceSink` allocations.
     pub const MAX_ENCODED_BYTES: usize = 2201;
 
-    /// Encode `self` into the caller-owned sink. Returns
-    /// `CodecError::BufferOverflow` from a bounded sink when the
-    /// destination has insufficient remaining capacity; growable
-    /// sinks (e.g. `VecSink`) are effectively infallible.
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> {
-        // RFC §synth-5-B peek-byte / streaming-prefix:
-        // streaming prefix encode (per-field present_if/tlv-chain/embed/
-        // repeat helpers). Peek-byte mode: the arm body's encode prepends
-        // its own header byte (which the decoder peeked); no separate
-        // tag byte is emitted here. Streaming-prefix mode (own-field
-        // variant): the carrier is part of the prefix fields and emits
-        // through the same per-field path.
-        w.write_u8(self.header)?;
-        if let Some(_v) = self.consolidation {
-            w.write_u8(_v)?;
-        }
-        if let Some(_list) = &self.extensions {
-            for _e in _list {
-                _e.encode(w)?;
-            }
-        }
-        // Append the active arm's encoded bytes.
-        match &self.body {
-            ReplyVariant::CodecZenohMsgPut(b) => {
-                b.encode(w)?;
-            }
-            ReplyVariant::CodecZenohMsgDel(b) => {
-                b.encode(w)?;
-            }
-            ReplyVariant::Default { body, .. } => {
-                body.encode(w)?;
-            }
-        }
-        Ok(())
+    /// Encode `self` into the caller-owned sink. Returns the value's refusal
+    /// when the encoding cannot carry it (a length past its type, a list past
+    /// its bound, a gate that disagrees with a presence; the document declares
+    /// `sce:encode-may-fail`), or the sink's own error:
+    /// `CodecError::BufferOverflow` from a bounded sink when the destination
+    /// has insufficient remaining capacity.
+    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> where CodecError: From<S::Error> {
+        Self::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. Pre-reserves
     /// `MAX_ENCODED_BYTES` so the worst-case write path performs at
     /// most one allocation, then delegates to `encode` over a
-    /// `VecSink`. Returns the freshly-encoded byte vector. Callers
-    /// targeting zero-alloc hot paths should call `encode` directly
-    /// against a caller-owned sink.
+    /// `VecSink`. Returns the freshly-encoded byte vector, or the error
+    /// `encode` refuses a value with: one the encoding cannot carry (a
+    /// length past its type, a list past its bound) or one a gate
+    /// disagrees with. Callers targeting zero-alloc hot paths should call
+    /// `encode` directly against a caller-owned sink.
     ///
     /// Gated on the `alloc` feature — `VecSink` lives behind the
     /// same gate (see `backends/rust/forge-runtime/src/codec.rs`). MCU /
     /// `no_std` builds without `alloc` only see the sink-based
     /// primary `encode`.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Vec<u8> {
+    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
         let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)
-            .expect("VecSink is infallible");
-        _sce_v
+        self.encode(&mut _sce_sink)?;
+        Ok(_sce_v)
     }
 }
+
+/// The arm of `Reply`'s variant a value holds, each arm's body as the
+/// source it says. The tag is not among them: `Reply` derives it from
+/// the arm, as it derives a length, and a default arm presents the tag
+/// it could not name.
+// A default arm's tag is read by the codec that embeds this one and
+// derives its own carrier bits from the arm, which not every build uses.
+#[allow(dead_code)]
+pub enum ReplyVariantSource<'s, A0: ?Sized, A1: ?Sized, D: ?Sized> {
+    CodecZenohMsgPut(&'s A0),
+    CodecZenohMsgDel(&'s A1),
+    Default { tag: u8, body: &'s D },
+}
+
+// ── Source (ADR 0058) ────────────────────────────────────────────────
+/// What a value of `Reply` says: its presented fields. A length, a count
+/// or the flag a gated field is announced by is not among them; `Reply`
+/// computes those from what is ([`Reply::encode_source`]).
+pub trait ReplySource {
+    /// The `header` field.
+    fn header(&self) -> u8;
+    /// The `consolidation` field.
+    fn consolidation(&self) -> Option<u8>;
+    /// The `extensions` field.
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone>;
+    /// The arm of the variant this value holds.
+    fn body(&self) -> ReplyVariantSource<'_, impl super::msg_put::MsgPutSource, impl super::msg_del::MsgDelSource, impl super::msg_put::MsgPutSource>;
+}
+
+impl<T: ReplySource + ?Sized> ReplySource for &T {
+    fn header(&self) -> u8 {
+        (**self).header()
+    }
+    fn consolidation(&self) -> Option<u8> {
+        (**self).consolidation()
+    }
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+        (**self).extensions()
+    }
+    fn body(&self) -> ReplyVariantSource<'_, impl super::msg_put::MsgPutSource, impl super::msg_del::MsgDelSource, impl super::msg_put::MsgPutSource> {
+        (**self).body()
+    }
+}
+
+/// The arm of `Reply`'s variant that ReplyParts holds.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub enum ReplyPartsBody<'a> {
+    CodecZenohMsgPut(&'a super::msg_put::MsgPutParts<'a>),
+    CodecZenohMsgDel(&'a super::msg_del::MsgDelParts<'a>),
+    /// The tag the grammar could not name, and the body it holds.
+    Default { tag: u8, body: &'a super::msg_put::MsgPutParts<'a> },
+}
+
+/// A value of `Reply` held in the types a caller already has: a source
+/// ([`ReplySource`]) whose lists are slices and whose bodies are references.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub struct ReplyParts<'a> {
+    /// The `header` field.
+    pub header: u8,
+    /// The `consolidation` field.
+    pub consolidation: Option<u8>,
+    /// The `extensions` field.
+    pub extensions: Option<&'a [super::ext_entry::ExtEntryParts<'a>]>,
+    /// The arm of the variant this value holds.
+    pub body: ReplyPartsBody<'a>,
+}
+
+impl<'a> ReplySource for ReplyParts<'a> {
+    fn header(&self) -> u8 {
+        self.header
+    }
+    fn consolidation(&self) -> Option<u8> {
+        self.consolidation
+    }
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+        self.extensions.map(<[_]>::iter)
+    }
+    fn body(&self) -> ReplyVariantSource<'_, impl super::msg_put::MsgPutSource, impl super::msg_del::MsgDelSource, impl super::msg_put::MsgPutSource> {
+        match &self.body {
+            ReplyPartsBody::CodecZenohMsgPut(_b) => ReplyVariantSource::CodecZenohMsgPut(*_b),
+            ReplyPartsBody::CodecZenohMsgDel(_b) => ReplyVariantSource::CodecZenohMsgDel(*_b),
+            ReplyPartsBody::Default { tag, body } => ReplyVariantSource::Default { tag: *tag, body: *body },
+        }
+    }
+}
+
+impl<'a> ReplySource for Reply<'a> {
+    fn header(&self) -> u8 {
+        self.header
+    }
+    fn consolidation(&self) -> Option<u8> {
+        self.consolidation
+    }
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+        self.extensions.as_ref().map(|_l| _l.iter())
+    }
+    fn body(&self) -> ReplyVariantSource<'_, impl super::msg_put::MsgPutSource, impl super::msg_del::MsgDelSource, impl super::msg_put::MsgPutSource> {
+        match &self.body {
+            ReplyVariant::CodecZenohMsgPut(_b) => ReplyVariantSource::CodecZenohMsgPut(_b),
+            ReplyVariant::CodecZenohMsgDel(_b) => ReplyVariantSource::CodecZenohMsgDel(_b),
+            ReplyVariant::Default { tag, body } => ReplyVariantSource::Default { tag: *tag, body },
+        }
+    }
+}
+
+impl<'a> ReplySource for ReplyView<'a> {
+    fn header(&self) -> u8 {
+        self.header
+    }
+    fn consolidation(&self) -> Option<u8> {
+        self.consolidation
+    }
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+        self.extensions.as_ref().map(|_l| _l.iter())
+    }
+    fn body(&self) -> ReplyVariantSource<'_, impl super::msg_put::MsgPutSource, impl super::msg_del::MsgDelSource, impl super::msg_put::MsgPutSource> {
+        match &self.body {
+            ReplyViewVariant::CodecZenohMsgPut(_b) => ReplyVariantSource::CodecZenohMsgPut(_b),
+            ReplyViewVariant::CodecZenohMsgDel(_b) => ReplyVariantSource::CodecZenohMsgDel(_b),
+            ReplyViewVariant::Default { tag, body } => ReplyVariantSource::Default { tag: *tag, body },
+        }
+    }
+}
+
+impl<S: ::sce_forge_runtime::codec::CodecStorage> ReplySource for ReplyOwned<S> {
+    fn header(&self) -> u8 {
+        self.header
+    }
+    fn consolidation(&self) -> Option<u8> {
+        self.consolidation
+    }
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+        self.extensions.as_ref().map(|_l| ::sce_forge_runtime::codec::SceList::as_slice(_l).iter())
+    }
+    fn body(&self) -> ReplyVariantSource<'_, impl super::msg_put::MsgPutSource, impl super::msg_del::MsgDelSource, impl super::msg_put::MsgPutSource> {
+        match &self.body {
+            ReplyOwnedVariant::CodecZenohMsgPut(_b) => ReplyVariantSource::CodecZenohMsgPut(_b),
+            ReplyOwnedVariant::CodecZenohMsgDel(_b) => ReplyVariantSource::CodecZenohMsgDel(_b),
+            ReplyOwnedVariant::Default { tag, body } => ReplyVariantSource::Default { tag: *tag, body },
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl<'a> Reply<'a> {
+    /// Encode what `src` says into the caller-owned sink: the bytes
+    /// [`Self::encode`] writes for the value it holds, read through
+    /// [`ReplySource`]. A length, a count or a gate flag is computed from what
+    /// `src` presents, and a value the encoding cannot carry is refused
+    /// before the first byte is written.
+    pub fn encode_source<S: ReplySource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        Self::count_source(src)?;
+        Self::write_source(src, w)
+    }
+
+    /// [`Self::encode_source`] without the guard a parent has already made.
+    #[doc(hidden)]
+    pub fn write_source<S: ReplySource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        let _k_extensions: usize = src.extensions().map_or(0, |_l| _l.count());
+        if _k_extensions > 8 {
+            return Err(CodecError::TlvChainOverflow);
+        }
+        let _p_header_c_0: bool = src.consolidation().is_some();
+        let _p_header_z_0: bool = src.extensions().is_some();
+        let _c_header: u8 = (((src.header() & !0x20) | (u8::from(_p_header_c_0) << 5)) & !0x80) | (u8::from(_p_header_z_0) << 7);
+        w.write_u8(_c_header)?;
+        if let Some(_v) = src.consolidation() {
+            w.write_u8(_v)?;
+        }
+        if let Some(_v) = src.extensions() {
+            for (_i, _e) in _v.enumerate() {
+                ExtEntry::write_source_in(&_e, w, &super::ext_entry::ExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
+            }
+        }
+        match src.body() {
+            ReplyVariantSource::CodecZenohMsgPut(_b) => MsgPut::write_source(_b, w)?,
+            ReplyVariantSource::CodecZenohMsgDel(_b) => MsgDel::write_source(_b, w)?,
+            ReplyVariantSource::Default { body: _b, .. } => MsgPut::write_source(_b, w)?,
+        }
+        Ok(())
+    }
+
+    /// The bytes [`Self::write_source`] writes for `src`, counted with
+    /// nothing written.
+    #[doc(hidden)]
+    pub fn count_source<S: ReplySource + ?Sized>(src: &S) -> Result<usize, CodecError> {
+        let mut _c = ::sce_forge_runtime::codec::CountSink::new();
+        Self::write_source(src, &mut _c)?;
+        Ok(_c.len())
+    }
+}
+
+impl<'a, S: ReplySource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for Reply<'a> {
+    type Error<E> = CodecError;
+
+    fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        Self::write_source(src, w)
+    }
+}
+
+#[allow(dead_code)]
+impl<'a> Reply<'a> {
+    /// The size of the frame [`Self::encode_source`] writes for `src`, found
+    /// with nothing written, or the refusal that encode would give. The result
+    /// writes the frame into a window of exactly that size and cannot fail.
+    pub fn measure<S: ReplySource + ?Sized>(src: &S) -> Result<::sce_forge_runtime::codec::Measured<'_, Self, S>, CodecError> {
+        ::sce_forge_runtime::codec::measure(src)
+    }
+
+    /// Write `src` into `window` in one pass and return the bytes it is, for a
+    /// window as large as the caller can spare. On an error the window holds a
+    /// prefix to discard; see [`::sce_forge_runtime::codec::write_window`].
+    pub fn write_window<S: ReplySource + ?Sized>(src: &S, window: &mut [u8]) -> Result<usize, CodecError> {
+        let mut sink = ::sce_forge_runtime::codec::SliceSink::new(window);
+        Self::write_source(src, &mut sink)?;
+        Ok(sink.position())
+    }
+}
+
 
 // ── View (ADR 0049) ──────────────────────────────────────────────────
 // `ReplyView` is what a decode of `Reply` learned, not a
@@ -518,46 +714,18 @@ impl<'a> ReplyView<'a> {
     /// builder. It writes the canonical wire, not the frame the view was decoded
     /// from, so a frame `decode` accepted in a form that is not canonical is
     /// not passed on as it came.
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> {
-        // RFC §synth-5-B peek-byte / streaming-prefix:
-        // streaming prefix encode (per-field present_if/tlv-chain/embed/
-        // repeat helpers). Peek-byte mode: the arm body's encode prepends
-        // its own header byte (which the decoder peeked); no separate
-        // tag byte is emitted here. Streaming-prefix mode (own-field
-        // variant): the carrier is part of the prefix fields and emits
-        // through the same per-field path.
-        w.write_u8(self.header)?;
-        if let Some(_v) = self.consolidation {
-            w.write_u8(_v)?;
-        }
-        if let Some(_list) = &self.extensions {
-            for _e in _list.iter() {
-                _e.encode(w)?;
-            }
-        }
-        // Append the active arm's encoded bytes.
-        match &self.body {
-            ReplyViewVariant::CodecZenohMsgPut(b) => {
-                b.encode(w)?;
-            }
-            ReplyViewVariant::CodecZenohMsgDel(b) => {
-                b.encode(w)?;
-            }
-            ReplyViewVariant::Default { body, .. } => {
-                body.encode(w)?;
-            }
-        }
-        Ok(())
+    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> where CodecError: From<S::Error> {
+        Reply::encode_source(self, w)
     }
 
-    /// Heap-backed convenience facade over [`Self::encode`].
+    /// Heap-backed convenience facade over [`Self::encode`], which refuses a
+    /// value it cannot carry.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Vec<u8> {
+    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
         let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)
-            .expect("VecSink is infallible");
-        _sce_v
+        self.encode(&mut _sce_sink)?;
+        Ok(_sce_v)
     }
 
     pub fn mid(&self) -> u8 {
@@ -813,46 +981,18 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> ReplyOwned<S> {
     ///
     /// The projection builds the whole borrowed record (every list and
     /// embedded body in it, by value) only for `encode` to read it once. A
-    /// sender that holds an owned value encodes it from here. The same
-    /// refusals as the projection's: a list longer than the borrowed view
-    /// declares raises `CodecError::TooManyElements`, so an owned value the
+    /// sender that holds an owned value encodes it from here.
+    /// The same refusals as the projection's: a list longer than the borrowed
+    /// view declares raises `CodecError::TooManyElements`, so an owned value the
     /// borrowed form could not carry is an error and never a frame its own
     /// decoder would reject.
-    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), CodecError> {
-        // RFC §synth-5-B peek-byte / streaming-prefix:
-        // streaming prefix encode (per-field present_if/tlv-chain/embed/
-        // repeat helpers). Peek-byte mode: the arm body's encode prepends
-        // its own header byte (which the decoder peeked); no separate
-        // tag byte is emitted here. Streaming-prefix mode (own-field
-        // variant): the carrier is part of the prefix fields and emits
-        // through the same per-field path.
-        w.write_u8(self.header)?;
-        if let Some(_v) = self.consolidation {
-            w.write_u8(_v)?;
-        }
-        if let Some(_list) = &self.extensions {
-            for _e in ::sce_forge_runtime::codec::bounded_entries::<_, _, 8>(_list)? {
-                _e.encode(w)?;
-            }
-        }
-        // Append the active arm's encoded bytes.
-        match &self.body {
-            ReplyOwnedVariant::CodecZenohMsgPut(b) => {
-                b.encode(w)?;
-            }
-            ReplyOwnedVariant::CodecZenohMsgDel(b) => {
-                b.encode(w)?;
-            }
-            ReplyOwnedVariant::Default { body, .. } => {
-                body.encode(w)?;
-            }
-        }
-        Ok(())
+    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        Reply::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade over [`Self::encode`]. Fallible: a list
-    /// past the bound the borrowed view declares is refused, and so is a
-    /// presence the chain predicates disagree with.
+    /// past the bound the borrowed view declares is refused, as is any value
+    /// the encoding cannot carry.
     #[cfg(feature = "alloc")]
     pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Reply::MAX_ENCODED_BYTES);

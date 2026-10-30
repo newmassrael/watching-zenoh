@@ -35,7 +35,7 @@
      count co-located). No new primitive surface. -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
-       sce:kind="codec" sce:default-endian="big" name="linkstate_list">
+       sce:kind="codec" sce:encode-may-fail="true" sce:default-endian="big" name="linkstate_list">
   <sce:import src="linkstate.scxml" kind="codec" as="codec_zenoh_linkstate"/>
   <datamodel>
     <sce:field id="num_link_states" sce:type="uint64" sce:byte="0" sce:bit-size="vle"/>

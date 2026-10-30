@@ -246,72 +246,360 @@ impl<'a> Linkstate<'a> {
     /// caller-owned `SliceSink` allocations.
     pub const MAX_ENCODED_BYTES: usize = 9987;
 
-    /// Encode `self` into the caller-owned sink. Returns
-    /// `CodecError::BufferOverflow` from a bounded sink when the
-    /// destination has insufficient remaining capacity; growable
-    /// sinks (e.g. `VecSink`) are effectively infallible.
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> {
-        // Streaming cursor encode (SSOT selection: `needs_streaming`).
-        // Mirrors the streaming decode: every field appends its own bytes
-        // in declaration order through the per-field encode blocks, so a
-        // gated field skips its append when absent, and a fixed field after
-        // a variable-length payload lands after the payload (the positional
-        // path appends variable fields last, placing it ahead on the wire).
-        // Per-field `is_repeat` / `is_tlv_chain` / `is_embed` route to their
-        // dedicated helpers; everything else uses `present_if_encode_block`
-        // (its non-gated arm covers plain fixed / tail / length-ref / VLE).
-        w.write_u8(self.options)?;
-        w.write_vle_u64(self.psid)?;
-        w.write_vle_u64(self.sn)?;
-        if let Some(_v) = self.zid_len {
-        w.write_vle_u64(_v)?;
-        }
-        if let Some(_v) = &self.zid {
-            w.write_bytes(_v)?;
-        }
-        if let Some(_v) = self.whatami {
-            w.write_u8(_v)?;
-        }
-        if let Some(_v) = self.num_locators {
-        w.write_vle_u64(_v)?;
-        }
-        if let Some(_list) = &self.locators {
-            for _e in _list {
-                _e.encode(w)?;
-            }
-        }
-        w.write_vle_u64(self.links_len)?;
-        for _e in &self.links {
-            _e.encode(w)?;
-        }
-        if let Some(_list) = &self.weights {
-            for _e in _list {
-                _e.encode(w)?;
-            }
-        }
-        Ok(())
+    /// Encode `self` into the caller-owned sink. Returns the value's refusal
+    /// when the encoding cannot carry it (a length past its type, a list past
+    /// its bound, a gate that disagrees with a presence; the document declares
+    /// `sce:encode-may-fail`), or the sink's own error:
+    /// `CodecError::BufferOverflow` from a bounded sink when the destination
+    /// has insufficient remaining capacity.
+    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> where CodecError: From<S::Error> {
+        Self::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. Pre-reserves
     /// `MAX_ENCODED_BYTES` so the worst-case write path performs at
     /// most one allocation, then delegates to `encode` over a
-    /// `VecSink`. Returns the freshly-encoded byte vector. Callers
-    /// targeting zero-alloc hot paths should call `encode` directly
-    /// against a caller-owned sink.
+    /// `VecSink`. Returns the freshly-encoded byte vector, or the error
+    /// `encode` refuses a value with: one the encoding cannot carry (a
+    /// length past its type, a list past its bound) or one a gate
+    /// disagrees with. Callers targeting zero-alloc hot paths should call
+    /// `encode` directly against a caller-owned sink.
     ///
     /// Gated on the `alloc` feature — `VecSink` lives behind the
     /// same gate (see `backends/rust/forge-runtime/src/codec.rs`). MCU /
     /// `no_std` builds without `alloc` only see the sink-based
     /// primary `encode`.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Vec<u8> {
+    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
         let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)
-            .expect("VecSink is infallible");
-        _sce_v
+        self.encode(&mut _sce_sink)?;
+        Ok(_sce_v)
     }
 }
+
+/// Flags of `Linkstate` a parent sets in place of the ones a value presents:
+/// the end flag of a chain whose entries are `Linkstate`, which the chain
+/// derives from where an entry stands.
+#[doc(hidden)]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LinkstateOverrides {
+    /// The `G` flag of `options`, when a parent sets it.
+    pub options_g: Option<bool>,
+}
+
+#[allow(dead_code)]
+impl LinkstateOverrides {
+    /// Sets `G` of `options` and nothing else.
+    #[allow(clippy::needless_update)]
+    pub fn options_g(value: bool) -> Self {
+        Self { options_g: Some(value), ..Self::default() }
+    }
+}
+
+// ── Source (ADR 0058) ────────────────────────────────────────────────
+/// What a value of `Linkstate` says: its presented fields. A length, a count
+/// or the flag a gated field is announced by is not among them; `Linkstate`
+/// computes those from what is ([`Linkstate::encode_source`]).
+pub trait LinkstateSource {
+    /// The `options` field.
+    fn options(&self) -> u8;
+    /// The `psid` field.
+    fn psid(&self) -> u64;
+    /// The `sn` field.
+    fn sn(&self) -> u64;
+    /// The `zid` field.
+    fn zid(&self) -> Option<&[u8]>;
+    /// The `whatami` field.
+    fn whatami(&self) -> Option<u8>;
+    /// The `locators` field.
+    fn locators(&self) -> Option<impl Iterator<Item = impl super::locator::LocatorSource> + Clone>;
+    /// The `links` field.
+    fn links(&self) -> impl Iterator<Item = impl super::linkstate_link::LinkstateLinkSource> + Clone;
+    /// The `weights` field.
+    fn weights(&self) -> Option<impl Iterator<Item = impl super::linkstate_weight::LinkstateWeightSource> + Clone>;
+}
+
+impl<T: LinkstateSource + ?Sized> LinkstateSource for &T {
+    fn options(&self) -> u8 {
+        (**self).options()
+    }
+    fn psid(&self) -> u64 {
+        (**self).psid()
+    }
+    fn sn(&self) -> u64 {
+        (**self).sn()
+    }
+    fn zid(&self) -> Option<&[u8]> {
+        (**self).zid()
+    }
+    fn whatami(&self) -> Option<u8> {
+        (**self).whatami()
+    }
+    fn locators(&self) -> Option<impl Iterator<Item = impl super::locator::LocatorSource> + Clone> {
+        (**self).locators()
+    }
+    fn links(&self) -> impl Iterator<Item = impl super::linkstate_link::LinkstateLinkSource> + Clone {
+        (**self).links()
+    }
+    fn weights(&self) -> Option<impl Iterator<Item = impl super::linkstate_weight::LinkstateWeightSource> + Clone> {
+        (**self).weights()
+    }
+}
+
+/// A value of `Linkstate` held in the types a caller already has: a source
+/// ([`LinkstateSource`]) whose lists are slices and whose bodies are references.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub struct LinkstateParts<'a> {
+    /// The `options` field.
+    pub options: u8,
+    /// The `psid` field.
+    pub psid: u64,
+    /// The `sn` field.
+    pub sn: u64,
+    /// The `zid` field.
+    pub zid: Option<&'a [u8]>,
+    /// The `whatami` field.
+    pub whatami: Option<u8>,
+    /// The `locators` field.
+    pub locators: Option<&'a [super::locator::LocatorParts<'a>]>,
+    /// The `links` field.
+    pub links: &'a [super::linkstate_link::LinkstateLinkParts],
+    /// The `weights` field.
+    pub weights: Option<&'a [super::linkstate_weight::LinkstateWeightParts]>,
+}
+
+impl<'a> LinkstateSource for LinkstateParts<'a> {
+    fn options(&self) -> u8 {
+        self.options
+    }
+    fn psid(&self) -> u64 {
+        self.psid
+    }
+    fn sn(&self) -> u64 {
+        self.sn
+    }
+    fn zid(&self) -> Option<&[u8]> {
+        self.zid
+    }
+    fn whatami(&self) -> Option<u8> {
+        self.whatami
+    }
+    fn locators(&self) -> Option<impl Iterator<Item = impl super::locator::LocatorSource> + Clone> {
+        self.locators.map(<[_]>::iter)
+    }
+    fn links(&self) -> impl Iterator<Item = impl super::linkstate_link::LinkstateLinkSource> + Clone {
+        self.links.iter()
+    }
+    fn weights(&self) -> Option<impl Iterator<Item = impl super::linkstate_weight::LinkstateWeightSource> + Clone> {
+        self.weights.map(<[_]>::iter)
+    }
+}
+
+impl<'a> LinkstateSource for Linkstate<'a> {
+    fn options(&self) -> u8 {
+        self.options
+    }
+    fn psid(&self) -> u64 {
+        self.psid
+    }
+    fn sn(&self) -> u64 {
+        self.sn
+    }
+    fn zid(&self) -> Option<&[u8]> {
+        self.zid
+    }
+    fn whatami(&self) -> Option<u8> {
+        self.whatami
+    }
+    fn locators(&self) -> Option<impl Iterator<Item = impl super::locator::LocatorSource> + Clone> {
+        self.locators.as_ref().map(|_l| _l.iter())
+    }
+    fn links(&self) -> impl Iterator<Item = impl super::linkstate_link::LinkstateLinkSource> + Clone {
+        self.links.iter()
+    }
+    fn weights(&self) -> Option<impl Iterator<Item = impl super::linkstate_weight::LinkstateWeightSource> + Clone> {
+        self.weights.as_ref().map(|_l| _l.iter())
+    }
+}
+
+impl<'a> LinkstateSource for LinkstateView<'a> {
+    fn options(&self) -> u8 {
+        self.options
+    }
+    fn psid(&self) -> u64 {
+        self.psid
+    }
+    fn sn(&self) -> u64 {
+        self.sn
+    }
+    fn zid(&self) -> Option<&[u8]> {
+        self.zid
+    }
+    fn whatami(&self) -> Option<u8> {
+        self.whatami
+    }
+    fn locators(&self) -> Option<impl Iterator<Item = impl super::locator::LocatorSource> + Clone> {
+        self.locators.as_ref().map(|_l| _l.iter())
+    }
+    fn links(&self) -> impl Iterator<Item = impl super::linkstate_link::LinkstateLinkSource> + Clone {
+        self.links.iter()
+    }
+    fn weights(&self) -> Option<impl Iterator<Item = impl super::linkstate_weight::LinkstateWeightSource> + Clone> {
+        self.weights.as_ref().map(|_l| _l.iter())
+    }
+}
+
+impl<S: ::sce_forge_runtime::codec::CodecStorage> LinkstateSource for LinkstateOwned<S> {
+    fn options(&self) -> u8 {
+        self.options
+    }
+    fn psid(&self) -> u64 {
+        self.psid
+    }
+    fn sn(&self) -> u64 {
+        self.sn
+    }
+    fn zid(&self) -> Option<&[u8]> {
+        self.zid.as_ref().map(::sce_forge_runtime::codec::SceByteBuf::as_slice)
+    }
+    fn whatami(&self) -> Option<u8> {
+        self.whatami
+    }
+    fn locators(&self) -> Option<impl Iterator<Item = impl super::locator::LocatorSource> + Clone> {
+        self.locators.as_ref().map(|_l| ::sce_forge_runtime::codec::SceList::as_slice(_l).iter())
+    }
+    fn links(&self) -> impl Iterator<Item = impl super::linkstate_link::LinkstateLinkSource> + Clone {
+        ::sce_forge_runtime::codec::SceList::as_slice(&self.links).iter()
+    }
+    fn weights(&self) -> Option<impl Iterator<Item = impl super::linkstate_weight::LinkstateWeightSource> + Clone> {
+        self.weights.as_ref().map(|_l| ::sce_forge_runtime::codec::SceList::as_slice(_l).iter())
+    }
+}
+
+#[allow(dead_code)]
+impl<'a> Linkstate<'a> {
+    /// Encode what `src` says into the caller-owned sink: the bytes
+    /// [`Self::encode`] writes for the value it holds, read through
+    /// [`LinkstateSource`]. A length, a count or a gate flag is computed from what
+    /// `src` presents, and a value the encoding cannot carry is refused
+    /// before the first byte is written.
+    pub fn encode_source<S: LinkstateSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        Self::write_source(src, w)
+    }
+
+    /// [`Self::encode_source`] without the guard a parent has already made.
+    #[doc(hidden)]
+    pub fn write_source<S: LinkstateSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        Self::write_source_in(src, w, &LinkstateOverrides::default())
+    }
+
+    /// [`Self::write_source`] with the flags a parent sets in place of the
+    /// ones `src` presents.
+    #[doc(hidden)]
+    pub fn write_source_in<S: LinkstateSource + ?Sized, K: SceSink>(src: &S, w: &mut K, over: &LinkstateOverrides) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        let _k_locators: usize = src.locators().map_or(0, |_l| _l.count());
+        if _k_locators > 64 {
+            return Err(CodecError::TooManyElements);
+        }
+        let _k_links: usize = src.links().count();
+        if _k_links > 64 {
+            return Err(CodecError::TooManyElements);
+        }
+        let _k_weights: usize = src.weights().map_or(0, |_l| _l.count());
+        if _k_weights > 64 {
+            return Err(CodecError::TooManyElements);
+        }
+        let _p_options_p_0: bool = src.zid().is_some();
+        let _p_options_w_0: bool = src.whatami().is_some();
+        let _p_options_l_0: bool = src.locators().is_some();
+        let _p_options_h_0: bool = src.weights().is_some();
+        let _n_d_zid_len_0: usize = match src.zid() {
+            Some(_v) => _v.len(),
+            None => 0,
+        };
+        let _f_d_zid_len: Option<usize> = if src.zid().is_some() { Some(_n_d_zid_len_0) } else { None };
+        let _d_zid_len: u64 = ::sce_forge_runtime::codec::widen_usize(_f_d_zid_len.unwrap_or(0));
+        let _f_d_num_locators: Option<usize> = if src.locators().is_some() { Some(_k_locators) } else { None };
+        let _d_num_locators: u64 = ::sce_forge_runtime::codec::widen_usize(_f_d_num_locators.unwrap_or(0));
+        if src.weights().is_some() && _k_weights != _k_links {
+            return Err(CodecError::InconsistentSource);
+        }
+        let _d_links_len: u64 = ::sce_forge_runtime::codec::widen_usize(_k_links);
+        let mut _c_options: u8 = (((((((src.options() & !0x1) | u8::from(_p_options_p_0)) & !0x2) | (u8::from(_p_options_w_0) << 1)) & !0x4) | (u8::from(_p_options_l_0) << 2)) & !0x8) | (u8::from(_p_options_h_0) << 3);
+        if let Some(_o) = over.options_g {
+            _c_options = (_c_options & !0x10) | (u8::from(_o) << 4);
+        }
+        w.write_u8(_c_options)?;
+        w.write_vle_u64(src.psid())?;
+        w.write_vle_u64(src.sn())?;
+        if (_c_options & 0x1) != 0 {
+            w.write_vle_u64(_d_zid_len)?;
+        }
+        if let Some(_v) = src.zid() {
+            w.write_bytes(_v)?;
+        }
+        if let Some(_v) = src.whatami() {
+            w.write_u8(_v)?;
+        }
+        if (_c_options & 0x4) != 0 {
+            w.write_vle_u64(_d_num_locators)?;
+        }
+        if let Some(_v) = src.locators() {
+            for _e in _v {
+                Locator::write_source(&_e, w)?;
+            }
+        }
+        w.write_vle_u64(_d_links_len)?;
+        for _e in src.links() {
+            LinkstateLink::write_source(&_e, w)?;
+        }
+        if let Some(_v) = src.weights() {
+            for _e in _v {
+                LinkstateWeight::write_source(&_e, w)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The bytes [`Self::write_source`] writes for `src`, counted with
+    /// nothing written.
+    #[doc(hidden)]
+    pub fn count_source<S: LinkstateSource + ?Sized>(src: &S) -> Result<usize, CodecError> {
+        let mut _c = ::sce_forge_runtime::codec::CountSink::new();
+        Self::write_source(src, &mut _c)?;
+        Ok(_c.len())
+    }
+}
+
+impl<'a, S: LinkstateSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for Linkstate<'a> {
+    type Error<E> = CodecError;
+
+    fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        Self::write_source(src, w)
+    }
+}
+
+#[allow(dead_code)]
+impl<'a> Linkstate<'a> {
+    /// The size of the frame [`Self::encode_source`] writes for `src`, found
+    /// with nothing written, or the refusal that encode would give. The result
+    /// writes the frame into a window of exactly that size and cannot fail.
+    pub fn measure<S: LinkstateSource + ?Sized>(src: &S) -> Result<::sce_forge_runtime::codec::Measured<'_, Self, S>, CodecError> {
+        ::sce_forge_runtime::codec::measure(src)
+    }
+
+    /// Write `src` into `window` in one pass and return the bytes it is, for a
+    /// window as large as the caller can spare. On an error the window holds a
+    /// prefix to discard; see [`::sce_forge_runtime::codec::write_window`].
+    pub fn write_window<S: LinkstateSource + ?Sized>(src: &S, window: &mut [u8]) -> Result<usize, CodecError> {
+        let mut sink = ::sce_forge_runtime::codec::SliceSink::new(window);
+        Self::write_source(src, &mut sink)?;
+        Ok(sink.position())
+    }
+}
+
 
 // ── View (ADR 0049) ──────────────────────────────────────────────────
 // `LinkstateView` is what a decode of `Linkstate` learned, not a
@@ -562,56 +850,18 @@ impl<'a> LinkstateView<'a> {
     /// builder. It writes the canonical wire, not the frame the view was decoded
     /// from, so a frame `decode` accepted in a form that is not canonical is
     /// not passed on as it came.
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> {
-        // Streaming cursor encode (SSOT selection: `needs_streaming`).
-        // Mirrors the streaming decode: every field appends its own bytes
-        // in declaration order through the per-field encode blocks, so a
-        // gated field skips its append when absent, and a fixed field after
-        // a variable-length payload lands after the payload (the positional
-        // path appends variable fields last, placing it ahead on the wire).
-        // Per-field `is_repeat` / `is_tlv_chain` / `is_embed` route to their
-        // dedicated helpers; everything else uses `present_if_encode_block`
-        // (its non-gated arm covers plain fixed / tail / length-ref / VLE).
-        w.write_u8(self.options)?;
-        w.write_vle_u64(self.psid)?;
-        w.write_vle_u64(self.sn)?;
-        if let Some(_v) = self.zid_len {
-        w.write_vle_u64(_v)?;
-        }
-        if let Some(_v) = &self.zid {
-            w.write_bytes(_v)?;
-        }
-        if let Some(_v) = self.whatami {
-            w.write_u8(_v)?;
-        }
-        if let Some(_v) = self.num_locators {
-        w.write_vle_u64(_v)?;
-        }
-        if let Some(_list) = &self.locators {
-            for _e in _list.iter() {
-                _e.encode(w)?;
-            }
-        }
-        w.write_vle_u64(self.links_len)?;
-        for _e in self.links.iter() {
-            _e.encode(w)?;
-        }
-        if let Some(_list) = &self.weights {
-            for _e in _list.iter() {
-                _e.encode(w)?;
-            }
-        }
-        Ok(())
+    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> where CodecError: From<S::Error> {
+        Linkstate::encode_source(self, w)
     }
 
-    /// Heap-backed convenience facade over [`Self::encode`].
+    /// Heap-backed convenience facade over [`Self::encode`], which refuses a
+    /// value it cannot carry.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Vec<u8> {
+    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
         let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)
-            .expect("VecSink is infallible");
-        _sce_v
+        self.encode(&mut _sce_sink)?;
+        Ok(_sce_v)
     }
 
     pub fn p(&self) -> bool {
@@ -821,56 +1071,18 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> LinkstateOwned<S> {
     ///
     /// The projection builds the whole borrowed record (every list and
     /// embedded body in it, by value) only for `encode` to read it once. A
-    /// sender that holds an owned value encodes it from here. The same
-    /// refusals as the projection's: a list longer than the borrowed view
-    /// declares raises `CodecError::TooManyElements`, so an owned value the
+    /// sender that holds an owned value encodes it from here.
+    /// The same refusals as the projection's: a list longer than the borrowed
+    /// view declares raises `CodecError::TooManyElements`, so an owned value the
     /// borrowed form could not carry is an error and never a frame its own
     /// decoder would reject.
-    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), CodecError> {
-        // Streaming cursor encode (SSOT selection: `needs_streaming`).
-        // Mirrors the streaming decode: every field appends its own bytes
-        // in declaration order through the per-field encode blocks, so a
-        // gated field skips its append when absent, and a fixed field after
-        // a variable-length payload lands after the payload (the positional
-        // path appends variable fields last, placing it ahead on the wire).
-        // Per-field `is_repeat` / `is_tlv_chain` / `is_embed` route to their
-        // dedicated helpers; everything else uses `present_if_encode_block`
-        // (its non-gated arm covers plain fixed / tail / length-ref / VLE).
-        w.write_u8(self.options)?;
-        w.write_vle_u64(self.psid)?;
-        w.write_vle_u64(self.sn)?;
-        if let Some(_v) = self.zid_len {
-        w.write_vle_u64(_v)?;
-        }
-        if let Some(_v) = &self.zid {
-            w.write_bytes(::sce_forge_runtime::codec::SceByteBuf::as_slice(_v))?;
-        }
-        if let Some(_v) = self.whatami {
-            w.write_u8(_v)?;
-        }
-        if let Some(_v) = self.num_locators {
-        w.write_vle_u64(_v)?;
-        }
-        if let Some(_list) = &self.locators {
-            for _e in ::sce_forge_runtime::codec::bounded_entries::<_, _, 64>(_list)? {
-                _e.encode(w)?;
-            }
-        }
-        w.write_vle_u64(self.links_len)?;
-        for _e in ::sce_forge_runtime::codec::bounded_entries::<_, _, 64>(&self.links)? {
-            _e.encode(w)?;
-        }
-        if let Some(_list) = &self.weights {
-            for _e in ::sce_forge_runtime::codec::bounded_entries::<_, _, 64>(_list)? {
-                _e.encode(w)?;
-            }
-        }
-        Ok(())
+    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        Linkstate::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade over [`Self::encode`]. Fallible: a list
-    /// past the bound the borrowed view declares is refused, and so is a
-    /// presence the chain predicates disagree with.
+    /// past the bound the borrowed view declares is refused, as is any value
+    /// the encoding cannot carry.
     #[cfg(feature = "alloc")]
     pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Linkstate::MAX_ENCODED_BYTES);

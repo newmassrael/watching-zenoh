@@ -164,7 +164,7 @@ pub fn write_plain_put<S: sce_forge_runtime::codec::SceSink>(
     suffix: Option<&str>,
     value: &[u8],
     qos: crate::sample::QosLevel,
-) -> Result<(), sce_forge_runtime::codec::CodecError> {
+) -> Result<(), S::Error> {
     // The QoS extension rides when `pubsub-qos` is built and the byte is not the default one.
     #[cfg(feature = "pubsub-qos")]
     let with_qos = qos != crate::sample::QosLevel::DEFAULT;

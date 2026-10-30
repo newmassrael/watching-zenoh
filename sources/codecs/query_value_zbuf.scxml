@@ -51,7 +51,7 @@
                      slices       (that many `zbuf_slice` elements) -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
-       sce:kind="codec" sce:default-endian="big" name="query_value_zbuf">
+       sce:kind="codec" sce:encode-may-fail="true" sce:default-endian="big" name="query_value_zbuf">
   <sce:import src="encoding.scxml" kind="codec" as="codec_zenoh_encoding"/>
   <sce:import src="zbuf_slice.scxml" kind="codec" as="codec_zenoh_zbuf_slice"/>
   <sce:flag-inputs>

@@ -22,13 +22,13 @@ use sce_forge_runtime::codec::VecSink;
 // pure no_std no-alloc MCU tier.
 use sce_forge_runtime::heapless::Vec as HeaplessVec;
 
-use super::wireexpr::{Wireexpr, WireexprVariant};
+use super::wireexpr::Wireexpr;
 use super::ext_entry::ExtEntry;
 use super::reply::Reply;
 use super::err::Err;
 
 use sce_forge_runtime::codec::{ListView, ListWalk};
-use super::wireexpr::{WireexprView, WireexprViewVariant};
+use super::wireexpr::WireexprView;
 use super::ext_entry::ExtEntryView;
 use super::reply::ReplyView;
 use super::err::ErrView;
@@ -255,67 +255,305 @@ impl<'a> Response<'a> {
     /// caller-owned `SliceSink` allocations.
     pub const MAX_ENCODED_BYTES: usize = 2467;
 
-    /// Encode `self` into the caller-owned sink. Returns
-    /// `CodecError::BufferOverflow` from a bounded sink when the
-    /// destination has insufficient remaining capacity; growable
-    /// sinks (e.g. `VecSink`) are effectively infallible.
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> {
-        // RFC §synth-5-B parent-tag carriers — derive carrier bits from each embedded
-        // parent-tag variant's active arm before the carrier byte is
-        // emitted. Each `_derived_<carrier>` local is OR'd into the
-        // carrier's encode site (see `inject_parent_tag_carrier_suffix`).
-        let _derived_header: u8 = match &self.keyexpr.body { WireexprVariant::WireexprNonlocal(_) => 0x00u8, WireexprVariant::WireexprLocal(_) => 0x40u8 };
-
-        // RFC §synth-5-B peek-byte / streaming-prefix:
-        // streaming prefix encode (per-field present_if/tlv-chain/embed/
-        // repeat helpers). Peek-byte mode: the arm body's encode prepends
-        // its own header byte (which the decoder peeked); no separate
-        // tag byte is emitted here. Streaming-prefix mode (own-field
-        // variant): the carrier is part of the prefix fields and emits
-        // through the same per-field path.
-        w.write_u8(self.header | _derived_header)?;
-        w.write_vle_u64(self.request_id)?;
-        self.keyexpr.encode(w, (self.header >> 5) & 0x1)?;
-        if let Some(_list) = &self.extensions {
-            for _e in _list {
-                _e.encode(w)?;
-            }
-        }
-        // Append the active arm's encoded bytes.
-        match &self.body {
-            ResponseVariant::CodecZenohReply(b) => {
-                b.encode(w)?;
-            }
-            ResponseVariant::CodecZenohErr(b) => {
-                b.encode(w)?;
-            }
-            ResponseVariant::Default { body, .. } => {
-                body.encode(w)?;
-            }
-        }
-        Ok(())
+    /// Encode `self` into the caller-owned sink. Returns the value's refusal
+    /// when the encoding cannot carry it (a length past its type, a list past
+    /// its bound, a gate that disagrees with a presence; the document declares
+    /// `sce:encode-may-fail`), or the sink's own error:
+    /// `CodecError::BufferOverflow` from a bounded sink when the destination
+    /// has insufficient remaining capacity.
+    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> where CodecError: From<S::Error> {
+        Self::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. Pre-reserves
     /// `MAX_ENCODED_BYTES` so the worst-case write path performs at
     /// most one allocation, then delegates to `encode` over a
-    /// `VecSink`. Returns the freshly-encoded byte vector. Callers
-    /// targeting zero-alloc hot paths should call `encode` directly
-    /// against a caller-owned sink.
+    /// `VecSink`. Returns the freshly-encoded byte vector, or the error
+    /// `encode` refuses a value with: one the encoding cannot carry (a
+    /// length past its type, a list past its bound) or one a gate
+    /// disagrees with. Callers targeting zero-alloc hot paths should call
+    /// `encode` directly against a caller-owned sink.
     ///
     /// Gated on the `alloc` feature — `VecSink` lives behind the
     /// same gate (see `backends/rust/forge-runtime/src/codec.rs`). MCU /
     /// `no_std` builds without `alloc` only see the sink-based
     /// primary `encode`.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Vec<u8> {
+    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
         let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)
-            .expect("VecSink is infallible");
-        _sce_v
+        self.encode(&mut _sce_sink)?;
+        Ok(_sce_v)
     }
 }
+
+/// The arm of `Response`'s variant a value holds, each arm's body as the
+/// source it says. The tag is not among them: `Response` derives it from
+/// the arm, as it derives a length, and a default arm presents the tag
+/// it could not name.
+// A default arm's tag is read by the codec that embeds this one and
+// derives its own carrier bits from the arm, which not every build uses.
+#[allow(dead_code)]
+pub enum ResponseVariantSource<'s, A0: ?Sized, A1: ?Sized, D: ?Sized> {
+    CodecZenohReply(&'s A0),
+    CodecZenohErr(&'s A1),
+    Default { tag: u8, body: &'s D },
+}
+
+/// Flags of `Response` a parent sets in place of the ones a value presents:
+/// the end flag of a chain whose entries are `Response`, which the chain
+/// derives from where an entry stands.
+#[doc(hidden)]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ResponseOverrides {
+    /// The `N` flag of `header`, when a parent sets it.
+    pub header_n: Option<bool>,
+}
+
+#[allow(dead_code)]
+impl ResponseOverrides {
+    /// Sets `N` of `header` and nothing else.
+    #[allow(clippy::needless_update)]
+    pub fn header_n(value: bool) -> Self {
+        Self { header_n: Some(value), ..Self::default() }
+    }
+}
+
+// ── Source (ADR 0058) ────────────────────────────────────────────────
+/// What a value of `Response` says: its presented fields. A length, a count
+/// or the flag a gated field is announced by is not among them; `Response`
+/// computes those from what is ([`Response::encode_source`]).
+pub trait ResponseSource {
+    /// The `header` field.
+    fn header(&self) -> u8;
+    /// The `request_id` field.
+    fn request_id(&self) -> u64;
+    /// The `keyexpr` field.
+    fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource;
+    /// The `extensions` field.
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone>;
+    /// The arm of the variant this value holds.
+    fn body(&self) -> ResponseVariantSource<'_, impl super::reply::ReplySource, impl super::err::ErrSource, impl super::reply::ReplySource>;
+}
+
+impl<T: ResponseSource + ?Sized> ResponseSource for &T {
+    fn header(&self) -> u8 {
+        (**self).header()
+    }
+    fn request_id(&self) -> u64 {
+        (**self).request_id()
+    }
+    fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
+        (**self).keyexpr()
+    }
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+        (**self).extensions()
+    }
+    fn body(&self) -> ResponseVariantSource<'_, impl super::reply::ReplySource, impl super::err::ErrSource, impl super::reply::ReplySource> {
+        (**self).body()
+    }
+}
+
+/// The arm of `Response`'s variant that ResponseParts holds.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub enum ResponsePartsBody<'a> {
+    CodecZenohReply(&'a super::reply::ReplyParts<'a>),
+    CodecZenohErr(&'a super::err::ErrParts<'a>),
+    /// The tag the grammar could not name, and the body it holds.
+    Default { tag: u8, body: &'a super::reply::ReplyParts<'a> },
+}
+
+/// A value of `Response` held in the types a caller already has: a source
+/// ([`ResponseSource`]) whose lists are slices and whose bodies are references.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub struct ResponseParts<'a> {
+    /// The `header` field.
+    pub header: u8,
+    /// The `request_id` field.
+    pub request_id: u64,
+    /// The `keyexpr` field.
+    pub keyexpr: &'a super::wireexpr::WireexprParts<'a>,
+    /// The `extensions` field.
+    pub extensions: Option<&'a [super::ext_entry::ExtEntryParts<'a>]>,
+    /// The arm of the variant this value holds.
+    pub body: ResponsePartsBody<'a>,
+}
+
+impl<'a> ResponseSource for ResponseParts<'a> {
+    fn header(&self) -> u8 {
+        self.header
+    }
+    fn request_id(&self) -> u64 {
+        self.request_id
+    }
+    fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
+        self.keyexpr
+    }
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+        self.extensions.map(<[_]>::iter)
+    }
+    fn body(&self) -> ResponseVariantSource<'_, impl super::reply::ReplySource, impl super::err::ErrSource, impl super::reply::ReplySource> {
+        match &self.body {
+            ResponsePartsBody::CodecZenohReply(_b) => ResponseVariantSource::CodecZenohReply(*_b),
+            ResponsePartsBody::CodecZenohErr(_b) => ResponseVariantSource::CodecZenohErr(*_b),
+            ResponsePartsBody::Default { tag, body } => ResponseVariantSource::Default { tag: *tag, body: *body },
+        }
+    }
+}
+
+impl<'a> ResponseSource for Response<'a> {
+    fn header(&self) -> u8 {
+        self.header
+    }
+    fn request_id(&self) -> u64 {
+        self.request_id
+    }
+    fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
+        &self.keyexpr
+    }
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+        self.extensions.as_ref().map(|_l| _l.iter())
+    }
+    fn body(&self) -> ResponseVariantSource<'_, impl super::reply::ReplySource, impl super::err::ErrSource, impl super::reply::ReplySource> {
+        match &self.body {
+            ResponseVariant::CodecZenohReply(_b) => ResponseVariantSource::CodecZenohReply(_b),
+            ResponseVariant::CodecZenohErr(_b) => ResponseVariantSource::CodecZenohErr(_b),
+            ResponseVariant::Default { tag, body } => ResponseVariantSource::Default { tag: *tag, body },
+        }
+    }
+}
+
+impl<'a> ResponseSource for ResponseView<'a> {
+    fn header(&self) -> u8 {
+        self.header
+    }
+    fn request_id(&self) -> u64 {
+        self.request_id
+    }
+    fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
+        &self.keyexpr
+    }
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+        self.extensions.as_ref().map(|_l| _l.iter())
+    }
+    fn body(&self) -> ResponseVariantSource<'_, impl super::reply::ReplySource, impl super::err::ErrSource, impl super::reply::ReplySource> {
+        match &self.body {
+            ResponseViewVariant::CodecZenohReply(_b) => ResponseVariantSource::CodecZenohReply(_b),
+            ResponseViewVariant::CodecZenohErr(_b) => ResponseVariantSource::CodecZenohErr(_b),
+            ResponseViewVariant::Default { tag, body } => ResponseVariantSource::Default { tag: *tag, body },
+        }
+    }
+}
+
+impl<S: ::sce_forge_runtime::codec::CodecStorage> ResponseSource for ResponseOwned<S> {
+    fn header(&self) -> u8 {
+        self.header
+    }
+    fn request_id(&self) -> u64 {
+        self.request_id
+    }
+    fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
+        &self.keyexpr
+    }
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+        self.extensions.as_ref().map(|_l| ::sce_forge_runtime::codec::SceList::as_slice(_l).iter())
+    }
+    fn body(&self) -> ResponseVariantSource<'_, impl super::reply::ReplySource, impl super::err::ErrSource, impl super::reply::ReplySource> {
+        match &self.body {
+            ResponseOwnedVariant::CodecZenohReply(_b) => ResponseVariantSource::CodecZenohReply(_b),
+            ResponseOwnedVariant::CodecZenohErr(_b) => ResponseVariantSource::CodecZenohErr(_b),
+            ResponseOwnedVariant::Default { tag, body } => ResponseVariantSource::Default { tag: *tag, body },
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl<'a> Response<'a> {
+    /// Encode what `src` says into the caller-owned sink: the bytes
+    /// [`Self::encode`] writes for the value it holds, read through
+    /// [`ResponseSource`]. A length, a count or a gate flag is computed from what
+    /// `src` presents, and a value the encoding cannot carry is refused
+    /// before the first byte is written.
+    pub fn encode_source<S: ResponseSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        Self::count_source(src)?;
+        Self::write_source(src, w)
+    }
+
+    /// [`Self::encode_source`] without the guard a parent has already made.
+    #[doc(hidden)]
+    pub fn write_source<S: ResponseSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        Self::write_source_in(src, w, &ResponseOverrides::default())
+    }
+
+    /// [`Self::write_source`] with the flags a parent sets in place of the
+    /// ones `src` presents.
+    #[doc(hidden)]
+    pub fn write_source_in<S: ResponseSource + ?Sized, K: SceSink>(src: &S, w: &mut K, over: &ResponseOverrides) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        let _k_extensions: usize = src.extensions().map_or(0, |_l| _l.count());
+        if _k_extensions > 8 {
+            return Err(CodecError::TlvChainOverflow);
+        }
+        let _d_header_m: u8 = match super::wireexpr::WireexprSource::body(src.keyexpr()) { super::wireexpr::WireexprVariantSource::WireexprNonlocal(_) => 0, super::wireexpr::WireexprVariantSource::WireexprLocal(_) => 1 };
+        let _p_header_z_0: bool = src.extensions().is_some();
+        let mut _c_header: u8 = (((src.header() & !0x40) | (_d_header_m << 6)) & !0x80) | (u8::from(_p_header_z_0) << 7);
+        if let Some(_o) = over.header_n {
+            _c_header = (_c_header & !0x20) | (u8::from(_o) << 5);
+        }
+        w.write_u8(_c_header)?;
+        w.write_vle_u64(src.request_id())?;
+        Wireexpr::write_source(src.keyexpr(), w, (_c_header >> 5) & 0x1)?;
+        if let Some(_v) = src.extensions() {
+            for (_i, _e) in _v.enumerate() {
+                ExtEntry::write_source_in(&_e, w, &super::ext_entry::ExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
+            }
+        }
+        match src.body() {
+            ResponseVariantSource::CodecZenohReply(_b) => Reply::write_source(_b, w)?,
+            ResponseVariantSource::CodecZenohErr(_b) => Err::write_source(_b, w)?,
+            ResponseVariantSource::Default { body: _b, .. } => Reply::write_source(_b, w)?,
+        }
+        Ok(())
+    }
+
+    /// The bytes [`Self::write_source`] writes for `src`, counted with
+    /// nothing written.
+    #[doc(hidden)]
+    pub fn count_source<S: ResponseSource + ?Sized>(src: &S) -> Result<usize, CodecError> {
+        let mut _c = ::sce_forge_runtime::codec::CountSink::new();
+        Self::write_source(src, &mut _c)?;
+        Ok(_c.len())
+    }
+}
+
+impl<'a, S: ResponseSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for Response<'a> {
+    type Error<E> = CodecError;
+
+    fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        Self::write_source(src, w)
+    }
+}
+
+#[allow(dead_code)]
+impl<'a> Response<'a> {
+    /// The size of the frame [`Self::encode_source`] writes for `src`, found
+    /// with nothing written, or the refusal that encode would give. The result
+    /// writes the frame into a window of exactly that size and cannot fail.
+    pub fn measure<S: ResponseSource + ?Sized>(src: &S) -> Result<::sce_forge_runtime::codec::Measured<'_, Self, S>, CodecError> {
+        ::sce_forge_runtime::codec::measure(src)
+    }
+
+    /// Write `src` into `window` in one pass and return the bytes it is, for a
+    /// window as large as the caller can spare. On an error the window holds a
+    /// prefix to discard; see [`::sce_forge_runtime::codec::write_window`].
+    pub fn write_window<S: ResponseSource + ?Sized>(src: &S, window: &mut [u8]) -> Result<usize, CodecError> {
+        let mut sink = ::sce_forge_runtime::codec::SliceSink::new(window);
+        Self::write_source(src, &mut sink)?;
+        Ok(sink.position())
+    }
+}
+
 
 // ── View (ADR 0049) ──────────────────────────────────────────────────
 // `ResponseView` is what a decode of `Response` learned, not a
@@ -530,51 +768,18 @@ impl<'a> ResponseView<'a> {
     /// builder. It writes the canonical wire, not the frame the view was decoded
     /// from, so a frame `decode` accepted in a form that is not canonical is
     /// not passed on as it came.
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> {
-        // RFC §synth-5-B parent-tag carriers — derive carrier bits from each embedded
-        // parent-tag variant's active arm before the carrier byte is
-        // emitted. Each `_derived_<carrier>` local is OR'd into the
-        // carrier's encode site (see `inject_parent_tag_carrier_suffix`).
-        let _derived_header: u8 = match &self.keyexpr.body { WireexprViewVariant::WireexprNonlocal(_) => 0x00u8, WireexprViewVariant::WireexprLocal(_) => 0x40u8 };
-
-        // RFC §synth-5-B peek-byte / streaming-prefix:
-        // streaming prefix encode (per-field present_if/tlv-chain/embed/
-        // repeat helpers). Peek-byte mode: the arm body's encode prepends
-        // its own header byte (which the decoder peeked); no separate
-        // tag byte is emitted here. Streaming-prefix mode (own-field
-        // variant): the carrier is part of the prefix fields and emits
-        // through the same per-field path.
-        w.write_u8(self.header | _derived_header)?;
-        w.write_vle_u64(self.request_id)?;
-        self.keyexpr.encode(w, (self.header >> 5) & 0x1)?;
-        if let Some(_list) = &self.extensions {
-            for _e in _list.iter() {
-                _e.encode(w)?;
-            }
-        }
-        // Append the active arm's encoded bytes.
-        match &self.body {
-            ResponseViewVariant::CodecZenohReply(b) => {
-                b.encode(w)?;
-            }
-            ResponseViewVariant::CodecZenohErr(b) => {
-                b.encode(w)?;
-            }
-            ResponseViewVariant::Default { body, .. } => {
-                body.encode(w)?;
-            }
-        }
-        Ok(())
+    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> where CodecError: From<S::Error> {
+        Response::encode_source(self, w)
     }
 
-    /// Heap-backed convenience facade over [`Self::encode`].
+    /// Heap-backed convenience facade over [`Self::encode`], which refuses a
+    /// value it cannot carry.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Vec<u8> {
+    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
         let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)
-            .expect("VecSink is infallible");
-        _sce_v
+        self.encode(&mut _sce_sink)?;
+        Ok(_sce_v)
     }
 
     pub fn mid(&self) -> u8 {
@@ -626,7 +831,7 @@ impl<'a> ResponseView<'a> {
 // types, which cannot be run backwards to recover the profile from a value.
 // Naming it once is also what lets each field's declared capacity infer,
 // so no call site repeats a `sce:max-size` / `sce:max-count` constant.
-use super::wireexpr::{WireexprOwned, WireexprOwnedVariant};
+use super::wireexpr::WireexprOwned;
 use super::ext_entry::ExtEntryOwned;
 use super::reply::ReplyOwned;
 use super::err::ErrOwned;
@@ -842,51 +1047,18 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> ResponseOwned<S> {
     ///
     /// The projection builds the whole borrowed record (every list and
     /// embedded body in it, by value) only for `encode` to read it once. A
-    /// sender that holds an owned value encodes it from here. The same
-    /// refusals as the projection's: a list longer than the borrowed view
-    /// declares raises `CodecError::TooManyElements`, so an owned value the
+    /// sender that holds an owned value encodes it from here.
+    /// The same refusals as the projection's: a list longer than the borrowed
+    /// view declares raises `CodecError::TooManyElements`, so an owned value the
     /// borrowed form could not carry is an error and never a frame its own
     /// decoder would reject.
-    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), CodecError> {
-        // RFC §synth-5-B parent-tag carriers — derive carrier bits from each embedded
-        // parent-tag variant's active arm before the carrier byte is
-        // emitted. Each `_derived_<carrier>` local is OR'd into the
-        // carrier's encode site (see `inject_parent_tag_carrier_suffix`).
-        let _derived_header: u8 = match &self.keyexpr.body { WireexprOwnedVariant::WireexprNonlocal(_) => 0x00u8, WireexprOwnedVariant::WireexprLocal(_) => 0x40u8 };
-
-        // RFC §synth-5-B peek-byte / streaming-prefix:
-        // streaming prefix encode (per-field present_if/tlv-chain/embed/
-        // repeat helpers). Peek-byte mode: the arm body's encode prepends
-        // its own header byte (which the decoder peeked); no separate
-        // tag byte is emitted here. Streaming-prefix mode (own-field
-        // variant): the carrier is part of the prefix fields and emits
-        // through the same per-field path.
-        w.write_u8(self.header | _derived_header)?;
-        w.write_vle_u64(self.request_id)?;
-        self.keyexpr.encode(w, (self.header >> 5) & 0x1)?;
-        if let Some(_list) = &self.extensions {
-            for _e in ::sce_forge_runtime::codec::bounded_entries::<_, _, 8>(_list)? {
-                _e.encode(w)?;
-            }
-        }
-        // Append the active arm's encoded bytes.
-        match &self.body {
-            ResponseOwnedVariant::CodecZenohReply(b) => {
-                b.encode(w)?;
-            }
-            ResponseOwnedVariant::CodecZenohErr(b) => {
-                b.encode(w)?;
-            }
-            ResponseOwnedVariant::Default { body, .. } => {
-                body.encode(w)?;
-            }
-        }
-        Ok(())
+    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        Response::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade over [`Self::encode`]. Fallible: a list
-    /// past the bound the borrowed view declares is refused, and so is a
-    /// presence the chain predicates disagree with.
+    /// past the bound the borrowed view declares is refused, as is any value
+    /// the encoding cannot carry.
     #[cfg(feature = "alloc")]
     pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Response::MAX_ENCODED_BYTES);

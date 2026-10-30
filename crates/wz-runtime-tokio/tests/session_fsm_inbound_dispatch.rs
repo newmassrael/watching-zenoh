@@ -493,7 +493,9 @@ fn parse_frame_payload_dispatches_request_mid_to_request_decoder() {
         header: 0x1C,
         ..Request::default()
     };
-    let bytes = req.encode_to_vec();
+    let bytes = req
+        .encode_to_vec()
+        .expect("a default-armed Request encodes");
     assert_eq!(
         bytes.len(),
         4,
@@ -531,7 +533,9 @@ fn parse_frame_payload_decodes_request_then_unknown_chain() {
         header: 0x1C,
         ..Request::default()
     };
-    let mut bytes = req.encode_to_vec();
+    let mut bytes = req
+        .encode_to_vec()
+        .expect("a default-armed Request encodes");
     let request_len = bytes.len();
     // Append an Unknown MID — synthetic 0x00 outside the {0x19..0x1F}
     // typed catalog. Pre-R115 this slot used 0x1E (DECLARE) as the
@@ -584,7 +588,9 @@ fn parse_frame_payload_dispatches_push_mid_to_push_decoder() {
         header: 0x1D,
         ..Push::default()
     };
-    let bytes = wz_codecs_test_support::with_empty_inline_put(push).encode_to_vec();
+    let bytes = wz_codecs_test_support::with_empty_inline_put(push)
+        .encode_to_vec()
+        .expect("a fixture Push encodes");
 
     let parsed = parse_frame_payload(&bytes).expect("Push envelope parses");
     assert_eq!(
@@ -615,8 +621,13 @@ fn parse_frame_payload_decodes_push_then_request_chain() {
         header: 0x1C,
         ..Request::default()
     };
-    let mut bytes = wz_codecs_test_support::with_empty_inline_put(push).encode_to_vec();
-    bytes.extend_from_slice(&req.encode_to_vec());
+    let mut bytes = wz_codecs_test_support::with_empty_inline_put(push)
+        .encode_to_vec()
+        .expect("a fixture Push encodes");
+    bytes.extend_from_slice(
+        &req.encode_to_vec()
+            .expect("a default-armed Request encodes"),
+    );
 
     let parsed = parse_frame_payload(&bytes).expect("Push+Request batch parses");
     assert_eq!(parsed.len(), 2, "two records: Push then Request");
@@ -638,7 +649,7 @@ fn parse_frame_payload_dispatches_response_final_mid_to_response_final_decoder()
         header: 0x1A,
         ..ResponseFinal::default()
     };
-    let bytes = rf.encode_to_vec();
+    let bytes = rf.encode_to_vec().expect("a fixture ResponseFinal encodes");
     assert_eq!(
         bytes.len(),
         2,
@@ -668,7 +679,7 @@ fn parse_frame_payload_dispatches_oam_mid_to_oam_decoder() {
         header: 0x1F,
         ..Oam::default()
     };
-    let bytes = oam.encode_to_vec();
+    let bytes = oam.encode_to_vec().expect("a fixture Oam encodes");
 
     let parsed = parse_frame_payload(&bytes).expect("OAM envelope parses");
     assert_eq!(
@@ -697,7 +708,9 @@ fn parse_frame_payload_dispatches_interest_mid_to_interest_decoder() {
         header: 0x19,
         ..Interest::default()
     };
-    let bytes = interest.encode_to_vec();
+    let bytes = interest
+        .encode_to_vec()
+        .expect("a fixture Interest encodes");
     assert_eq!(
         bytes.len(),
         2,
@@ -737,7 +750,9 @@ fn parse_frame_payload_dispatches_response_mid_to_response_decoder() {
     };
     // The Put inside the default Reply names no payload layout (R3008), and an
     // encoder refuses that, so it carries the empty inline payload explicitly.
-    let bytes = wz_codecs_test_support::with_empty_inline_put_reply(resp).encode_to_vec();
+    let bytes = wz_codecs_test_support::with_empty_inline_put_reply(resp)
+        .encode_to_vec()
+        .expect("a fixture Response encodes");
     let parsed = parse_frame_payload(&bytes).expect("Response envelope parses");
     assert_eq!(
         parsed.len(),
@@ -770,7 +785,9 @@ fn parse_frame_payload_dispatches_non_final_interest_with_body_byte() {
         body: Some(InterestBody::default()),
         ..Interest::default()
     };
-    let bytes = interest.encode_to_vec();
+    let bytes = interest
+        .encode_to_vec()
+        .expect("a fixture Interest encodes");
     assert_eq!(
         bytes.len(),
         3,

@@ -2299,7 +2299,7 @@ pub(crate) mod tests {
             scout.zid = Some(z);
         }
         let mut wire = alloc::vec![wz_session_core::wire_const::S_MID_SCOUT];
-        wire.extend_from_slice(&scout.encode_to_vec());
+        wire.extend_from_slice(&scout.encode_to_vec().expect("a fixture Scout is encodable"));
         wire
     }
 
@@ -2327,7 +2327,8 @@ pub(crate) mod tests {
         let body = owned
             .try_as_borrowed()
             .expect("borrowed projection")
-            .encode_to_vec(l);
+            .encode_to_vec(l)
+            .expect("a fixture Hello is encodable");
         let mut header = wz_session_core::wire_const::S_MID_HELLO;
         if l != 0 {
             header |= wz_session_core::wire_const::FLAG_S_HELLO_L;
@@ -2801,7 +2802,11 @@ pub(crate) mod tests {
         } else {
             wz_session_core::wire_const::T_MID_INIT
         }];
-        wire.extend_from_slice(&body.encode_to_vec(0, u8::from(ack)));
+        wire.extend_from_slice(
+            &body
+                .encode_to_vec(0, u8::from(ack))
+                .expect("a fixture InitBody is encodable"),
+        );
         let mut framed = (wire.len() as u16).to_le_bytes().to_vec();
         framed.extend_from_slice(&wire);
         framed
@@ -2820,7 +2825,7 @@ pub(crate) mod tests {
         join.set_whatami(role);
         join.set_zid_len_m1(zid.len() as u8 - 1);
         let mut wire = alloc::vec![wz_session_core::wire_const::T_MID_JOIN];
-        wire.extend_from_slice(&join.encode_to_vec(0));
+        wire.extend_from_slice(&join.encode_to_vec(0).expect("a fixture Join is encodable"));
         wire
     }
 

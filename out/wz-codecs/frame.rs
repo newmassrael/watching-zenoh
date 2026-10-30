@@ -93,31 +93,22 @@ impl<'a> Frame<'a> {
     /// caller-owned `SliceSink` allocations.
     pub const MAX_ENCODED_BYTES: usize = 65545;
 
-    /// Encode `self` into the caller-owned sink. Returns
-    /// `CodecError::BufferOverflow` from a bounded sink when the
-    /// destination has insufficient remaining capacity; growable
-    /// sinks (e.g. `VecSink`) are effectively infallible.
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> {
-        // Streaming cursor encode (SSOT selection: `needs_streaming`).
-        // Mirrors the streaming decode: every field appends its own bytes
-        // in declaration order through the per-field encode blocks, so a
-        // gated field skips its append when absent, and a fixed field after
-        // a variable-length payload lands after the payload (the positional
-        // path appends variable fields last, placing it ahead on the wire).
-        // Per-field `is_repeat` / `is_tlv_chain` / `is_embed` route to their
-        // dedicated helpers; everything else uses `present_if_encode_block`
-        // (its non-gated arm covers plain fixed / tail / length-ref / VLE).
-        w.write_vle_u64(self.sn)?;
-        w.write_bytes(self.payload)?;
-        Ok(())
+    /// Encode `self` into the caller-owned sink. Every value has a frame
+    /// (docs/adr/0065), so the only error is the sink's own:
+    /// `CodecError::BufferOverflow` from a bounded sink when the destination
+    /// has insufficient remaining capacity, and none from a sink that cannot
+    /// refuse (`VecSink`, `CountSink`).
+    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), S::Error> {
+        Self::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. Pre-reserves
     /// `MAX_ENCODED_BYTES` so the worst-case write path performs at
     /// most one allocation, then delegates to `encode` over a
-    /// `VecSink`. Returns the freshly-encoded byte vector. Callers
-    /// targeting zero-alloc hot paths should call `encode` directly
-    /// against a caller-owned sink.
+    /// `VecSink`, and returns the freshly-encoded bytes: the encode refuses
+    /// no value and the vector cannot run out of room. Callers targeting
+    /// zero-alloc hot paths should call `encode` directly against a
+    /// caller-owned sink.
     ///
     /// Gated on the `alloc` feature — `VecSink` lives behind the
     /// same gate (see `backends/rust/forge-runtime/src/codec.rs`). MCU /
@@ -126,12 +117,127 @@ impl<'a> Frame<'a> {
     #[cfg(feature = "alloc")]
     pub fn encode_to_vec(&self) -> Vec<u8> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
-        let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)
-            .expect("VecSink is infallible");
+        let Ok(()) = self.encode(&mut VecSink::new(&mut _sce_v));
         _sce_v
     }
 }
+
+// ── Source (ADR 0058) ────────────────────────────────────────────────
+/// What a value of `Frame` says: its presented fields. A length, a count
+/// or the flag a gated field is announced by is not among them; `Frame`
+/// computes those from what is ([`Frame::encode_source`]).
+pub trait FrameSource {
+    /// The `sn` field.
+    fn sn(&self) -> u64;
+    /// The `payload` field.
+    fn payload(&self) -> &[u8];
+}
+
+impl<T: FrameSource + ?Sized> FrameSource for &T {
+    fn sn(&self) -> u64 {
+        (**self).sn()
+    }
+    fn payload(&self) -> &[u8] {
+        (**self).payload()
+    }
+}
+
+/// A value of `Frame` held in the types a caller already has: a source
+/// ([`FrameSource`]) whose lists are slices and whose bodies are references.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub struct FrameParts<'a> {
+    /// The `sn` field.
+    pub sn: u64,
+    /// The `payload` field.
+    pub payload: &'a [u8],
+}
+
+impl<'a> FrameSource for FrameParts<'a> {
+    fn sn(&self) -> u64 {
+        self.sn
+    }
+    fn payload(&self) -> &[u8] {
+        self.payload
+    }
+}
+
+impl<'a> FrameSource for Frame<'a> {
+    fn sn(&self) -> u64 {
+        self.sn
+    }
+    fn payload(&self) -> &[u8] {
+        self.payload
+    }
+}
+
+impl<S: ::sce_forge_runtime::codec::CodecStorage> FrameSource for FrameOwned<S> {
+    fn sn(&self) -> u64 {
+        self.sn
+    }
+    fn payload(&self) -> &[u8] {
+        ::sce_forge_runtime::codec::SceByteBuf::as_slice(&self.payload)
+    }
+}
+
+#[allow(dead_code)]
+impl<'a> Frame<'a> {
+    /// Encode what `src` says into the caller-owned sink: the bytes
+    /// [`Self::encode`] writes for the value it holds, read through
+    /// [`FrameSource`]. A length, a count or a gate flag is computed from what
+    /// `src` presents. Every value `src` can present has a frame, so the
+    /// only error is the sink's (docs/adr/0065).
+    pub fn encode_source<S: FrameSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> {
+        Self::write_source(src, w)
+    }
+
+    /// [`Self::encode_source`] without the guard a parent has already made.
+    #[doc(hidden)]
+    pub fn write_source<S: FrameSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> {
+        w.write_vle_u64(src.sn())?;
+        w.write_bytes(src.payload())?;
+        Ok(())
+    }
+
+    /// The bytes [`Self::write_source`] writes for `src`, counted with
+    /// nothing written.
+    #[doc(hidden)]
+    pub fn count_source<S: FrameSource + ?Sized>(src: &S) -> usize {
+        let mut _c = ::sce_forge_runtime::codec::CountSink::new();
+        let Ok(()) = Self::write_source(src, &mut _c);
+        _c.len()
+    }
+}
+
+impl<'a, S: FrameSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for Frame<'a> {
+    type Error<E> = E;
+
+    fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), K::Error> where CodecError: From<K::Error> {
+        Self::write_source(src, w)
+    }
+}
+
+#[allow(dead_code)]
+impl<'a> Frame<'a> {
+    /// The size of the frame [`Self::encode_source`] writes for `src`, found
+    /// with nothing written: the encode refuses no value, so neither does
+    /// this. The result writes the frame into a window of exactly that size
+    /// and cannot fail.
+    pub fn measure<S: FrameSource + ?Sized>(src: &S) -> ::sce_forge_runtime::codec::Measured<'_, Self, S> {
+        let Ok(measured) = ::sce_forge_runtime::codec::measure(src);
+        measured
+    }
+
+    /// Write `src` into `window` in one pass and return the bytes it is, for a
+    /// window as large as the caller can spare. On an error the window holds a
+    /// prefix to discard; see [`::sce_forge_runtime::codec::write_window`].
+    pub fn write_window<S: FrameSource + ?Sized>(src: &S, window: &mut [u8]) -> Result<usize, CodecError> {
+        let mut sink = ::sce_forge_runtime::codec::SliceSink::new(window);
+        Self::write_source(src, &mut sink)?;
+        Ok(sink.position())
+    }
+}
+
 
 // ── View (ADR 0049) ──────────────────────────────────────────────────
 // `Frame` holds no bounded list, embedded body or variant, so a
@@ -270,33 +376,19 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> FrameOwned<S> {
     ///
     /// The projection builds the whole borrowed record (every list and
     /// embedded body in it, by value) only for `encode` to read it once. A
-    /// sender that holds an owned value encodes it from here. The same
-    /// refusals as the projection's: a list longer than the borrowed view
-    /// declares raises `CodecError::TooManyElements`, so an owned value the
-    /// borrowed form could not carry is an error and never a frame its own
-    /// decoder would reject.
-    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), CodecError> {
-        // Streaming cursor encode (SSOT selection: `needs_streaming`).
-        // Mirrors the streaming decode: every field appends its own bytes
-        // in declaration order through the per-field encode blocks, so a
-        // gated field skips its append when absent, and a fixed field after
-        // a variable-length payload lands after the payload (the positional
-        // path appends variable fields last, placing it ahead on the wire).
-        // Per-field `is_repeat` / `is_tlv_chain` / `is_embed` route to their
-        // dedicated helpers; everything else uses `present_if_encode_block`
-        // (its non-gated arm covers plain fixed / tail / length-ref / VLE).
-        w.write_vle_u64(self.sn)?;
-        w.write_bytes(::sce_forge_runtime::codec::SceByteBuf::as_slice(&self.payload))?;
-        Ok(())
+    /// sender that holds an owned value encodes it from here.
+    /// Every value has a frame (docs/adr/0065), so the only error is the
+    /// sink's own.
+    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), K::Error> {
+        Frame::encode_source(self, w)
     }
 
-    /// Heap-backed convenience facade over [`Self::encode`].
+    /// Heap-backed convenience facade over [`Self::encode`], which refuses no
+    /// value.
     #[cfg(feature = "alloc")]
     pub fn encode_to_vec(&self) -> Vec<u8> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Frame::MAX_ENCODED_BYTES);
-        let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)
-            .expect("VecSink is infallible");
+        let Ok(()) = self.encode(&mut VecSink::new(&mut _sce_v));
         _sce_v
     }
 }

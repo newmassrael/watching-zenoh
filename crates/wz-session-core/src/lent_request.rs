@@ -98,7 +98,10 @@ impl<'a> RequestWriter<'a> {
     }
 
     /// Encode the `Request` into `sink`.
-    pub fn encode<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError> {
+    pub fn encode<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError>
+    where
+        CodecError: From<S::Error>,
+    {
         let parts = &self.parts;
 
         // The Query body: the consolidation byte and the parameters behind the flags
@@ -205,7 +208,7 @@ mod tests {
         let request = build_request_query_with_meta(parts.rid, 0, Some(parts.keyexpr), &meta)
             .expect("the owned request is built");
         let view = request.try_as_borrowed().expect("a view");
-        view.encode_to_vec()
+        view.encode_to_vec().expect("the request view is encodable")
     }
 
     /// The bytes the writer writes for `parts`.

@@ -520,7 +520,10 @@ mod tests {
 
     /// The wire bytes of `push`, as a peer sends them.
     fn wire_of(push: &crate::wire::PushOwned) -> Vec<u8> {
-        push.try_as_borrowed().expect("a view").encode_to_vec()
+        push.try_as_borrowed()
+            .expect("a view")
+            .encode_to_vec()
+            .expect("a fixture push is encodable")
     }
 
     /// `push` delivered lent (the in-place path) and owned (the copying path)

@@ -22,13 +22,13 @@ use sce_forge_runtime::codec::VecSink;
 // pure no_std no-alloc MCU tier.
 use sce_forge_runtime::heapless::Vec as HeaplessVec;
 
-use super::wireexpr::{Wireexpr, WireexprVariant};
+use super::wireexpr::Wireexpr;
 use super::ext_entry::ExtEntry;
 use super::msg_put::MsgPut;
 use super::msg_del::MsgDel;
 
 use sce_forge_runtime::codec::{ListView, ListWalk};
-use super::wireexpr::{WireexprView, WireexprViewVariant};
+use super::wireexpr::WireexprView;
 use super::ext_entry::ExtEntryView;
 use super::msg_put::MsgPutView;
 use super::msg_del::MsgDelView;
@@ -251,66 +251,285 @@ impl<'a> Push<'a> {
     /// caller-owned `SliceSink` allocations.
     pub const MAX_ENCODED_BYTES: usize = 2456;
 
-    /// Encode `self` into the caller-owned sink. Returns
-    /// `CodecError::BufferOverflow` from a bounded sink when the
-    /// destination has insufficient remaining capacity; growable
-    /// sinks (e.g. `VecSink`) are effectively infallible.
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> {
-        // RFC §synth-5-B parent-tag carriers — derive carrier bits from each embedded
-        // parent-tag variant's active arm before the carrier byte is
-        // emitted. Each `_derived_<carrier>` local is OR'd into the
-        // carrier's encode site (see `inject_parent_tag_carrier_suffix`).
-        let _derived_header: u8 = match &self.keyexpr.body { WireexprVariant::WireexprNonlocal(_) => 0x00u8, WireexprVariant::WireexprLocal(_) => 0x40u8 };
-
-        // RFC §synth-5-B peek-byte / streaming-prefix:
-        // streaming prefix encode (per-field present_if/tlv-chain/embed/
-        // repeat helpers). Peek-byte mode: the arm body's encode prepends
-        // its own header byte (which the decoder peeked); no separate
-        // tag byte is emitted here. Streaming-prefix mode (own-field
-        // variant): the carrier is part of the prefix fields and emits
-        // through the same per-field path.
-        w.write_u8(self.header | _derived_header)?;
-        self.keyexpr.encode(w, (self.header >> 5) & 0x1)?;
-        if let Some(_list) = &self.extensions {
-            for _e in _list {
-                _e.encode(w)?;
-            }
-        }
-        // Append the active arm's encoded bytes.
-        match &self.body {
-            PushVariant::CodecZenohMsgPut(b) => {
-                b.encode(w)?;
-            }
-            PushVariant::CodecZenohMsgDel(b) => {
-                b.encode(w)?;
-            }
-            PushVariant::Default { body, .. } => {
-                body.encode(w)?;
-            }
-        }
-        Ok(())
+    /// Encode `self` into the caller-owned sink. Returns the value's refusal
+    /// when the encoding cannot carry it (a length past its type, a list past
+    /// its bound, a gate that disagrees with a presence; the document declares
+    /// `sce:encode-may-fail`), or the sink's own error:
+    /// `CodecError::BufferOverflow` from a bounded sink when the destination
+    /// has insufficient remaining capacity.
+    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> where CodecError: From<S::Error> {
+        Self::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. Pre-reserves
     /// `MAX_ENCODED_BYTES` so the worst-case write path performs at
     /// most one allocation, then delegates to `encode` over a
-    /// `VecSink`. Returns the freshly-encoded byte vector. Callers
-    /// targeting zero-alloc hot paths should call `encode` directly
-    /// against a caller-owned sink.
+    /// `VecSink`. Returns the freshly-encoded byte vector, or the error
+    /// `encode` refuses a value with: one the encoding cannot carry (a
+    /// length past its type, a list past its bound) or one a gate
+    /// disagrees with. Callers targeting zero-alloc hot paths should call
+    /// `encode` directly against a caller-owned sink.
     ///
     /// Gated on the `alloc` feature — `VecSink` lives behind the
     /// same gate (see `backends/rust/forge-runtime/src/codec.rs`). MCU /
     /// `no_std` builds without `alloc` only see the sink-based
     /// primary `encode`.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Vec<u8> {
+    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
         let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)
-            .expect("VecSink is infallible");
-        _sce_v
+        self.encode(&mut _sce_sink)?;
+        Ok(_sce_v)
     }
 }
+
+/// The arm of `Push`'s variant a value holds, each arm's body as the
+/// source it says. The tag is not among them: `Push` derives it from
+/// the arm, as it derives a length, and a default arm presents the tag
+/// it could not name.
+// A default arm's tag is read by the codec that embeds this one and
+// derives its own carrier bits from the arm, which not every build uses.
+#[allow(dead_code)]
+pub enum PushVariantSource<'s, A0: ?Sized, A1: ?Sized, D: ?Sized> {
+    CodecZenohMsgPut(&'s A0),
+    CodecZenohMsgDel(&'s A1),
+    Default { tag: u8, body: &'s D },
+}
+
+/// Flags of `Push` a parent sets in place of the ones a value presents:
+/// the end flag of a chain whose entries are `Push`, which the chain
+/// derives from where an entry stands.
+#[doc(hidden)]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PushOverrides {
+    /// The `N` flag of `header`, when a parent sets it.
+    pub header_n: Option<bool>,
+}
+
+#[allow(dead_code)]
+impl PushOverrides {
+    /// Sets `N` of `header` and nothing else.
+    #[allow(clippy::needless_update)]
+    pub fn header_n(value: bool) -> Self {
+        Self { header_n: Some(value), ..Self::default() }
+    }
+}
+
+// ── Source (ADR 0058) ────────────────────────────────────────────────
+/// What a value of `Push` says: its presented fields. A length, a count
+/// or the flag a gated field is announced by is not among them; `Push`
+/// computes those from what is ([`Push::encode_source`]).
+pub trait PushSource {
+    /// The `header` field.
+    fn header(&self) -> u8;
+    /// The `keyexpr` field.
+    fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource;
+    /// The `extensions` field.
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone>;
+    /// The arm of the variant this value holds.
+    fn body(&self) -> PushVariantSource<'_, impl super::msg_put::MsgPutSource, impl super::msg_del::MsgDelSource, impl super::msg_put::MsgPutSource>;
+}
+
+impl<T: PushSource + ?Sized> PushSource for &T {
+    fn header(&self) -> u8 {
+        (**self).header()
+    }
+    fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
+        (**self).keyexpr()
+    }
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+        (**self).extensions()
+    }
+    fn body(&self) -> PushVariantSource<'_, impl super::msg_put::MsgPutSource, impl super::msg_del::MsgDelSource, impl super::msg_put::MsgPutSource> {
+        (**self).body()
+    }
+}
+
+/// The arm of `Push`'s variant that PushParts holds.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub enum PushPartsBody<'a> {
+    CodecZenohMsgPut(&'a super::msg_put::MsgPutParts<'a>),
+    CodecZenohMsgDel(&'a super::msg_del::MsgDelParts<'a>),
+    /// The tag the grammar could not name, and the body it holds.
+    Default { tag: u8, body: &'a super::msg_put::MsgPutParts<'a> },
+}
+
+/// A value of `Push` held in the types a caller already has: a source
+/// ([`PushSource`]) whose lists are slices and whose bodies are references.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub struct PushParts<'a> {
+    /// The `header` field.
+    pub header: u8,
+    /// The `keyexpr` field.
+    pub keyexpr: &'a super::wireexpr::WireexprParts<'a>,
+    /// The `extensions` field.
+    pub extensions: Option<&'a [super::ext_entry::ExtEntryParts<'a>]>,
+    /// The arm of the variant this value holds.
+    pub body: PushPartsBody<'a>,
+}
+
+impl<'a> PushSource for PushParts<'a> {
+    fn header(&self) -> u8 {
+        self.header
+    }
+    fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
+        self.keyexpr
+    }
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+        self.extensions.map(<[_]>::iter)
+    }
+    fn body(&self) -> PushVariantSource<'_, impl super::msg_put::MsgPutSource, impl super::msg_del::MsgDelSource, impl super::msg_put::MsgPutSource> {
+        match &self.body {
+            PushPartsBody::CodecZenohMsgPut(_b) => PushVariantSource::CodecZenohMsgPut(*_b),
+            PushPartsBody::CodecZenohMsgDel(_b) => PushVariantSource::CodecZenohMsgDel(*_b),
+            PushPartsBody::Default { tag, body } => PushVariantSource::Default { tag: *tag, body: *body },
+        }
+    }
+}
+
+impl<'a> PushSource for Push<'a> {
+    fn header(&self) -> u8 {
+        self.header
+    }
+    fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
+        &self.keyexpr
+    }
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+        self.extensions.as_ref().map(|_l| _l.iter())
+    }
+    fn body(&self) -> PushVariantSource<'_, impl super::msg_put::MsgPutSource, impl super::msg_del::MsgDelSource, impl super::msg_put::MsgPutSource> {
+        match &self.body {
+            PushVariant::CodecZenohMsgPut(_b) => PushVariantSource::CodecZenohMsgPut(_b),
+            PushVariant::CodecZenohMsgDel(_b) => PushVariantSource::CodecZenohMsgDel(_b),
+            PushVariant::Default { tag, body } => PushVariantSource::Default { tag: *tag, body },
+        }
+    }
+}
+
+impl<'a> PushSource for PushView<'a> {
+    fn header(&self) -> u8 {
+        self.header
+    }
+    fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
+        &self.keyexpr
+    }
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+        self.extensions.as_ref().map(|_l| _l.iter())
+    }
+    fn body(&self) -> PushVariantSource<'_, impl super::msg_put::MsgPutSource, impl super::msg_del::MsgDelSource, impl super::msg_put::MsgPutSource> {
+        match &self.body {
+            PushViewVariant::CodecZenohMsgPut(_b) => PushVariantSource::CodecZenohMsgPut(_b),
+            PushViewVariant::CodecZenohMsgDel(_b) => PushVariantSource::CodecZenohMsgDel(_b),
+            PushViewVariant::Default { tag, body } => PushVariantSource::Default { tag: *tag, body },
+        }
+    }
+}
+
+impl<S: ::sce_forge_runtime::codec::CodecStorage> PushSource for PushOwned<S> {
+    fn header(&self) -> u8 {
+        self.header
+    }
+    fn keyexpr(&self) -> &impl super::wireexpr::WireexprSource {
+        &self.keyexpr
+    }
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+        self.extensions.as_ref().map(|_l| ::sce_forge_runtime::codec::SceList::as_slice(_l).iter())
+    }
+    fn body(&self) -> PushVariantSource<'_, impl super::msg_put::MsgPutSource, impl super::msg_del::MsgDelSource, impl super::msg_put::MsgPutSource> {
+        match &self.body {
+            PushOwnedVariant::CodecZenohMsgPut(_b) => PushVariantSource::CodecZenohMsgPut(_b),
+            PushOwnedVariant::CodecZenohMsgDel(_b) => PushVariantSource::CodecZenohMsgDel(_b),
+            PushOwnedVariant::Default { tag, body } => PushVariantSource::Default { tag: *tag, body },
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl<'a> Push<'a> {
+    /// Encode what `src` says into the caller-owned sink: the bytes
+    /// [`Self::encode`] writes for the value it holds, read through
+    /// [`PushSource`]. A length, a count or a gate flag is computed from what
+    /// `src` presents, and a value the encoding cannot carry is refused
+    /// before the first byte is written.
+    pub fn encode_source<S: PushSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        Self::count_source(src)?;
+        Self::write_source(src, w)
+    }
+
+    /// [`Self::encode_source`] without the guard a parent has already made.
+    #[doc(hidden)]
+    pub fn write_source<S: PushSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        Self::write_source_in(src, w, &PushOverrides::default())
+    }
+
+    /// [`Self::write_source`] with the flags a parent sets in place of the
+    /// ones `src` presents.
+    #[doc(hidden)]
+    pub fn write_source_in<S: PushSource + ?Sized, K: SceSink>(src: &S, w: &mut K, over: &PushOverrides) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        let _k_extensions: usize = src.extensions().map_or(0, |_l| _l.count());
+        if _k_extensions > 8 {
+            return Err(CodecError::TlvChainOverflow);
+        }
+        let _d_header_m: u8 = match super::wireexpr::WireexprSource::body(src.keyexpr()) { super::wireexpr::WireexprVariantSource::WireexprNonlocal(_) => 0, super::wireexpr::WireexprVariantSource::WireexprLocal(_) => 1 };
+        let _p_header_z_0: bool = src.extensions().is_some();
+        let mut _c_header: u8 = (((src.header() & !0x40) | (_d_header_m << 6)) & !0x80) | (u8::from(_p_header_z_0) << 7);
+        if let Some(_o) = over.header_n {
+            _c_header = (_c_header & !0x20) | (u8::from(_o) << 5);
+        }
+        w.write_u8(_c_header)?;
+        Wireexpr::write_source(src.keyexpr(), w, (_c_header >> 5) & 0x1)?;
+        if let Some(_v) = src.extensions() {
+            for (_i, _e) in _v.enumerate() {
+                ExtEntry::write_source_in(&_e, w, &super::ext_entry::ExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
+            }
+        }
+        match src.body() {
+            PushVariantSource::CodecZenohMsgPut(_b) => MsgPut::write_source(_b, w)?,
+            PushVariantSource::CodecZenohMsgDel(_b) => MsgDel::write_source(_b, w)?,
+            PushVariantSource::Default { body: _b, .. } => MsgPut::write_source(_b, w)?,
+        }
+        Ok(())
+    }
+
+    /// The bytes [`Self::write_source`] writes for `src`, counted with
+    /// nothing written.
+    #[doc(hidden)]
+    pub fn count_source<S: PushSource + ?Sized>(src: &S) -> Result<usize, CodecError> {
+        let mut _c = ::sce_forge_runtime::codec::CountSink::new();
+        Self::write_source(src, &mut _c)?;
+        Ok(_c.len())
+    }
+}
+
+impl<'a, S: PushSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for Push<'a> {
+    type Error<E> = CodecError;
+
+    fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        Self::write_source(src, w)
+    }
+}
+
+#[allow(dead_code)]
+impl<'a> Push<'a> {
+    /// The size of the frame [`Self::encode_source`] writes for `src`, found
+    /// with nothing written, or the refusal that encode would give. The result
+    /// writes the frame into a window of exactly that size and cannot fail.
+    pub fn measure<S: PushSource + ?Sized>(src: &S) -> Result<::sce_forge_runtime::codec::Measured<'_, Self, S>, CodecError> {
+        ::sce_forge_runtime::codec::measure(src)
+    }
+
+    /// Write `src` into `window` in one pass and return the bytes it is, for a
+    /// window as large as the caller can spare. On an error the window holds a
+    /// prefix to discard; see [`::sce_forge_runtime::codec::write_window`].
+    pub fn write_window<S: PushSource + ?Sized>(src: &S, window: &mut [u8]) -> Result<usize, CodecError> {
+        let mut sink = ::sce_forge_runtime::codec::SliceSink::new(window);
+        Self::write_source(src, &mut sink)?;
+        Ok(sink.position())
+    }
+}
+
 
 // ── View (ADR 0049) ──────────────────────────────────────────────────
 // `PushView` is what a decode of `Push` learned, not a
@@ -520,50 +739,18 @@ impl<'a> PushView<'a> {
     /// builder. It writes the canonical wire, not the frame the view was decoded
     /// from, so a frame `decode` accepted in a form that is not canonical is
     /// not passed on as it came.
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> {
-        // RFC §synth-5-B parent-tag carriers — derive carrier bits from each embedded
-        // parent-tag variant's active arm before the carrier byte is
-        // emitted. Each `_derived_<carrier>` local is OR'd into the
-        // carrier's encode site (see `inject_parent_tag_carrier_suffix`).
-        let _derived_header: u8 = match &self.keyexpr.body { WireexprViewVariant::WireexprNonlocal(_) => 0x00u8, WireexprViewVariant::WireexprLocal(_) => 0x40u8 };
-
-        // RFC §synth-5-B peek-byte / streaming-prefix:
-        // streaming prefix encode (per-field present_if/tlv-chain/embed/
-        // repeat helpers). Peek-byte mode: the arm body's encode prepends
-        // its own header byte (which the decoder peeked); no separate
-        // tag byte is emitted here. Streaming-prefix mode (own-field
-        // variant): the carrier is part of the prefix fields and emits
-        // through the same per-field path.
-        w.write_u8(self.header | _derived_header)?;
-        self.keyexpr.encode(w, (self.header >> 5) & 0x1)?;
-        if let Some(_list) = &self.extensions {
-            for _e in _list.iter() {
-                _e.encode(w)?;
-            }
-        }
-        // Append the active arm's encoded bytes.
-        match &self.body {
-            PushViewVariant::CodecZenohMsgPut(b) => {
-                b.encode(w)?;
-            }
-            PushViewVariant::CodecZenohMsgDel(b) => {
-                b.encode(w)?;
-            }
-            PushViewVariant::Default { body, .. } => {
-                body.encode(w)?;
-            }
-        }
-        Ok(())
+    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> where CodecError: From<S::Error> {
+        Push::encode_source(self, w)
     }
 
-    /// Heap-backed convenience facade over [`Self::encode`].
+    /// Heap-backed convenience facade over [`Self::encode`], which refuses a
+    /// value it cannot carry.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Vec<u8> {
+    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
         let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)
-            .expect("VecSink is infallible");
-        _sce_v
+        self.encode(&mut _sce_sink)?;
+        Ok(_sce_v)
     }
 
     pub fn mid(&self) -> u8 {
@@ -615,7 +802,7 @@ impl<'a> PushView<'a> {
 // types, which cannot be run backwards to recover the profile from a value.
 // Naming it once is also what lets each field's declared capacity infer,
 // so no call site repeats a `sce:max-size` / `sce:max-count` constant.
-use super::wireexpr::{WireexprOwned, WireexprOwnedVariant};
+use super::wireexpr::WireexprOwned;
 use super::ext_entry::ExtEntryOwned;
 use super::msg_put::MsgPutOwned;
 use super::msg_del::MsgDelOwned;
@@ -828,50 +1015,18 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> PushOwned<S> {
     ///
     /// The projection builds the whole borrowed record (every list and
     /// embedded body in it, by value) only for `encode` to read it once. A
-    /// sender that holds an owned value encodes it from here. The same
-    /// refusals as the projection's: a list longer than the borrowed view
-    /// declares raises `CodecError::TooManyElements`, so an owned value the
+    /// sender that holds an owned value encodes it from here.
+    /// The same refusals as the projection's: a list longer than the borrowed
+    /// view declares raises `CodecError::TooManyElements`, so an owned value the
     /// borrowed form could not carry is an error and never a frame its own
     /// decoder would reject.
-    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), CodecError> {
-        // RFC §synth-5-B parent-tag carriers — derive carrier bits from each embedded
-        // parent-tag variant's active arm before the carrier byte is
-        // emitted. Each `_derived_<carrier>` local is OR'd into the
-        // carrier's encode site (see `inject_parent_tag_carrier_suffix`).
-        let _derived_header: u8 = match &self.keyexpr.body { WireexprOwnedVariant::WireexprNonlocal(_) => 0x00u8, WireexprOwnedVariant::WireexprLocal(_) => 0x40u8 };
-
-        // RFC §synth-5-B peek-byte / streaming-prefix:
-        // streaming prefix encode (per-field present_if/tlv-chain/embed/
-        // repeat helpers). Peek-byte mode: the arm body's encode prepends
-        // its own header byte (which the decoder peeked); no separate
-        // tag byte is emitted here. Streaming-prefix mode (own-field
-        // variant): the carrier is part of the prefix fields and emits
-        // through the same per-field path.
-        w.write_u8(self.header | _derived_header)?;
-        self.keyexpr.encode(w, (self.header >> 5) & 0x1)?;
-        if let Some(_list) = &self.extensions {
-            for _e in ::sce_forge_runtime::codec::bounded_entries::<_, _, 8>(_list)? {
-                _e.encode(w)?;
-            }
-        }
-        // Append the active arm's encoded bytes.
-        match &self.body {
-            PushOwnedVariant::CodecZenohMsgPut(b) => {
-                b.encode(w)?;
-            }
-            PushOwnedVariant::CodecZenohMsgDel(b) => {
-                b.encode(w)?;
-            }
-            PushOwnedVariant::Default { body, .. } => {
-                body.encode(w)?;
-            }
-        }
-        Ok(())
+    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        Push::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade over [`Self::encode`]. Fallible: a list
-    /// past the bound the borrowed view declares is refused, and so is a
-    /// presence the chain predicates disagree with.
+    /// past the bound the borrowed view declares is refused, as is any value
+    /// the encoding cannot carry.
     #[cfg(feature = "alloc")]
     pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Push::MAX_ENCODED_BYTES);

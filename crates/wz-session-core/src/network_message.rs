@@ -2041,7 +2041,8 @@ mod chain_saturation_tests {
             id: 7,
             ..Default::default()
         }
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("a fixture oam record is encodable");
         wire.extend_from_slice(&push_with_put_exts(
             crate::ext_chain::NETWORK_EXT_CHAIN_DEPTH + 1,
         ));
@@ -2522,6 +2523,7 @@ mod record_walk_tests {
             ..Default::default()
         }
         .encode_to_vec()
+        .expect("a fixture oam record is encodable")
     }
 
     /// What `for_each_record` hands over, one entry per call: the OAM id, or
@@ -2658,6 +2660,7 @@ mod record_walk_tests {
             .try_as_borrowed()
             .expect("a view")
             .encode_to_vec()
+            .expect("a fixture push record is encodable")
     }
 
     /// The lent walk hands a Push over where the payload lies and every other
@@ -2714,15 +2717,26 @@ mod record_walk_tests {
         use wz_codecs::ext_unit::ExtUnit;
 
         fn declare_bytes(declare: &wz_codecs::declare::DeclareOwned) -> Vec<u8> {
-            declare.try_as_borrowed().expect("a view").encode_to_vec()
+            declare
+                .try_as_borrowed()
+                .expect("a view")
+                .encode_to_vec()
+                .expect("a fixture declare is encodable")
         }
 
         fn interest_bytes(interest: &wz_codecs::interest::InterestOwned) -> Vec<u8> {
-            interest.try_as_borrowed().expect("a view").encode_to_vec()
+            interest
+                .try_as_borrowed()
+                .expect("a view")
+                .encode_to_vec()
+                .expect("a fixture interest is encodable")
         }
 
         fn response_final_bytes(done: &wz_codecs::response_final::ResponseFinalOwned) -> Vec<u8> {
-            done.try_as_borrowed().expect("a view").encode_to_vec()
+            done.try_as_borrowed()
+                .expect("a view")
+                .encode_to_vec()
+                .expect("a fixture response final is encodable")
         }
 
         /// A DeclSubscriber of `id` on a literal keyexpr.
@@ -2899,6 +2913,7 @@ mod record_walk_tests {
                     ..Default::default()
                 }
                 .encode_to_vec()
+                .expect("a fixture oam with an unknown ext is encodable")
             };
             for (name, bad) in [
                 ("declare", declare),
@@ -2947,7 +2962,10 @@ mod record_walk_tests {
         });
         refused.extensions = Some(chain);
         refused.header |= 0x80;
-        let payload = [plain, refused.encode_to_vec(), push_record("a/3")].concat();
+        let refused = refused
+            .encode_to_vec()
+            .expect("a fixture record with an unknown ext is encodable");
+        let payload = [plain, refused, push_record("a/3")].concat();
         let walk = |form| {
             let mut record = new_record_buf();
             let mut handed = 0;
@@ -2973,8 +2991,16 @@ mod record_walk_tests {
         let response = crate::response_build::ResponseReplyBuilder::new(3, 0, Some("q/1"), b"v")
             .build()
             .expect("build");
-        let rq = request.try_as_borrowed().expect("a view").encode_to_vec();
-        let rs = response.try_as_borrowed().expect("a view").encode_to_vec();
+        let rq = request
+            .try_as_borrowed()
+            .expect("a view")
+            .encode_to_vec()
+            .expect("a fixture request is encodable");
+        let rs = response
+            .try_as_borrowed()
+            .expect("a view")
+            .encode_to_vec()
+            .expect("a fixture response is encodable");
         let payload = [rq.clone(), oam_record(2), rs.clone()].concat();
         let mut record = new_record_buf();
         let mut seen: Vec<char> = Vec::new();
@@ -3019,7 +3045,14 @@ mod record_walk_tests {
         let mut bad_response = response.try_as_borrowed().expect("a view");
         bad_response.extensions = Some(unknown());
         bad_response.header |= 0x80;
-        for bad in [bad_request.encode_to_vec(), bad_response.encode_to_vec()] {
+        for bad in [
+            bad_request
+                .encode_to_vec()
+                .expect("a fixture request with an unknown ext is encodable"),
+            bad_response
+                .encode_to_vec()
+                .expect("a fixture response with an unknown ext is encodable"),
+        ] {
             let payload = [rq.clone(), bad, rs.clone()].concat();
             let walk = |form| {
                 let mut record = new_record_buf();
@@ -3064,6 +3097,7 @@ mod best_effort_batch_tests {
             ..Default::default()
         }
         .encode_to_vec()
+        .expect("a fixture oam record is encodable")
     }
 
     fn oam_ids(messages: &[NetworkMessage]) -> Vec<u64> {
@@ -3421,7 +3455,12 @@ mod declare_body_ext_chain_tests {
             0,
             "the decode left the extension bytes on the cursor"
         );
-        assert_eq!(decoded.encode_to_vec(), wire);
+        assert_eq!(
+            decoded
+                .encode_to_vec()
+                .expect("a decoded ext chain re-encodes"),
+            wire
+        );
     }
 }
 

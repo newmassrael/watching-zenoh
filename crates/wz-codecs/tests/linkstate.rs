@@ -83,7 +83,7 @@ fn rich_linkstate_round_trips_byte_exact() {
     assert_eq!(ls.links[1].psid, 9);
     assert!(ls.weights.is_none(), "H clear => no weights block");
 
-    let wire = ls.encode_to_vec();
+    let wire = ls.encode_to_vec().expect("encode RICH LinkState");
     assert_eq!(wire, RICH, "encode(decode(RICH)) must be byte-identical");
 }
 
@@ -104,7 +104,7 @@ fn minimal_linkstate_round_trips_byte_exact() {
     assert_eq!(ls.links.len(), 0);
     assert!(ls.weights.is_none(), "H clear => no weights block");
 
-    let wire = ls.encode_to_vec();
+    let wire = ls.encode_to_vec().expect("encode minimal LinkState");
     assert_eq!(wire, MIN, "encode(decode(MIN)) must be byte-identical");
 }
 
@@ -130,7 +130,7 @@ fn weighted_linkstate_round_trips_byte_exact() {
     assert_eq!(weights[0].weight, 100);
     assert_eq!(weights[1].weight, 300, "multi-byte VLE u16");
 
-    let wire = ls.encode_to_vec();
+    let wire = ls.encode_to_vec().expect("encode weighted LinkState");
     assert_eq!(
         wire, WEIGHTED,
         "encode(decode(WEIGHTED)) must be byte-identical"
@@ -157,7 +157,7 @@ fn linkstate_list_round_trips_byte_exact() {
     assert_eq!(lst.link_states[1].links.len(), 2);
     assert_eq!(lst.link_states[1].links[1].psid, 9);
 
-    let wire = lst.encode_to_vec();
+    let wire = lst.encode_to_vec().expect("encode LinkStateList");
     assert_eq!(
         wire, list_wire,
         "encode(decode(list)) must be byte-identical"

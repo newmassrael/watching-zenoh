@@ -881,6 +881,7 @@ impl StreamWriteDriver {
                 payload: bytes,
             }
             .encode_to_vec()
+            .expect("a payload within the u16 prefix encodes")
         }
     }
 
@@ -1412,7 +1413,8 @@ mod tests {
                         payload_len: payload.len() as u16,
                         payload,
                     }
-                    .encode_to_vec();
+                    .encode_to_vec()
+                    .expect("a test payload fits the u16 stream envelope");
                     assert_eq!(by_lend, envelope);
                 }
             }
@@ -1673,7 +1675,8 @@ mod tests {
             payload_len: frames[0].len() as u16,
             payload: &frames[0],
         }
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("a one-push frame fits the u16 stream envelope");
         assert_eq!(wire, envelope);
     }
 
@@ -1796,7 +1799,8 @@ mod tests {
             payload_len: frames[0].len() as u16,
             payload: &frames[0],
         }
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("a one-push frame fits the u16 stream envelope");
         assert_eq!(wire, envelope);
     }
 
@@ -1878,7 +1882,8 @@ mod tests {
                         payload_len: payload.len() as u16,
                         payload,
                     }
-                    .encode_to_vec();
+                    .encode_to_vec()
+                    .expect("a test payload fits the u16 stream envelope");
                     assert_eq!(by_lend, envelope);
                 }
             }
@@ -2003,7 +2008,8 @@ mod tests {
             payload_len: frames[0].len() as u16,
             payload: &frames[0],
         }
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("a one-push frame fits the u16 stream envelope");
         assert_eq!(wire, envelope);
     }
 

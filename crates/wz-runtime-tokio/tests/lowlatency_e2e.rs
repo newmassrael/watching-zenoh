@@ -358,12 +358,14 @@ async fn a_lean_unit_is_read_in_place_and_handed_over_as_the_copying_path_reads_
             .try_as_borrowed()
             .expect("a borrowed view")
             .encode_to_vec()
+            .expect("a literal Push encodes")
     };
     let oam = wz_codecs::oam::Oam {
         id: 7,
         ..Default::default()
     }
-    .encode_to_vec();
+    .encode_to_vec()
+    .expect("an OAM with no body encodes");
     let one_put = push(b"lean");
     let two_puts = [push(b"one"), push(b"two")].concat();
     let put_then_oam = [push(b"three"), oam.clone()].concat();
@@ -459,7 +461,8 @@ async fn a_lean_unit_is_read_in_place_and_handed_over_as_the_copying_path_reads_
                 IterationEvent::InPlace(lent) => got.push(
                     lent.push()
                         .expect("only Puts and an OAM were encoded")
-                        .encode_to_vec(),
+                        .encode_to_vec()
+                        .expect("a decoded Push re-encodes"),
                 ),
                 IterationEvent::Poll(DriverLoopOutcome::FramePayload {
                     messages,
@@ -499,11 +502,13 @@ fn record_bytes(message: &wz_session_core::network_message::NetworkMessage) -> V
         NetworkMessage::Push(push) => push
             .try_as_borrowed()
             .expect("a borrowed view")
-            .encode_to_vec(),
+            .encode_to_vec()
+            .expect("a decoded Push re-encodes"),
         NetworkMessage::Oam(oam) => oam
             .try_as_borrowed()
             .expect("a borrowed view")
-            .encode_to_vec(),
+            .encode_to_vec()
+            .expect("a decoded OAM re-encodes"),
         other => panic!("only Puts and an OAM were encoded: {other:?}"),
     }
 }

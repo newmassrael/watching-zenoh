@@ -194,7 +194,8 @@ mod tests {
             }),
             ..Default::default()
         }
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("the fixture push is encodable");
         // Repeated enough that lz4 has something to shrink: the wrap ships RAW
         // when it cannot, and the header assertion below is what stops this
         // test from quietly becoming the control twice.

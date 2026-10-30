@@ -1455,6 +1455,7 @@ mod tests {
             .try_as_borrowed()
             .expect("and it must re-borrow")
             .encode_to_vec()
+            .expect("and it must encode")
     }
 
     fn declare_sub_aliased(id: u64, mapping: u64, suffix: Option<&str>) -> Vec<u8> {
@@ -1463,6 +1464,7 @@ mod tests {
             .try_as_borrowed()
             .expect("and it must re-borrow")
             .encode_to_vec()
+            .expect("and it must encode")
     }
 
     fn declare_qbl(id: u64, keyexpr: &str) -> Vec<u8> {
@@ -1471,6 +1473,7 @@ mod tests {
             .try_as_borrowed()
             .expect("and it must re-borrow")
             .encode_to_vec()
+            .expect("and it must encode")
     }
 
     fn declare_token(id: u64, keyexpr: &str) -> Vec<u8> {
@@ -1479,6 +1482,7 @@ mod tests {
             .try_as_borrowed()
             .expect("and it must re-borrow")
             .encode_to_vec()
+            .expect("and it must encode")
     }
 
     fn undeclare_sub(id: u64) -> Vec<u8> {
@@ -1486,6 +1490,7 @@ mod tests {
             .try_as_borrowed()
             .expect("re-borrow")
             .encode_to_vec()
+            .expect("and it must encode")
     }
 
     /// Gated on the union of its CONSUMERS' cfgs rather than silenced with
@@ -1498,6 +1503,7 @@ mod tests {
             .try_as_borrowed()
             .expect("and it must re-borrow")
             .encode_to_vec()
+            .expect("and it must encode")
     }
 
     /// R311y869 — THE DEFECT, end to end. A subscriber declaring the ordinary
@@ -2028,6 +2034,7 @@ mod tests {
         .try_as_borrowed()
         .expect("re-borrow")
         .encode_to_vec()
+        .expect("and it must encode")
     }
 
     /// Round 2022 (item 272) — a `DeclareSubscriber` that CITES an interest id.
@@ -2048,7 +2055,7 @@ mod tests {
         declare.header |= 0x20;
         declare.interest_id = Some(interest_id);
         let borrowed = declare.try_as_borrowed().expect("and it must re-borrow");
-        borrowed.encode_to_vec()
+        borrowed.encode_to_vec().expect("and it must encode")
     }
 
     fn interest_final(id: u64) -> Vec<u8> {
@@ -2056,6 +2063,7 @@ mod tests {
             .try_as_borrowed()
             .expect("re-borrow")
             .encode_to_vec()
+            .expect("and it must encode")
     }
 
     fn sub_reply(interest_id: u64, keyexpr: &str) -> Vec<u8> {
@@ -2064,6 +2072,7 @@ mod tests {
             .try_as_borrowed()
             .expect("re-borrow")
             .encode_to_vec()
+            .expect("and it must encode")
     }
 
     fn final_reply(interest_id: u64) -> Vec<u8> {
@@ -2071,6 +2080,7 @@ mod tests {
             .try_as_borrowed()
             .expect("re-borrow")
             .encode_to_vec()
+            .expect("and it must encode")
     }
 
     /// R311y870 — THE PAIR, and the assertion that the correlation crosses the
@@ -2272,7 +2282,8 @@ mod tests {
             }),
             extensions: None,
         }
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("a fixture Interest is encodable");
         let d = wire(&[(true, interest)]);
         let census = interests(&d);
         let scope = census.requests()[0].scope.expect("a body");
@@ -2422,6 +2433,7 @@ mod tests {
         .try_as_borrowed()
         .expect("re-borrow")
         .encode_to_vec()
+        .expect("and it must encode")
     }
 
     /// A `Current` interest for subscribers with `R` CLEAR.
@@ -2444,6 +2456,7 @@ mod tests {
             extensions: None,
         }
         .encode_to_vec()
+        .expect("a fixture Interest is encodable")
     }
 
     /// R311y871 — THE DEFECT on the keyexpr axis. A peer answering a `demo/**`
@@ -2590,6 +2603,7 @@ mod tests {
                 .try_as_borrowed()
                 .expect("re-borrow")
                 .encode_to_vec()
+                .expect("and it must encode")
             }),
             (false, sub_reply(14, "demo/a")),
         ]);
@@ -2651,7 +2665,8 @@ mod no_wildcard_tests {
                 .expect("the production builder")
                 .try_as_borrowed()
                 .expect("re-borrow")
-                .encode_to_vec();
+                .encode_to_vec()
+                .expect("and it must encode");
         let mut d = Dissection::new();
         let unit = frame_carrying(&declare);
         d.push_packet(
@@ -2709,12 +2724,14 @@ mod no_wildcard_tests {
         .expect("the production interest builder")
         .try_as_borrowed()
         .expect("re-borrow")
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("and it must encode");
         let reply = wz_session_core::declare_build::build_declare_subscriber_reply(21, "demo/a")
             .expect("the production reply builder")
             .try_as_borrowed()
             .expect("re-borrow")
-            .encode_to_vec();
+            .encode_to_vec()
+            .expect("and it must encode");
         let mut d = Dissection::new();
         let unit = frame_carrying(&interest);
         d.push_packet(

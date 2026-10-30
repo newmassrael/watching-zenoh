@@ -30,7 +30,9 @@ use wz_runtime_tokio::session_glue::{parse_frame_payload, NetworkMessage};
 
 #[test]
 fn declare_default_round_trips_through_parse_frame_payload() {
-    let wire = Declare::default().encode_to_vec();
+    let wire = Declare::default()
+        .encode_to_vec()
+        .expect("a default Declare encodes");
     assert_eq!(
         wire,
         &[0x1E, 0x1A],
@@ -47,10 +49,13 @@ fn declare_default_round_trips_through_parse_frame_payload() {
             let re_encoded = decl
                 .try_as_borrowed()
                 .expect("test: <=N exts by construction")
-                .encode_to_vec();
+                .encode_to_vec()
+                .expect("the parsed Declare re-encodes");
             assert_eq!(
                 re_encoded,
-                canonical.encode_to_vec(),
+                canonical
+                    .encode_to_vec()
+                    .expect("the canonical Declare encodes"),
                 "parse_frame_payload-produced Declare must field-match the canonical decode"
             );
             assert_eq!(re_encoded, wire, "round-trip byte-equivalence preserved");
@@ -75,9 +80,21 @@ fn declare_dispatch_does_not_swallow_subsequent_records() {
         put.payload_len = Some(0);
         put.payload = Some(&[]);
     }
-    wire.extend_from_slice(&push.encode_to_vec());
-    wire.extend_from_slice(&Declare::default().encode_to_vec());
-    wire.extend_from_slice(&ResponseFinal::default().encode_to_vec());
+    wire.extend_from_slice(
+        &push
+            .encode_to_vec()
+            .expect("the explicit-payload Push encodes"),
+    );
+    wire.extend_from_slice(
+        &Declare::default()
+            .encode_to_vec()
+            .expect("a default Declare encodes"),
+    );
+    wire.extend_from_slice(
+        &ResponseFinal::default()
+            .encode_to_vec()
+            .expect("a default ResponseFinal encodes"),
+    );
 
     let messages = parse_frame_payload(&wire).expect("parse 3-record batch");
     assert_eq!(messages.len(), 3, "all three records must be dispatched");

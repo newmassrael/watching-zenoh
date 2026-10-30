@@ -445,7 +445,10 @@ fn hello_datagram_with(identity: &ResponderIdentity, advertised: &[String]) -> V
     }
 
     let l_flag = u8::from(has_locators);
-    let body = hello.encode_to_vec(l_flag);
+    // The locators were cut to the codec's own bound above, so the encode has no refusal to give.
+    let body = hello
+        .encode_to_vec(l_flag)
+        .expect("a hello within the codec's own bounds encodes");
     let mut datagram = Vec::with_capacity(1 + body.len());
     let mut header = wire_const::S_MID_HELLO;
     if has_locators {
@@ -501,7 +504,7 @@ mod tests {
             scout.set_zid_len_m1((z.len() - 1) as u8);
             scout.zid = Some(z);
         }
-        let body = scout.encode_to_vec();
+        let body = scout.encode_to_vec().expect("a fixture scout is encodable");
         let mut wire = vec![wire_const::S_MID_SCOUT];
         wire.extend_from_slice(&body);
         wire

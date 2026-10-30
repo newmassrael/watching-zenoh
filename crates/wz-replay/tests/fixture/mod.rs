@@ -54,6 +54,7 @@ fn reply(request_id: u64, suffix: &'static str, payload: &'static [u8]) -> Vec<u
         ..Default::default()
     }
     .encode_to_vec()
+    .expect("a fixture message is encodable")
 }
 
 /// R311y716 ([REDACTED-REQ]) — a PUSH, which is the one record shape in this module
@@ -81,6 +82,7 @@ fn push(suffix: &'static str, payload: &'static [u8]) -> Vec<u8> {
         ..Default::default()
     }
     .encode_to_vec()
+    .expect("a fixture message is encodable")
 }
 
 /// R311y716 ([REDACTED-REQ]) — a capture with NOTHING wrong with it.
@@ -205,6 +207,7 @@ fn declare_kexpr(id: u64, base: &'static str) -> Vec<u8> {
         ..Default::default()
     }
     .encode_to_vec()
+    .expect("a fixture message is encodable")
 }
 
 /// A reply whose keyexpr is the bare numeric `id`, with no suffix at all.
@@ -232,6 +235,7 @@ fn aliased_reply(request_id: u64, id: u64, payload: &'static [u8]) -> Vec<u8> {
         ..Default::default()
     }
     .encode_to_vec()
+    .expect("a fixture message is encodable")
 }
 
 /// R311y703 (RP4) — two replies in SEPARATE PACKETS, 350 ms apart.

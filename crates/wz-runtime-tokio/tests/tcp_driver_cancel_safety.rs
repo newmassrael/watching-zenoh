@@ -81,7 +81,9 @@ fn envelope_bytes(payload: &[u8]) -> Vec<u8> {
         payload_len: payload.len() as u16,
         payload,
     };
-    envelope.encode_to_vec()
+    envelope
+        .encode_to_vec()
+        .expect("a test payload fits the u16 stream envelope")
 }
 
 /// Sanity decode helper — confirms a `LinkEvent::Rx` carries the

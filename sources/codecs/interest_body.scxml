@@ -61,7 +61,7 @@
      (codec_zenoh_wireexpr inner codec). No new primitives. -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
-       sce:kind="codec" sce:default-endian="big" name="interest_body">
+       sce:kind="codec" sce:encode-may-fail="true" sce:default-endian="big" name="interest_body">
   <!-- R121h-pre: B5-ν ownership invert. Deliberately NO
        `<sce:variant-dispatch>` child — interest_body's flag layout
        (KE/SU/QU/TO/RES/CUR/FUT/AGG per interest.c L55-71) maps bit 5

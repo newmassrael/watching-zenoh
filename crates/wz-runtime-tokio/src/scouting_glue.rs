@@ -358,7 +358,8 @@ mod tests {
         let body = owned
             .try_as_borrowed()
             .expect("borrowed projection of owned Hello")
-            .encode_to_vec(l_flag);
+            .encode_to_vec(l_flag)
+            .expect("a fixture Hello encodes");
 
         let mut dgram = Vec::with_capacity(1 + body.len());
         let mut header = wire_const::S_MID_HELLO;
@@ -750,7 +751,7 @@ mod tests {
         scout.set_zid_len_m1((zid.len() - 1) as u8);
         scout.zid = Some(zid);
         let mut wire = vec![wire_const::S_MID_SCOUT];
-        wire.extend_from_slice(&scout.encode_to_vec());
+        wire.extend_from_slice(&scout.encode_to_vec().expect("a fixture Scout encodes"));
         wire
     }
 

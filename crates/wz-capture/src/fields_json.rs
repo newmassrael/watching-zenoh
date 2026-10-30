@@ -6152,7 +6152,8 @@ mod tests {
             ),
             ..Default::default()
         }
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("a fixture Declare is encodable");
 
         // A REAL capture file, because this document renders a row only by
         // RE-READING the bytes a message was framed out of: handed an empty
@@ -8196,7 +8197,10 @@ mod tests {
                     wz_codecs::ext_unit::ExtUnit::default(),
                 ),
             };
-            let mut bytes = entry.as_borrowed().encode_to_vec();
+            let mut bytes = entry
+                .as_borrowed()
+                .encode_to_vec()
+                .expect("a unit extension entry is encodable");
             if i + 1 < ids.len() {
                 bytes[0] |= wz_session_core::ext_header::EXT_FLAG_Z;
             }
@@ -8600,7 +8604,10 @@ mod tests {
                             wz_codecs::ext_zint::ExtZint { value },
                         ),
                     };
-                entry.as_borrowed().encode_to_vec()
+                entry
+                    .as_borrowed()
+                    .encode_to_vec()
+                    .expect("a zint extension entry is encodable")
             }
         };
         init_datagram(is_ack, &chain)
@@ -12497,6 +12504,7 @@ mod tests {
             ..Default::default()
         }
         .encode_to_vec()
+        .expect("a fixture Push is encodable")
     }
 
     /// The table id of an encoding NAME, so a fixture asks for the encoding it
@@ -12836,6 +12844,7 @@ mod tests {
                 ..Default::default()
             }
             .encode_to_vec()
+            .expect("a fixture Declare is encodable")
         };
         let empty_put = || wz_codecs::msg_put::MsgPut {
             payload_len: Some(0),
@@ -12851,6 +12860,7 @@ mod tests {
                 ..Default::default()
             }
             .encode_to_vec()
+            .expect("a fixture Request is encodable")
         };
         let response = |body: ResponseVariant<'static>| {
             Response {
@@ -12861,6 +12871,7 @@ mod tests {
                 ..Default::default()
             }
             .encode_to_vec()
+            .expect("a fixture Response is encodable")
         };
         let reply = |body: ReplyVariant<'static>| {
             ResponseVariant::CodecZenohReply(Reply {
@@ -13007,7 +13018,8 @@ mod tests {
                     request_id: 1,
                     ..Default::default()
                 }
-                .encode_to_vec(),
+                .encode_to_vec()
+                .expect("a fixture ResponseFinal is encodable"),
             ),
             (
                 "Interest",
@@ -13017,7 +13029,8 @@ mod tests {
                     body: None,
                     ..Default::default()
                 }
-                .encode_to_vec(),
+                .encode_to_vec()
+                .expect("a fixture Interest is encodable"),
             ),
             (
                 "Interest",
@@ -13032,9 +13045,16 @@ mod tests {
                 .expect("the production interest builder")
                 .try_as_borrowed()
                 .expect("re-borrow")
-                .encode_to_vec(),
+                .encode_to_vec()
+                .expect("a built interest is encodable"),
             ),
-            ("Oam", None, wz_codecs::oam::Oam::default().encode_to_vec()),
+            (
+                "Oam",
+                None,
+                wz_codecs::oam::Oam::default()
+                    .encode_to_vec()
+                    .expect("a default Oam is encodable"),
+            ),
         ]
     }
 
@@ -13179,6 +13199,7 @@ mod tests {
                 ..Default::default()
             }
             .encode_to_vec()
+            .expect("a fixture Declare is encodable")
         }
 
         /// One datagram: `from_low` says which end of the flow sent it.

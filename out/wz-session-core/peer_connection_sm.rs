@@ -16,8 +16,8 @@
 // SCE Protocol-Synthesis RFC §synth-5-J-2: no_std variant of the statechart
 // emitter. It compiles against `sce-rust-runtime` with or without that
 // crate's `std` feature, and the generated crate omits `std::*` paths — Duration comes from
-// `core::time`, the configuration and history records are the runtime's
-// capacity-bounded `BoundedVec`, sized to this document's state tree, and the
+// `core::time`, the configuration and history records are kept by the engine
+// in a run store sized to this document's state tree, and the
 // parent-event queue field is elided
 // (SCXML `<invoke>` is rejected at codegen time under `--no-std` per the
 // `codegen/no-std-invoke-not-supported` diagnostic).
@@ -89,54 +89,157 @@ pub const EVENT_QUEUE_CAPACITY: usize = 2;
 // State enum (W3C SCXML 3.3)
 // ======================================================================
 
+/// The document's states, declared in document order. Each variant's
+/// discriminant is its position in that order, which is the number the
+/// runtime's tables know the state by (docs/adr/0064), so a state is its number
+/// at no cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[repr(u16)]
 pub enum PeerConnectionState {
-    AuthorityRefused,
-    Backoff,
-    Connecting,
-    Established,
-    IdentityMismatch,
     // W3C SCXML 3.2: `<scxml initial>` state — the machine's `Default`.
     #[default]
-    Idle,
-    NoLocator,
-    NoSlot,
-    Refused,
-    Resolving,
+    Idle = 0,
+    Resolving = 1,
+    Connecting = 2,
+    Established = 3,
+    Backoff = 4,
+    Refused = 5,
+    NoLocator = 6,
+    NoSlot = 7,
+    IdentityMismatch = 8,
+    AuthorityRefused = 9,
 }
 
 // ======================================================================
 // Event enum (W3C SCXML 3.12)
 // ======================================================================
 
+/// The events the document names, and the null event. Each variant's
+/// discriminant is the number the runtime knows the event by, its position in
+/// `StatePolicy::EVENTS`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u16)]
 pub enum PeerConnectionEvent {
-    DialEstablished,
-    DialFailed,
-    DialMismatch,
-    DialNoSlot,
-    ManualRefused,
-    ManualStart,
-    ManualStop,
-    ResolveEmpty,
-    ResolveFound,
-    RetryDue,
-    SessionLost,
+    DialEstablished = 0,
+    DialFailed = 1,
+    DialMismatch = 2,
+    DialNoSlot = 3,
+    ManualRefused = 4,
+    ManualStart = 5,
+    ManualStop = 6,
+    ResolveEmpty = 7,
+    ResolveFound = 8,
+    RetryDue = 9,
+    SessionLost = 10,
     /// W3C SCXML 3.13: Sentinel for eventless transition dispatch
-    Null,
+    Null = 11,
 }
 
 // ======================================================================
 // What this document's state tree bounds (W3C SCXML 3.4)
 // ======================================================================
 
-/// A set of this machine's states that are, or are about to be, in one
-/// configuration: the configuration a host observes, and what the runtime's
-/// microstep builds from it (an exit set, an entry set, a history's record).
-/// Its capacity, 2, is the most states one configuration of this document holds,
-/// read from its state tree; the runtime names no size of its own. A `Vec` under
-/// std, where the capacity is not read.
+/// A configuration of this machine, in its own states: what
+/// `Engine::get_active_states` returns and a host observes. The engine keeps
+/// the configuration itself as numbers (docs/adr/0064). Its capacity, 2, is
+/// the most states one configuration of this document holds, read from its
+/// state tree; the runtime names no size of its own. A `Vec` under std, where
+/// the capacity is not read.
 pub type PeerConnectionConfiguration = ::sce_rust_runtime::helpers::hierarchy::BoundedVec<PeerConnectionState, 2>;
+
+// ======================================================================
+// The document's tables (docs/adr/0064)
+// ======================================================================
+
+/// This document's state tree as the runtime's Appendix D procedures read it.
+/// Those procedures are compiled once for a program, whatever machines it
+/// holds, so they read a document as numbers: each state by its position in
+/// document order (the discriminant of `PeerConnectionState`), each `<history>` by
+/// the discriminant of its variant, and each transition by its row here — the
+/// written ones grouped by source state, then each compound state's initial
+/// transition, each history's default transition and the document's own
+/// initial transition. A state's children are not listed: the numbering is a
+/// pre-order walk, so they are the state's number plus one and each number past
+/// the subtree (`last_descendant`) of the child before.
+///
+/// A `const` and not a `static`: `StatePolicy::TABLES` refers to it, and a
+/// constant may refer to a static only from Rust 1.83 on, past the toolchain
+/// the runtime supports. The reference is to one constant allocation all the
+/// same.
+pub const PEER_CONNECTION_TABLES: ::sce_rust_runtime::DocumentTables = {
+    use ::sce_rust_runtime::{
+        DocumentTables, HistoryId, HistoryRow, Span, StateId, StateKind, StateRow, Target,
+        TransitionId, TransitionRow,
+    };
+    DocumentTables {
+        states: &[
+            // 0: Idle
+            StateRow::new(None, StateKind::Atomic, StateId(0), None),
+            // 1: Resolving
+            StateRow::new(None, StateKind::Atomic, StateId(1), None),
+            // 2: Connecting
+            StateRow::new(None, StateKind::Atomic, StateId(2), None),
+            // 3: Established
+            StateRow::new(None, StateKind::Atomic, StateId(3), None),
+            // 4: Backoff
+            StateRow::new(None, StateKind::Atomic, StateId(4), None),
+            // 5: Refused
+            StateRow::new(None, StateKind::Compound, StateId(9), Some(TransitionId(17))),
+            // 6: NoLocator
+            StateRow::new(Some(StateId(5)), StateKind::Atomic, StateId(6), None),
+            // 7: NoSlot
+            StateRow::new(Some(StateId(5)), StateKind::Atomic, StateId(7), None),
+            // 8: IdentityMismatch
+            StateRow::new(Some(StateId(5)), StateKind::Atomic, StateId(8), None),
+            // 9: AuthorityRefused
+            StateRow::new(Some(StateId(5)), StateKind::Atomic, StateId(9), None),
+        ],
+        histories: &[
+        ],
+        transitions: &[
+            // 0: Idle, transition 0
+            TransitionRow::new(Some(StateId(0)), Span { start: 0, len: 1 }, false, false),
+            // 1: Idle, transition 1
+            TransitionRow::new(Some(StateId(0)), Span { start: 1, len: 1 }, false, false),
+            // 2: Resolving, transition 0
+            TransitionRow::new(Some(StateId(1)), Span { start: 2, len: 1 }, false, false),
+            // 3: Resolving, transition 1
+            TransitionRow::new(Some(StateId(1)), Span { start: 3, len: 1 }, false, false),
+            // 4: Resolving, transition 2
+            TransitionRow::new(Some(StateId(1)), Span { start: 4, len: 1 }, false, true),
+            // 5: Connecting, transition 0
+            TransitionRow::new(Some(StateId(2)), Span { start: 5, len: 1 }, false, false),
+            // 6: Connecting, transition 1
+            TransitionRow::new(Some(StateId(2)), Span { start: 6, len: 1 }, false, false),
+            // 7: Connecting, transition 2
+            TransitionRow::new(Some(StateId(2)), Span { start: 7, len: 1 }, false, false),
+            // 8: Connecting, transition 3
+            TransitionRow::new(Some(StateId(2)), Span { start: 8, len: 1 }, false, false),
+            // 9: Connecting, transition 4
+            TransitionRow::new(Some(StateId(2)), Span { start: 9, len: 1 }, false, true),
+            // 10: Established, transition 0
+            TransitionRow::new(Some(StateId(3)), Span { start: 10, len: 1 }, false, false),
+            // 11: Established, transition 1
+            TransitionRow::new(Some(StateId(3)), Span { start: 11, len: 1 }, false, true),
+            // 12: Backoff, transition 0
+            TransitionRow::new(Some(StateId(4)), Span { start: 12, len: 1 }, false, false),
+            // 13: Backoff, transition 1
+            TransitionRow::new(Some(StateId(4)), Span { start: 13, len: 1 }, false, true),
+            // 14: Refused, transition 0
+            TransitionRow::new(Some(StateId(5)), Span { start: 14, len: 1 }, false, false),
+            // 15: Refused, transition 1
+            TransitionRow::new(Some(StateId(5)), Span { start: 15, len: 1 }, false, false),
+            // 16: Refused, transition 2
+            TransitionRow::new(Some(StateId(5)), Span { start: 16, len: 1 }, false, false),
+            // 17: Refused, initial
+            TransitionRow::new(Some(StateId(5)), Span { start: 17, len: 1 }, false, false),
+            // 18: the document's initial transition
+            TransitionRow::new(None, Span { start: 18, len: 1 }, false, false),
+        ],
+        targets: &[Target::state(StateId(1)), Target::state(StateId(9)), Target::state(StateId(2)), Target::state(StateId(6)), Target::state(StateId(0)), Target::state(StateId(3)), Target::state(StateId(4)), Target::state(StateId(7)), Target::state(StateId(8)), Target::state(StateId(0)), Target::state(StateId(4)), Target::state(StateId(0)), Target::state(StateId(1)), Target::state(StateId(0)), Target::state(StateId(1)), Target::state(StateId(9)), Target::state(StateId(0)), Target::state(StateId(6)), Target::state(StateId(0))],
+        initial: TransitionId(18),
+    }
+};
 
 // ======================================================================
 // Externally-drivable event surface (W3C SCXML 3.12 / 5.10)
@@ -340,23 +443,70 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
     // EventQueue per-machine sizing lever above.
     type ScheduledSendId = sce_rust_runtime::ElidedSendId;
 
+    // docs/adr/0064: the document as the runtime's Appendix D procedures read
+    // it, which are compiled once for a program: its tables, and its states,
+    // histories and events by the numbers the tables know them by. Each of the
+    // three lists is in the order of those numbers, so it is the inverse of the
+    // enum's discriminant.
+    const TABLES: &'static ::sce_rust_runtime::DocumentTables = &PEER_CONNECTION_TABLES;
+    const STATES: &'static [Self::State] = &[
+        PeerConnectionState::Idle,
+        PeerConnectionState::Resolving,
+        PeerConnectionState::Connecting,
+        PeerConnectionState::Established,
+        PeerConnectionState::Backoff,
+        PeerConnectionState::Refused,
+        PeerConnectionState::NoLocator,
+        PeerConnectionState::NoSlot,
+        PeerConnectionState::IdentityMismatch,
+        PeerConnectionState::AuthorityRefused,
+    ];
+    const HISTORIES: &'static [Self::History] = &[];
+    const EVENTS: &'static [Self::Event] = &[
+        PeerConnectionEvent::DialEstablished,
+        PeerConnectionEvent::DialFailed,
+        PeerConnectionEvent::DialMismatch,
+        PeerConnectionEvent::DialNoSlot,
+        PeerConnectionEvent::ManualRefused,
+        PeerConnectionEvent::ManualStart,
+        PeerConnectionEvent::ManualStop,
+        PeerConnectionEvent::ResolveEmpty,
+        PeerConnectionEvent::ResolveFound,
+        PeerConnectionEvent::RetryDue,
+        PeerConnectionEvent::SessionLost,
+        PeerConnectionEvent::Null,
+    ];
+
+    fn state_id(state: Self::State) -> ::sce_rust_runtime::StateId {
+        ::sce_rust_runtime::StateId(state as u16)
+    }
+
+    fn history_id(history: Self::History) -> ::sce_rust_runtime::HistoryId {
+        // No `<history>`, so no value of the type to number.
+        match history {}
+    }
+
+    fn event_id(event: Self::Event) -> ::sce_rust_runtime::EventId {
+        ::sce_rust_runtime::EventId(event as u16)
+    }
+
     // W3C SCXML 3.4: what this document's state tree bounds, read by the
     // generator and written here so every buffer of the runtime's microstep is
-    // this document's size and no larger. A configuration holds 2 state(s) at
-    // most; a selection enables 1 transition(s) at most, one from each atomic state
-    // of one; the deepest state sits 2 level(s) down. Under std the buffers
-    // are `Vec`s and the capacities are not read.
+    // this document's size and no larger, in both profiles. Every set of states
+    // the runtime keeps is a bit vector of this document's 10 state(s); a
+    // configuration holds 2 state(s) at most, the capacity of the
+    // `Configuration` a host reads; a selection enables 1 transition(s) at most, one from each atomic state
+    // of one configuration; a microstep owes 0 history default(s) at most;
+    // and Appendix D's entry procedures, the effective targets and the
+    // completion check are run over a stack of steps and not by recursion, so a
+    // call needs no depth the program has to assume: 9 step(s) at most, three
+    // for each level of the tree, one for each `<history>` and three of
+    // headroom. The workspace is a local of the call that runs a macrostep; the
+    // run store, the configuration and what each of the 0 `<history>`
+    // element(s) recorded, one such set each, is the engine's.
+    type Workspace = ::sce_rust_runtime::Workspace<{ ::sce_rust_runtime::state_scratch(10) }, 1, 9, 0>;
+    type RunStore = ::sce_rust_runtime::RunStore<{ ::sce_rust_runtime::state_words(10) }, { ::sce_rust_runtime::record_words(10, 0) }, 0>;
     type Configuration = PeerConnectionConfiguration;
-    type EnabledSet = ::sce_rust_runtime::helpers::hierarchy::BoundedVec<::sce_rust_runtime::EnabledTransition<Self::State, Self::History>, 1>;
-    type HistoryDefaults = ::sce_rust_runtime::helpers::hierarchy::BoundedVec<(Self::State, Self::History), 0>;
-    // Appendix D's entry procedures, the effective targets and the completion
-    // check are run over a stack of steps and not by recursion, so a call needs
-    // no depth the program has to assume: 9 step(s) at most, three for each level
-    // of the tree, one for each `<history>` and three of headroom.
-    type EntryWalk = ::sce_rust_runtime::helpers::hierarchy::BoundedVec<::sce_rust_runtime::helpers::microstep::WalkStep<Self::State, Self::History>, 9>;
-    const MAX_CONFIGURATION: usize = 2;
-    const MAX_ENABLED: usize = 1;
-    const MAX_DEPTH: usize = 2;
 
     // W3C SCXML feature flags
     const HAS_PARALLEL_STATES: bool = false;
@@ -382,81 +532,10 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
         <Self as sce_rust_runtime::ConstStatePolicy>::INITIAL_STATE
     }
 
-    fn is_final_state(state: Self::State) -> bool {
-        match state {
-            _ => false,
-        }
-    }
-
-    fn get_parent(state: Self::State) -> Option<Self::State> {
-        match state {
-            PeerConnectionState::AuthorityRefused => Some(PeerConnectionState::Refused),
-            PeerConnectionState::IdentityMismatch => Some(PeerConnectionState::Refused),
-            PeerConnectionState::NoLocator => Some(PeerConnectionState::Refused),
-            PeerConnectionState::NoSlot => Some(PeerConnectionState::Refused),
-            _ => None,
-        }
-    }
-
-    // W3C SCXML 3.3: a <state> with child states — exactly the states that have
-    // an initial transition. A <parallel> is not compound.
-    fn is_compound_state(state: Self::State) -> bool {
-        match state {
-            PeerConnectionState::Refused => true,
-            _ => false,
-        }
-    }
-
-
-    // §scxml-D-getChildStates: a state's <state>, <parallel> and <final>
-    // children, in document order — for a <parallel>, its regions.
-    fn get_child_states(state: Self::State) -> &'static [Self::State] {
-        match state {
-            PeerConnectionState::Refused => &[PeerConnectionState::NoLocator, PeerConnectionState::NoSlot, PeerConnectionState::IdentityMismatch, PeerConnectionState::AuthorityRefused],
-            _ => &[],
-        }
-    }
-
-    // §scxml-3.3: a compound state's initial transition target, as written —
-    // the engine's entry procedures dereference a <history> among them.
-    fn get_initial_targets(state: Self::State) -> &'static [::sce_rust_runtime::EntryTarget<Self::State, Self::History>] {
-        match state {
-            PeerConnectionState::Refused => &[::sce_rust_runtime::EntryTarget::State(PeerConnectionState::NoLocator)],
-            _ => &[],
-        }
-    }
-
-    // §scxml-3.2: the target of the document's own initial transition, as written.
-    fn get_document_initial_targets() -> &'static [::sce_rust_runtime::EntryTarget<Self::State, Self::History>] {
-        &[::sce_rust_runtime::EntryTarget::State(PeerConnectionState::Idle)]
-    }
-
-    // §scxml-3.10: the state a <history> is declared in.
-    fn get_history_parent(history: Self::History) -> Self::State {
-        match history {
-        }
-    }
-
-    // §scxml-3.10.2: a <history>'s default transition target, as written.
-    fn get_history_default_targets(history: Self::History) -> &'static [::sce_rust_runtime::EntryTarget<Self::State, Self::History>] {
-        match history {
-        }
-    }
-
-    fn get_document_order(state: Self::State) -> u32 {
-        match state {
-            PeerConnectionState::AuthorityRefused => 9,
-            PeerConnectionState::Backoff => 4,
-            PeerConnectionState::Connecting => 2,
-            PeerConnectionState::Established => 3,
-            PeerConnectionState::IdentityMismatch => 8,
-            PeerConnectionState::Idle => 0,
-            PeerConnectionState::NoLocator => 6,
-            PeerConnectionState::NoSlot => 7,
-            PeerConnectionState::Refused => 5,
-            PeerConnectionState::Resolving => 1,
-        }
-    }
+    // The document's structure — each state's parent, kind, subtree and
+    // initial transition, and so its children, each history's parent and
+    // default, document order — is read from `TABLES` by the trait's own
+    // methods (docs/adr/0064), so none of it is written here a second time.
 
     fn get_event_name(event: Self::Event) -> &'static str {
         match event {
@@ -530,18 +609,6 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
         PeerConnectionEvent::Null
     }
 
-    // ======================================================================
-    // Run-time state the entry procedures read
-    // ======================================================================
-
-    // §scxml-3.10: what a <history> recorded when its parent was last exited;
-    // None before that ever happened.
-    fn history_value(&self, history: Self::History) -> Option<&[Self::State]> {
-        match history {
-        }
-    }
-
-
 
     // ======================================================================
     // Instance methods - generated executable content
@@ -611,11 +678,12 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
         &mut self,
         state: Self::State,
         engine: &mut sce_rust_runtime::Engine<Self>,
-        configuration_before_exit: &[Self::State],
     ) {
         // §scxml-D-exitStates orders one state's exit as onexit, then
         // cancelInvoke, then configuration.delete(s), so `In(s)` inside s's
-        // own handler is true: the deactivation is the LAST step here.
+        // own handler is true. The engine recorded every history this exit
+        // set records before its first exit (W3C SCXML 3.10), and removes
+        // `state` from the configuration after this returns.
     }
 
 
@@ -624,8 +692,9 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
 
     // Appendix D selectTransitions, the half only this document can answer:
     // the first of `state`'s own transitions, in document order, that `event`
-    // enables. The engine walks the atomic states and their ancestors and
-    // keeps the ordered set. `Event::Null` asks for eventless transitions.
+    // enables, as its row of the tables, which holds its targets and its
+    // type. The engine walks the atomic states and their ancestors and keeps
+    // the ordered set. `Event::Null` asks for eventless transitions.
     #[doc = "SCE-MAP: peer_connection.scxml:82 :: _machine"]
 // SCE-MAP: peer_connection.scxml:82 :: _machine
     fn first_enabled_transition(
@@ -633,29 +702,19 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
         state: Self::State,
         event: Self::Event,
         engine: &mut sce_rust_runtime::Engine<Self>,
-    ) -> Option<::sce_rust_runtime::EnabledTransition<Self::State, Self::History>> {
+    ) -> Option<::sce_rust_runtime::TransitionId> {
         match state {
             PeerConnectionState::Backoff => {
                 if event == PeerConnectionEvent::RetryDue {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(PeerConnectionState::Resolving)],
-                            transition_index: 0,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // Backoff, transition 0
+                        return Some(::sce_rust_runtime::TransitionId(12));
                     }
                 }
                 if event == PeerConnectionEvent::ManualStop {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(PeerConnectionState::Idle)],
-                            transition_index: 1,
-                            has_actions: true,
-                            is_internal: false,
-                        });
+                        // Backoff, transition 1
+                        return Some(::sce_rust_runtime::TransitionId(13));
                     }
                 }
                 None
@@ -663,57 +722,32 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
             PeerConnectionState::Connecting => {
                 if event == PeerConnectionEvent::DialEstablished {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(PeerConnectionState::Established)],
-                            transition_index: 0,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // Connecting, transition 0
+                        return Some(::sce_rust_runtime::TransitionId(5));
                     }
                 }
                 if event == PeerConnectionEvent::DialFailed {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(PeerConnectionState::Backoff)],
-                            transition_index: 1,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // Connecting, transition 1
+                        return Some(::sce_rust_runtime::TransitionId(6));
                     }
                 }
                 if event == PeerConnectionEvent::DialNoSlot {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(PeerConnectionState::NoSlot)],
-                            transition_index: 2,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // Connecting, transition 2
+                        return Some(::sce_rust_runtime::TransitionId(7));
                     }
                 }
                 if event == PeerConnectionEvent::DialMismatch {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(PeerConnectionState::IdentityMismatch)],
-                            transition_index: 3,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // Connecting, transition 3
+                        return Some(::sce_rust_runtime::TransitionId(8));
                     }
                 }
                 if event == PeerConnectionEvent::ManualStop {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(PeerConnectionState::Idle)],
-                            transition_index: 4,
-                            has_actions: true,
-                            is_internal: false,
-                        });
+                        // Connecting, transition 4
+                        return Some(::sce_rust_runtime::TransitionId(9));
                     }
                 }
                 None
@@ -721,24 +755,14 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
             PeerConnectionState::Established => {
                 if event == PeerConnectionEvent::SessionLost {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(PeerConnectionState::Backoff)],
-                            transition_index: 0,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // Established, transition 0
+                        return Some(::sce_rust_runtime::TransitionId(10));
                     }
                 }
                 if event == PeerConnectionEvent::ManualStop {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(PeerConnectionState::Idle)],
-                            transition_index: 1,
-                            has_actions: true,
-                            is_internal: false,
-                        });
+                        // Established, transition 1
+                        return Some(::sce_rust_runtime::TransitionId(11));
                     }
                 }
                 None
@@ -746,24 +770,14 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
             PeerConnectionState::Idle => {
                 if event == PeerConnectionEvent::ManualStart {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(PeerConnectionState::Resolving)],
-                            transition_index: 0,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // Idle, transition 0
+                        return Some(::sce_rust_runtime::TransitionId(0));
                     }
                 }
                 if event == PeerConnectionEvent::ManualRefused {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(PeerConnectionState::AuthorityRefused)],
-                            transition_index: 1,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // Idle, transition 1
+                        return Some(::sce_rust_runtime::TransitionId(1));
                     }
                 }
                 None
@@ -771,35 +785,20 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
             PeerConnectionState::Refused => {
                 if event == PeerConnectionEvent::ManualStart {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(PeerConnectionState::Resolving)],
-                            transition_index: 0,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // Refused, transition 0
+                        return Some(::sce_rust_runtime::TransitionId(14));
                     }
                 }
                 if event == PeerConnectionEvent::ManualRefused {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(PeerConnectionState::AuthorityRefused)],
-                            transition_index: 1,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // Refused, transition 1
+                        return Some(::sce_rust_runtime::TransitionId(15));
                     }
                 }
                 if event == PeerConnectionEvent::ManualStop {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(PeerConnectionState::Idle)],
-                            transition_index: 2,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // Refused, transition 2
+                        return Some(::sce_rust_runtime::TransitionId(16));
                     }
                 }
                 None
@@ -807,35 +806,20 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
             PeerConnectionState::Resolving => {
                 if event == PeerConnectionEvent::ResolveFound {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(PeerConnectionState::Connecting)],
-                            transition_index: 0,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // Resolving, transition 0
+                        return Some(::sce_rust_runtime::TransitionId(2));
                     }
                 }
                 if event == PeerConnectionEvent::ResolveEmpty {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(PeerConnectionState::NoLocator)],
-                            transition_index: 1,
-                            has_actions: false,
-                            is_internal: false,
-                        });
+                        // Resolving, transition 1
+                        return Some(::sce_rust_runtime::TransitionId(3));
                     }
                 }
                 if event == PeerConnectionEvent::ManualStop {
                     {
-                        return Some(::sce_rust_runtime::EnabledTransition {
-                            source: state,
-                            targets: &[::sce_rust_runtime::EntryTarget::State(PeerConnectionState::Idle)],
-                            transition_index: 2,
-                            has_actions: true,
-                            is_internal: false,
-                        });
+                        // Resolving, transition 2
+                        return Some(::sce_rust_runtime::TransitionId(4));
                     }
                 }
                 None
@@ -845,74 +829,58 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
     }
 
     // W3C SCXML 3.13: a transition's executable content, run by the engine
-    // between the microstep's exits and its entries.
+    // between the microstep's exits and its entries. `transition` is a
+    // written transition's row, one whose row says it has content.
     #[doc = "SCE-MAP: peer_connection.scxml:82 :: _machine"]
 // SCE-MAP: peer_connection.scxml:82 :: _machine
     fn execute_transition_content(
         &mut self,
-        source: Self::State,
-        transition_index: usize,
+        transition: ::sce_rust_runtime::TransitionId,
         engine: &mut sce_rust_runtime::Engine<Self>,
     ) {
-        match source {
-            PeerConnectionState::Backoff => {
-                match transition_index {
-                    1 => {
-                        // SCE-MAP: peer_connection.scxml:136 :: Backoff :: _transition_1
-                        // W3C SCXML 3.13: Transition 1 actions
-                        // W3C SCXML 4.9: a transition's content is one block; an error ends it.
-                        'action_block: {
+        match transition.0 {
+            // Backoff, transition 1
+            13 => {
+                // SCE-MAP: peer_connection.scxml:136 :: Backoff :: _transition_1
+                // W3C SCXML 3.13: Transition 1 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
 
             // W3C SCXML G.7: <sce:action name="cancel_retry">
             self.actions.cancel_retry();
-                        }
-                    }
-                    _ => {}
                 }
             }
-            PeerConnectionState::Connecting => {
-                match transition_index {
-                    4 => {
-                        // SCE-MAP: peer_connection.scxml:116 :: Connecting :: _transition_4
-                        // W3C SCXML 3.13: Transition 4 actions
-                        // W3C SCXML 4.9: a transition's content is one block; an error ends it.
-                        'action_block: {
+            // Connecting, transition 4
+            9 => {
+                // SCE-MAP: peer_connection.scxml:116 :: Connecting :: _transition_4
+                // W3C SCXML 3.13: Transition 4 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
 
             // W3C SCXML G.7: <sce:action name="abandon_dial">
             self.actions.abandon_dial();
-                        }
-                    }
-                    _ => {}
                 }
             }
-            PeerConnectionState::Established => {
-                match transition_index {
-                    1 => {
-                        // SCE-MAP: peer_connection.scxml:126 :: Established :: _transition_1
-                        // W3C SCXML 3.13: Transition 1 actions
-                        // W3C SCXML 4.9: a transition's content is one block; an error ends it.
-                        'action_block: {
+            // Established, transition 1
+            11 => {
+                // SCE-MAP: peer_connection.scxml:126 :: Established :: _transition_1
+                // W3C SCXML 3.13: Transition 1 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
 
             // W3C SCXML G.7: <sce:action name="close_session">
             self.actions.close_session();
-                        }
-                    }
-                    _ => {}
                 }
             }
-            PeerConnectionState::Resolving => {
-                match transition_index {
-                    2 => {
-                        // SCE-MAP: peer_connection.scxml:103 :: Resolving :: _transition_2
-                        // W3C SCXML 3.13: Transition 2 actions
-                        // W3C SCXML 4.9: a transition's content is one block; an error ends it.
-                        'action_block: {
+            // Resolving, transition 2
+            4 => {
+                // SCE-MAP: peer_connection.scxml:103 :: Resolving :: _transition_2
+                // W3C SCXML 3.13: Transition 2 actions
+                // W3C SCXML 4.9: a transition's content is one block; an error ends it.
+                'action_block: {
 
             // W3C SCXML G.7: <sce:action name="abandon_dial">
             self.actions.abandon_dial();
-                        }
-                    }
-                    _ => {}
                 }
             }
             _ => {}

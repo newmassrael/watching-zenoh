@@ -1794,7 +1794,7 @@ mod join_tests {
     fn join_wire(flags: u8, join: &wz_codecs::join::Join<'_>) -> Vec<u8> {
         let s = u8::from(flags & wire_const::FLAG_T_JOIN_S != 0);
         let mut wire = alloc::vec![wire_const::T_MID_JOIN | flags];
-        wire.extend_from_slice(&join.encode_to_vec(s));
+        wire.extend_from_slice(&join.encode_to_vec(s).expect("a fixture join is encodable"));
         wire
     }
 
@@ -2027,7 +2027,7 @@ mod kind_name_tests {
                 next_sn_best_effort: 9,
             };
             let mut wire = alloc::vec![wire_const::T_MID_JOIN | wire_const::FLAG_T_JOIN_S];
-            wire.extend_from_slice(&join.encode_to_vec(1));
+            wire.extend_from_slice(&join.encode_to_vec(1).expect("a fixture join is encodable"));
             cases.push((wire, "Join"));
         }
 

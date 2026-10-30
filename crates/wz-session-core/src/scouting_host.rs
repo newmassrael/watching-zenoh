@@ -286,7 +286,10 @@ impl<R: Runtime> ScoutingActionsTrait for ScoutActionsBinding<R> {
             scout.set_zid_len_m1((zid.len() - 1) as u8);
             scout.zid = Some(zid);
         }
-        let body = scout.encode_to_vec();
+        // The id is at most the codec's own bound (`zid_len_m1` is four bits), so no refusal.
+        let body = scout
+            .encode_to_vec()
+            .expect("a scout within the codec's own bounds encodes");
         let mut datagram = Vec::with_capacity(1 + body.len());
         // The scouting-message envelope: the MID header byte the body codec omits.
         datagram.push(wire_const::S_MID_SCOUT);

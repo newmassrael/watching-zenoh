@@ -1376,6 +1376,7 @@ pub(crate) mod tests {
             ..Default::default()
         }
         .encode_to_vec()
+        .expect("a fixture Request is encodable")
     }
 
     /// A `Request` carrying a `MsgPut` of `payload` — a put that expects an
@@ -1403,6 +1404,7 @@ pub(crate) mod tests {
             ..Default::default()
         }
         .encode_to_vec()
+        .expect("a fixture Request is encodable")
     }
 
     /// A `Response` carrying a `Reply` with `payload`, echoing `request_id`.
@@ -1429,6 +1431,7 @@ pub(crate) mod tests {
             ..Default::default()
         }
         .encode_to_vec()
+        .expect("a fixture Response is encodable")
     }
 
     /// A `Response` carrying an `Err`, echoing `request_id`.
@@ -1446,6 +1449,7 @@ pub(crate) mod tests {
             ..Default::default()
         }
         .encode_to_vec()
+        .expect("a fixture Response is encodable")
     }
 
     /// The closing `ResponseFinal`.
@@ -1455,6 +1459,7 @@ pub(crate) mod tests {
             ..Default::default()
         }
         .encode_to_vec()
+        .expect("a fixture ResponseFinal is encodable")
     }
 
     /// `DeclKexpr`: bind `id` to `suffix` in the SENDER's space.
@@ -1472,6 +1477,7 @@ pub(crate) mod tests {
             ..Default::default()
         }
         .encode_to_vec()
+        .expect("a fixture Declare is encodable")
     }
 
     /// One record per UDP datagram, with the capture instant the tuple names.

@@ -11054,6 +11054,7 @@ mod datagram_tests {
             ..Default::default()
         }
         .encode_to_vec()
+        .expect("a fixture Push is encodable")
     }
 
     pub(crate) fn push(keyexpr: Wireexpr<'static>, payload: &[u8]) -> Vec<u8> {
@@ -11077,6 +11078,7 @@ mod datagram_tests {
             ..Default::default()
         }
         .encode_to_vec()
+        .expect("a fixture Push is encodable")
     }
 
     /// R311y621 (§1.4i) — the establishment ext chain that OFFERS COMPRESSION.
@@ -11096,7 +11098,10 @@ mod datagram_tests {
                 wz_codecs::ext_unit::ExtUnit::default(),
             ),
         };
-        entry.as_borrowed().encode_to_vec()
+        entry
+            .as_borrowed()
+            .encode_to_vec()
+            .expect("a unit extension entry is encodable")
     }
 
     /// One `T_MID_INIT` datagram trailing `ext_bytes` as its chain, through the
@@ -11125,7 +11130,11 @@ mod datagram_tests {
         };
         // The S (resolution present) and A (is-ack) discriminators ride the
         // parent header, so the codec takes them as arguments.
-        wire.extend_from_slice(&body.encode_to_vec(0, u8::from(is_ack)));
+        wire.extend_from_slice(
+            &body
+                .encode_to_vec(0, u8::from(is_ack))
+                .expect("a fixture InitBody is encodable"),
+        );
         wire.extend_from_slice(ext_bytes);
         wire
     }
@@ -11152,7 +11161,8 @@ mod datagram_tests {
                 cookie_len: if is_ack { None } else { Some(0) },
                 cookie: if is_ack { None } else { Some(&[]) },
             }
-            .encode_to_vec(u8::from(is_ack)),
+            .encode_to_vec(u8::from(is_ack))
+            .expect("a fixture OpenBody is encodable"),
         );
         wire
     }
@@ -11179,7 +11189,11 @@ mod datagram_tests {
             cookie_len: if is_ack { Some(0) } else { None },
             cookie: if is_ack { Some(&[]) } else { None },
         };
-        wire.extend_from_slice(&body.encode_to_vec(1, u8::from(is_ack)));
+        wire.extend_from_slice(
+            &body
+                .encode_to_vec(1, u8::from(is_ack))
+                .expect("a fixture InitBody is encodable"),
+        );
         wire
     }
 
@@ -11471,7 +11485,10 @@ mod datagram_tests {
                 wz_codecs::ext_zint::ExtZint { value: level },
             ),
         };
-        entry.as_borrowed().encode_to_vec()
+        entry
+            .as_borrowed()
+            .encode_to_vec()
+            .expect("a zint extension entry is encodable")
     }
 
     /// R2211 (open-debt item 565) — a Fragment's own ext chain carrying the
@@ -11494,7 +11511,10 @@ mod datagram_tests {
         }
         let mut out = Vec::new();
         for (i, entry) in entries.iter().enumerate() {
-            let mut bytes = entry.as_borrowed().encode_to_vec();
+            let mut bytes = entry
+                .as_borrowed()
+                .encode_to_vec()
+                .expect("a fragment marker extension entry is encodable");
             if i + 1 < entries.len() {
                 bytes[0] |= wz_session_core::ext_header::EXT_FLAG_Z;
             }
@@ -12344,7 +12364,7 @@ mod datagram_tests {
         scout.set_zid_len_m1(3);
         scout.zid = Some(&[0x11, 0x22, 0x33, 0x44]);
         let mut wire = alloc::vec![wz_session_core::wire_const::S_MID_SCOUT];
-        wire.extend_from_slice(&scout.encode_to_vec());
+        wire.extend_from_slice(&scout.encode_to_vec().expect("a fixture Scout is encodable"));
         wire
     }
 
@@ -12749,7 +12769,7 @@ mod datagram_tests {
             next_sn_best_effort: 9,
         };
         let mut wire = alloc::vec![wz_session_core::wire_const::T_MID_JOIN];
-        wire.extend_from_slice(&join.encode_to_vec(0));
+        wire.extend_from_slice(&join.encode_to_vec(0).expect("a fixture Join is encodable"));
 
         let mut d = Dissection::new();
         d.push_packet(LINKTYPE_ETHERNET, 0, &raweth_packet(&wire));
@@ -12886,7 +12906,7 @@ mod datagram_tests {
             next_sn_best_effort: 9,
         };
         let mut wire = alloc::vec![wz_session_core::wire_const::T_MID_JOIN];
-        wire.extend_from_slice(&join.encode_to_vec(0));
+        wire.extend_from_slice(&join.encode_to_vec(0).expect("a fixture Join is encodable"));
 
         let pkt = udp_packet([192, 168, 1, 5], 43210, SCOUT_GROUP, 7446, &wire);
         let mut d = Dissection::new();
@@ -13043,7 +13063,11 @@ mod datagram_tests {
                 cookie: None,
             };
             let mut w = alloc::vec![wc::T_MID_INIT];
-            w.extend_from_slice(&body.encode_to_vec(0, 0));
+            w.extend_from_slice(
+                &body
+                    .encode_to_vec(0, 0)
+                    .expect("a fixture InitBody is encodable"),
+            );
             w
         };
         let open = {
@@ -13054,7 +13078,11 @@ mod datagram_tests {
                 cookie: Some(&[0xAB, 0xCD]),
             };
             let mut w = alloc::vec![wc::T_MID_OPEN];
-            w.extend_from_slice(&body.encode_to_vec(0));
+            w.extend_from_slice(
+                &body
+                    .encode_to_vec(0)
+                    .expect("a fixture OpenBody is encodable"),
+            );
             w
         };
         let close = {
@@ -13080,7 +13108,7 @@ mod datagram_tests {
                 next_sn_best_effort: 0,
             };
             let mut w = alloc::vec![wc::T_MID_JOIN];
-            w.extend_from_slice(&body.encode_to_vec(0));
+            w.extend_from_slice(&body.encode_to_vec(0).expect("a fixture Join is encodable"));
             w
         };
         let keep_alive = alloc::vec![wc::T_MID_KEEP_ALIVE];
@@ -13313,14 +13341,16 @@ mod datagram_tests {
             body: wz_codecs::push::PushVariant::CodecZenohMsgPut(empty_put()),
             ..Default::default()
         }
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("a fixture Push is encodable");
         let request = wz_codecs::request::Request {
             header: wz_codecs::request::Request::default().header | FLAG_N_N,
             rid: 1,
             keyexpr: literal("census/request"),
             ..Default::default()
         }
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("a fixture Request is encodable");
         let response = wz_codecs::response::Response {
             header: wz_codecs::response::Response::default().header | FLAG_N_N,
             request_id: 1,
@@ -13331,12 +13361,14 @@ mod datagram_tests {
             }),
             ..Default::default()
         }
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("a fixture Response is encodable");
         let response_final = wz_codecs::response_final::ResponseFinal {
             request_id: 1,
             ..Default::default()
         }
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("a fixture ResponseFinal is encodable");
         let declare = wz_codecs::declare::Declare {
             body: wz_codecs::declare::DeclareVariant::CodecZenohDeclKexpr(
                 wz_codecs::decl_kexpr::DeclKexpr {
@@ -13349,14 +13381,18 @@ mod datagram_tests {
             ),
             ..Default::default()
         }
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("a fixture Declare is encodable");
         let interest = wz_codecs::interest::Interest {
             interest_id: 1,
             body: None,
             ..Default::default()
         }
-        .encode_to_vec();
-        let oam = wz_codecs::oam::Oam::default().encode_to_vec();
+        .encode_to_vec()
+        .expect("a fixture Interest is encodable");
+        let oam = wz_codecs::oam::Oam::default()
+            .encode_to_vec()
+            .expect("a default Oam is encodable");
 
         alloc::vec![
             ("Push", push),
@@ -13850,7 +13886,8 @@ mod datagram_tests {
         let body = owned
             .try_as_borrowed()
             .expect("borrowed projection")
-            .encode_to_vec(1);
+            .encode_to_vec(1)
+            .expect("a fixture Hello is encodable");
         let mut wire = alloc::vec![
             wz_session_core::wire_const::S_MID_HELLO | wz_session_core::wire_const::FLAG_S_HELLO_L
         ];
@@ -13867,7 +13904,11 @@ mod datagram_tests {
             locators: None,
         };
         let mut wire = alloc::vec![wz_session_core::wire_const::S_MID_HELLO];
-        wire.extend_from_slice(&hello.encode_to_vec(0));
+        wire.extend_from_slice(
+            &hello
+                .encode_to_vec(0)
+                .expect("a fixture Hello is encodable"),
+        );
         wire
     }
 
@@ -17066,7 +17107,7 @@ mod datagram_tests {
                 | wz_session_core::wire_const::FLAG_T_JOIN_S
                 | wz_session_core::wire_const::FLAG_T_JOIN_T
         ];
-        wire.extend_from_slice(&join.encode_to_vec(1));
+        wire.extend_from_slice(&join.encode_to_vec(1).expect("a fixture Join is encodable"));
 
         let mut d = Dissection::new();
         // The real multicast session group: zenoh shares 224.0.0.224:7446 for

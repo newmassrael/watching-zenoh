@@ -651,13 +651,25 @@ def reason_citations(*tables: dict[str, str]) -> dict[str, list[str]]:
     return out
 
 
+# The `<Message>Overrides` struct a codec generates beside its message, so a parent can
+# set a flag of the message's header that the parent derives (the end flag of a chain).
+# Its fields name a flag of a header field, not a field the message carries, so they are
+# no part of the message's vocabulary.
+OVERRIDES_STRUCT = re.compile(r"^pub struct \w+Overrides\b.*?^\}", re.M | re.S)
+
+
+def message_fields(text: str) -> set[str]:
+    """Every `pub <field>:` of the structs of one generated codec, Overrides aside."""
+    return set(
+        re.findall(r"^\s*pub ([a-z_][a-z0-9_]*)\s*:", OVERRIDES_STRUCT.sub("", text), re.M)
+    )
+
+
 def codec_fields() -> dict[str, list[str]]:
     """Every `pub <field>:` of every generated codec, and which codec declares it."""
     out: dict[str, list[str]] = {}
     for path in sorted(CODECS.glob("*.rs")):
-        for field in sorted(
-            set(re.findall(r"^\s*pub ([a-z_][a-z0-9_]*)\s*:", path.read_text(encoding="utf-8"), re.M))
-        ):
+        for field in sorted(message_fields(path.read_text(encoding="utf-8"))):
             out.setdefault(field, []).append(path.stem)
     return out
 
@@ -769,6 +781,26 @@ def selftest() -> int:
         bad.append(
             f"the citation sweep claimed {sorted(cites)} -- expected the two "
             "bare identifiers and none of the four upstream tokens"
+        )
+
+    # THE OVERRIDES: a codec's own fields are claimed and the fields of its Overrides
+    # struct are not, in one fixture, so a sweep that claims everything or nothing fails.
+    fields = message_fields(
+        "pub struct Probe<'a> {\n"
+        "    pub header: u8,\n"
+        "    pub probe_id: u64,\n"
+        "}\n"
+        "pub struct ProbeOverrides {\n"
+        "    pub header_c: Option<bool>,\n"
+        "}\n"
+        "pub struct Other {\n"
+        "    pub tail: u8,\n"
+        "}\n"
+    )
+    if fields != {"header", "probe_id", "tail"}:
+        bad.append(
+            f"the codec field sweep claimed {sorted(fields)} -- expected the fields of "
+            "both messages and none of the Overrides struct between them"
         )
 
     for line in bad:

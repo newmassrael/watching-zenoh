@@ -239,6 +239,7 @@ fn push_of(key: &str, fill: u8, value_len: usize) -> Vec<u8> {
         .try_as_borrowed()
         .expect("a built push re-borrows")
         .encode_to_vec()
+        .expect("a built push is encodable")
 }
 
 /// The consumer's message.

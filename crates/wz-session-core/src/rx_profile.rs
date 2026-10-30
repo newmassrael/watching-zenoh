@@ -186,7 +186,8 @@ mod tests {
         let wire = push
             .try_as_borrowed()
             .expect("the push borrows")
-            .encode_to_vec();
+            .encode_to_vec()
+            .expect("a fixture push is encodable");
         let mut storage = vec![0xEEu8; 7];
         let start = storage.len();
         storage.extend_from_slice(&wire);
@@ -309,7 +310,11 @@ mod tests {
     fn an_owned_frame_yields_a_copy_with_the_same_bytes() {
         let payload = b"payload in an owned frame";
         let push = crate::push_build::build_push_literal("demo/own", payload).expect("a push");
-        let wire = push.try_as_borrowed().expect("borrows").encode_to_vec();
+        let wire = push
+            .try_as_borrowed()
+            .expect("borrows")
+            .encode_to_vec()
+            .expect("a fixture push is encodable");
         let frame = RxBytes::from(wire);
 
         let borrowed = Push::decode(&mut SceCursor::new(frame.as_slice())).expect("decodes");

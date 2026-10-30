@@ -209,6 +209,7 @@ fn envelope(payload: &[u8]) -> Vec<u8> {
         payload,
     }
     .encode_to_vec()
+    .expect("a payload within the u16 prefix encodes")
 }
 
 /// One round: `frames` frames of `payload` through `send`, and the writer let

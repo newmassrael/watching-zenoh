@@ -306,83 +306,307 @@ impl<'a> Declare<'a> {
     /// caller-owned `SliceSink` allocations.
     pub const MAX_ENCODED_BYTES: usize = 612;
 
-    /// Encode `self` into the caller-owned sink. Returns
-    /// `CodecError::BufferOverflow` from a bounded sink when the
-    /// destination has insufficient remaining capacity; growable
-    /// sinks (e.g. `VecSink`) are effectively infallible.
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> {
-        // RFC §synth-5-B peek-byte / streaming-prefix:
-        // streaming prefix encode (per-field present_if/tlv-chain/embed/
-        // repeat helpers). Peek-byte mode: the arm body's encode prepends
-        // its own header byte (which the decoder peeked); no separate
-        // tag byte is emitted here. Streaming-prefix mode (own-field
-        // variant): the carrier is part of the prefix fields and emits
-        // through the same per-field path.
-        w.write_u8(self.header)?;
-        if let Some(_v) = self.interest_id {
-        w.write_vle_u64(_v)?;
-        }
-        if let Some(_list) = &self.extensions {
-            for _e in _list {
-                _e.encode(w)?;
-            }
-        }
-        // Append the active arm's encoded bytes.
-        match &self.body {
-            DeclareVariant::CodecZenohDeclKexpr(b) => {
-                b.encode(w)?;
-            }
-            DeclareVariant::CodecZenohUndeclKexpr(b) => {
-                b.encode(w)?;
-            }
-            DeclareVariant::CodecZenohDeclSubscriber(b) => {
-                b.encode(w)?;
-            }
-            DeclareVariant::CodecZenohUndeclSubscriber(b) => {
-                b.encode(w)?;
-            }
-            DeclareVariant::CodecZenohDeclQueryable(b) => {
-                b.encode(w)?;
-            }
-            DeclareVariant::CodecZenohUndeclQueryable(b) => {
-                b.encode(w)?;
-            }
-            DeclareVariant::CodecZenohDeclToken(b) => {
-                b.encode(w)?;
-            }
-            DeclareVariant::CodecZenohUndeclToken(b) => {
-                b.encode(w)?;
-            }
-            DeclareVariant::CodecZenohDeclFinal(b) => {
-                b.encode(w)?;
-            }
-            DeclareVariant::Default { body, .. } => {
-                body.encode(w)?;
-            }
-        }
-        Ok(())
+    /// Encode `self` into the caller-owned sink. Returns the value's refusal
+    /// when the encoding cannot carry it (a length past its type, a list past
+    /// its bound, a gate that disagrees with a presence; the document declares
+    /// `sce:encode-may-fail`), or the sink's own error:
+    /// `CodecError::BufferOverflow` from a bounded sink when the destination
+    /// has insufficient remaining capacity.
+    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> where CodecError: From<S::Error> {
+        Self::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. Pre-reserves
     /// `MAX_ENCODED_BYTES` so the worst-case write path performs at
     /// most one allocation, then delegates to `encode` over a
-    /// `VecSink`. Returns the freshly-encoded byte vector. Callers
-    /// targeting zero-alloc hot paths should call `encode` directly
-    /// against a caller-owned sink.
+    /// `VecSink`. Returns the freshly-encoded byte vector, or the error
+    /// `encode` refuses a value with: one the encoding cannot carry (a
+    /// length past its type, a list past its bound) or one a gate
+    /// disagrees with. Callers targeting zero-alloc hot paths should call
+    /// `encode` directly against a caller-owned sink.
     ///
     /// Gated on the `alloc` feature — `VecSink` lives behind the
     /// same gate (see `backends/rust/forge-runtime/src/codec.rs`). MCU /
     /// `no_std` builds without `alloc` only see the sink-based
     /// primary `encode`.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Vec<u8> {
+    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
         let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)
-            .expect("VecSink is infallible");
-        _sce_v
+        self.encode(&mut _sce_sink)?;
+        Ok(_sce_v)
     }
 }
+
+/// The arm of `Declare`'s variant a value holds, each arm's body as the
+/// source it says. The tag is not among them: `Declare` derives it from
+/// the arm, as it derives a length, and a default arm presents the tag
+/// it could not name.
+// A default arm's tag is read by the codec that embeds this one and
+// derives its own carrier bits from the arm, which not every build uses.
+#[allow(dead_code)]
+pub enum DeclareVariantSource<'s, A0: ?Sized, A1: ?Sized, A2: ?Sized, A3: ?Sized, A4: ?Sized, A5: ?Sized, A6: ?Sized, A7: ?Sized, A8: ?Sized, D: ?Sized> {
+    CodecZenohDeclKexpr(&'s A0),
+    CodecZenohUndeclKexpr(&'s A1),
+    CodecZenohDeclSubscriber(&'s A2),
+    CodecZenohUndeclSubscriber(&'s A3),
+    CodecZenohDeclQueryable(&'s A4),
+    CodecZenohUndeclQueryable(&'s A5),
+    CodecZenohDeclToken(&'s A6),
+    CodecZenohUndeclToken(&'s A7),
+    CodecZenohDeclFinal(&'s A8),
+    Default { tag: u8, body: &'s D },
+}
+
+// ── Source (ADR 0058) ────────────────────────────────────────────────
+/// What a value of `Declare` says: its presented fields. A length, a count
+/// or the flag a gated field is announced by is not among them; `Declare`
+/// computes those from what is ([`Declare::encode_source`]).
+pub trait DeclareSource {
+    /// The `header` field.
+    fn header(&self) -> u8;
+    /// The `interest_id` field.
+    fn interest_id(&self) -> Option<u64>;
+    /// The `extensions` field.
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone>;
+    /// The arm of the variant this value holds.
+    fn body(&self) -> DeclareVariantSource<'_, impl super::decl_kexpr::DeclKexprSource, impl super::undecl_kexpr::UndeclKexprSource, impl super::decl_subscriber::DeclSubscriberSource, impl super::undecl_subscriber::UndeclSubscriberSource, impl super::decl_queryable::DeclQueryableSource, impl super::undecl_queryable::UndeclQueryableSource, impl super::decl_token::DeclTokenSource, impl super::undecl_token::UndeclTokenSource, impl super::decl_final::DeclFinalSource, impl super::decl_final::DeclFinalSource>;
+}
+
+impl<T: DeclareSource + ?Sized> DeclareSource for &T {
+    fn header(&self) -> u8 {
+        (**self).header()
+    }
+    fn interest_id(&self) -> Option<u64> {
+        (**self).interest_id()
+    }
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+        (**self).extensions()
+    }
+    fn body(&self) -> DeclareVariantSource<'_, impl super::decl_kexpr::DeclKexprSource, impl super::undecl_kexpr::UndeclKexprSource, impl super::decl_subscriber::DeclSubscriberSource, impl super::undecl_subscriber::UndeclSubscriberSource, impl super::decl_queryable::DeclQueryableSource, impl super::undecl_queryable::UndeclQueryableSource, impl super::decl_token::DeclTokenSource, impl super::undecl_token::UndeclTokenSource, impl super::decl_final::DeclFinalSource, impl super::decl_final::DeclFinalSource> {
+        (**self).body()
+    }
+}
+
+/// The arm of `Declare`'s variant that DeclareParts holds.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub enum DeclarePartsBody<'a> {
+    CodecZenohDeclKexpr(&'a super::decl_kexpr::DeclKexprParts<'a>),
+    CodecZenohUndeclKexpr(&'a super::undecl_kexpr::UndeclKexprParts<'a>),
+    CodecZenohDeclSubscriber(&'a super::decl_subscriber::DeclSubscriberParts<'a>),
+    CodecZenohUndeclSubscriber(&'a super::undecl_subscriber::UndeclSubscriberParts<'a>),
+    CodecZenohDeclQueryable(&'a super::decl_queryable::DeclQueryableParts<'a>),
+    CodecZenohUndeclQueryable(&'a super::undecl_queryable::UndeclQueryableParts<'a>),
+    CodecZenohDeclToken(&'a super::decl_token::DeclTokenParts<'a>),
+    CodecZenohUndeclToken(&'a super::undecl_token::UndeclTokenParts<'a>),
+    CodecZenohDeclFinal(&'a super::decl_final::DeclFinalParts<'a>),
+    /// The tag the grammar could not name, and the body it holds.
+    Default { tag: u8, body: &'a super::decl_final::DeclFinalParts<'a> },
+}
+
+/// A value of `Declare` held in the types a caller already has: a source
+/// ([`DeclareSource`]) whose lists are slices and whose bodies are references.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub struct DeclareParts<'a> {
+    /// The `header` field.
+    pub header: u8,
+    /// The `interest_id` field.
+    pub interest_id: Option<u64>,
+    /// The `extensions` field.
+    pub extensions: Option<&'a [super::ext_entry::ExtEntryParts<'a>]>,
+    /// The arm of the variant this value holds.
+    pub body: DeclarePartsBody<'a>,
+}
+
+impl<'a> DeclareSource for DeclareParts<'a> {
+    fn header(&self) -> u8 {
+        self.header
+    }
+    fn interest_id(&self) -> Option<u64> {
+        self.interest_id
+    }
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+        self.extensions.map(<[_]>::iter)
+    }
+    fn body(&self) -> DeclareVariantSource<'_, impl super::decl_kexpr::DeclKexprSource, impl super::undecl_kexpr::UndeclKexprSource, impl super::decl_subscriber::DeclSubscriberSource, impl super::undecl_subscriber::UndeclSubscriberSource, impl super::decl_queryable::DeclQueryableSource, impl super::undecl_queryable::UndeclQueryableSource, impl super::decl_token::DeclTokenSource, impl super::undecl_token::UndeclTokenSource, impl super::decl_final::DeclFinalSource, impl super::decl_final::DeclFinalSource> {
+        match &self.body {
+            DeclarePartsBody::CodecZenohDeclKexpr(_b) => DeclareVariantSource::CodecZenohDeclKexpr(*_b),
+            DeclarePartsBody::CodecZenohUndeclKexpr(_b) => DeclareVariantSource::CodecZenohUndeclKexpr(*_b),
+            DeclarePartsBody::CodecZenohDeclSubscriber(_b) => DeclareVariantSource::CodecZenohDeclSubscriber(*_b),
+            DeclarePartsBody::CodecZenohUndeclSubscriber(_b) => DeclareVariantSource::CodecZenohUndeclSubscriber(*_b),
+            DeclarePartsBody::CodecZenohDeclQueryable(_b) => DeclareVariantSource::CodecZenohDeclQueryable(*_b),
+            DeclarePartsBody::CodecZenohUndeclQueryable(_b) => DeclareVariantSource::CodecZenohUndeclQueryable(*_b),
+            DeclarePartsBody::CodecZenohDeclToken(_b) => DeclareVariantSource::CodecZenohDeclToken(*_b),
+            DeclarePartsBody::CodecZenohUndeclToken(_b) => DeclareVariantSource::CodecZenohUndeclToken(*_b),
+            DeclarePartsBody::CodecZenohDeclFinal(_b) => DeclareVariantSource::CodecZenohDeclFinal(*_b),
+            DeclarePartsBody::Default { tag, body } => DeclareVariantSource::Default { tag: *tag, body: *body },
+        }
+    }
+}
+
+impl<'a> DeclareSource for Declare<'a> {
+    fn header(&self) -> u8 {
+        self.header
+    }
+    fn interest_id(&self) -> Option<u64> {
+        self.interest_id
+    }
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+        self.extensions.as_ref().map(|_l| _l.iter())
+    }
+    fn body(&self) -> DeclareVariantSource<'_, impl super::decl_kexpr::DeclKexprSource, impl super::undecl_kexpr::UndeclKexprSource, impl super::decl_subscriber::DeclSubscriberSource, impl super::undecl_subscriber::UndeclSubscriberSource, impl super::decl_queryable::DeclQueryableSource, impl super::undecl_queryable::UndeclQueryableSource, impl super::decl_token::DeclTokenSource, impl super::undecl_token::UndeclTokenSource, impl super::decl_final::DeclFinalSource, impl super::decl_final::DeclFinalSource> {
+        match &self.body {
+            DeclareVariant::CodecZenohDeclKexpr(_b) => DeclareVariantSource::CodecZenohDeclKexpr(_b),
+            DeclareVariant::CodecZenohUndeclKexpr(_b) => DeclareVariantSource::CodecZenohUndeclKexpr(_b),
+            DeclareVariant::CodecZenohDeclSubscriber(_b) => DeclareVariantSource::CodecZenohDeclSubscriber(_b),
+            DeclareVariant::CodecZenohUndeclSubscriber(_b) => DeclareVariantSource::CodecZenohUndeclSubscriber(_b),
+            DeclareVariant::CodecZenohDeclQueryable(_b) => DeclareVariantSource::CodecZenohDeclQueryable(_b),
+            DeclareVariant::CodecZenohUndeclQueryable(_b) => DeclareVariantSource::CodecZenohUndeclQueryable(_b),
+            DeclareVariant::CodecZenohDeclToken(_b) => DeclareVariantSource::CodecZenohDeclToken(_b),
+            DeclareVariant::CodecZenohUndeclToken(_b) => DeclareVariantSource::CodecZenohUndeclToken(_b),
+            DeclareVariant::CodecZenohDeclFinal(_b) => DeclareVariantSource::CodecZenohDeclFinal(_b),
+            DeclareVariant::Default { tag, body } => DeclareVariantSource::Default { tag: *tag, body },
+        }
+    }
+}
+
+impl<'a> DeclareSource for DeclareView<'a> {
+    fn header(&self) -> u8 {
+        self.header
+    }
+    fn interest_id(&self) -> Option<u64> {
+        self.interest_id
+    }
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+        self.extensions.as_ref().map(|_l| _l.iter())
+    }
+    fn body(&self) -> DeclareVariantSource<'_, impl super::decl_kexpr::DeclKexprSource, impl super::undecl_kexpr::UndeclKexprSource, impl super::decl_subscriber::DeclSubscriberSource, impl super::undecl_subscriber::UndeclSubscriberSource, impl super::decl_queryable::DeclQueryableSource, impl super::undecl_queryable::UndeclQueryableSource, impl super::decl_token::DeclTokenSource, impl super::undecl_token::UndeclTokenSource, impl super::decl_final::DeclFinalSource, impl super::decl_final::DeclFinalSource> {
+        match &self.body {
+            DeclareViewVariant::CodecZenohDeclKexpr(_b) => DeclareVariantSource::CodecZenohDeclKexpr(_b),
+            DeclareViewVariant::CodecZenohUndeclKexpr(_b) => DeclareVariantSource::CodecZenohUndeclKexpr(_b),
+            DeclareViewVariant::CodecZenohDeclSubscriber(_b) => DeclareVariantSource::CodecZenohDeclSubscriber(_b),
+            DeclareViewVariant::CodecZenohUndeclSubscriber(_b) => DeclareVariantSource::CodecZenohUndeclSubscriber(_b),
+            DeclareViewVariant::CodecZenohDeclQueryable(_b) => DeclareVariantSource::CodecZenohDeclQueryable(_b),
+            DeclareViewVariant::CodecZenohUndeclQueryable(_b) => DeclareVariantSource::CodecZenohUndeclQueryable(_b),
+            DeclareViewVariant::CodecZenohDeclToken(_b) => DeclareVariantSource::CodecZenohDeclToken(_b),
+            DeclareViewVariant::CodecZenohUndeclToken(_b) => DeclareVariantSource::CodecZenohUndeclToken(_b),
+            DeclareViewVariant::CodecZenohDeclFinal(_b) => DeclareVariantSource::CodecZenohDeclFinal(_b),
+            DeclareViewVariant::Default { tag, body } => DeclareVariantSource::Default { tag: *tag, body },
+        }
+    }
+}
+
+impl<S: ::sce_forge_runtime::codec::CodecStorage> DeclareSource for DeclareOwned<S> {
+    fn header(&self) -> u8 {
+        self.header
+    }
+    fn interest_id(&self) -> Option<u64> {
+        self.interest_id
+    }
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+        self.extensions.as_ref().map(|_l| ::sce_forge_runtime::codec::SceList::as_slice(_l).iter())
+    }
+    fn body(&self) -> DeclareVariantSource<'_, impl super::decl_kexpr::DeclKexprSource, impl super::undecl_kexpr::UndeclKexprSource, impl super::decl_subscriber::DeclSubscriberSource, impl super::undecl_subscriber::UndeclSubscriberSource, impl super::decl_queryable::DeclQueryableSource, impl super::undecl_queryable::UndeclQueryableSource, impl super::decl_token::DeclTokenSource, impl super::undecl_token::UndeclTokenSource, impl super::decl_final::DeclFinalSource, impl super::decl_final::DeclFinalSource> {
+        match &self.body {
+            DeclareOwnedVariant::CodecZenohDeclKexpr(_b) => DeclareVariantSource::CodecZenohDeclKexpr(_b),
+            DeclareOwnedVariant::CodecZenohUndeclKexpr(_b) => DeclareVariantSource::CodecZenohUndeclKexpr(_b),
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(_b) => DeclareVariantSource::CodecZenohDeclSubscriber(_b),
+            DeclareOwnedVariant::CodecZenohUndeclSubscriber(_b) => DeclareVariantSource::CodecZenohUndeclSubscriber(_b),
+            DeclareOwnedVariant::CodecZenohDeclQueryable(_b) => DeclareVariantSource::CodecZenohDeclQueryable(_b),
+            DeclareOwnedVariant::CodecZenohUndeclQueryable(_b) => DeclareVariantSource::CodecZenohUndeclQueryable(_b),
+            DeclareOwnedVariant::CodecZenohDeclToken(_b) => DeclareVariantSource::CodecZenohDeclToken(_b),
+            DeclareOwnedVariant::CodecZenohUndeclToken(_b) => DeclareVariantSource::CodecZenohUndeclToken(_b),
+            DeclareOwnedVariant::CodecZenohDeclFinal(_b) => DeclareVariantSource::CodecZenohDeclFinal(_b),
+            DeclareOwnedVariant::Default { tag, body } => DeclareVariantSource::Default { tag: *tag, body },
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl<'a> Declare<'a> {
+    /// Encode what `src` says into the caller-owned sink: the bytes
+    /// [`Self::encode`] writes for the value it holds, read through
+    /// [`DeclareSource`]. A length, a count or a gate flag is computed from what
+    /// `src` presents, and a value the encoding cannot carry is refused
+    /// before the first byte is written.
+    pub fn encode_source<S: DeclareSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        Self::count_source(src)?;
+        Self::write_source(src, w)
+    }
+
+    /// [`Self::encode_source`] without the guard a parent has already made.
+    #[doc(hidden)]
+    pub fn write_source<S: DeclareSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        let _k_extensions: usize = src.extensions().map_or(0, |_l| _l.count());
+        if _k_extensions > 8 {
+            return Err(CodecError::TlvChainOverflow);
+        }
+        let _p_header_i_0: bool = src.interest_id().is_some();
+        let _p_header_z_0: bool = src.extensions().is_some();
+        let _c_header: u8 = (((src.header() & !0x20) | (u8::from(_p_header_i_0) << 5)) & !0x80) | (u8::from(_p_header_z_0) << 7);
+        w.write_u8(_c_header)?;
+        if let Some(_v) = src.interest_id() {
+            w.write_vle_u64(_v)?;
+        }
+        if let Some(_v) = src.extensions() {
+            for (_i, _e) in _v.enumerate() {
+                ExtEntry::write_source_in(&_e, w, &super::ext_entry::ExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
+            }
+        }
+        match src.body() {
+            DeclareVariantSource::CodecZenohDeclKexpr(_b) => DeclKexpr::write_source(_b, w)?,
+            DeclareVariantSource::CodecZenohUndeclKexpr(_b) => UndeclKexpr::write_source(_b, w)?,
+            DeclareVariantSource::CodecZenohDeclSubscriber(_b) => DeclSubscriber::write_source(_b, w)?,
+            DeclareVariantSource::CodecZenohUndeclSubscriber(_b) => UndeclSubscriber::write_source(_b, w)?,
+            DeclareVariantSource::CodecZenohDeclQueryable(_b) => DeclQueryable::write_source(_b, w)?,
+            DeclareVariantSource::CodecZenohUndeclQueryable(_b) => UndeclQueryable::write_source(_b, w)?,
+            DeclareVariantSource::CodecZenohDeclToken(_b) => DeclToken::write_source(_b, w)?,
+            DeclareVariantSource::CodecZenohUndeclToken(_b) => UndeclToken::write_source(_b, w)?,
+            DeclareVariantSource::CodecZenohDeclFinal(_b) => DeclFinal::write_source(_b, w)?,
+            DeclareVariantSource::Default { body: _b, .. } => DeclFinal::write_source(_b, w)?,
+        }
+        Ok(())
+    }
+
+    /// The bytes [`Self::write_source`] writes for `src`, counted with
+    /// nothing written.
+    #[doc(hidden)]
+    pub fn count_source<S: DeclareSource + ?Sized>(src: &S) -> Result<usize, CodecError> {
+        let mut _c = ::sce_forge_runtime::codec::CountSink::new();
+        Self::write_source(src, &mut _c)?;
+        Ok(_c.len())
+    }
+}
+
+impl<'a, S: DeclareSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for Declare<'a> {
+    type Error<E> = CodecError;
+
+    fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        Self::write_source(src, w)
+    }
+}
+
+#[allow(dead_code)]
+impl<'a> Declare<'a> {
+    /// The size of the frame [`Self::encode_source`] writes for `src`, found
+    /// with nothing written, or the refusal that encode would give. The result
+    /// writes the frame into a window of exactly that size and cannot fail.
+    pub fn measure<S: DeclareSource + ?Sized>(src: &S) -> Result<::sce_forge_runtime::codec::Measured<'_, Self, S>, CodecError> {
+        ::sce_forge_runtime::codec::measure(src)
+    }
+
+    /// Write `src` into `window` in one pass and return the bytes it is, for a
+    /// window as large as the caller can spare. On an error the window holds a
+    /// prefix to discard; see [`::sce_forge_runtime::codec::write_window`].
+    pub fn write_window<S: DeclareSource + ?Sized>(src: &S, window: &mut [u8]) -> Result<usize, CodecError> {
+        let mut sink = ::sce_forge_runtime::codec::SliceSink::new(window);
+        Self::write_source(src, &mut sink)?;
+        Ok(sink.position())
+    }
+}
+
 
 // ── View (ADR 0049) ──────────────────────────────────────────────────
 // `DeclareView` is what a decode of `Declare` learned, not a
@@ -689,67 +913,18 @@ impl<'a> DeclareView<'a> {
     /// builder. It writes the canonical wire, not the frame the view was decoded
     /// from, so a frame `decode` accepted in a form that is not canonical is
     /// not passed on as it came.
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> {
-        // RFC §synth-5-B peek-byte / streaming-prefix:
-        // streaming prefix encode (per-field present_if/tlv-chain/embed/
-        // repeat helpers). Peek-byte mode: the arm body's encode prepends
-        // its own header byte (which the decoder peeked); no separate
-        // tag byte is emitted here. Streaming-prefix mode (own-field
-        // variant): the carrier is part of the prefix fields and emits
-        // through the same per-field path.
-        w.write_u8(self.header)?;
-        if let Some(_v) = self.interest_id {
-        w.write_vle_u64(_v)?;
-        }
-        if let Some(_list) = &self.extensions {
-            for _e in _list.iter() {
-                _e.encode(w)?;
-            }
-        }
-        // Append the active arm's encoded bytes.
-        match &self.body {
-            DeclareViewVariant::CodecZenohDeclKexpr(b) => {
-                b.encode(w)?;
-            }
-            DeclareViewVariant::CodecZenohUndeclKexpr(b) => {
-                b.encode(w)?;
-            }
-            DeclareViewVariant::CodecZenohDeclSubscriber(b) => {
-                b.encode(w)?;
-            }
-            DeclareViewVariant::CodecZenohUndeclSubscriber(b) => {
-                b.encode(w)?;
-            }
-            DeclareViewVariant::CodecZenohDeclQueryable(b) => {
-                b.encode(w)?;
-            }
-            DeclareViewVariant::CodecZenohUndeclQueryable(b) => {
-                b.encode(w)?;
-            }
-            DeclareViewVariant::CodecZenohDeclToken(b) => {
-                b.encode(w)?;
-            }
-            DeclareViewVariant::CodecZenohUndeclToken(b) => {
-                b.encode(w)?;
-            }
-            DeclareViewVariant::CodecZenohDeclFinal(b) => {
-                b.encode(w)?;
-            }
-            DeclareViewVariant::Default { body, .. } => {
-                body.encode(w)?;
-            }
-        }
-        Ok(())
+    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> where CodecError: From<S::Error> {
+        Declare::encode_source(self, w)
     }
 
-    /// Heap-backed convenience facade over [`Self::encode`].
+    /// Heap-backed convenience facade over [`Self::encode`], which refuses a
+    /// value it cannot carry.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Vec<u8> {
+    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
         let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)
-            .expect("VecSink is infallible");
-        _sce_v
+        self.encode(&mut _sce_sink)?;
+        Ok(_sce_v)
     }
 
     pub fn mid(&self) -> u8 {
@@ -1068,67 +1243,18 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> DeclareOwned<S> {
     ///
     /// The projection builds the whole borrowed record (every list and
     /// embedded body in it, by value) only for `encode` to read it once. A
-    /// sender that holds an owned value encodes it from here. The same
-    /// refusals as the projection's: a list longer than the borrowed view
-    /// declares raises `CodecError::TooManyElements`, so an owned value the
+    /// sender that holds an owned value encodes it from here.
+    /// The same refusals as the projection's: a list longer than the borrowed
+    /// view declares raises `CodecError::TooManyElements`, so an owned value the
     /// borrowed form could not carry is an error and never a frame its own
     /// decoder would reject.
-    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), CodecError> {
-        // RFC §synth-5-B peek-byte / streaming-prefix:
-        // streaming prefix encode (per-field present_if/tlv-chain/embed/
-        // repeat helpers). Peek-byte mode: the arm body's encode prepends
-        // its own header byte (which the decoder peeked); no separate
-        // tag byte is emitted here. Streaming-prefix mode (own-field
-        // variant): the carrier is part of the prefix fields and emits
-        // through the same per-field path.
-        w.write_u8(self.header)?;
-        if let Some(_v) = self.interest_id {
-        w.write_vle_u64(_v)?;
-        }
-        if let Some(_list) = &self.extensions {
-            for _e in ::sce_forge_runtime::codec::bounded_entries::<_, _, 8>(_list)? {
-                _e.encode(w)?;
-            }
-        }
-        // Append the active arm's encoded bytes.
-        match &self.body {
-            DeclareOwnedVariant::CodecZenohDeclKexpr(b) => {
-                b.encode(w)?;
-            }
-            DeclareOwnedVariant::CodecZenohUndeclKexpr(b) => {
-                b.encode(w)?;
-            }
-            DeclareOwnedVariant::CodecZenohDeclSubscriber(b) => {
-                b.encode(w)?;
-            }
-            DeclareOwnedVariant::CodecZenohUndeclSubscriber(b) => {
-                b.encode(w)?;
-            }
-            DeclareOwnedVariant::CodecZenohDeclQueryable(b) => {
-                b.encode(w)?;
-            }
-            DeclareOwnedVariant::CodecZenohUndeclQueryable(b) => {
-                b.encode(w)?;
-            }
-            DeclareOwnedVariant::CodecZenohDeclToken(b) => {
-                b.encode(w)?;
-            }
-            DeclareOwnedVariant::CodecZenohUndeclToken(b) => {
-                b.encode(w)?;
-            }
-            DeclareOwnedVariant::CodecZenohDeclFinal(b) => {
-                b.encode(w)?;
-            }
-            DeclareOwnedVariant::Default { body, .. } => {
-                body.encode(w)?;
-            }
-        }
-        Ok(())
+    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        Declare::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade over [`Self::encode`]. Fallible: a list
-    /// past the bound the borrowed view declares is refused, and so is a
-    /// presence the chain predicates disagree with.
+    /// past the bound the borrowed view declares is refused, as is any value
+    /// the encoding cannot carry.
     #[cfg(feature = "alloc")]
     pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Declare::MAX_ENCODED_BYTES);

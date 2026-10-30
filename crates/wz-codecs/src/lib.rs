@@ -1327,7 +1327,7 @@ mod ext_envelope_oracle {
     fn round_trip_oracle_byte_equivalent() {
         let mut cursor = SceCursor::new(&ORACLE_WIRE);
         let env = ExtEnvelope::decode(&mut cursor).expect("decode oracle wire");
-        let wire = env.encode_to_vec();
+        let wire = env.encode_to_vec().expect("the oracle envelope encodes");
         assert_eq!(
             wire, ORACLE_WIRE,
             "encode(decode(oracle)) must round-trip byte-equivalent"

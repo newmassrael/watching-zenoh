@@ -31,7 +31,12 @@
 use core::time::Duration;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use sce_rust_runtime::{EnabledTransition, Engine, EntryTarget, Hal, NoHistory, StatePolicy};
+use sce_rust_runtime::helpers::hierarchy::BoundedVec;
+use sce_rust_runtime::{
+    state_scratch, state_words, DocumentTables, Engine, EventId, Hal, HistoryId, NoHistory,
+    RunStore, Span, StateId, StateKind, StatePolicy, StateRow, Target, TransitionId, TransitionRow,
+    Workspace,
+};
 use wz_runtime_tokio_test_support::{
     test_hal_advance_ticks, test_hal_now_ticks, test_hal_set_ticks, TestHal,
 };
@@ -110,57 +115,51 @@ impl StatePolicy for TimerProbePolicy {
     >;
     type ScheduledSendId = sce_rust_runtime::SceString;
     // What a document's state tree bounds, which a generated machine's policy
-    // reads off its document: this one is a single state with no `<history>`,
-    // one level below `<scxml>`, so a configuration holds 1 state and a
-    // selection enables 1 transition, and the walk of Appendix D's procedures
+    // reads off its document: this one is a single state with no `<history>`
+    // and no transition of its own, one level below `<scxml>`, so a
+    // configuration holds 1 state and the walk of Appendix D's procedures
     // takes three steps for the one level and three of headroom.
-    type Configuration = sce_rust_runtime::helpers::hierarchy::BoundedVec<St, 1>;
-    type EnabledSet = sce_rust_runtime::helpers::hierarchy::BoundedVec<
-        sce_rust_runtime::EnabledTransition<St, NoHistory>,
-        1,
-    >;
-    type HistoryDefaults = sce_rust_runtime::helpers::hierarchy::BoundedVec<(St, NoHistory), 0>;
-    type EntryWalk = sce_rust_runtime::helpers::hierarchy::BoundedVec<
-        sce_rust_runtime::helpers::microstep::WalkStep<St, NoHistory>,
-        6,
-    >;
-    const MAX_CONFIGURATION: usize = 1;
-    const MAX_ENABLED: usize = 1;
-    const MAX_DEPTH: usize = 1;
+    type Workspace = Workspace<{ state_scratch(1) }, 1, 6, 0>;
+    type RunStore = RunStore<{ state_words(1) }, 0, 0>;
+    type Configuration = BoundedVec<St, 1>;
+
+    // A flat machine: one child of the `<scxml>` element, and the only row of
+    // the transitions table is the document's own initial transition, which
+    // enters that state.
+    const TABLES: &'static DocumentTables = &DocumentTables {
+        states: &[StateRow::new(None, StateKind::Atomic, StateId(0), None)],
+        histories: &[],
+        transitions: &[TransitionRow::new(
+            None,
+            Span { start: 0, len: 1 },
+            false,
+            false,
+        )],
+        targets: &[Target::state(StateId(0))],
+        initial: TransitionId(0),
+    };
+    const STATES: &'static [St] = &[St::S0];
+    const HISTORIES: &'static [NoHistory] = &[];
+    const EVENTS: &'static [Ev] = &[
+        Ev::Null,
+        Ev::LinkOpenTimeout,
+        Ev::InitAckTimeout,
+        Ev::OpenAckTimeout,
+        Ev::ClosingTimeout,
+    ];
+
+    fn state_id(s: Self::State) -> StateId {
+        StateId(s as u16)
+    }
+    fn history_id(h: Self::History) -> HistoryId {
+        match h {}
+    }
+    fn event_id(e: Self::Event) -> EventId {
+        EventId(e as u16)
+    }
 
     fn initial_state() -> Self::State {
         St::S0
-    }
-    fn is_final_state(_s: Self::State) -> bool {
-        false
-    }
-    fn get_parent(_s: Self::State) -> Option<Self::State> {
-        None
-    }
-    fn is_compound_state(_s: Self::State) -> bool {
-        false
-    }
-    // A flat machine: no state has children, and the document's own initial
-    // transition enters the one state.
-    fn get_child_states(_s: Self::State) -> &'static [Self::State] {
-        &[]
-    }
-    fn get_initial_targets(_s: Self::State) -> &'static [EntryTarget<Self::State, Self::History>] {
-        &[]
-    }
-    fn get_document_initial_targets() -> &'static [EntryTarget<Self::State, Self::History>] {
-        &[EntryTarget::State(St::S0)]
-    }
-    fn get_history_parent(history: Self::History) -> Self::State {
-        match history {}
-    }
-    fn get_history_default_targets(
-        history: Self::History,
-    ) -> &'static [EntryTarget<Self::State, Self::History>] {
-        match history {}
-    }
-    fn get_document_order(_s: Self::State) -> u32 {
-        0
     }
     fn null_event() -> Self::Event {
         Ev::Null
@@ -201,11 +200,6 @@ impl StatePolicy for TimerProbePolicy {
         }
     }
 
-    // No `<history>` exists, so nothing was ever recorded.
-    fn history_value(&self, history: Self::History) -> Option<&[Self::State]> {
-        match history {}
-    }
-
     // Appendix D selection: the one state has no transitions, so none is ever
     // enabled, whatever the event. The probe only schedules and fires timers.
     fn first_enabled_transition(
@@ -213,16 +207,10 @@ impl StatePolicy for TimerProbePolicy {
         _state: Self::State,
         _event: Self::Event,
         _eng: &mut Engine<Self>,
-    ) -> Option<EnabledTransition<Self::State, Self::History>> {
+    ) -> Option<TransitionId> {
         None
     }
-    fn execute_transition_content(
-        &mut self,
-        _source: Self::State,
-        _transition_index: usize,
-        _eng: &mut Engine<Self>,
-    ) {
-    }
+    fn execute_transition_content(&mut self, _t: TransitionId, _eng: &mut Engine<Self>) {}
     // The fixture is a single flat state with no entry or exit actions at all.
     fn execute_entry_actions(
         &mut self,
@@ -231,13 +219,7 @@ impl StatePolicy for TimerProbePolicy {
         _is_default_entry: bool,
     ) {
     }
-    fn execute_exit_actions(
-        &mut self,
-        _s: Self::State,
-        _eng: &mut Engine<Self>,
-        _configuration_before_exit: &[Self::State],
-    ) {
-    }
+    fn execute_exit_actions(&mut self, _s: Self::State, _eng: &mut Engine<Self>) {}
 }
 
 // ─────────────────────────────────────────────────────────────

@@ -109,7 +109,7 @@
      retargeted to wz-stems. -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
-       sce:kind="codec" sce:default-endian="big" name="request">
+       sce:kind="codec" sce:encode-may-fail="true" sce:default-endian="big" name="request">
   <!-- R121h-pre: B5-ν ownership invert. Request.header bit 6 =
        `_Z_FLAG_N_REQUEST_M = 0x40` (zenoh-pico network.h:71). -->
   <sce:import src="wireexpr.scxml" kind="codec" as="codec_zenoh_wireexpr">

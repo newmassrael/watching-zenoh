@@ -65,7 +65,7 @@ use alloc::vec::Vec;
 
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
-use sce_forge_runtime::codec::{SceCursor, SceSink, SliceSink};
+use sce_forge_runtime::codec::{CodecError, SceCursor, SceSink, SliceSink};
 
 use crate::accept_state::{AcceptState, NegotiatedExtensions};
 use crate::session_init_params::{session_bytes, SessionBytes};
@@ -333,7 +333,10 @@ pub const ACCEPT_COOKIE_MAX_BYTES: usize =
 /// The payload of the cookie, written to any sink: `None` when `peer_zid` is
 /// outside the protocol's 1..=16, when a state refuses its own encoding, or when
 /// the sink does.
-fn write_cookie_payload<S: SceSink>(view: &AcceptCookieView<'_>, w: &mut S) -> Option<()> {
+fn write_cookie_payload<S: SceSink>(view: &AcceptCookieView<'_>, w: &mut S) -> Option<()>
+where
+    CodecError: From<S::Error>,
+{
     let zid_len = view.peer_zid.len();
     if zid_len == 0 || zid_len > MAX_ZID_BYTES {
         return None;

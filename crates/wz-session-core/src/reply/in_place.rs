@@ -483,7 +483,8 @@ mod tests {
         let wire = response
             .try_as_borrowed()
             .expect("a borrowed view")
-            .encode_to_vec();
+            .encode_to_vec()
+            .expect("a fixture response is encodable");
         let peer = peer();
         let (mut owned, owned_log) = recording();
         let messages = parse_frame_payload(&wire).expect("the record decodes");

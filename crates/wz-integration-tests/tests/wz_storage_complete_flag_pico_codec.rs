@@ -163,7 +163,8 @@ async fn wire_complete_seen_by_pico(config_complete: bool) -> bool {
                     let declaration = dq
                         .try_as_borrowed()
                         .expect("<=N exts by construction")
-                        .encode_to_vec();
+                        .encode_to_vec()
+                        .expect("the DeclareQueryable encodes");
                     assert!(
                         found.is_none(),
                         "expected exactly one DeclareQueryable from the storage declare"

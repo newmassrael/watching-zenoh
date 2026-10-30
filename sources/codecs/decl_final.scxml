@@ -27,7 +27,7 @@
      declare envelope lands. -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
-       sce:kind="codec" sce:default-endian="big" name="decl_final">
+       sce:kind="codec" sce:encode-may-fail="true" sce:default-endian="big" name="decl_final">
   <!-- R311y804: the Z bit and its ext chain. Like decl_kexpr, this body did
        not model bit 7 at all, so `DeclFinal::decode` read exactly one byte and
        a Z-flagged Final left its whole chain in the cursor. The bit is part of

@@ -124,7 +124,10 @@ pub fn encode_join_into<S: SceSink>(
     params: &MulticastParams,
     tx_sn: &MulticastTxConduits,
     out: &mut S,
-) -> Result<(), CodecError> {
+) -> Result<(), CodecError>
+where
+    CodecError: From<S::Error>,
+{
     let zid = &params.zid;
     let mut join = Join::new();
     // The protocol's, not a parameter: see `MulticastParams`.
@@ -267,7 +270,10 @@ fn write_join_qos_ext<S: SceSink>(
     out: &mut S,
     conduits: &[crate::sn::TxSn; crate::qos::Priority::NUM],
     more: bool,
-) -> Result<(), CodecError> {
+) -> Result<(), CodecError>
+where
+    CodecError: From<S::Error>,
+{
     out.write_u8(if more {
         JOIN_QOS_EXT_HEADER | crate::ext_header::EXT_FLAG_Z
     } else {
@@ -285,7 +291,7 @@ fn write_join_qos_ext<S: SceSink>(
     let len = sns.position();
     // A ZBuf: a VLE length, then that many bytes (`crate::vle::write_zbuf`'s framing).
     out.write_vle_u64(len as u64)?;
-    out.write_bytes(&body[..len])
+    Ok(out.write_bytes(&body[..len])?)
 }
 
 /// R2417 — append the JOIN Patch extension: `[0x27][VLE(level)]`, the LAST ext
@@ -298,9 +304,12 @@ fn write_join_qos_ext<S: SceSink>(
 /// [`encode_join`] gates it on the feature that makes those markers reach the
 /// wire rather than on the one that reads them.
 #[cfg(feature = "transport-fragmentation")]
-fn write_join_patch_ext<S: SceSink>(out: &mut S, level: u8) -> Result<(), CodecError> {
+fn write_join_patch_ext<S: SceSink>(out: &mut S, level: u8) -> Result<(), CodecError>
+where
+    CodecError: From<S::Error>,
+{
     out.write_u8(JOIN_PATCH_EXT_HEADER)?;
-    out.write_vle_u64(u64::from(level))
+    Ok(out.write_vle_u64(u64::from(level))?)
 }
 
 /// R2417 — the announcer's protocol PATCH level from a JOIN's extension chain,
@@ -1024,7 +1033,8 @@ mod tests {
         join.sn_res = Some(0x00);
         join.batch_size = Some(0xFFFF);
         join.lease = 5_000;
-        let body = join.encode_to_vec(1); // s=1: sn_res + batch_size written
+        // s=1: sn_res + batch_size written
+        let body = join.encode_to_vec(1).expect("a fixture join is encodable");
         let mut dgram = std::vec![wire_const::T_MID_JOIN | wire_const::FLAG_T_JOIN_S];
         dgram.extend_from_slice(&body);
         assert_eq!(decode_join_zid(&dgram), Some(&zid[..]));

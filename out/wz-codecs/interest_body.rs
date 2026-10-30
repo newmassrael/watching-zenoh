@@ -200,47 +200,261 @@ impl<'a> InterestBody<'a> {
     /// caller-owned `SliceSink` allocations.
     pub const MAX_ENCODED_BYTES: usize = 257;
 
-    /// Encode `self` into the caller-owned sink. Returns
-    /// `CodecError::BufferOverflow` from a bounded sink when the
-    /// destination has insufficient remaining capacity; growable
-    /// sinks (e.g. `VecSink`) are effectively infallible.
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> {
-        // Streaming cursor encode (SSOT selection: `needs_streaming`).
-        // Mirrors the streaming decode: every field appends its own bytes
-        // in declaration order through the per-field encode blocks, so a
-        // gated field skips its append when absent, and a fixed field after
-        // a variable-length payload lands after the payload (the positional
-        // path appends variable fields last, placing it ahead on the wire).
-        // Per-field `is_repeat` / `is_tlv_chain` / `is_embed` route to their
-        // dedicated helpers; everything else uses `present_if_encode_block`
-        // (its non-gated arm covers plain fixed / tail / length-ref / VLE).
-        w.write_u8(self.header)?;
-        if let Some(_v) = &self.keyexpr {
-            _v.encode(w, (self.header >> 5) & 0x1)?;
-        }
-        Ok(())
+    /// Encode `self` into the caller-owned sink. Returns the value's refusal
+    /// when the encoding cannot carry it (a length past its type, a list past
+    /// its bound, a gate that disagrees with a presence; the document declares
+    /// `sce:encode-may-fail`), or the sink's own error:
+    /// `CodecError::BufferOverflow` from a bounded sink when the destination
+    /// has insufficient remaining capacity.
+    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> where CodecError: From<S::Error> {
+        Self::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. Pre-reserves
     /// `MAX_ENCODED_BYTES` so the worst-case write path performs at
     /// most one allocation, then delegates to `encode` over a
-    /// `VecSink`. Returns the freshly-encoded byte vector. Callers
-    /// targeting zero-alloc hot paths should call `encode` directly
-    /// against a caller-owned sink.
+    /// `VecSink`. Returns the freshly-encoded byte vector, or the error
+    /// `encode` refuses a value with: one the encoding cannot carry (a
+    /// length past its type, a list past its bound) or one a gate
+    /// disagrees with. Callers targeting zero-alloc hot paths should call
+    /// `encode` directly against a caller-owned sink.
     ///
     /// Gated on the `alloc` feature — `VecSink` lives behind the
     /// same gate (see `backends/rust/forge-runtime/src/codec.rs`). MCU /
     /// `no_std` builds without `alloc` only see the sink-based
     /// primary `encode`.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Vec<u8> {
+    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
         let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)
-            .expect("VecSink is infallible");
-        _sce_v
+        self.encode(&mut _sce_sink)?;
+        Ok(_sce_v)
     }
 }
+
+/// Flags of `InterestBody` a parent sets in place of the ones a value presents:
+/// the end flag of a chain whose entries are `InterestBody`, which the chain
+/// derives from where an entry stands.
+#[doc(hidden)]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct InterestBodyOverrides {
+    /// The `KE` flag of `header`, when a parent sets it.
+    pub header_ke: Option<bool>,
+    /// The `SU` flag of `header`, when a parent sets it.
+    pub header_su: Option<bool>,
+    /// The `QU` flag of `header`, when a parent sets it.
+    pub header_qu: Option<bool>,
+    /// The `TO` flag of `header`, when a parent sets it.
+    pub header_to: Option<bool>,
+    /// The `N` flag of `header`, when a parent sets it.
+    pub header_n: Option<bool>,
+    /// The `M` flag of `header`, when a parent sets it.
+    pub header_m: Option<bool>,
+    /// The `AG` flag of `header`, when a parent sets it.
+    pub header_ag: Option<bool>,
+}
+
+#[allow(dead_code)]
+impl InterestBodyOverrides {
+    /// Sets `KE` of `header` and nothing else.
+    #[allow(clippy::needless_update)]
+    pub fn header_ke(value: bool) -> Self {
+        Self { header_ke: Some(value), ..Self::default() }
+    }
+
+    /// Sets `SU` of `header` and nothing else.
+    #[allow(clippy::needless_update)]
+    pub fn header_su(value: bool) -> Self {
+        Self { header_su: Some(value), ..Self::default() }
+    }
+
+    /// Sets `QU` of `header` and nothing else.
+    #[allow(clippy::needless_update)]
+    pub fn header_qu(value: bool) -> Self {
+        Self { header_qu: Some(value), ..Self::default() }
+    }
+
+    /// Sets `TO` of `header` and nothing else.
+    #[allow(clippy::needless_update)]
+    pub fn header_to(value: bool) -> Self {
+        Self { header_to: Some(value), ..Self::default() }
+    }
+
+    /// Sets `N` of `header` and nothing else.
+    #[allow(clippy::needless_update)]
+    pub fn header_n(value: bool) -> Self {
+        Self { header_n: Some(value), ..Self::default() }
+    }
+
+    /// Sets `M` of `header` and nothing else.
+    #[allow(clippy::needless_update)]
+    pub fn header_m(value: bool) -> Self {
+        Self { header_m: Some(value), ..Self::default() }
+    }
+
+    /// Sets `AG` of `header` and nothing else.
+    #[allow(clippy::needless_update)]
+    pub fn header_ag(value: bool) -> Self {
+        Self { header_ag: Some(value), ..Self::default() }
+    }
+}
+
+// ── Source (ADR 0058) ────────────────────────────────────────────────
+/// What a value of `InterestBody` says: its presented fields. A length, a count
+/// or the flag a gated field is announced by is not among them; `InterestBody`
+/// computes those from what is ([`InterestBody::encode_source`]).
+pub trait InterestBodySource {
+    /// The `header` field.
+    fn header(&self) -> u8;
+    /// The `keyexpr` field.
+    fn keyexpr(&self) -> Option<&impl super::wireexpr::WireexprSource>;
+}
+
+impl<T: InterestBodySource + ?Sized> InterestBodySource for &T {
+    fn header(&self) -> u8 {
+        (**self).header()
+    }
+    fn keyexpr(&self) -> Option<&impl super::wireexpr::WireexprSource> {
+        (**self).keyexpr()
+    }
+}
+
+/// A value of `InterestBody` held in the types a caller already has: a source
+/// ([`InterestBodySource`]) whose lists are slices and whose bodies are references.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub struct InterestBodyParts<'a> {
+    /// The `header` field.
+    pub header: u8,
+    /// The `keyexpr` field.
+    pub keyexpr: Option<&'a super::wireexpr::WireexprParts<'a>>,
+}
+
+impl<'a> InterestBodySource for InterestBodyParts<'a> {
+    fn header(&self) -> u8 {
+        self.header
+    }
+    fn keyexpr(&self) -> Option<&impl super::wireexpr::WireexprSource> {
+        self.keyexpr
+    }
+}
+
+impl<'a> InterestBodySource for InterestBody<'a> {
+    fn header(&self) -> u8 {
+        self.header
+    }
+    fn keyexpr(&self) -> Option<&impl super::wireexpr::WireexprSource> {
+        self.keyexpr.as_ref()
+    }
+}
+
+impl<'a> InterestBodySource for InterestBodyView<'a> {
+    fn header(&self) -> u8 {
+        self.header
+    }
+    fn keyexpr(&self) -> Option<&impl super::wireexpr::WireexprSource> {
+        self.keyexpr.as_ref()
+    }
+}
+
+impl<S: ::sce_forge_runtime::codec::CodecStorage> InterestBodySource for InterestBodyOwned<S> {
+    fn header(&self) -> u8 {
+        self.header
+    }
+    fn keyexpr(&self) -> Option<&impl super::wireexpr::WireexprSource> {
+        self.keyexpr.as_ref()
+    }
+}
+
+#[allow(dead_code)]
+impl<'a> InterestBody<'a> {
+    /// Encode what `src` says into the caller-owned sink: the bytes
+    /// [`Self::encode`] writes for the value it holds, read through
+    /// [`InterestBodySource`]. A length, a count or a gate flag is computed from what
+    /// `src` presents, and a value the encoding cannot carry is refused
+    /// before the first byte is written.
+    pub fn encode_source<S: InterestBodySource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        Self::count_source(src)?;
+        Self::write_source(src, w)
+    }
+
+    /// [`Self::encode_source`] without the guard a parent has already made.
+    #[doc(hidden)]
+    pub fn write_source<S: InterestBodySource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        Self::write_source_in(src, w, &InterestBodyOverrides::default())
+    }
+
+    /// [`Self::write_source`] with the flags a parent sets in place of the
+    /// ones `src` presents.
+    #[doc(hidden)]
+    pub fn write_source_in<S: InterestBodySource + ?Sized, K: SceSink>(src: &S, w: &mut K, over: &InterestBodyOverrides) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        let _p_header_r_0: bool = src.keyexpr().is_some();
+        let mut _c_header: u8 = (src.header() & !0x10) | (u8::from(_p_header_r_0) << 4);
+        if let Some(_o) = over.header_ke {
+            _c_header = (_c_header & !0x1) | u8::from(_o);
+        }
+        if let Some(_o) = over.header_su {
+            _c_header = (_c_header & !0x2) | (u8::from(_o) << 1);
+        }
+        if let Some(_o) = over.header_qu {
+            _c_header = (_c_header & !0x4) | (u8::from(_o) << 2);
+        }
+        if let Some(_o) = over.header_to {
+            _c_header = (_c_header & !0x8) | (u8::from(_o) << 3);
+        }
+        if let Some(_o) = over.header_n {
+            _c_header = (_c_header & !0x20) | (u8::from(_o) << 5);
+        }
+        if let Some(_o) = over.header_m {
+            _c_header = (_c_header & !0x40) | (u8::from(_o) << 6);
+        }
+        if let Some(_o) = over.header_ag {
+            _c_header = (_c_header & !0x80) | (u8::from(_o) << 7);
+        }
+        w.write_u8(_c_header)?;
+        if let Some(_v) = src.keyexpr() {
+            Wireexpr::write_source(_v, w, (_c_header >> 5) & 0x1)?;
+        }
+        Ok(())
+    }
+
+    /// The bytes [`Self::write_source`] writes for `src`, counted with
+    /// nothing written.
+    #[doc(hidden)]
+    pub fn count_source<S: InterestBodySource + ?Sized>(src: &S) -> Result<usize, CodecError> {
+        let mut _c = ::sce_forge_runtime::codec::CountSink::new();
+        Self::write_source(src, &mut _c)?;
+        Ok(_c.len())
+    }
+}
+
+impl<'a, S: InterestBodySource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for InterestBody<'a> {
+    type Error<E> = CodecError;
+
+    fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        Self::write_source(src, w)
+    }
+}
+
+#[allow(dead_code)]
+impl<'a> InterestBody<'a> {
+    /// The size of the frame [`Self::encode_source`] writes for `src`, found
+    /// with nothing written, or the refusal that encode would give. The result
+    /// writes the frame into a window of exactly that size and cannot fail.
+    pub fn measure<S: InterestBodySource + ?Sized>(src: &S) -> Result<::sce_forge_runtime::codec::Measured<'_, Self, S>, CodecError> {
+        ::sce_forge_runtime::codec::measure(src)
+    }
+
+    /// Write `src` into `window` in one pass and return the bytes it is, for a
+    /// window as large as the caller can spare. On an error the window holds a
+    /// prefix to discard; see [`::sce_forge_runtime::codec::write_window`].
+    pub fn write_window<S: InterestBodySource + ?Sized>(src: &S, window: &mut [u8]) -> Result<usize, CodecError> {
+        let mut sink = ::sce_forge_runtime::codec::SliceSink::new(window);
+        Self::write_source(src, &mut sink)?;
+        Ok(sink.position())
+    }
+}
+
 
 // ── View (ADR 0049) ──────────────────────────────────────────────────
 // `InterestBodyView` is what a decode of `InterestBody` learned, not a
@@ -331,31 +545,18 @@ impl<'a> InterestBodyView<'a> {
     /// builder. It writes the canonical wire, not the frame the view was decoded
     /// from, so a frame `decode` accepted in a form that is not canonical is
     /// not passed on as it came.
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> {
-        // Streaming cursor encode (SSOT selection: `needs_streaming`).
-        // Mirrors the streaming decode: every field appends its own bytes
-        // in declaration order through the per-field encode blocks, so a
-        // gated field skips its append when absent, and a fixed field after
-        // a variable-length payload lands after the payload (the positional
-        // path appends variable fields last, placing it ahead on the wire).
-        // Per-field `is_repeat` / `is_tlv_chain` / `is_embed` route to their
-        // dedicated helpers; everything else uses `present_if_encode_block`
-        // (its non-gated arm covers plain fixed / tail / length-ref / VLE).
-        w.write_u8(self.header)?;
-        if let Some(_v) = &self.keyexpr {
-            _v.encode(w, (self.header >> 5) & 0x1)?;
-        }
-        Ok(())
+    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> where CodecError: From<S::Error> {
+        InterestBody::encode_source(self, w)
     }
 
-    /// Heap-backed convenience facade over [`Self::encode`].
+    /// Heap-backed convenience facade over [`Self::encode`], which refuses a
+    /// value it cannot carry.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Vec<u8> {
+    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
         let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)
-            .expect("VecSink is infallible");
-        _sce_v
+        self.encode(&mut _sce_sink)?;
+        Ok(_sce_v)
     }
 
     pub fn ke(&self) -> bool {
@@ -555,36 +756,24 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> InterestBodyOwned<S> {
     ///
     /// The projection builds the whole borrowed record (every list and
     /// embedded body in it, by value) only for `encode` to read it once. A
-    /// sender that holds an owned value encodes it from here. The same
-    /// refusals as the projection's: a list longer than the borrowed view
-    /// declares raises `CodecError::TooManyElements`, so an owned value the
+    /// sender that holds an owned value encodes it from here.
+    /// The same refusals as the projection's: a list longer than the borrowed
+    /// view declares raises `CodecError::TooManyElements`, so an owned value the
     /// borrowed form could not carry is an error and never a frame its own
     /// decoder would reject.
-    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), CodecError> {
-        // Streaming cursor encode (SSOT selection: `needs_streaming`).
-        // Mirrors the streaming decode: every field appends its own bytes
-        // in declaration order through the per-field encode blocks, so a
-        // gated field skips its append when absent, and a fixed field after
-        // a variable-length payload lands after the payload (the positional
-        // path appends variable fields last, placing it ahead on the wire).
-        // Per-field `is_repeat` / `is_tlv_chain` / `is_embed` route to their
-        // dedicated helpers; everything else uses `present_if_encode_block`
-        // (its non-gated arm covers plain fixed / tail / length-ref / VLE).
-        w.write_u8(self.header)?;
-        if let Some(_v) = &self.keyexpr {
-            _v.encode(w, (self.header >> 5) & 0x1)?;
-        }
-        Ok(())
+    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        InterestBody::encode_source(self, w)
     }
 
-    /// Heap-backed convenience facade over [`Self::encode`].
+    /// Heap-backed convenience facade over [`Self::encode`]. Fallible: a list
+    /// past the bound the borrowed view declares is refused, as is any value
+    /// the encoding cannot carry.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Vec<u8> {
+    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(InterestBody::MAX_ENCODED_BYTES);
         let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)
-            .expect("VecSink is infallible");
-        _sce_v
+        self.encode(&mut _sce_sink)?;
+        Ok(_sce_v)
     }
 }
 

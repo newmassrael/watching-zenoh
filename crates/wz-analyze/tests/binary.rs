@@ -1888,6 +1888,7 @@ fn query(rid: u64, suffix: &'static str) -> Vec<u8> {
         ..Default::default()
     }
     .encode_to_vec()
+    .expect("a fixture message is encodable")
 }
 
 /// The `Response` that answers it, carrying `payload`.
@@ -1907,6 +1908,7 @@ fn reply(request_id: u64, suffix: &'static str, payload: &'static [u8]) -> Vec<u
         ..Default::default()
     }
     .encode_to_vec()
+    .expect("a fixture message is encodable")
 }
 
 /// The closing `ResponseFinal`.
@@ -1916,6 +1918,7 @@ fn response_final(request_id: u64) -> Vec<u8> {
         ..Default::default()
     }
     .encode_to_vec()
+    .expect("a fixture message is encodable")
 }
 
 /// A cleartext TCP capture of ONE query exchange: the client asks, the server
@@ -2325,7 +2328,8 @@ fn four_named_nodes() -> Vec<u8> {
                 }),
                 ..Default::default()
             }
-            .encode_to_vec(),
+            .encode_to_vec()
+            .expect("a fixture message is encodable"),
         );
         frame
     };
@@ -5671,6 +5675,7 @@ fn declare_kexpr(id: u64, base: &'static str) -> Vec<u8> {
         ..Default::default()
     }
     .encode_to_vec()
+    .expect("a fixture message is encodable")
 }
 
 /// A reply under an ALIASED keyexpr, carrying `payload`.
@@ -5700,6 +5705,7 @@ fn aliased_reply(
         ..Default::default()
     }
     .encode_to_vec()
+    .expect("a fixture message is encodable")
 }
 
 /// R311y701 ([REDACTED-REQ], PF2) — A KEYEXPR NAMED BY NUMERIC ID IS RESOLVED, and a

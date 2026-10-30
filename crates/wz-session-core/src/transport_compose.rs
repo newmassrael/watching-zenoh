@@ -635,7 +635,9 @@ pub fn frame_unit(framing: Framing, body: &[u8]) -> Result<Vec<u8>, ComposeError
             payload_len: body.len() as u16,
             payload: body,
         }
-        .encode_to_vec(),
+        // The length check above is the prefix's own bound, so the codec has nothing to refuse.
+        .encode_to_vec()
+        .expect("a body within the framing's length prefix encodes"),
         Framing::LowLatencyStream => {
             let mut wire = Vec::with_capacity(4 + body.len());
             wire.extend_from_slice(&(body.len() as u32).to_le_bytes());

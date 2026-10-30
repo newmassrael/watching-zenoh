@@ -46,7 +46,9 @@ fn zenoh_pico_encode_oam_default() -> Vec<u8> {
 // wz-proves: none -- real pico byte-parity but NO catalog atom names the OAM envelope
 #[test]
 fn layer3_oam_default_byte_equivalent() {
-    let wz = Oam::default().encode_to_vec();
+    let wz = Oam::default()
+        .encode_to_vec()
+        .expect("a default Oam encodes");
     let pico = zenoh_pico_encode_oam_default();
     assert_eq!(
         wz, pico,

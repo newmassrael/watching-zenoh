@@ -146,6 +146,7 @@ fn qos_offer() -> Vec<u8> {
     wz_session_core::extqos::encode_qos_ext()
         .as_borrowed()
         .encode_to_vec()
+        .expect("the QoS offer entry is encodable")
 }
 
 /// Rebuild the whole file from the encoders: the QoS handshake, the control, the
@@ -286,6 +287,7 @@ fn the_tracked_publisher_fields_capture_is_a_qos_session_with_a_control_and_a_fu
             .try_as_borrowed()
             .expect("a built push re-borrows")
             .encode_to_vec()
+            .expect("a built push is encodable")
     };
     assert_eq!(
         &control[2..],

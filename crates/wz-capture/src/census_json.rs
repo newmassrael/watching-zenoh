@@ -1931,7 +1931,8 @@ pub(crate) mod fed_tests {
         let body = owned
             .try_as_borrowed()
             .expect("borrowed projection")
-            .encode_to_vec(1);
+            .encode_to_vec(1)
+            .expect("a fixture Hello is encodable");
         let mut wire = alloc::vec![
             wz_session_core::wire_const::S_MID_HELLO | wz_session_core::wire_const::FLAG_S_HELLO_L
         ];
@@ -1978,7 +1979,8 @@ pub(crate) mod fed_tests {
                 .expect("the production keyexpr-declaration builder")
                 .try_as_borrowed()
                 .expect("re-borrow")
-                .encode_to_vec(),
+                .encode_to_vec()
+                .expect("a built declaration is encodable"),
         );
         let put = framed_frame(1, &push(sender_space(17, Some("/temp")), b"hello"));
         let mut low = framed_init(&ZID_A);
@@ -2035,7 +2037,8 @@ pub(crate) mod fed_tests {
                 .expect("the production interest builder")
                 .try_as_borrowed()
                 .expect("re-borrow")
-                .encode_to_vec(),
+                .encode_to_vec()
+                .expect("a built interest is encodable"),
             )
         };
         const LOW: [u8; 4] = [10, 0, 0, 1];
@@ -2192,7 +2195,8 @@ pub(crate) mod fed_tests {
                 .expect("the production subscriber builder")
                 .try_as_borrowed()
                 .expect("re-borrow")
-                .encode_to_vec(),
+                .encode_to_vec()
+                .expect("a built declaration is encodable"),
         );
         let declare_qbl = framed_frame(
             0,
@@ -2200,7 +2204,8 @@ pub(crate) mod fed_tests {
                 .expect("the production queryable builder")
                 .try_as_borrowed()
                 .expect("re-borrow")
-                .encode_to_vec(),
+                .encode_to_vec()
+                .expect("a built declaration is encodable"),
         );
         // R311y870 — the QUESTION, and it is deliberately one NOBODY ANSWERS:
         // A asks for B's SUBSCRIBERS and B declares a queryable. That is the
@@ -2219,7 +2224,8 @@ pub(crate) mod fed_tests {
             .expect("the production interest builder")
             .try_as_borrowed()
             .expect("re-borrow")
-            .encode_to_vec(),
+            .encode_to_vec()
+            .expect("a built interest is encodable"),
         );
         // The data plane: a Put under a literal keyexpr (id 0 + suffix, which
         // needs no Declare to resolve).

@@ -57,6 +57,7 @@ macro_rules! impl_test_wire_owned {
                 self.try_as_borrowed()
                     .expect("test: <=N exts by construction")
                     .encode_to_vec()
+                    .expect("test: a message a fixture builds is encodable")
             }
         }
     };

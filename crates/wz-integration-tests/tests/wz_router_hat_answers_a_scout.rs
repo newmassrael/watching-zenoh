@@ -352,7 +352,11 @@ fn scout_datagram(what: u8) -> Vec<u8> {
     scout.version = 0x09;
     scout.set_what(what);
     let mut wire = vec![wire_const::S_MID_SCOUT];
-    wire.extend_from_slice(&scout.encode_to_vec());
+    wire.extend_from_slice(
+        &scout
+            .encode_to_vec()
+            .expect("a version-and-flags Scout encodes"),
+    );
     wire
 }
 

@@ -68,7 +68,7 @@
      identical at the envelope layer. No new primitives. -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
-       sce:kind="codec" sce:default-endian="big" name="push">
+       sce:kind="codec" sce:encode-may-fail="true" sce:default-endian="big" name="push">
   <!-- R121h-pre: B5-ν ownership invert (SCE pin e10619d3). Push.header
        bit 6 = `_Z_FLAG_N_PUSH_M = 0x40` (zenoh-pico network.h:64);
        parent declares the wireexpr arm dispatch on its own M flag. -->

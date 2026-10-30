@@ -1778,6 +1778,7 @@ pub(crate) mod tests_support {
             ..Default::default()
         }
         .encode_to_vec()
+        .expect("a fixture Push is encodable")
     }
 
     /// A `Push` under `keyexpr` whose Put carries the encoding the caller
@@ -1821,6 +1822,7 @@ pub(crate) mod tests_support {
             ..Default::default()
         }
         .encode_to_vec()
+        .expect("a fixture Push is encodable")
     }
 
     /// A `Push` whose payload travels as SLICES, every one of them plain bytes.
@@ -1873,6 +1875,7 @@ pub(crate) mod tests_support {
             ..Default::default()
         }
         .encode_to_vec()
+        .expect("a fixture Push is encodable")
     }
 
     /// R2510 (open-debt item 713) — [`push_declaring`] keyed by an ALIAS rather
@@ -1917,6 +1920,7 @@ pub(crate) mod tests_support {
             ..Default::default()
         }
         .encode_to_vec()
+        .expect("a fixture Push is encodable")
     }
 
     /// R311y622 (§1.1s) — a `Response` carrying an `Err` whose payload is
@@ -1950,6 +1954,7 @@ pub(crate) mod tests_support {
             ..Default::default()
         }
         .encode_to_vec()
+        .expect("a fixture Response is encodable")
     }
 
     /// R311y622 (§1.1o) — a `Push` whose payload slot holds an SHM DESCRIPTOR:
@@ -2003,6 +2008,7 @@ pub(crate) mod tests_support {
             ..Default::default()
         }
         .encode_to_vec()
+        .expect("a fixture Push is encodable")
     }
 
     /// R311y622 (§1.1o) — THE DISCRIMINATOR'S fixture: an `Err` whose body ext
@@ -2056,6 +2062,7 @@ pub(crate) mod tests_support {
             ..Default::default()
         }
         .encode_to_vec()
+        .expect("a fixture Response is encodable")
     }
 
     /// A dissection carrying one A-to-B `Push` per entry.
@@ -4353,7 +4360,8 @@ mod census_tests {
             ),
             ..Default::default()
         }
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("a fixture Push is encodable");
         let stamped: Vec<(bool, Option<u64>, Vec<u8>)> = alloc::vec![
             (true, Some(1), push_declaring("t/put", ID_JSON, b"{}")),
             (true, Some(1), del),
@@ -4813,6 +4821,7 @@ mod census_tests {
             ..Default::default()
         }
         .encode_to_vec()
+        .expect("a fixture Push is encodable")
     }
 
     /// R311y618 (§1.4j) — an id NOT in this build's table, arriving off the
@@ -5007,7 +5016,8 @@ mod census_tests {
             }),
             ..Default::default()
         }
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("a fixture Push is encodable");
         let (t, plain) = census_where(&alloc::vec![(true, unnamed)], "key == app/topic");
         assert_eq!(plain.payloads(), 1, "the control: the record decoded");
         assert_eq!(t.payloads(), 0);

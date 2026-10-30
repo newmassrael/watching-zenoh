@@ -82,7 +82,9 @@ fn zenoh_pico_encode_request_default() -> Vec<u8> {
 // wz-proves: codec-request codec-parity partial
 #[test]
 fn layer3_request_default_byte_equivalent() {
-    let wz = Request::default().encode_to_vec();
+    let wz = Request::default()
+        .encode_to_vec()
+        .expect("a default Request encodes");
     let pico = zenoh_pico_encode_request_default();
     assert_eq!(
         wz, pico,
@@ -154,7 +156,8 @@ fn layer3_request_query_value_byte_equivalent() {
     let wz = owned
         .try_as_borrowed()
         .expect("borrow the owned request")
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("the request under test encodes");
     let pico = zenoh_pico_encode_request_query_value(PAYLOAD);
     assert_eq!(
         wz, pico,
@@ -273,7 +276,8 @@ fn layer3_request_target_byte_equivalent() {
         let wz = owned
             .try_as_borrowed()
             .expect("borrow the owned request")
-            .encode_to_vec();
+            .encode_to_vec()
+            .expect("the request under test encodes");
         let pico = zenoh_pico_encode_request_query_knobs(&PicoQueryKnobs {
             target: Some(pico_target),
             ..Default::default()
@@ -310,7 +314,8 @@ fn layer3_request_timeout_byte_equivalent() {
         let wz = owned
             .try_as_borrowed()
             .expect("borrow the owned request")
-            .encode_to_vec();
+            .encode_to_vec()
+            .expect("the request under test encodes");
         let pico = zenoh_pico_encode_request_query_knobs(&PicoQueryKnobs {
             timeout_ms: Some(timeout_ms),
             ..Default::default()
@@ -381,7 +386,8 @@ fn layer3_request_consolidation_diverges_from_zenoh_pico_by_exactly_one_slot() {
         let wz = owned
             .try_as_borrowed()
             .expect("borrow the owned request")
-            .encode_to_vec();
+            .encode_to_vec()
+            .expect("the request under test encodes");
         let pico = zenoh_pico_encode_request_query_knobs(&PicoQueryKnobs {
             consolidation: Some(pico_mode),
             ..Default::default()
@@ -452,7 +458,8 @@ fn layer3_request_parameters_byte_equivalent() {
         let wz = owned
             .try_as_borrowed()
             .expect("borrow the owned request")
-            .encode_to_vec();
+            .encode_to_vec()
+            .expect("the request under test encodes");
         let pico = zenoh_pico_encode_request_query_knobs(&PicoQueryKnobs {
             parameters: Some(params),
             ..Default::default()
@@ -492,7 +499,8 @@ fn layer3_request_attachment_byte_equivalent() {
         let wz = owned
             .try_as_borrowed()
             .expect("borrow the owned request")
-            .encode_to_vec();
+            .encode_to_vec()
+            .expect("the request under test encodes");
         let pico = zenoh_pico_encode_request_query_knobs(&PicoQueryKnobs {
             attachment: Some(attachment),
             ..Default::default()
@@ -533,7 +541,8 @@ fn layer3_request_builder_default_emits_no_spurious_ext() {
     let wz = owned
         .try_as_borrowed()
         .expect("borrow the owned request")
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("the request under test encodes");
     assert_eq!(
         wz,
         zenoh_pico_encode_request_default(),

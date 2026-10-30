@@ -70,7 +70,9 @@ async fn echo_msg_del_tcp_round_trip() {
             timestamp: None,
             extensions: None,
         };
-        let bytes = original.encode_to_vec();
+        let bytes = original
+            .encode_to_vec()
+            .expect("a Del without extensions encodes");
         driver
             .send(&TxFrame { bytes: &bytes }, Reliability::Reliable)
             .await

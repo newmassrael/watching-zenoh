@@ -88,7 +88,7 @@ fn msg_put_default_encode_decode_roundtrip() {
 #[test]
 fn msg_del_default_encode_decode_roundtrip() {
     let del = MsgDel::default();
-    let encoded = del.encode_to_vec();
+    let encoded = del.encode_to_vec().expect("a default Del encodes");
     assert!(
         !encoded.is_empty(),
         "Default MsgDel encode produced 0 bytes — at minimum the \
@@ -124,7 +124,7 @@ fn reply_default_encode_decode_roundtrip() {
         }),
         ..Reply::default()
     };
-    let encoded = reply.encode_to_vec();
+    let encoded = reply.encode_to_vec().expect("a default Reply encodes");
     assert!(
         !encoded.is_empty(),
         "default Reply encode produced 0 bytes — header byte expected"
@@ -187,7 +187,7 @@ fn stream_envelope_wire_bytes_match_zenoh_pico_reference() {
             payload_len: payload.len() as u16,
             payload,
         };
-        let wire = env.encode_to_vec();
+        let wire = env.encode_to_vec().expect("an envelope encodes");
         assert_eq!(
             wire.len(),
             expected_wire.len(),
@@ -254,7 +254,7 @@ fn err_default_encode_decode_roundtrip() {
     use wz_codecs::err::Err;
 
     let err = Err::default();
-    let encoded = err.encode_to_vec();
+    let encoded = err.encode_to_vec().expect("a default Err encodes");
     assert!(
         !encoded.is_empty(),
         "default Err encode produced 0 bytes — header expected"

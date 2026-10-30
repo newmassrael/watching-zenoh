@@ -4604,7 +4604,11 @@ mod tests {
         };
         // `encode(sink, s, a)`: the S (resolution present) and A (is-ack)
         // discriminators ride the parent header, so the codec takes them.
-        wire.extend_from_slice(&body.encode_to_vec(0, u8::from(is_ack)));
+        wire.extend_from_slice(
+            &body
+                .encode_to_vec(0, u8::from(is_ack))
+                .expect("a fixture init body is encodable"),
+        );
         if !exts.is_empty() {
             wire.extend_from_slice(&crate::ext_chain::encode_ext_chain(&exts));
         }
@@ -4641,6 +4645,7 @@ mod tests {
             ..Default::default()
         }
         .encode_to_vec()
+        .expect("a fixture oam record is encodable")
     }
 
     /// Drive a session to Established so the post-handshake contracts are in
@@ -4688,7 +4693,8 @@ mod tests {
                 cookie_len: if is_ack { None } else { Some(0) },
                 cookie: if is_ack { None } else { Some(&[]) },
             }
-            .encode_to_vec(u8::from(is_ack)),
+            .encode_to_vec(u8::from(is_ack))
+            .expect("a fixture open body is encodable"),
         );
         wire
     }
@@ -6318,7 +6324,8 @@ mod tests {
         let record = declare
             .try_as_borrowed()
             .expect("owned -> borrowed")
-            .encode_to_vec();
+            .encode_to_vec()
+            .expect("a fixture declare is encodable");
 
         let mut s = established(vec![]);
         assert!(s.keyexprs().is_empty(Direction::A));
@@ -7161,7 +7168,11 @@ mod tests {
             cookie: is_ack.then_some(&zeros[..]),
         };
         let mut wire = vec![flags | wz_codecs::wire_const::T_MID_INIT];
-        wire.extend_from_slice(&body.encode_to_vec(1, u8::from(is_ack)));
+        wire.extend_from_slice(
+            &body
+                .encode_to_vec(1, u8::from(is_ack))
+                .expect("a fixture init body is encodable"),
+        );
         wire
     }
 

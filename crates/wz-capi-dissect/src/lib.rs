@@ -7462,7 +7462,8 @@ mod tests {
                 .expect("the production subscriber builder")
                 .try_as_borrowed()
                 .expect("re-borrow")
-                .encode_to_vec(),
+                .encode_to_vec()
+                .expect("the subscriber declare is encodable"),
         );
         let put = framed_frame(
             1,
@@ -7476,7 +7477,8 @@ mod tests {
                 }),
                 ..Default::default()
             }
-            .encode_to_vec(),
+            .encode_to_vec()
+            .expect("a fixture Push is encodable"),
         );
         let query = framed_frame(
             2,
@@ -7490,7 +7492,8 @@ mod tests {
                 ),
                 ..Default::default()
             }
-            .encode_to_vec(),
+            .encode_to_vec()
+            .expect("a fixture Request is encodable"),
         );
         let mut answer_records = wz_codecs::response::Response {
             header: wz_codecs::response::Response::default().header
@@ -7509,13 +7512,15 @@ mod tests {
             }),
             ..Default::default()
         }
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("a fixture Response is encodable");
         answer_records.extend_from_slice(
             &wz_codecs::response_final::ResponseFinal {
                 request_id: 7,
                 ..Default::default()
             }
-            .encode_to_vec(),
+            .encode_to_vec()
+            .expect("a fixture ResponseFinal is encodable"),
         );
 
         // R311y870 — the QUESTION, and one NOBODY ANSWERS: A asks B for its
@@ -7533,7 +7538,8 @@ mod tests {
             .expect("the production interest builder")
             .try_as_borrowed()
             .expect("re-borrow")
-            .encode_to_vec(),
+            .encode_to_vec()
+            .expect("the interest is encodable"),
         );
 
         let mut low_to_high = framed_init(&ZID_A);
@@ -8064,7 +8070,8 @@ mod tests {
                 .expect("subscriber")
                 .try_as_borrowed()
                 .expect("borrow")
-                .encode_to_vec();
+                .encode_to_vec()
+                .expect("the subscriber declare is encodable");
         let push = wz_codecs::push::Push {
             header: wz_codecs::push::Push::default().header | wz_codecs::wire_const::FLAG_N_N,
             keyexpr: literal("demo/temp"),
@@ -8075,7 +8082,8 @@ mod tests {
             }),
             ..Default::default()
         }
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("a fixture Push is encodable");
         let units = [
             (false, framed(&[0x81, 9, 2, 1, 5], 2)),
             (true, framed(&[0xa1, 9, 2, 2, 0, 5], 2)),
@@ -9572,7 +9580,8 @@ mod tests {
                     ),
                     ..Default::default()
                 }
-                .encode_to_vec(),
+                .encode_to_vec()
+                .expect("a fixture Push is encodable"),
             ));
         }
         let low = tcp_packet(1000, &low_to_high);
@@ -9683,7 +9692,8 @@ mod tests {
                 }),
                 ..Default::default()
             }
-            .encode_to_vec(),
+            .encode_to_vec()
+            .expect("a fixture Push is encodable"),
         );
         let mut low_to_high = framed_init(&ZID_A);
         low_to_high.extend_from_slice(&put);
@@ -9752,7 +9762,8 @@ mod tests {
                 }),
                 ..Default::default()
             }
-            .encode_to_vec(),
+            .encode_to_vec()
+            .expect("a fixture Push is encodable"),
         )
     }
 
@@ -13571,7 +13582,7 @@ mod tests {
         scout.set_zid_len_m1(3);
         scout.zid = Some(&[0x11, 0x22, 0x33, 0x44]);
         let mut wire = vec![wz_session_core::wire_const::S_MID_SCOUT];
-        wire.extend_from_slice(&scout.encode_to_vec());
+        wire.extend_from_slice(&scout.encode_to_vec().expect("a fixture Scout is encodable"));
         udp_packet(asker, asker_port, [224, 0, 0, 224], 7446, &wire)
     }
 
@@ -13586,7 +13597,11 @@ mod tests {
             locators: None,
         };
         let mut wire = vec![wz_session_core::wire_const::S_MID_HELLO];
-        wire.extend_from_slice(&hello.encode_to_vec(0));
+        wire.extend_from_slice(
+            &hello
+                .encode_to_vec(0)
+                .expect("a fixture Hello is encodable"),
+        );
         udp_packet(responder, 7447, asker, asker_port, &wire)
     }
 
@@ -16082,6 +16097,7 @@ mod tests {
                 ..Default::default()
             }
             .encode_to_vec()
+            .expect("a fixture Request is encodable")
         };
         let reply = |request_id: u64| {
             wz_codecs::response::Response {
@@ -16104,6 +16120,7 @@ mod tests {
                 ..Default::default()
             }
             .encode_to_vec()
+            .expect("a fixture Response is encodable")
         };
         let close_of = |request_id: u64| {
             wz_codecs::response_final::ResponseFinal {
@@ -16111,6 +16128,7 @@ mod tests {
                 ..Default::default()
             }
             .encode_to_vec()
+            .expect("a fixture ResponseFinal is encodable")
         };
         let push = |body: wz_codecs::push::PushVariant<'static>| {
             wz_codecs::push::Push {
@@ -16120,6 +16138,7 @@ mod tests {
                 ..Default::default()
             }
             .encode_to_vec()
+            .expect("a fixture Push is encodable")
         };
         let put = push(wz_codecs::push::PushVariant::CodecZenohMsgPut(
             wz_codecs::msg_put::MsgPut {
@@ -16136,7 +16155,8 @@ mod tests {
                 .expect("the production subscriber builder")
                 .try_as_borrowed()
                 .expect("re-borrow")
-                .encode_to_vec();
+                .encode_to_vec()
+                .expect("the subscriber declare is encodable");
         let interest = wz_session_core::interest_build::build_interest_subscribers(
             9,
             true,
@@ -16147,7 +16167,8 @@ mod tests {
         .expect("the production interest builder")
         .try_as_borrowed()
         .expect("re-borrow")
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("the interest is encodable");
 
         let mut low_to_high = framed_init(&ZID_A);
         low_to_high.extend_from_slice(&framed_transport(&[
@@ -16930,7 +16951,8 @@ mod tests {
                     ),
                     ..Default::default()
                 }
-                .encode_to_vec(),
+                .encode_to_vec()
+                .expect("a fixture Push is encodable"),
             );
             packets.push(tcp_packet_on(2000 + flow as u16, true, next[flow], &record));
             next[flow] += record.len() as u32;
@@ -17383,7 +17405,8 @@ mod tests {
                 ),
                 ..Default::default()
             }
-            .encode_to_vec(),
+            .encode_to_vec()
+            .expect("a fixture Request is encodable"),
         );
         let mut answer_records = wz_codecs::response::Response {
             header: wz_codecs::response::Response::default().header
@@ -17402,13 +17425,15 @@ mod tests {
             }),
             ..Default::default()
         }
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("a fixture Response is encodable");
         answer_records.extend_from_slice(
             &wz_codecs::response_final::ResponseFinal {
                 request_id: 7,
                 ..Default::default()
             }
-            .encode_to_vec(),
+            .encode_to_vec()
+            .expect("a fixture ResponseFinal is encodable"),
         );
         let answer = framed_frame(0, &answer_records);
         let (init_a, init_b) = (framed_init(&[1, 2, 3, 4]), framed_init(&[5, 6, 7, 8]));

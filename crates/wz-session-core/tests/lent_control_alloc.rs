@@ -104,7 +104,11 @@ macro_rules! owned_window {
     ($build:expr) => {{
         let (bytes, allocations) = allocations_during(|| {
             let message = $build;
-            let encoded = message.try_as_borrowed().expect("a view").encode_to_vec();
+            let encoded = message
+                .try_as_borrowed()
+                .expect("a view")
+                .encode_to_vec()
+                .expect("the builder's message is encodable");
             encoded
         });
         (bytes, allocations)

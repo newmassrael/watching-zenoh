@@ -4452,7 +4452,7 @@ mod tests {
         join.sn_res = Some(0x01); // 14-bit ring, ours is 0x02 (28-bit)
         join.batch_size = Some(0xFFFF);
         join.lease = 5_000;
-        let body = join.encode_to_vec(1);
+        let body = join.encode_to_vec(1).expect("a fixture Join encodes");
         let mut dgram = std::vec![wire_const::T_MID_JOIN | wire_const::FLAG_T_JOIN_S];
         dgram.extend_from_slice(&body);
 

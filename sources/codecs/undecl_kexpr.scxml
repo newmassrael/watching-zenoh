@@ -33,7 +33,7 @@
      codec exists yet. -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
-       sce:kind="codec" sce:default-endian="big" name="undecl_kexpr">
+       sce:kind="codec" sce:encode-may-fail="true" sce:default-endian="big" name="undecl_kexpr">
   <!-- R311y804: the Z-gated body ext chain. This is the ONE undeclare body
        that lacked it — undecl_subscriber / undecl_queryable / undecl_token all
        carry the identical chain because their SOURCED form rides it (the

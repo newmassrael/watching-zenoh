@@ -2288,7 +2288,7 @@ fn a_scout_of_another_version_names_no_node() {
         scout.set_zid_len_m1(3);
         scout.zid = Some(&ZID_C);
         let mut wire = vec![wire_const::S_MID_SCOUT];
-        wire.extend_from_slice(&scout.encode_to_vec());
+        wire.extend_from_slice(&scout.encode_to_vec().expect("a fixture Scout is encodable"));
         wire
     };
     let census_of = |wire: &[u8]| {
@@ -2428,7 +2428,7 @@ fn a_scouting_datagram_reads_as_a_unit_of_one_message() {
         scout.set_zid_len_m1(3);
         scout.zid = Some(&ZID_C);
         let mut wire = vec![wire_const::S_MID_SCOUT];
-        wire.extend_from_slice(&scout.encode_to_vec());
+        wire.extend_from_slice(&scout.encode_to_vec().expect("a fixture Scout is encodable"));
         wire
     };
     let readings_of = |wire: &[u8]| {

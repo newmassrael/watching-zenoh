@@ -47,7 +47,7 @@
      `<sce:flag value=>` so OAM::default() carries the wire MID. -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
-       sce:kind="codec" sce:default-endian="big" name="oam">
+       sce:kind="codec" sce:encode-may-fail="true" sce:default-endian="big" name="oam">
   <sce:import src="ext_entry.scxml" kind="codec" as="codec_zenoh_ext_entry"/>
   <sce:import src="ext_unit.scxml" kind="codec" as="codec_zenoh_ext_unit"/>
   <sce:import src="ext_zint.scxml" kind="codec" as="codec_zenoh_ext_zint"/>

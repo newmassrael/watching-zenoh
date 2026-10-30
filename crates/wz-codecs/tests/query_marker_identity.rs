@@ -126,7 +126,7 @@ fn both_layouts_re_encode_to_the_bytes_they_were_read_from() {
         let wire = query(chain, value);
         let mut cursor = SceCursor::new(&wire);
         let decoded = Query::decode(&mut cursor).expect("the Query decodes");
-        let again = decoded.encode_to_vec();
+        let again = decoded.encode_to_vec().expect("the Query encodes");
         assert_eq!(again, wire, "chain {chain:02x?} round-trips");
     }
 }

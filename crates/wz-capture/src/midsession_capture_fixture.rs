@@ -75,6 +75,7 @@ fn message() -> Vec<u8> {
         .try_as_borrowed()
         .expect("a built push re-borrows")
         .encode_to_vec()
+        .expect("a built push is encodable")
 }
 
 /// One Fragment datagram: reliable, `more` as asked, sequence number `sn` (below

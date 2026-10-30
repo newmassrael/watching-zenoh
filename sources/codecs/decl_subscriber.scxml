@@ -38,7 +38,7 @@
      Body byte-identical to upstream wire RFC. -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
-       sce:kind="codec" sce:default-endian="big" name="decl_subscriber">
+       sce:kind="codec" sce:encode-may-fail="true" sce:default-endian="big" name="decl_subscriber">
   <!-- R121h-pre: B5-ν ownership invert. DeclSubscriber.header bit 6 =
        `_Z_DECL_SUBSCRIBER_FLAG_M = 0x40` (zenoh-pico
        declarations.h:30). -->

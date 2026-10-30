@@ -242,63 +242,271 @@ impl<'a> Oam<'a> {
     /// caller-owned `SliceSink` allocations.
     pub const MAX_ENCODED_BYTES: usize = 51;
 
-    /// Encode `self` into the caller-owned sink. Returns
-    /// `CodecError::BufferOverflow` from a bounded sink when the
-    /// destination has insufficient remaining capacity; growable
-    /// sinks (e.g. `VecSink`) are effectively infallible.
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> {
-        // RFC §synth-5-B peek-byte / streaming-prefix:
-        // streaming prefix encode (per-field present_if/tlv-chain/embed/
-        // repeat helpers). Peek-byte mode: the arm body's encode prepends
-        // its own header byte (which the decoder peeked); no separate
-        // tag byte is emitted here. Streaming-prefix mode (own-field
-        // variant): the carrier is part of the prefix fields and emits
-        // through the same per-field path.
-        w.write_u8(self.header)?;
-        w.write_vle_u64(self.id)?;
-        if let Some(_list) = &self.extensions {
-            for _e in _list {
-                _e.encode(w)?;
-            }
-        }
-        // Append the active arm's encoded bytes.
-        match &self.body {
-            OamVariant::CodecZenohExtUnit(b) => {
-                b.encode(w)?;
-            }
-            OamVariant::CodecZenohExtZint(b) => {
-                b.encode(w)?;
-            }
-            OamVariant::CodecZenohExtZbuf(b) => {
-                b.encode(w)?;
-            }
-            OamVariant::Default { body, .. } => {
-                body.encode(w)?;
-            }
-        }
-        Ok(())
+    /// Encode `self` into the caller-owned sink. Returns the value's refusal
+    /// when the encoding cannot carry it (a length past its type, a list past
+    /// its bound, a gate that disagrees with a presence; the document declares
+    /// `sce:encode-may-fail`), or the sink's own error:
+    /// `CodecError::BufferOverflow` from a bounded sink when the destination
+    /// has insufficient remaining capacity.
+    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> where CodecError: From<S::Error> {
+        Self::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade. Pre-reserves
     /// `MAX_ENCODED_BYTES` so the worst-case write path performs at
     /// most one allocation, then delegates to `encode` over a
-    /// `VecSink`. Returns the freshly-encoded byte vector. Callers
-    /// targeting zero-alloc hot paths should call `encode` directly
-    /// against a caller-owned sink.
+    /// `VecSink`. Returns the freshly-encoded byte vector, or the error
+    /// `encode` refuses a value with: one the encoding cannot carry (a
+    /// length past its type, a list past its bound) or one a gate
+    /// disagrees with. Callers targeting zero-alloc hot paths should call
+    /// `encode` directly against a caller-owned sink.
     ///
     /// Gated on the `alloc` feature — `VecSink` lives behind the
     /// same gate (see `backends/rust/forge-runtime/src/codec.rs`). MCU /
     /// `no_std` builds without `alloc` only see the sink-based
     /// primary `encode`.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Vec<u8> {
+    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
         let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)
-            .expect("VecSink is infallible");
-        _sce_v
+        self.encode(&mut _sce_sink)?;
+        Ok(_sce_v)
     }
 }
+
+/// The arm of `Oam`'s variant a value holds, each arm's body as the
+/// source it says. The tag is not among them: `Oam` derives it from
+/// the arm, as it derives a length, and a default arm presents the tag
+/// it could not name.
+// A default arm's tag is read by the codec that embeds this one and
+// derives its own carrier bits from the arm, which not every build uses.
+#[allow(dead_code)]
+pub enum OamVariantSource<'s, A0: ?Sized, A1: ?Sized, A2: ?Sized, D: ?Sized> {
+    CodecZenohExtUnit(&'s A0),
+    CodecZenohExtZint(&'s A1),
+    CodecZenohExtZbuf(&'s A2),
+    Default { tag: u8, body: &'s D },
+}
+
+// ── Source (ADR 0058) ────────────────────────────────────────────────
+/// What a value of `Oam` says: its presented fields. A length, a count
+/// or the flag a gated field is announced by is not among them; `Oam`
+/// computes those from what is ([`Oam::encode_source`]).
+pub trait OamSource {
+    /// The `header` field.
+    fn header(&self) -> u8;
+    /// The `id` field.
+    fn id(&self) -> u64;
+    /// The `extensions` field.
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone>;
+    /// The arm of the variant this value holds.
+    fn body(&self) -> OamVariantSource<'_, impl super::ext_unit::ExtUnitSource, impl super::ext_zint::ExtZintSource, impl super::ext_zbuf::ExtZbufSource, impl super::ext_unit::ExtUnitSource>;
+}
+
+impl<T: OamSource + ?Sized> OamSource for &T {
+    fn header(&self) -> u8 {
+        (**self).header()
+    }
+    fn id(&self) -> u64 {
+        (**self).id()
+    }
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+        (**self).extensions()
+    }
+    fn body(&self) -> OamVariantSource<'_, impl super::ext_unit::ExtUnitSource, impl super::ext_zint::ExtZintSource, impl super::ext_zbuf::ExtZbufSource, impl super::ext_unit::ExtUnitSource> {
+        (**self).body()
+    }
+}
+
+/// The arm of `Oam`'s variant that OamParts holds.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub enum OamPartsBody<'a> {
+    CodecZenohExtUnit(&'a super::ext_unit::ExtUnitParts),
+    CodecZenohExtZint(&'a super::ext_zint::ExtZintParts),
+    CodecZenohExtZbuf(&'a super::ext_zbuf::ExtZbufParts<'a>),
+    /// The tag the grammar could not name, and the body it holds.
+    Default { tag: u8, body: &'a super::ext_unit::ExtUnitParts },
+}
+
+/// A value of `Oam` held in the types a caller already has: a source
+/// ([`OamSource`]) whose lists are slices and whose bodies are references.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+pub struct OamParts<'a> {
+    /// The `header` field.
+    pub header: u8,
+    /// The `id` field.
+    pub id: u64,
+    /// The `extensions` field.
+    pub extensions: Option<&'a [super::ext_entry::ExtEntryParts<'a>]>,
+    /// The arm of the variant this value holds.
+    pub body: OamPartsBody<'a>,
+}
+
+impl<'a> OamSource for OamParts<'a> {
+    fn header(&self) -> u8 {
+        self.header
+    }
+    fn id(&self) -> u64 {
+        self.id
+    }
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+        self.extensions.map(<[_]>::iter)
+    }
+    fn body(&self) -> OamVariantSource<'_, impl super::ext_unit::ExtUnitSource, impl super::ext_zint::ExtZintSource, impl super::ext_zbuf::ExtZbufSource, impl super::ext_unit::ExtUnitSource> {
+        match &self.body {
+            OamPartsBody::CodecZenohExtUnit(_b) => OamVariantSource::CodecZenohExtUnit(*_b),
+            OamPartsBody::CodecZenohExtZint(_b) => OamVariantSource::CodecZenohExtZint(*_b),
+            OamPartsBody::CodecZenohExtZbuf(_b) => OamVariantSource::CodecZenohExtZbuf(*_b),
+            OamPartsBody::Default { tag, body } => OamVariantSource::Default { tag: *tag, body: *body },
+        }
+    }
+}
+
+impl<'a> OamSource for Oam<'a> {
+    fn header(&self) -> u8 {
+        self.header
+    }
+    fn id(&self) -> u64 {
+        self.id
+    }
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+        self.extensions.as_ref().map(|_l| _l.iter())
+    }
+    fn body(&self) -> OamVariantSource<'_, impl super::ext_unit::ExtUnitSource, impl super::ext_zint::ExtZintSource, impl super::ext_zbuf::ExtZbufSource, impl super::ext_unit::ExtUnitSource> {
+        match &self.body {
+            OamVariant::CodecZenohExtUnit(_b) => OamVariantSource::CodecZenohExtUnit(_b),
+            OamVariant::CodecZenohExtZint(_b) => OamVariantSource::CodecZenohExtZint(_b),
+            OamVariant::CodecZenohExtZbuf(_b) => OamVariantSource::CodecZenohExtZbuf(_b),
+            OamVariant::Default { tag, body } => OamVariantSource::Default { tag: *tag, body },
+        }
+    }
+}
+
+impl<'a> OamSource for OamView<'a> {
+    fn header(&self) -> u8 {
+        self.header
+    }
+    fn id(&self) -> u64 {
+        self.id
+    }
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+        self.extensions.as_ref().map(|_l| _l.iter())
+    }
+    fn body(&self) -> OamVariantSource<'_, impl super::ext_unit::ExtUnitSource, impl super::ext_zint::ExtZintSource, impl super::ext_zbuf::ExtZbufSource, impl super::ext_unit::ExtUnitSource> {
+        match &self.body {
+            OamViewVariant::CodecZenohExtUnit(_b) => OamVariantSource::CodecZenohExtUnit(_b),
+            OamViewVariant::CodecZenohExtZint(_b) => OamVariantSource::CodecZenohExtZint(_b),
+            OamViewVariant::CodecZenohExtZbuf(_b) => OamVariantSource::CodecZenohExtZbuf(_b),
+            OamViewVariant::Default { tag, body } => OamVariantSource::Default { tag: *tag, body },
+        }
+    }
+}
+
+impl<S: ::sce_forge_runtime::codec::CodecStorage> OamSource for OamOwned<S> {
+    fn header(&self) -> u8 {
+        self.header
+    }
+    fn id(&self) -> u64 {
+        self.id
+    }
+    fn extensions(&self) -> Option<impl Iterator<Item = impl super::ext_entry::ExtEntrySource> + Clone> {
+        self.extensions.as_ref().map(|_l| ::sce_forge_runtime::codec::SceList::as_slice(_l).iter())
+    }
+    fn body(&self) -> OamVariantSource<'_, impl super::ext_unit::ExtUnitSource, impl super::ext_zint::ExtZintSource, impl super::ext_zbuf::ExtZbufSource, impl super::ext_unit::ExtUnitSource> {
+        match &self.body {
+            OamOwnedVariant::CodecZenohExtUnit(_b) => OamVariantSource::CodecZenohExtUnit(_b),
+            OamOwnedVariant::CodecZenohExtZint(_b) => OamVariantSource::CodecZenohExtZint(_b),
+            OamOwnedVariant::CodecZenohExtZbuf(_b) => OamVariantSource::CodecZenohExtZbuf(_b),
+            OamOwnedVariant::Default { tag, body } => OamVariantSource::Default { tag: *tag, body },
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl<'a> Oam<'a> {
+    /// Encode what `src` says into the caller-owned sink: the bytes
+    /// [`Self::encode`] writes for the value it holds, read through
+    /// [`OamSource`]. A length, a count or a gate flag is computed from what
+    /// `src` presents, and a value the encoding cannot carry is refused
+    /// before the first byte is written.
+    pub fn encode_source<S: OamSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        Self::count_source(src)?;
+        Self::write_source(src, w)
+    }
+
+    /// [`Self::encode_source`] without the guard a parent has already made.
+    #[doc(hidden)]
+    pub fn write_source<S: OamSource + ?Sized, K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        let _k_extensions: usize = src.extensions().map_or(0, |_l| _l.count());
+        if _k_extensions > 8 {
+            return Err(CodecError::TlvChainOverflow);
+        }
+        let _d_header_enc: u8 = match src.body() {
+            OamVariantSource::CodecZenohExtUnit(_) => 0,
+            OamVariantSource::CodecZenohExtZint(_) => 1,
+            OamVariantSource::CodecZenohExtZbuf(_) => 2,
+            OamVariantSource::Default { tag, .. } => tag,
+        };
+        let _p_header_z_0: bool = src.extensions().is_some();
+        if _d_header_enc > 0x3 {
+            return Err(CodecError::LengthOutOfRange);
+        }
+        let _c_header: u8 = (((src.header() & !0x60) | (_d_header_enc << 5)) & !0x80) | (u8::from(_p_header_z_0) << 7);
+        w.write_u8(_c_header)?;
+        w.write_vle_u64(src.id())?;
+        if let Some(_v) = src.extensions() {
+            for (_i, _e) in _v.enumerate() {
+                ExtEntry::write_source_in(&_e, w, &super::ext_entry::ExtEntryOverrides::header_z(_i + 1 < _k_extensions))?;
+            }
+        }
+        match src.body() {
+            OamVariantSource::CodecZenohExtUnit(_b) => ExtUnit::write_source(_b, w)?,
+            OamVariantSource::CodecZenohExtZint(_b) => ExtZint::write_source(_b, w)?,
+            OamVariantSource::CodecZenohExtZbuf(_b) => ExtZbuf::write_source(_b, w)?,
+            OamVariantSource::Default { body: _b, .. } => ExtUnit::write_source(_b, w)?,
+        }
+        Ok(())
+    }
+
+    /// The bytes [`Self::write_source`] writes for `src`, counted with
+    /// nothing written.
+    #[doc(hidden)]
+    pub fn count_source<S: OamSource + ?Sized>(src: &S) -> Result<usize, CodecError> {
+        let mut _c = ::sce_forge_runtime::codec::CountSink::new();
+        Self::write_source(src, &mut _c)?;
+        Ok(_c.len())
+    }
+}
+
+impl<'a, S: OamSource + ?Sized> ::sce_forge_runtime::codec::SourceWrite<S> for Oam<'a> {
+    type Error<E> = CodecError;
+
+    fn write<K: SceSink>(src: &S, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        Self::write_source(src, w)
+    }
+}
+
+#[allow(dead_code)]
+impl<'a> Oam<'a> {
+    /// The size of the frame [`Self::encode_source`] writes for `src`, found
+    /// with nothing written, or the refusal that encode would give. The result
+    /// writes the frame into a window of exactly that size and cannot fail.
+    pub fn measure<S: OamSource + ?Sized>(src: &S) -> Result<::sce_forge_runtime::codec::Measured<'_, Self, S>, CodecError> {
+        ::sce_forge_runtime::codec::measure(src)
+    }
+
+    /// Write `src` into `window` in one pass and return the bytes it is, for a
+    /// window as large as the caller can spare. On an error the window holds a
+    /// prefix to discard; see [`::sce_forge_runtime::codec::write_window`].
+    pub fn write_window<S: OamSource + ?Sized>(src: &S, window: &mut [u8]) -> Result<usize, CodecError> {
+        let mut sink = ::sce_forge_runtime::codec::SliceSink::new(window);
+        Self::write_source(src, &mut sink)?;
+        Ok(sink.position())
+    }
+}
+
 
 // ── View (ADR 0049) ──────────────────────────────────────────────────
 // `OamView` is what a decode of `Oam` learned, not a
@@ -521,47 +729,18 @@ impl<'a> OamView<'a> {
     /// builder. It writes the canonical wire, not the frame the view was decoded
     /// from, so a frame `decode` accepted in a form that is not canonical is
     /// not passed on as it came.
-    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> {
-        // RFC §synth-5-B peek-byte / streaming-prefix:
-        // streaming prefix encode (per-field present_if/tlv-chain/embed/
-        // repeat helpers). Peek-byte mode: the arm body's encode prepends
-        // its own header byte (which the decoder peeked); no separate
-        // tag byte is emitted here. Streaming-prefix mode (own-field
-        // variant): the carrier is part of the prefix fields and emits
-        // through the same per-field path.
-        w.write_u8(self.header)?;
-        w.write_vle_u64(self.id)?;
-        if let Some(_list) = &self.extensions {
-            for _e in _list.iter() {
-                _e.encode(w)?;
-            }
-        }
-        // Append the active arm's encoded bytes.
-        match &self.body {
-            OamViewVariant::CodecZenohExtUnit(b) => {
-                b.encode(w)?;
-            }
-            OamViewVariant::CodecZenohExtZint(b) => {
-                b.encode(w)?;
-            }
-            OamViewVariant::CodecZenohExtZbuf(b) => {
-                b.encode(w)?;
-            }
-            OamViewVariant::Default { body, .. } => {
-                body.encode(w)?;
-            }
-        }
-        Ok(())
+    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> where CodecError: From<S::Error> {
+        Oam::encode_source(self, w)
     }
 
-    /// Heap-backed convenience facade over [`Self::encode`].
+    /// Heap-backed convenience facade over [`Self::encode`], which refuses a
+    /// value it cannot carry.
     #[cfg(feature = "alloc")]
-    pub fn encode_to_vec(&self) -> Vec<u8> {
+    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
         let mut _sce_sink = VecSink::new(&mut _sce_v);
-        self.encode(&mut _sce_sink)
-            .expect("VecSink is infallible");
-        _sce_v
+        self.encode(&mut _sce_sink)?;
+        Ok(_sce_v)
     }
 
     pub fn mid(&self) -> u8 {
@@ -824,47 +1003,18 @@ impl<S: ::sce_forge_runtime::codec::CodecStorage> OamOwned<S> {
     ///
     /// The projection builds the whole borrowed record (every list and
     /// embedded body in it, by value) only for `encode` to read it once. A
-    /// sender that holds an owned value encodes it from here. The same
-    /// refusals as the projection's: a list longer than the borrowed view
-    /// declares raises `CodecError::TooManyElements`, so an owned value the
+    /// sender that holds an owned value encodes it from here.
+    /// The same refusals as the projection's: a list longer than the borrowed
+    /// view declares raises `CodecError::TooManyElements`, so an owned value the
     /// borrowed form could not carry is an error and never a frame its own
     /// decoder would reject.
-    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), CodecError> {
-        // RFC §synth-5-B peek-byte / streaming-prefix:
-        // streaming prefix encode (per-field present_if/tlv-chain/embed/
-        // repeat helpers). Peek-byte mode: the arm body's encode prepends
-        // its own header byte (which the decoder peeked); no separate
-        // tag byte is emitted here. Streaming-prefix mode (own-field
-        // variant): the carrier is part of the prefix fields and emits
-        // through the same per-field path.
-        w.write_u8(self.header)?;
-        w.write_vle_u64(self.id)?;
-        if let Some(_list) = &self.extensions {
-            for _e in ::sce_forge_runtime::codec::bounded_entries::<_, _, 8>(_list)? {
-                _e.encode(w)?;
-            }
-        }
-        // Append the active arm's encoded bytes.
-        match &self.body {
-            OamOwnedVariant::CodecZenohExtUnit(b) => {
-                b.encode(w)?;
-            }
-            OamOwnedVariant::CodecZenohExtZint(b) => {
-                b.encode(w)?;
-            }
-            OamOwnedVariant::CodecZenohExtZbuf(b) => {
-                b.encode(w)?;
-            }
-            OamOwnedVariant::Default { body, .. } => {
-                body.encode(w)?;
-            }
-        }
-        Ok(())
+    pub fn encode<K: SceSink>(&self, w: &mut K) -> Result<(), CodecError> where CodecError: From<K::Error> {
+        Oam::encode_source(self, w)
     }
 
     /// Heap-backed convenience facade over [`Self::encode`]. Fallible: a list
-    /// past the bound the borrowed view declares is refused, and so is a
-    /// presence the chain predicates disagree with.
+    /// past the bound the borrowed view declares is refused, as is any value
+    /// the encoding cannot carry.
     #[cfg(feature = "alloc")]
     pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Oam::MAX_ENCODED_BYTES);

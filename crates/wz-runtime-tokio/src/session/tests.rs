@@ -931,6 +931,7 @@ fn encoded(push: &wz_session_core::wire::PushOwned) -> Vec<u8> {
     push.try_as_borrowed()
         .expect("owned Push re-borrows")
         .encode_to_vec()
+        .expect("a built Push encodes")
 }
 
 /// A Put on a DECLARED keyexpr whose payload lives in shared memory goes out as the
@@ -2765,7 +2766,8 @@ fn auto_stamp_reaches_both_legs_as_one_value() {
     let expected_bytes = expected
         .try_as_borrowed()
         .expect("owned Push re-borrows")
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("a built Push encodes");
 
     let frame = driver.frame_bytes(0);
     assert!(
@@ -5325,6 +5327,7 @@ fn expected_query_request_bytes(
         .try_as_borrowed()
         .expect("test: <=N exts by construction")
         .encode_to_vec()
+        .expect("a built Request encodes")
 }
 
 #[cfg(all(
@@ -6290,7 +6293,8 @@ fn declare_querier_asks_the_peer_for_matching_queryable_declarations() {
     .unwrap()
     .try_as_borrowed()
     .expect("test: <=N exts by construction")
-    .encode_to_vec();
+    .encode_to_vec()
+    .expect("a built fixture message encodes");
     let frame = driver.frame_bytes(0);
     assert!(
         frame.windows(wanted.len()).any(|w| w == wanted),
@@ -6311,7 +6315,8 @@ fn declare_querier_asks_the_peer_for_matching_queryable_declarations() {
     .unwrap()
     .try_as_borrowed()
     .expect("test: <=N exts by construction")
-    .encode_to_vec();
+    .encode_to_vec()
+    .expect("a built fixture message encodes");
     assert!(
         !frame.windows(wrong_plane.len()).any(|w| w == wrong_plane),
         "a SUBSCRIBERS Interest would prove nothing about queryables",
@@ -6378,6 +6383,7 @@ fn a_hold_asks_in_the_form_it_was_given_and_retracts_on_drop() {
             .try_as_borrowed()
             .expect("test: <=N exts by construction")
             .encode_to_vec()
+            .expect("a built Interest encodes")
     };
 
     let (session, driver) = build_session();
@@ -7609,7 +7615,8 @@ fn declare_publisher_asks_the_peer_for_matching_subscriber_declarations() {
     .unwrap()
     .try_as_borrowed()
     .expect("test: <=N exts by construction")
-    .encode_to_vec();
+    .encode_to_vec()
+    .expect("a built fixture message encodes");
     let frame = driver.frame_bytes(0);
     assert!(
         frame.windows(wanted.len()).any(|w| w == wanted),
@@ -7628,7 +7635,8 @@ fn declare_publisher_asks_the_peer_for_matching_subscriber_declarations() {
     .unwrap()
     .try_as_borrowed()
     .expect("test: <=N exts by construction")
-    .encode_to_vec();
+    .encode_to_vec()
+    .expect("a built fixture message encodes");
     assert!(
         !frame.windows(token_form.len()).any(|w| w == token_form),
         "a token-plane Interest would prove nothing about subscribers",
@@ -7727,7 +7735,8 @@ fn a_publisher_clone_shares_one_interest_and_only_the_last_drop_retracts_it() {
     let expected = build_interest_final(id)
         .try_as_borrowed()
         .expect("Final carries no exts")
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("an Interest(Final) encodes");
     let frame = driver.frame_bytes(after_declare);
     assert!(
         frame.windows(expected.len()).any(|w| w == expected),
@@ -9597,7 +9606,8 @@ fn a_token_retraction_names_its_key_only_when_the_declaring_abi_asks() {
         let expected = declare
             .try_as_borrowed()
             .expect("test: <=N exts by construction")
-            .encode_to_vec();
+            .encode_to_vec()
+            .expect("a built fixture message encodes");
         assert!(
             frame.windows(expected.len()).any(|w| w == expected),
             "names_the_key={names_the_key}: the retraction is not the expected shape"
@@ -9655,7 +9665,8 @@ fn a_subscriber_retraction_names_its_key_only_when_the_declaring_abi_asks() {
         let expected = declare
             .try_as_borrowed()
             .expect("test: <=N exts by construction")
-            .encode_to_vec();
+            .encode_to_vec()
+            .expect("a built fixture message encodes");
         assert!(
             frame.windows(expected.len()).any(|w| w == expected),
             "named={named:?}: the retraction is not the expected shape"
@@ -9708,7 +9719,8 @@ fn a_queryable_retraction_names_its_key_only_when_the_declaring_abi_asks() {
         let expected = declare
             .try_as_borrowed()
             .expect("test: <=N exts by construction")
-            .encode_to_vec();
+            .encode_to_vec()
+            .expect("a built fixture message encodes");
         assert!(
             frame.windows(expected.len()).any(|w| w == expected),
             "named={named:?}: the retraction is not the expected shape"
@@ -10497,7 +10509,8 @@ fn declare_token_wire_frame_contains_decl_token_bytes() {
         .unwrap()
         .try_as_borrowed()
         .expect("test: <=N exts by construction")
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("a built fixture message encodes");
     let frame = driver.frame_bytes(0);
     assert!(
         frame.windows(expected.len()).any(|w| w == expected),
@@ -10561,7 +10574,8 @@ fn liveliness_token_drop_wire_frame_contains_undecl_token_bytes() {
     let expected = build_undeclare_token(1)
         .try_as_borrowed()
         .expect("test: <=N exts by construction")
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("a built fixture message encodes");
     let frame = driver.frame_bytes(1);
     assert!(
         frame.windows(expected.len()).any(|w| w == expected),
@@ -10878,7 +10892,8 @@ fn declare_token_aliased_wire_frame_uses_alias_form() {
     .unwrap()
     .try_as_borrowed()
     .expect("test: <=N exts by construction")
-    .encode_to_vec();
+    .encode_to_vec()
+    .expect("a built fixture message encodes");
     let token_frame = driver.frame_bytes(baseline_frames);
     assert!(
         token_frame.windows(expected.len()).any(|w| w == expected),
@@ -11239,7 +11254,8 @@ fn declare_liveliness_subscriber_aliased_wire_frame_uses_alias_form() {
     .unwrap()
     .try_as_borrowed()
     .expect("test: <=N exts by construction")
-    .encode_to_vec();
+    .encode_to_vec()
+    .expect("a built fixture message encodes");
     let interest_frame = driver.frame_bytes(baseline_frames);
     assert!(
         interest_frame
@@ -12006,7 +12022,8 @@ fn a_publisher_matching_listener_asks_the_peer_for_subscriber_declarations() {
     .unwrap()
     .try_as_borrowed()
     .expect("test: <=N exts by construction")
-    .encode_to_vec();
+    .encode_to_vec()
+    .expect("a built fixture message encodes");
     assert!(
         frame.windows(wanted.len()).any(|w| w == wanted),
         "the emitted frame must carry a SUBSCRIBERS Interest for the \
@@ -12024,7 +12041,8 @@ fn a_publisher_matching_listener_asks_the_peer_for_subscriber_declarations() {
     .unwrap()
     .try_as_borrowed()
     .expect("test: <=N exts by construction")
-    .encode_to_vec();
+    .encode_to_vec()
+    .expect("a built fixture message encodes");
     assert!(
         !frame.windows(token_form.len()).any(|w| w == token_form),
         "a TOKENS interest is what wz used to send and is not what a router \
@@ -12070,7 +12088,8 @@ fn a_querier_matching_listener_asks_the_peer_for_queryable_declarations() {
         .unwrap()
         .try_as_borrowed()
         .expect("test: <=N exts by construction")
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("a built fixture message encodes");
     assert!(
         frame.windows(wanted.len()).any(|w| w == wanted),
         "the emitted frame must carry a QUERYABLES Interest; frame was {frame:02x?}",
@@ -12080,7 +12099,8 @@ fn a_querier_matching_listener_asks_the_peer_for_queryable_declarations() {
         .unwrap()
         .try_as_borrowed()
         .expect("test: <=N exts by construction")
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("a built fixture message encodes");
     assert!(
         !frame
             .windows(subscriber_form.len())
@@ -12128,7 +12148,8 @@ fn undeclaring_a_matching_listener_retracts_the_interest_it_declared() {
     let expected = build_interest_final(declared_id)
         .try_as_borrowed()
         .expect("Final carries no exts")
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("an Interest(Final) encodes");
     let frame = driver.frame_bytes(after_declare);
     assert!(
         frame.windows(expected.len()).any(|w| w == expected),
@@ -12178,11 +12199,13 @@ fn two_matching_listeners_take_two_interest_ids_and_retract_their_own() {
     let expected_b = build_interest_final(b)
         .try_as_borrowed()
         .expect("Final carries no exts")
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("an Interest(Final) encodes");
     let expected_a = build_interest_final(a)
         .try_as_borrowed()
         .expect("Final carries no exts")
-        .encode_to_vec();
+        .encode_to_vec()
+        .expect("an Interest(Final) encodes");
     assert!(
         retract.windows(expected_b.len()).any(|w| w == expected_b),
         "the second listener's undeclare must retract ITS id ({b})",
